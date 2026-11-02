@@ -232,6 +232,67 @@ impl Specimen {
             "company primary assigned under fence job={}",
             execution.job_id
         );
+        let read_client = self.db.get().await?;
+        let (name, code) = {
+            let row = read_client
+                .query_one(
+                    "SELECT name,code FROM companies WHERE tenant_id=$1 AND id=$2",
+                    &[&scope.tenant(), &COMPANY],
+                )
+                .await?;
+            (row.get::<_, String>(0), row.get::<_, String>(1))
+        };
+        let current = |tenant: i64| {
+            let read = &read_client;
+            async move {
+                Ok::<i64, Error>(
+                    read.query_one(
+                        "SELECT version FROM companies WHERE tenant_id=$1 AND id=$2",
+                        &[&tenant, &COMPANY],
+                    )
+                    .await?
+                    .get(0),
+                )
+            }
+        };
+        let edit = |field: &str, value: String, version: i64| bilibi_core::company::Edit {
+            id: COMPANY,
+            field: field.into(),
+            value,
+            version,
+        };
+        self.companies
+            .save_as(scope, &edit("name", name, current(scope.tenant()).await?))
+            .await?;
+        println!("company field saved under fence job={}", execution.job_id);
+        self.companies
+            .save_as(
+                scope,
+                &edit("code", code.clone(), current(scope.tenant()).await?),
+            )
+            .await?;
+        println!(
+            "company unchanged code saved under fence job={}",
+            execution.job_id
+        );
+        match self
+            .companies
+            .save_as(
+                scope,
+                &edit(
+                    "code",
+                    format!("{code}-changed"),
+                    current(scope.tenant()).await?,
+                ),
+            )
+            .await
+        {
+            Err(Error::Refused(message)) => println!(
+                "company code change refused under fence job={} message={message}",
+                execution.job_id
+            ),
+            _ => return Err(Error::Internal),
+        }
         Ok(())
     }
 }
