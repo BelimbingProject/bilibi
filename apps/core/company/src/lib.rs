@@ -402,6 +402,21 @@ pub async fn save(
         }
         "code" => {
             let code = edit.value.trim().to_owned();
+            if scope.channel() == bilibi_tenancy::Channel::Job
+                && scope.current_company().is_some_and(|c| c.get() == id)
+            {
+                let unchanged = tx
+                    .sql()
+                    .query_opt(
+                        "SELECT 1 FROM companies WHERE tenant_id=$1 AND id=$2 AND code=$3",
+                        &[&tenant, &id, &code],
+                    )
+                    .await?
+                    .is_some();
+                if !unchanged {
+                    return Err(Error::Refused("A company code cannot be changed by a background job working on that company; change it on the company page.".into()));
+                }
+            }
             organisation::lock_code(tx.sql(), tenant, &code).await?;
             let taken = tx
                 .sql()

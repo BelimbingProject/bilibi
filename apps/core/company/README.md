@@ -131,7 +131,7 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
   every record it owns. With locking enabled it uses `FOR NO KEY UPDATE`: this
   holds the judged status through commit and remains compatible with Queue's
   `FOR KEY SHARE` workplace proof. Reads never ask it.
-- Company's field, primary and eligibility writes lock with `FOR NO KEY UPDATE`, so a queued job holding its `Execution::begin` fence can make them. Archiving keeps `FOR UPDATE` on purpose: it waits for jobs fenced on that company, so none keeps writing into a company being archived. A queued job therefore cannot archive the company its own fence covers.
+- Company's field, primary and eligibility writes lock with `FOR NO KEY UPDATE`, so a queued job holding its `Execution::begin` fence can make them. Archiving keeps `FOR UPDATE` on purpose: it waits for jobs fenced on that company, so none keeps writing into a company being archived. A queued job therefore cannot archive the company its own fence covers. Changing a company code is not fence-compatible (`code` is a unique key column, so its update waits on the fence's `FOR KEY SHARE`): a job working on that company is refused at once with a message pointing to the company page. Saving other fields with an unchanged code works.
 - `organisation::Provider` is the `OrganisationProvider` Tenancy's
   `PartyProofs` proves targets with: a live, unarchived company of the
   actor's tenant, bound at the service factory.
