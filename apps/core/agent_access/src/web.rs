@@ -443,6 +443,7 @@ fn replacement(fields: &BTreeMap<String, Value>, has_matches: bool) -> Option<bo
 }
 struct DuplicateView {
     name: String,
+    approved_from: String,
     approved: Instant,
     last_used: String,
 }
@@ -477,6 +478,7 @@ async fn duplicate_views(
         .map(|row| {
             Ok(DuplicateView {
                 name: row.agent_id.clone(),
+                approved_from: row.approved_client.clone(),
                 approved: instant(
                     display,
                     format!("duplicate-approved-{}", row.id),
