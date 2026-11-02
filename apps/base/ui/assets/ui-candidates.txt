@@ -10228,11 +10228,8 @@ plainest
 plainly
 plaintext
 plan
-plan-code
 plan/2
-plan_code
 plan_endpoint
-plan_expiry_seconds
 plan_hash
 plan_id
 plan_max_operations
