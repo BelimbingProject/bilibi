@@ -250,6 +250,50 @@ struct Connection {
     live: bool,
     enabled_session: Option<String>,
 }
+struct PendingAuthorization {
+    tenant: i64,
+    user: i64,
+    organisation: Option<i64>,
+    person: Option<i64>,
+    agent_id: String,
+    client_id: String,
+    resource: String,
+    oauth_scope: String,
+    approved_client: String,
+    replace: Vec<i64>,
+}
+impl PendingAuthorization {
+    fn from_row(row: &Row) -> Self {
+        Self {
+            tenant: row.get("tenant_id"),
+            user: row.get("user_id"),
+            organisation: row.get("organisation_id"),
+            person: row.get("person_id"),
+            agent_id: row.get("agent_id"),
+            client_id: row.get("client_id"),
+            resource: row.get("resource"),
+            oauth_scope: row.get("oauth_scope"),
+            approved_client: row.get("approved_client"),
+            replace: row.get("replace_connection_ids"),
+        }
+    }
+    fn agent_context(&self, action: &str) -> Context {
+        Context {
+            tenant: self.tenant,
+            actor: Principal {
+                kind: "agent".into(),
+                id: self.user.to_string(),
+            },
+            impersonator: None,
+            actor_role: None,
+            action: action.into(),
+            trace_id: uuid::Uuid::new_v4().to_string(),
+            agent_self_report: None,
+            client_identity: None,
+            agent_connection: None,
+        }
+    }
+}
 const CONNECTION_COLUMNS: &str = "id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,seen_agent_ids,self_reported_agents,observed_clients,revoked_at IS NULL AS live,enabled_session_id";
 impl Connection {
     fn from_row(row: &Row) -> Self {
@@ -326,6 +370,51 @@ pub fn valid_label(label: &str) -> bool {
     (1..=255).contains(&label.len())
         && !label.trim().is_empty()
         && !label.chars().any(char::is_control)
+}
+fn approved_client_label(user_agent: &str) -> String {
+    let browser = if user_agent.contains("Edg/")
+        || user_agent.contains("EdgiOS/")
+        || user_agent.contains("EdgA/")
+    {
+        Some("Edge")
+    } else if user_agent.contains("Chrome/")
+        || user_agent.contains("CriOS/")
+        || user_agent.contains("HeadlessChrome/")
+    {
+        Some("Chrome")
+    } else if user_agent.contains("Firefox/") || user_agent.contains("FxiOS/") {
+        Some("Firefox")
+    } else if user_agent.contains("OPR/") || user_agent.contains("Opera/") {
+        Some("Opera")
+    } else if user_agent.contains("Safari/") && user_agent.contains("Version/") {
+        Some("Safari")
+    } else {
+        None
+    };
+    let system = if user_agent.contains("Windows") {
+        Some("Windows")
+    } else if user_agent.contains("iPhone")
+        || user_agent.contains("iPad")
+        || user_agent.contains("iPod")
+    {
+        Some("iOS")
+    } else if user_agent.contains("Android") {
+        Some("Android")
+    } else if user_agent.contains("CrOS") {
+        Some("ChromeOS")
+    } else if user_agent.contains("Macintosh") || user_agent.contains("Mac OS X") {
+        Some("macOS")
+    } else if user_agent.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    };
+    match (browser, system) {
+        (Some(browser), Some(system)) => format!("{browser} on {system}"),
+        (Some(browser), None) => browser.to_owned(),
+        (None, Some(system)) => format!("Browser on {system}"),
+        (None, None) => "Browser".to_owned(),
+    }
 }
 /// Impersonated sessions and agent facets are refused from managing
 /// connections: a bearer request carries the agent facet, an impersonated
@@ -430,26 +519,29 @@ impl AgentAccess {
         let replace = replace.to_vec();
         tx.mutate(move |sql| {
             Box::pin(async move {
-                let mut changes = replace_connections(sql, tenant, user, &request.client_name, &replace).await?;
-                let row = sql.query_one(
-                    "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,expires_at,approved_client) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'infinity',$9) RETURNING id,expires_at::text",
-                    &[&tenant,&user,&organisation,&person,&request.client_name,&request.client_id,&resource,&OAUTH_SCOPE,&browser.name],
+                // Serialize approvals of the same PKCE request even when no
+                // earlier receipt exists yet. The later approval expires the
+                // earlier code before publishing its replacement.
+                let request_lock = format!("{tenant}\u{1f}{user}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", request.client_id, request.redirect_uri, resource, request.code_challenge);
+                sql.query_one("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", &[&request_lock]).await?;
+                let replaced = sql.query(
+                    "UPDATE core_agent_authorization_codes SET expires_at=now() WHERE tenant_id=$1 AND user_id=$2 AND client_id=$3 AND redirect_uri=$4 AND resource=$5 AND code_challenge=$6 AND connection_id IS NULL AND used_at IS NULL AND expires_at>now() RETURNING id",
+                    &[&tenant,&user,&request.client_id,&request.redirect_uri,&resource,&request.code_challenge],
                 ).await?;
-                let connection: i64 = row.get(0);
                 let auth = sql.query_one(
-                    "INSERT INTO core_agent_authorization_codes(connection_id,code_hash,code_challenge,redirect_uri,expires_at) VALUES($1,$2,$3,$4,now()+make_interval(secs => $5::double precision)) RETURNING id,expires_at::text",
-                    &[&connection,&code_hash,&request.code_challenge,&request.redirect_uri,&code_seconds],
+                    "INSERT INTO core_agent_authorization_codes(connection_id,code_hash,code_challenge,redirect_uri,expires_at,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids) VALUES(NULL,$1,$2,$3,now()+make_interval(secs => $4::double precision),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id,expires_at::text",
+                    &[&code_hash,&request.code_challenge,&request.redirect_uri,&code_seconds,&tenant,&user,&organisation,&person,&request.client_name,&request.client_id,&resource,&OAUTH_SCOPE,&browser.name,&replace],
                 ).await?;
-                changes.extend(vec![
-                    change("agent_connection", connection, json!({}), json!({"agent_id":request.client_name,"client_id":request.client_id,"resource":resource,"oauth_scope":OAUTH_SCOPE,"approved_client":browser.name})),
-                    change("agent_authorization_code", auth.get(0), json!({}), json!({"connection_id":connection,"redirect_uri":request.redirect_uri,"expires_at":auth.get::<_,String>(1)})),
-                ]);
+                let mut changes = replaced
+                    .iter()
+                    .map(|row| change("agent_authorization_code", row.get(0), json!({"live":true}), json!({"live":false,"reason":"replaced by later approval"})))
+                    .collect::<Vec<_>>();
+                changes.push(change("agent_authorization_code", auth.get(0), json!({}), json!({"agent_id":request.client_name,"client_id":request.client_id,"resource":resource,"oauth_scope":OAUTH_SCOPE,"approved_client":browser.name,"redirect_uri":request.redirect_uri,"expires_at":auth.get::<_,String>(1)})));
                 Ok(((), changes))
             })
         })
         .await?;
         tx.commit().await?;
-        self.connections_changed(scope);
         Ok(code)
     }
     /// Redeems a short-lived code once, bound to client, callback, resource and
@@ -472,69 +564,111 @@ impl AgentAccess {
         if !secret_shaped(&params.code) {
             return Err(OAuthError::InvalidGrant);
         }
-        let mut client = self.db.get().await?;
-        let found = client
-            .query_opt(
-                "SELECT id,connection_id FROM core_agent_authorization_codes WHERE code_hash=$1",
-                &[&secrets::digest(&params.code)],
-            )
-            .await?
-            .ok_or(OAuthError::InvalidGrant)?;
-        let (code_id, connection_id): (i64, i64) = (found.get(0), found.get(1));
-        let unlocked = self.connection(&**client, connection_id, false).await?;
-        let mut context = unlocked.agent_context("agent_access.code.exchange");
-        context.client_identity = client_identity.map(|client| client.as_str().to_owned());
-        let mut tx = self.mutations.begin(&mut client, context).await?;
-        let connection = self.connection(tx.sql(), connection_id, true).await?;
-        let auth = tx
-            .sql()
-            .query_one(
-                "SELECT code_challenge,redirect_uri,expires_at>now() AS live,used_at IS NOT NULL AS used FROM core_agent_authorization_codes WHERE id=$1 FOR UPDATE",
-                &[&code_id],
-            )
-            .await?;
-        let redirect: String = auth.get("redirect_uri");
-        // The grant and code already contain the consented client and exact
-        // callback. Keeping this binding preserves grants across migration and
-        // registration pruning without admitting any new authorization.
-        let bound = connection.client_id == params.client_id
-            && connection.resource.as_deref() == Some(resource)
-            && params.resource == resource
-            && redirect == params.redirect_uri
-            && oauth_client::proof(&params.code_verifier, auth.get("code_challenge"))
-            && auth.get::<_, bool>("live");
-        if !bound {
-            tx.rollback().await?;
-            return Err(OAuthError::InvalidGrant);
-        }
-        if auth.get::<_, bool>("used") {
-            Self::revoke_connection(&mut tx, &connection, "authorization code replayed").await?;
-            tx.commit().await?;
-            return Err(OAuthError::InvalidGrant);
-        }
-        self.live(tx.sql(), &connection).await?;
-        tx.mutate(move |sql| {
-            Box::pin(async move {
-                sql.execute(
-                    "UPDATE core_agent_authorization_codes SET used_at=now() WHERE id=$1",
-                    &[&code_id],
+        loop {
+            let mut client = self.db.get().await?;
+            let found = client
+                .query_opt(
+                    "SELECT id,connection_id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids FROM core_agent_authorization_codes WHERE code_hash=$1",
+                    &[&secrets::digest(&params.code)],
                 )
-                .await?;
-                Ok((
-                    (),
-                    vec![change(
-                        "agent_authorization_code",
-                        code_id,
-                        json!({"used":false}),
-                        json!({"used":true}),
-                    )],
-                ))
-            })
-        })
-        .await?;
-        let tokens = self.issue(&mut tx, &connection).await?;
-        tx.commit().await?;
-        Ok(tokens)
+                .await?
+                .ok_or(OAuthError::InvalidGrant)?;
+            let code_id: i64 = found.get("id");
+            if let Some(connection_id) = found.get::<_, Option<i64>>("connection_id") {
+                // A spent code keeps its connection binding so replay can end
+                // the whole grant. Lock the parent before the child as every
+                // other token path does.
+                let unlocked = self.connection(&**client, connection_id, false).await?;
+                let mut context = unlocked.agent_context("agent_access.code.exchange");
+                context.client_identity = client_identity.map(|client| client.as_str().to_owned());
+                let mut tx = self.mutations.begin(&mut client, context).await?;
+                let connection = self.connection(tx.sql(), connection_id, true).await?;
+                let auth = tx.sql().query_one(
+                    "SELECT code_challenge,redirect_uri,expires_at>now() AS live,used_at IS NOT NULL AS used FROM core_agent_authorization_codes WHERE id=$1 FOR UPDATE",
+                    &[&code_id],
+                ).await?;
+                let bound = connection.client_id == params.client_id
+                    && connection.resource.as_deref() == Some(resource)
+                    && params.resource == resource
+                    && auth.get::<_, String>("redirect_uri") == params.redirect_uri
+                    && oauth_client::proof(&params.code_verifier, auth.get("code_challenge"))
+                    && auth.get::<_, bool>("live");
+                if !bound {
+                    tx.rollback().await?;
+                    return Err(OAuthError::InvalidGrant);
+                }
+                if auth.get::<_, bool>("used") {
+                    Self::revoke_connection(&mut tx, &connection, "authorization code replayed")
+                        .await?;
+                    tx.commit().await?;
+                    return Err(OAuthError::InvalidGrant);
+                }
+                tx.rollback().await?;
+                return Err(OAuthError::InvalidGrant);
+            }
+
+            let pending = PendingAuthorization::from_row(&found);
+            let mut context = pending.agent_context("agent_access.code.exchange");
+            context.client_identity = client_identity.map(|client| client.as_str().to_owned());
+            let mut tx = self.mutations.begin(&mut client, context).await?;
+            let auth = tx.sql().query_one(
+                "SELECT id,connection_id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids,code_challenge,redirect_uri,expires_at>now() AS live,used_at IS NOT NULL AS used FROM core_agent_authorization_codes WHERE id=$1 FOR UPDATE",
+                &[&code_id],
+            ).await?;
+            // A concurrent redemption may have activated the receipt while we
+            // waited. Restart so replay follows connection-before-code locks.
+            if auth.get::<_, Option<i64>>("connection_id").is_some() {
+                tx.rollback().await?;
+                continue;
+            }
+            let pending = PendingAuthorization::from_row(&auth);
+            let bound = pending.client_id == params.client_id
+                && pending.resource == resource
+                && params.resource == resource
+                && auth.get::<_, String>("redirect_uri") == params.redirect_uri
+                && oauth_client::proof(&params.code_verifier, auth.get("code_challenge"))
+                && auth.get::<_, bool>("live")
+                && !auth.get::<_, bool>("used");
+            if !bound {
+                tx.rollback().await?;
+                return Err(OAuthError::InvalidGrant);
+            }
+            let tenant = pending.tenant;
+            let user = pending.user;
+            let agent_id = pending.agent_id.clone();
+            let client_id = pending.client_id.clone();
+            let resource = pending.resource.clone();
+            let oauth_scope = pending.oauth_scope.clone();
+            let approved_client = pending.approved_client.clone();
+            let organisation = pending.organisation;
+            let person = pending.person;
+            let replace = pending.replace.clone();
+            let connection_id = tx.mutate(move |sql| {
+                Box::pin(async move {
+                    let mut changes = replace_connections(sql, tenant, user, &agent_id, &replace).await?;
+                    let row = sql.query_one(
+                        "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,expires_at,approved_client) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'infinity',$9) RETURNING id",
+                        &[&tenant,&user,&organisation,&person,&agent_id,&client_id,&resource,&oauth_scope,&approved_client],
+                    ).await?;
+                    let connection_id: i64 = row.get(0);
+                    sql.execute(
+                        "UPDATE core_agent_authorization_codes SET connection_id=$2,used_at=now() WHERE id=$1",
+                        &[&code_id,&connection_id],
+                    ).await?;
+                    changes.extend([
+                        change("agent_connection", connection_id, json!({}), json!({"agent_id":agent_id,"client_id":client_id,"resource":resource,"oauth_scope":oauth_scope,"approved_client":approved_client})),
+                        change("agent_authorization_code", code_id, json!({"used":false}), json!({"used":true,"connection_id":connection_id})),
+                    ]);
+                    Ok((connection_id, changes))
+                })
+            }).await?;
+            let connection = self.connection(tx.sql(), connection_id, true).await?;
+            self.live(tx.sql(), &connection).await?;
+            let tokens = self.issue(&mut tx, &connection).await?;
+            tx.commit().await?;
+            self.connections_changed_for(tenant, user);
+            return Ok(tokens);
+        }
     }
 
     /// Starts device authorization for the built-in client. The receipt knows
@@ -1058,7 +1192,7 @@ impl AgentAccess {
                 self_reported_agents: serde_json::from_value(row.get(4)).unwrap_or_default(),
                 observed_clients: serde_json::from_value(row.get(5)).unwrap_or_default(),
                 created_at: row.get(6),
-                approved_client: row.get(7),
+                approved_client: approved_client_label(&row.get::<_, String>(7)),
                 enabled,
             });
         }
@@ -1247,9 +1381,12 @@ impl AgentAccess {
     }
     /// After commit only; a send with no live subscriber is not a failure.
     fn connections_changed(&self, scope: &Scope) {
+        self.connections_changed_for(scope.tenant(), scope.user());
+    }
+    fn connections_changed_for(&self, tenant: i64, user: i64) {
         let _ = self.connections.send(bilibi_ui::page::Change {
-            tenant: scope.tenant(),
-            user: Some(scope.user()),
+            tenant,
+            user: Some(user),
         });
     }
 
@@ -1507,7 +1644,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/agent_access", layer: bilibi_module_registry::Layer::Core,
         dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "core/user", "core/company"],
-        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql"))],
+        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql"))],
         services: &[bilibi_module_registry::Service { id: "core/agent_access.grants", factory: |services| {
             let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
             let users = services.get::<bilibi_user::UserService>("core/user.accounts")?;
