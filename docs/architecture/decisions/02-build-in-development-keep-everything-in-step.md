@@ -4,11 +4,11 @@
 **Status:** Accepted. Local builds, discovery, release installation, the stored server role, the catalogue-wide compatibility check, the release gate, automatic catalogue entries and upgrade notes for agents and the Software page status are built.
 **Agents:** codex/gpt-6 (author)
 **Scope:** Where Bilibi is built, how servers receive releases, and how the Platform, official Domains and official Extensions stay compatible
-**Last Updated:** 2026-10-20
+**Last Updated:** 2026-11-02
 
 > The `Agents` value is self-reporting: what the agent reports about itself. Only known parts are included.
 >
-> These are the owner's decisions of 2026-10-19 and 2026-10-20. This delivery model is Bilibi's own.
+> These are the owner's decisions of 2026-10-19 and 2026-10-20, clarified on 2026-11-02 to allow a separate build account on a Dev server. This delivery model is Bilibi's own.
 
 ## Context
 
@@ -20,12 +20,12 @@ Much industry practice supports independently evolving plugins through version r
 
 ## Decision
 
-**Build locally, release together, and install only tested releases on servers.**
+**Build in a separate development checkout, release together, and install only tested releases in running instances.**
 
 ### Development builds
 
 - Development uses the operator's local Bilibi repository and coding agent. The public application starting point also builds the pinned composition in GitHub Actions and publishes release assets.
-- Servers never build, including servers labelled Dev or Staging. A Dev role does not enable a compiler or a build job.
+- A Dev server may host the development checkout under a separate unprivileged build account, outside `/opt/bilibi`, with its own toolchain and low-priority builds. The web and installer services never compile source. A Dev role does not enable a compiler or a build job in Bilibi.
 - Production never changes code in place. It receives a release built and tested elsewhere, for its operating system, processor and system libraries.
 - Adding or updating a Domain or Extension means preparing a new composition in development, keeping the other mounted software, then building and checking it before installation.
 
@@ -82,7 +82,7 @@ This table describes the checkout on 2026-10-20. Accepted direction does not mea
 
 ## Open items
 
-**The build host and release transport may evolve without moving builds onto servers.**
+**The build host and release transport may evolve; Production still receives the exact tested file and never builds.**
 
 | Item | State |
 | --- | --- |

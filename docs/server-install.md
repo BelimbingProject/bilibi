@@ -4,13 +4,13 @@
 
 ## The short version
 
-Build both programs on your own machine, from your local Bilibi checkout. Install Node.js >=22 and npm there; Cargo generates and embeds the stylesheet during the build:
+Build both programs in a development checkout: on your own machine, in GitHub Actions, or under a separate build account on a Dev server. Install Node.js >=22 and npm on that build machine; Cargo generates and embeds the stylesheet during the build:
 
 ```sh
 cargo build --release --locked -p bilibi-web -p bilibi-installer
 ```
 
-Copy the programs from `target/release/` and the whole `scripts/` directory to a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server. The server needs neither Cargo nor a Rust compiler. On that server, as root:
+Copy the programs from `target/release/` and the whole `scripts/` directory to a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On that server, as root:
 
 ```sh
 sudo scripts/install-server.sh create production --role production --site erp.example.com
@@ -73,7 +73,7 @@ Two system users share the work, so the program that serves pages can never rewr
 | `bilibi` | the service `bilibi@<instance>` | `data/`, and `incoming/` together with `bilibi-build`; it can read `releases/` and `env` |
 | `bilibi-build` | the installer `bilibi-installer@<instance>`: put releases into service | `releases/`, `backups/`, `/opt/bilibi/build`, and `incoming/` with `bilibi`; it may start, stop and restart `bilibi@*` and reload Caddy through sudo, nothing else |
 
-Two systemd unit templates serve every instance: `bilibi@<instance>` runs `current/bilibi-web run` as `bilibi`, reads `env`, restarts after a crash and permits writes under `data/` and `incoming/`. `bilibi-installer@<instance>` runs `/opt/bilibi/build/bin/bilibi-installer` as `bilibi-build` and carries out install and undo jobs from Software. Servers have no build worker or toolchain requirement. Build releases locally or through your application repository’s GitHub Actions; see [application workspaces](application-workspaces.md).
+Two systemd unit templates serve every instance: `bilibi@<instance>` runs `current/bilibi-web run` as `bilibi`, reads `env`, restarts after a crash and permits writes under `data/` and `incoming/`. `bilibi-installer@<instance>` runs `/opt/bilibi/build/bin/bilibi-installer` as `bilibi-build` and carries out install and undo jobs from Software. These services never compile source and need no toolchain. Build releases locally, through your application repository’s GitHub Actions, or with a separate account on a Dev server; see [Build releases](#build-releases) and [application workspaces](application-workspaces.md).
 
 Each instance has its own PostgreSQL role and database (`bilibi_production`, `bilibi_dev`) on the server's PostgreSQL 18 cluster, with a generated password kept only in `env`. Dev cannot read Production's data.
 
@@ -125,7 +125,7 @@ The role comes from **`instance.role` in the settings table**. The explicit inst
 | Staging | `staging` | Test a release before Production | On |
 | Production | `production` | Run the tested release | On |
 
-Builds run in a development workspace or in your application repository’s GitHub Actions. The role identifies the instance; it never enables a server build.
+Builds run in a development workspace, which may live on a Dev server, or in your application repository’s GitHub Actions. The role identifies the instance; it never enables a build job in Bilibi.
 
 Click the role in the status bar to open **Instance settings** (`/system/instance`). A Core Administrator in the platform-operator organisation can change the role, name and colour. Every role change needs a fresh 2FA code, even on Dev, and is audited. The page warns before moving to or from Production: this changes warnings and 2FA rules without moving any data. Other accounts cannot change the role.
 
@@ -140,7 +140,7 @@ In code, `bilibi_base::system::Instance::resolve` returns the role, label and co
 
 ## One machine or two
 
-**Dev and Production on one machine** use separate databases, ports and addresses. Build in your local Bilibi checkout, install the release on Dev or Staging to check it, then promote the tested release to Production.
+**Dev and Production on one machine** use separate databases, ports and addresses. Build in a separate development checkout, install the release on Dev or Staging to check it, then promote the tested file to Production without rebuilding.
 
 **Dev and Production on two machines** use the same release archive from GitHub or a saved upload. Each instance keeps its own local release numbers, database and backup. No instance serves release files to another.
 
@@ -179,7 +179,7 @@ sudo scripts/install-server.sh switch production 1
 
 ## The installer service
 
-Build the installer on your own machine:
+Build the installer on the same build machine as the web program:
 
 ```sh
 cargo build --release --locked -p bilibi-installer
@@ -268,9 +268,27 @@ While the service is stopped, Caddy answers every request with status 503 and th
 
 The page is rendered once per instance from `scripts/waiting-page.html` into `site/waiting.html`, so the development launcher and the server share one page.
 
-## Build locally
+## Build releases
 
-[ADR 02](architecture/decisions/02-build-in-development-keep-everything-in-step.md) records why builds stay in development, servers only install tested releases, and official software is kept in step.
+[ADR 02](architecture/decisions/02-build-in-development-keep-everything-in-step.md) records why builds stay separate from the running application, Production only installs tested releases, and official software is kept in step.
+
+### Building on a Dev server
+
+**A Dev server can also be the build machine.** Use a separate unprivileged account, such as `bilibi-compile`, with its own home directory. It is not `bilibi` (the web service) or `bilibi-build` (the release installer). Give it no sudo access and no access to instance secrets.
+
+- Keep its source checkout, Rust toolchain, Node.js >=22, npm and Cargo output under its home directory, outside `/opt/bilibi`.
+- Compose the required Domains and Extensions in that checkout using the normal mounting workflow. Save the composition manifest and lockfile with the release.
+- Build at low CPU and disk priority, with a bounded number of compiler jobs. Run long builds in a persistent session or service so an SSH disconnect does not kill them.
+
+For example, from the build account's composed checkout:
+
+```sh
+nice -n 15 ionice -c 3 cargo build --release --locked -j 2 -p bilibi-web -p bilibi-installer
+```
+
+An administrator installs the finished files with `release` and `installer`; the build account does not write into the running instance. Check the release on Dev and Staging, retain its manifest, lockfile and checksums, then copy that exact tested release to Production. **Production never builds or resolves source dependencies.**
+
+### Application releases
 
 **Prepare application releases from the outer application repository.** Create it from your trial with `./bilibi new <name>`. Commit and push component changes in their own repositories. Run `./bilibi check` with a separate empty disposable database, then `./bilibi build`. Each asks whether to use new commits and saves the record when you accept. Run `./bilibi release` to commit the record and start the release workflow; GitHub builds from that record. The builder verifies the source selection and saved lock; the application's README describes publication. See [application workspaces](application-workspaces.md) for the directory layout and migration.
 

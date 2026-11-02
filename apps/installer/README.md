@@ -123,7 +123,7 @@ The audit trail is the app's job, not the installer's: `base/software` records e
 
 ## Running it
 
-Build `bilibi-installer` on your own machine, then copy the finished program to the server ([local builds](../../docs/server-install.md#build-locally)). On the server, run:
+Build `bilibi-installer` on your build machine, which may be a separate account on a Dev server, then install the finished program ([build releases](../../docs/server-install.md#build-releases)). On the server, run:
 
 ```sh
 sudo scripts/install-server.sh installer /path/to/bilibi-installer
