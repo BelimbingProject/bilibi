@@ -575,6 +575,18 @@ expected_repository_id() {
     fi
 }
 
+# stage_source <file>: copy the operator's file once into a private folder only
+# root can enter, set $staged to that copy, and remove the folder on every exit.
+# Verify and use only the copy, so the original cannot change in between.
+staging=''
+staged=''
+stage_source() {
+    staging=$(mktemp -d /tmp/bilibi-stage.XXXXXX) || fail 'cannot create a private staging folder'
+    trap 'rm -rf -- "$staging"' EXIT
+    staged=$staging/artifact
+    install -m 0700 -o root -g root "$1" "$staged" || fail "cannot copy $1 for verification; nothing was installed"
+}
+
 # verify_provenance <artifact> <repository> <repository id> <tag>: GitHub
 # verifies the file's digest, signing repository, release workflow and tag, and
 # the signing repository's number must equal the expected one. Public
@@ -679,12 +691,13 @@ installer() {
     [[ -n $repository && -n $tag ]] || usage
     need_root installer "$@"
     [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it in your development checkout with: cargo build --release --locked -p bilibi-installer, then install target/release/bilibi-installer here"
-    verify_provenance "$source" "$repository" "$repository_id" "$tag"
+    stage_source "$source"
+    verify_provenance "$staged" "$repository" "$repository_id" "$tag"
     [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
     install_unit
     retire_worker
     install -d -m 0755 -o root -g root "$root/build/bin"
-    install -m 0755 -o root -g root "$source" "$installer_bin.new" && mv -T "$installer_bin.new" "$installer_bin"
+    install -m 0755 -o root -g root "$staged" "$installer_bin.new" && mv -T "$installer_bin.new" "$installer_bin"
     say "installer: $installer_bin updated"
     local instance
     for instance in $(instances); do
@@ -758,11 +771,11 @@ release() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role ... --site ..."
     retire_worker
     [[ -f $source ]] || fail "$source is not a setup release archive"
-    verify_provenance "$source" "$repository" "$repository_id" "$tag"
+    stage_source "$source"
+    verify_provenance "$staged" "$repository" "$repository_id" "$tag"
     local unpacked binary dir n previous
-    unpacked=$(mktemp -d /tmp/bilibi-release.XXXXXX)
-    if ! unpack_release "$source" "$unpacked"; then
-        rm -rf -- "$unpacked"
+    unpacked=$staging/unpacked
+    if ! unpack_release "$staged" "$unpacked"; then
         fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry'
     fi
     binary=$unpacked/bilibi-web
