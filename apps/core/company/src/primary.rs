@@ -114,7 +114,7 @@ pub async fn assign(
     .ok_or(AssignmentError::TenantNotFound)?;
     let company = sql
         .query_opt(
-            "SELECT status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
+            "SELECT status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
             &[&tenant, &company_id.max(0)],
         )
         .await

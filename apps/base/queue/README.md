@@ -67,6 +67,11 @@ transactions short and do external IO outside them. Cancellation waits for any
 already locked business transaction; it cannot undo a committed effect.
 At-least-once delivery requires an owner idempotency key, including for external
 IO and when a business commit succeeds before queue completion is recorded.
+When an owner's normal facade opens its own short transaction, keep an
+`Execution::begin` transaction open around that call as the fence. Company's
+locking `require_writable` guard is compatible with the captured desk proof;
+the facade needs no queue-specific write path. A job cannot archive the company
+its own fence covers: archiving waits for fenced jobs by design.
 
 `Queue::enqueue_system_within` is the same system job enqueued from inside
 another actor's transaction, for a Platform delivery edge whose work is not
@@ -155,14 +160,15 @@ stops the private executable gracefully. It never drives Herdr or shared app
 processes. The contributed worker/handler is absent from production.
 
 Other enqueue modes: `retry`, `discard`, `cancel`, `panic`, `invalid`,
-`heartbeat`, `timeout`, `late-write`, `fenced-write`, `complete`, `secret`
+`heartbeat`, `timeout`, `late-write`, `fenced-write`, `company-write`, `complete`, `secret`
 (reads the company secret as the actor; `enqueue-system secret` as the
 principal; `BILIBI_SETTINGS_KEY` must be set for `prepare` and `worker`).
 `grant`, `revoke-secret` and `revoke` change the principal's grants as the
 fixture administrator. `cancel JOB_ID` and
 `retry JOB_ID` use the production audited owner commands. `QUEUE_DEMO_RUNTIME`
-sets the private attempt timeout (seconds). The heartbeat mode takes eight
-seconds, exceeding the three-second lease without a second attempt. The effect
+sets the private attempt timeout (seconds); `QUEUE_DEMO_LEASE` sets its lease
+(three seconds by default). The heartbeat mode takes eight seconds, exceeding
+the default lease without a second attempt. The effect
 uses job ID as an owner idempotency key. To demonstrate current actor refusal,
 set the enqueuing account's `users.status` to `suspended` after enqueue and
 before starting the private worker. To demonstrate reauthorization before a
@@ -170,6 +176,8 @@ delayed write, change the specimen's `principal_capabilities` row for
 `companies.update` to false while `late-write` is executing. Both refuse the
 owner effect. All such manual database changes belong exclusively in the
 disposable specimen DB.
+
+`company-write` holds the queue fence on one connection while the normal owner transaction locks the captured company and records one company-scoped effect, then, still under the fence, assigns the primary company, saves a field and an unchanged code through the Company facade, and shows a changed code refused at once. It proves the workplace recheck and write guard do not block each other.
 
 User job scopes carry `Channel::Job` through `Execution::scope`, `Execution::identity` and live reproof. Passing a job scope directly to an owner facade keeps background restrictions, including Workflow's refusal to approve.
 

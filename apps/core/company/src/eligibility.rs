@@ -97,7 +97,7 @@ pub async fn lock_work_context_and_target(
     companies.sort_unstable();
     companies.dedup();
     tx.query(
-        "SELECT id FROM companies WHERE tenant_id=$1 AND id=ANY($2) ORDER BY id FOR UPDATE",
+        "SELECT id FROM companies WHERE tenant_id=$1 AND id=ANY($2) ORDER BY id FOR NO KEY UPDATE",
         &[&scope.tenant(), &companies],
     )
     .await?;

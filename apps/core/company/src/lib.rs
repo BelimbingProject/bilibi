@@ -380,10 +380,35 @@ pub async fn save(
     edit.validate()?;
     let mut client = db.get().await?;
     let scope = guard(&**client, token, sessions).await?;
-    let mut tx = mutations
+    let tx = mutations
         .begin(&mut client, scope.mutation_context("company.update"))
         .await?;
     let scope = guard(tx.sql(), token, sessions).await?;
+    save_in(tx, &scope, edit, notifications).await
+}
+
+pub async fn save_as(
+    db: &Db,
+    scope: &Scope,
+    edit: &Edit,
+    notifications: &NotificationBoundary,
+    mutations: &MutationBoundary,
+) -> Result<()> {
+    edit.validate()?;
+    let mut client = db.get().await?;
+    let tx = mutations
+        .begin(&mut client, scope.mutation_context("company.update"))
+        .await?;
+    save_in(tx, scope, edit, notifications).await
+}
+
+async fn save_in(
+    mut tx: bilibi_database::MutationTransaction<'_>,
+    scope: &Scope,
+    edit: &Edit,
+    notifications: &NotificationBoundary,
+) -> Result<()> {
+    let scope = scope.clone();
     organisation::authorize_target(tx.sql(), &scope, edit.id, UPDATE).await?;
     if restrictions(tx.sql(), &scope).await?.contains(&edit.field) {
         return Err(Error::Forbidden);
@@ -402,6 +427,21 @@ pub async fn save(
         }
         "code" => {
             let code = edit.value.trim().to_owned();
+            if scope.channel() == bilibi_tenancy::Channel::Job
+                && scope.current_company().is_some_and(|c| c.get() == id)
+            {
+                let unchanged = tx
+                    .sql()
+                    .query_opt(
+                        "SELECT 1 FROM companies WHERE tenant_id=$1 AND id=$2 AND code=$3",
+                        &[&tenant, &id, &code],
+                    )
+                    .await?
+                    .is_some();
+                if !unchanged {
+                    return Err(Error::Refused("A company code cannot be changed by a background job working on that company; change it on the company page.".into()));
+                }
+            }
             organisation::lock_code(tx.sql(), tenant, &code).await?;
             let taken = tx
                 .sql()
@@ -420,7 +460,7 @@ pub async fn save(
         _ => edit.value.clone(),
     };
     tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_opt(&format!("SELECT {}::text,version,status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",field), &[&tenant,&id]).await?.ok_or(Error::NotFound)?;
+        let row = sql.query_opt(&format!("SELECT {}::text,version,status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",field), &[&tenant,&id]).await?.ok_or(Error::NotFound)?;
         if row.get::<_, i64>(1) != version { return Err(Error::Conflict); }
         if row.get::<_, String>(2) == "archived" { return Err(Error::Forbidden); }
         let old: Option<String> = row.get(0);
@@ -484,6 +524,9 @@ impl CompanyService {
             }
         }
         result
+    }
+    pub async fn save_as(&self, scope: &Scope, edit: &Edit) -> Result<()> {
+        save_as(&self.db, scope, edit, &self.notifications, &self.mutations).await
     }
     pub async fn save(&self, token: &str, edit: &Edit) -> Result<()> {
         save(
