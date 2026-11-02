@@ -2,7 +2,7 @@
   "format": 1,
   "platform": {
     "name": "Bilibi",
-    "repository": "https://github.com/BelimbingApp/bilibi",
+    "repository": "https://github.com/BelimbingProject/bilibi",
     "versions": {
       "0.1.0": {
         "released": "2026-10-18",
@@ -18,7 +18,7 @@
     "people": {
       "name": "People",
       "description": "Employment, attendance, leave, claims, skills, training, performance, progression and payroll.",
-      "repository": "https://github.com/BelimbingApp/bilibi-dom-people",
+      "repository": "https://github.com/BelimbingProject/bilibi-dom-people",
       "modules": [
         "attendance",
         "claims",
@@ -45,7 +45,7 @@
     "people_connector": {
       "name": "People connector",
       "description": "People directory connections, synchronisation, file exchange, backups and recovery.",
-      "repository": "https://github.com/BelimbingApp/bilibi-dom-people-connector",
+      "repository": "https://github.com/BelimbingProject/bilibi-dom-people-connector",
       "modules": [
         "connector",
         "native_people_adapter"
@@ -61,7 +61,7 @@
     "finance": {
       "name": "Finance",
       "description": "A company's bookkeeping: the ledger, bills and payments, invoices and receipts, bank statements and reports.",
-      "repository": "https://github.com/BelimbingApp/bilibi-dom-finance",
+      "repository": "https://github.com/BelimbingProject/bilibi-dom-finance",
       "modules": [
         "ledger",
         "payables",
@@ -90,7 +90,7 @@
     "factory": {
       "name": "Factory",
       "description": "For manufacturers: stock and lots, products with their formulas and routings, and production orders.",
-      "repository": "https://github.com/BelimbingApp/bilibi-dom-factory",
+      "repository": "https://github.com/BelimbingProject/bilibi-dom-factory",
       "modules": [
         "inventory",
         "product_definition",
@@ -112,7 +112,7 @@
     "supply_chain": {
       "name": "Supply Chain",
       "description": "Buying through to delivery: suppliers, purchase requests, purchase orders and goods received.",
-      "repository": "https://github.com/BelimbingApp/bilibi-dom-supply-chain",
+      "repository": "https://github.com/BelimbingProject/bilibi-dom-supply-chain",
       "modules": [
         "purchasing",
         "receiving"
