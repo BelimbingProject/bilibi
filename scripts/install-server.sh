@@ -200,6 +200,8 @@ ensure_cloudflare_module() {
 }
 # ---------------------------------------------------------------- users
 ensure_users() {
+    # RHEL useradd does not create missing parents of a new home directory.
+    install -d -m 0755 -o root -g root "$root"
     getent group bilibi >/dev/null || groupadd --system bilibi
     getent passwd bilibi >/dev/null ||
         useradd --system --gid bilibi --no-create-home --home-dir "$root" --shell /usr/sbin/nologin bilibi
