@@ -178,9 +178,10 @@ owner effect. All such manual database changes belong exclusively in the
 disposable specimen DB.
 
 `company-write` holds the queue fence on one connection while the normal owner
-transaction locks the captured company and records one company-scoped effect, then, still under the fence, assigns the primary company, saves a field and an
-unchanged code through the Company facade, and shows a changed code refused
-at once. It proves the workplace recheck and write guard do not block each other.
+transaction locks the captured company and records one company-scoped effect, then, still under the fence, assigns the
+primary company, saves a field and an unchanged code through the Company
+facade, and shows a changed code refused at once. It proves the workplace
+recheck and write guard do not block each other.
 
 User job scopes carry `Channel::Job` through `Execution::scope`, `Execution::identity` and live reproof. Passing a job scope directly to an owner facade keeps background restrictions, including Workflow's refusal to approve.
 
