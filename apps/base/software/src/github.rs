@@ -117,6 +117,12 @@ struct Saved {
     refresh_minutes: i64,
     token_set: bool,
 }
+
+pub(crate) struct Verification {
+    pub repository: String,
+    pub repository_id: i64,
+    pub token: Option<String>,
+}
 impl Software {
     async fn github_saved(
         &self,
@@ -156,6 +162,33 @@ impl Software {
             refresh_minutes,
             token_set,
         })
+    }
+
+    /// The accepted repository identity used to verify an uploaded release's
+    /// GitHub build provenance. A missing or changed identity is a plain
+    /// refusal, not permission to accept an unsigned upload.
+    pub(crate) async fn github_verification(
+        &self,
+        scope: &Scope,
+    ) -> Result<std::result::Result<Verification, String>> {
+        let client = self.db.get().await?;
+        let saved = self.github_saved(&**client, scope).await?;
+        drop(client);
+        let Some(repository) = saved.repository else {
+            return Ok(Err("Set and accept the application repository on Software › Releases before uploading a release.".into()));
+        };
+        let Some(repository_id) = saved.repository_id else {
+            return Ok(Err("Accept the application repository on Software › Releases before uploading a release.".into()));
+        };
+        if saved.bound.as_deref() != Some(repository.as_str()) {
+            return Ok(Err("The application repository name has changed since it was accepted. Accept it again before uploading a release.".into()));
+        }
+        let token = self.github_token(scope).await?;
+        Ok(Ok(Verification {
+            repository,
+            repository_id,
+            token,
+        }))
     }
 
     /// The cached GitHub release list, refreshed when it is older than the

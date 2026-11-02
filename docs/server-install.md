@@ -4,31 +4,38 @@
 
 ## The short version
 
-Build both programs in a development checkout: on your own machine, in GitHub Actions, or under a separate build account on a Dev server. Install Node.js >=22 and npm on that build machine; Cargo generates and embeds the stylesheet during the build:
-
-```sh
-cargo build --release --locked -p bilibi-web -p bilibi-installer
-```
-
-Copy the programs from `target/release/` and the whole `scripts/` directory to a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On that server, as root:
+Publish your application's protected setup tag, then download its setup archive, installer and server-tools assets. Verify `bilibi-server-tools.tar.gz` with `gh attestation verify` before you extract or run its root-owned script. The runtime needs neither Cargo nor a Rust compiler; Production receives the tested programs and never builds them. On a fresh Ubuntu, Debian, Rocky Linux 10 or RHEL 10 server, run:
 
 ```sh
 sudo scripts/install-server.sh create production --role production --site erp.example.com
-sudo scripts/install-server.sh release production /path/to/bilibi-web
+sudo scripts/install-server.sh release production /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --tag setup-v1.0.0
 ```
 
 ```sh
 sudo scripts/install-server.sh create-owner production
-sudo scripts/install-server.sh installer /path/to/bilibi-installer
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --tag setup-v1.0.0
 ```
 
 The first command installs PostgreSQL 18 and Caddy, creates the users and folders, writes the service and the proxy site, and prints what to do next. The second copies the program into `releases/1`, updates the database, points `current` at it and starts the service. The third asks you for your organisation's name, your email and a password, and creates the first account: the server owner. The fourth starts the installer, the service that puts later releases into service when the owner asks on the Software page. Open `https://erp.example.com`, sign in with that email, and Caddy serves the app, with a certificate it fetched itself.
+
+### Verify the server tools first
+
+The server-tools archive contains a script that runs as root, so verify the archive before extracting it. A public repository needs no GitHub login. Install a current GitHub CLI from its official package repository if `gh attestation verify --help` is not available; [GitHub maintains the package commands](https://github.com/cli/cli/blob/trunk/docs/install_linux.md). Then run:
+
+```sh
+gh attestation verify bilibi-server-tools.tar.gz \
+  --repo your-company/my-bilibi \
+  --signer-workflow your-company/my-bilibi/.github/workflows/release.yml \
+  --source-ref refs/tags/setup-v1.0.0
+```
+
+For a private application repository, set a fine-grained read token in `GH_TOKEN` only for this command. Extract and run the tools only after the command succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
 
 Want a Dev instance on the same machine to try changes first? Add one:
 
 ```sh
 sudo scripts/install-server.sh create dev --role dev --site dev.erp.example.com
-sudo scripts/install-server.sh release dev /path/to/bilibi-web
+sudo scripts/install-server.sh release dev /path/to/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --tag setup-v1.0.0
 ```
 
 Notice what you did **not** do: pick ports, write database passwords, write a unit file or a proxy config, or edit the database to get a first login. The script generated them, and it tells you when something you asked for conflicts with what exists.
@@ -73,7 +80,7 @@ Two system users share the work, so the program that serves pages can never rewr
 | `bilibi` | the service `bilibi@<instance>` | `data/`, and `incoming/` together with `bilibi-build`; it can read `releases/` and `env` |
 | `bilibi-build` | the installer `bilibi-installer@<instance>`: put releases into service | `releases/`, `backups/`, `/opt/bilibi/build`, and `incoming/` with `bilibi`; it may start, stop and restart `bilibi@*` and reload Caddy through sudo, nothing else |
 
-Two systemd unit templates serve every instance: `bilibi@<instance>` runs `current/bilibi-web run` as `bilibi`, reads `env`, restarts after a crash and permits writes under `data/` and `incoming/`. `bilibi-installer@<instance>` runs `/opt/bilibi/build/bin/bilibi-installer` as `bilibi-build` and carries out install and undo jobs from Software. These services never compile source and need no toolchain. Build releases locally, through your application repository’s GitHub Actions, or with a separate account on a Dev server; see [Build releases](#build-releases) and [application workspaces](application-workspaces.md).
+Two systemd unit templates serve every instance: `bilibi@<instance>` runs `current/bilibi-web run` as `bilibi`, reads `env`, restarts after a crash and permits writes under `data/` and `incoming/`. `bilibi-installer@<instance>` runs `/opt/bilibi/build/bin/bilibi-installer` as `bilibi-build` and carries out install and undo jobs from Software. These services never compile source and need no toolchain. Test source locally or with a separate account on a Dev server, then publish the saved composition through the application repository’s GitHub Actions; see [Build releases](#build-releases) and [application workspaces](application-workspaces.md).
 
 Each instance has its own PostgreSQL role and database (`bilibi_production`, `bilibi_dev`) on the server's PostgreSQL 18 cluster, with a generated password kept only in `env`. Dev cannot read Production's data.
 
@@ -142,9 +149,9 @@ In code, `bilibi_base::system::Instance::resolve` returns the role, label and co
 
 **Dev and Production on one machine** use separate databases, ports and addresses. Build in a separate development checkout, install the release on Dev or Staging to check it, then promote the tested file to Production without rebuilding.
 
-**Dev and Production on two machines** use the same release archive from GitHub or a saved upload. Each instance keeps its own local release numbers, database and backup. No instance serves release files to another.
+**Dev and Production on two machines** use the same verified release archive from GitHub, either downloaded directly or saved and uploaded again. Each instance keeps its own local release numbers, database and backup. No instance serves release files to another.
 
-**Install from GitHub**: on Software › Releases, name your application repository (for example your-company/my-bilibi), save a read-only token only when the repository is private, and accept the repository. That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a file still works when you do not want GitHub to supply the release.
+**Install from GitHub**: on Software › Releases, name your application repository (for example your-company/my-bilibi), save a read-only token only when the repository is private, and accept the repository. That asks for your 2FA code. Then review one setup file for this server. The server downloads that file, checks it, backs up, switches and can switch back or Undo, the same way as an upload. Uploading a saved copy of that published asset still works when you do not want GitHub to supply the bytes.
 
 Staging is optional. When used, install and check the exact GitHub asset there first, then review a separate Production install of that asset with fresh 2FA. See [Staging and Production](../apps/base/software/README.md#staging-and-production) for the agent report and identity checks.
 
@@ -152,15 +159,17 @@ Staging is optional. When used, install and check the exact GitHub asset there f
 
 **After the first release, the owner does this from the Software page**, and the installer service does the work: copy and check, pause, back up, update the database, switch, check, and switch back by itself when the check fails. The page also offers Undo. What each step does, and what Undo loses, is in [`apps/installer/README.md`](../apps/installer/README.md).
 
-The first release has no program to ask through, so `release` puts it in service from the terminal. It takes a `bilibi-web` program, or a folder holding it next to the build's `manifest.txt` and `Cargo.lock`:
+The first release has no program to ask through, so `release` puts a published setup archive in service from the terminal. Name the application repository and protected setup tag so the script can verify GitHub build provenance before it opens the archive:
 
 ```sh
-sudo scripts/install-server.sh release production /home/me/bilibi-0.2.1/
+sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --tag setup-v1.0.0
 ```
+
+Public repositories need no GitHub login. For a private repository, set a fine-grained read token in `GH_TOKEN` for this command. If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
 
 Step by step, we:
 
-1. Copy the program into the next numbered folder, `releases/<n>`, and write its SHA-256 checksum.
+1. Verify the archive with GitHub, unpack only the expected files, check its SHA-256 list, and copy it into the next numbered folder, `releases/<n>`.
 2. Stop the service. From here Caddy shows the waiting page.
 3. Update the database with the new program's `migrate` and apply its production seeds. Nothing migrates on boot, so this must happen before the new program serves. If it fails, the previous release is started again and nothing has changed.
 4. Point `releases/current` at `<n>` and start the service. The instance's `current` is a fixed link to `releases/current`, so the link that moves lives in the folder `bilibi-build` owns, and the installer can move it too; an instance created before this shape is converted the next time you run `create`, `installer`, `release` or `switch`. A job that finds an unconverted instance ends before the pause with "Nothing changed" and says to run `installer` or `create`.
@@ -179,19 +188,13 @@ sudo scripts/install-server.sh switch production 1
 
 ## The installer service
 
-Build the installer on the same build machine as the web program:
+Download the installer asset from the same published application release, then run:
 
 ```sh
-cargo build --release --locked -p bilibi-installer
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --tag setup-v1.0.0
 ```
 
-Copy the finished program to the server, then run there:
-
-```sh
-sudo scripts/install-server.sh installer /path/to/bilibi-installer
-```
-
-This copies the program to `/opt/bilibi/build/bin/bilibi-installer`, owned by root so neither Bilibi user can change it, and starts `bilibi-installer@<instance>` for every instance on the machine. A `create` after that starts one for the new instance too. Run `installer` again with a newer program to update it: the services restart, and a job one of them was in the middle of is settled by the rules in [`apps/installer/README.md`](../apps/installer/README.md) ("If the server restarts mid-way"): before the database changed it ends `interrupted` and nothing changed; after, it finishes.
+The script verifies the installer's GitHub provenance before it replaces anything. It then copies the program to `/opt/bilibi/build/bin/bilibi-installer`, owned by root so neither Bilibi user can change it, and starts `bilibi-installer@<instance>` for every instance on the machine. A `create` after that starts one for the new instance too. Run `installer` again with a newer verified program to update it: the services restart, and a job one of them was in the middle of is settled by the rules in [`apps/installer/README.md`](../apps/installer/README.md) ("If the server restarts mid-way"): before the database changed it ends `interrupted` and nothing changed; after, it finishes.
 
 The installer reads the instance's `env` for its database and port. It copies a release from `incoming/`, where the program puts a verified GitHub download or uploaded archive.
 
@@ -286,11 +289,11 @@ For example, from the build account's composed checkout:
 nice -n 15 ionice -c 3 cargo build --release --locked -j 2 -p bilibi-web -p bilibi-installer
 ```
 
-An administrator installs the finished files with `release` and `installer`; the build account does not write into the running instance. Check the release on Dev and Staging, retain its manifest, lockfile and checksums, then copy that exact tested release to Production. **Production never builds or resolves source dependencies.**
+Local builds are for development checks. They are not server releases. An application release must come from the protected setup tag and GitHub release workflow below. **Production never builds or resolves source dependencies.**
 
 ### Application releases
 
-**Prepare application releases from the outer application repository.** Create it from your trial with `./bilibi new <name>`. Commit and push component changes in their own repositories. Run `./bilibi check` with a separate empty disposable database, then `./bilibi build`. Each asks whether to use new commits and saves the record when you accept. Run `./bilibi release` to commit the record and start the release workflow; GitHub builds from that record. The builder verifies the source selection and saved lock; the application's README describes publication. See [application workspaces](application-workspaces.md) for the directory layout and migration.
+**Prepare application releases from the outer application repository.** Create it from your trial with `./bilibi new <name>`. Commit and push component changes in their own repositories. Run `./bilibi check` with a separate empty disposable database, then `./bilibi build`. Each asks whether to use new commits and saves the record when you accept. Commit and review that record on the application's default branch, then run `./bilibi release` to create the protected tag and start the release workflow. GitHub builds from that record. The builder verifies the source selection and saved lock; the application's README describes publication. See [application workspaces](application-workspaces.md) for the directory layout and migration.
 
 ### Focused component builds
 
@@ -308,18 +311,7 @@ cargo build --release --locked -p bilibi-web
 
 Keep other mounted Domains and Extensions. For an existing clone at another commit, `add` changes nothing and prints the fetch and checkout steps to run once your work is saved. Run the composition locally against its own database and check its pages in the browser. Build for the server’s operating system, processor and system library version.
 
-Copy `target/release/bilibi-web`, `.local/composition/manifest.txt` and `.local/composition/Cargo.lock` into a release folder, then write its checksum and archive it:
-
-```sh
-mkdir -p /path/to/release
-cp target/release/bilibi-web .local/composition/manifest.txt .local/composition/Cargo.lock /path/to/release/
-(cd /path/to/release && sha256sum bilibi-web manifest.txt Cargo.lock > SHA256SUMS)
-tar -C /path/to/release -czf /path/to/release.tar.gz bilibi-web SHA256SUMS manifest.txt Cargo.lock
-```
-
-Upload that archive on **Software › Releases** and review the install. To build and publish complete assets on GitHub, create your application with `./bilibi new <name>` and use its release workflow; see [application workspaces](application-workspaces.md). Install the same published asset on Staging and Production with separate reviews and fresh 2FA. Backup, automatic switch-back, audit and Undo use the same path for GitHub and upload.
-
-A folder prepared this way has no `release.json`. An uploaded file's review therefore warns that its change list is known only once the installer reads the program. The installer records the pinned composition and changes in the job's result.
+Do not turn this local binary into a server archive. Create an application with `./bilibi new <name>` and use its release workflow; see [application workspaces](application-workspaces.md). That workflow publishes the complete archive, its checksums and GitHub build provenance. Install the same published asset on Staging and Production with separate reviews and fresh 2FA. Backup, automatic switch-back, audit and Undo use the same path for a GitHub download and an uploaded copy of that verified asset.
 
 When upgrading an older installation, `create`, `installer` and `release` stop and disable each former `bilibi-worker@<instance>` service, then remove that obsolete unit and its sudoers rule. Rerunning is safe, and a fresh server is left alone. The new `base-software-003-local-builds` migration cancels queued and running build jobs with local build guidance, preserving their history. Before upgrading to the GitHub-and-upload release, finish or cancel active instance-source installs; the migration refuses while one remains, including the install that delivers the upgrade. Deliver the upgrade itself as a GitHub asset or an uploaded archive, and update the installer alongside the app. Completed history and Undo are preserved.
 
@@ -330,10 +322,10 @@ Script commands:
 | Command | What it does |
 | --- | --- |
 | `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
-| `release <instance> <bilibi-web or folder>` | Copy into `releases/<n>`, migrate, switch, check |
+| `release <instance> <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
 | `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | The first account, the server owner; asks for anything not given, refuses once an owner exists (it then only finishes an unfinished Person, business affiliation and first desk) |
 | `two-factor-reset <instance> --email <address>` | Turn off one account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
-| `installer <bilibi-installer>` | Copy the installer program to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
+| `installer <bilibi-installer> --repo <owner/name> --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `switch <instance> <n>` | Put a kept release in service |
 | `status [<instance>]` | Roles, addresses, service and installer states, releases |
 
@@ -353,7 +345,7 @@ Files outside `/opt/bilibi`: `/etc/systemd/system/bilibi@.service`, `/etc/system
 
 ## Where to go next
 
-- [Repeat the fresh-server proof](server-proof/README.md): disposable systemd lab, local Finance build, file upload, 2FA, Undo and a failed health check.
+- [Repeat the fresh-server proof](server-proof/README.md): disposable systemd lab, verified application release, file upload, 2FA, Undo and a failed health check.
 - The design behind this layout: the Software page plan, in the Firstmate scout report `bilibi-domain-chooser` (sections 2, 3 and 6).
 - What each environment variable does: [`README.md`](../README.md), Configuration.
 - 2FA step-up and why Dev skips it: [`apps/base/step_up/README.md`](../apps/base/step_up/README.md).

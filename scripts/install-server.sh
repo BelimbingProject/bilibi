@@ -6,10 +6,10 @@
 # The layout, and why it is this way, is in docs/server-install.md.
 #
 #   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
-#   install-server.sh release <instance> <bilibi-web binary, or a folder holding it>
+#   install-server.sh release <instance> <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
 #   install-server.sh two-factor-reset <instance> --email <address>
-#   install-server.sh installer <bilibi-installer binary>
+#   install-server.sh installer <bilibi-installer binary> --repo <owner/name> --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
 #
@@ -42,6 +42,8 @@ fail() { printf 'install-server: %s\n' "$1" >&2; [[ -n ${2:-} ]] && printf 'Next
 say() { printf '%s\n' "$*"; }
 need_root() { [[ $(id -u) -eq 0 ]] || fail 'run this as root' "sudo $0 $*"; }
 valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; }
+valid_repository() { [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
+valid_setup_tag() { [[ $1 =~ ^setup-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 instance_dir() { printf '%s/%s' "$root" "$1"; }
 instance_exists() { [[ -f $(instance_dir "$1")/env ]]; }
 # env_value <instance> <KEY>: one value from the instance's env file.
@@ -178,6 +180,26 @@ install_packages() {
         debian) install_debian_packages ;;
         rhel) install_rhel_packages ;;
     esac
+}
+ensure_github_cli() {
+    gh attestation verify --help >/dev/null 2>&1 && return 0
+    say "installing GitHub CLI with artifact-attestation support (details in $log)"
+    case $os_family in
+        debian)
+            apt_repo github-cli https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                "deb [arch=$(dpkg --print-architecture) signed-by=@KEYRING@] https://cli.github.com/packages stable main"
+            apt-get install -y -qq --no-install-recommends gh >>"$log" 2>&1 ||
+                fail 'could not install GitHub CLI' "see $log"
+            ;;
+        rhel)
+            [[ -f /etc/yum.repos.d/gh-cli.repo ]] ||
+                dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo >>"$log" 2>&1 ||
+                fail 'could not add the GitHub CLI repository' "see $log"
+            dnf install -y -q gh >>"$log" 2>&1 || fail 'could not install GitHub CLI' "see $log"
+            ;;
+    esac
+    gh attestation verify --help >/dev/null 2>&1 ||
+        fail 'the installed GitHub CLI cannot verify release provenance' 'update GitHub CLI, then rerun this command'
 }
 hold_caddy_package() {
     if [[ $os_family == debian ]]; then
@@ -432,6 +454,7 @@ create() {
     [[ -f $here/waiting-page.html && -f $here/server/site.caddy ]] || fail "run this from a Bilibi checkout: $here/server is missing"
 
     install_packages
+    ensure_github_cli
     [[ $tls == cloudflare ]] && ensure_cloudflare_module
     ensure_users
     install_unit
@@ -523,11 +546,87 @@ EOF
 
     say "$instance: $([[ -n $created ]] && echo created || echo updated) as $role at https://$site (backend 127.0.0.1:$port), files under $dir"
     if [[ -z $(current_release "$instance") ]]; then
-        say "Next: put a release into service with: $0 release $instance <path to bilibi-web>"
+        say "Next: put a verified release into service with: $0 release $instance <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>"
     fi
     if [[ ! -x $installer_bin ]]; then
-        say "Then let the Software page install releases here with: $0 installer <path to bilibi-installer>"
+        say "Then let the Software page install releases here with: $0 installer <bilibi-installer> --repo <owner/name> --tag <setup-vX.Y.Z>"
     fi
+}
+
+# verify_provenance <artifact> <repository> <tag>: GitHub verifies the file's
+# digest, signing repository, release workflow and tag. Public repositories do
+# not need a login. For a private repository, pass its read token as GH_TOKEN;
+# it is inherited only by this command and is never printed.
+verify_provenance() {
+    local artifact=$1 repository=$2 tag=$3
+    command -v gh >/dev/null || fail 'GitHub CLI is not installed, so release provenance cannot be checked' 'rerun create to install the server packages, then retry'
+    valid_repository "$repository" || fail 'the release repository must be owner/name'
+    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z'
+    gh attestation verify "$artifact" --repo "$repository" \
+        --signer-workflow "$repository/.github/workflows/release.yml" \
+        --source-ref "refs/tags/$tag" >>"$log" 2>&1 ||
+        fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+}
+
+# unpack_release <archive> <folder>: accept only the release archive's plain
+# files and verify its own checksum list before root copies anything from it.
+unpack_release() {
+    python3 - "$1" "$2" <<'PY'
+import hashlib
+from pathlib import Path, PurePosixPath
+import shutil
+import sys
+import tarfile
+
+archive, target = Path(sys.argv[1]), Path(sys.argv[2])
+allowed = {'bilibi-web', 'SHA256SUMS', 'manifest.txt', 'Cargo.lock', 'release.json', 'bundle.json'}
+seen = set()
+with tarfile.open(archive, 'r:gz') as source:
+    members = source.getmembers()
+    for member in members:
+        name = member.name.removeprefix('./')
+        path = PurePosixPath(name)
+        parts = path.parts
+        safe_plugin = len(parts) > 1 and parts[0] == 'plugins' and all(
+            part and not part.startswith('.') and len(part) <= 128 and
+            all(c.isalnum() or c in '._-' for c in part) for part in parts[1:])
+        if path.is_absolute() or '..' in parts or (name not in allowed and name != 'plugins' and not safe_plugin):
+            raise SystemExit(f'Release archive contains an unexpected path: {member.name}')
+        if name in seen or not (member.isfile() or (member.isdir() and (name == 'plugins' or safe_plugin))):
+            raise SystemExit(f'Release archive contains an unsafe or duplicate entry: {member.name}')
+        seen.add(name)
+    if not {'bilibi-web', 'SHA256SUMS'} <= seen:
+        raise SystemExit('Release archive is missing bilibi-web or SHA256SUMS')
+    target.mkdir(mode=0o700)
+    for member in members:
+        name = member.name.removeprefix('./')
+        destination = target.joinpath(*PurePosixPath(name).parts)
+        if member.isdir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        opened = source.extractfile(member)
+        if opened is None:
+            raise SystemExit(f'Release archive entry cannot be read: {name}')
+        with opened, destination.open('wb') as output:
+            shutil.copyfileobj(opened, output)
+        destination.chmod(0o755 if name == 'bilibi-web' else 0o644)
+
+checks = {}
+for line in (target / 'SHA256SUMS').read_text().splitlines():
+    digest, separator, name = line.partition('  ')
+    if not separator or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise SystemExit('Release checksum list is invalid')
+    if name not in seen or name in checks or not (target / name).is_file():
+        raise SystemExit(f'Release checksum list names an unexpected file: {name}')
+    checks[name] = digest
+    with (target / name).open('rb') as checked:
+        actual = hashlib.file_digest(checked, 'sha256').hexdigest()
+    if actual != digest:
+        raise SystemExit(f'Release checksum failed for {name}')
+if 'bilibi-web' not in checks:
+    raise SystemExit('Release checksum list does not name bilibi-web')
+PY
 }
 
 # ================================================================ installer
@@ -536,10 +635,19 @@ EOF
 # restart, and a job one of them was running is settled by the rules in
 # apps/installer/README.md ("If the server restarts mid-way").
 installer() {
-    local source=${1:-}
-    [[ -n $source ]] || usage
+    local source=${1:-} repository='' tag=''
+    [[ -n $source ]] || usage; shift
+    while (($#)); do
+        case $1 in
+            --repo) repository=${2:-}; shift 2 ;;
+            --tag) tag=${2:-}; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ -n $repository && -n $tag ]] || usage
     need_root installer "$@"
     [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it in your development checkout with: cargo build --release --locked -p bilibi-installer, then install target/release/bilibi-installer here"
+    verify_provenance "$source" "$repository" "$tag"
     [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
     install_unit
     retire_worker
@@ -603,14 +711,28 @@ put_in_service() {
     return 1
 }
 release() {
-    local instance=${1:-} source=${2:-}
-    [[ -n $instance && -n $source ]] || usage
+    local instance=${1:-} source=${2:-} repository='' tag=''
+    [[ -n $instance && -n $source ]] || usage; shift 2
+    while (($#)); do
+        case $1 in
+            --repo) repository=${2:-}; shift 2 ;;
+            --tag) tag=${2:-}; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ -n $repository && -n $tag ]] || usage
     need_root release "$@"
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role ... --site ..."
     retire_worker
-    local binary dir n previous
-    if [[ -d $source ]]; then binary=$source/bilibi-web; else binary=$source; fi
-    [[ -f $binary && -x $binary ]] || fail "$binary is not an executable bilibi-web"
+    [[ -f $source ]] || fail "$source is not a setup release archive"
+    verify_provenance "$source" "$repository" "$tag"
+    local unpacked binary dir n previous
+    unpacked=$(mktemp -d /tmp/bilibi-release.XXXXXX)
+    if ! unpack_release "$source" "$unpacked"; then
+        rm -rf -- "$unpacked"
+        fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry'
+    fi
+    binary=$unpacked/bilibi-web
     dir=$(instance_dir "$instance")
     previous=$(current_release "$instance")
     n=$(( $(release_numbers "$instance" | tail -n1) + 1 ))
@@ -618,10 +740,15 @@ release() {
     install -m 0755 -o bilibi-build -g bilibi "$binary" "$dir/releases/$n/bilibi-web"
     # The release's recipe, when the build wrote one (scripts/discover-modules.py --pin).
     local extra
-    for extra in manifest.txt Cargo.lock; do
-        [[ -d $source && -f $source/$extra ]] && install -m 0644 -o bilibi-build -g bilibi "$source/$extra" "$dir/releases/$n/$extra"
+    for extra in manifest.txt Cargo.lock release.json bundle.json; do
+        [[ -f $unpacked/$extra ]] && install -m 0644 -o bilibi-build -g bilibi "$unpacked/$extra" "$dir/releases/$n/$extra"
     done
-    (cd "$dir/releases/$n" && sha256sum bilibi-web > SHA256SUMS && chown bilibi-build:bilibi SHA256SUMS)
+    install -m 0644 -o bilibi-build -g bilibi "$unpacked/SHA256SUMS" "$dir/releases/$n/SHA256SUMS"
+    if [[ -d $unpacked/plugins ]]; then
+        cp -R -- "$unpacked/plugins" "$dir/releases/$n/plugins"
+        chown -R bilibi-build:bilibi "$dir/releases/$n/plugins"
+    fi
+    rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
     # The database must be up to date before the new program serves; nothing
     # migrates on boot. The service pauses from here: Caddy shows the waiting page.
@@ -647,7 +774,7 @@ create_owner() {
     shift
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <path to bilibi-web>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" create-owner "$@"
 }
 # ========================================================= two-factor-reset
@@ -661,7 +788,7 @@ two_factor_reset() {
     shift
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <path to bilibi-web>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" two-factor-reset "$@"
 }
 switch() {

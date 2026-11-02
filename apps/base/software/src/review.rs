@@ -278,14 +278,15 @@ pub fn install(
     let rest = if matches!(chosen, Chosen::GitHub(_)) {
         vec![
             "The GitHub file is still the one that was reviewed (repository, release, file, tag and check code)",
-            "The downloaded file matches that check code before it is unpacked",
+            "The downloaded file matches that check code and has GitHub build provenance from the repository's release workflow before it is unpacked",
             "The files inside match their own check codes after copying",
             "The release was built for this kind of server",
             "Enough disk for the program and a backup",
         ]
     } else {
         vec![
-            "The file matches its check code (checksum)",
+            "The uploaded archive has GitHub build provenance from the accepted repository's release workflow",
+            "The files inside match their check codes (checksums)",
             "The release was built for this kind of server",
             "Enough disk for the program and a backup",
         ]
@@ -309,7 +310,7 @@ pub fn install(
         "pause_minutes": PAUSE_MINUTES,
         "switch": switch,
         "what_happens": format!("{}Then {} pauses for about {PAUSE_MINUTES} minute to back up the database, update it, switch and check. If the check fails it switches back by itself.",
-            if matches!(chosen, Chosen::GitHub(_)) { "The release is downloaded from GitHub, its check code is verified, then it is copied and checked. " } else { "The release is copied and checked. " },
+            if matches!(chosen, Chosen::GitHub(_)) { "The release is downloaded from GitHub, its check code and build provenance are verified, then it is copied and checked. " } else { "The release's build provenance was verified when it was uploaded; it is copied and checked again. " },
             instance.label),
         "steps": jobs::install_steps(downloads).iter().map(|s| json!({"seq": s.seq, "key": s.key, "label": s.label, "pauses": s.pauses})).collect::<Vec<_>>(),
         "step_up": [STEP_UP],

@@ -566,7 +566,7 @@ impl ReleaseFiles {
         section(
             "release-files-github",
             "GitHub releases",
-            "Install a setup file from the GitHub repository you name. Uploading a file still works when GitHub cannot be reached.",
+            "Install a setup file from the GitHub repository you name, or upload a saved copy of one. Bilibi verifies GitHub build provenance either way.",
             actions,
             false,
             body,
