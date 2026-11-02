@@ -128,7 +128,9 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
   uniqueness on the write's transaction under a per-code advisory lock. Automatic suggestions are allocated under the tenant lock.
 - `bilibi_company::require_writable` is the one archived check: a live company
   whose status is `archived` is read-only for good, for its own facts and
-  every record it owns. Reads never ask it.
+  every record it owns. With locking enabled it uses `FOR NO KEY UPDATE`: this
+  holds the judged status through commit and remains compatible with Queue's
+  `FOR KEY SHARE` workplace proof. Reads never ask it.
 - `organisation::Provider` is the `OrganisationProvider` Tenancy's
   `PartyProofs` proves targets with: a live, unarchived company of the
   actor's tenant, bound at the service factory.
