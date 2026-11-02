@@ -37,7 +37,7 @@
 {% endcall %}
 {% if !duplicates.is_empty() %}
 {% for duplicate in duplicates %}
-{% call ui::facts() %}{% call ui::fact(title="Already connected") %}{{ duplicate.name }} · approved {% call time::datetime(instant=duplicate.approved) %}{% endcall %} · {{ duplicate.last_used }}{% endcall %}{% endcall %}
+{% call ui::facts() %}{% call ui::fact(title="Already connected") %}{{ duplicate.name }} · approved {% call time::datetime(instant=duplicate.approved) %}{% endcall %} · from {{ duplicate.approved_from }} · {{ duplicate.last_used }}{% endcall %}{% endcall %}
 {% endfor %}
 {% call forms::radio_group(group=replacement) %}{% endcall %}
 {% endif %}

@@ -443,9 +443,9 @@ fn replacement(fields: &BTreeMap<String, Value>, has_matches: bool) -> Option<bo
 }
 struct DuplicateView {
     name: String,
+    approved_from: String,
     approved: Instant,
     last_used: String,
-    never_used: bool,
 }
 async fn duplicates(pages: &Pages, scope: &Scope, name: &str) -> Result<Vec<ConnectionSummary>> {
     match pages.access.list_connections(scope).await {
@@ -478,6 +478,7 @@ async fn duplicate_views(
         .map(|row| {
             Ok(DuplicateView {
                 name: row.agent_id.clone(),
+                approved_from: row.approved_client.clone(),
                 approved: instant(
                     display,
                     format!("duplicate-approved-{}", row.id),
@@ -487,13 +488,11 @@ async fn duplicate_views(
                     .get(&row.id.to_string())
                     .map(|at| format!("Last used {}", crate::ai_status::ago(*at, now)))
                     .unwrap_or_else(|| "Never used".to_owned()),
-                never_used: !uses.contains_key(&row.id.to_string()),
             })
         })
         .collect()
 }
-fn replacement_choice(duplicates: &[DuplicateView]) -> RadioGroup {
-    let unused = duplicates.iter().all(|d| d.never_used);
+fn replacement_choice(_duplicates: &[DuplicateView]) -> RadioGroup {
     RadioGroup::new(
         "replacement",
         "replacement",
@@ -503,7 +502,7 @@ fn replacement_choice(duplicates: &[DuplicateView]) -> RadioGroup {
         ],
     )
     .label("Existing connections")
-    .value(if unused { "replace" } else { "keep" })
+    .value("replace")
 }
 pub(crate) fn html<T: Template>(template: T) -> Result<String> {
     template.render().map_err(|_| Error::Internal)
