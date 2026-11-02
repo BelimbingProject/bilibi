@@ -420,7 +420,7 @@ pub async fn save(
         _ => edit.value.clone(),
     };
     tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_opt(&format!("SELECT {}::text,version,status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",field), &[&tenant,&id]).await?.ok_or(Error::NotFound)?;
+        let row = sql.query_opt(&format!("SELECT {}::text,version,status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",field), &[&tenant,&id]).await?.ok_or(Error::NotFound)?;
         if row.get::<_, i64>(1) != version { return Err(Error::Conflict); }
         if row.get::<_, String>(2) == "archived" { return Err(Error::Forbidden); }
         let old: Option<String> = row.get(0);

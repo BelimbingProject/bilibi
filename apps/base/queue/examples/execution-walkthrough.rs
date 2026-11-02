@@ -73,6 +73,7 @@ fn allowlist(args: Value) -> Result<Value> {
 struct Specimen {
     db: Db,
     boundary: Arc<MutationBoundary>,
+    companies: Arc<bilibi_core::company::CompanyService>,
     settings: Arc<Settings>,
 }
 impl Handler for Specimen {
@@ -219,7 +220,19 @@ impl Specimen {
             let inserted = sql.execute("INSERT INTO queue_company_effects(job_id,company_id) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&id,&company]).await?;
             Ok(((),vec![Change {kind:"queue.specimen.company-effect".into(),id,old:Value::Null,new:json!({"company":company,"applied":inserted == 1})}]))
         })).await?;
-        tx.commit().await
+        tx.commit().await?;
+        self.companies
+            .assign_primary_company(scope, COMPANY, true)
+            .await
+            .map_err(|error| match error {
+                bilibi_core::company::WriteError::Access(error) => error,
+                _ => Error::Forbidden,
+            })?;
+        println!(
+            "company primary assigned under fence job={}",
+            execution.job_id
+        );
+        Ok(())
     }
 }
 inventory::submit! { Contribution::new(WORKERS,"queue/execution-walkthrough",Provenance {module:"base/queue",source:file!(),line:line!()},&Worker {max_attempts:3,validate:allowlist}) }
@@ -263,6 +276,8 @@ async fn main() -> Result<()> {
         Arc::new(HandlerService(Arc::new(Specimen {
             db: db.clone(),
             boundary: boundary.clone(),
+            companies: services
+                .get::<bilibi_core::company::CompanyService>(bilibi_core::company::SERVICE)?,
             settings: settings.clone(),
         }))),
     )?;

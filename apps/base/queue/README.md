@@ -70,7 +70,8 @@ IO and when a business commit succeeds before queue completion is recorded.
 When an owner's normal facade opens its own short transaction, keep an
 `Execution::begin` transaction open around that call as the fence. Company's
 locking `require_writable` guard is compatible with the captured desk proof;
-the facade needs no queue-specific write path.
+the facade needs no queue-specific write path. A job cannot archive the company
+its own fence covers: archiving waits for fenced jobs by design.
 
 `Queue::enqueue_system_within` is the same system job enqueued from inside
 another actor's transaction, for a Platform delivery edge whose work is not
@@ -177,8 +178,8 @@ owner effect. All such manual database changes belong exclusively in the
 disposable specimen DB.
 
 `company-write` holds the queue fence on one connection while the normal owner
-transaction locks the captured company and records one company-scoped effect.
-It proves the workplace recheck and write guard do not block each other.
+transaction locks the captured company and records one company-scoped effect, then assigns the primary company through
+the Company facade. It proves the workplace recheck and write guard do not block each other.
 
 User job scopes carry `Channel::Job` through `Execution::scope`, `Execution::identity` and live reproof. Passing a job scope directly to an owner facade keeps background restrictions, including Workflow's refusal to approve.
 
