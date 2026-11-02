@@ -14,7 +14,7 @@
 #   install-server.sh status [<instance>]
 #
 # Only the layout, the first release and the installer service live here.
-# Build releases in your local Bilibi copy, then install a tested release here.
+# Build releases in a separate development checkout, then install a tested release here.
 # Backing up before a switch, checking the new release, switching back and Undo
 # are the installer's work once a server owner asks on the Software page
 # (apps/installer/README.md).
@@ -538,7 +538,7 @@ installer() {
     local source=${1:-}
     [[ -n $source ]] || usage
     need_root installer "$@"
-    [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it on your own machine with: cargo build --release --locked -p bilibi-installer, then copy target/release/bilibi-installer to this server"
+    [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it in your development checkout with: cargo build --release --locked -p bilibi-installer, then install target/release/bilibi-installer here"
     [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
     install_unit
     retire_worker
