@@ -126,10 +126,10 @@ The audit trail is the app's job, not the installer's: `base/software` records e
 Build `bilibi-installer` on your build machine, which may be a separate account on a Dev server, then install the finished program ([build releases](../../docs/server-install.md#build-releases)). On the server, run:
 
 ```sh
-sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --tag setup-v1.0.0
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-That verifies GitHub build provenance, copies the program to `/opt/bilibi/build/bin/bilibi-installer` and starts `bilibi-installer@<instance>` for every instance. Nothing is replaced when verification fails. A later `create` starts one for the new instance too. Rerun `installer` with a newer verified program to update it; the services restart and a job in progress is settled as in "If the server restarts mid-way".
+Copy `--repo-id` beforehand from the application repository's GitHub **Settings › General** page or another trusted record; never derive it from the repository name during the install. The command verifies GitHub build provenance and that repository number, copies the program to `/opt/bilibi/build/bin/bilibi-installer` and starts `bilibi-installer@<instance>` for every instance. Nothing is replaced when verification fails. A later `create` starts one for the new instance too. Rerun `installer` with a newer verified program to update it; the services restart and a job in progress is settled as in "If the server restarts mid-way".
 
 By hand, for one instance, with its `env` file loaded:
 

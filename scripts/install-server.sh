@@ -556,8 +556,8 @@ EOF
 # expected_repository_id <repository> <given id>: the GitHub repository number
 # the signature must come from, so a reused repository name cannot pass. Only
 # the official repositories are pinned here; an application repository needs
-# its number from --repo-id (see its Settings page on GitHub, or
-# gh api repos/<owner/name> --jq .id), never looked up at install time.
+# its number from --repo-id, copied from its GitHub Settings page or another
+# trusted record before the install, never looked up from its name at install time.
 expected_repository_id() {
     local repository=$1 given=$2 pinned=''
     case $repository in

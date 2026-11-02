@@ -27,6 +27,7 @@ Publish a disposable application release through its protected `setup-vX.Y.Z` ta
 
 ```sh
 export PROOF_REPOSITORY=your-company/bilibi-proof
+export PROOF_REPOSITORY_ID=123456789
 export PROOF_TAG=setup-v1.0.0
 mkdir -p "$BILIBI_PROOF_DATA/assets"
 gh-axi release download "$PROOF_TAG" --repo "$PROOF_REPOSITORY" --dir "$BILIBI_PROOF_DATA/assets"
@@ -34,7 +35,7 @@ docs/server-proof/lab.sh prepare
 docs/server-proof/lab.sh boot
 ```
 
-`prepare` bootstraps Ubuntu 26.04 with `main` and `universe`. Pass a clean debootstrap rootfs as its second argument to copy a base instead. The checkout is mounted read-only at `/src`; task material is mounted at `/data`.
+Copy `PROOF_REPOSITORY_ID` beforehand from the proof repository's GitHub **Settings › General** page or another trusted record. `prepare` bootstraps Ubuntu 26.04 with `main` and `universe`. Pass a clean debootstrap rootfs as its second argument to copy a base instead. The checkout is mounted read-only at `/src`; task material is mounted at `/data`.
 
 ## Install the fresh server
 
@@ -42,9 +43,9 @@ Run the product installer inside the lab:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create production --role production --site prod.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner production --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner" --password-stdin < /data/private/password'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --repo $PROOF_REPOSITORY --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run 'if command -v cargo || command -v rustc; then exit 1; fi'
 docs/server-proof/drive.py login
 docs/server-proof/drive.py enrol
@@ -70,7 +71,7 @@ Add Finance to the disposable application's saved composition before you publish
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --tag $PROOF_TAG"
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner" --password-stdin < /data/private/password'
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll

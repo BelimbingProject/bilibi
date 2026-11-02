@@ -23,13 +23,18 @@ The first command installs PostgreSQL 18 and Caddy, creates the users and folder
 The server-tools archive contains a script that runs as root, so verify the archive before extracting it. A public repository needs no GitHub login. Install a current GitHub CLI from its official package repository if `gh attestation verify --help` is not available; [GitHub maintains the package commands](https://github.com/cli/cli/blob/trunk/docs/install_linux.md). Then run:
 
 ```sh
+set -o pipefail
+EXPECTED_REPOSITORY_ID=123456789
 gh attestation verify bilibi-server-tools.tar.gz \
   --repo your-company/my-bilibi \
   --signer-workflow your-company/my-bilibi/.github/workflows/release.yml \
-  --source-ref refs/tags/setup-v1.0.0
+  --source-ref refs/tags/setup-v1.0.0 \
+  --format json \
+  --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier' |
+  awk -v expected="$EXPECTED_REPOSITORY_ID" 'NF { found=1; if ($0 != expected) exit 1 } END { if (!found) exit 1 }'
 ```
 
-For a private application repository, set a fine-grained read token in `GH_TOKEN` only for this command. Extract and run the tools only after the command succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
+Copy `EXPECTED_REPOSITORY_ID` from the application repository's GitHub **Settings › General** page or another trusted record before you start the install. Never derive it from the repository name during the install. For a private application repository, set a fine-grained read token in `GH_TOKEN` only for this command. Extract and run the tools only after the whole pipeline succeeds. If it fails, delete the archive and download it again from the official release; do not run or repair it by hand. `install-server.sh create` installs the same current GitHub CLI for later release checks.
 
 Want a Dev instance on the same machine to try changes first? Add one:
 
@@ -165,7 +170,7 @@ The first release has no program to ask through, so `release` puts a published s
 sudo scripts/install-server.sh release production /home/me/bilibi-setup-v1.0.0-x86_64-unknown-linux-gnu.tar.gz --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-Add `--repo-id <number>` with your application repository's GitHub number (`gh api repos/your-company/my-bilibi --jq .id`), copied from a trusted source; the script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. For a private repository, set a fine-grained read token in `GH_TOKEN` for this command. If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
+Add `--repo-id <number>` with your application repository's GitHub number, copied beforehand from its GitHub **Settings › General** page or another trusted record. Never look it up from the repository name during the install. The script refuses a release signed by any other number, so a reused repository name cannot pass. The official `BelimbingProject` repositories need no `--repo-id`. The `installer` command takes the same flags. Public repositories need no GitHub login. For a private repository, set a fine-grained read token in `GH_TOKEN` for this command. If the checksum, repository, tag or signer workflow does not match, the command stops before unpacking, migration or service changes. Download the asset from the official release again; never bypass the check.
 
 Step by step, we:
 
