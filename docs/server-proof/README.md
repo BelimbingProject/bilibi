@@ -23,18 +23,19 @@ openssl rand -base64 30 > "$BILIBI_PROOF_DATA/private/password"
 chmod 600 "$BILIBI_PROOF_DATA/private/password"
 ```
 
-Build the baseline locally, with no Domains mounted:
+Publish a disposable application release through its protected `setup-vX.Y.Z` tag. Keep the setup archive and matching installer asset outside this checkout:
 
 ```sh
-cargo build --release --locked -p bilibi-web -p bilibi-installer
-mkdir -p "$BILIBI_PROOF_DATA/bin/platform"
-cp target/release/bilibi-web "$BILIBI_PROOF_DATA/bin/platform/"
-cp target/release/bilibi-installer "$BILIBI_PROOF_DATA/bin/"
+export PROOF_REPOSITORY=your-company/bilibi-proof
+export PROOF_REPOSITORY_ID=123456789
+export PROOF_TAG=setup-v1.0.0
+mkdir -p "$BILIBI_PROOF_DATA/assets"
+gh-axi release download "$PROOF_TAG" --repo "$PROOF_REPOSITORY" --dir "$BILIBI_PROOF_DATA/assets"
 docs/server-proof/lab.sh prepare
 docs/server-proof/lab.sh boot
 ```
 
-`prepare` bootstraps Ubuntu 26.04 with `main` and `universe`. Pass a clean debootstrap rootfs as its second argument to copy a base instead. The checkout is mounted read-only at `/src`; task material is mounted at `/data`.
+Copy `PROOF_REPOSITORY_ID` beforehand from the proof repository's GitHub **Settings › General** page or another trusted record. `prepare` bootstraps Ubuntu 26.04 with `main` and `universe`. Pass a clean debootstrap rootfs as its second argument to copy a base instead. The checkout is mounted read-only at `/src`; task material is mounted at `/data`.
 
 ## Install the fresh server
 
@@ -42,9 +43,9 @@ Run the product installer inside the lab:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create production --role production --site prod.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run '/src/scripts/install-server.sh release production /data/bin/platform'
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release production /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner production --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner" --password-stdin < /data/private/password'
-docs/server-proof/lab.sh run '/src/scripts/install-server.sh installer /data/bin/bilibi-installer'
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh installer /data/assets/bilibi-installer-x86_64-unknown-linux-gnu --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run 'if command -v cargo || command -v rustc; then exit 1; fi'
 docs/server-proof/drive.py login
 docs/server-proof/drive.py enrol
@@ -64,27 +65,13 @@ docs/server-proof/lab.sh run '/src/docs/server-proof/legacy.sh'
 
 The script installs a lab-only legacy worker unit and old sudoers contents, then runs the new `create` twice. It checks the worker process is gone, the unit and enablement link are removed, sudoers matches the product rule, and the app PID survives. The second run preserves configuration contents and the sudoers timestamp.
 
-## Build and check Finance
+## Check a release with Finance
 
-Mount the chosen Domain in the local checkout and pin before building:
-
-```sh
-./bilibi add finance --kind domains --source https://github.com/BelimbingProject/bilibi-dom-finance --commit 24938fb69a4da94275ae74085ec03671a8efd51e
-python3 scripts/discover-modules.py
-./scripts/build-assets.sh --check
-cargo metadata --format-version 1 > /dev/null
-python3 scripts/discover-modules.py --pin
-cargo build --release --locked -p bilibi-web
-./target/release/bilibi-web status
-mkdir -p "$BILIBI_PROOF_DATA/bin/finance"
-cp target/release/bilibi-web .local/composition/manifest.txt .local/composition/Cargo.lock "$BILIBI_PROOF_DATA/bin/finance/"
-```
-
-Put that finished release on the lab's test instance:
+Add Finance to the disposable application's saved composition before you publish the proof release. Check the release on its Dev instance:
 
 ```sh
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create dev --role dev --site dev.10.77.61.2.sslip.io --tls internal'
-docs/server-proof/lab.sh run '/src/scripts/install-server.sh release dev /data/bin/finance'
+docs/server-proof/lab.sh run "/src/scripts/install-server.sh release dev /data/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz --repo $PROOF_REPOSITORY --repo-id $PROOF_REPOSITORY_ID --tag $PROOF_TAG"
 docs/server-proof/lab.sh run '/src/scripts/install-server.sh create-owner dev --company-name "Proof Operations" --company-code proof_operations --email owner@proof.invalid --name "Proof Owner" --password-stdin < /data/private/password'
 LAB_ORIGIN=https://dev.10.77.61.2.sslip.io docs/server-proof/drive.py login
 chrome-devtools-axi open https://dev.10.77.61.2.sslip.io/finance/payroll
@@ -94,11 +81,10 @@ Open Finance and use its Payroll page before packaging the release. An empty pay
 
 ## Upload and install
 
-Package the checked build locally and upload that archive on Production:
+Upload the same published archive on Production:
 
 ```sh
-docs/server-proof/pack-setup.sh "$BILIBI_PROOF_DATA/bin/finance/bilibi-web" "$BILIBI_PROOF_DATA/proof/release.tar.gz"
-docs/server-proof/drive.py upload
+docs/server-proof/drive.py upload "$BILIBI_PROOF_DATA/assets/bilibi-$PROOF_TAG-x86_64-unknown-linux-gnu.tar.gz"
 docs/server-proof/drive.py receive
 docs/server-proof/drive.py refuse-install upload-1
 docs/server-proof/drive.py review upload-1
@@ -112,19 +98,13 @@ docs/server-proof/lab.sh run '/src/docs/server-proof/rows.sh'
 
 `refuse-install` checks that a write without the required 2FA is refused. `confirm` submits the browser's reviewed operations with a fresh code from the enrolled lab authenticator. Observe the backup before migrations, the switch and verification, then use Finance's menu in Production.
 
-The documented release folder has no `release.json`; the review warns that the change list is known only after the installer reads the program. The install result must then identify Finance and its pinned commit.
+The upload is kept only when GitHub verifies its repository number, setup tag and release workflow. The install result must identify Finance and its pinned commit.
 
 The driver works around an AXI limit: it fills the real file input through browser scripting because the native upload command's argument shape differs from the installed DevTools tool. Bilibi still streams, receives and validates the file through its ordinary page.
 
 ## Install from GitHub
 
-Use a throwaway release in a repository you own, such as `BelimbingProject/bilibi-app-maker`. Publish it as a pre-release with the archive attached, and delete it afterwards. GitHub allows only 60 unauthenticated calls an hour per address, and the lab shares the host's address, so refresh sparingly.
-
-```sh
-docs/server-proof/pack-setup.sh target/release/bilibi-web "$BILIBI_PROOF_DATA/assets/bilibi-setup-proof1-x86_64-unknown-linux-gnu.tar.gz"
-gh-axi release create proof-github-source-1 --draft --prerelease -R BelimbingProject/bilibi-app-maker <archive>
-gh-axi release edit proof-github-source-1 --draft=false --prerelease=true -R BelimbingProject/bilibi-app-maker
-```
+Use the same disposable application release. A hand-created release asset has no valid build provenance and must fail before unpacking. GitHub allows only 60 unauthenticated calls an hour per address, and the lab shares the host's address, so refresh sparingly.
 
 Name the repository and accept it on Software › Releases, choose **Show pre-releases**, then drive the same reviewed install the page offers:
 

@@ -677,7 +677,8 @@ impl View {
             content.push(&self.backups_card(&display, &status)?);
             content.push(&render(SectionHeading {
                 title: "Get an update",
-                description: "Install a setup file from GitHub or upload a tested release file.",
+                description:
+                    "Install a verified setup file from GitHub or upload a saved copy of one.",
                 ..SectionHeading::default()
             })?);
             content.push(&transfer);

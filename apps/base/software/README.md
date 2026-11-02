@@ -23,7 +23,7 @@ cargo build --release --locked -p bilibi-web
 ./target/release/bilibi-web status
 ```
 
-`add` clones that repository at that commit, whether or not this checkout’s `catalogue.json` lists it. If the folder already exists at another commit, `add` changes nothing and prints the commit and fetch steps to run after you have saved your work. Extensions mount under `apps/extensions/<id>`. Run the composition locally with its own database and check its pages in the browser. Prepare a release using [`docs/server-install.md`](../../../docs/server-install.md), then upload it on **Software › Releases**, or publish the setup archive on GitHub.
+`add` clones that repository at that commit, whether or not this checkout’s `catalogue.json` lists it. If the folder already exists at another commit, `add` changes nothing and prints the commit and fetch steps to run after you have saved your work. Extensions mount under `apps/extensions/<id>`. Run the composition locally with its own database and check its pages in the browser. Then save it in an application workspace and publish its protected setup tag. The application workflow creates the installable archive, checksums and GitHub build provenance; a local source build is not a server release.
 
 ## Compatibility
 
@@ -75,7 +75,7 @@ Reads and reviewed writes use the shared Agent API; the page uses the same contr
 
 The `base.software.change` agent operation is removed; only its step-up key stays (see Access). There is no server build operation, builder worker, compiler setting or builder service.
 
-Install takes an exact GitHub asset or an uploaded bundle. Installing the program already in service or starting a second active job is refused. `switch: auto` proceeds after copying; `switch: ask` waits for `go` before the pause.
+Install takes an exact GitHub asset or an uploaded bundle from the accepted application repository. Both need valid GitHub build provenance from that repository's `.github/workflows/release.yml`; a checksum alone is refused. Installing the program already in service or starting a second active job is refused. `switch: auto` proceeds after copying; `switch: ask` waits for `go` before the pause.
 
 ## Page and ChatGPT card
 
@@ -129,7 +129,7 @@ Install a published GitHub asset or upload a saved archive. Both paths use the s
 
 The upload is resumable: while Media has a staging disk (`media.upload.staging_disk`), a dropped connection or a restarted server carries on from the bytes already sent, and choosing the same file again within `media.upload.staging_hours` does too. It is still at most 64 MiB.
 
-A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifest.txt`, `Cargo.lock`, `release.json`, `bundle.json` and `plugins/`. The application repository created by `./bilibi new <name>` builds and packages the complete composition on GitHub; see [application workspaces](../../../docs/application-workspaces.md). A local build can use the archive commands in [server installation](../../../docs/server-install.md). Archive parsing, safe paths and compatibility checks live in private `src/transport.rs`.
+A gzip-compressed tar carries `bilibi-web`, `SHA256SUMS` and optionally `manifest.txt`, `Cargo.lock`, `release.json`, `bundle.json` and `plugins/`. The application repository created by `./bilibi new <name>` builds and packages the complete composition on GitHub; see [application workspaces](../../../docs/application-workspaces.md). Only that published, attested archive is installable. Archive parsing, safe paths and compatibility checks live in private `src/transport.rs`.
 
 ### Install from GitHub
 
@@ -139,15 +139,15 @@ The first time you save a repository, Bilibi asks GitHub for its number and reme
 
 The list shows setup files for this server: names that start with `bilibi-setup-` and end with this computer's target, such as `-x86_64-unknown-linux-gnu.tar.gz`. Drafts stay hidden. Pre-releases stay hidden until you choose **Show pre-releases**. The list is kept on this server and refreshed at most as often as **Check GitHub every this many minutes** (15 by default), and again when you choose **Refresh**. The list is saved in the instance's `data/` folder. If GitHub is limiting this server, or cannot be reached, the saved list stays on the page, and a failed look is not repeated before the interval has passed; **Refresh** asks again. The running program, Undo and a file already downloaded do not call GitHub.
 
-Choose **Review** on a file. The install records the repository number, the release number, the file number, the tag, the target and the file's check code. Before the download, Bilibi reads that release from GitHub again and refuses when any of those differ. It then downloads the file through the shared outgoing calls, follows only GitHub's own file hosts, and drops the token when the host changes. The download address is not stored. The file's check code is compared before the archive is opened. The files inside are checked after they are copied, the same way as an upload. The job result keeps the GitHub identity. Undo does not call GitHub.
+Choose **Review** on a file. The install records the repository number, the release number, the file number, the tag, the target and the file's check code. Before the download, Bilibi reads that release from GitHub again and refuses when any of those differ. It then downloads the file through the shared outgoing calls, follows only GitHub's own file hosts, and drops the token when the host changes. The download address is not stored. Before opening the archive, GitHub CLI checks its digest, signed build provenance, repository number, setup tag and signer workflow. A public repository needs no GitHub login; a private repository uses the read token already saved in Software. The files inside are checked after they are copied. The job result keeps the GitHub identity. Undo does not call GitHub.
 
-Uploading a saved release archive stays available when GitHub cannot be reached.
+An upload is verified before it is kept: its `release.json` must name the accepted repository and setup tag, and GitHub must return valid build provenance for the complete uploaded archive. Uploading therefore needs GitHub to be reachable at upload time. Verification failure removes the unpacked copy and says to download the official release asset again; the running release is untouched.
 
 ### What happens on the target
 
 1. Review an exact GitHub asset or a queued upload. GitHub review binds repository, release and asset IDs, tag, target and archive SHA-256. It checks the selected identity again at commit.
 2. The server's supervised `run_downloads` loop downloads queued GitHub installs through `base/integration` as the reauthenticated requester. It rechecks GitHub, streams into `incoming/job-<id>/`, checks the approved digest before unpacking, and wakes the installer. Cancel stops a download within about two seconds; failures finish before any pause.
-3. The installer takes `incoming/job-<id>/` or `incoming/upload-<n>/`, checks checksums, processor, system libraries and disk space, refuses the program already in service, then copies and checks again. For GitHub, it compares the program with the downloader's recorded SHA-256 before executing `status`. A downloaded folder is removed after the attempt; an upload stays for retry unless installed, corrupt or discarded.
+3. The installer takes `incoming/job-<id>/` or `incoming/upload-<n>/` only after the complete archive's GitHub provenance verified. It checks checksums, processor, system libraries and disk space, refuses the program already in service, then copies and checks again. For GitHub, it compares the program with the downloader's recorded SHA-256 before executing `status`. A downloaded folder is removed after the attempt; an upload stays for retry unless installed, corrupt or discarded.
 
 Each failed check is a plain sentence that says what to do next: "This release was built for Linux ARM 64-bit computers, and this server is Linux x86-64. Build it locally for the same kind of server."
 
@@ -205,7 +205,7 @@ Finish or cancel all active installs using instance sources before applying `bas
 ## Caveats
 
 - An unpinned program cannot prove its exact Domain versions or CI pair. Pin before building locally.
-- The documented local release folder has no `release.json`; an uploaded file's review says its change list is known only after the installer reads the program. The completed job records its pinned composition and changes.
+- A local source build is still supported for `./bilibi start`, checks and development. It is not installable on a server: publish the saved application composition through its Release setup workflow so the archive has `release.json` and GitHub build provenance.
 - Live uploads are limited to 64 MB. GitHub downloads stream with bounded archive checks.
 
 ## Where to go next
