@@ -6,10 +6,10 @@
 # The layout, and why it is this way, is in docs/server-install.md.
 #
 #   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
-#   install-server.sh release <instance> <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>
+#   install-server.sh release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
 #   install-server.sh two-factor-reset <instance> --email <address>
-#   install-server.sh installer <bilibi-installer binary> --repo <owner/name> --tag <setup-vX.Y.Z>
+#   install-server.sh installer <bilibi-installer binary> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
 #
@@ -546,26 +546,57 @@ EOF
 
     say "$instance: $([[ -n $created ]] && echo created || echo updated) as $role at https://$site (backend 127.0.0.1:$port), files under $dir"
     if [[ -z $(current_release "$instance") ]]; then
-        say "Next: put a verified release into service with: $0 release $instance <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>"
+        say "Next: put a verified release into service with: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     fi
     if [[ ! -x $installer_bin ]]; then
-        say "Then let the Software page install releases here with: $0 installer <bilibi-installer> --repo <owner/name> --tag <setup-vX.Y.Z>"
+        say "Then let the Software page install releases here with: $0 installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     fi
 }
 
-# verify_provenance <artifact> <repository> <tag>: GitHub verifies the file's
-# digest, signing repository, release workflow and tag. Public repositories do
-# not need a login. For a private repository, pass its read token as GH_TOKEN;
-# it is inherited only by this command and is never printed.
+# expected_repository_id <repository> <given id>: the GitHub repository number
+# the signature must come from, so a reused repository name cannot pass. Only
+# the official repositories are pinned here; an application repository needs
+# its number from --repo-id (see its Settings page on GitHub, or
+# gh api repos/<owner/name> --jq .id), never looked up at install time.
+expected_repository_id() {
+    local repository=$1 given=$2 pinned=''
+    case $repository in
+        BelimbingProject/bilibi) pinned=1418519406 ;;
+        BelimbingProject/bilibi-app-maker) pinned=1426391840 ;;
+    esac
+    if [[ -n $given ]]; then
+        [[ $given =~ ^[1-9][0-9]*$ ]] || fail '--repo-id must be the GitHub repository number'
+        [[ -z $pinned || $given == "$pinned" ]] || fail "--repo-id $given is not the official number for $repository; nothing was installed"
+        printf '%s' "$given"
+    elif [[ -n $pinned ]]; then
+        printf '%s' "$pinned"
+    else
+        fail "$repository is not an official repository, so its GitHub repository number is needed" "rerun with --repo-id <number>, taken from a trusted source"
+    fi
+}
+
+# verify_provenance <artifact> <repository> <repository id> <tag>: GitHub
+# verifies the file's digest, signing repository, release workflow and tag, and
+# the signing repository's number must equal the expected one. Public
+# repositories do not need a login. For a private repository, pass its read
+# token as GH_TOKEN; it is inherited only by this command and is never printed.
 verify_provenance() {
-    local artifact=$1 repository=$2 tag=$3
+    local artifact=$1 repository=$2 repository_id=$3 tag=$4 ids id found=0
     command -v gh >/dev/null || fail 'GitHub CLI is not installed, so release provenance cannot be checked' 'rerun create to install the server packages, then retry'
     valid_repository "$repository" || fail 'the release repository must be owner/name'
     valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z'
-    gh attestation verify "$artifact" --repo "$repository" \
+    repository_id=$(expected_repository_id "$repository" "$repository_id")
+    ids=$(gh attestation verify "$artifact" --repo "$repository" \
         --signer-workflow "$repository/.github/workflows/release.yml" \
-        --source-ref "refs/tags/$tag" >>"$log" 2>&1 ||
+        --source-ref "refs/tags/$tag" \
+        --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier' 2>>"$log") ||
         fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+    while IFS= read -r id; do
+        [[ -n $id ]] || continue
+        found=1
+        [[ $id == "$repository_id" ]] || fail "the release was signed by a different GitHub repository number than $repository_id; nothing was installed" 'use the asset from the repository you intend, or check the --repo-id you gave'
+    done <<<"$ids"
+    ((found)) || fail "GitHub returned no verified provenance for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
 }
 
 # unpack_release <archive> <folder>: accept only the release archive's plain
@@ -635,11 +666,12 @@ PY
 # restart, and a job one of them was running is settled by the rules in
 # apps/installer/README.md ("If the server restarts mid-way").
 installer() {
-    local source=${1:-} repository='' tag=''
+    local source=${1:-} repository='' repository_id='' tag=''
     [[ -n $source ]] || usage; shift
     while (($#)); do
         case $1 in
             --repo) repository=${2:-}; shift 2 ;;
+            --repo-id) repository_id=${2:-}; shift 2 ;;
             --tag) tag=${2:-}; shift 2 ;;
             *) usage ;;
         esac
@@ -647,7 +679,7 @@ installer() {
     [[ -n $repository && -n $tag ]] || usage
     need_root installer "$@"
     [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it in your development checkout with: cargo build --release --locked -p bilibi-installer, then install target/release/bilibi-installer here"
-    verify_provenance "$source" "$repository" "$tag"
+    verify_provenance "$source" "$repository" "$repository_id" "$tag"
     [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
     install_unit
     retire_worker
@@ -711,11 +743,12 @@ put_in_service() {
     return 1
 }
 release() {
-    local instance=${1:-} source=${2:-} repository='' tag=''
+    local instance=${1:-} source=${2:-} repository='' repository_id='' tag=''
     [[ -n $instance && -n $source ]] || usage; shift 2
     while (($#)); do
         case $1 in
             --repo) repository=${2:-}; shift 2 ;;
+            --repo-id) repository_id=${2:-}; shift 2 ;;
             --tag) tag=${2:-}; shift 2 ;;
             *) usage ;;
         esac
@@ -725,7 +758,7 @@ release() {
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role ... --site ..."
     retire_worker
     [[ -f $source ]] || fail "$source is not a setup release archive"
-    verify_provenance "$source" "$repository" "$tag"
+    verify_provenance "$source" "$repository" "$repository_id" "$tag"
     local unpacked binary dir n previous
     unpacked=$(mktemp -d /tmp/bilibi-release.XXXXXX)
     if ! unpack_release "$source" "$unpacked"; then
@@ -774,7 +807,7 @@ create_owner() {
     shift
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" create-owner "$@"
 }
 # ========================================================= two-factor-reset
@@ -788,7 +821,7 @@ two_factor_reset() {
     shift
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> --tag <setup-vX.Y.Z>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" two-factor-reset "$@"
 }
 switch() {

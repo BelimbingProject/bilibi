@@ -146,24 +146,25 @@ impl Software {
             fs::write(&archive, &bytes)
                 .map_err(|error| format!("The uploaded release could not be saved for verification: {error}."))?;
             let checked = (|| {
+                let tag = setup_tag_of(&filename).ok_or_else(|| "The file name does not carry its setup tag (bilibi-setup-vX.Y.Z-...). Upload it under the name it was published with. Nothing was unpacked.".to_owned())?;
+                transport::verify_attestation(
+                    &archive,
+                    &verification.repository,
+                    verification.repository_id,
+                    &tag,
+                    verification.token.as_deref(),
+                )?;
                 let unpacked = transport::unpack_bundle(bytes.as_slice(), &into)?;
                 check_folder(&into)?;
                 let recipe: Value = fs::read_to_string(into.join("release.json"))
                     .ok()
                     .and_then(|text| serde_json::from_str(&text).ok())
-                    .ok_or_else(|| "The release has no readable release.json, so its GitHub build provenance cannot be checked. Nothing was installed.".to_owned())?;
-                let repository = recipe["setup"]["repository"].as_str().unwrap_or("");
-                let tag = recipe["setup"]["tag"].as_str().unwrap_or("");
-                if repository != verification.repository || tag.is_empty() {
-                    return Err("The release does not identify the accepted application repository and setup tag. Nothing was installed.".into());
+                    .ok_or_else(|| "The release has no readable release.json. Nothing was installed.".to_owned())?;
+                if recipe["setup"]["repository"].as_str() != Some(verification.repository.as_str())
+                    || recipe["setup"]["tag"].as_str() != Some(tag.as_str())
+                {
+                    return Err("The release does not identify the accepted application repository and the setup tag in its file name. Nothing was installed.".into());
                 }
-                transport::verify_attestation(
-                    &archive,
-                    &verification.repository,
-                    verification.repository_id,
-                    tag,
-                    verification.token.as_deref(),
-                )?;
                 Ok::<transport::Unpacked, String>(unpacked)
             })();
             let _ = fs::remove_file(&archive);
@@ -512,6 +513,18 @@ fn db<E: Into<Error>>(error: E) -> String {
 }
 /// The checks every way in shares, on an unpacked folder: the checksum and
 /// that the program was built for this server. Returns the checksum.
+/// `setup-v1.2.3` from a published name like `bilibi-setup-v1.2.3-<target>.tar.gz`.
+fn setup_tag_of(filename: &str) -> Option<String> {
+    let rest = filename.strip_prefix("bilibi-")?;
+    let version = rest.strip_prefix("setup-v")?;
+    let end = version
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(version.len());
+    let numbers: Vec<&str> = version[..end].split('.').collect();
+    (numbers.len() == 3 && numbers.iter().all(|n| !n.is_empty()))
+        .then(|| format!("setup-v{}", &version[..end]))
+}
+
 fn check_folder(dir: &Path) -> std::result::Result<String, String> {
     let sha = transport::verify_checksum(dir)?;
     transport::built_for_this_server(dir)?;
