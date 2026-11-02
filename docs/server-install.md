@@ -39,7 +39,7 @@ You may already have questions: where do the files go, how does a page know it i
 
 The installer supports Ubuntu, Debian, Rocky Linux 10 and RHEL 10 on a systemd server.
 
-On Ubuntu and Debian, it installs PostgreSQL 18 from the official PostgreSQL APT repository and Caddy from the official Caddy repository. On Rocky Linux and RHEL, it installs PostgreSQL 18 from PGDG and Caddy from the official Caddy COPR repository.
+On Ubuntu and Debian, it installs PostgreSQL 18 from the official PostgreSQL APT repository and Caddy from the official Caddy repository. On Rocky Linux and RHEL, it installs PostgreSQL 18 from PGDG, including the contrib package used by migrations (`btree_gist`), and Caddy from the official Caddy COPR repository.
 
 Rocky Linux and RHEL keep SELinux enforcing. The installer labels Bilibi's writable folders and Caddy's waiting page, and it allows Caddy to connect to the local Bilibi service. It stops with instructions if SELinux is disabled or permissive.
 

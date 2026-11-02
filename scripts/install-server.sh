@@ -165,7 +165,8 @@ install_rhel_packages() {
         dnf install -y -q "https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm" >>"$log" 2>&1 ||
             fail 'could not install the PostgreSQL PGDG repository' "see $log"
     fi
-    dnf_install "postgresql${pg}" "postgresql${pg}-server"
+    # Migrations use trusted extensions such as btree_gist from PGDG's contrib package.
+    dnf_install "postgresql${pg}" "postgresql${pg}-server" "postgresql${pg}-contrib"
     if ! rpm -q caddy >/dev/null 2>&1; then
         say "enabling the official Caddy COPR repository (details in $log)"
         dnf copr enable -y @caddy/caddy >>"$log" 2>&1 || fail 'could not enable the Caddy repository' "see $log"
