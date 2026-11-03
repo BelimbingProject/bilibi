@@ -60,8 +60,8 @@ pub use portal::{
 };
 pub use shell::{
     company_bar, navigation, navigation_unpinned, tenant_bar, tenant_changed, version_badges,
-    AppShell, CompanyChoice, DisplayPreferences, Framed, NavNode, ShellContext, TenantChoice,
-    VersionBadge,
+    AppShell, CompanyChoice, DisplayPreferences, Framed, NavNode, ShellContext, StandaloneReview,
+    TenantChoice, VersionBadge,
 };
 
 pub use auth::{

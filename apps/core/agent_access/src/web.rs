@@ -23,7 +23,7 @@ use bilibi_tenancy::{ClientIdentity, ProofFuture, Scope, SelfReport};
 use bilibi_ui::{
     page::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
-        PageFuture, PageRequest,
+        PageChrome, PageFuture, PageRequest,
     },
     params, ActionLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Choice, CodeInput,
     EmptyState, FlashMap, FlexRow, FlexTable, Html, IconButton, ListColumns, RadioGroup,
@@ -46,7 +46,7 @@ pub struct Pages {
     pub db: Db,
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
-    /// Reads the instance label and colour that both consent pages open with.
+    /// Reads the instance label and colour for connection setup guidance.
     pub settings: Arc<Settings>,
     /// `APP_ORIGIN`, the OAuth issuer; the MCP resource is `{origin}/mcp`.
     /// Never the request's Host header.
@@ -74,20 +74,15 @@ impl Pages {
     fn resource(&self) -> String {
         format!("{}/mcp", self.origin)
     }
-    /// The banner naming which installation the person connects the agent to.
-    async fn instance_banner(
-        &self,
-        client: &(impl GenericClient + Sync),
-        id: &str,
-    ) -> Result<Html> {
-        Instance::resolve(&self.settings, client)
-            .await?
-            .banner(id, "mb-4")
-            .map_err(|_| Error::Internal)
-    }
 }
 type State = Box<dyn LiveState<Scope, Error>>;
 impl Page<Scope, Error> for Pages {
+    fn chrome(&self, operation: &str) -> PageChrome {
+        match operation {
+            "device" | "authorize" => PageChrome::StandaloneReview,
+            _ => PageChrome::Workspace,
+        }
+    }
     fn title(&self, operation: &str) -> Option<&'static str> {
         match operation {
             "connections" => Some("My settings"),
@@ -565,7 +560,6 @@ impl CompletedView<'_> {
 #[derive(Template)]
 #[template(path = "device.html")]
 struct DeviceView<'a> {
-    instance: Html,
     flash: FlashMap<'static>,
     error: Option<&'static str>,
     code: &'a str,
@@ -613,10 +607,6 @@ impl DevicePage {
         });
         let duplicates = duplicate_views(&self.pages, scope, &self.duplicates, &display).await?;
         html(DeviceView {
-            instance: self
-                .pages
-                .instance_banner(&**client, "device-instance")
-                .await?,
             flash: flash_map(self.flash),
             error: self.error,
             code: &self.code,
@@ -767,7 +757,6 @@ enum AuthorizeEvent {
 #[derive(Template)]
 #[template(path = "authorize.html")]
 struct AuthorizeView<'a> {
-    instance: Html,
     origin: &'a str,
     connections: Html,
     actions: Html,
@@ -849,10 +838,6 @@ impl AuthorizePage {
         let display = self.pages.display(&**client, scope).await?;
         let duplicates = duplicate_views(&self.pages, scope, &self.duplicates, &display).await?;
         html(AuthorizeView {
-            instance: self
-                .pages
-                .instance_banner(&**client, "oauth-instance")
-                .await?,
             origin: &self.pages.origin,
             connections: Html::render(&ActionLink {
                 id: "oauth-connections",

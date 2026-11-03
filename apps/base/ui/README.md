@@ -12,6 +12,10 @@ List toolbars put search first and filter boxes to its right, wrapping below sea
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+## Signed-in standalone reviews
+
+Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi mark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
+
 ## Embedded application frames
 
 Use `AppFrame` for a self-contained same-origin interactive document inside a Bilibi live page. The frame is stable across patches and `assets/app_frame.js` translates its MCP Apps `tools/call`, `ui/open-link`, size and model-context messages into owner events. The page owns authentication and authorization, then handles each call through the existing operation contract; the frame adds no write path.

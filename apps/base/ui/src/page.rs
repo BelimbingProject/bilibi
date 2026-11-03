@@ -14,6 +14,18 @@ pub struct PageRequest<'a, Context> {
     pub framed: bool,
 }
 
+/// The host chrome around a signed-in page. Most pages use the workspace;
+/// reviews that must keep the person's attention use the credential-style
+/// standalone layout while retaining the same guarded live transport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageChrome {
+    #[default]
+    Workspace,
+    StandaloneReview,
+    /// The host's minimal document root for embedded pages.
+    Framed,
+}
+
 /// HTML must be rendered/escaped by the owner. Enable live only with a mount adapter.
 pub struct PageBody {
     pub html: String,
@@ -30,6 +42,11 @@ pub trait Page<Context, Error>: Send + Sync {
     /// " · Business application platform" and falls back to the product name.
     fn title(&self, _operation: &str) -> Option<&'static str> {
         None
+    }
+    /// Selects the host-owned chrome for this operation. This is presentation
+    /// only; route access, CSRF and the owner's authorization are unchanged.
+    fn chrome(&self, _operation: &str) -> PageChrome {
+        PageChrome::Workspace
     }
     /// Controls the shell shows in its top bar, left of the bell, while this
     /// page is open. Buttons raise events to

@@ -15,7 +15,7 @@ use bilibi_module_registry::{
     RegistryError, Services,
 };
 use bilibi_tenancy::PortalScope;
-use bilibi_ui::{download::DownloadRequest, page::PageRequest, StatusKind};
+use bilibi_ui::{download::DownloadRequest, page::PageChrome, page::PageRequest, StatusKind};
 use std::{collections::HashMap, sync::Arc};
 
 type PageService = bilibi_ui::page::PageService<bilibi_security::Scope, Error>;
@@ -634,7 +634,11 @@ async fn dispatch(
         &app,
         scope.as_ref(),
         uri.path(),
-        framed,
+        if framed {
+            PageChrome::Framed
+        } else {
+            bound.page.0.chrome(bound.route.operation)
+        },
         page.live,
         &page.html,
         topbar_actions(&bound, framed),

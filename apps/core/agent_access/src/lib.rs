@@ -261,6 +261,7 @@ struct PendingAuthorization {
     resource: String,
     oauth_scope: String,
     approved_client: String,
+    enabled_session: String,
     replace: Vec<i64>,
 }
 impl PendingAuthorization {
@@ -275,6 +276,7 @@ impl PendingAuthorization {
             resource: row.get("resource"),
             oauth_scope: row.get("oauth_scope"),
             approved_client: row.get("approved_client"),
+            enabled_session: row.get("enabled_session_id"),
             replace: row.get("replace_connection_ids"),
         }
     }
@@ -518,6 +520,7 @@ impl AgentAccess {
         let person = scope.actor().person().map(PersonId::get);
         let resource = resource.to_owned();
         let replace = replace.to_vec();
+        let enabled_session = browser.id.clone();
         tx.mutate(move |sql| {
             Box::pin(async move {
                 // Serialize approvals of the same PKCE request even when no
@@ -530,8 +533,8 @@ impl AgentAccess {
                     &[&tenant,&user,&request.client_id,&request.redirect_uri,&resource,&request.code_challenge],
                 ).await?;
                 let auth = sql.query_one(
-                    "INSERT INTO core_agent_authorization_codes(connection_id,code_hash,code_challenge,redirect_uri,expires_at,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids) VALUES(NULL,$1,$2,$3,now()+make_interval(secs => $4::double precision),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id,expires_at::text",
-                    &[&code_hash,&request.code_challenge,&request.redirect_uri,&code_seconds,&tenant,&user,&organisation,&person,&request.client_name,&request.client_id,&resource,&OAUTH_SCOPE,&browser.name,&replace],
+                    "INSERT INTO core_agent_authorization_codes(connection_id,code_hash,code_challenge,redirect_uri,expires_at,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids,enabled_session_id) VALUES(NULL,$1,$2,$3,now()+make_interval(secs => $4::double precision),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,expires_at::text",
+                    &[&code_hash,&request.code_challenge,&request.redirect_uri,&code_seconds,&tenant,&user,&organisation,&person,&request.client_name,&request.client_id,&resource,&OAUTH_SCOPE,&browser.name,&replace,&enabled_session],
                 ).await?;
                 let mut changes = replaced
                     .iter()
@@ -569,7 +572,7 @@ impl AgentAccess {
             let mut client = self.db.get().await?;
             let found = client
                 .query_opt(
-                    "SELECT id,connection_id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids FROM core_agent_authorization_codes WHERE code_hash=$1",
+                    "SELECT id,connection_id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids,enabled_session_id FROM core_agent_authorization_codes WHERE code_hash=$1",
                     &[&secrets::digest(&params.code)],
                 )
                 .await?
@@ -612,7 +615,7 @@ impl AgentAccess {
             context.client_identity = client_identity.map(|client| client.as_str().to_owned());
             let mut tx = self.mutations.begin(&mut client, context).await?;
             let auth = tx.sql().query_one(
-                "SELECT id,connection_id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids,code_challenge,redirect_uri,expires_at>now() AS live,used_at IS NOT NULL AS used FROM core_agent_authorization_codes WHERE id=$1 FOR UPDATE",
+                "SELECT id,connection_id,tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,approved_client,replace_connection_ids,enabled_session_id,code_challenge,redirect_uri,expires_at>now() AS live,used_at IS NOT NULL AS used FROM core_agent_authorization_codes WHERE id=$1 FOR UPDATE",
                 &[&code_id],
             ).await?;
             // A concurrent redemption may have activated the receipt while we
@@ -640,6 +643,7 @@ impl AgentAccess {
             let resource = pending.resource.clone();
             let oauth_scope = pending.oauth_scope.clone();
             let approved_client = pending.approved_client.clone();
+            let enabled_session = pending.enabled_session.clone();
             let organisation = pending.organisation;
             let person = pending.person;
             let replace = pending.replace.clone();
@@ -647,8 +651,8 @@ impl AgentAccess {
                 Box::pin(async move {
                     let mut changes = replace_connections(sql, tenant, user, &agent_id, &replace).await?;
                     let row = sql.query_one(
-                        "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,expires_at,approved_client) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'infinity',$9) RETURNING id",
-                        &[&tenant,&user,&organisation,&person,&agent_id,&client_id,&resource,&oauth_scope,&approved_client],
+                        "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,expires_at,approved_client,enabled_session_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'infinity',$9,$10) RETURNING id",
+                        &[&tenant,&user,&organisation,&person,&agent_id,&client_id,&resource,&oauth_scope,&approved_client,&enabled_session],
                     ).await?;
                     let connection_id: i64 = row.get(0);
                     sql.execute(
@@ -656,7 +660,7 @@ impl AgentAccess {
                         &[&code_id,&connection_id],
                     ).await?;
                     changes.extend([
-                        change("agent_connection", connection_id, json!({}), json!({"agent_id":agent_id,"client_id":client_id,"resource":resource,"oauth_scope":oauth_scope,"approved_client":approved_client})),
+                        change("agent_connection", connection_id, json!({}), json!({"agent_id":agent_id,"client_id":client_id,"resource":resource,"oauth_scope":oauth_scope,"approved_client":approved_client,"enabled":true,"session_bound":true})),
                         change("agent_authorization_code", code_id, json!({"used":false}), json!({"used":true,"connection_id":connection_id})),
                     ]);
                     Ok((connection_id, changes))
@@ -769,6 +773,7 @@ impl AgentAccess {
         let organisation = scope.actor().organisation().map(OrganisationId::get);
         let person = scope.actor().person().map(PersonId::get);
         let replace = replace.to_vec();
+        let enabled_session = browser.id.clone();
         tx.mutate(move |sql| {
             Box::pin(async move {
                 if decision == Decision::Deny {
@@ -789,8 +794,8 @@ impl AgentAccess {
                 }
                 let mut changes = replace_connections(sql, tenant, user, &agent_id, &replace).await?;
                 let row = sql.query_one(
-                    "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,expires_at,approved_client) VALUES($1,$2,$3,$4,$5,'infinity',$6) RETURNING id,expires_at::text",
-                    &[&tenant,&user,&organisation,&person,&agent_id,&browser.name],
+                    "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,expires_at,approved_client,enabled_session_id) VALUES($1,$2,$3,$4,$5,'infinity',$6,$7) RETURNING id,expires_at::text",
+                    &[&tenant,&user,&organisation,&person,&agent_id,&browser.name,&enabled_session],
                 ).await?;
                 let connection: i64 = row.get(0);
                 sql.execute(
@@ -799,7 +804,7 @@ impl AgentAccess {
                 )
                 .await?;
                 changes.extend(vec![
-                        change("agent_connection", connection, json!({}), json!({"agent_id":agent_id,"client_id":CLIENT_ID,"approved_client":browser.name})),
+                        change("agent_connection", connection, json!({}), json!({"agent_id":agent_id,"client_id":CLIENT_ID,"approved_client":browser.name,"enabled":true,"session_bound":true})),
                         change("agent_device", device_id, json!({"status":"pending"}), json!({"status":"approved","connection_id":connection})),
                     ]);
                 Ok(((), changes))
@@ -1652,7 +1657,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/agent_access", layer: bilibi_module_registry::Layer::Core,
         dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "core/user", "core/company"],
-        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql"))],
+        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql")), ("core-agent-access-010-approved-session", include_str!("../migrations/010-approved-session.sql"))],
         services: &[bilibi_module_registry::Service { id: "core/agent_access.grants", factory: |services| {
             let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
             let users = services.get::<bilibi_user::UserService>("core/user.accounts")?;
