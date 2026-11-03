@@ -18,6 +18,23 @@ pub const EXTERNAL: &str = "external";
 pub const MAX_READ: u64 = 536_870_912;
 const RESERVED_ROOT_PARTS: [&str; 3] = ["static", "public", "assets"];
 
+/// Installation's private default, saved in settings rather than resolved anew on reads.
+pub fn default_root() -> Result<String> {
+    let instance = match std::env::var_os("BILIBI_INSTANCE_DIR") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        Some(_) => return Err(Error::UnsafeStorageRoot),
+        None => std::env::current_dir().map_err(|_| Error::UnsafeStorageRoot)?,
+    };
+    if !instance.is_absolute() {
+        return Err(Error::UnsafeStorageRoot);
+    }
+    instance
+        .join("data/media")
+        .into_os_string()
+        .into_string()
+        .map_err(|_| Error::UnsafeStorageRoot)
+}
+
 pub fn validate_key(key: &str) -> Result<()> {
     if !key.is_empty()
         && key.len() <= 255
@@ -121,6 +138,32 @@ pub async fn make_directories(path: &Path) -> Result<()> {
 
 /// Exclusive, 0600, synced. A failed write removes the partial file.
 pub async fn write(roots: &Value, disk: &str, key: &str, bytes: &[u8]) -> Result<()> {
+    // Only the built-in root may be created; a missing operator disk must not
+    // silently become an empty replacement for an unmounted volume.
+    if let Some(root) = roots.get(disk).and_then(Value::as_str) {
+        if default_root().is_ok_and(|default| default == root) {
+            let path = Path::new(root);
+            let instance = path
+                .parent()
+                .and_then(Path::parent)
+                .ok_or(Error::UnsafeStorageRoot)?;
+            if instance.components().any(|part| match part {
+                Component::RootDir => false,
+                Component::Normal(name) => {
+                    RESERVED_ROOT_PARTS.iter().any(|reserved| name == *reserved)
+                }
+                _ => true,
+            }) {
+                return Err(Error::UnsafeStorageRoot);
+            }
+            directory_chain(instance)
+                .await
+                .map_err(|_| Error::UnsafeStorageRoot)?;
+            make_directories(path)
+                .await
+                .map_err(|_| Error::UnsafeStorageRoot)?;
+        }
+    }
     let path = location(roots, disk, key).await?;
     make_directories(path.parent().ok_or(Error::UnsafeStorageKey)?).await?;
     let mut file = OpenOptions::new()

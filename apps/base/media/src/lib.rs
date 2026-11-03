@@ -13,6 +13,7 @@
 mod agent;
 mod attachments;
 mod contributions;
+mod install;
 mod owner;
 mod quarantine;
 mod response;
@@ -919,6 +920,7 @@ inventory::submit! {
             ("base-media-004-erasure", include_str!("../migrations/004-erasure.sql")),
         ],
         services: &[
+            Service { id: "base/media.install-policy", factory: |_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy)))) },
             Service { id: SERVICE, factory: |services| {
                 let modules = bilibi_module_registry::discover()?;
                 let catalog = Catalog::discover(&modules)?;
