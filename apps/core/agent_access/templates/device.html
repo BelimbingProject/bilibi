@@ -50,9 +50,11 @@
 {% if done.approved %}
 {% call ui::facts(id="device-completed-state") %}
 {% call ui::fact(title="OAuth approval") %}Approved{% endcall %}
-{% call ui::fact(title="AI access") %}Off until you switch it on{% endcall %}
+{% call ui::fact(title="AI access") %}{% if done.ai_on %}On{% else %}Off{% endif %}{% endcall %}
 {% endcall %}
-<p class="text-sm text-muted">Open <a href="/settings/ai-connections" class="font-medium text-link hover:underline">AI connections</a> after this connection appears, then switch it on.</p>
+{% if !done.ai_on %}
+<p class="text-sm text-muted">Open <a href="/settings/ai-connections" class="font-medium text-link hover:underline">AI connections</a> and switch on the {{ done.agent_id }} connection.</p>
+{% endif %}
 <p class="text-sm text-muted">Return to {{ done.agent_id }}. It will verify the connection.</p>
 {% else %}
 <p class="text-sm text-muted">Return to {{ done.agent_id }}. It will report that you refused the connection.</p>

@@ -519,6 +519,7 @@ fn only(query: &HashMap<String, String>, allowed: &[&str]) -> Result<()> {
 struct Completed {
     approved: bool,
     agent_id: String,
+    ai_on: bool,
 }
 struct DevicePage {
     pages: Pages,
@@ -552,6 +553,7 @@ enum DeviceEvent {
 pub struct CompletedView<'a> {
     pub approved: bool,
     pub agent_id: &'a str,
+    pub ai_on: bool,
 }
 impl CompletedView<'_> {
     pub fn title(&self) -> &'static str {
@@ -610,6 +612,7 @@ impl DevicePage {
         let completed = self.completed.as_ref().map(|done| CompletedView {
             approved: done.approved,
             agent_id: &done.agent_id,
+            ai_on: done.ai_on,
         });
         let duplicates = duplicate_views(&self.pages, scope, &self.duplicates, &display).await?;
         html(DeviceView {
@@ -670,9 +673,16 @@ impl DevicePage {
         {
             Ok(()) => {
                 let approved = decision == Decision::Approve;
+                let agent_id = device.agent_id.clone();
+                let ai_on = approved
+                    && duplicates(&self.pages, scope, &agent_id)
+                        .await?
+                        .first()
+                        .is_some_and(|connection| connection.enabled);
                 self.completed = Some(Completed {
                     approved,
-                    agent_id: device.agent_id.clone(),
+                    agent_id,
+                    ai_on,
                 });
                 self.device = None;
                 self.code = String::new();
