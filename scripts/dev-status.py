@@ -98,7 +98,13 @@ def run(phase, command):
                 writers.append(writer)
                 selector.register(reader, selectors.EVENT_READ, destination)
             try:
-                process = subprocess.Popen(command, stdout=writers[0], stderr=writers[1])
+                # Popen closes inherited descriptors, including a parent Cargo or
+                # make jobserver's pipe. Start these steps with their own jobserver
+                # instead of advertising descriptors that no longer belong to it.
+                env = os.environ.copy()
+                for key in ('CARGO_MAKEFLAGS', 'MAKEFLAGS', 'MFLAGS'):
+                    env.pop(key, None)
+                process = subprocess.Popen(command, stdout=writers[0], stderr=writers[1], env=env)
             except OSError as error:
                 message = f'Could not run this step: {error.strerror}\n'
                 print(message, end='', file=sys.stderr)
