@@ -1772,7 +1772,6 @@ dependencies = [
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-locale",
- "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-notifications",
  "bilibi-principal-directory",

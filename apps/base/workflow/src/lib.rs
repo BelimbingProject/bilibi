@@ -155,7 +155,7 @@ pub trait SubjectAdapter: Send + Sync {
 
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/workflow",layer:bilibi_module_registry::Layer::Base,
-    dependencies:&["base/module_registry","base/database","base/audit","base/authz","base/tenancy","base/queue","base/schedule","base/settings","base/ui","base/locale","base/datetime","base/notifications","base/principal_directory","base/step_up","base/agent_api","base/menu","base/system"],
+    dependencies:&["base/module_registry","base/database","base/audit","base/authz","base/tenancy","base/queue","base/schedule","base/settings","base/ui","base/locale","base/datetime","base/notifications","base/principal_directory","base/step_up","base/agent_api","base/system"],
     migrations:&[("workflow-001-status-kernel",include_str!("../migrations/001-status.sql")),
         ("workflow-002-process-graphs",include_str!("../migrations/002-process.sql")),
         ("workflow-003-human-actions",include_str!("../migrations/003-human-actions.sql")),
@@ -189,7 +189,10 @@ inventory::submit! { bilibi_module_registry::Module {
             display: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?,
         }))))
     }},bilibi_module_registry::Service{id:"base/workflow.approval-reads",factory:|services|{
-        approval_reads::bind(services.get("base/workflow.engine")?)?;Ok(Arc::new(()))
+        let engine: Arc<Engine> = services.get("base/workflow.engine")?;
+        approval_reads::bind(engine.clone())?;
+        services.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?.register_todos(Arc::new(approval_reads::ApprovalTodos(engine)))?;
+        Ok(Arc::new(()))
     }},bilibi_module_registry::Service{id:"base/workflow.approval-pages",factory:|services|{
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope,bilibi_database::Error>(Arc::new(approval_web::Pages{
             engine:services.get("base/workflow.engine")?,contracts:services.get("base/agent_api.pages")?,

@@ -624,7 +624,7 @@ Recall is available only while waiting, to the initiating person when the owner 
 
 ### Waiting list and exceptions
 
-**Waiting for my approval** (`/workflow/approvals`) scans bounded aggregate work candidates and applies live owner visibility, capability, selector and independence checks. Filters and cursors stay in `ListState`. Returned counts describe eligible rows on the page; hidden candidates do not contribute a total. Capability removal hides the request on the next read and refuses an already-open decision.
+**Waiting for my approval** (`/workflow/approvals`) is reached from See all in the bell's **To do** tab, not a sidebar menu item. Workflow supplies the bell through the [to-do source boundary](../notifications/README.md); read state never completes an approval. The page scans bounded aggregate work candidates and applies live owner visibility, capability, selector and independence checks. Filters and cursors stay in `ListState`. Returned counts describe eligible rows on the page; hidden candidates do not contribute a total. Capability removal hides the request on the next read and refuses an already-open decision.
 
 The shared read contracts are `base.workflow.approvals.list`, `.history`, `.delegations` and `.exceptions`. Their read permission admits the projection only, and the five approval pages require the same `workflow.approvals.view` in addition to the owner's checks. Decision and management writes use static per-case contracts; there is no permission to approve everything. The shared page opts into owner-contributed bindings through Agent API's page-family contract, without a host list or module endpoint.
 

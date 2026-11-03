@@ -235,6 +235,7 @@ pub struct UserService {
     pub sessions: std::sync::Arc<Sessions>,
     pub db: Db,
     pub notifications: Notifications,
+    pub(crate) notification_boundary: std::sync::Arc<bilibi_notifications::NotificationBoundary>,
     pub mutations: std::sync::Arc<MutationBoundary>,
     authentication: std::sync::Arc<bilibi_security::Authentication>,
     pub(crate) persons: std::sync::Arc<bilibi_person::PersonService>,
@@ -269,7 +270,7 @@ inventory::submit! {
             services.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?.bind(std::sync::Arc::new(notifications.clone()))?;
             services.get::<bilibi_principal_directory::PrincipalDirectory>("base/principal_directory.directory")?.bind("core/user", std::sync::Arc::new(directory::UserDirectory))?;
             privacy::bind(services.get("base/session.sessions")?, services.get(bilibi_step_up::SERVICE)?)?;
-            let users = std::sync::Arc::new(UserService {identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notifications,mailer:services.get("base/mail.mailer")?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
+            let users = std::sync::Arc::new(UserService {identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
             users.register_identity_provider("oidc", std::sync::Arc::new(sso::oidc::Oidc(services.get("base/integration.exchanges")?)))?;
             users.step_up.register(sso::factor::METHOD, std::sync::Arc::new(sso::factor::Factor(users.clone())))?;
             let authenticator = std::sync::Arc::new(two_factor::Authenticator(users.clone()));
