@@ -837,6 +837,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         include_owner: true,
         skip_empty: true,
         roles: Vec::new(),
+        people: Vec::new(),
     };
     let refused = write(&boundary, &db, &viewer, "reports.subscribe", async |tx| {
         reports.subscribe(tx, &viewer, rows_id, &plan).await
