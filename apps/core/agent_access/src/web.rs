@@ -90,7 +90,7 @@ type State = Box<dyn LiveState<Scope, Error>>;
 impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         match operation {
-            "connections" => Some("My Settings"),
+            "connections" => Some("My settings"),
             "review" => Some("Review entries"),
             _ => None,
         }
@@ -1249,7 +1249,7 @@ impl ConnectionsPage {
         table.empty = Some(TableEmpty::State(if let Some(error) = error {
             EmptyState::missing("Connections unavailable", error).id("connections-error")
         } else {
-            EmptyState::missing("No AI apps connected yet", "").id("connections-empty")
+            EmptyState::missing("No AI apps connected", "").id("connections-empty")
         }));
         let render = |rendered: askama::Result<Html>| rendered.map_err(|_| Error::Internal);
         let setup = self.setup(scope).await?;
@@ -1258,7 +1258,7 @@ impl ConnectionsPage {
         html(ConnectionsView {
             flash: flash_map(self.flash),
             header: render(Html::render(&bilibi_ui::Header {
-                title: Html::text("My Settings"),
+                title: Html::text("My settings"),
                 ..bilibi_ui::Header::default()
             }))?,
             table: render(Html::render(&table))?,

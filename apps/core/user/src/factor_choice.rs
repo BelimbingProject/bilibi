@@ -96,7 +96,7 @@ impl LiveState<Scope, Error> for Choices {
                     title: Html::text(if self.confirm {
                         "Confirm access"
                     } else {
-                        "My Settings"
+                        "My settings"
                     }),
                     subtitle: "Choose a 2FA method.",
                     ..Header::default()
