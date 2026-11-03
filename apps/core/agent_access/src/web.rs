@@ -12,7 +12,7 @@ use askama::Template;
 use bilibi_agent_api::{
     mcp,
     plans::{PlanAuthority, PlanIdentity, Plans},
-    Reviews,
+    BrowserReview, Reviews,
 };
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
@@ -166,23 +166,67 @@ impl BrowserReviewPage {
         Ok(Self { pages, review })
     }
 
-    fn html(&self) -> Result<String> {
-        let src = bilibi_ui::Assets::url("/assets/review-entries-v1.html");
-        let frame = Html::render(&bilibi_ui::AppFrame {
-            id: "review-card",
-            src,
-            title: "Review entries",
-        })
-        .map_err(|_| Error::Internal)?;
+    async fn html(&self, scope: &Scope, review: &BrowserReview) -> Result<String> {
+        let mut open = review.pending();
+        if open {
+            match self
+                .pages
+                .access
+                .review_claims(scope, review.connection)
+                .await
+            {
+                Ok(_) => {}
+                Err(OAuthError::InvalidGrant) => open = false,
+                Err(error) => return Err(oauth_error(error)),
+            }
+        }
+        self.render(review, open)
+    }
+
+    fn render(&self, review: &BrowserReview, open: bool) -> Result<String> {
+        let content = if open {
+            let src = bilibi_ui::Assets::url("/assets/review-entries-v1.html");
+            Html::render(&bilibi_ui::AppFrame {
+                id: "review-card",
+                src,
+                title: "Review entries",
+            })
+            .map_err(|_| Error::Internal)?
+        } else {
+            let (title, reason) = match review.status.as_str() {
+                "open" => (
+                    "Review cancelled",
+                    "This review ended when its AI connection or browser session ended. Start a new review from the AI app if the changes are still needed.",
+                ),
+                "saved" | "edited_and_saved" => (
+                    "Review complete",
+                    "The proposed changes were saved. There is nothing left to review.",
+                ),
+                "cancelled" => (
+                    "Review cancelled",
+                    "This review ended when its AI connection or browser session ended. Start a new review from the AI app if the changes are still needed.",
+                ),
+                "uncertain" => (
+                    "Review outcome needs checking",
+                    "The result could not be confirmed. Check the affected records before starting another review.",
+                ),
+                _ => ("Review ended", "There is nothing left to review."),
+            };
+            Html::render(&EmptyState::missing(title, reason).id("agent-review-ended"))
+                .map_err(|_| Error::Internal)?
+        };
         let header = Html::render(&bilibi_ui::Header {
             title: Html::text("Review entries"),
-            subtitle:
-                "Edit the proposed values, check the complete review, then approve or cancel.",
+            subtitle: if open {
+                "Edit the proposed values, check the complete review, then approve or cancel."
+            } else {
+                "This review is no longer waiting for a decision."
+            },
             ..Default::default()
         })
         .map_err(|_| Error::Internal)?;
         let mut body = header;
-        body.push(&frame);
+        body.push(&content);
         Html::render(&bilibi_ui::Page {
             id: "agent-review-page",
             variant: bilibi_ui::PageVariant::Detail,
@@ -200,17 +244,17 @@ impl BrowserReviewPage {
             .browser(scope, &self.review)
             .await
             .map_err(review_error)?;
-        self.pages
-            .access
-            .review_claims(scope, review.connection)
-            .await
-            .map_err(oauth_error)?;
-        self.html()
+        self.html(scope, &review).await
     }
 
-    fn event(&self, message: Value) -> Result<LiveBody> {
+    async fn event(
+        &self,
+        scope: &Scope,
+        review: &BrowserReview,
+        message: Value,
+    ) -> Result<LiveBody> {
         Ok(LiveBody {
-            html: self.html()?,
+            html: self.html(scope, review).await?,
             events: vec![(
                 "app-frame",
                 json!({"frame":"review-card","message":message}),
@@ -268,13 +312,14 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
             let LiveInput::Event(event) = request.input else {
-                self.pages
+                let review = self
+                    .pages
                     .reviews
                     .browser(request.scope, &self.review)
                     .await
                     .map_err(review_error)?;
                 return Ok(LiveBody {
-                    html: self.html()?,
+                    html: self.html(request.scope, &review).await?,
                     ..LiveBody::default()
                 });
             };
@@ -292,18 +337,33 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                 .browser(request.scope, &self.review)
                 .await
                 .map_err(review_error)?;
+            if !review.pending() {
+                return Ok(LiveBody {
+                    html: self.html(request.scope, &review).await?,
+                    ..LiveBody::default()
+                });
+            }
             if message.get("method").and_then(Value::as_str) == Some("open") {
-                return self.event(json!({
-                    "jsonrpc":"2.0",
-                    "method":"ui/notifications/tool-result",
-                    "params":mcp::tool_result(review.card, false)
-                }));
+                return self
+                    .event(
+                        request.scope,
+                        &review,
+                        json!({
+                            "jsonrpc":"2.0",
+                            "method":"ui/notifications/tool-result",
+                            "params":mcp::tool_result(review.card.clone(), false)
+                        }),
+                    )
+                    .await;
             }
             let id = message.get("id").cloned().ok_or(Error::Invalid)?;
             if message.get("method").and_then(Value::as_str) != Some("tools/call") {
                 return self.event(
+                    request.scope,
+                    &review,
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}),
-                );
+                )
+                .await;
             }
             let name = message
                 .pointer("/params/name")
@@ -357,7 +417,12 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                 arguments,
             )
             .await?;
-            self.event(json!({"jsonrpc":"2.0","id":id,"result":result}))
+            self.event(
+                request.scope,
+                &review,
+                json!({"jsonrpc":"2.0","id":id,"result":result}),
+            )
+            .await
         })
     }
 }

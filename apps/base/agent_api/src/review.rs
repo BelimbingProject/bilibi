@@ -104,8 +104,15 @@ pub struct BrowserReview {
     pub id: String,
     pub connection: i64,
     pub card: Value,
+    pub status: String,
     pub agent_self_report: Option<String>,
     pub client_identity: Option<String>,
+}
+
+impl BrowserReview {
+    pub fn pending(&self) -> bool {
+        matches!(self.status.as_str(), "open" | "refused")
+    }
 }
 
 impl Reviews {
@@ -137,23 +144,22 @@ impl Reviews {
         Ok(())
     }
 
-    /// Open the review only for the exact browser session that held the AI
-    /// switch when the originating tool call created it.
+    /// Open a review only for its owning account and tenant. A pending review's
+    /// originating AI connection is re-proved separately before the card may
+    /// call a tool; a terminal review exposes only its ended state.
     pub async fn browser(&self, scope: &bilibi_tenancy::Scope, id: &str) -> Result<BrowserReview> {
-        let session = scope
-            .browser_session_fingerprint()
-            .ok_or(Error::Forbidden)?;
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let row = client.query_opt(
-            "SELECT connection_id,card,agent_self_report,client_identity FROM base_agent_api_reviews WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND browser_session_hash=$4 AND status IN ('open','refused')",
-            &[&id, &scope.tenant(), &scope.user(), &session],
+            "SELECT connection_id,card,status,agent_self_report,client_identity FROM base_agent_api_reviews WHERE id=$1 AND tenant_id=$2 AND user_id=$3",
+            &[&id, &scope.tenant(), &scope.user()],
         ).await.map_err(bilibi_database::Error::from)?.ok_or(Error::Forbidden)?;
         Ok(BrowserReview {
             id: id.to_owned(),
             connection: row.get(0),
             card: row.get(1),
-            agent_self_report: row.get(2),
-            client_identity: row.get(3),
+            status: row.get(2),
+            agent_self_report: row.get(3),
+            client_identity: row.get(4),
         })
     }
 
@@ -280,6 +286,39 @@ impl Reviews {
         })
         .await;
         read().await
+    }
+}
+
+impl bilibi_notifications::TodoSource for Reviews {
+    fn read<'a>(
+        &'a self,
+        scope: &'a bilibi_tenancy::Scope,
+    ) -> bilibi_notifications::TodoFuture<'a> {
+        Box::pin(async move {
+            let client = self.db.get().await?;
+            let rows = client
+                .query(
+                    "SELECT id,COALESCE(card#>>'{operation,title}','AI changes') FROM base_agent_api_reviews WHERE tenant_id=$1 AND user_id=$2 AND status IN ('open','refused') ORDER BY created_at DESC LIMIT 101",
+                    &[&scope.tenant(), &scope.user()],
+                )
+                .await?;
+            let more = rows.len() > 100;
+            let count = rows.len().min(100);
+            let items = rows
+                .iter()
+                .take(5)
+                .map(|row| bilibi_notifications::TodoItem {
+                    title: format!("Review: {}", row.get::<_, String>(1)),
+                    url: format!("/ai/reviews/{}", row.get::<_, String>(0)),
+                })
+                .collect();
+            Ok(bilibi_notifications::TodoList {
+                items,
+                count,
+                more,
+                see_all: None,
+            })
+        })
     }
 }
 
@@ -569,7 +608,7 @@ inventory::submit! { Contribution::new(APPS, "agent-api.review", Provenance {mod
     source: AppSource::ReviewEntries,
     html: include_str!("../card/review-entries-v1.html"),
     connect_domains: &[], resource_domains: &[],
-    skill: "# Review entries\n\nDiscover and describe the write, then call review_entries. Use this shared card for both one record and a batch; never generate a separate write form or an HTML page of your own. A host with MCP Apps opens the card inline. Otherwise show the compact review and browser link returned by the tool, then call review_status with its review id until the person finishes. The same account and browser session that enabled the AI connection must open the link.\n\nOne write key, one or more records: `{\"key\":\"core.company.create\",\"entries\":[{...},{...}]}`. A review holds at most 1,000 entries; if it refuses a larger review, split at the exact size in the refusal.\n\nSeveral keys or records that depend on each other: `{\"operations\":[{\"key\":\"core.company.create\",\"input\":{\"name\":\"Acme\",\"code\":\"Acme\"}},{\"key\":\"core.affiliation.contact.create\",\"input\":{\"name\":\"Ann Lee\",\"organisation_id\":{\"$ref\":\"1.id\"}}}]}`. Each step is exactly `key` and `input`, one step per record. `{\"$ref\":\"N.id\"}` stands for the record step N creates (one-based, earlier steps only; describe shows what a key creates). One person at two organisations: create the contact once with `core.affiliation.contact.create`, then add a `core.affiliation.create` step whose `person_id` is `{\"$ref\":\"<that step>.id\"}`. Send `operations` alone, never with `key` or `entries`. All steps stay in one atomic write and one approval; do not split a task to obtain IDs.\n\nSend only these arguments and the optional `agent_self_report`; a refusal names the field and the fix, so correct that and call again. The person can edit values, paste spreadsheet rows, update or stop the dry-run check, explicitly exclude refused rows and approve the reviewed operations. A schema-marked secret is never stored for the browser hand-off, so the person enters it in the card. Keep the instance visible. Do not call commit yourself while the card owns the review. The card reports committed, refused, cancelled and uncertain outcomes through model context and review_status. A refused review stays open: the person corrects it and approves again, and review_status then reports the latest state (refused, later saved). Only saved, cancelled and uncertain end it; when the card is not shown, show the entry digest from the tool text; read records to verify an uncertain outcome, never automatically retry it.\n",
+    skill: "# Review entries\n\nDiscover and describe the write, then call review_entries. Use this shared card for both one record and a batch; never generate a separate write form or an HTML page of your own. A host with MCP Apps opens the card inline. Otherwise show the compact review and browser link returned by the tool, then call review_status with its review id until the person finishes. The same signed-in account must open the link while the originating AI connection remains switched on.\n\nOne write key, one or more records: `{\"key\":\"core.company.create\",\"entries\":[{...},{...}]}`. A review holds at most 1,000 entries; if it refuses a larger review, split at the exact size in the refusal.\n\nSeveral keys or records that depend on each other: `{\"operations\":[{\"key\":\"core.company.create\",\"input\":{\"name\":\"Acme\",\"code\":\"Acme\"}},{\"key\":\"core.affiliation.contact.create\",\"input\":{\"name\":\"Ann Lee\",\"organisation_id\":{\"$ref\":\"1.id\"}}}]}`. Each step is exactly `key` and `input`, one step per record. `{\"$ref\":\"N.id\"}` stands for the record step N creates (one-based, earlier steps only; describe shows what a key creates). One person at two organisations: create the contact once with `core.affiliation.contact.create`, then add a `core.affiliation.create` step whose `person_id` is `{\"$ref\":\"<that step>.id\"}`. Send `operations` alone, never with `key` or `entries`. All steps stay in one atomic write and one approval; do not split a task to obtain IDs.\n\nSend only these arguments and the optional `agent_self_report`; a refusal names the field and the fix, so correct that and call again. The person can edit values, paste spreadsheet rows, update or stop the dry-run check, explicitly exclude refused rows and approve the reviewed operations. A schema-marked secret is never stored for the browser hand-off, so the person enters it in the card. Keep the instance visible. Do not call commit yourself while the card owns the review. The card reports committed, refused, cancelled and uncertain outcomes through model context and review_status. A refused review stays open: the person corrects it and approves again, and review_status then reports the latest state (refused, later saved). Only saved, cancelled and uncertain end it; when the card is not shown, show the entry digest from the tool text; read records to verify an uncertain outcome, never automatically retry it.\n",
 }) }
 
 inventory::submit! { Contribution::new(bilibi_ui::PUBLIC_ASSETS, "agent-api.review-card", Provenance {module:"base/agent_api",source:file!(),line:line!()}, &bilibi_ui::PublicAsset {
