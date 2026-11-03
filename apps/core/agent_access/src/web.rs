@@ -166,8 +166,21 @@ impl BrowserReviewPage {
         Ok(Self { pages, review })
     }
 
-    fn html(&self, review: &BrowserReview) -> Result<String> {
-        self.render(review, review.pending())
+    async fn html(&self, scope: &Scope, review: &BrowserReview) -> Result<String> {
+        let mut open = review.pending();
+        if open {
+            match self
+                .pages
+                .access
+                .review_claims(scope, review.connection)
+                .await
+            {
+                Ok(_) => {}
+                Err(OAuthError::InvalidGrant) => open = false,
+                Err(error) => return Err(oauth_error(error)),
+            }
+        }
+        self.render(review, open)
     }
 
     fn render(&self, review: &BrowserReview, open: bool) -> Result<String> {
@@ -231,25 +244,17 @@ impl BrowserReviewPage {
             .browser(scope, &self.review)
             .await
             .map_err(review_error)?;
-        let mut open = review.pending();
-        if open {
-            match self
-                .pages
-                .access
-                .review_claims(scope, review.connection)
-                .await
-            {
-                Ok(_) => {}
-                Err(OAuthError::InvalidGrant) => open = false,
-                Err(error) => return Err(oauth_error(error)),
-            }
-        }
-        self.render(&review, open)
+        self.html(scope, &review).await
     }
 
-    fn event(&self, review: &BrowserReview, message: Value) -> Result<LiveBody> {
+    async fn event(
+        &self,
+        scope: &Scope,
+        review: &BrowserReview,
+        message: Value,
+    ) -> Result<LiveBody> {
         Ok(LiveBody {
-            html: self.html(review)?,
+            html: self.html(scope, review).await?,
             events: vec![(
                 "app-frame",
                 json!({"frame":"review-card","message":message}),
@@ -314,7 +319,7 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                     .await
                     .map_err(review_error)?;
                 return Ok(LiveBody {
-                    html: self.html(&review)?,
+                    html: self.html(request.scope, &review).await?,
                     ..LiveBody::default()
                 });
             };
@@ -334,26 +339,30 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                 .map_err(review_error)?;
             if !review.pending() {
                 return Ok(LiveBody {
-                    html: self.html(&review)?,
+                    html: self.html(request.scope, &review).await?,
                     ..LiveBody::default()
                 });
             }
             if message.get("method").and_then(Value::as_str) == Some("open") {
                 return self.event(
+                    request.scope,
                     &review,
                     json!({
                         "jsonrpc":"2.0",
                         "method":"ui/notifications/tool-result",
                         "params":mcp::tool_result(review.card.clone(), false)
                     }),
-                );
+                )
+                .await;
             }
             let id = message.get("id").cloned().ok_or(Error::Invalid)?;
             if message.get("method").and_then(Value::as_str) != Some("tools/call") {
                 return self.event(
+                    request.scope,
                     &review,
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}),
-                );
+                )
+                .await;
             }
             let name = message
                 .pointer("/params/name")
@@ -407,7 +416,8 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                 arguments,
             )
             .await?;
-            self.event(&review, json!({"jsonrpc":"2.0","id":id,"result":result}))
+            self.event(request.scope, &review, json!({"jsonrpc":"2.0","id":id,"result":result}))
+                .await
         })
     }
 }
