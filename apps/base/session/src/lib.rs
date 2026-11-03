@@ -87,6 +87,7 @@ pub enum CredentialRevocationReason {
     PasswordReset,
     SignedOut,
     AdminAction,
+    AccountChanged,
 }
 #[derive(Clone, Debug)]
 pub struct SessionClient {
@@ -283,7 +284,8 @@ impl Sessions {
                 "user.change_password" => CredentialRevocationReason::PasswordChanged,
                 "user.reset_password" => CredentialRevocationReason::PasswordReset,
                 "user.sso.backchannel_logout" => CredentialRevocationReason::SignedOut,
-                _ => CredentialRevocationReason::AdminAction,
+                "user.password_reset" => CredentialRevocationReason::AdminAction,
+                _ => CredentialRevocationReason::AccountChanged,
             },
         };
         let revokers = self.credential_revokers()?;

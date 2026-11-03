@@ -1606,6 +1606,7 @@ impl CredentialRevoker for AgentAccess {
                     bilibi_session::CredentialRevocationReason::PasswordReset => "password_reset",
                     bilibi_session::CredentialRevocationReason::SignedOut => "signed_out",
                     bilibi_session::CredentialRevocationReason::AdminAction => "admin_action",
+                    bilibi_session::CredentialRevocationReason::AccountChanged => "account_change",
                 },
             )
             .await

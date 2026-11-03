@@ -8,6 +8,7 @@ ALTER TABLE core_agent_connections
    'turned_off',
    'replaced',
    'admin_action',
+   'account_change',
    'security_event'
   )
  );

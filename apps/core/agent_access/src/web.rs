@@ -1180,6 +1180,7 @@ impl ConnectionsPage {
                             Some("turned_off") => "Ended: you turned it off",
                             Some("replaced") => "Ended: you replaced it with a newer connection",
                             Some("admin_action") => "Ended: an administrator ended it",
+                            Some("account_change") => "Ended: your account was changed",
                             Some("security_event") => {
                                 "Ended: someone reused the connection credentials"
                             }
