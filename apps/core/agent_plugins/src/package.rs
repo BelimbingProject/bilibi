@@ -297,17 +297,23 @@ Bilibi records the value labelled \"{label}\" on the request log and the audit o
 
 /// Connection check and OAuth linking, naming this installation's endpoint and client.
 fn setup(package: &str, connection: &Connection, instance: &Instance) -> Skill {
+    let server = connection.server_url();
+    let settings = format!("{}/settings/ai-connections", connection.origin());
     Skill {
         name: setup_skill_name(package),
         description: format!("Set up or diagnose the Bilibi {} connection: check the MCP tools, complete OAuth linking through the host, and report what is available.", instance.label),
         body: format!(
             "Read the `{package}` skill's workflow first, including how to report yourself.\n\n\
 This plugin connects to **{label}** ({consequence}). Its MCP server is `{server}`. It uses OAuth with PKCE (S256) and automatic client registration, with no client secret and the scope `{scope}`.\n\n\
-If Bilibi MCP tools are connected, call `search` for the requested task (or `search` for `company` as a connection test) and complete OAuth linking through the host if prompted. Report the operations actually returned, then continue the task. Authentication refusals, permission refusals and empty results are distinct outcomes; report which one happened.\n\n\
-If no Bilibi tools are connected, explain that the server must be added in the host as a remote MCP server with the address above, and that the person signs in to Bilibi to approve the connection and sees its end date there. A skill package alone cannot register a server, and the person never sends a Bilibi password or token in a message.\n",
+Follow these steps in order:\n\n\
+1. Check whether `{package}` is already in the host's MCP settings.\n\
+2. If it is absent, add it with `{server}`.\n\
+3. If sign-in is required, or the saved sign-in is missing or invalid, check the host's MCP management commands and settings, then start MCP sign-in for `{package}`. Give the person the authorization link to open. Never ask for a Bilibi password or token. Do not say that sign-in cannot be started until both have been checked.\n\
+4. After the person approves sign-in, call `search` for `company`. If Bilibi returns `ai_switched_off`, tell the person to open {settings} and switch on this connection. OAuth approval and the AI switch are separate choices. Wait for confirmation, then call `search` for `company` again.\n\
+5. Report the operations actually returned. Authentication refusals, permission refusals and empty results are distinct outcomes; report which one happened.\n\n\
+If the Bilibi tools still do not appear, report the exact error. Say whether a new chat or a host reload is needed, then verify again. Do not assume that missing tools mean the server is absent.\n",
             label = instance.label,
             consequence = instance.role.consequence(),
-            server = connection.server_url(),
             scope = connection.scope(),
         ),
     }

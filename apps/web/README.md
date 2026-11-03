@@ -183,7 +183,7 @@ the two notifications are public: the tool list and a card's HTML hold no data
 and no credential, and an MCP Apps host may fetch them before the person signs
 in. Every other message passes `api::authenticate` with the MCP resource
 (`APP_ORIGIN/mcp`) as audience; a missing, invalid or no-longer-eligible bearer gets `401 invalid_token` with
-`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`.
+`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`. An authenticated request refused because its connection switch is off returns `ai_switched_off`, a plain instruction, and the exact AI connections settings URL.
 The protocol adapter is `bilibi_base::agent_api::mcp`: generic tools
 (`search`, `describe`, `guide`, `read`, `plan`, `commit`, `review_entries` and
 `review_status`) over the one Agent

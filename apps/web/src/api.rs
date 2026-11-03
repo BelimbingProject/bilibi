@@ -752,11 +752,13 @@ pub(crate) async fn authenticate(
         None => false,
     };
     if !allowed {
+        let settings_url = format!("{}/settings/ai-connections", origin(app));
         return Err(refusal(
             StatusCode::FORBIDDEN,
             json!({
                 "error": "ai_switched_off",
-                "error_description": "AI is switched off in Bilibi for this connection. Sign in and turn it on to continue."
+                "error_description": format!("AI access is off for this connection. Open {settings_url}, switch it on, then try again."),
+                "settings_url": settings_url,
             }),
         ));
     }
