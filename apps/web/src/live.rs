@@ -13,7 +13,7 @@ use bilibi_database::{page_write, Error, Result};
 use bilibi_module_registry::contributions::{Access, Embed, Route, EMBEDS};
 use bilibi_security::Scope;
 use bilibi_ui::page::{
-    Change, LiveBody, LiveInput, LiveRequest, LiveState, PageRequest, PanelSpec,
+    Change, LiveBody, LiveInput, LiveRequest, LiveState, PageChrome, PageRequest, PanelSpec,
 };
 use bilibi_ui::params;
 use bilibi_ui::upload::{ClientEntry, Registration, UploadError, CHUNK_SIZE, MAX_ENTRIES};
@@ -272,12 +272,23 @@ impl Side for Staff {
         framed: bool,
         html: &str,
     ) -> Result<String> {
-        let topbar_actions = routes::topbar_actions(&routes::resolve(app, path)?.0, framed);
-        Ok(
-            crate::shell::render(app, Some(context), path, framed, true, html, topbar_actions)
-                .await?
-                .html,
+        let bound = routes::resolve(app, path)?.0;
+        let topbar_actions = routes::topbar_actions(&bound, framed);
+        Ok(crate::shell::render(
+            app,
+            Some(context),
+            path,
+            if framed {
+                PageChrome::Framed
+            } else {
+                bound.page.0.chrome(bound.route.operation)
+            },
+            true,
+            html,
+            topbar_actions,
         )
+        .await?
+        .html)
     }
     async fn prompt(app: &App, context: &Scope, back: &str) -> Option<String> {
         app.step_up.prompt(context, back).await.ok()
@@ -673,7 +684,13 @@ impl<S: Side> Session<S> {
     /// Mounts each shell embed the actor may see, once per socket, and drops
     /// one whose access is gone. A refused embed renders nothing in the shell.
     async fn sync_shell(&mut self, app: &App, token: &str, scope: &S::Context) -> Result<()> {
-        if self.framed || !S::SHELL {
+        let standalone = S::SHELL
+            && S::resolve(app, &self.path).is_ok_and(|bound| {
+                bound.page.0.chrome(bound.route.operation)
+                    == bilibi_ui::page::PageChrome::StandaloneReview
+            });
+        if self.framed || !S::SHELL || standalone {
+            self.shell.clear();
             return Ok(());
         }
         for slot in crate::shell::embeds(app)? {

@@ -8,9 +8,7 @@
 {%- import "datetime.html" as time -%}
 <div data-shared-ui>
 {% call feedback::flash_group(messages=flash) %}{% endcall %}
-{% call ui::page(variant=bilibi_ui::PageVariant::Form) %}
-{% call ui::header() %}Connect an agent{% endcall %}
-{{ instance|safe }}
+{% call ui::header(pin=false) %}Connect an agent{% endcall %}
 {% if let Some(error) = error %}
 {% call feedback::panel_notice(id="device-error", kind=bilibi_ui::NoticeKind::Error, dismiss_event="dismiss") %}{{ error }}{% endcall %}
 {% endif %}
@@ -21,7 +19,7 @@
 </form>
 {% endif %}
 {% if let Some(device) = device %}
-{% call ui::card(id="device-consent", class="mt-4") %}
+<section id="device-consent" class="mt-4">
 {% call ui::section_heading(title="Review connection") %}{% endcall %}
 {% call ui::facts() %}
 {% call ui::fact(title="Code") %}{{ code }}{% endcall %}
@@ -40,27 +38,26 @@
 {% call ui::button(id="device-approve", button_type="submit") %}Approve connection{% endcall %}
 {% call ui::button(id="device-deny", button_type="button", event="deny") %}Refuse{% endcall %}
 </form>
-{% endcall %}
+<p id="device-approval-ai" class="mt-3 text-xs text-ink-muted">Approving also turns AI on in this browser.</p>
+</section>
 {% endif %}
 {% if let Some(done) = completed %}
-{% call ui::card(id="device-completed", class="mt-4") %}
+<section id="device-completed" class="mt-4">
 <div role="status">
 {% call ui::section_heading(title=done.title()) %}{% endcall %}
 <p id="device-completed-agent" class="text-sm text-ink">{{ done.agent_id }}</p>
 {% if done.approved %}
 {% call ui::facts(id="device-completed-state") %}
 {% call ui::fact(title="OAuth approval") %}Approved{% endcall %}
-{% call ui::fact(title="AI access") %}Off until you switch it on{% endcall %}
+{% call ui::fact(title="AI access") %}On{% endcall %}
 {% endcall %}
-<p class="text-sm text-muted">Open <a href="/settings/ai-connections" class="font-medium text-link hover:underline">AI connections</a> and switch on the {{ done.agent_id }} connection once the app finishes connecting.</p>
 <p class="text-sm text-muted">Return to {{ done.agent_id }}. It will verify the connection.</p>
 {% else %}
 <p class="text-sm text-muted">Return to {{ done.agent_id }}. It will report that you refused the connection.</p>
 {% endif %}
 </div>
 {% call ui::button(id="device-another", button_type="button", event="another") %}Connect another device{% endcall %}
-{% endcall %}
+</section>
 {% endif %}
 <a id="device-connections" href="/settings/ai-connections">Your connections</a>
-{% endcall %}
 </div>

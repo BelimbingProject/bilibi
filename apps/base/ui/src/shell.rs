@@ -386,3 +386,20 @@ pub struct Framed<'a> {
     pub csrf: &'a str,
     pub impersonating: bool,
 }
+
+/// A signed-in review without workspace navigation. It keeps the guarded live
+/// root and the account's display preferences, but draws only the Bilibi mark,
+/// the installation banner and the review card.
+#[derive(Template)]
+#[template(path = "standalone_review.html")]
+pub struct StandaloneReview<'a> {
+    pub body: &'a str,
+    pub instance: &'a Html,
+    pub live: bool,
+    pub tenant_id: i64,
+    pub user_id: i64,
+    pub company_id: Option<i64>,
+    pub preferences: &'a DisplayPreferences,
+    pub csrf: &'a str,
+    pub impersonating: bool,
+}

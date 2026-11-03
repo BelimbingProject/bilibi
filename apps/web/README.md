@@ -85,6 +85,7 @@ scope, `X-CSRF-Token`. The secret rotates when the session switches identity
 the live socket likewise binds the identity, the secret and the current company it was opened under (`live::Identity`) and reloads its page, without acting, once they differ. The company is the one the page was rendered under: stamped as `data-company-id` on the shell root and sent by `live.js` as the `company` query of `/live`, so a reconnect after the session switched company reloads the page rather than re-rendering under a stale top bar. Owners must reauthorize mutations inside their transaction.
 The adapter receives the operation, proven optional scope, path/query values,
 bounded request body and presentation flag. HTML escaping belongs to the owner.
+An authenticated page uses the workspace shell by default. A page operation may return `PageChrome::StandaloneReview`; Web then keeps the same guarded live transport, CSRF and session binding but wraps it in Base UI's credential-style review layout with the Bilibi mark and instance banner. Core Agent Access uses this for OAuth consent.
 
 Framing comes from `Sec-Fetch-Dest: iframe` (or `frame`) on each HTTP navigation,
 never a cookie, account setting or query parameter. A route with `framed: false`

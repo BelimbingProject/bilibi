@@ -8,14 +8,12 @@
 {%- import "datetime.html" as time -%}
 <div data-shared-ui>
 {% call feedback::flash_group() %}{% endcall %}
-{% call ui::page(variant=bilibi_ui::PageVariant::Form) %}
 {% if let Some(request) = request %}
 {% let summary = "{} wants to connect to Bilibi."|format(request.client_name) %}
-{% call ui::header(subtitle=summary, actions=connections) %}Connect an app{% endcall %}
+{% call ui::header(subtitle=summary, actions=connections, pin=false) %}Connect an app{% endcall %}
 {% else %}
-{% call ui::header(actions=connections) %}Connect an app{% endcall %}
+{% call ui::header(actions=connections, pin=false) %}Connect an app{% endcall %}
 {% endif %}
-{{ instance|safe }}
 {% if let Some(error) = error %}
 {% if let Some(_request) = request %}
 {% call feedback::panel_notice(id="oauth-consent-error", kind=bilibi_ui::NoticeKind::Error, dismiss_event="dismiss") %}{{ error }}{% endcall %}
@@ -25,7 +23,8 @@
 {% endif %}
 {% endif %}
 {% if let Some(request) = request %}
-{% call ui::card(id="oauth-consent", title="Review connection", inner_class="wrap-anywhere") %}
+<div id="oauth-consent" class="wrap-anywhere">
+{% call ui::section_heading(title="Review connection") %}{% endcall %}
 {% call forms::form(id="oauth-consent-form", event="approve", actions=actions) %}
 {% call ui::facts(id="oauth-client-details") %}
 {% call ui::fact(title="App name (self-declared)") %}{{ request.client_name }}{% endcall %}
@@ -43,7 +42,7 @@
 {% endif %}
 {% call ui::section_heading(title="What this app can do", description="This app works as you in the companies you may act in, naming the company on every call: it can read what you can read and suggest changes you approve one by one. You can revoke access at any time in Your connections.") %}{% endcall %}
 {% endcall %}
-{% endcall %}
+<p id="oauth-approval-ai" class="mt-3 text-xs text-ink-muted">Approving also turns AI on in this browser.</p>
+</div>
 {% endif %}
-{% endcall %}
 </div>
