@@ -938,7 +938,7 @@ impl Show {
                 id: "report-copy",
                 button_type: "button",
                 event: "request_copy",
-                body: Html::text("Copy"),
+                body: Html::text("Make a copy"),
                 ..Button::default()
             })?);
         }
