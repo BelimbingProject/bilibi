@@ -1205,10 +1205,11 @@ impl AgentAccess {
         Ok(summaries)
     }
 
-    /// Reconstruct the originating connection's stable claims only when this
-    /// exact signed-in browser session still holds its AI switch. Browser
-    /// review pages call this before every card request; another session, a
-    /// transferred switch, sign-out and expiry all fail closed.
+    /// Reconstruct the originating connection's stable claims for its owning
+    /// account while the browser-session switch that enabled it remains live.
+    /// Browser review pages call this before every card request; the owner may
+    /// use another signed-in session, but another account, switch-off, sign-out
+    /// and expiry all fail closed.
     pub async fn review_claims(
         &self,
         scope: &Scope,
@@ -1216,11 +1217,18 @@ impl AgentAccess {
     ) -> std::result::Result<AgentClaims, OAuthError> {
         self_service(scope)?;
         let client = self.db.get().await?;
-        let session = self.sessions.identify(&**client, scope).await?;
         let row = client.query_opt(
-            "SELECT tenant_id,user_id,organisation_id,person_id,enabled_session_id FROM core_agent_connections WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND revoked_at IS NULL AND enabled_session_id=$4",
-            &[&connection, &scope.tenant(), &scope.user(), &session],
+            "SELECT tenant_id,user_id,organisation_id,person_id,enabled_session_id FROM core_agent_connections WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND revoked_at IS NULL AND enabled_session_id IS NOT NULL",
+            &[&connection, &scope.tenant(), &scope.user()],
         ).await?.ok_or(OAuthError::InvalidGrant)?;
+        let enabled_session: String = row.get(4);
+        if !self
+            .sessions
+            .is_live(&**client, scope.tenant(), scope.user(), &enabled_session)
+            .await?
+        {
+            return Err(OAuthError::InvalidGrant);
+        }
         let organisation = row
             .get::<_, Option<i64>>(2)
             .map(|id| OrganisationId::new(id).map_err(|_| OAuthError::InvalidGrant))
@@ -1235,7 +1243,7 @@ impl AgentAccess {
             user: row.get(1),
             organisation,
             person,
-            enabled_session: row.get(4),
+            enabled_session: Some(enabled_session),
         })
     }
     /// Turn one owned connection on for this exact browser session, or off
