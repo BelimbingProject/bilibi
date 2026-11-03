@@ -323,7 +323,7 @@ impl WriteHandler for Write {
                 Self::Subscribe => {
                     let current = reports.get(scope, id(input)?).await?;
                     let plan = plan(input)?;
-                    json!({"summary": format!("Deliver {} {} at {} as {}{}", current.name, plan.frequency.key(), clock(plan.at_minute), plan.format.key().to_uppercase(), if plan.roles.is_empty() { String::new() } else { format!(", also to {} role(s)", plan.roles.len()) })})
+                    json!({"summary": format!("Deliver {} {} at {} as {}{}{}", current.name, plan.frequency.key(), clock(plan.at_minute), plan.format.key().to_uppercase(), if plan.roles.is_empty() { String::new() } else { format!(", also to {} role(s)", plan.roles.len()) }, if plan.people.is_empty() { String::new() } else { format!(", {} person(s)", plan.people.len()) })})
                 }
                 Self::Pause => {
                     let paused = input["paused"].as_bool() == Some(true);
@@ -511,7 +511,7 @@ fn clock(minute: i16) -> String {
 }
 /// A schedule from `frequency`, `at` (HH:MM in your time zone), `weekday`
 /// (1 Monday … 7 Sunday) or `monthday` (1–28), `format`, `include_me`,
-/// `skip_empty` and `roles`.
+/// `skip_empty`, `roles` and `people`.
 pub(crate) fn plan(input: &Value) -> Result<Plan, AgentError> {
     let frequency = Frequency::from_key(input["frequency"].as_str().unwrap_or_default())
         .ok_or_else(|| invalid("frequency", "must be daily, weekly or monthly"))?;
@@ -541,6 +541,12 @@ pub(crate) fn plan(input: &Value) -> Result<Plan, AgentError> {
             .flatten()
             .filter_map(Value::as_i64)
             .collect(),
+        people: input["people"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_i64)
+            .collect(),
     })
 }
 fn subscribe_schema() -> Value {
@@ -553,7 +559,8 @@ fn subscribe_schema() -> Value {
         "format":{"type":"string","enum":["csv","pdf"]},
         "include_me":{"type":"boolean","description":"Left out: true."},
         "skip_empty":{"type":"boolean","description":"Left out: true, so an empty result sends nothing."},
-        "roles":{"type":"array","items":{"type":"integer","minimum":1},"description":"Role ids whose holders also receive it, each with their own access. Needs reports.share."}
+        "roles":{"type":"array","items":{"type":"integer","minimum":1},"description":"Role ids whose holders also receive it, each with their own access. Needs reports.share."},
+        "people":{"type":"array","items":{"type":"integer","minimum":1},"description":"Account ids of staff who also receive it, each with their own access. Needs reports.share."}
     }})
 }
 fn pause_schema() -> Value {

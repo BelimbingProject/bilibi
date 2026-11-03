@@ -96,3 +96,4 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file or command instead.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
+- A titled table inside a `Card` gets its space under the title from `app.css` (`[data-card-body]` rule next to the unframed-table notch), not from a page. Never add a margin or padding class on the page to separate a card title from its table; fix the shared rule.

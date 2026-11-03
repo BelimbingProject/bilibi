@@ -8,8 +8,7 @@ use bilibi_database::Result;
 use bilibi_datetime::DisplayContext;
 use bilibi_ui::{
     choices, error_sentence, BuiltinColumn, Button, ButtonVariant, Card, ErrorSummary, Field,
-    FlexRow, FlexTable, Html, IconButton, IconKind, InputKind, ListColumns, MultiSelect,
-    TableEmpty,
+    FlexRow, FlexTable, Html, IconButton, IconKind, InputKind, ListColumns, Modal, MultiSelect,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -34,7 +33,9 @@ pub(crate) struct Draft {
     include_me: bool,
     skip_empty: bool,
     roles: Vec<String>,
+    people: Vec<String>,
     pub errors: BTreeMap<String, Vec<String>>,
+    pub open: bool,
 }
 impl Default for Draft {
     fn default() -> Self {
@@ -47,7 +48,9 @@ impl Default for Draft {
             include_me: true,
             skip_empty: true,
             roles: Vec::new(),
+            people: Vec::new(),
             errors: BTreeMap::new(),
+            open: false,
         }
     }
 }
@@ -74,6 +77,17 @@ impl Draft {
                     .collect()
             })
             .unwrap_or_default();
+        self.people = value
+            .get("sched[people][]")
+            .and_then(Value::as_array)
+            .map(|v| {
+                v.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
     }
     /// The contract's input, in the agent dialect.
     pub fn input(&self, report: i64) -> Value {
@@ -81,6 +95,7 @@ impl Draft {
             "id": report, "frequency": self.frequency, "at": self.at,
             "format": self.format, "include_me": self.include_me, "skip_empty": self.skip_empty,
             "roles": self.roles.iter().filter_map(|r| r.parse::<i64>().ok()).collect::<Vec<_>>(),
+            "people": self.people.iter().filter_map(|r| r.parse::<i64>().ok()).collect::<Vec<_>>(),
         });
         // Only the day this frequency uses: the contract takes no nulls.
         let day = match self.frequency.as_str() {
@@ -124,6 +139,7 @@ pub(crate) fn tab(
     draft: &Draft,
     subscriptions: &[Subscription],
     roles: &[(i64, String)],
+    people: &[(i64, String)],
     can: Can,
 ) -> Result<Html> {
     let mut rows = Vec::new();
@@ -142,11 +158,19 @@ pub(crate) fn tab(
             (Some(state), None) => Html::text(state),
             _ => Html::text("Not yet"),
         };
-        let recipients = match (subscription.include_owner, subscription.roles.len()) {
-            (true, 0) => "You".to_owned(),
-            (true, n) => format!("You and {n} role{}", if n == 1 { "" } else { "s" }),
-            (false, n) => format!("{n} role{}", if n == 1 { "" } else { "s" }),
-        };
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut parts = Vec::new();
+        if subscription.include_owner {
+            parts.push("You".to_owned());
+        }
+        if !subscription.roles.is_empty() {
+            parts.push(plural(subscription.roles.len(), "role", "roles"));
+        }
+        if !subscription.people.is_empty() {
+            parts.push(plural(subscription.people.len(), "person", "people"));
+        }
+        let recipients = parts.join(" and ");
         let (pause_icon, pause_label, pause_value) = if subscription.paused {
             ("play", "Resume this schedule", format!("{key}:false"))
         } else {
@@ -190,17 +214,25 @@ pub(crate) fn tab(
     table.caption = "Your schedules of this report";
     table.framed = false;
     table.actions = true;
-    table.empty = Some(TableEmpty::Content(Html::text(
-        "Not scheduled. Add a schedule below to receive this report by bell and email.",
-    )));
-    let mut out = render(Card {
-        id: "report-schedules-card",
-        title: "Your schedules",
-        inner_class: "p-0",
-        body: render(table)?,
-        ..Card::default()
+    let mut out = render(Button {
+        id: "report-schedule-open",
+        button_type: "button",
+        event: "open_schedule",
+        variant: ButtonVariant::Primary,
+        body: Html::text("+ Schedule"),
+        ..Button::default()
     })?;
-    out.push(&form(draft, roles, can)?);
+    if !subscriptions.is_empty() {
+        out.push(&render(Card {
+            id: "report-schedules-card",
+            inner_class: "p-0",
+            body: render(table)?,
+            ..Card::default()
+        })?);
+    }
+    if draft.open {
+        out.push(&form(draft, roles, people, can)?);
+    }
     Ok(out)
 }
 
@@ -215,7 +247,12 @@ pub(crate) fn columns() -> Vec<BuiltinColumn> {
     ]
 }
 
-fn form(draft: &Draft, roles: &[(i64, String)], can: Can) -> Result<Html> {
+fn form(
+    draft: &Draft,
+    roles: &[(i64, String)],
+    people: &[(i64, String)],
+    can: Can,
+) -> Result<Html> {
     let field = |key: &str, label: &str| {
         Field::in_form("sched", key)
             .id(format!("sched-{}", key.replace('_', "-")))
@@ -286,15 +323,20 @@ fn form(draft: &Draft, roles: &[(i64, String)], can: Can) -> Result<Html> {
             .checked(draft.include_me),
     )?);
     body.push(&render(
-        field("skip_empty", "Skip a delivery when the result is empty")
+        field("skip_empty", "Don't send empty reports")
             .kind(InputKind::Checkbox)
             .checked(draft.skip_empty),
     )?);
     if can.share {
         let mut picker = MultiSelect::new("sched-roles", "sched[roles]")
-            .label("Also to the holders of")
-            .options(roles.iter().map(|(id, name)| bilibi_ui::Choice::new(name, id.to_string())).collect())
-            .hint("Each person receives the result their own access allows, and nothing once they lose it.")
+            .label("CC roles")
+            .options(
+                roles
+                    .iter()
+                    .map(|(id, name)| bilibi_ui::Choice::new(name, id.to_string()))
+                    .collect(),
+            )
+            .hint("Each person sees only what they're permitted to see.")
             .errors(errors("roles"));
         picker.values = draft.roles.clone();
         picker.selection_label = ":count role|:count roles".into();
@@ -302,8 +344,31 @@ fn form(draft: &Draft, roles: &[(i64, String)], can: Can) -> Result<Html> {
         picker.chips = true;
         picker.wrap_chips = true;
         body.push(&render(picker)?);
+        let mut picker = MultiSelect::new("sched-people", "sched[people]")
+            .label("CC people")
+            .options(
+                people
+                    .iter()
+                    .map(|(id, name)| bilibi_ui::Choice::new(name, id.to_string()))
+                    .collect(),
+            )
+            .hint("Each person sees only what they're permitted to see.")
+            .errors(errors("people"));
+        picker.values = draft.people.clone();
+        picker.selection_label = ":count person|:count people".into();
+        picker.placeholder = "No people".into();
+        picker.chips = true;
+        picker.wrap_chips = true;
+        body.push(&render(picker)?);
     }
-    let actions = render(Button {
+    let mut actions = render(Button {
+        id: "sched-cancel",
+        button_type: "button",
+        event: "close_schedule",
+        body: Html::text("Cancel"),
+        ..Button::default()
+    })?;
+    actions.push(&render(Button {
         id: "sched-save",
         button_type: "button",
         event: "subscribe",
@@ -311,10 +376,11 @@ fn form(draft: &Draft, roles: &[(i64, String)], can: Can) -> Result<Html> {
         working: "Scheduling…",
         body: Html::text("Add schedule"),
         ..Button::default()
-    })?;
-    render(Card {
+    })?);
+    render(Modal {
         id: "report-schedule-form",
         title: "Add a schedule",
+        cancel_event: "close_schedule",
         body: render(bilibi_ui::Form {
             id: "report-schedule",
             event: "edit_schedule",
@@ -323,7 +389,7 @@ fn form(draft: &Draft, roles: &[(i64, String)], can: Can) -> Result<Html> {
             body,
             actions,
         })?,
-        ..Card::default()
+        ..Modal::default()
     })
 }
 
@@ -333,6 +399,7 @@ fn label(key: &str) -> String {
         "weekday" => "The day",
         "monthday" => "The day",
         "roles" => "Roles",
+        "people" => "People",
         "recipients" => "Recipients",
         "frequency" => "How often",
         _ => "The schedule",
