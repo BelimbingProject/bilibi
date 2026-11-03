@@ -167,7 +167,11 @@ impl BrowserReviewPage {
     }
 
     fn html(&self, review: &BrowserReview) -> Result<String> {
-        let content = if review.pending() {
+        self.render(review, review.pending())
+    }
+
+    fn render(&self, review: &BrowserReview, open: bool) -> Result<String> {
+        let content = if open {
             let src = bilibi_ui::Assets::url("/assets/review-entries-v1.html");
             Html::render(&bilibi_ui::AppFrame {
                 id: "review-card",
@@ -177,6 +181,10 @@ impl BrowserReviewPage {
             .map_err(|_| Error::Internal)?
         } else {
             let (title, reason) = match review.status.as_str() {
+                "open" => (
+                    "Review cancelled",
+                    "This review ended when its AI connection or browser session ended. Start a new review from the AI app if the changes are still needed.",
+                ),
                 "saved" | "edited_and_saved" => (
                     "Review complete",
                     "The proposed changes were saved. There is nothing left to review.",
@@ -196,7 +204,7 @@ impl BrowserReviewPage {
         };
         let header = Html::render(&bilibi_ui::Header {
             title: Html::text("Review entries"),
-            subtitle: if review.pending() {
+            subtitle: if open {
                 "Edit the proposed values, check the complete review, then approve or cancel."
             } else {
                 "This review is no longer waiting for a decision."
@@ -223,14 +231,20 @@ impl BrowserReviewPage {
             .browser(scope, &self.review)
             .await
             .map_err(review_error)?;
-        if review.pending() {
-            self.pages
+        let mut open = review.pending();
+        if open {
+            match self
+                .pages
                 .access
                 .review_claims(scope, review.connection)
                 .await
-                .map_err(oauth_error)?;
+            {
+                Ok(_) => {}
+                Err(OAuthError::InvalidGrant) => open = false,
+                Err(error) => return Err(oauth_error(error)),
+            }
         }
-        self.html(&review)
+        self.render(&review, open)
     }
 
     fn event(&self, review: &BrowserReview, message: Value) -> Result<LiveBody> {
