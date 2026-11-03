@@ -46,6 +46,10 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/media", provenance!(), 
 // tenant's files then stay pending, or its purged bytes stay on disk.
 inventory::submit! { Contribution::new(STANDING_GRANTS, PRINCIPAL, provenance!(), &StandingGrant { principal: PRINCIPAL, capabilities: &[SCAN] }) }
 inventory::submit! { Contribution::new(STANDING_GRANTS, PURGER, provenance!(), &StandingGrant { principal: PURGER, capabilities: &[REMOVE] }) }
+inventory::submit! { Contribution::new(bilibi_module_registry::contributions::SEEDS, "base/media.storage-policy", provenance!(), &bilibi_module_registry::contributions::Seed {
+    version: "media-storage-policy-v1", mode: bilibi_module_registry::contributions::SeedMode::Production,
+    action: bilibi_module_registry::contributions::SeedAction::Service { service: "base/media.install-policy", operation: "initialize" },
+}) }
 const GLOBAL: &[ScopeKind] = &[ScopeKind::Global];
 const ALLOWED: [&str; 11] = [
     "application/pdf",

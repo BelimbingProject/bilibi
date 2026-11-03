@@ -364,6 +364,12 @@ impl Profile {
             Err(bilibi_media::Error::InvalidSize) => {
                 self.flash.error("That image is empty or too large.")
             }
+            Err(bilibi_media::Error::StorageNotConfigured) => self.flash.error(
+                "Your profile picture was not saved. Ask an administrator to configure the private attachment disk under Media storage disks in Administration → System → Settings.",
+            ),
+            Err(bilibi_media::Error::UnsafeStorageRoot) => self.flash.error(
+                "Your profile picture was not saved. Ask an administrator to check the private folder and its permissions under Media storage disks in Administration → System → Settings.",
+            ),
             Err(bilibi_media::Error::Database(Error::Unauthorized)) => {
                 return Err(Error::Unauthorized)
             }
