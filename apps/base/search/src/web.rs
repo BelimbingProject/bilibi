@@ -646,8 +646,8 @@ async fn preferences(pages: &Pages, scope: &Scope, saved: bool) -> Result<String
             inner_class: "px-2 py-8",
             body: render(
                 EmptyState::missing(
-                    "No records to search yet",
-                    "Ask your administrator for access to the records you need.",
+                    "No records available to search",
+                    "Ask your admin for access to the records you need.",
                 )
                 .id("search-preferences-empty"),
             )?,
@@ -687,12 +687,12 @@ async fn preferences(pages: &Pages, scope: &Scope, saved: bool) -> Result<String
             },
         })?,
         header: render(Header {
-            title: Html::text("My Settings"),
+            title: Html::text("My settings"),
             ..Header::default()
         })?,
         current: SettingsTab::Search,
         heading: "Search",
-        subheading: "Choose which kinds of records your search shows.",
+        subheading: "Choose which records appear in your search results.",
         body,
     })
     .map(|html| html.to_string())
