@@ -1148,6 +1148,9 @@ impl ConnectionsPage {
             .into_iter()
             .filter(|row| {
                 let first = groups.insert((row.agent_id.clone(), row.approved_client.clone()));
+                if row.revoked_at.is_none() {
+                    return true;
+                }
                 has_earlier |= !first;
                 first || self.show_earlier
             })
@@ -1173,10 +1176,9 @@ impl ConnectionsPage {
                         match row.end_reason.as_deref() {
                             Some("password_changed") => "Ended: you changed your password",
                             Some("password_reset") => "Ended: you reset your password",
-                            Some("signed_out") => "Ended: you signed out in this browser",
+                            Some("signed_out") => "Ended: you signed out",
                             Some("turned_off") => "Ended: you turned it off",
                             Some("replaced") => "Ended: you replaced it with a newer connection",
-                            Some("expired") => "Ended: expired",
                             Some("admin_action") => "Ended: an administrator ended it",
                             Some("security_event") => {
                                 "Ended: someone reused the connection credentials"

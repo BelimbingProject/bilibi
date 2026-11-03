@@ -7,7 +7,6 @@ ALTER TABLE core_agent_connections
    'signed_out',
    'turned_off',
    'replaced',
-   'expired',
    'admin_action',
    'security_event'
   )

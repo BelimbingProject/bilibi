@@ -82,14 +82,14 @@ slot `dashboard.sessions`) shows the open count, reading only while
 
 `terminate(tx, id, current)` is the operator command: the caller's own session is refused before any row is read (`Termination::CurrentSession`), the delete is an audited mutation recording whose session ended and from where (the payload is marked redacted; the token is never written), and the termination is announced after the commit. `delete(client, scope, id)` is logout: the holder's own session, no audit row. `revoke(tx, user, except)` runs inside an owner's mutation transaction (Core User's password change and reset), invokes every registered factor revocation hook and delegated-credential revoker, and returns the ended ids for `announce` after that commit, so a rolled-back credential change signs nobody out or disconnects an app.
 
-`subscribe_terminations()` is the broadcast the host consumes. Each message carries only the durable session id, a safe reason category and an optional redirect: every live
+`subscribe_terminations()` is the broadcast the host consumes: every live
 socket subscribes once (`apps/web/src/live.rs`) and, when its own session is
 announced, sends the browser back through the page it holds and closes. The
 page's guard then forwards to sign-in with the expired-session message. A
 lagged subscriber may miss an announcement; the next guarded action or 15 s
 refresh still refuses an ended session, so promptness, not correctness, depends
-on the broadcast. Agent Access subscribes once at boot and records that a connection ended, without exposing the session id. `prune_expired` announces each session it removes, so what a
-session held can be shown as ended with the expiry reason. A session that
+on the broadcast. `prune_expired` announces each session it removes, so what a
+session held (an AI connection's switch) can be shown as ended. A session that
 expired but is not yet pruned announces nothing; its holders re-check on their
 own schedule.
 

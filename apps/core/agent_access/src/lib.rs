@@ -1301,7 +1301,8 @@ impl AgentAccess {
         let revoked = tx
             .mutate(move |sql| {
                 Box::pin(async move {
-                    let changes = revoke_rows(sql, tenant, user, Some(id), "turned_off").await?;
+                    let changes =
+                        revoke_rows(sql, tenant, user, Some(id), "revoked by owner").await?;
                     if changes.is_empty() {
                         return Err(Error::NotFound);
                     }
@@ -1326,28 +1327,20 @@ impl AgentAccess {
     /// (approved, revoked); with `Integration::subscribe_agent_activity` it
     /// keeps the status bar's AI tag current without a refresh.
     pub fn subscribe_connections(&self) -> bilibi_ui::page::Subscription {
-        self.start_session_bridge();
-        bilibi_ui::page::Subscription {
-            receiver: self.connections.subscribe(),
-        }
-    }
-    fn start_session_bridge(&self) {
         self.session_bridge.call_once(|| {
             let mut ended = self.sessions.subscribe_terminations();
             let db = self.db.clone();
-            let mutations = self.mutations.clone();
             let reviews = self.reviews.clone();
             let connections = self.connections.clone();
             tokio::spawn(async move {
                 loop {
-                    let terminated = match ended.recv().await {
-                        Ok(terminated) => terminated,
+                    let id = match ended.recv().await {
+                        Ok(terminated) => terminated.id,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
-                    let id = terminated.id;
                     let _ = reviews.cancel_session(&id).await;
-                    let Ok(mut client) = db.get().await else { continue };
+                    let Ok(client) = db.get().await else { continue };
                     let Ok(rows) = client
                         .query("SELECT DISTINCT tenant_id,user_id FROM core_agent_connections WHERE enabled_session_id=$1 AND revoked_at IS NULL", &[&id])
                         .await
@@ -1355,49 +1348,17 @@ impl AgentAccess {
                         continue;
                     };
                     for row in rows {
-                        let tenant = row.get::<_, i64>(0);
-                        let user = row.get::<_, i64>(1);
-                        let reason = match terminated.reason {
-                            bilibi_session::TerminationReason::SignedOut => "signed_out",
-                            bilibi_session::TerminationReason::Expired => "expired",
-                            bilibi_session::TerminationReason::AdminAction => "admin_action",
-                        };
-                        let Ok(mut tx) = mutations
-                            .begin(
-                                &mut client,
-                                Context::system(
-                                    tenant,
-                                    "core.agent_access",
-                                    "agent_access.connection.session_ended",
-                                ),
-                            )
-                            .await
-                        else {
-                            continue;
-                        };
-                        let session = id.clone();
-                        let ended = tx
-                            .mutate(move |sql| {
-                                Box::pin(async move {
-                                    let changes = revoke_session_rows(
-                                        sql, tenant, user, &session, reason,
-                                    )
-                                    .await?;
-                                    Ok((!changes.is_empty(), changes))
-                                })
-                            })
-                            .await;
-                        if !matches!(ended, Ok(true)) || tx.commit().await.is_err() {
-                            continue;
-                        }
                         let _ = connections.send(bilibi_ui::page::Change {
-                            tenant,
-                            user: Some(user),
+                            tenant: row.get(0),
+                            user: Some(row.get(1)),
                         });
                     }
                 }
             });
         });
+        bilibi_ui::page::Subscription {
+            receiver: self.connections.subscribe(),
+        }
     }
     /// A once-a-minute wake for one person's live panel, so a holder session
     /// that lapsed without an announcement still turns the tag grey. It ends
@@ -1591,14 +1552,6 @@ async fn revoke_rows(
             &[&tenant, &user, &id, &reason],
         )
         .await?;
-    revoked_changes(sql, rows, reason).await
-}
-
-async fn revoked_changes(
-    sql: &Transaction<'_>,
-    rows: Vec<Row>,
-    reason: &'static str,
-) -> Result<Vec<Change>> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -1633,22 +1586,6 @@ async fn revoked_changes(
         )
     }));
     Ok(changes)
-}
-
-async fn revoke_session_rows(
-    sql: &Transaction<'_>,
-    tenant: i64,
-    user: i64,
-    session: &str,
-    reason: &'static str,
-) -> Result<Vec<Change>> {
-    let rows = sql
-        .query(
-            "UPDATE core_agent_connections SET revoked_at=now(),end_reason=$4,enabled_session_id=NULL,updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND enabled_session_id=$3 AND revoked_at IS NULL RETURNING id",
-            &[&tenant, &user, &session, &reason],
-        )
-        .await?;
-    revoked_changes(sql, rows, reason).await
 }
 
 impl CredentialRevoker for AgentAccess {
@@ -1735,7 +1672,6 @@ inventory::submit! {
             session_bridge: std::sync::Once::new(),
             });
             services.get::<bilibi_session::Sessions>("base/session.sessions")?.register_credential_revoker("core.agent_access", access.clone())?;
-            access.start_session_bridge();
             Ok(access) } }, bilibi_module_registry::Service { id: "core/agent_access.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::Pages {
             access: services.get("core/agent_access.grants")?,
             db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
