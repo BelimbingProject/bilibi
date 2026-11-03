@@ -436,6 +436,8 @@ impl Show {
             "save_sharing" if get("discard").is_some() => {
                 self.sharing = Some(Sharing::from_report(&report))
             }
+            "open_schedule" if self.pages.can(scope).await?.schedule => self.schedule.open = true,
+            "close_schedule" => self.schedule = schedule::Draft::default(),
             "edit_schedule" => self.schedule.read(value),
             "subscribe" => {
                 self.schedule.errors.clear();
@@ -1210,9 +1212,26 @@ impl Show {
         } else {
             Vec::new()
         };
+        let people = if can.share {
+            self.pages
+                .reports
+                .share_people(scope)
+                .await
+                .map_err(page_error)?
+        } else {
+            Vec::new()
+        };
         self.host("schedules", &schedule::columns())?;
         let host = &self.hosts["schedules"].1;
-        schedule::tab(host, &display, &self.schedule, &subscriptions, &roles, can)
+        schedule::tab(
+            host,
+            &display,
+            &self.schedule,
+            &subscriptions,
+            &roles,
+            &people,
+            can,
+        )
     }
 
     /// The reader's prepared exports of this report, and the buttons that

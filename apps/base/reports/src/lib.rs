@@ -46,7 +46,7 @@ const EXPORTED: &str = "base/reports.exported";
 const PREPARER: &str = "base/reports.preparer";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 6] = [
+const MIGRATIONS: [(&str, &str); 7] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -70,6 +70,10 @@ const MIGRATIONS: [(&str, &str); 6] = [
     (
         "base-reports-006-subscription-company",
         include_str!("../migrations/006-subscription-company.sql"),
+    ),
+    (
+        "base-reports-007-subscription-people",
+        include_str!("../migrations/007-subscription-people.sql"),
     ),
 ];
 const KIND: &str = "base_report";
@@ -194,6 +198,7 @@ pub struct Reports {
     authentication: Arc<bilibi_tenancy::Authentication>,
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
+    directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
     origin: String,
     builtins: Vec<&'static Builtin>,
@@ -644,6 +649,59 @@ impl Reports {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, SHARE).await?;
         Ok(store::roles(&**client, scope.tenant()).await?)
+    }
+
+    /// The staff who can run reports, as `(id, name)`, for choosing whom a
+    /// schedule also goes to. Needs `reports.share`; at most 500 are offered.
+    pub async fn share_people(&self, scope: &Scope) -> Outcome<Vec<(i64, String)>> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        authorize(&**client, scope, SHARE).await?;
+        let mut accounts = Vec::new();
+        let mut after = 0_i64;
+        while accounts.len() < 500 {
+            let page = bilibi_authz::holder_page(&**client, scope, after, VIEW, 100).await?;
+            for id in &page {
+                after = *id;
+                if self
+                    .authentication
+                    .account_identity(&**client, scope, *id)
+                    .await
+                    .is_ok_and(|identity| identity.kind == bilibi_tenancy::AccountKind::Staff)
+                {
+                    accounts.push(*id);
+                }
+            }
+            if page.len() < 100 {
+                break;
+            }
+        }
+        accounts.truncate(500);
+        let principals = accounts
+            .iter()
+            .filter_map(|id| {
+                bilibi_principal_directory::PrincipalRef::new(
+                    bilibi_principal_directory::PrincipalKind::User,
+                    *id,
+                )
+                .ok()
+            })
+            .collect::<Vec<_>>();
+        let names = self
+            .directory
+            .rank(
+                &**client,
+                scope,
+                &principals,
+                &bilibi_principal_directory::Query::default(),
+            )
+            .await
+            .map_err(|_| Error::Internal)?;
+        let mut people: Vec<(i64, String)> = principals
+            .into_iter()
+            .map(|principal| (principal.id(), names.label(principal)))
+            .collect();
+        people.sort_by_key(|(id, name)| (name.to_lowercase(), *id));
+        Ok(people)
     }
 
     /// What this reader may see of a report now, as a key that changes when
@@ -1307,7 +1365,7 @@ fn line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/reports", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory"],
         migrations: &MIGRATIONS,
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let reports = Arc::new(Reports {
@@ -1322,6 +1380,7 @@ inventory::submit! {
                 authentication: services.get("base/tenancy.authentication")?,
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
+                directory: services.get("base/principal_directory.directory")?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
                 builtins: builtin::validate(bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?.entries::<Builtin>(BUILTINS)?)?,
             });
