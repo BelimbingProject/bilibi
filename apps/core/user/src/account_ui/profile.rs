@@ -164,20 +164,13 @@ impl Profile {
                 &self
                     .uploads
                     .input(PROFILE_IMAGE_UPLOAD, "profile-image-input")
-                    .label("Profile picture")
-                    .hint("PNG, JPEG or WebP, up to 1 MiB."),
+                    .label("Upload")
+                    .hint("PNG, JPEG or WebP, up to 1 MiB.")
+                    .immediate(),
             )?,
             has_image: image_url.is_some(),
         })?;
-        let upload = render(&Button {
-            id: "profile-image-upload",
-            button_type: "submit",
-            variant: ButtonVariant::Primary,
-            working: "Uploading…",
-            body: Html::text("Upload"),
-            ..Button::default()
-        })?;
-        let mut image_actions = vec![upload];
+        let mut image_actions = Vec::new();
         if image_url.is_some() {
             image_actions.push(render(&Button {
                 id: "profile-image-remove",
@@ -428,7 +421,7 @@ impl LiveState<Scope, Error> for Profile {
 
 #[derive(Template)]
 #[template(
-    source = r#"<div class="flex items-center gap-3"><span class="shrink-0">{{ preview|safe }}</span><span class="text-xs text-ink-muted">{% if has_image %}Current profile picture{% else %}You see your initials until you upload a picture.{% endif %}</span></div><div class="mt-3">{{ input|safe }}</div>"#,
+    source = r#"<div class="flex items-center gap-3"><span class="shrink-0">{{ preview|safe }}</span>{% if !has_image %}<span class="text-xs text-ink-muted">You see your initials until you upload a picture.</span>{% endif %}</div><div class="mt-3">{{ input|safe }}</div>"#,
     ext = "html"
 )]
 struct ProfileImageFields {

@@ -404,6 +404,7 @@ impl Uploads {
             class: String::new(),
             wrapper_class: String::new(),
             disabled: false,
+            immediate: false,
             spec,
             entries: self
                 .entries
@@ -631,12 +632,21 @@ pub struct FileInput<'a> {
     pub class: String,
     pub wrapper_class: String,
     pub disabled: bool,
+    /// Choose one file with a button and submit its enclosing form on arrival.
+    pub immediate: bool,
     pub spec: &'a UploadSpec,
     pub entries: Vec<&'a UploadEntry>,
     pub errors: Vec<UploadError>,
 }
 
 impl FileInput<'_> {
+    /// For a single-file form whose choice is the action itself.
+    pub fn immediate(mut self) -> Self {
+        assert_eq!(self.spec.max_entries, 1, "immediate upload needs one file");
+        self.immediate = true;
+        self
+    }
+
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self

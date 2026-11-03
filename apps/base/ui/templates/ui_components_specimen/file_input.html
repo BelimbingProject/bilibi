@@ -2,5 +2,5 @@
 {%- import "forms.html" as form -%}
 {% call ui::card(id="specimen-file-input", title="File input", class="lg:col-span-2", inner_class="p-4 lg:col-span-2") %}
 <p class="mb-3 text-xs text-ink-muted">The live file input lists each chosen file with its progress and a Remove action. The server refuses a file over the limit or of a kind not accepted before any byte is sent, and names the surplus over the input's limit; the page receives the bytes only in the event that acts on them.</p>
-<div class="grid gap-x-3 sm:grid-cols-2">{% call form::file_input(input=self.file_empty()) %}{% endcall %}{% call form::file_input(input=self.file_arriving()) %}{% endcall %}{% call form::file_input(input=self.file_refused()) %}{% endcall %}{% call form::file_input(input=self.file_disabled()) %}{% endcall %}</div>
+<div class="grid gap-x-3 sm:grid-cols-2">{% call form::file_input(input=self.file_empty()) %}{% endcall %}{% call form::file_input(input=self.file_arriving()) %}{% endcall %}{% call form::file_input(input=self.file_refused()) %}{% endcall %}{% call form::file_input(input=self.file_disabled()) %}{% endcall %}{% call form::file_input(input=self.file_immediate()) %}{% endcall %}</div>
 {% endcall %}
