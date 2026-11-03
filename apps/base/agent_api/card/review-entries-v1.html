@@ -61,6 +61,11 @@ main { padding:12px; display:grid; gap:12px; border-top:3px solid var(--brand); 
 .field:has(>input:not([type=checkbox])) { border:1px solid var(--color-border-primary,var(--line-strong)); border-radius:6px; padding:4px 8px; }
 .field>input:not([type=checkbox]) { border:0; padding:0; background:transparent; }
 .field:focus-within { outline:1px solid var(--brand-strong); }
+#editor>div>section+section { border-top:1px solid var(--line); }
+.step-heading { padding:12px 12px 0; }
+.field-group { grid-column:1/-1; }
+.field-group>fieldset { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:8px; }
+.value-line { padding:3px 0; overflow-wrap:anywhere; }
 .error { color:var(--danger); font-size:11px; overflow-wrap:anywhere; }
 .grid-scroll { overflow:auto; max-height:60vh; }
 table { border-collapse:separate; border-spacing:0; width:100%; font-variant-numeric:tabular-nums; }
@@ -108,12 +113,42 @@ legend { font-size:11px; color:var(--ink-muted); }
 'use strict';
 const $ = id => document.getElementById(id);
 const clone = value => JSON.parse(JSON.stringify(value));
-const label = key => key.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+const label = key => ({raw_input:'Original address',is_primary:'Primary'}[key]||key.replace(/_/g,' ').replace(/([a-z])(\d)/g,'$1 $2').replace(/\b\w/g, c => c.toUpperCase()));
 const RENDER_STEP=50;
 function fields(schema) {
   const required=schema.required||[];
   const rank=([key,value])=>required.includes(key)?required.indexOf(key):required.length+(['object','array'].includes(value.type)?2:1);
   return Object.entries(schema.properties||{}).sort((a,b)=>rank(a)-rank(b));
+}
+// Presentation only: hidden inputs remain in plannedInput and the owner still validates them.
+const internalFields=new Set(['id','version','address_version','create_anyway','priority','source','verification_status','candidate_ids','affiliation_id','attachment_id','kinds','source_ref','parser_version','parse_confidence']);
+const hasValue=value=>value!==undefined&&value!==null&&value!==''&&(!Array.isArray(value)||value.length>0)&&(typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>0);
+function shownFields(schema,value={},row,path=[]) {
+  return fields(schema).filter(([key])=>{
+    const childPath=[...path,key],error=row.fields[childPath.join('.')];
+    if(error?.length)return true;
+    if(internalFields.has(key))return false;
+    return schema.required?.includes(key)||key==='code'||hasValue(value?.[key])||edited(row,childPath);
+  });
+}
+function previewFor(row) {
+  const preview=unwrap(row.result||row.preview);
+  return preview?.owner_preview||preview||{};
+}
+function referenceName(value) {
+  const step=Number(/^([1-9][0-9]*)\.id$/.exec(value?.$ref)?.[1]||0);
+  const source=state.rows[step-1];
+  return source?.input.name||source?.input.code||(step?'Step '+step:null);
+}
+function stepTitle(row) {
+  const properties=schemaFor(row).properties||{};
+  const company=Object.entries(properties).find(([key,s])=>key==='organisation_id'||s['x-bilibi-reference']==='company');
+  const person=Object.entries(properties).find(([key,s])=>key==='person_id'||s['x-bilibi-reference']==='person');
+  const companyName=company&&referenceName(row.input[company[0]]);
+  const personName=row.input.name||(person&&referenceName(row.input[person[0]]));
+  if(companyName&&personName&&properties.organisation_id)return 'Add '+personName+' to '+companyName+(row.input.title?' as '+row.input.title:'');
+  const target=Object.values(row.input).map(referenceName).find(Boolean);
+  return (row.operation?.title||state.data.operation.title)+(target?' for '+target:'');
 }
 const restricted = value => value && typeof value === 'object' && value.restricted === true;
 const unwrap = value => value && Object.hasOwn(value,'result') ? value.result : value;
@@ -313,7 +348,11 @@ function clearedFields(row) {
   collect(schemaFor(row),row.input,[]);return names;
 }
 function control(row,schema,path,required=false,position={}) {
-  const key=path.join('.'), value=getValue(row.input,path), name=schema.title||label(String(path.at(-1)));
+  const key=path.join('.');
+  const stored=getValue(row.input,path);
+  const value=stored===undefined&&path.length===1&&path[0]==='code'?previewFor(row).changes?.find(change=>change.field==='code')?.to:stored;
+  const linkedKind=value?.$ref?state.rows[Number(value.$ref.split('.')[0])-1]?.operation?.creates?.kind:null;
+  const name=schema.title||(linkedKind?label(linkedKind):label(String(path.at(-1))));
   const id='field-'+state.rows.indexOf(row)+'-'+path.map(p=>encodeURIComponent(p)).join('-');
   const box=el('div',{class:'field'});
   const locked=restricted(value)||row.state==='done'||row.state==='excluded'||row.restricted?.has(key);
@@ -324,13 +363,14 @@ function control(row,schema,path,required=false,position={}) {
   if(value && typeof value==='object' && Object.hasOwn(value,'$ref')) {
     const match=/^([1-9][0-9]*)\.id$/.exec(value.$ref),step=match?Number(match[1]):0;
     const source=state.rows[step-1],kind=source?.operation?.creates?.kind||'record';
-    box.append(el('a',{href:'#entry-'+step,text:'the new '+kind+' (step '+step+')'}),errors);
+    box.append(el('a',{href:'#entry-'+step,text:referenceName(value)||'the new '+kind+' (step '+step+')'}),errors);
     return box;
   }
   if(schema.type==='object') {
+    box.classList.add('field-group');
     if(!required&&value===undefined) {box.append(el('button',{type:'button',text:'+ '+name,'data-locked':locked,onclick:()=>{change({});renderEditor();}}));return box;}
     const section=el('fieldset',{},[el('legend',{text:name})]);
-    for(const [key,child]of fields(schema))section.append(control(row,child,[...path,key],schema.required?.includes(key),position));
+    for(const [key,child]of shownFields(schema,value,row,path))section.append(control(row,child,[...path,key],schema.required?.includes(key),position));
     if(!required)section.append(el('button',{type:'button',text:'Clear '+name,'data-locked':locked,onclick:()=>{change(undefined);renderEditor();}}));
     box.replaceChildren(section);return box;
   }
@@ -375,7 +415,7 @@ function control(row,schema,path,required=false,position={}) {
   input.addEventListener('paste',event=>paste(event,position.row,position.col));
   input.addEventListener('keydown',event=>navigate(event,position));
   box.append(input,errors);
-  if(schema.description)box.append(el('span',{class:'muted',text:schema.description}));
+  if(schema.description&&path.at(-1)!=='code')box.append(el('span',{class:'muted',text:schema.description}));
   if(schema.nullable&&!values)box.append(el('button',{type:'button',text:value===null?'Null selected':'Set null','data-locked':locked,onclick:()=>{change(null);renderEditor();}}));
   if(schema['x-bilibi-reference']&&!locked)referencePicker(box,input,row,schema,path,change);
   return box;
@@ -427,17 +467,18 @@ function renderEditor() {
     const list=el('div');
     state.rows.forEach((row,index)=>{
       const section=el('section',{id:'entry-'+(index+1),'aria-label':'Step '+(index+1)},[
-        el('h2',{class:'preview',text:'Step '+(index+1)+' · '+row.operation.title})]);
+        el('h2',{class:'step-heading',text:(index+1)+'. '+stepTitle(row)})]);
       const form=el('div',{class:'form'});
-      fields(schemaFor(row)).forEach(([key,schema],col)=>form.append(control(row,schema,[key],schemaFor(row).required?.includes(key),{row:index,col})));
+      shownFields(schemaFor(row),row.input,row).forEach(([key,schema],col)=>form.append(control(row,schema,[key],schemaFor(row).required?.includes(key),{row:index,col})));
       section.append(form);list.append(section);
     });
     $('editor').replaceChildren(list);
   } else if(!grid) {
     const form=el('div',{class:'form'}),row=state.rows[0];
-    state.fields.forEach(([key,schema],col)=>form.append(control(row,schema,[key],state.data.operation.input.required?.includes(key),{row:0,col})));
+    shownFields(schemaFor(row),row.input,row).forEach(([key,schema],col)=>form.append(control(row,schema,[key],state.data.operation.input.required?.includes(key),{row:0,col})));
     $('editor').replaceChildren(form);
   } else {
+    state.fields=fields(state.data.operation.input).filter(([key])=>state.rows.some(row=>shownFields(schemaFor(row),row.input,row).some(([shown])=>shown===key)));
     const table=el('table',{'aria-label':'Draft entries'});
     table.append(el('thead',{},[el('tr',{},[el('th',{scope:'col',text:'Entry'}),...state.fields.map(([key,schema])=>el('th',{scope:'col',text:schema.title||label(key)})),el('th',{scope:'col',text:'Review'})])]));
     const body=el('tbody');
@@ -537,41 +578,76 @@ async function waitUntilRequest(deadline,checked,total,message='') {
 function reserveRequest() {
   state.nextToolAt=Date.now()+Math.ceil(60_000/state.data.mcp_requests_per_minute);
 }
-function facts(value) {
-  if(value && typeof value==='object' && Object.hasOwn(value,'$ref')) {
-    const step=Number(/^([1-9][0-9]*)\.id$/.exec(value.$ref)?.[1]||0),kind=state.rows[step-1]?.operation?.creates?.kind||'record';
-    return el('a',{href:'#entry-'+step,text:'the new '+kind+' (step '+step+')'});
+const previewInternals=new Set([...internalFields,'meta','references','location','admin1','localities','postcodes','kinds','organisation_id','person_id','company_id','address_id','affiliation_id','created_at','updated_at','restricted','kind','owner','duplicates_likely','duplicate_candidates','notice']);
+function valueText(value) {
+  if(restricted(value))return 'Restricted';
+  if(value===null||value===undefined||value==='')return 'Empty';
+  const name=referenceName(value);if(name)return name;
+  if(Array.isArray(value))return value.map(valueText).join(', ');
+  if(typeof value==='boolean')return value?'Yes':'No';
+  if(typeof value==='object')return Object.entries(value).filter(([key,item])=>!previewInternals.has(key)&&hasValue(item)).map(([key,item])=>(key==='name'||key==='label'?'':label(key)+': ')+valueText(item)).join(', ');
+  return String(value);
+}
+function facts(value,row) {
+  const updating=/\.(update|edit|replace|end)$/.test(row.key||state.data.key);
+  const lines=el('div');
+  function line(name,to,from,changed=false) {
+    lines.append(el('p',{class:'value-line',text:name+': '+(changed?valueText(from)+' → ':'')+valueText(to)}));
   }
-  if(restricted(value))return el('span',{class:'muted',text:'Restricted'});
-  if(value===null||value===undefined)return el('span',{class:'muted',text:'No value'});
-  if(Array.isArray(value))return el('ol',{},value.map(item=>el('li',{},[facts(item)])));
-  if(typeof value!=='object')return el('span',{text:String(value)});
-  const dl=el('dl');
-  for(const [key,item] of Object.entries(value)) {
-    if(key==='meta'||(key==='path'&&value.url))continue;
-    let node;
-    if(key==='label'&&value.step)node=el('a',{href:'#entry-'+value.step,text:item});
-    if((key==='url'||key==='path')&&typeof item==='string') {
-      try {const url=new URL(item,state.data.instance.origin);if(url.origin===new URL(state.data.instance.origin).origin&&['http:','https:'].includes(url.protocol))node=el('a',{href:url.href,text:'Open record ↗',onclick:event=>{event.preventDefault();request('ui/open-link',{url:url.href}).catch(()=>status('The host could not open the record.','warning'));}});}catch(_){}
+  function walk(value,path=[],before) {
+    if(!value||typeof value!=='object')return;
+    if(value.owner_preview){walk(value.owner_preview,path,before);return;}
+    if(Array.isArray(value)){for(const item of value)walk(item,path,before);return;}
+    before=value.before||before;
+    if(Array.isArray(value.changes)) {
+      for(const change of value.changes) {
+        if(previewInternals.has(change.field)||JSON.stringify(change.from)===JSON.stringify(change.to))continue;
+        line(label(change.field),change.to,change.from,updating||hasValue(change.from));
+      }
     }
-    dl.append(el('div',{},[el('dt',{text:label(key)}),el('dd',{},[node||facts(item)])]));
-  }return dl;
+    for(const [key,item]of Object.entries(value)) {
+      if(previewInternals.has(key)||['changes','summary','before'].includes(key)||(!before&&!hasValue(item)))continue;
+      if((key==='url'||key==='path')&&typeof item==='string') {
+        if(key==='path'&&value.url)continue;
+        try {
+          const url=new URL(item,state.data.instance.origin);
+          if(url.origin===new URL(state.data.instance.origin).origin&&['http:','https:'].includes(url.protocol)) {
+            lines.append(el('p',{class:'value-line'},[el('a',{href:url.href,text:'Open record ↗',onclick:event=>{event.preventDefault();request('ui/open-link',{url:url.href}).catch(()=>status('The host could not open the record.','warning'));}})]));
+            continue;
+          }
+        }catch(_){}
+      }
+      const name=[...path,label(key)];
+      const old=before?.[key];
+      if(item&&typeof item==='object'&&!Array.isArray(item)&&!restricted(item)&&!item.$ref)walk(item,name,old||before);
+      else if(!before||JSON.stringify(old)!==JSON.stringify(item))line(name.join(' · '),item,old,!!before);
+    }
+  }
+  walk(value);
+  // Removal previews describe the record being removed, rather than a replacement.
+  if(!lines.childElementCount&&value?.before&&!Object.keys(value).some(key=>!['before','summary','meta'].includes(key)))walk(value.before);
+  return lines;
+}
+function duplicateWarning(preview) {
+  if(!preview.duplicates_likely)return null;
+  const candidates=preview.duplicate_candidates||[];
+  const matches=candidates.map(candidate=>candidate.name||candidate.label||candidate.company?.name).filter(Boolean);
+  return el('p',{class:'clear-note',text:'Possible duplicate'+(matches.length?': '+matches.join(', '):' found. Check the existing record before approving.')});
 }
 function renderReviews() {
-  $('reviews').hidden=false;$('reviews').replaceChildren(el('h2',{text:'Review of changes'}));
+  $('reviews').hidden=false;$('reviews').replaceChildren(el('h2',{text:'Changes'}));
   const rows=state.rows.map((row,index)=>({row,index})).filter(({row})=>row.preview||row.error||row.result);
   rows.slice(0,state.renderedReviews).forEach(({row,index})=>{
-    const detail=el('details',{open:true},[el('summary',{text:'Entry '+(index+1)+' · '+(row.state==='done'?'Saved':row.error?'Refused':row.state==='excluded'?'Excluded':'Ready')})]);
+    const detail=el('article',{},[el('h2',{text:(index+1)+'. '+(state.data.linked?stepTitle(row):row.operation?.title||state.data.operation.title)+(row.state==='done'?' · Saved':'')})]);
     if(row.error)detail.append(el('p',{class:'error',text:errorText(row.error)}));
     else {
-      const cleared=clearedFields(row);
-      if(row.preview&&cleared.length)detail.append(el('p',{class:'clear-note',text:'Will be cleared: '+cleared.join(', ')+'.'}));
-      detail.append(facts(unwrap(row.result||row.preview)));
+      const preview=previewFor(row),warning=duplicateWarning(preview);
+      if(warning)detail.append(warning);
+      detail.append(facts(preview,row));
     }
-    $('reviews').append(el('article',{},[detail]));
+    $('reviews').append(detail);
   });
-  for(const [index,batch]of state.plans.entries())$('reviews').append(el('p',{class:'muted',text:'Batch '+(index+1)+' · '+batch.rows.length+' entries'}));
-  if(state.renderedReviews<rows.length)$('reviews').append(el('div',{class:'row more'},[el('span',{class:'muted',text:'Showing '+state.renderedReviews+' of '+rows.length+' reviews.'}),el('button',{type:'button',text:'Show '+Math.min(RENDER_STEP,rows.length-state.renderedReviews)+' more',onclick:()=>{state.renderedReviews=Math.min(rows.length,state.renderedReviews+RENDER_STEP);renderReviews();}})]));
+  if(state.renderedReviews<rows.length)$('reviews').append(el('div',{class:'row more'},[el('span',{class:'muted',text:'Showing '+state.renderedReviews+' of '+rows.length+' changes.'}),el('button',{type:'button',text:'Show '+Math.min(RENDER_STEP,rows.length-state.renderedReviews)+' more',onclick:()=>{state.renderedReviews=Math.min(rows.length,state.renderedReviews+RENDER_STEP);renderReviews();}})]));
 }
 async function update() {
   if(state.busy||state.cancelled||state.uncertain)return;
