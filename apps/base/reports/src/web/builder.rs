@@ -453,9 +453,9 @@ impl Builder {
             summary.push(render(list)?);
         }
         let about = vec![
-            render(field("oversight", "Read consenting child tenants")
+            render(field("oversight", "Include subsidiaries")
                 .kind(InputKind::Checkbox).checked(self.oversight)
-                .hint("Read-only parent oversight. Child consent and your live permissions apply to every result and download. Unclassified sources, including Core Contacts, accounts, affiliations, addresses and companies, are unavailable until their owners complete classification and privacy/store contracts; existing grants cannot enable them."))?,
+                .hint("Adds data from subsidiaries whose admin has turned on sharing with your company, read-only. You still see only what you're permitted to. Contacts, accounts, affiliations, addresses and companies can't be included yet."))?,
             render(
                 field("name", "Name")
                     .value(&self.name)
@@ -466,7 +466,7 @@ impl Builder {
                 field("description", "Description")
                     .kind(InputKind::Textarea)
                     .value(&self.description)
-                    .hint("What question it answers, for the people you share it with."),
+                    .hint("Describe what question the report answers."),
             )?,
             render(
                 field("kind", "Kind")
@@ -719,7 +719,7 @@ impl Builder {
             shape,
             measures,
             filters_note: if self.filters.is_empty() {
-                "Every record is counted. Add a filter to narrow it; one marked Ask when run takes the reader's value each time."
+                "Add a filter to report only what you need. Tick Ask when run to pick the value each time you run it."
             } else {
                 ""
             },
