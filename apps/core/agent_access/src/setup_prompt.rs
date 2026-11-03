@@ -32,12 +32,19 @@ pub fn identity(instance: &Instance) -> String {
 
 pub fn prompt(instance: &Instance) -> String {
     let (address, name) = (address(instance), server_name(instance));
+    let settings = format!("{}/settings/ai-connections", instance.origin);
     format!(
-        "Connect to my Bilibi business application using MCP and OAuth.\n\n\
+        "Connect my AI app to my Bilibi business application using MCP and OAuth.\n\n\
 {}\n\
 Server name: {name}\n\
 Server URL: {address}\n\n\
-I will approve sign-in in my browser and switch on the connection. Never ask for my password. Then check that a Bilibi tool works and tell me the result.",
+Follow these steps:\n\
+1. Check whether `{name}` is already in your MCP settings.\n\
+2. If it is absent, add it with the server URL above.\n\
+3. If sign-in is required, or the saved sign-in is missing or invalid, check your app's MCP management commands and settings, then start MCP sign-in for `{name}`. Give me the authorization link to open. Never ask for my password or a token. Do not say that you cannot start sign-in until you have checked both.\n\
+4. After I approve sign-in, try the Bilibi `search` tool with `company`. If Bilibi returns `ai_switched_off`, tell me to open {settings} and switch on this connection. Wait for me to confirm, then try the search again.\n\
+5. Report the actual search result. OAuth approval and the AI switch are separate steps.\n\n\
+If the tools still do not appear, report the exact error. Tell me whether I need to start a new chat or reload the app, then verify again.",
         identity(instance)
     )
 }

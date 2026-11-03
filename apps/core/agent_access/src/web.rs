@@ -556,7 +556,7 @@ pub struct CompletedView<'a> {
 impl CompletedView<'_> {
     pub fn title(&self) -> &'static str {
         if self.approved {
-            "Agent connected"
+            "Connection approved"
         } else {
             "Connection refused"
         }
@@ -680,7 +680,7 @@ impl DevicePage {
                 self.flash = Some(Flash {
                     kind: StatusKind::Success,
                     message: if approved {
-                        "Agent connected."
+                        "Connection approved."
                     } else {
                         "Connection refused."
                     },

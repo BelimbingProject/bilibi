@@ -36,8 +36,7 @@ are the base layer and stay where they are.
 - Refuses an origin that is not bare `https://host[:port]`.
 - `Skill`s are generated, not hand-written per harness:
   - `bilibi-<instance>`: the MCP workflow over the six generic tools and every registered app tool, opening with the instance it reaches, and the self-report rule (ADR 01): send `harness/model-version-effort` in the `SelfReport::HEADER` header or MCP `_meta` (`SelfReport::MCP_META`), ask the person using the harness for an unknown part, never the installation owner, and never guess.
-  - `bilibi-<instance>-setup`: connection check and OAuth linking, naming
-    the instance.
+  - `bilibi-<instance>-setup`: state-aware MCP setup and recovery in app-neutral words. It checks registration before adding the server, reauthorizes missing or invalid OAuth credentials, directs `ai_switched_off` to the AI connections switch, and verifies the connection with a company search.
   - one skill per MCP App in the registry (`bilibi-<instance>-software` for
     the Software card): the app's own `skill` text, then which instance this
     connection reaches and whether it builds. See

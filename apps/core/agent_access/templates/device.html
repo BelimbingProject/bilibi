@@ -47,7 +47,16 @@
 <div role="status">
 {% call ui::section_heading(title=done.title()) %}{% endcall %}
 <p id="device-completed-agent" class="text-sm text-ink">{{ done.agent_id }}</p>
-<p class="text-sm text-muted">You can go back to your agent.</p>
+{% if done.approved %}
+{% call ui::facts(id="device-completed-state") %}
+{% call ui::fact(title="OAuth approval") %}Approved{% endcall %}
+{% call ui::fact(title="AI access") %}Off until you switch it on{% endcall %}
+{% endcall %}
+<p class="text-sm text-muted">Open <a href="/settings/ai-connections" class="font-medium text-link hover:underline">AI connections</a> and switch on the {{ done.agent_id }} connection once the app finishes connecting.</p>
+<p class="text-sm text-muted">Return to {{ done.agent_id }}. It will verify the connection.</p>
+{% else %}
+<p class="text-sm text-muted">Return to {{ done.agent_id }}. It will report that you refused the connection.</p>
+{% endif %}
 </div>
 {% call ui::button(id="device-another", button_type="button", event="another") %}Connect another device{% endcall %}
 {% endcall %}
