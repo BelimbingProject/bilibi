@@ -344,16 +344,17 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                 });
             }
             if message.get("method").and_then(Value::as_str) == Some("open") {
-                return self.event(
-                    request.scope,
-                    &review,
-                    json!({
-                        "jsonrpc":"2.0",
-                        "method":"ui/notifications/tool-result",
-                        "params":mcp::tool_result(review.card.clone(), false)
-                    }),
-                )
-                .await;
+                return self
+                    .event(
+                        request.scope,
+                        &review,
+                        json!({
+                            "jsonrpc":"2.0",
+                            "method":"ui/notifications/tool-result",
+                            "params":mcp::tool_result(review.card.clone(), false)
+                        }),
+                    )
+                    .await;
             }
             let id = message.get("id").cloned().ok_or(Error::Invalid)?;
             if message.get("method").and_then(Value::as_str) != Some("tools/call") {
@@ -416,8 +417,12 @@ impl LiveState<Scope, Error> for BrowserReviewPage {
                 arguments,
             )
             .await?;
-            self.event(request.scope, &review, json!({"jsonrpc":"2.0","id":id,"result":result}))
-                .await
+            self.event(
+                request.scope,
+                &review,
+                json!({"jsonrpc":"2.0","id":id,"result":result}),
+            )
+            .await
         })
     }
 }
