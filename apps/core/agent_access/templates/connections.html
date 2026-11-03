@@ -14,10 +14,7 @@
 {% call ui::card(id="ai-connect", title="Connect an AI app") %}
 <div class="space-y-3" data-hook="ClipboardCopy">
 <p class="text-ink-muted">Give this prompt to your AI app, then approve the connection in your browser.</p>
-{% call ui::copy_text_button(id="ai-prompt-copy", text=prompt_text, label="Copy prompt") %}{% endcall %}
-{% call ui::fold(id="ai-prompt-fold", title="Show prompt") %}
 {% call ui::copy_box(id="ai-prompt", label="Prompt for your AI app", text=prompt_text, copy_label="Copy prompt") %}{% endcall %}
-{% endcall %}
 </div>
 {% endcall %}
 {% call ui::fold(id="ai-trouble", title="Trouble connecting?") %}

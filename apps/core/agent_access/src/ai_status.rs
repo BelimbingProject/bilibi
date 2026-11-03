@@ -87,7 +87,7 @@ struct AiStatusView {
     plugin_href: &'static str,
     /// `/settings/ai-connections`, for the manual steps under Connect.
     manage: &'static str,
-    /// The link to `/settings/ai-connections` beside the connections heading.
+    /// The link to `/settings/ai-connections`, at the foot of the panel in every state.
     manage_link: Html,
     /// The link to the page listing every request, beside the activity
     /// heading; empty for a reader who cannot open it.
@@ -228,10 +228,10 @@ impl AiStatus {
             manage_link: render(Html::render(&ActionLink {
                 id: "app-ai-manage",
                 icon: "manage",
-                title: "Manage connections",
+                title: "Manage your AI connections",
                 href: MANAGE,
                 method: "",
-                body: Html::text("Manage"),
+                body: Html::text("AI connections settings"),
             }))?,
             all_activity_link: if all_activity {
                 render(Html::render(&ActionLink {
