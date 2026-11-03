@@ -32,7 +32,7 @@ use bilibi_ui::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::SystemTime,
 };
@@ -997,6 +997,7 @@ struct ConnectionsPage {
     columns: ListColumns,
     pending: Option<i64>,
     flash: Option<Flash>,
+    show_earlier: bool,
 }
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1016,6 +1017,8 @@ enum ConnectionsEvent {
     SwitchOff {
         id: String,
     },
+    ShowEarlier,
+    HideEarlier,
     #[serde(rename = "clear-flash")]
     ClearFlash {
         key: String,
@@ -1029,7 +1032,7 @@ pub struct ConnectionRow {
     pub agent_id: String,
     pub approved_client: String,
     pub enabled: bool,
-    pub status: &'static str,
+    pub status: String,
     /// Other stated IDs, sorted, comma-separated; empty when none.
     pub seen: String,
     /// Self-reported `harness/model-version-effort` values, newest first,
@@ -1054,6 +1057,7 @@ struct ConnectionsView {
     flash: FlashMap<'static>,
     header: Html,
     table: Html,
+    history: Html,
     pending: Option<i64>,
     /// Impersonation and an agent facet see the table's refusal, not the prompt.
     show_setup: bool,
@@ -1099,6 +1103,7 @@ impl ConnectionsPage {
             ]),
             pending: None,
             flash: None,
+            show_earlier: false,
         })
     }
     /// Only the person may set up their own connection.
@@ -1137,8 +1142,18 @@ impl ConnectionsPage {
         } else {
             Default::default()
         };
+        let mut groups = HashSet::new();
+        let mut has_earlier = false;
         let rows = rows
             .into_iter()
+            .filter(|row| {
+                let first = groups.insert((row.agent_id.clone(), row.approved_client.clone()));
+                if row.revoked_at.is_none() {
+                    return true;
+                }
+                has_earlier |= !first;
+                first || self.show_earlier
+            })
             .map(|row| {
                 Ok(ConnectionRow {
                     last_used: last_use
@@ -1158,12 +1173,25 @@ impl ConnectionsPage {
                     approved_client: row.approved_client,
                     enabled: row.enabled,
                     status: if row.revoked_at.is_some() {
-                        "Ended"
+                        match row.end_reason.as_deref() {
+                            Some("password_changed") => "Ended: you changed your password",
+                            Some("password_reset") => "Ended: you reset your password",
+                            Some("signed_out") => "Ended: you signed out",
+                            Some("turned_off") => "Ended: you turned it off",
+                            Some("replaced") => "Ended: you replaced it with a newer connection",
+                            Some("admin_action") => "Ended: an administrator ended it",
+                            Some("account_change") => "Ended: your account was changed",
+                            Some("security_event") => {
+                                "Ended: someone reused the connection credentials"
+                            }
+                            _ => "Ended",
+                        }
                     } else if row.enabled {
                         "On"
                     } else {
                         "Off"
-                    },
+                    }
+                    .to_owned(),
                     seen: row
                         .seen_agent_ids
                         .keys()
@@ -1197,7 +1225,7 @@ impl ConnectionsPage {
                     .slot("agent", Html::text(&row.agent_id))
                     .slot("approved_client", Html::text(&row.approved_client))
                     .slot("last_used", row.last_used)
-                    .slot("status", Html::text(row.status))
+                    .slot("status", Html::text(&row.status))
                     .slot(
                         "seen",
                         if row.seen.is_empty() {
@@ -1262,6 +1290,24 @@ impl ConnectionsPage {
                 ..bilibi_ui::Header::default()
             }))?,
             table: render(Html::render(&table))?,
+            history: if has_earlier {
+                render(Html::render(&Button {
+                    class: "mt-3",
+                    event: if self.show_earlier {
+                        "hide_earlier"
+                    } else {
+                        "show_earlier"
+                    },
+                    body: Html::text(if self.show_earlier {
+                        "Hide earlier connections"
+                    } else {
+                        "Show earlier connections"
+                    }),
+                    ..Button::default()
+                }))?
+            } else {
+                Html::EMPTY
+            },
             pending: self.pending,
             show_setup,
             prompt_text: prompt.unwrap_or_default(),
@@ -1345,6 +1391,8 @@ impl LiveState<Scope, Error> for ConnectionsPage {
                         ConnectionsEvent::SwitchOff { id } => {
                             self.switch(request.scope, &id, false).await?;
                         }
+                        ConnectionsEvent::ShowEarlier => self.show_earlier = true,
+                        ConnectionsEvent::HideEarlier => self.show_earlier = false,
                         ConnectionsEvent::ClearFlash { key } => clear_flash(&mut self.flash, &key),
                     }
                 }
