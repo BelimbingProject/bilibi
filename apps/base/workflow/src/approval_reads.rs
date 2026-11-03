@@ -21,7 +21,7 @@ impl bilibi_notifications::TodoSource for ApprovalTodos {
             }
             let mut entries = Vec::new();
             let mut after = None;
-            loop {
+            for _ in 0..5 {
                 let page = match self
                     .0
                     .my_approvals(
@@ -47,7 +47,7 @@ impl bilibi_notifications::TodoSource for ApprovalTodos {
             let count = entries.len();
             Ok(bilibi_notifications::TodoList {
                 count,
-                more: count == 100 && after.is_some(),
+                more: after.is_some(),
                 items: entries
                     .into_iter()
                     .take(5)

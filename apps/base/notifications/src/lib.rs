@@ -162,11 +162,18 @@ impl NotificationBoundary {
             .clone();
         let mut lists = Vec::new();
         for source in sources {
-            let list = source.read(scope).await?;
+            let list = match source.read(scope).await {
+                Ok(list) => list,
+                Err(error) => {
+                    eprintln!("To-do source failed: {error}");
+                    continue;
+                }
+            };
             if list.items.iter().any(|item| !local_path(&item.url))
                 || list.see_all.as_deref().is_some_and(|url| !local_path(url))
             {
-                return Err(Error::Invalid);
+                eprintln!("To-do source returned a non-local link");
+                continue;
             }
             lists.push(list);
         }
