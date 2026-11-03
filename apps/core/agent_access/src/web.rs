@@ -1174,17 +1174,17 @@ impl ConnectionsPage {
                     enabled: row.enabled,
                     status: if row.revoked_at.is_some() {
                         match row.end_reason.as_deref() {
-                            Some("password_changed") => "Ended: you changed your password",
-                            Some("password_reset") => "Ended: you reset your password",
-                            Some("signed_out") => "Ended: you signed out",
-                            Some("turned_off") => "Ended: you turned it off",
-                            Some("replaced") => "Ended: you replaced it with a newer connection",
-                            Some("admin_action") => "Ended: an administrator ended it",
-                            Some("account_change") => "Ended: your account was changed",
+                            Some("password_changed") => "Revoked: you changed your password",
+                            Some("password_reset") => "Revoked: you reset your password",
+                            Some("signed_out") => "Revoked: you signed out",
+                            Some("turned_off") => "Revoked: you turned it off",
+                            Some("replaced") => "Revoked: replaced by a newer connection",
+                            Some("admin_action") => "Revoked: an administrator revoked it",
+                            Some("account_change") => "Revoked: your account was changed",
                             Some("security_event") => {
-                                "Ended: someone reused the connection credentials"
+                                "Revoked: someone reused the connection credentials"
                             }
-                            _ => "Ended",
+                            _ => "Revoked",
                         }
                     } else if row.enabled {
                         "On"
