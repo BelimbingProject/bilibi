@@ -178,6 +178,7 @@ pub struct ConnectionSummary {
     pub approved_client: String,
     pub enabled: bool,
     pub revoked_at: Option<SystemTime>,
+    pub end_reason: Option<String>,
     pub created_at: SystemTime,
 }
 /// Form fields of a PKCE code redemption, as the host decodes them.
@@ -200,7 +201,7 @@ async fn replace_connections(
     ids: &[i64],
 ) -> Result<Vec<Change>> {
     let rows = sql.query(
-        "UPDATE core_agent_connections SET revoked_at=now(),updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND agent_id=$3 AND id=ANY($4) AND revoked_at IS NULL RETURNING id",
+        "UPDATE core_agent_connections SET revoked_at=now(),end_reason='replaced',updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND agent_id=$3 AND id=ANY($4) AND revoked_at IS NULL RETURNING id",
         &[&tenant, &user, &name, &ids],
     ).await?;
     Ok(rows
@@ -210,7 +211,7 @@ async fn replace_connections(
                 "agent_connection",
                 row.get(0),
                 json!({"revoked":false}),
-                json!({"revoked":true,"reason":"revoked by owner"}),
+                json!({"revoked":true,"reason":"replaced"}),
             )
         })
         .collect())
@@ -598,8 +599,7 @@ impl AgentAccess {
                     return Err(OAuthError::InvalidGrant);
                 }
                 if auth.get::<_, bool>("used") {
-                    Self::revoke_connection(&mut tx, &connection, "authorization code replayed")
-                        .await?;
+                    Self::revoke_connection(&mut tx, &connection, "security_event").await?;
                     tx.commit().await?;
                     return Err(OAuthError::InvalidGrant);
                 }
@@ -955,7 +955,7 @@ impl AgentAccess {
             return Err(OAuthError::InvalidGrant);
         }
         if token.get::<_, bool>("used") {
-            Self::revoke_connection(&mut tx, &connection, "refresh token replayed").await?;
+            Self::revoke_connection(&mut tx, &connection, "security_event").await?;
             tx.commit().await?;
             return Err(OAuthError::InvalidGrant);
         }
@@ -1169,13 +1169,13 @@ impl AgentAccess {
         let client = self.db.get().await?;
         let rows = client
             .query(
-                "SELECT id,agent_id,seen_agent_ids,revoked_at,self_reported_agents,observed_clients,created_at,approved_client,enabled_session_id FROM core_agent_connections WHERE tenant_id=$1 AND user_id=$2 ORDER BY (revoked_at IS NULL) DESC,id DESC",
+                "SELECT id,agent_id,seen_agent_ids,revoked_at,end_reason,self_reported_agents,observed_clients,created_at,approved_client,enabled_session_id FROM core_agent_connections WHERE tenant_id=$1 AND user_id=$2 ORDER BY (revoked_at IS NULL) DESC,id DESC",
                 &[&scope.tenant(), &scope.user()],
             )
             .await?;
         let mut summaries = Vec::with_capacity(rows.len());
         for row in &rows {
-            let session: Option<String> = row.get(8);
+            let session: Option<String> = row.get(9);
             let enabled = match session.as_deref() {
                 Some(session) => {
                     self.sessions
@@ -1189,10 +1189,11 @@ impl AgentAccess {
                 agent_id: row.get(1),
                 seen_agent_ids: serde_json::from_value(row.get(2)).unwrap_or_default(),
                 revoked_at: row.get(3),
-                self_reported_agents: serde_json::from_value(row.get(4)).unwrap_or_default(),
-                observed_clients: serde_json::from_value(row.get(5)).unwrap_or_default(),
-                created_at: row.get(6),
-                approved_client: approved_client_label(&row.get::<_, String>(7)),
+                end_reason: row.get(4),
+                self_reported_agents: serde_json::from_value(row.get(5)).unwrap_or_default(),
+                observed_clients: serde_json::from_value(row.get(6)).unwrap_or_default(),
+                created_at: row.get(7),
+                approved_client: approved_client_label(&row.get::<_, String>(8)),
                 enabled,
             });
         }
@@ -1300,8 +1301,7 @@ impl AgentAccess {
         let revoked = tx
             .mutate(move |sql| {
                 Box::pin(async move {
-                    let changes =
-                        revoke_rows(sql, tenant, user, Some(id), "revoked by owner").await?;
+                    let changes = revoke_rows(sql, tenant, user, Some(id), "turned_off").await?;
                     if changes.is_empty() {
                         return Err(Error::NotFound);
                     }
@@ -1326,20 +1326,28 @@ impl AgentAccess {
     /// (approved, revoked); with `Integration::subscribe_agent_activity` it
     /// keeps the status bar's AI tag current without a refresh.
     pub fn subscribe_connections(&self) -> bilibi_ui::page::Subscription {
+        self.start_session_bridge();
+        bilibi_ui::page::Subscription {
+            receiver: self.connections.subscribe(),
+        }
+    }
+    fn start_session_bridge(&self) {
         self.session_bridge.call_once(|| {
             let mut ended = self.sessions.subscribe_terminations();
             let db = self.db.clone();
+            let mutations = self.mutations.clone();
             let reviews = self.reviews.clone();
             let connections = self.connections.clone();
             tokio::spawn(async move {
                 loop {
-                    let id = match ended.recv().await {
-                        Ok(terminated) => terminated.id,
+                    let terminated = match ended.recv().await {
+                        Ok(terminated) => terminated,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
+                    let id = terminated.id;
                     let _ = reviews.cancel_session(&id).await;
-                    let Ok(client) = db.get().await else { continue };
+                    let Ok(mut client) = db.get().await else { continue };
                     let Ok(rows) = client
                         .query("SELECT DISTINCT tenant_id,user_id FROM core_agent_connections WHERE enabled_session_id=$1 AND revoked_at IS NULL", &[&id])
                         .await
@@ -1347,17 +1355,49 @@ impl AgentAccess {
                         continue;
                     };
                     for row in rows {
+                        let tenant = row.get::<_, i64>(0);
+                        let user = row.get::<_, i64>(1);
+                        let reason = match terminated.reason {
+                            bilibi_session::TerminationReason::SignedOut => "signed_out",
+                            bilibi_session::TerminationReason::Expired => "expired",
+                            bilibi_session::TerminationReason::AdminAction => "admin_action",
+                        };
+                        let Ok(mut tx) = mutations
+                            .begin(
+                                &mut client,
+                                Context::system(
+                                    tenant,
+                                    "core.agent_access",
+                                    "agent_access.connection.session_ended",
+                                ),
+                            )
+                            .await
+                        else {
+                            continue;
+                        };
+                        let session = id.clone();
+                        let ended = tx
+                            .mutate(move |sql| {
+                                Box::pin(async move {
+                                    let changes = revoke_session_rows(
+                                        sql, tenant, user, &session, reason,
+                                    )
+                                    .await?;
+                                    Ok((!changes.is_empty(), changes))
+                                })
+                            })
+                            .await;
+                        if !matches!(ended, Ok(true)) || tx.commit().await.is_err() {
+                            continue;
+                        }
                         let _ = connections.send(bilibi_ui::page::Change {
-                            tenant: row.get(0),
-                            user: Some(row.get(1)),
+                            tenant,
+                            user: Some(user),
                         });
                     }
                 }
             });
         });
-        bilibi_ui::page::Subscription {
-            receiver: self.connections.subscribe(),
-        }
     }
     /// A once-a-minute wake for one person's live panel, so a holder session
     /// that lapsed without an announcement still turns the tag grey. It ends
@@ -1547,10 +1587,18 @@ async fn revoke_rows(
 ) -> Result<Vec<Change>> {
     let rows = sql
         .query(
-            "UPDATE core_agent_connections SET revoked_at=now(),enabled_session_id=NULL,updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND ($3::bigint IS NULL OR id=$3) AND revoked_at IS NULL RETURNING id",
-            &[&tenant, &user, &id],
+            "UPDATE core_agent_connections SET revoked_at=now(),end_reason=$4,enabled_session_id=NULL,updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND ($3::bigint IS NULL OR id=$3) AND revoked_at IS NULL RETURNING id",
+            &[&tenant, &user, &id, &reason],
         )
         .await?;
+    revoked_changes(sql, rows, reason).await
+}
+
+async fn revoked_changes(
+    sql: &Transaction<'_>,
+    rows: Vec<Row>,
+    reason: &'static str,
+) -> Result<Vec<Change>> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -1587,6 +1635,22 @@ async fn revoke_rows(
     Ok(changes)
 }
 
+async fn revoke_session_rows(
+    sql: &Transaction<'_>,
+    tenant: i64,
+    user: i64,
+    session: &str,
+    reason: &'static str,
+) -> Result<Vec<Change>> {
+    let rows = sql
+        .query(
+            "UPDATE core_agent_connections SET revoked_at=now(),end_reason=$4,enabled_session_id=NULL,updated_at=now() WHERE tenant_id=$1 AND user_id=$2 AND enabled_session_id=$3 AND revoked_at IS NULL RETURNING id",
+            &[&tenant, &user, &session, &reason],
+        )
+        .await?;
+    revoked_changes(sql, rows, reason).await
+}
+
 impl CredentialRevoker for AgentAccess {
     fn revoke<'a>(
         &'a self,
@@ -1599,7 +1663,14 @@ impl CredentialRevoker for AgentAccess {
                 account.tenant(),
                 account.user(),
                 None,
-                "account credentials reset",
+                match account.reason() {
+                    bilibi_session::CredentialRevocationReason::PasswordChanged => {
+                        "password_changed"
+                    }
+                    bilibi_session::CredentialRevocationReason::PasswordReset => "password_reset",
+                    bilibi_session::CredentialRevocationReason::SignedOut => "signed_out",
+                    bilibi_session::CredentialRevocationReason::AdminAction => "admin_action",
+                },
             )
             .await
         })
@@ -1644,7 +1715,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/agent_access", layer: bilibi_module_registry::Layer::Core,
         dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "core/user", "core/company"],
-        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql"))],
+        migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql"))],
         services: &[bilibi_module_registry::Service { id: "core/agent_access.grants", factory: |services| {
             let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
             let users = services.get::<bilibi_user::UserService>("core/user.accounts")?;
@@ -1664,6 +1735,7 @@ inventory::submit! {
             session_bridge: std::sync::Once::new(),
             });
             services.get::<bilibi_session::Sessions>("base/session.sessions")?.register_credential_revoker("core.agent_access", access.clone())?;
+            access.start_session_bridge();
             Ok(access) } }, bilibi_module_registry::Service { id: "core/agent_access.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::Pages {
             access: services.get("core/agent_access.grants")?,
             db: services.get::<Db>("base/database.pool")?.as_ref().clone(),

@@ -77,9 +77,27 @@ impl Default for Policy {
 #[derive(Clone, Debug)]
 pub struct Terminated {
     pub id: String,
+    /// Why the browser session ended. Consumers may record this category, but
+    /// never the session id, as person-facing history.
+    pub reason: TerminationReason,
     /// A safe replacement address for a session deliberately moved to a
     /// different tenant. Ordinary endings return through the page they held.
     pub redirect: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminationReason {
+    SignedOut,
+    Expired,
+    AdminAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRevocationReason {
+    PasswordChanged,
+    PasswordReset,
+    SignedOut,
+    AdminAction,
 }
 #[derive(Clone, Debug)]
 pub struct SessionClient {
@@ -176,6 +194,7 @@ pub enum Termination {
 pub struct RevocationAccount {
     tenant: i64,
     user: i64,
+    reason: CredentialRevocationReason,
 }
 impl RevocationAccount {
     pub fn tenant(self) -> i64 {
@@ -183,6 +202,9 @@ impl RevocationAccount {
     }
     pub fn user(self) -> i64 {
         self.user
+    }
+    pub fn reason(self) -> CredentialRevocationReason {
+        self.reason
     }
 }
 
@@ -268,6 +290,12 @@ impl Sessions {
         let account = RevocationAccount {
             tenant: tx.context().tenant,
             user,
+            reason: match tx.context().action.as_str() {
+                "user.change_password" => CredentialRevocationReason::PasswordChanged,
+                "user.reset_password" => CredentialRevocationReason::PasswordReset,
+                "user.sso.backchannel_logout" => CredentialRevocationReason::SignedOut,
+                _ => CredentialRevocationReason::AdminAction,
+            },
         };
         let revokers = self.credential_revokers()?;
         tx.mutate(move |sql| {
@@ -543,7 +571,11 @@ impl Sessions {
             Some(id) => {
                 let sessions = self.terminations.clone();
                 tx.after_commit(move || {
-                    let _ = sessions.send(Terminated { id, redirect: None });
+                    let _ = sessions.send(Terminated {
+                        id,
+                        reason: TerminationReason::AdminAction,
+                        redirect: None,
+                    });
                 });
                 Ok(Termination::Terminated)
             }
@@ -585,7 +617,7 @@ impl Sessions {
             )
             .await?;
         if count > 0 {
-            self.announce(vec![id.to_owned()]);
+            self.announce_with(vec![id.to_owned()], TerminationReason::SignedOut);
         }
         Ok(())
     }
@@ -741,8 +773,15 @@ impl Sessions {
     }
     /// Publishes terminations the caller already committed.
     pub fn announce(&self, ids: Vec<String>) {
+        self.announce_with(ids, TerminationReason::AdminAction);
+    }
+    fn announce_with(&self, ids: Vec<String>, reason: TerminationReason) {
         for id in ids {
-            let _ = self.terminations.send(Terminated { id, redirect: None });
+            let _ = self.terminations.send(Terminated {
+                id,
+                reason,
+                redirect: None,
+            });
         }
     }
     /// Closes live pages of a session whose bearer was rotated while moving
@@ -750,6 +789,7 @@ impl Sessions {
     pub fn announce_tenant_switch(&self, id: String) {
         let _ = self.terminations.send(Terminated {
             id,
+            reason: TerminationReason::SignedOut,
             redirect: Some("/session/tenant-changed"),
         });
     }
@@ -776,7 +816,7 @@ impl Sessions {
             .map(|row| row.get(0))
             .collect();
         let pruned = ids.len() as u64;
-        self.announce(ids);
+        self.announce_with(ids, TerminationReason::Expired);
         Ok(pruned)
     }
     async fn resolve(
