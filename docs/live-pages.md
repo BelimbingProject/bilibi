@@ -176,6 +176,8 @@ means nothing has finished arriving. Nothing else ever reads the bytes, and
 they go with the state when it is dropped. The Design Library's File input
 card is the running specimen.
 
+For a single-file form where choosing a file is the action, `FileInput::immediate()` draws its label as a button and submits the enclosing form after the file arrives. A refused or interrupted upload does not submit. The form's event consumes the file as usual.
+
 The host owns the stream. A chosen file is announced as an `upload` intent
 (`{"type":"upload","target":"page","upload":"statement","entries":[{"ref":"1","name":"x.csv","size":1200,"content_type":"text/csv"}]}`),
 queued and acknowledged like any other; the host registers each entry under
