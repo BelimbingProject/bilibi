@@ -1301,8 +1301,7 @@ impl AgentAccess {
         let revoked = tx
             .mutate(move |sql| {
                 Box::pin(async move {
-                    let changes =
-                        revoke_rows(sql, tenant, user, Some(id), "revoked by owner").await?;
+                    let changes = revoke_rows(sql, tenant, user, Some(id), "turned_off").await?;
                     if changes.is_empty() {
                         return Err(Error::NotFound);
                     }
