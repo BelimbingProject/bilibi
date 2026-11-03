@@ -111,8 +111,67 @@ pub type EligibleFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<i64>>> + Se
 #[derive(Default)]
 pub struct NotificationBoundary {
     sink: OnceLock<Arc<dyn NotificationSink>>,
+    todo_sources: std::sync::RwLock<Vec<Arc<dyn TodoSource>>>,
+}
+/// An actionable row; reading notifications never changes its lifetime.
+#[derive(Clone, Debug)]
+pub struct TodoItem {
+    pub title: String,
+    pub url: String,
+}
+/// One owner's bounded, live-authorized worklist.
+#[derive(Default)]
+pub struct TodoList {
+    pub items: Vec<TodoItem>,
+    pub count: usize,
+    pub more: bool,
+    pub see_all: Option<String>,
+}
+pub type TodoFuture<'a> = Pin<Box<dyn Future<Output = Result<TodoList>> + Send + 'a>>;
+pub trait TodoSource: Send + Sync {
+    fn read<'a>(&'a self, scope: &'a Scope) -> TodoFuture<'a>;
 }
 impl NotificationBoundary {
+    /// Re-read the acting person's bell after this transaction commits, without
+    /// creating a notification or changing read state.
+    pub fn todos_changed(&self, tx: &mut MutationTransaction<'_>, scope: &Scope) -> Result<()> {
+        let sink = self.sink.get().cloned().ok_or(Error::Internal)?;
+        let tenant = scope.tenant();
+        let user = scope.user();
+        tx.after_commit(move || sink.committed(tenant, &[user]));
+        Ok(())
+    }
+    /// Install an owner adapter at boot, without coupling the bell to that owner.
+    pub fn register_todos(
+        &self,
+        source: Arc<dyn TodoSource>,
+    ) -> bilibi_module_registry::Result<()> {
+        self.todo_sources
+            .write()
+            .map_err(|_| {
+                bilibi_module_registry::RegistryError::Service("to-do sources poisoned".into())
+            })?
+            .push(source);
+        Ok(())
+    }
+    pub async fn todos(&self, scope: &Scope) -> Result<Vec<TodoList>> {
+        let sources = self
+            .todo_sources
+            .read()
+            .map_err(|_| Error::Internal)?
+            .clone();
+        let mut lists = Vec::new();
+        for source in sources {
+            let list = source.read(scope).await?;
+            if list.items.iter().any(|item| !local_path(&item.url))
+                || list.see_all.as_deref().is_some_and(|url| !local_path(url))
+            {
+                return Err(Error::Invalid);
+            }
+            lists.push(list);
+        }
+        Ok(lists)
+    }
     pub fn bind(&self, sink: Arc<dyn NotificationSink>) -> bilibi_module_registry::Result<()> {
         self.sink.set(sink).map_err(|_| {
             bilibi_module_registry::RegistryError::Service(

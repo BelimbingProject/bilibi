@@ -641,6 +641,7 @@ impl Engine {
             })).await?;
             if let Some(outcome)=terminal {engine.finish_approval_run_in(tx,&scope,&saved,outcome).await?;}
             else if next_stage!=saved.stage_index {engine.notify_approval_stage_in(tx,&scope,case.key,&subject,&facts,saved.id).await?;}
+            engine.approval.notices.as_ref().ok_or(Error::Internal)?.todos_changed(tx, &scope)?;
             Ok(result)
         })).await
     }

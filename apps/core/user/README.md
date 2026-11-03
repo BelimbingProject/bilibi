@@ -12,6 +12,8 @@ disposable database to see the after-commit fan-out. The anonymous sign-in,
 forgot-password and reset-password
 pages belong to the Web host.
 
+The bell separates **To do** from **Notifications**, with distinct counts. Owners supply actionable rows through [Base Notifications](../../base/notifications/README.md), not a dependency from the shell to Workflow. Each tab has one See all link. Reading or clearing notifications leaves to-dos alone; their owner's normal action completes them.
+
 A `user_identities` row owns one login address, password, verification state, reset token, sign-in attempts, pending admissions and second-factor enrollment. A `users` row is the tenant-owned account that acts there. Staff identities are installation-wide and may have one live account per tenant; customer identities stay bound to one tenant and never become memberships. [ADR 21](../../../docs/architecture/decisions/21-one-sign-in-several-tenant-memberships.md) records the complete boundary. Invitation administration, acceptance and switching between tenants are built, including the second-factor and company-sign-in handoff.
 
 Role assignments on `/users/{id}` use `base.authz_agent.principal_role.set`, the same reviewed operation as the agent. The page retains its account checks; the operation checks role authority and step-up at commit.

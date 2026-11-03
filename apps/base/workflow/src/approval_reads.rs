@@ -6,6 +6,61 @@ use bilibi_database::Error;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
+pub(crate) struct ApprovalTodos(pub Arc<Engine>);
+impl bilibi_notifications::TodoSource for ApprovalTodos {
+    fn read<'a>(&'a self, scope: &'a Scope) -> bilibi_notifications::TodoFuture<'a> {
+        Box::pin(async move {
+            {
+                let client = self.0.db.get().await?;
+                match bilibi_authz::authorize_key(&**client, scope, crate::approval_web::VIEW).await
+                {
+                    Ok(()) => {}
+                    Err(Error::Forbidden | Error::Unauthorized) => return Ok(Default::default()),
+                    Err(error) => return Err(error),
+                }
+            }
+            let mut entries = Vec::new();
+            let mut after = None;
+            loop {
+                let page = match self
+                    .0
+                    .my_approvals(
+                        scope,
+                        &ApprovalQuery {
+                            limit: 100 - entries.len() as i64,
+                            after,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(Error::Forbidden | Error::Unauthorized) => return Ok(Default::default()),
+                    Err(error) => return Err(error),
+                };
+                entries.extend(page.entries);
+                after = page.next_cursor;
+                if entries.len() == 100 || after.is_none() {
+                    break;
+                }
+            }
+            let count = entries.len();
+            Ok(bilibi_notifications::TodoList {
+                count,
+                more: count == 100 && after.is_some(),
+                items: entries
+                    .into_iter()
+                    .take(5)
+                    .map(|item| bilibi_notifications::TodoItem {
+                        title: item.label,
+                        url: format!("/workflow/approvals/{}", item.request.id),
+                    })
+                    .collect(),
+                see_all: Some("/workflow/approvals".into()),
+            })
+        })
+    }
+}
 struct Reads {
     engine: OnceLock<Arc<Engine>>,
     kind: &'static str,
