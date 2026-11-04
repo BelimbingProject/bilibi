@@ -286,8 +286,7 @@ fn link_record(link: &Link) -> Value {
 fn access_record(grant: &AccessGrant) -> Value {
     json!({
         "id": grant.id,
-        "principal_type": grant.principal_type,
-        "principal_id": grant.principal_id,
+        "user_id": grant.user_id,
         "view": grant.can_view,
         "download": grant.can_download,
         "manage": grant.can_manage,
@@ -405,14 +404,13 @@ impl WriteHandler for Share {
                     client,
                     scope,
                     id(input)?,
-                    input["principal_type"].as_str().unwrap_or_default(),
-                    input["principal_id"].as_i64().unwrap_or_default(),
+                    input["user_id"].as_i64().unwrap_or_default(),
                     input["download"].as_bool().unwrap_or(false),
                     input["manage"].as_bool().unwrap_or(false),
                     input["share"].as_bool().unwrap_or(false),
                 )
                 .await
-                .map_err(|e| invalid(e, "", "principal"))?;
+                .map_err(|e| invalid(e, "", "user_id"))?;
             Ok(json!({"grants": access_record(&grant)}).into())
         })
     }
@@ -428,14 +426,13 @@ impl WriteHandler for Share {
                     tx,
                     scope,
                     id(input)?,
-                    input["principal_type"].as_str().unwrap_or_default(),
-                    input["principal_id"].as_i64().unwrap_or_default(),
+                    input["user_id"].as_i64().unwrap_or_default(),
                     input["download"].as_bool().unwrap_or(false),
                     input["manage"].as_bool().unwrap_or(false),
                     input["share"].as_bool().unwrap_or(false),
                 )
                 .await
-                .map_err(|e| invalid(e, "", "principal"))?;
+                .map_err(|e| invalid(e, "", "user_id"))?;
             Ok(access_record(&grant).into())
         })
     }
@@ -774,10 +771,9 @@ fn link_schema() -> Value {
     }})
 }
 fn share_schema() -> Value {
-    json!({"type":"object","required":["id","principal_type","principal_id"],"properties":{
+    json!({"type":"object","required":["id","user_id"],"properties":{
         "id":{"type":"integer","minimum":1},
-        "principal_type":{"type":"string","enum":["user","company"],"description":"Share with an active account, or the current workplace."},
-        "principal_id":{"type":"integer","minimum":1},
+        "user_id":{"type":"integer","minimum":1,"description":"The active account to share with."},
         "download":{"type":"boolean","description":"Allow file downloads as well as metadata viewing."},
         "manage":{"type":"boolean","description":"Allow document changes."},
         "share":{"type":"boolean","description":"Allow changing this document's access."}
@@ -843,8 +839,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/document.operations", 
     operations: &[
         Operation { key: "core.document.list", title: "List documents", summary: "Documents you may see, by name, category, type or status, or those linked to one record.", keywords: KEYWORDS, capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&LIST), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.get", title: "Read a document", summary: "One document with its revisions and related records.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: document_output, handler: Handler::Read(&GET), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.document.access", title: "List document access", summary: "The people and workplace explicitly allowed to use one document. Needs sharing permission on that document.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: review_output, handler: Handler::Read(&ACCESS), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.document.share", title: "Share a document", summary: "Give an active account or the current workplace explicit document access.", keywords: KEYWORDS, capability: MANAGE, input: share_schema, output: review_output, handler: Handler::SafeWrite(&SHARE), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.access", title: "List document access", summary: "The people explicitly allowed to use one document. Needs sharing permission on that document.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: review_output, handler: Handler::Read(&ACCESS), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.share", title: "Share a document", summary: "Give an active account explicit document access.", keywords: KEYWORDS, capability: MANAGE, input: share_schema, output: review_output, handler: Handler::SafeWrite(&SHARE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.unshare", title: "Remove document access", summary: "Remove one explicit access grant. You cannot remove your own grant.", keywords: KEYWORDS, capability: MANAGE, input: unshare_schema, output: review_output, handler: Handler::SafeWrite(&UNSHARE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.create", title: "Create a document", summary: "A document from a file you stored, or an external https link, optionally related to records.", keywords: KEYWORDS, capability: MANAGE, input: create_schema, output: review_output, handler: Handler::SafeWrite(&CREATE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.update", title: "Change a document", summary: "Change the fields named in patch, using the stored version.", keywords: KEYWORDS, capability: MANAGE, input: update_schema, output: review_output, handler: Handler::SafeWrite(&UPDATE), channels: Channels::Every, step_up: &[] },

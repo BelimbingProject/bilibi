@@ -291,17 +291,13 @@ impl Detail {
                 let form = params::form_values_checked(value, "share", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
                 let checked = |name: &str| form.get(name).is_some_and(|value| value == "true");
-                let workplace = checked("workplace");
-                let principal_id = if workplace {
-                    scope.current_company().map(|company| company.get())
-                } else {
-                    form.get("account_id").and_then(|id| id.parse::<i64>().ok())
-                }
-                .ok_or(Error::Invalid)?;
+                let user_id = form
+                    .get("account_id")
+                    .and_then(|id| id.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
                 let input = json!({
                     "id": self.id,
-                    "principal_type": if workplace { "company" } else { "user" },
-                    "principal_id": principal_id,
+                    "user_id": user_id,
                     "download": checked("download"),
                     "manage": checked("manage"),
                     "share": checked("allow_share"),
@@ -774,29 +770,21 @@ impl Detail {
     }
 
     async fn sharing(&self, scope: &Scope, grants: &[AccessGrant]) -> Result<Html> {
-        let users: Vec<i64> = grants
-            .iter()
-            .filter(|grant| grant.principal_type == "user")
-            .map(|grant| grant.principal_id)
-            .collect();
+        let users: Vec<i64> = grants.iter().map(|grant| grant.user_id).collect();
         let names = self.pages.names(scope, &users).await?;
         let mut body = render(SectionHeading {
             id: "document-sharing-heading",
             title: "Access",
-            description: "Only the people and workplace listed here can find this document.",
+            description: "Only the people listed here can find this document.",
             ..SectionHeading::default()
         })?;
         let mut ids = Vec::with_capacity(grants.len());
         let mut items = Vec::with_capacity(grants.len());
         for grant in grants {
-            let title = if grant.principal_type == "user" {
-                names
-                    .get(&grant.principal_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Account {}", grant.principal_id))
-            } else {
-                format!("Workplace {}", grant.principal_id)
-            };
+            let title = names
+                .get(&grant.user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("Account {}", grant.user_id));
             let mut permissions = vec!["View"];
             if grant.can_download {
                 permissions.push("Download");
@@ -808,7 +796,7 @@ impl Detail {
                 permissions.push("Share");
             }
             let mut value = Html::text(&permissions.join(" · "));
-            if !(grant.principal_type == "user" && grant.principal_id == scope.user()) {
+            if grant.user_id != scope.user() {
                 value.push(&render(Button {
                     id: &format!("document-access-{}-remove", grant.id),
                     button_type: "button",
@@ -841,10 +829,9 @@ impl Detail {
                 .id("document-share-account")
                 .label("Account ID")
                 .kind(InputKind::Number)
-                .hint("Use an active account ID, or select the current workplace below."),
+                .hint("Use an active account ID."),
         )?;
         for (key, label, checked) in [
-            ("workplace", "Current workplace", false),
             ("download", "Allow downloads", true),
             ("manage", "Allow changes", false),
             ("allow_share", "Allow sharing", false),
@@ -959,7 +946,7 @@ impl Detail {
                     "unlink",
                 ),
                 Confirm::Unshare(_) => (
-                    "This person or workplace will lose access to the document.".into(),
+                    "This person will lose access to the document.".into(),
                     "They will no longer find, view or download it through this grant.",
                     "Remove access",
                     "Removing…",

@@ -40,8 +40,7 @@ CREATE TABLE core_document_access (
  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  tenant_id bigint NOT NULL REFERENCES tenants(id),
  document_id bigint NOT NULL,
- principal_type text NOT NULL CHECK (principal_type IN ('user','company')),
- principal_id bigint NOT NULL,
+ user_id bigint NOT NULL,
  can_view boolean NOT NULL DEFAULT true,
  can_download boolean NOT NULL DEFAULT false,
  can_manage boolean NOT NULL DEFAULT false,
@@ -49,13 +48,13 @@ CREATE TABLE core_document_access (
  granted_by bigint NOT NULL,
  granted_at timestamptz NOT NULL DEFAULT now(),
  UNIQUE (tenant_id, id),
- UNIQUE (tenant_id, document_id, principal_type, principal_id),
+ UNIQUE (tenant_id, document_id, user_id),
+ FOREIGN KEY (tenant_id, user_id) REFERENCES users(tenant_id, id),
  FOREIGN KEY (tenant_id, document_id) REFERENCES core_documents(tenant_id, id),
  FOREIGN KEY (tenant_id, granted_by) REFERENCES users(tenant_id, id),
  CHECK (can_view OR NOT (can_download OR can_manage OR can_share))
 );
-CREATE INDEX core_document_access_user_idx ON core_document_access(tenant_id, principal_id, document_id) WHERE principal_type='user' AND can_view;
-CREATE INDEX core_document_access_company_idx ON core_document_access(tenant_id, principal_id, document_id) WHERE principal_type='company' AND can_view;
+CREATE INDEX core_document_access_user_idx ON core_document_access(tenant_id, user_id, document_id) WHERE can_view;
 
 -- Every private file this module stores, from before `base/artifacts`
 -- reserves it until it is purged: `reserved` (no artifact yet), `stored`

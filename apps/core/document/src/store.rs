@@ -130,14 +130,12 @@ fn link_values(document: i64, l: &Link) -> Value {
 /// Who is reading, and how far their reach goes.
 struct Reader {
     tenant: i64,
-    company: Option<i64>,
     user: i64,
 }
 async fn reader(client: &dyn ProofClient, scope: &Scope) -> Result<Reader> {
     authorize_proof(client, scope, VIEW).await?;
     Ok(Reader {
         tenant: scope.tenant(),
-        company: scope.current_company().map(|o| o.get()),
         user: scope.user(),
     })
 }
@@ -156,10 +154,10 @@ impl Reader {
             _ => return Err(Error::Internal),
         };
         let sql = format!(
-            "SELECT EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=$1 AND a.document_id=$2 AND a.{column} AND ((a.principal_type='user' AND a.principal_id=$3) OR (a.principal_type='company' AND a.principal_id=$4)))"
+            "SELECT EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=$1 AND a.document_id=$2 AND a.{column} AND a.user_id=$3)"
         );
         Ok(client
-            .query_opt(&sql, &[&self.tenant, &document, &self.user, &self.company])
+            .query_opt(&sql, &[&self.tenant, &document, &self.user])
             .await?
             .ok_or(Error::Internal)?
             .get(0))
@@ -389,9 +387,9 @@ impl Store<'_> {
             return Err(WriteError::Forbidden);
         }
         Ok(client.query(
-            "SELECT id,principal_type,principal_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 ORDER BY principal_type,principal_id",
+            "SELECT id,user_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 ORDER BY user_id",
             &[&scope.tenant(), &id],
-        ).await?.into_iter().map(|row| AccessGrant { id: row.get(0), principal_type: row.get(1), principal_id: row.get(2), can_view: row.get(3), can_download: row.get(4), can_manage: row.get(5), can_share: row.get(6) }).collect())
+        ).await?.into_iter().map(|row| AccessGrant { id: row.get(0), user_id: row.get(1), can_view: row.get(2), can_download: row.get(3), can_manage: row.get(4), can_share: row.get(5) }).collect())
     }
 
     async fn check_share(
@@ -399,25 +397,19 @@ impl Store<'_> {
         on: On<'_>,
         scope: &Scope,
         id: i64,
-        principal_type: &str,
-        principal_id: i64,
+        user_id: i64,
     ) -> WriteResult<()> {
         self.editable(on, scope, id, None, MANAGE).await?;
         let client = on.client();
         if !permission(client, scope, id, "share").await? {
             return Err(WriteError::Forbidden);
         }
-        let valid = match principal_type {
-            "user" => principal_id > 0 && self.active_account(client, scope, principal_id).await?,
-            "company" => scope.current_company().map(|company| company.get()) == Some(principal_id),
-            _ => false,
-        };
-        if valid {
+        if user_id > 0 && self.active_account(client, scope, user_id).await? {
             Ok(())
         } else {
             Err(WriteError::field(
-                "principal",
-                "is not an account or workplace you can share with",
+                "user_id",
+                "is not an active account you can share with",
             ))
         }
     }
@@ -428,18 +420,16 @@ impl Store<'_> {
         client: &dyn ReadClient,
         scope: &Scope,
         id: i64,
-        principal_type: &str,
-        principal_id: i64,
+        user_id: i64,
         can_download: bool,
         can_manage: bool,
         can_share: bool,
     ) -> WriteResult<AccessGrant> {
-        self.check_share(On::Preview(client), scope, id, principal_type, principal_id)
+        self.check_share(On::Preview(client), scope, id, user_id)
             .await?;
         Ok(AccessGrant {
             id: 0,
-            principal_type: principal_type.to_owned(),
-            principal_id,
+            user_id,
             can_view: true,
             can_download,
             can_manage,
@@ -453,33 +443,26 @@ impl Store<'_> {
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         id: i64,
-        principal_type: &str,
-        principal_id: i64,
+        user_id: i64,
         can_download: bool,
         can_manage: bool,
         can_share: bool,
     ) -> WriteResult<AccessGrant> {
-        self.check_share(
-            On::Commit(tx.sql()),
-            scope,
-            id,
-            principal_type,
-            principal_id,
-        )
-        .await?;
-        let (tenant, actor, kind) = (scope.tenant(), scope.user(), principal_type.to_owned());
+        self.check_share(On::Commit(tx.sql()), scope, id, user_id)
+            .await?;
+        let (tenant, actor) = (scope.tenant(), scope.user());
         tx.mutate(move |sql| Box::pin(async move {
             let before = sql.query_opt(
-                "SELECT id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND principal_type=$3 AND principal_id=$4 FOR UPDATE",
-                &[&tenant,&id,&kind,&principal_id],
+                "SELECT id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 FOR UPDATE",
+                &[&tenant,&id,&user_id],
             ).await?;
             let row = sql.query_one(
-                "INSERT INTO core_document_access(tenant_id,document_id,principal_type,principal_id,can_view,can_download,can_manage,can_share,granted_by) VALUES($1,$2,$3,$4,true,$5,$6,$7,$8) ON CONFLICT(tenant_id,document_id,principal_type,principal_id) DO UPDATE SET can_view=true,can_download=EXCLUDED.can_download,can_manage=EXCLUDED.can_manage,can_share=EXCLUDED.can_share,granted_by=EXCLUDED.granted_by,granted_at=now() RETURNING id,principal_type,principal_id,can_view,can_download,can_manage,can_share",
-                &[&tenant,&id,&kind,&principal_id,&can_download,&can_manage,&can_share,&actor],
+                "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,granted_by) VALUES($1,$2,$3,true,$4,$5,$6,$7) ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_view=true,can_download=EXCLUDED.can_download,can_manage=EXCLUDED.can_manage,can_share=EXCLUDED.can_share,granted_by=EXCLUDED.granted_by,granted_at=now() RETURNING id,user_id,can_view,can_download,can_manage,can_share",
+                &[&tenant,&id,&user_id,&can_download,&can_manage,&can_share,&actor],
             ).await?;
-            let grant = AccessGrant { id: row.get(0), principal_type: row.get(1), principal_id: row.get(2), can_view: row.get(3), can_download: row.get(4), can_manage: row.get(5), can_share: row.get(6) };
-            let old = before.map(|row| json!({"document_id":id,"principal_type":kind,"principal_id":principal_id,"view":row.get::<_,bool>(1),"download":row.get::<_,bool>(2),"manage":row.get::<_,bool>(3),"share":row.get::<_,bool>(4)})).unwrap_or_else(|| json!({}));
-            let change = Change { kind: crate::ACCESS_RECORD.into(), id: grant.id, old, new: json!({"document_id":id,"principal_type":grant.principal_type,"principal_id":grant.principal_id,"view":grant.can_view,"download":grant.can_download,"manage":grant.can_manage,"share":grant.can_share}) };
+            let grant = AccessGrant { id: row.get(0), user_id: row.get(1), can_view: row.get(2), can_download: row.get(3), can_manage: row.get(4), can_share: row.get(5) };
+            let old = before.map(|row| json!({"document_id":id,"user_id":user_id,"view":row.get::<_,bool>(1),"download":row.get::<_,bool>(2),"manage":row.get::<_,bool>(3),"share":row.get::<_,bool>(4)})).unwrap_or_else(|| json!({}));
+            let change = Change { kind: crate::ACCESS_RECORD.into(), id: grant.id, old, new: json!({"document_id":id,"user_id":grant.user_id,"view":grant.can_view,"download":grant.can_download,"manage":grant.can_manage,"share":grant.can_share}) };
             Ok((grant, vec![change]))
         })).await.map_err(write_error)
     }
@@ -500,14 +483,14 @@ impl Store<'_> {
         let actor = scope.user();
         tx.mutate(move |sql| Box::pin(async move {
             let row = sql.query_opt(
-                "SELECT principal_type,principal_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3 FOR UPDATE",
+                "SELECT user_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3 FOR UPDATE",
                 &[&tenant,&id,&grant],
             ).await?.ok_or(Error::NotFound)?;
-            if row.get::<_,String>(0) == "user" && row.get::<_,i64>(1) == actor {
+            if row.get::<_,i64>(0) == actor {
                 return Err(Error::Forbidden);
             }
             sql.execute("DELETE FROM core_document_access WHERE tenant_id=$1 AND id=$2", &[&tenant,&grant]).await?;
-            let change = Change { kind: crate::ACCESS_RECORD.into(), id: grant, old: json!({"document_id":id,"principal_type":row.get::<_,String>(0),"principal_id":row.get::<_,i64>(1),"view":row.get::<_,bool>(2),"download":row.get::<_,bool>(3),"manage":row.get::<_,bool>(4),"share":row.get::<_,bool>(5)}), new: json!({}) };
+            let change = Change { kind: crate::ACCESS_RECORD.into(), id: grant, old: json!({"document_id":id,"user_id":row.get::<_,i64>(0),"view":row.get::<_,bool>(1),"download":row.get::<_,bool>(2),"manage":row.get::<_,bool>(3),"share":row.get::<_,bool>(4)}), new: json!({}) };
             Ok(((), vec![change]))
         })).await.map_err(write_error)
     }
@@ -525,19 +508,18 @@ impl Store<'_> {
             return Err(WriteError::Forbidden);
         }
         let row = client.query_opt(
-            "SELECT id,principal_type,principal_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
+            "SELECT id,user_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
             &[&scope.tenant(),&id,&grant],
         ).await?.ok_or(WriteError::NotFound)?;
         let result = AccessGrant {
             id: row.get(0),
-            principal_type: row.get(1),
-            principal_id: row.get(2),
-            can_view: row.get(3),
-            can_download: row.get(4),
-            can_manage: row.get(5),
-            can_share: row.get(6),
+            user_id: row.get(1),
+            can_view: row.get(2),
+            can_download: row.get(3),
+            can_manage: row.get(4),
+            can_share: row.get(5),
         };
-        if result.principal_type == "user" && result.principal_id == scope.user() {
+        if result.user_id == scope.user() {
             return Err(WriteError::Forbidden);
         }
         Ok(result)
@@ -577,17 +559,16 @@ impl Store<'_> {
             (Some(r.kind.as_str()), Some(r.id.as_str()))
         });
         let conditions = "d.tenant_id=$1 AND d.deleting_at IS NULL
-             AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND ((a.principal_type='user' AND a.principal_id=$2) OR (a.principal_type='company' AND a.principal_id=$4)))
-             AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$5))
-             AND ($6 = '' OR d.name ILIKE $7)
-             AND ($8::text IS NULL OR d.category = $8)
-             AND ($9::text IS NULL OR d.document_type = $9)
-             AND ($10::text IS NULL OR d.status = $10)";
-        let params: [&(dyn ToSql + Sync); 10] = [
+             AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND a.user_id=$2)
+             AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$4))
+             AND ($5 = '' OR d.name ILIKE $6)
+             AND ($7::text IS NULL OR d.category = $7)
+             AND ($8::text IS NULL OR d.document_type = $8)
+             AND ($9::text IS NULL OR d.status = $9)";
+        let params: [&(dyn ToSql + Sync); 9] = [
             &reader.tenant,
             &reader.user,
             &related_kind,
-            &reader.company,
             &related_id,
             &search,
             &pattern,
@@ -997,11 +978,11 @@ impl Store<'_> {
                 let mut changes = vec![Change { kind: RECORD.into(), id: document.id, old: json!({}), new: audit_values(&document) }];
                 let access = sql
                     .query_one(
-                        "INSERT INTO core_document_access(tenant_id,document_id,principal_type,principal_id,can_view,can_download,can_manage,can_share,granted_by) VALUES($1,$2,'user',$3,true,true,true,true,$3) RETURNING id",
+                        "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,granted_by) VALUES($1,$2,$3,true,true,true,true,$3) RETURNING id",
                         &[&tenant, &document.id, &user],
                     )
                     .await?;
-                changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: access.get(0), old: json!({}), new: json!({"document_id":document.id,"principal_type":"user","principal_id":user,"view":true,"download":true,"manage":true,"share":true}) });
+                changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: access.get(0), old: json!({}), new: json!({"document_id":document.id,"user_id":user,"view":true,"download":true,"manage":true,"share":true}) });
                 let revision = insert_revision(sql, tenant, user, &document, 1, file.as_ref(), external_url.as_deref(), &change_log).await?;
                 changes.push(Change { kind: REVISION_RECORD.into(), id: revision.id, old: json!({}), new: revision_values(&revision) });
                 if let Some(file) = &file {

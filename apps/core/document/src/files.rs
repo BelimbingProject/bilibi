@@ -602,10 +602,10 @@ pub(crate) async fn finalize_document_delete(
             changes.push(Change { kind: crate::LINK_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"record":{"kind":row.get::<_,String>(1),"id":row.get::<_,String>(2)}}), new: json!({}) });
         }
         for row in sql.query(
-            "DELETE FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 RETURNING id,principal_type,principal_id,can_view,can_download,can_manage,can_share",
+            "DELETE FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 RETURNING id,user_id,can_view,can_download,can_manage,can_share",
             &[&tenant, &document],
         ).await? {
-            changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"principal_type":row.get::<_,String>(1),"principal_id":row.get::<_,i64>(2),"view":row.get::<_,bool>(3),"download":row.get::<_,bool>(4),"manage":row.get::<_,bool>(5),"share":row.get::<_,bool>(6)}), new: json!({}) });
+            changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"user_id":row.get::<_,i64>(1),"view":row.get::<_,bool>(2),"download":row.get::<_,bool>(3),"manage":row.get::<_,bool>(4),"share":row.get::<_,bool>(5)}), new: json!({}) });
         }
         for row in sql.query(
             "DELETE FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 RETURNING id,revision,change_log",

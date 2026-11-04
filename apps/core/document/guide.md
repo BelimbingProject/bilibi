@@ -4,7 +4,7 @@ Use Documents to keep one business document with every revision and link it to t
 
 ## Find a document
 
-Use `core.document.list` to search by name or filter by category, type, status or related record. The results include only documents explicitly shared with you or your current workplace. A record link never gives you document access.
+Use `core.document.list` to search by name or filter by category, type, status or related record. The results include only documents explicitly shared with you. A record link never gives you document access.
 
 Use `core.document.get` for one document, its revisions and its related records. Use the revision's `download_path` only when you have download permission.
 
@@ -16,7 +16,7 @@ Use `core.document.update` for the document's name, publication date, category, 
 
 ## Share safely
 
-Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account or your current workplace view access, with optional download, manage or share permission. Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
+Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission. Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
 
 ## Delete
 

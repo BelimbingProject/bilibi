@@ -96,13 +96,11 @@ pub struct Revision {
     pub created_at: Timestamp,
 }
 
-/// One explicit document authority. A company grant applies only while the
-/// reader works through a live desk in that company.
+/// One explicit document authority granted to one person.
 #[derive(Clone, Debug)]
 pub struct AccessGrant {
     pub id: i64,
-    pub principal_type: String,
-    pub principal_id: i64,
+    pub user_id: i64,
     pub can_view: bool,
     pub can_download: bool,
     pub can_manage: bool,
@@ -441,8 +439,8 @@ impl Documents {
         .await)
     }
 
-    /// One document the reader may see through an explicit user or current
-    /// workplace grant. Links never grant access.
+    /// One document the reader may see through an explicit user
+    /// grant. Links never grant access.
     pub async fn get(&self, scope: &Scope, id: i64) -> Result<Document> {
         let client = self.db.get().await?;
         let scope = self.fresh(&**client, scope).await?;
@@ -475,7 +473,7 @@ impl Documents {
         self.store().get(&**client, &scope, id).await?;
         store::links(&**client, &scope, id).await
     }
-    /// A page of the library restricted to explicit user or current-workplace
+    /// A page of the library restricted to explicit user
     /// grants. `related` filters that already-authorized set; it grants no
     /// additional access.
     pub async fn list(&self, scope: &Scope, filter: &Filter) -> Result<Page> {
@@ -629,31 +627,21 @@ impl Documents {
         self.store().access(&**client, &scope, id).await
     }
 
-    /// Adds or replaces one explicit user or company grant.
+    /// Adds or replaces one explicit user grant.
     #[allow(clippy::too_many_arguments)]
     pub async fn share(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         id: i64,
-        principal_type: &str,
-        principal_id: i64,
+        user_id: i64,
         can_download: bool,
         can_manage: bool,
         can_share: bool,
     ) -> WriteResult<AccessGrant> {
         let scope = self.fresh(tx.sql(), scope).await?;
         self.store()
-            .share(
-                tx,
-                &scope,
-                id,
-                principal_type,
-                principal_id,
-                can_download,
-                can_manage,
-                can_share,
-            )
+            .share(tx, &scope, id, user_id, can_download, can_manage, can_share)
             .await
     }
 
@@ -664,8 +652,7 @@ impl Documents {
         client: &dyn ReadClient,
         scope: &Scope,
         id: i64,
-        principal_type: &str,
-        principal_id: i64,
+        user_id: i64,
         can_download: bool,
         can_manage: bool,
         can_share: bool,
@@ -675,8 +662,7 @@ impl Documents {
                 client,
                 scope,
                 id,
-                principal_type,
-                principal_id,
+                user_id,
                 can_download,
                 can_manage,
                 can_share,

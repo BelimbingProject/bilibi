@@ -7,7 +7,7 @@
 - One document record with a name, filing company, publication date, category, optional subcategory, type and status.
 - Numbered revisions with their own date, change log and internal file or external HTTPS link.
 - Links to registered records. A link helps people find an already-authorized document; it never grants access.
-- Explicit user and workplace grants for view, download, manage and share permissions.
+- Explicit user grants for view, download, manage and share permissions.
 - Personal favourite and follow marks.
 - The file ledger and the `core.document` Artifact owner.
 - One Documents list, one document record page, metadata CSV export, file downloads and agent operations.
@@ -16,9 +16,9 @@ Base owns private bytes, malware scanning, retention and legal holds. Domains ow
 
 ## Access
 
-Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user or their current workplace. A file download also needs `core.document.download` and the grant's download permission. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
+Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
 
-Creating a document gives its creator view, download, manage and share permissions. Sharing with a workplace is limited to the actor's current proved workplace. Sharing with a user accepts only an active account. The creator's own grant cannot be removed through `unshare`.
+Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants. The creator's own grant cannot be removed through `unshare`.
 
 Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant.
 
