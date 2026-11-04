@@ -1,0 +1,739 @@
+//! A library of documents with revisions, related to records in any area
+//! (`core/document`). See `README.md`. This Domain has no Bilimbi
+//! counterpart; files are private `base/artifacts` documents owned here
+//! (the owner adapter pattern of Core Company's files), and related records
+//! are `base/records` references (the records reference holder).
+mod agent_operations;
+mod contributions;
+mod files;
+mod model;
+mod store;
+mod web;
+
+use bilibi_artifacts::Artifacts;
+use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
+use bilibi_datetime::DisplayPolicy;
+use bilibi_media::Media;
+use bilibi_module_registry::{Layer, Module, Service};
+use bilibi_picklists::PickLists;
+use bilibi_principal_directory::PrincipalDirectory;
+use bilibi_records::Records;
+use bilibi_settings::Settings;
+use bilibi_tenancy::{Authentication, ReadClient, Scope};
+use jiff::{civil::Date, Timestamp};
+use std::sync::Arc;
+use store::On;
+
+pub use bilibi_records::Reference;
+pub use contributions::{
+    ALLOWED_TYPES, DOWNLOAD, LIST_CATEGORY, LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE, MANAGE,
+    MAX_UPLOAD_BYTES, MERGE, VIEW,
+};
+pub use model::{
+    Draft, FieldError, Patch, RevisionInput, ScanStatus, Source, Upload, FILE_TYPES,
+    FIRST_CHANGE_LOG,
+};
+
+pub const MODULE: &str = "core/document";
+pub const SERVICE: &str = "core/document.documents";
+/// The audit kind of a document and its `base/records` kind.
+pub const RECORD: &str = "core.document.document";
+/// The audit kind of a revision.
+pub const REVISION_RECORD: &str = "core.document.revision";
+/// The audit kind of a link to a related record.
+pub const LINK_RECORD: &str = "core.document.link";
+/// The audit kind of an explicit document access grant.
+pub const ACCESS_RECORD: &str = "core.document.access";
+/// The audit kind of a stored file's ledger row.
+pub const FILE_RECORD: &str = "core.document.file";
+/// The audit kind of a person's favourite and follow marks.
+pub const MARK_RECORD: &str = "core.document.mark";
+
+/// One document as stored.
+#[derive(Clone, Debug)]
+pub struct Document {
+    pub id: i64,
+    /// The responsible filing company. Access remains explicit and is never
+    /// inferred from company membership.
+    pub company_id: i64,
+    pub name: String,
+    pub publish_date: Date,
+    pub source: Source,
+    /// An external document's latest link.
+    pub external_url: Option<String>,
+    pub category: Option<String>,
+    pub sub_category: Option<String>,
+    pub document_type: Option<String>,
+    pub status: String,
+    /// The latest revision's number.
+    pub revision: i32,
+    pub last_revision_at: Timestamp,
+    pub created_by: i64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    /// Set while Artifacts handles every revision's bytes before metadata is removed.
+    pub deleting_at: Option<Timestamp>,
+    pub version: i64,
+}
+
+/// One revision of a document. An internal revision has a file; an external
+/// one a link.
+#[derive(Clone, Debug)]
+pub struct Revision {
+    pub id: i64,
+    pub document_id: i64,
+    pub revision: i32,
+    pub name: String,
+    pub artifact_id: Option<String>,
+    pub file_name: Option<String>,
+    pub content_type: Option<String>,
+    pub byte_size: Option<i64>,
+    pub sha256: Option<String>,
+    pub external_url: Option<String>,
+    pub change_log: String,
+    pub scan_status: ScanStatus,
+    pub created_by: i64,
+    pub created_at: Timestamp,
+}
+
+/// One explicit document authority. A company grant applies only while the
+/// reader works through a live desk in that company.
+#[derive(Clone, Debug)]
+pub struct AccessGrant {
+    pub id: i64,
+    pub principal_type: String,
+    pub principal_id: i64,
+    pub can_view: bool,
+    pub can_download: bool,
+    pub can_manage: bool,
+    pub can_share: bool,
+}
+
+/// A record a document relates to.
+#[derive(Clone, Debug)]
+pub struct Link {
+    pub id: i64,
+    pub record: Reference,
+    pub linked_by: i64,
+    pub linked_at: Timestamp,
+}
+
+/// A file `store_file` kept, ready to become a revision.
+#[derive(Clone, Debug)]
+pub struct StoredFile {
+    pub artifact_id: String,
+    pub file_name: String,
+    pub content_type: String,
+    pub byte_size: i64,
+    pub sha256: String,
+}
+
+/// A revision's file, read for one download. Never cache it for another
+/// reader.
+pub struct File {
+    pub file_name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// A revision `add_revision` would add, as its preview shows it.
+#[derive(Clone, Debug)]
+pub struct PlannedRevision {
+    pub revision: i32,
+    pub file_name: Option<String>,
+    pub external_url: Option<String>,
+    pub change_log: String,
+}
+
+/// What `delete` staged: the files still to delete from `base/artifacts`
+/// once the caller's transaction commits.
+#[derive(Clone, Debug, Default)]
+pub struct Deleted {
+    pub files: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sort {
+    #[default]
+    LastRevision,
+    Name,
+    PublishDate,
+    Created,
+}
+
+/// A page of the documents the reader may see. `page` counts from 1.
+#[derive(Clone, Debug)]
+pub struct Filter {
+    /// Part of the name, ignoring case.
+    pub search: String,
+    pub category: Option<String>,
+    pub document_type: Option<String>,
+    pub status: Option<String>,
+    /// Related to this record.
+    pub related: Option<Reference>,
+    pub sort: Sort,
+    pub descending: bool,
+    pub page: i64,
+    pub page_size: i64,
+}
+impl Default for Filter {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            category: None,
+            document_type: None,
+            status: None,
+            related: None,
+            sort: Sort::LastRevision,
+            descending: true,
+            page: 1,
+            page_size: 25,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Page {
+    pub entries: Vec<Document>,
+    pub total: i64,
+}
+
+pub type WriteResult<T> = std::result::Result<T, WriteError>;
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("The document could not be found.")]
+    NotFound,
+    #[error("You may not change this document.")]
+    Forbidden,
+    #[error("The document changed since this edit began. Reload before saving.")]
+    Stale,
+    #[error("Invalid input")]
+    Invalid(Vec<FieldError>),
+    /// `base/records.check` refused the related record; the text completes
+    /// "The related record …".
+    #[error("The related record {0}.")]
+    RelatedRefused(&'static str),
+    #[error("The file is larger than the {} MiB allowed.", max_bytes / (1024 * 1024))]
+    TooLarge { max_bytes: u64 },
+    #[error("This file is quarantined and cannot be downloaded.")]
+    Quarantined,
+    #[error("This file is retained until its retain-until date and cannot be deleted yet.")]
+    Retained,
+    #[error("This file is under legal hold and cannot be deleted.")]
+    LegalHold,
+    #[error(transparent)]
+    Access(#[from] Error),
+}
+impl WriteError {
+    pub(crate) fn field(field: &'static str, message: impl Into<String>) -> Self {
+        Self::Invalid(vec![FieldError::new(field, message)])
+    }
+}
+
+/// The `core/document` facade. Every call refreshes the scope and checks its
+/// capability; no call takes a tenant, company or actor from input.
+pub struct Documents {
+    db: Db,
+    authentication: Arc<Authentication>,
+    boundary: Arc<MutationBoundary>,
+    artifacts: Arc<Artifacts>,
+    media: Arc<Media>,
+    records: Arc<Records>,
+    picklists: Arc<PickLists>,
+    settings: Arc<Settings>,
+    display: Arc<DisplayPolicy>,
+    directory: Arc<PrincipalDirectory>,
+}
+impl Documents {
+    async fn fresh(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Scope> {
+        self.authentication.reprove(client, scope).await
+    }
+    fn store(&self) -> store::Store<'_> {
+        store::Store {
+            records: &self.records,
+            picklists: &self.picklists,
+            display: &self.display,
+            directory: &self.directory,
+        }
+    }
+
+    /// Keeps `upload` as a private file under the `core.document` artifacts
+    /// owner, filed under the actor's company, outside any business
+    /// transaction (as `base/artifacts` requires). Needs
+    /// `core.document.manage`. The type comes from the file name's extension,
+    /// must be one of `core.document.allowed_types` and must match the bytes;
+    /// the size must be within `core.document.max_upload_bytes` and the
+    /// operator's `artifacts.max_bytes`. Attach the result with `attach`,
+    /// `create` or `add_revision`; a file never attached is removed by the
+    /// cleanup job.
+    pub async fn store_file(&self, scope: &Scope, upload: Upload<'_>) -> WriteResult<StoredFile> {
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let scope = self.fresh(&**client, scope).await?;
+        files::store(
+            &mut client,
+            &scope,
+            &self.boundary,
+            &self.artifacts,
+            &self.media,
+            &self.settings,
+            upload,
+        )
+        .await
+    }
+
+    /// Files a document with revision 1 from a file `store_file` returned to
+    /// this actor, and links it to `related` after `base/records.check` for
+    /// the actor. Idempotent on `artifact_id`: once attached, a second call
+    /// returns the same document and adds the link. Needs
+    /// `core.document.manage`.
+    pub async fn attach(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        related: &Reference,
+        artifact_id: &str,
+        name: Option<&str>,
+        category: Option<&str>,
+    ) -> WriteResult<i64> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .attach(tx, &scope, related, artifact_id, name, category)
+            .await
+    }
+
+    /// Creates a document from `draft` with its first revision and links.
+    /// Needs `core.document.manage`.
+    pub async fn create(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> WriteResult<Document> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().create(tx, &scope, draft).await
+    }
+
+    /// Changes the fields `patch` names, fenced on `version`. Needs
+    /// `core.document.manage` and a document the actor may see.
+    pub async fn update(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        patch: &Patch,
+    ) -> WriteResult<Document> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().update(tx, &scope, id, version, patch).await
+    }
+
+    /// Adds a revision: a new stored file for an internal document, a new
+    /// link for an external one. The number defaults to the latest plus one
+    /// and must be above it; skipped numbers stay skipped. Fenced on the
+    /// document's `version`, which it moves on.
+    pub async fn add_revision(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        input: &RevisionInput,
+    ) -> WriteResult<Revision> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .add_revision(tx, &scope, id, version, input)
+            .await
+    }
+
+    /// Relates the document to `record` after `base/records.check` for the
+    /// actor. Linking a record already linked returns that link.
+    pub async fn link(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        record: &Reference,
+    ) -> WriteResult<Link> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().link(tx, &scope, id, record).await
+    }
+
+    /// Removes the document's link to `record`.
+    pub async fn unlink(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        record: &Reference,
+    ) -> WriteResult<()> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().unlink(tx, &scope, id, record).await
+    }
+
+    /// Removes the document with its revisions, links and marks in the
+    /// caller's transaction, fenced on `version`. Its files remain attached
+    /// and readable until `base/artifacts` deletes them as one protected
+    /// batch once it commits. A retained or held revision refuses the whole
+    /// batch, leaving every file and all metadata available for a retry.
+    pub async fn delete(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+    ) -> WriteResult<Deleted> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        let deleted = self.store().delete(tx, &scope, id, version).await?;
+        {
+            let (db, authentication, boundary, artifacts) = (
+                self.db.clone(),
+                self.authentication.clone(),
+                self.boundary.clone(),
+                self.artifacts.clone(),
+            );
+            let files = deleted.files.clone();
+            let document = id;
+            tx.after_commit(move || {
+                tokio::spawn(async move {
+                    let Ok(mut client) = db.get().await else {
+                        return;
+                    };
+                    let Ok(scope) = authentication.reprove(&**client, &scope).await else {
+                        return;
+                    };
+                    match files::discard_document(&mut client, &scope, &artifacts, &files).await {
+                        Ok(()) => {
+                            if let Err(error) = files::finalize_document_delete(&mut client, &scope, &boundary, document).await {
+                                eprintln!("warning: document {document} metadata awaits delete finalization: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!(
+                            "warning: document {document} and its full revision history await delete retry: {error}"
+                        ),
+                    }
+                });
+            });
+        }
+        Ok(deleted)
+    }
+
+    /// Deletes files this actor stored but never attached. Released document
+    /// revisions are refused here; `delete` handles their history as one
+    /// protected batch.
+    pub async fn discard_files(
+        &self,
+        scope: &Scope,
+        artifact_ids: &[String],
+    ) -> Result<Vec<(String, WriteError)>> {
+        let mut client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        Ok(files::discard(
+            &mut client,
+            &scope,
+            &self.boundary,
+            &self.artifacts,
+            artifact_ids,
+        )
+        .await)
+    }
+
+    /// One document the reader may see through an explicit user or current
+    /// workplace grant. Links never grant access.
+    pub async fn get(&self, scope: &Scope, id: i64) -> Result<Document> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().get(&**client, &scope, id).await
+    }
+    /// The document's revisions, newest number first.
+    pub async fn revisions(&self, scope: &Scope, id: i64) -> Result<Vec<Revision>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().get(&**client, &scope, id).await?;
+        store::revisions(&**client, &scope, id).await
+    }
+    /// The latest revision of each document given, by document id, in one
+    /// read, for the pages. The documents are ones `list` or `get` returned
+    /// to this reader.
+    pub(crate) async fn latest_revisions(
+        &self,
+        scope: &Scope,
+        documents: &[Document],
+    ) -> Result<std::collections::HashMap<i64, Revision>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        let ids: Vec<i64> = documents.iter().map(|d| d.id).collect();
+        store::latest_revisions(&**client, &scope, &ids).await
+    }
+    /// The records the document relates to, oldest link first.
+    pub async fn links(&self, scope: &Scope, id: i64) -> Result<Vec<Link>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().get(&**client, &scope, id).await?;
+        store::links(&**client, &scope, id).await
+    }
+    /// A page of the library restricted to explicit user or current-workplace
+    /// grants. `related` filters that already-authorized set; it grants no
+    /// additional access.
+    pub async fn list(&self, scope: &Scope, filter: &Filter) -> Result<Page> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().list(&**client, &scope, filter).await
+    }
+    /// The documents linked to `record`, newest revision first; the record
+    /// must be one the reader may view.
+    pub async fn for_record(
+        &self,
+        scope: &Scope,
+        record: &Reference,
+        page_size: i64,
+    ) -> Result<Page> {
+        let filter = Filter {
+            related: Some(record.clone()),
+            page_size,
+            ..Filter::default()
+        };
+        self.list(scope, &filter).await
+    }
+    /// One revision's file, read through `base/artifacts` (which rechecks
+    /// access and audits the read) every time. Needs
+    /// `core.document.download` and a document the reader may see; artifacts
+    /// also requires the reader to belong to the filing company.
+    pub async fn read_file(&self, scope: &Scope, id: i64, revision: i32) -> WriteResult<File> {
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let scope = self.fresh(&**client, scope).await?;
+        let document = self.store().get(&**client, &scope, id).await?;
+        files::read(&mut client, &scope, &self.artifacts, &document, revision).await
+    }
+    /// What `create` would store, with no write, on the client a plan hands
+    /// its preview: the draft with its defaults filled in and its records
+    /// in their one spelling. An omitted publish date stays `None` (today on
+    /// commit).
+    pub async fn preview_create(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> WriteResult<Draft> {
+        Ok(self
+            .store()
+            .prepare_create(On::Preview(client), scope, draft)
+            .await?
+            .draft())
+    }
+    /// What `update` would store, with no write: the document before and
+    /// after.
+    pub async fn preview_update(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        patch: &Patch,
+    ) -> WriteResult<(Document, Document)> {
+        self.store()
+            .prepare_update(On::Preview(client), scope, id, version, patch)
+            .await
+    }
+    /// What `add_revision` would add, with no write.
+    pub async fn preview_revision(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        input: &RevisionInput,
+    ) -> WriteResult<(Document, PlannedRevision)> {
+        let plan = self
+            .store()
+            .prepare_revision(On::Preview(client), scope, id, version, input)
+            .await?;
+        let planned = PlannedRevision {
+            revision: plan.revision,
+            file_name: plan.file.as_ref().map(|f| f.file_name().to_owned()),
+            external_url: plan.external_url,
+            change_log: plan.change_log,
+        };
+        Ok((plan.document, planned))
+    }
+    /// What `link` would do, with no write: the document, the record in its
+    /// one spelling, and whether it is linked already.
+    pub async fn preview_link(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        record: &Reference,
+    ) -> WriteResult<(Document, Reference, bool)> {
+        let (document, record, existing) = self
+            .store()
+            .prepare_link(On::Preview(client), scope, id, record)
+            .await?;
+        Ok((document, record, existing.is_some()))
+    }
+    /// The link `unlink` would remove, with no write.
+    pub async fn preview_unlink(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        record: &Reference,
+    ) -> WriteResult<(Document, Link)> {
+        self.store()
+            .prepare_unlink(On::Preview(client), scope, id, record)
+            .await
+    }
+    /// The document `delete` would remove, with no write.
+    pub async fn preview_delete(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+    ) -> WriteResult<Document> {
+        self.store()
+            .prepare_delete(On::Preview(client), scope, id, version)
+            .await
+    }
+    /// Names references with the reader's permissions (`base/records`).
+    pub(crate) fn records(&self) -> &Records {
+        &self.records
+    }
+    /// Whether the reader may create and change documents.
+    pub async fn may_manage(&self, scope: &Scope) -> Result<bool> {
+        let client = self.db.get().await?;
+        bilibi_authz::holds_proof(&**client, scope, MANAGE).await
+    }
+    /// Whether the reader holds the module capability and an explicit manage
+    /// grant on `document`.
+    pub async fn may_change(&self, scope: &Scope, document: &Document) -> Result<bool> {
+        let client = self.db.get().await?;
+        if !bilibi_authz::holds_proof(&**client, scope, MANAGE).await? {
+            return Ok(false);
+        }
+        store::permission(&**client, scope, document.id, "manage").await
+    }
+    /// Whether the reader may download files.
+    pub async fn may_download(&self, scope: &Scope) -> Result<bool> {
+        let client = self.db.get().await?;
+        bilibi_authz::holds_proof(&**client, scope, DOWNLOAD).await
+    }
+
+    /// The explicit grants, visible only to someone allowed to share this document.
+    pub async fn access(&self, scope: &Scope, id: i64) -> WriteResult<Vec<AccessGrant>> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().access(&**client, &scope, id).await
+    }
+
+    /// Adds or replaces one explicit user or company grant.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn share(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        principal_type: &str,
+        principal_id: i64,
+        can_download: bool,
+        can_manage: bool,
+        can_share: bool,
+    ) -> WriteResult<AccessGrant> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .share(
+                tx,
+                &scope,
+                id,
+                principal_type,
+                principal_id,
+                can_download,
+                can_manage,
+                can_share,
+            )
+            .await
+    }
+
+    /// The explicit grant `share` would add or replace, without writing it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn preview_share(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        principal_type: &str,
+        principal_id: i64,
+        can_download: bool,
+        can_manage: bool,
+        can_share: bool,
+    ) -> WriteResult<AccessGrant> {
+        self.store()
+            .preview_share(
+                client,
+                scope,
+                id,
+                principal_type,
+                principal_id,
+                can_download,
+                can_manage,
+                can_share,
+            )
+            .await
+    }
+
+    /// Removes one explicit grant. The caller's own grant cannot be removed.
+    pub async fn unshare(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        grant: i64,
+    ) -> WriteResult<()> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().unshare(tx, &scope, id, grant).await
+    }
+
+    /// The explicit grant `unshare` would remove, without writing it.
+    pub async fn preview_unshare(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        grant: i64,
+    ) -> WriteResult<AccessGrant> {
+        self.store().preview_unshare(client, scope, id, grant).await
+    }
+}
+
+inventory::submit! { Module {
+    id: MODULE, layer: Layer::Core,
+    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/database", "base/datetime", "base/grid", "base/locale", "base/media", "base/menu", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/user"],
+    migrations: &[
+        ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
+        ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
+    ],
+    services: &[Service { id: SERVICE, factory: |s| {
+        files::bind(s.get("base/tenancy.parties")?)?;
+        let documents = Arc::new(Documents {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            authentication: s.get("base/tenancy.authentication")?,
+            boundary: s.get("base/database.mutations")?,
+            artifacts: s.get("base/artifacts.store")?,
+            media: s.get(bilibi_media::SERVICE)?,
+            records: s.get(bilibi_records::SERVICE)?,
+            picklists: s.get(bilibi_picklists::SERVICE)?,
+            settings: s.get("base/settings.store")?,
+            display: s.get("base/datetime.display")?,
+            directory: s.get("base/principal_directory.directory")?,
+        });
+        agent_operations::bind(documents.clone())?;
+        Ok(documents)
+    }}, Service { id: web::SERVICE, factory: |s| {
+        Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
+    }}, Service { id: web::FILES, factory: |s| {
+        Ok(Arc::new(bilibi_ui::download::DownloadService::<Scope, Error>(Arc::new(web::Files(s.get(SERVICE)?)))))
+    }}],
+} }

@@ -924,6 +924,52 @@ impl<O: Owner> Owned<'_, O> {
         tx.commit().await?;
         self.cleanup(client, id).await
     }
+    /// Tombstones a set only after every document is authorized and free of
+    /// retention or legal hold. This prevents a multi-file owner from
+    /// deleting part of a record before a protected file refuses deletion.
+    /// Physical cleanup remains idempotent and may be retried with the same
+    /// set after an interruption.
+    pub async fn delete_batch(&self, client: &mut Client, ids: &[String]) -> Result<()> {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.begin(client, "artifacts.delete_batch").await?;
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let row = self.fetch(&tx, id).await?;
+            self.authorize(tx.sql(), Operation::Delete, Some(&row.metadata.reference))
+                .await?;
+            if !row.deleted {
+                if let Some(refusal) = row.refusal() {
+                    self.audit_with(
+                        &tx,
+                        &row,
+                        "artifacts.delete_refused",
+                        json!({"reason":refusal.code(),"batch":true}),
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    return Err(refusal);
+                }
+            }
+            rows.push(row);
+        }
+        for row in &rows {
+            if !row.deleted {
+                let next = self.transition(&mut tx, row, "deleted").await?;
+                self.audit_with(&tx, &next, "artifacts.delete", json!({"batch":true}))
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+        for id in &ids {
+            self.cleanup(client, id).await?;
+        }
+        Ok(())
+    }
     async fn cleanup(&self, client: &mut Client, id: &str) -> Result<()> {
         let mut tx = self.begin(client, "artifacts.purge").await?;
         let row = self.fetch(&tx, id).await?;
