@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
             bilibi_web::provision(&db, command, &args).await?;
         }
         Some("plugin-export") => {
-            use bilibi_core::agent_plugins::{
-                AgentPlugins, ExportError, PluginError, SERVICE, USAGE,
+            use bilibi_core::agent::{
+                AgentPlugins, ExportError, PluginError, PLUGIN_SERVICE, USAGE,
             };
             let args: Vec<String> = std::env::args().skip(2).collect();
             let Some([harness, output]) = flags(&args, ["--harness", "--output"]) else {
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
                 Error::Invalid
             })?;
             let app = bilibi_web::App::new(db.clone(), &origin)?;
-            let plugins = app.services.get::<AgentPlugins>(SERVICE)?;
+            let plugins = app.services.get::<AgentPlugins>(PLUGIN_SERVICE)?;
             match plugins
                 .export(harness, std::path::Path::new(output))
                 .await

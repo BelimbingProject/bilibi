@@ -9,8 +9,7 @@ license.workspace = true
 [dependencies]
 bilibi-address = { path = "address" }
 bilibi-affiliation = { path = "affiliation" }
-bilibi-agent-access = { path = "agent_access" }
-bilibi-agent-plugins = { path = "agent_plugins" }
+bilibi-agent = { path = "agent" }
 bilibi-company = { path = "company" }
 bilibi-currency = { path = "currency" }
 bilibi-geonames = { path = "geonames" }

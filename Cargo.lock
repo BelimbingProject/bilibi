@@ -319,7 +319,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bilibi-agent-access"
+name = "bilibi-agent"
 version = "0.2.1"
 dependencies = [
  "askama",
@@ -328,6 +328,7 @@ dependencies = [
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
+ "bilibi-company",
  "bilibi-core",
  "bilibi-database",
  "bilibi-datetime",
@@ -357,6 +358,7 @@ dependencies = [
  "tokio-postgres",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -387,25 +389,6 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "uuid",
-]
-
-[[package]]
-name = "bilibi-agent-plugins"
-version = "0.2.1"
-dependencies = [
- "bilibi-agent-access",
- "bilibi-agent-api",
- "bilibi-database",
- "bilibi-module-registry",
- "bilibi-settings",
- "bilibi-system",
- "bilibi-tenancy",
- "bilibi-ui",
- "inventory",
- "serde",
- "serde_json",
- "thiserror",
- "zip",
 ]
 
 [[package]]
@@ -661,8 +644,7 @@ version = "0.2.1"
 dependencies = [
  "bilibi-address",
  "bilibi-affiliation",
- "bilibi-agent-access",
- "bilibi-agent-plugins",
+ "bilibi-agent",
  "bilibi-company",
  "bilibi-currency",
  "bilibi-geonames",

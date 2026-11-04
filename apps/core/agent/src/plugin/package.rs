@@ -8,8 +8,8 @@
 //! Staging"), so a person who connects Dev, Staging and Production to one
 //! harness gets three plugins that do not collide, each naming the server it
 //! reaches.
-use crate::PluginError;
-use bilibi_agent_access::{https_origin, OAUTH_SCOPE};
+use super::PluginError;
+use crate::{https_origin, OAUTH_SCOPE};
 use bilibi_agent_api::{
     mcp, Registry, BUSINESS_CONTEXT, INSTANCE_INSTRUCTIONS, REVIEW_INSTRUCTIONS,
 };

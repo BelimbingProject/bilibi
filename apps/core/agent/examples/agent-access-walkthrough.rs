@@ -4,7 +4,7 @@
 //! assertions; every outcome is printed for inspection. Clock-dependent waits
 //! are replaced by explicit SQL time travel on the disposable rows, and each
 //! such step says so. Raw codes and tokens are never printed in full.
-use bilibi_agent_access::{
+use bilibi_agent::{
     code_challenge, normalize_user_code, AgentAccess, AgentClaims, AuthorizeParams,
     ClientRegistration, CodeExchange, Decision, OAuthError, Throttle, CLIENT_ID, SEEN_LIMIT,
 };
@@ -85,7 +85,7 @@ async fn connect(
     client: &Client,
     actor: &Scope,
     label: &str,
-) -> std::result::Result<(i64, bilibi_agent_access::TokenResponse), OAuthError> {
+) -> std::result::Result<(i64, bilibi_agent::TokenResponse), OAuthError> {
     let start = grants.start_device(CLIENT_ID, label).await?;
     grants
         .decide(actor, &start.user_code, Decision::Approve)
@@ -128,7 +128,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         std::sync::Arc::new(bilibi_web::composition()),
     )?;
     services.install(&modules)?;
-    let grants = services.get::<AgentAccess>("core/agent_access.grants")?;
+    let grants = services.get::<AgentAccess>("core/agent.grants")?;
     let plans = services.get::<Plans>("base/agent_api.plans")?;
     let companies =
         services.get::<bilibi_core::company::CompanyService>(bilibi_core::company::SERVICE)?;

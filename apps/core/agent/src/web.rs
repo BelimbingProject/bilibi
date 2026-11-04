@@ -38,7 +38,7 @@ use std::{
 };
 use tokio_postgres::GenericClient;
 
-/// `core/agent_access.pages`: one adapter for the three routes; the operation
+/// `core/agent.pages`: one adapter for the three routes; the operation
 /// names the page. Every field is shared by the mounted states.
 #[derive(Clone)]
 pub struct Pages {

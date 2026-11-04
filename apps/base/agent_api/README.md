@@ -151,7 +151,7 @@ Every preview and every successful commit carries `instance` (`bilibi_system::In
 
 - `environment` is `development`, `staging` or `production` (the saved `instance.role` setting); `role` is its display word (Dev, Staging or Production); `origin` is the canonical `APP_ORIGIN`; `label` is the operator's `instance.label` setting, which defaults to the role word.
 - MCP names it too: `initialize` (`serverInfo.title` and the instructions) and the `plan` and `commit` tool descriptions in `tools/list`. `GET /.well-known/bilibi` carries the same object.
-- MCP initialization, the `plan` and `commit` tool descriptions, and the plugin skill (`core/agent_plugins`) share `REVIEW_INSTRUCTIONS`: open every review and confirmation with a full-width instance banner in HTML, or a prominent opening block in text-only hosts such as Codex CLI. Run the dry-run check, show what will change including every returned preview fact, then wait for the person’s explicit approval before committing the unchanged operations. Bilibi draws no plan review page itself; the harness does. No plugin is needed to receive this rule.
+- MCP initialization, the `plan` and `commit` tool descriptions, and the plugin skill (`core/agent`) share `REVIEW_INSTRUCTIONS`: open every review and confirmation with a full-width instance banner in HTML, or a prominent opening block in text-only hosts such as Codex CLI. Run the dry-run check, show what will change including every returned preview fact, then wait for the person’s explicit approval before committing the unchanged operations. Bilibi draws no plan review page itself; the harness does. No plugin is needed to receive this rule.
 
 An owner's commit may answer `Error::StepUpRequired` (Base Step-up). The whole commit rolls back. The edges answer `step_up_required` with the operation and reason. The client asks its human for a current 2FA code and submits the same write again with `step_up_code`. That code is used once, for that operation, and opens the agent connection's window (`apps/base/step_up/README.md`).
 
@@ -192,7 +192,7 @@ An MCP App (specification 2026-01-26, which ChatGPT and Claude implement) is an 
 
 The card calls `read`, `plan` and `commit` through the host's `tools/call` bridge, so it adds no permission path: a person who cannot reach an operation is refused inside the card exactly as an agent is. Every tool carries `openai/widgetAccessible: true` for that reason. The card tells the model what happened with `ui/update-model-context` and can post into the chat with `ui/message`; the host decides whether to pass either on. A card never frames a Bilibi page (sign-in cookies do not travel into the host's frame) and never loads a script or style from elsewhere.
 
-The first card is `base/software` (`apps/base/software/card/software-v1.html`, tool `open_software`, operation `base.software.open`). The plugin package (`core/agent_plugins`) lists each app tool in the workflow skill and writes the app's `skill` as a skill of its own.
+The first card is `base/software` (`apps/base/software/card/software-v1.html`, tool `open_software`, operation `base.software.open`). The plugin package (`core/agent`) lists each app tool in the workflow skill and writes the app's `skill` as a skill of its own.
 
 ### Editable write reviews
 
@@ -298,7 +298,7 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | `base/system.pages` | Localization changes |
 | `base/tiling.pages` | Workspace and shared layouts |
 | `base/workflow.pages` | The workflow reference page |
-| `core/agent_access.pages` | Device approval and connection revocation |
+| `core/agent.pages` | Device approval and connection revocation |
 | `core/company.pages` | Company edits, lifecycle, activities, departments, reference types; the create form records activities `core.company.create` does not take |
 | `core/geonames.pages` | Postcode corrections |
 | `core/user.pages`, `core/user.query-pages`, `core/user.administration-pages` | Accounts, passwords, 2FA, notifications, saved queries and account administration |

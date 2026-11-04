@@ -100,8 +100,7 @@ bilibi-currency = { path = "apps/core/currency" }
 bilibi-portal = { path = "apps/core/portal" }
 bilibi-product = { path = "apps/core/product" }
 bilibi-affiliation = { path = "apps/core/affiliation" }
-bilibi-agent-access = { path = "apps/core/agent_access" }
-bilibi-agent-plugins = { path = "apps/core/agent_plugins" }
+bilibi-agent = { path = "apps/core/agent" }
 bilibi-geonames = { path = "apps/core/geonames" }
 bilibi-party = { path = "apps/core/party" }
 bilibi-person = { path = "apps/core/person" }

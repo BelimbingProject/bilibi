@@ -240,7 +240,7 @@ fn initialize(id: Value, params: &Map<String, Value>, instance: &Instance) -> Ou
         json!({
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": false}, "resources": {"subscribe": false, "listChanged": false}},
-            // The name is the plugin package's (`core/agent_plugins`), so a
+            // The name is the plugin package's (`core/agent`), so a
             // host that lists servers by name tells Dev from Production.
             "serverInfo": {"name": format!("bilibi-{}", instance.slug()), "title": format!("Bilibi {} ({}) at {}", instance.label, instance.role.label(), instance.origin), "version": env!("CARGO_PKG_VERSION")},
             "instructions": format!("{} {INSTRUCTIONS} {SELF_REPORT_INSTRUCTION} {app_instruction} {} {} {}", crate::BUSINESS_CONTEXT, instance.agent_notice(), crate::INSTANCE_INSTRUCTIONS, crate::REVIEW_INSTRUCTIONS),

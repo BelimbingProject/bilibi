@@ -1,7 +1,7 @@
 //! ChatGPT, the first harness. Only the manifest format and file
 //! layout live here. The ZIP is for a ChatGPT administrator; the settings page
-//! offers the AI connections prompt instead (`core/agent_access`).
-use crate::{
+//! offers the AI connections prompt instead (`core/agent`).
+use super::{
     harness::{Harness, PackageFile},
     package::Package,
 };

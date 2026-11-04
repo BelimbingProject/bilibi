@@ -1,11 +1,11 @@
-# Agent connections (E3, E4, E5)
+# Agent
 
-`core/agent_access` owns OAuth device codes, per-person connections, opaque
+`core/agent` owns OAuth device codes, per-person connections, opaque
 access/refresh tokens and PKCE authorization codes (ADR 0021). E3 is the service layer; E4 adds the
 `/oauth/device`, `/oauth/authorize` and `/settings/ai-connections` pages
 (`src/web.rs`, `templates/`). The host OAuth metadata/device/token endpoints
 and the bearer edge (E5) live in `apps/web/src/api.rs`. Use `AgentAccess`
-(`core/agent_access.grants`, `src/lib.rs`) for every code, token and
+(`core/agent.grants`, `src/lib.rs`) for every code, token and
 connection decision; never query `core_agent_*` tables from another module or
 compare a credential yourself.
 
@@ -50,7 +50,7 @@ compare a credential yourself.
 
 ## Pages
 
-`core/agent_access.pages` serves the three signed-in routes through the discovered page contract; `src/web.rs` serves the device, authorize and connections pages, and the templates compose the shared Base UI macros in place (`askama.toml` adds `base/ui/templates` to the template path).
+`core/agent.pages` serves the three signed-in routes through the discovered page contract; `src/web.rs` serves the device, authorize and connections pages, and the templates compose the shared Base UI macros in place (`askama.toml` adds `base/ui/templates` to the template path).
 
 Both consent pages use the host's standalone review layout: the Bilibi mark, the instance banner and the review card, without the workspace menu, top bar or status bar. The authorization review also shows the configured public origin (`APP_ORIGIN`) as the Bilibi address, separately from the client's return address. Its shared form groups the connection facts, access explanation and primary approval action; Your connections stays available in the page header.
 
@@ -58,11 +58,11 @@ Opening `/oauth/device?user_code=…` only fills the code. The person reviews th
 
 When an app name matches a live connection, both consent pages show the existing connections, their approval dates, the browser and system each was approved from, and last use. Replace existing connections is selected by default; Keep both remains available. Approval needs the choice and never revokes by itself. Approve switches the resulting connection on for the approving browser session; Refuse leaves AI access unchanged. When the app exchanges the code, Replace revokes the reviewed matching connections in the same audited transaction that creates the new connection. Matching uses the stated name, which does not verify identity. Consent is browser-only; agents cannot approve connections. An approve or refuse returns `code` or `error=access_denied`, `state` and `iss` (the configured `APP_ORIGIN`; `python3 scripts/oauth-issuer-check.py <APP_ORIGIN> [--callback-url <redirect>]` checks a running instance's issuer, protected-resource metadata and callback `iss` agree). Revocation, the per-connection switch, account checks, audit and 2FA policies apply on every request.
 
-`/settings/ai-connections` lists every live connection, and one ended connection per app and approving browser (the newest) when it has no live one. **Show earlier connections** reveals the older ended rows. The table shows App, Approved from, Last used (the shared datetime component) or Not used yet, and Status. A revoked connection's status says why when it recorded a reason, such as **Revoked: you reset your password**; rows created before migration `009-connection-end-reason` say only **Revoked**. Connections never time out, so there is no Expired status. Approved from is a short browser and system label, such as Chrome on Windows; the stored user agent is never shown in the list. The self-report, Also known as and client identity fields show in the row's record view. It revokes through the shared confirmation dialog. Under the table, a **Connect an AI app** card shows the prompt directly in a copy box (`copy_box` in `base/ui`) with its own copy icon. The generated prompt names the instance once (`setup_prompt::identity`; a label that only repeats the role is not said twice), the server name and URL, then gives every app the same plain, state-aware sequence: inspect registration, add only when absent, reauthorize missing or invalid OAuth credentials, distinguish OAuth approval from the AI switch, verify with a company search and report any remaining tool-loading error. A "Trouble connecting?" fold holds the exact `claude mcp add` and `codex mcp add` commands (without client IDs) with their sign-in step, and, when `Instance::public_address` is false, the cloud-app and WSL `NODE_EXTRA_CA_CERTS` notes. When the `offers_plugin` check holds (the person's own staff session and an HTTPS `APP_ORIGIN`, the download's own checks), the fold also has the ChatGPT plugin download (the ZIP that `core/agent_plugins` serves at `PLUGIN_DOWNLOAD`) with one line on OpenAI's Secure MCP Tunnel. Impersonation and agent facets cannot set up connections. `/settings/agent-connections`, `/settings/mcp` and `/settings/chatgpt-plugin` redirect here.
+`/settings/ai-connections` lists every live connection, and one ended connection per app and approving browser (the newest) when it has no live one. **Show earlier connections** reveals the older ended rows. The table shows App, Approved from, Last used (the shared datetime component) or Not used yet, and Status. A revoked connection's status says why when it recorded a reason, such as **Revoked: you reset your password**; rows created before migration `009-connection-end-reason` say only **Revoked**. Connections never time out, so there is no Expired status. Approved from is a short browser and system label, such as Chrome on Windows; the stored user agent is never shown in the list. The self-report, Also known as and client identity fields show in the row's record view. It revokes through the shared confirmation dialog. Under the table, a **Connect an AI app** card shows the prompt directly in a copy box (`copy_box` in `base/ui`) with its own copy icon. The generated prompt names the instance once (`setup_prompt::identity`; a label that only repeats the role is not said twice), the server name and URL, then gives every app the same plain, state-aware sequence: inspect registration, add only when absent, reauthorize missing or invalid OAuth credentials, distinguish OAuth approval from the AI switch, verify with a company search and report any remaining tool-loading error. A "Trouble connecting?" fold holds the exact `claude mcp add` and `codex mcp add` commands (without client IDs) with their sign-in step, and, when `Instance::public_address` is false, the cloud-app and WSL `NODE_EXTRA_CA_CERTS` notes. When the `offers_plugin` check holds (the person's own staff session and an HTTPS `APP_ORIGIN`, the download's own checks), the fold also has the ChatGPT plugin download (the ZIP that `src/plugin/` serves at `PLUGIN_DOWNLOAD`) with one line on OpenAI's Secure MCP Tunnel. Impersonation and agent facets cannot set up connections. `/settings/agent-connections`, `/settings/mcp` and `/settings/chatgpt-plugin` redirect here.
 
 ### The AI tag in the status bar
 
-The `shell.ai` embed (`src/ai_status.rs`, `templates/ai_status.html`, operation `ai_status` of `core/agent_access.pages`) is the AI tag every signed-in person sees in the status bar's centre and the panel it opens. Web renders it into the shell and mounts it as the shell panel `#app-ai` (`apps/web/README.md`). It shows the person their own AI and nothing else:
+The `shell.ai` embed (`src/ai_status.rs`, `templates/ai_status.html`, operation `ai_status` of `core/agent.pages`) is the AI tag every signed-in person sees in the status bar's centre and the panel it opens. Web renders it into the shell and mounts it as the shell panel `#app-ai` (`apps/web/README.md`). It shows the person their own AI and nothing else:
 
 - The tag reads AI in every state. Grey means every connection is off; green means at least one connection is on. The tooltip says whether any connection is on.
 - Not connected: the same prompt as this page (`setup_prompt`), the `{origin}/mcp` address, a copy icon for each (`copy_box`, `copy_button` in `base/ui`; a check shows for a moment, and a refused copy changes nothing), and a link to the manual steps on this page. When `Instance::public_address` is false (a Dev copy, or an address only this machine or network can reach), a blue notice at the top of the panel body says to use an AI program on this computer, because AI websites and bots cannot reach it. The same Download plugin button and line as the page sit under the address.
@@ -102,7 +102,42 @@ Each app supplies its own name and redirect URIs; Bilibi checks safety and match
 
 ## Agent plugins
 
-The package builder and harness adapters live in [core/agent_plugins](../agent_plugins/README.md). Packages use discovery and automatic registration without an operator-selected client. Downloading or exporting a package grants nothing; the person's browser consent still controls access.
+`src/plugin/` builds the downloadable package that connects an agent harness to this installation's `/mcp` edge. The settings page remains AI connections and does not name a harness. Its prompt is how an agent connects itself; the ZIP is only for a ChatGPT administrator.
+
+The plugin is thin. MCP, `/api/v1`, OAuth and the agent registry remain in Base and Web; this module owns OAuth registrations, grants and connections alongside the package builder, archive, download and exporter. The manifest format and file layout stay in one adapter per harness.
+
+### Package builder
+
+- The package is named after the instance (`bilibi-staging` and "Bilibi Staging", for example). The MCP server entry, workflow skill, every skill prefix and archive carry that name so several instances do not collide in one harness.
+- `Connection` uses the canonical `APP_ORIGIN`, the `/mcp`, `/oauth/authorize` and `/oauth/token` addresses, the `bilibi` scope, PKCE S256 and automatic public client registration. It refuses anything except a bare HTTPS origin.
+- The `bilibi-<instance>` workflow skill uses the six generic tools and every registered app tool, identifies the instance, and carries the agent self-report rule from ADR 01.
+- The `bilibi-<instance>-setup` skill gives state-aware setup and recovery instructions: check registration before adding, reauthorize missing or invalid OAuth credentials, direct `ai_switched_off` to the AI connections switch, and verify with a company search.
+- The builder generates one skill per MCP App and per guide in the Agent API registry. Guide bodies remain live behind the guide tool and never enter the package.
+- The workflow opens with `bilibi_agent_api::BUSINESS_CONTEXT`. `REVIEW_INSTRUCTIONS` supplies the shared editable-review, instance-banner and explicit-approval contract to MCP initialization, plan and commit descriptions, and the plugin workflow.
+
+### Harness adapters
+
+- A `Harness` names its stable key and display name, derives the archive name from the package, and lays out the manifest, MCP configuration and skill files.
+- Adapters know formats only. They never read settings, scopes or the registry, and they do not own a settings tab.
+- ChatGPT (`src/plugin/chatgpt.rs`) emits `plugin.json`, `mcp.json` and `skills/<name>/SKILL.md`. The ZIP nests them under the package name; the exporter writes them at the folder root.
+
+To add a harness:
+
+1. Add `src/plugin/<harness>.rs` implementing `Harness` for its names, archive name, manifest, MCP configuration and skill layout.
+2. Add it to `HARNESSES` in `src/plugin/harness.rs`.
+3. Submit its `Download` contribution in `src/plugin/contributions.rs` with the harness key as the operation. Do not add a settings tab.
+4. Run the exporter, unzip the archive and check the files.
+
+The builder, archive and exporter do not change when a harness is added.
+
+### Download and exporter
+
+- AI connections remains at `/settings/ai-connections`; the plugin code serves no settings page.
+- The ChatGPT ZIP stays at `/settings/chatgpt-plugin/download`. Every request rechecks the person's own session and HTTPS origin; signed-out requests go to sign-in, impersonation or an agent facet gets 403, unexpected query fields get 400, and an HTTP `APP_ORIGIN` gets 409.
+- A public installation needs an HTTPS address ChatGPT can reach and automatic OAuth registration. A LAN or VPN installation also needs OpenAI's Secure MCP Tunnel because a VPN on a person's computer does not let ChatGPT reach Bilibi.
+- The archive contains public configuration and skills only, with no token, credential, record or executable.
+- `bilibi-web plugin-export --harness chatgpt --output <new-directory>` uses the same builder from `APP_ORIGIN`. It refuses an existing output directory, an unknown harness and an HTTP origin, and never publishes or registers the package.
+- The exporter is not a client. A general Bilibi CLI client over `/api/v1` does not exist yet.
 
 ## Injected identity
 
@@ -128,7 +163,7 @@ Against a disposable database after the host's `migrate`, run
 
 ```sh
 BILIBI_DISPOSABLE_AGENT_ACCESS_DEMO=yes DATABASE_URL=... \
-  cargo run -p bilibi-agent-access --locked --example agent-access-walkthrough
+  cargo run -p bilibi-agent --locked --example agent-access-walkthrough
 ```
 
 It prints device start, pending, `slow_down` with the growing interval, review, approval, redemption and spent receipt; digest-only storage; bearer claims and resource binding; provider access through the exact linked company's live staff desk; bounded held-company refusal; company-before-desk archive contention; agent dry-run stability across an unrelated browser desk switch; write refusal after the explicit target desk is removed; observed IDs and the 20-entry limit; refresh rotation, replay revocation and its effect on every token; refusal; receipt expiry through explicit SQL time travel; the injected account proof refusing a suspended account; owner revocation and tenant isolation; the full PKCE consent/redemption/replay path for a registered client; the host throttle; and the audit rows. It uses only its own disposable rows. Raw codes and tokens are never printed in full. This is an opt-in demonstration, not a test suite.

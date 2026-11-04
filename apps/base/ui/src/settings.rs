@@ -1,6 +1,6 @@
 //! Personal settings navigation. All six pages use the
 //! same layout and typed active tab, including the pages owned by
-//! `core/agent_access` and `base/search`.
+//! `core/agent` and `base/search`.
 use crate::Tab;
 
 /// The active section of the signed-in account's settings.

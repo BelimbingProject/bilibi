@@ -1,14 +1,14 @@
 //! The ChatGPT plugin download. The
-//! settings page lives with the person's connections in `core/agent_access`.
+//! settings page lives with the person's connections in `core/agent`.
 //! Downloading grants no access. `AgentPlugins` keeps the self-service gate
 //! at download.
-use crate::{AgentPlugins, PluginError};
+use super::{AgentPlugins, PluginError};
 use bilibi_database::Error;
 use bilibi_tenancy::Scope;
 use bilibi_ui::download::{Download, DownloadFuture, DownloadRequest, FileBody};
 use std::sync::Arc;
 
-pub const FILES: &str = "core/agent_plugins.files";
+pub const FILES: &str = "core/agent.files";
 #[derive(Clone)]
 pub struct Pages {
     pub plugins: Arc<AgentPlugins>,

@@ -1,5 +1,5 @@
 [package]
-name = "bilibi-agent-access"
+name = "bilibi-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ bilibi-records.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-audit.workspace = true
 bilibi-user.workspace = true
+bilibi-company.workspace = true
 bilibi-authz = { path = "../../base/authz" }
 bilibi-party-ids = { path = "../../base/party_ids" }
 bilibi-settings = { path = "../../base/settings" }
@@ -37,6 +38,7 @@ url.workspace = true
 base64 = "0.23.1"
 getrandom = "0.4.3"
 sha2 = "0.11.1"
+zip.workspace = true
 
 [dev-dependencies]
 bilibi-web.workspace = true

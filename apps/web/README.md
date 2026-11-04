@@ -133,7 +133,7 @@ The host owns the machine endpoints; discovered pages cannot claim them
   `/.well-known/oauth-protected-resource[/mcp]` and `/.well-known/bilibi`, all
   built from `APP_ORIGIN`, never the Host header.
 - `POST /oauth/device_authorization` and `POST /oauth/token` take urlencoded or
-  JSON fields and delegate every decision to `core/agent_access.grants`
+  JSON fields and delegate every decision to `core/agent.grants`
   (device, refresh and PKCE code grants). Errors are `400 {"error":code}`;
   storage failure is `503 temporarily_unavailable`. Each endpoint has its own
   per-sender bucket from `agent_access.oauth_requests_per_minute`. The sender
@@ -199,7 +199,7 @@ as at `/api/v1`; storage failure is `503`. Commit results whose items carry a
 `path` get an absolute `url` from `APP_ORIGIN`. Each request is one exchange
 row with operation `mcp.<tool>` or `mcp.<method>`.
 
-`review_entries` always returns its MCP App resource metadata and a same-origin browser link. The public `initialize` response explains the inline path only when the client advertises the MCP Apps MIME type, but no authorization decision relies on that public metadata. The browser route belongs to `core/agent_access`; it proves the review's owning account and the live browser-session switch on its originating connection, then bridges the shared card back to these same tools. `review_status` provides a bounded wait for text-only clients. See [Agent API](../base/agent_api/README.md#editable-write-reviews) for the security and outcome contract.
+`review_entries` always returns its MCP App resource metadata and a same-origin browser link. The public `initialize` response explains the inline path only when the client advertises the MCP Apps MIME type, but no authorization decision relies on that public metadata. The browser route belongs to `core/agent`; it proves the review's owning account and the live browser-session switch on its originating connection, then bridges the shared card back to these same tools. `review_status` provides a bounded wait for text-only clients. See [Agent API](../base/agent_api/README.md#editable-write-reviews) for the security and outcome contract.
 
 MCP uses the same retryable lock-contention body as `/api/v1`. Authentication returns it as an HTTP 422 refusal, while `plan` or `commit` returns it as an `isError` tool result.
 
@@ -213,13 +213,13 @@ The status bar shows the same facts through `bilibi_ui::version_badges`. The sch
 
 # Agent plugins
 
-AI connections (`/settings/ai-connections`) is a `core/agent_access` page, not a host route. `/settings/mcp`, `/settings/agent-connections` and `/settings/chatgpt-plugin` redirect there. The page shows this `/mcp` edge from `APP_ORIGIN`. The ChatGPT plugin download stays a `core/agent_plugins` contribution. The package is named after the instance (`bilibi-staging`, "Bilibi Staging", `bilibi-staging-chatgpt-plugin.zip`), so a person can hold a Dev, a Staging and a Production connection in one harness. The host only parses the exporter subcommand:
+AI connections (`/settings/ai-connections`) is a `core/agent` page, not a host route. `/settings/mcp`, `/settings/agent-connections` and `/settings/chatgpt-plugin` redirect there. The page shows this `/mcp` edge from `APP_ORIGIN`. The ChatGPT plugin download is another `core/agent` contribution. The package is named after the instance (`bilibi-staging`, "Bilibi Staging", `bilibi-staging-chatgpt-plugin.zip`), so a person can hold a Dev, a Staging and a Production connection in one harness. The host only parses the exporter subcommand:
 
 ```sh
 bilibi-web plugin-export --harness chatgpt --output <new-directory>
 ```
 
-See `apps/core/agent_plugins/README.md`.
+See `apps/core/agent/README.md`.
 
 # Webhooks (`src/webhooks.rs`)
 
@@ -264,7 +264,7 @@ The host compresses textual responses (`text/*`, JSON, JavaScript, XML and `+jso
 
 Shared templates use `bilibi_ui::Assets::url` for CSS, scripts and icons; CSS also links versioned fonts. See [the UI asset contract](../base/ui/assets/README.md#urls-and-browser-caching) for the catalogue and hashing rules.
 
-OAuth discovery advertises `/oauth/register` and client ID metadata documents. Public client registration, redirect matching and receipt retention belong to [Agent Access](../core/agent_access/README.md#client-registration). Startup requires HTTPS for Staging and Production; Dev permits HTTP only on loopback. Token issuance rechecks the same policy if the stored instance role changes.
+OAuth discovery advertises `/oauth/register` and client ID metadata documents. Public client registration, redirect matching and receipt retention belong to [Agent](../core/agent/README.md#client-registration). Startup requires HTTPS for Staging and Production; Dev permits HTTP only on loopback. Token issuance rechecks the same policy if the stored instance role changes.
 
 ## Desk context
 
