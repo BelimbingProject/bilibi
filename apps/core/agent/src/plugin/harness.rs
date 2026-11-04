@@ -2,7 +2,7 @@
 //! and file layout, and nothing about settings, scopes or the agent registry:
 //! the builder (`package.rs`) hands it a finished `Package`. The settings page
 //! is one MCP tab (`web.rs`), not a page per harness.
-use crate::{chatgpt::ChatGpt, package::Package};
+use super::{chatgpt::ChatGpt, package::Package};
 
 /// One file of the package, at its path relative to the plugin folder (the
 /// export directory, or the archive's top folder).

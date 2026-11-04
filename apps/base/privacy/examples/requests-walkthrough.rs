@@ -1629,10 +1629,8 @@ async fn agent(
     person: &Scope,
     label: &str,
 ) -> Result<Scope> {
-    use bilibi_core::agent_access::{AgentAccess, Decision, CLIENT_ID};
-    let access = app
-        .services
-        .get::<AgentAccess>("core/agent_access.grants")?;
+    use bilibi_core::agent::{AgentAccess, Decision, CLIENT_ID};
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
     let refused = |step: &'static str| move |error| format!("{label} {step}: {error:?}");
     let start = access
         .start_device(CLIENT_ID, label)

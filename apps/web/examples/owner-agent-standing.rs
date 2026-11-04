@@ -3,7 +3,7 @@
 //! fabricated Scope. Owner standing per ADR 01.
 //! Pass BILIBI_OWNER_ACCESS_TOKEN and BILIBI_OTHER_ACCESS_TOKEN privately in
 //! the environment; output contains outcomes only, never credentials.
-use bilibi_core::agent_access::AgentAccess;
+use bilibi_core::agent::AgentAccess;
 use bilibi_database::pool;
 use bilibi_tenancy::{prove_operator, prove_owner};
 
@@ -14,9 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     let app = bilibi_web::App::new(db.clone(), &std::env::var("APP_ORIGIN")?)?;
-    let access = app
-        .services
-        .get::<AgentAccess>("core/agent_access.grants")?;
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
     let owner_claims = access
         .authenticate(&std::env::var("BILIBI_OWNER_ACCESS_TOKEN")?, None)
         .await?;

@@ -1,7 +1,7 @@
 //! The ChatGPT plugin download. The settings page is AI connections in
-//! `core/agent_access`. Every signed-in person may download; `AgentPlugins`
+//! `core/agent`. Every signed-in person may download; `AgentPlugins`
 //! keeps the self-service gate and the client check.
-use crate::web::FILES;
+use super::web::FILES;
 use bilibi_module_registry::{
     contributions::{Access, Download, DOWNLOADS},
     Contribution, Provenance,
@@ -9,7 +9,7 @@ use bilibi_module_registry::{
 macro_rules! provenance {
     () => {
         Provenance {
-            module: "core/agent_plugins",
+            module: "core/agent",
             source: file!(),
             line: line!(),
         }
@@ -18,6 +18,6 @@ macro_rules! provenance {
 
 // ChatGPT (`chatgpt.rs`): the operation is the harness key. The ZIP is not a
 // generic MCP download. AI connections and the status bar link it.
-inventory::submit! { Contribution::new(DOWNLOADS, "core/agent_plugins.chatgpt.download", provenance!(), &Download {
-    path: bilibi_agent_access::PLUGIN_DOWNLOAD, service: FILES, operation: "chatgpt", access: Access::SignedIn,
+inventory::submit! { Contribution::new(DOWNLOADS, "core/agent.chatgpt.download", provenance!(), &Download {
+    path: crate::PLUGIN_DOWNLOAD, service: FILES, operation: "chatgpt", access: Access::SignedIn,
 }) }

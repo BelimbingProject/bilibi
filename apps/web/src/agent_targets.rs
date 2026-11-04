@@ -1,6 +1,6 @@
 //! What an agent request operated on, recorded with its exchange row so the
 //! person's AI panel can say "Read 12 companies" instead of "Read records"
-//! (`core/agent_access` `ai_status.rs` is the reader). Facts only: the
+//! (`core/agent` `ai_status.rs` is the reader). Facts only: the
 //! operation's registry key, the record kind its key belongs to
 //! (`Records::kind_of_operation`), how many records, and the id when it was
 //! exactly one. A name is looked up when it is shown, with the reader's own

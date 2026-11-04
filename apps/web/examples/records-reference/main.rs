@@ -41,7 +41,7 @@ mod notes;
 
 use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
 use bilibi_base::authz::grants::Grants;
-use bilibi_core::agent_access::{
+use bilibi_core::agent::{
     code_challenge, AgentAccess, AuthorizeParams, ClientRegistration, CodeExchange, Decision,
     CLIENT_ID,
 };
@@ -521,9 +521,7 @@ async fn agent_token(
     db: &bilibi_database::Db,
     scope: &Scope,
 ) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let access = app
-        .services
-        .get::<AgentAccess>("core/agent_access.grants")?;
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
     let start = access.start_device(CLIENT_ID, "records-reference").await?;
     access
         .decide(scope, &start.user_code, Decision::Approve)
@@ -837,9 +835,7 @@ async fn mcp_token(
     scope: &Scope,
     origin: &str,
 ) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let access = app
-        .services
-        .get::<AgentAccess>("core/agent_access.grants")?;
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
     let resource = format!("{}/mcp", origin.trim_end_matches('/'));
     let callback = "https://agent.example/callback";
     let registration: ClientRegistration = serde_json::from_value(

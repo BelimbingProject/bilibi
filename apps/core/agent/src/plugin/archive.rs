@@ -1,6 +1,6 @@
 //! The in-memory ZIP and the
 //! exporter's directory writer. No temporary file is written for a download.
-use crate::harness::PackageFile;
+use super::harness::PackageFile;
 use std::{
     io::{Cursor, Write},
     path::Path,

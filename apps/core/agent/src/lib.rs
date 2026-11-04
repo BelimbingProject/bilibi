@@ -10,6 +10,7 @@
 mod ai_status;
 mod contributions;
 mod oauth_client;
+mod plugin;
 mod provider;
 use provider::prove_provider;
 mod registration;
@@ -19,6 +20,9 @@ mod throttle;
 mod web;
 pub use contributions::MANAGE;
 pub use oauth_client::{proof, AuthorizationRequest, AuthorizeParams, ClientRegistration};
+pub use plugin::{
+    AgentPlugins, Archive, ExportError, Harness, PackageFile, PluginError, PLUGIN_SERVICE, USAGE,
+};
 /// `code_challenge` is the S256 form a public client sends for its verifier.
 pub use secrets::{digest_base64 as code_challenge, normalize_user_code};
 pub use throttle::Throttle;
@@ -39,7 +43,7 @@ use tokio_postgres::{Row, Transaction};
 
 /// The built-in public client: no secret and no installation registration.
 pub const CLIENT_ID: &str = "bilibi-native";
-/// The ChatGPT plugin ZIP, served by `core/agent_plugins`. It lives here so the
+/// The ChatGPT plugin ZIP, served by `core/agent`. It lives here so the
 /// AI connections page and the status bar link the address the download owns.
 pub const PLUGIN_DOWNLOAD: &str = "/settings/chatgpt-plugin/download";
 pub const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -216,7 +220,7 @@ async fn replace_connections(
         })
         .collect())
 }
-/// `core/agent_access.grants`: the owner API behind the device, consent,
+/// `core/agent.grants`: the owner API behind the device, consent,
 /// token and connection pages and the host OAuth endpoints.
 pub struct AgentAccess {
     db: Db,
@@ -1663,10 +1667,10 @@ impl bilibi_tenancy::AgentVerifier for GrantVerifier {
 
 inventory::submit! {
     bilibi_module_registry::Module {
-        id: "core/agent_access", layer: bilibi_module_registry::Layer::Core,
+        id: "core/agent", layer: bilibi_module_registry::Layer::Core,
         dependencies: &["base/database", "base/settings", "base/session", "base/tenancy", "base/integration", "base/agent_api", "base/records", "base/audit", "base/authz", "base/party_ids", "base/ui", "base/datetime", "base/locale", "base/system", "base/step_up", "core/user", "core/company"],
         migrations: &[MIGRATION, SELF_REPORT_MIGRATION, ("core-agent-access-003-client-identity", include_str!("../migrations/003-client-identity.sql")), ("core-agent-access-004-client-registration", include_str!("../migrations/004-client-registration.sql")), ("core-agent-access-005-provider-access", include_str!("../migrations/005-provider-access.sql")), ("core-agent-access-006-session-switch", include_str!("../migrations/006-session-switch.sql")), ("core-agent-access-007-session-holder-id", include_str!("../migrations/007-session-holder-id.sql")), ("core-agent-access-008-pending-authorization", include_str!("../migrations/008-pending-authorization.sql")), ("core-agent-access-009-connection-end-reason", include_str!("../migrations/009-connection-end-reason.sql")), ("core-agent-access-010-approved-session", include_str!("../migrations/010-approved-session.sql"))],
-        services: &[bilibi_module_registry::Service { id: "core/agent_access.grants", factory: |services| {
+        services: &[bilibi_module_registry::Service { id: "core/agent.grants", factory: |services| {
             let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
             let users = services.get::<bilibi_user::UserService>("core/user.accounts")?;
             authentication.bind_agents(Arc::new(GrantVerifier(users.clone())))?;
@@ -1684,9 +1688,9 @@ inventory::submit! {
             connections: tokio::sync::broadcast::channel(128).0,
             session_bridge: std::sync::Once::new(),
             });
-            services.get::<bilibi_session::Sessions>("base/session.sessions")?.register_credential_revoker("core.agent_access", access.clone())?;
-            Ok(access) } }, bilibi_module_registry::Service { id: "core/agent_access.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::Pages {
-            access: services.get("core/agent_access.grants")?,
+            services.get::<bilibi_session::Sessions>("base/session.sessions")?.register_credential_revoker("core.agent", access.clone())?;
+            Ok(access) } }, bilibi_module_registry::Service { id: "core/agent.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::Pages {
+            access: services.get("core/agent.grants")?,
             db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
             display: services.get("base/datetime.display")?,
             locales: services.get("base/locale.locales")?,
@@ -1698,14 +1702,23 @@ inventory::submit! {
             reviews: services.get("base/agent_api.reviews")?,
             step_up: services.get(bilibi_step_up::SERVICE)?,
             records: services.get(bilibi_records::SERVICE)?,
+        })))) },
+        bilibi_module_registry::Service { id: plugin::PLUGIN_SERVICE, factory: |services| Ok(Arc::new(AgentPlugins {
+            registry: services.get("base/agent_api.registry")?,
+            db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+            settings: services.get("base/settings.store")?,
+            origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
+        })) },
+        bilibi_module_registry::Service { id: plugin::web::FILES, factory: |services| Ok(Arc::new(bilibi_ui::download::DownloadService(Arc::new(plugin::web::Pages {
+            plugins: services.get(plugin::PLUGIN_SERVICE)?,
         })))) }],
     }
 }
 
 // ADR 01 gap, listed so it stays visible: these pages still write through
 // the facade rather than an operation contract (`base/agent_api` page).
-inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/agent_access.pages", bilibi_module_registry::Provenance { module: "core/agent_access", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
-    service: "core/agent_access.pages",
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/agent.pages", bilibi_module_registry::Provenance { module: "core/agent", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
+    service: "core/agent.pages",
     contracts: &[],
     pending: bilibi_module_registry::contributions::Pending::Every { reason: "Approving devices and revoking connections write through Agent Access; no contract yet." },
 }) }

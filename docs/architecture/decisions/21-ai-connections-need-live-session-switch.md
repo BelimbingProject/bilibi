@@ -18,4 +18,4 @@ The status-bar AI tag is grey when every connection is off and green when at lea
 
 Approval is the first switch-on because it is already an explicit, guarded decision by the signed-in owner. Refusal does not change AI access. This chooses security over the convenience of a connection that stays active away from the browser. We rejected a fixed connection expiry because it leaves unattended access until an arbitrary date. We also rejected a device cookie because pairing a browser and AI client is harder to explain and cannot prove that the person still has a live signed-in session.
 
-The operating contract is in [Core Agent Access](../../../apps/core/agent_access/README.md).
+The operating contract is in [Core Agent](../../../apps/core/agent/README.md).

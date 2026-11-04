@@ -4184,7 +4184,7 @@ core-user-test
 core/a
 core/address
 core/address-owned
-core/agent_access
+core/agent
 core/ai
 core/b
 core/company

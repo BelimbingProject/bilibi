@@ -27,7 +27,7 @@ use bilibi_base::{
     settings::Settings,
     tenancy::{ClientIdentity, ProofFuture, Scope, SelfReport},
 };
-use bilibi_core::agent_access::{
+use bilibi_core::agent::{
     AgentAccess, AgentClaims, ClientRegistration, CodeExchange, OAuthError, Throttle, CLIENT_ID,
     DEVICE_GRANT, OAUTH_REQUESTS_PER_MINUTE, OAUTH_SCOPE,
 };
@@ -80,7 +80,7 @@ pub struct Edge {
 impl Edge {
     pub fn new(services: &bilibi_module_registry::Services) -> bilibi_database::Result<Self> {
         Ok(Self {
-            access: services.get("core/agent_access.grants")?,
+            access: services.get("core/agent.grants")?,
             registry: services.get("base/agent_api.registry")?,
             plans: services.get("base/agent_api.plans")?,
             reviews: services.get("base/agent_api.reviews")?,
@@ -266,8 +266,7 @@ pub(crate) fn client_identity(headers: &HeaderMap, mcp: bool) -> Option<ClientId
 pub(crate) fn label(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let value = values.next()?.to_str().ok()?;
-    (values.next().is_none() && bilibi_core::agent_access::valid_label(value))
-        .then(|| value.to_owned())
+    (values.next().is_none() && bilibi_core::agent::valid_label(value)).then(|| value.to_owned())
 }
 
 /// Absolute links belong to the host; operations return paths. Every record
