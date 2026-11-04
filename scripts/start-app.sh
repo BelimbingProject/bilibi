@@ -9,6 +9,8 @@ if [[ ${BILIBI_FRONT_DOOR:-} != 1 ]]; then
     exec "$root/bilibi" start
 fi
 cd "$root"
+# shellcheck source=scripts/lib/prerequisites.sh
+source "$root/scripts/lib/prerequisites.sh"
 # Settings come from the shell, then the gitignored .env beside the ./bilibi
 # you ran, then defaults; .env.example lists the lines .env accepts. This also
 # resolves BILIBI_DEV_HOST, the instance's own <name>.localhost (scripts/dev-env.py).
@@ -76,7 +78,7 @@ done
 cargo watch --version >/dev/null 2>&1 || { echo 'Missing prerequisite: cargo-watch. Run ./bilibi setup' >&2; exit 1; }
 echo "$(rustc --version); $(cargo --version)"
 if [[ -z ${DATABASE_URL:-} ]]; then
-    pg_bin=${PG18_BIN:-/usr/lib/postgresql/18/bin}
+    pg_bin=$(postgres_bin)
     [[ -x "$pg_bin/initdb" && -x "$pg_bin/pg_ctl" ]] || {
         echo 'Missing prerequisite: PostgreSQL 18 binaries. Run ./bilibi setup (or set DATABASE_URL).' >&2
         exit 1
