@@ -183,8 +183,11 @@ A Domain such as Finance is its own repository, mounted as a real folder (not a 
 
 ```sh
 ./bilibi add finance
+./bilibi add commerce
 ./bilibi start
 ```
+
+Commerce adds Products, Quotations and Sales orders under the Commerce menu.
 
 `add` uses the official repository's default branch. Repeating it keeps an existing checkout, branch and edits, and refreshes discovery and the working dependency lock. A conflicting destination or different origin is refused for you to inspect. Generated composition and lock changes stay local to Platform. Software's developer commands add `--kind`, `--source` and `--commit` so the clone is the exact repository and release commit it shows; an existing folder at another commit is left unchanged with the steps to move it.
 
