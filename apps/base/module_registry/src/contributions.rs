@@ -293,9 +293,9 @@ pub const PORTAL: &str = "/portal";
 pub const PORTAL_HOST: [&str; 8] = [
     "sign-in", "sign-out", "forgot", "reset", "accept", "register", "verify", "live",
 ];
-/// The portal's owner, Core Customer Access, alone serves the portal home
+/// The portal's owner, Core Portal, alone serves the portal home
 /// (`/portal`) and the customer's account (`/portal/account/...`).
-pub const PORTAL_OWNER: &str = "core/customer_access";
+pub const PORTAL_OWNER: &str = "core/portal";
 const PORTAL_OWNED: [&str; 1] = ["account"];
 /// Whether `path` lies in the portal's route space.
 pub fn in_portal(path: &str) -> bool {

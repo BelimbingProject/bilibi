@@ -1,4 +1,4 @@
-//! Customer accounts (ADR 16): the account commands Core Customer Access
+//! Customer accounts (ADR 16): the account commands Core Portal
 //! calls when a customer accepts an invitation, and the portal's forgotten
 //! password. Core User stays the only writer of `users` and credentials; the
 //! invitation, its token and the tenant it names belong to the caller.
@@ -256,7 +256,7 @@ impl UserService {
     }
 
     /// Revokes (`active` false) or restores a customer's portal access inside
-    /// the caller's audited transaction, for Core Customer Access, which has
+    /// the caller's audited transaction, for Core Portal, which has
     /// authorized its own capability: the account is suspended, so it cannot
     /// sign in and fails its standing, and every session it holds ends at
     /// once. Restoring lets it sign in again; no session comes back. Only a

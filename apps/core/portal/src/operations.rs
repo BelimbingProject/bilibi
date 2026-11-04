@@ -1,12 +1,12 @@
-//! The customer access operations agents may call
-//! (`core.customer_access.*`): thin adapters over the `CustomerAccess` facade
+//! The portal operations agents may call
+//! (`core.portal.*`): thin adapters over the `PortalService` facade
 //! with the sealed scope the registry proved. Reads return the portal site and
 //! the invitations; every write is a reviewed safe write whose preview shares
 //! the facade's checks without writing and whose commit writes through the
 //! plan's audited transaction. The staff page calls the same contracts. Same
 //! shape as `core/currency`.
 use crate::{
-    facade::{Checked, CustomerAccess, FieldError, InvitationInput, LogoChange, SiteInput},
+    facade::{Checked, FieldError, InvitationInput, LogoChange, PortalService, SiteInput},
     MANAGE, VIEW,
 };
 use bilibi_agent_api::{
@@ -24,27 +24,25 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-pub const SITE_GET: &str = "core.customer_access.site.get";
-pub const SITE_SET: &str = "core.customer_access.site.set";
-pub const LIST: &str = "core.customer_access.invitation.list";
-pub const INVITE: &str = "core.customer_access.invitation.create";
-pub const REVOKE: &str = "core.customer_access.invitation.revoke";
-pub const ACCOUNTS: &str = "core.customer_access.account.list";
-pub const ACCOUNT_REVOKE: &str = "core.customer_access.account.revoke";
-pub const ACCOUNT_RESTORE: &str = "core.customer_access.account.restore";
-pub const REGISTRATIONS: &str = "core.customer_access.registration.list";
-pub const APPROVE: &str = "core.customer_access.registration.approve";
-pub const REJECT: &str = "core.customer_access.registration.reject";
+pub const SITE_GET: &str = "core.portal.site.get";
+pub const SITE_SET: &str = "core.portal.site.set";
+pub const LIST: &str = "core.portal.invitation.list";
+pub const INVITE: &str = "core.portal.invitation.create";
+pub const REVOKE: &str = "core.portal.invitation.revoke";
+pub const ACCOUNTS: &str = "core.portal.account.list";
+pub const ACCOUNT_REVOKE: &str = "core.portal.account.revoke";
+pub const ACCOUNT_RESTORE: &str = "core.portal.account.restore";
+pub const REGISTRATIONS: &str = "core.portal.registration.list";
+pub const APPROVE: &str = "core.portal.registration.approve";
+pub const REJECT: &str = "core.portal.registration.reject";
 
-static BOUND: OnceLock<Arc<CustomerAccess>> = OnceLock::new();
-pub(crate) fn bind(access: Arc<CustomerAccess>) -> bilibi_module_registry::Result<()> {
+static BOUND: OnceLock<Arc<PortalService>> = OnceLock::new();
+pub(crate) fn bind(access: Arc<PortalService>) -> bilibi_module_registry::Result<()> {
     BOUND.set(access).map_err(|_| {
-        bilibi_module_registry::RegistryError::Service(
-            "duplicate customer access agent binding".into(),
-        )
+        bilibi_module_registry::RegistryError::Service("duplicate portal agent binding".into())
     })
 }
-fn access() -> bilibi_agent_api::Result<&'static CustomerAccess> {
+fn access() -> bilibi_agent_api::Result<&'static PortalService> {
     BOUND.get().map(Arc::as_ref).ok_or(Error::Internal.into())
 }
 fn checked<T>(checked: Checked<T>) -> bilibi_agent_api::Result<T> {
@@ -128,7 +126,7 @@ enum Read {
 }
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
-        "core/customer_access"
+        "core/portal"
     }
     fn call<'a>(
         &'a self,
@@ -213,7 +211,7 @@ enum Write {
 }
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
-        "core/customer_access"
+        "core/portal"
     }
     fn preview<'a>(
         &'a self,
@@ -390,19 +388,19 @@ fn account_json(account: &bilibi_user::CustomerAccount) -> Value {
 }
 fn approve_schema() -> Value {
     json!({"type":"object","required":["id","person_id"],"properties":{
-        "id":{"type":"integer","minimum":1,"description":"The request's id, from core.customer_access.registration.list."},
+        "id":{"type":"integer","minimum":1,"description":"The request's id, from core.portal.registration.list."},
         "person_id":{"type":"integer","minimum":1,"description":"The Person the customer signs in as: match or create it with the person operations first."},
         "affiliation_id":{"type":"integer","minimum":1,"description":"For a business customer, the Person's affiliation with its company. Leave it out for a private individual."},
     }})
 }
 fn reject_schema() -> Value {
-    json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1,"description":"The request's id, from core.customer_access.registration.list."}}})
+    json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1,"description":"The request's id, from core.portal.registration.list."}}})
 }
 fn registrations_output() -> Value {
     json!({"type":"array","items":{"type":"object","description":"id, name, email, company_name (as typed, not a company record), status (unverified, waiting, approved, rejected or expired) and invitation_id once approved."}})
 }
 fn account_schema() -> Value {
-    json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1,"description":"The customer account's id, from core.customer_access.account.list."}}})
+    json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1,"description":"The customer account's id, from core.portal.account.list."}}})
 }
 fn accounts_output() -> Value {
     json!({"type":"array","items":{"type":"object","description":"id, name, email, person_id, company_id (null for a private customer) and active (false once access is revoked)."}})
@@ -417,8 +415,8 @@ fn record_output() -> Value {
     json!({"type":"object","description":"The saved record. An invitation's link is emailed, never returned."})
 }
 
-const MODULE: &str = "core/customer_access";
-inventory::submit! { Contribution::new(DEFINITIONS, "core/customer_access.agent", Provenance { module: MODULE, source: file!(), line: line!() }, &Definitions {
+const MODULE: &str = "core/portal";
+inventory::submit! { Contribution::new(DEFINITIONS, "core/portal.agent", Provenance { module: MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
         Operation { key: SITE_GET, title: "Read the customer portal site", summary: "The portal address and title of this tenant's customer portal, or null when none is set.", keywords: &["portal", "customer", "site", "address"], capability: VIEW, input: empty_schema, output: site_output, handler: Handler::Read(&Read::Site), channels: Channels::Every, step_up: &[] },
         Operation { key: SITE_SET, title: "Set the customer portal site", summary: "Set the address customers sign in at (/portal/sign-in/{address}), the title they see, and whether the portal is on. A new site starts off. Changing the address breaks links already emailed.", keywords: &["portal", "customer", "site", "address", "title"], capability: MANAGE, input: site_schema, output: record_output, handler: Handler::SafeWrite(&Write::Site), channels: Channels::Every, step_up: &[] },
@@ -428,10 +426,10 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/customer_access.agent"
         Operation { key: APPROVE, title: "Approve a request for a customer account", summary: "Approve a confirmed request: the customer is invited as the Person you choose (and through one of its affiliations for a business customer), with the request's name and confirmed address. Match or create the Person first.", keywords: &["portal", "customer", "registration", "request", "approve", "invite"], capability: MANAGE, input: approve_schema, output: record_output, handler: Handler::SafeWrite(&Write::Approve), channels: Channels::Every, step_up: &[] },
         Operation { key: REJECT, title: "Reject a request for a customer account", summary: "Reject a confirmed request. The person is not told, and may ask again.", keywords: &["portal", "customer", "registration", "request", "reject"], capability: MANAGE, input: reject_schema, output: record_output, handler: Handler::SafeWrite(&Write::Reject), channels: Channels::Every, step_up: &[] },
         Operation { key: ACCOUNTS, title: "List customer accounts", summary: "This tenant's customer portal accounts, newest first, with whether each still has access.", keywords: &["portal", "customer", "account", "access"], capability: VIEW, input: list_schema, output: accounts_output, handler: Handler::Read(&Read::Accounts), channels: Channels::Every, step_up: &[] },
-        Operation { key: ACCOUNT_REVOKE, title: "Revoke a customer's portal access", summary: "Suspend a customer account: it cannot sign in, and every portal session it holds ends at once. Restore it with core.customer_access.account.restore.", keywords: &["portal", "customer", "account", "revoke", "suspend", "access"], capability: MANAGE, input: account_schema, output: record_output, handler: Handler::SafeWrite(&Write::Access(false)), channels: Channels::Every, step_up: &[] },
+        Operation { key: ACCOUNT_REVOKE, title: "Revoke a customer's portal access", summary: "Suspend a customer account: it cannot sign in, and every portal session it holds ends at once. Restore it with core.portal.account.restore.", keywords: &["portal", "customer", "account", "revoke", "suspend", "access"], capability: MANAGE, input: account_schema, output: record_output, handler: Handler::SafeWrite(&Write::Access(false)), channels: Channels::Every, step_up: &[] },
         Operation { key: ACCOUNT_RESTORE, title: "Restore a customer's portal access", summary: "Let a revoked customer account sign in again. No session comes back; the customer signs in.", keywords: &["portal", "customer", "account", "restore", "access"], capability: MANAGE, input: account_schema, output: record_output, handler: Handler::SafeWrite(&Write::Access(true)), channels: Channels::Every, step_up: &[] },
         Operation { key: REVOKE, title: "Revoke a customer invitation", summary: "Stop a pending invitation's link from working. An account already made from an accepted invitation is not touched.", keywords: &["portal", "customer", "invitation", "revoke", "cancel"], capability: MANAGE, input: revoke_schema, output: record_output, handler: Handler::SafeWrite(&Write::Revoke), channels: Channels::Every, step_up: &[] },
     ],
-    guides: &[Guide { key: "core.customer_access", title: "Customer portal access", summary: "How a tenant's customers get into its portal: the portal site, invitations and what a customer can reach.", keywords: &["portal", "customer", "invitation", "site"], capability: VIEW,
-        body: "A tenant's customers sign in to its portal, never to the staff application. First set the portal site with core.customer_access.site.set: an address such as acme (customers sign in at /portal/sign-in/acme), the title they see, and enabled true to turn it on; a portal is off until then, and while off its pages answer 404 and invitations are refused. Read it with core.customer_access.site.get.\n\nA customer account always belongs to a Person. Invite one with core.customer_access.invitation.create: the person_id, the name and email, and for a business customer the affiliation_id of the company it signs in through. The person gets an email with a one-time link to choose a password; the link expires after the tenant's invitation lifetime (7 days by default). Inviting the same address again replaces the earlier link. List invitations and their status with core.customer_access.invitation.list and stop a pending one with core.customer_access.invitation.revoke. List the accounts customers made with core.customer_access.account.list; core.customer_access.account.revoke ends a customer's access and sessions at once, and core.customer_access.account.restore gives it back.\n\nWhen the site has registration on, people may ask for an account at /portal/register/{address}. A request is confirmed by an emailed link, then waits for staff: list them with core.customer_access.registration.list, approve one with core.customer_access.registration.approve (choose the Person, matching or creating it first, and for a business customer its affiliation; this sends the invitation) or reject it with core.customer_access.registration.reject. The company name on a request is only what the person typed; nothing is created from it.\n\nA customer sees only portal pages and only its own records; it cannot open staff pages or connect an agent. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
+    guides: &[Guide { key: "core.portal", title: "Customer portal access", summary: "How a tenant's customers get into its portal: the portal site, invitations and what a customer can reach.", keywords: &["portal", "customer", "invitation", "site"], capability: VIEW,
+        body: "A tenant's customers sign in to its portal, never to the staff application. First set the portal site with core.portal.site.set: an address such as acme (customers sign in at /portal/sign-in/acme), the title they see, and enabled true to turn it on; a portal is off until then, and while off its pages answer 404 and invitations are refused. Read it with core.portal.site.get.\n\nA customer account always belongs to a Person. Invite one with core.portal.invitation.create: the person_id, the name and email, and for a business customer the affiliation_id of the company it signs in through. The person gets an email with a one-time link to choose a password; the link expires after the tenant's invitation lifetime (7 days by default). Inviting the same address again replaces the earlier link. List invitations and their status with core.portal.invitation.list and stop a pending one with core.portal.invitation.revoke. List the accounts customers made with core.portal.account.list; core.portal.account.revoke ends a customer's access and sessions at once, and core.portal.account.restore gives it back.\n\nWhen the site has registration on, people may ask for an account at /portal/register/{address}. A request is confirmed by an emailed link, then waits for staff: list them with core.portal.registration.list, approve one with core.portal.registration.approve (choose the Person, matching or creating it first, and for a business customer its affiliation; this sends the invitation) or reject it with core.portal.registration.reject. The company name on a request is only what the person typed; nothing is created from it.\n\nA customer sees only portal pages and only its own records; it cannot open staff pages or connect an agent. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
 }) }

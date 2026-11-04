@@ -1,8 +1,8 @@
-//! `/customer-access` (`core/customer_access.pages`, operation
-//! `customer_access`): the tenant's customer portal site (and whether it is
+//! `/customer-access` (`core/portal.pages`, operation
+//! `portal`): the tenant's customer portal site (and whether it is
 //! on), its invitations and the customer accounts they made.
 //! The page follows the tenants list of
-//! `core/tenant_administration` (a FlexTable on ListState and an add dialog)
+//! `core/tenant` (a FlexTable on ListState and an add dialog)
 //! and the account create form of `core/user` (a Person, then one of its
 //! affiliations).
 //!
@@ -11,7 +11,7 @@
 //! contracts agents call (`operations.rs`), so a page and an agent are
 //! refused alike. A refusal is a flash or a field error, never a cleared page.
 use crate::{
-    facade::{CustomerAccess, Invitation, Site, Status},
+    facade::{Invitation, PortalService, Site, Status},
     operations::{ACCOUNT_RESTORE, ACCOUNT_REVOKE, APPROVE, INVITE, REJECT, REVOKE, SITE_SET},
     registration::RegistrationStatus,
     MANAGE, PAGES,
@@ -44,7 +44,7 @@ use std::{
 /// The record kind the invite dialog's picker searches (`core/person`).
 const PERSON_KIND: &str = "person";
 /// The drop target of the invite review (`lib.rs`, `bilibi_records::drop_target!`).
-pub(crate) const INVITE_TARGET: &str = "customer_access.invite";
+pub(crate) const INVITE_TARGET: &str = "portal.invite";
 const DENIED: &str = "You do not have permission to manage the customer portal.";
 const PAGE_SIZES: [u64; 3] = [25, 50, 100];
 /// The largest portal logo. Media's own limit still applies.
@@ -143,7 +143,7 @@ fn builtins() -> Vec<BuiltinColumn> {
 #[derive(Clone)]
 pub struct Pages {
     pub db: Db,
-    pub access: Arc<CustomerAccess>,
+    pub access: Arc<PortalService>,
     pub persons: Arc<bilibi_person::PersonService>,
     pub records: Arc<bilibi_records::Records>,
     pub affiliations: Arc<bilibi_affiliation::AffiliationService>,
@@ -209,7 +209,7 @@ struct InviteForm {
 }
 
 #[derive(Template)]
-#[template(path = "customer_access.html")]
+#[template(path = "portal.html")]
 struct View<'a> {
     flash: FlashMap<'a>,
     actions: Html,
@@ -226,7 +226,7 @@ struct View<'a> {
     reject: bool,
 }
 
-struct CustomerAccessPage {
+struct PortalPage {
     pages: Pages,
     list: ListState,
     columns: ListColumns,
@@ -289,7 +289,7 @@ fn optional_id<T>(value: Option<&String>, make: impl Fn(i64) -> Option<T>) -> Re
     }
 }
 
-impl CustomerAccessPage {
+impl PortalPage {
     fn new(pages: &Pages, query: &HashMap<String, String>) -> Result<Self> {
         Ok(Self {
             pages: pages.clone(),
@@ -1070,7 +1070,7 @@ impl CustomerAccessPage {
 
     /// Opens the invitation review on a dropped contact. The package is a
     /// request only: `Records::receive` re-reads it under this person's scope,
-    /// and the review commits `core.customer_access.invitation.create`, which
+    /// and the review commits `core.portal.invitation.create`, which
     /// decides again.
     async fn receive_drop(&mut self, scope: &Scope, text: &str) -> Result<()> {
         if !self.can_manage(scope).await? {
@@ -1591,15 +1591,15 @@ impl CustomerAccessPage {
 
 impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
-        (operation == "customer_access").then_some("Customer portal")
+        (operation == "portal").then_some("Customer portal")
     }
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
-            if request.operation != "customer_access" {
+            if request.operation != "portal" {
                 return Err(Error::NotFound);
             }
             let scope = request.scope.ok_or(Error::Unauthorized)?;
-            let mut page = CustomerAccessPage::new(self, request.query)?;
+            let mut page = PortalPage::new(self, request.query)?;
             page.open_dropped(scope, request.query).await?;
             let html = page.body(scope).await?;
             Ok(PageBody {
@@ -1618,11 +1618,11 @@ impl Page<Scope, Error> for Pages {
                 );
                 return Ok(Some(state));
             }
-            if request.operation != "customer_access" {
+            if request.operation != "portal" {
                 return Err(Error::NotFound);
             }
             let scope = request.scope.ok_or(Error::Unauthorized)?;
-            let mut page = CustomerAccessPage::new(self, request.query)?;
+            let mut page = PortalPage::new(self, request.query)?;
             page.open_dropped(scope, request.query).await?;
             let state: Box<dyn LiveState<Scope, Error>> = Box::new(page);
             Ok(Some(state))
@@ -1630,7 +1630,7 @@ impl Page<Scope, Error> for Pages {
     }
 }
 
-impl LiveState<Scope, Error> for CustomerAccessPage {
+impl LiveState<Scope, Error> for PortalPage {
     fn uploads(&mut self) -> Option<&mut bilibi_ui::Uploads> {
         Some(&mut self.uploads)
     }

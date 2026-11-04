@@ -1,5 +1,5 @@
 //! Sealed identities for a single unit of work. No Base query of Core tables.
-//! Core Tenant Administration composes its pages.
+//! Core Tenant composes its pages.
 mod admin;
 mod oversight;
 mod party_identity;

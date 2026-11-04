@@ -8,8 +8,8 @@
 //! addresses.
 use crate::{
     facade::{
-        digest, field, new_token, normalize_email, token_shaped, Checked, CustomerAccess,
-        FieldError, Invitation, InvitationInput, Site, PRINCIPAL, SITE_COLUMNS,
+        digest, field, new_token, normalize_email, token_shaped, Checked, FieldError, Invitation,
+        InvitationInput, PortalService, Site, PRINCIPAL, SITE_COLUMNS,
     },
     MANAGE, REGISTRATION_DAYS_KEY, VIEW,
 };
@@ -127,7 +127,7 @@ async fn open_site(client: &(impl GenericClient + Sync), address: &str) -> Resul
         .map(|row| Site::from_row(&row)))
 }
 
-impl CustomerAccess {
+impl PortalService {
     /// Whether the portal at `address` takes requests for an account; its
     /// register page answers 404 otherwise.
     pub async fn registration_site(&self, address: &str) -> Result<Option<Site>> {
@@ -190,11 +190,7 @@ impl CustomerAccess {
             .mutations
             .begin(
                 &mut client,
-                Context::system(
-                    tenant,
-                    PRINCIPAL,
-                    "core.customer_access.registration.request",
-                ),
+                Context::system(tenant, PRINCIPAL, "core.portal.registration.request"),
             )
             .await?;
         let (insert_name, insert_email, insert_company) =
@@ -211,7 +207,7 @@ impl CustomerAccess {
                         .await?
                     {
                         changes.push(Change {
-                            kind: "customer_access.registration".into(),
+                            kind: "portal.registration".into(),
                             id: row.get(0),
                             old: json!({"status": "unverified"}),
                             new: json!(null),
@@ -232,7 +228,7 @@ impl CustomerAccess {
                     };
                     let id: i64 = inserted.get(0);
                     changes.push(Change {
-                        kind: "customer_access.registration".into(),
+                        kind: "portal.registration".into(),
                         id,
                         old: json!(null),
                         new: json!({"name": insert_name, "email": insert_email, "company_name": insert_company, "status": "unverified"}),
@@ -304,11 +300,7 @@ impl CustomerAccess {
             .mutations
             .begin(
                 &mut client,
-                Context::system(
-                    tenant,
-                    PRINCIPAL,
-                    "core.customer_access.registration.verify",
-                ),
+                Context::system(tenant, PRINCIPAL, "core.portal.registration.verify"),
             )
             .await?;
         let verified = tx
@@ -323,7 +315,7 @@ impl CustomerAccess {
                     let changes = row
                         .as_ref()
                         .map(|row| Change {
-                            kind: "customer_access.registration".into(),
+                            kind: "portal.registration".into(),
                             id: row.get(0),
                             old: json!({"status": "unverified"}),
                             new: json!({"status": "waiting"}),
@@ -473,7 +465,7 @@ impl CustomerAccess {
                 Ok((
                     (),
                     vec![Change {
-                        kind: "customer_access.registration".into(),
+                        kind: "portal.registration".into(),
                         id,
                         old: json!({"status": "waiting"}),
                         new: json!({"status": "approved", "invitation_id": invited}),
@@ -527,7 +519,7 @@ impl CustomerAccess {
                     Ok((
                         Registration::from_row(&row),
                         vec![Change {
-                            kind: "customer_access.registration".into(),
+                            kind: "portal.registration".into(),
                             id,
                             old: json!({"status": "waiting"}),
                             new: json!({"status": "rejected"}),

@@ -12,7 +12,7 @@ use serde_json::json;
 use std::sync::{Arc, OnceLock};
 
 /// The kind of the `X-Bilibi-Reference` this module tags its messages with.
-pub(crate) const REFERENCE_KIND: &str = "customer_access.invitation";
+pub(crate) const REFERENCE_KIND: &str = "portal.invitation";
 
 /// How the message failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,9 +43,7 @@ pub(crate) struct Desk {
 static BOUND: OnceLock<Desk> = OnceLock::new();
 pub(crate) fn bind(desk: Desk) -> bilibi_module_registry::Result<()> {
     BOUND.set(desk).map_err(|_| {
-        bilibi_module_registry::RegistryError::Service(
-            "duplicate customer access delivery binding".into(),
-        )
+        bilibi_module_registry::RegistryError::Service("duplicate portal delivery binding".into())
     })
 }
 
@@ -93,11 +91,7 @@ impl Desk {
             .mutations
             .begin(
                 &mut client,
-                Context::system(
-                    tenant,
-                    "customer_access",
-                    "customer_access.invitation.delivery",
-                ),
+                Context::system(tenant, "portal", "portal.invitation.delivery"),
             )
             .await?;
         let column = failure.column();
@@ -113,7 +107,7 @@ impl Desk {
                     let changes = rows
                         .iter()
                         .map(|row| Change {
-                            kind: "customer_access.invitation".into(),
+                            kind: "portal.invitation".into(),
                             id: row.get(0),
                             old: json!({"status": "pending"}),
                             new: json!({"status": column}),
@@ -142,7 +136,7 @@ impl Desk {
                     &scope,
                     &[inviter],
                     &Notice::new(format!("Invitation to {email} was not delivered"))
-                        .kind("customer_access.invitation_failed")
+                        .kind("portal.invitation_failed")
                         .body(body)
                         .url(format!("/contacts/{person}"))
                         .icon("envelope"),

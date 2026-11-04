@@ -1,4 +1,4 @@
-//! The Customer Access facade (ADR 16): each tenant's portal site, the
+//! The Portal facade (ADR 16): each tenant's portal site, the
 //! invitations staff send and their redemption. Staff writes take the sealed
 //! staff scope and its capability inside the caller's audited transaction
 //! (the operation contracts in `operations.rs` own review and commit); the
@@ -225,7 +225,7 @@ impl From<Error> for AcceptError {
     }
 }
 
-pub struct CustomerAccess {
+pub struct PortalService {
     pub(crate) db: Db,
     pub(crate) mutations: Arc<MutationBoundary>,
     pub(crate) users: Arc<UserService>,
@@ -278,7 +278,7 @@ pub(crate) fn normalize_email(email: &str) -> std::result::Result<String, FieldE
     }
 }
 
-impl CustomerAccess {
+impl PortalService {
     // ---- the portal site ---------------------------------------------------
 
     /// The scope's tenant's site, if one is set: `VIEW`.
@@ -437,7 +437,7 @@ impl CustomerAccess {
                         })?;
                     let site = Site::from_row(&row);
                     let change = Change {
-                        kind: "customer_access.site".into(),
+                        kind: "portal.site".into(),
                         id: tenant,
                         old,
                         new: json!({"address": site.address, "title": site.title, "enabled": site.enabled, "registration": site.registration, "logo_asset_id": site.logo_asset_id}),
@@ -746,7 +746,7 @@ impl CustomerAccess {
                         .await?
                     {
                         changes.push(Change {
-                            kind: "customer_access.invitation".into(),
+                            kind: "portal.invitation".into(),
                             id: row.get(0),
                             old: json!({"status": "pending"}),
                             new: json!({"status": "revoked", "reason": "replaced"}),
@@ -760,7 +760,7 @@ impl CustomerAccess {
                         .await?;
                     let invitation = Invitation::from_row(&row)?;
                     changes.push(Change {
-                        kind: "customer_access.invitation".into(),
+                        kind: "portal.invitation".into(),
                         id: invitation.id,
                         old: Value::Null,
                         new: invitation.to_json(),
@@ -842,7 +842,7 @@ impl CustomerAccess {
                         .await?;
                     let revoked = Invitation::from_row(&row)?;
                     let change = Change {
-                        kind: "customer_access.invitation".into(),
+                        kind: "portal.invitation".into(),
                         id,
                         old: json!({"status": "pending"}),
                         new: json!({"status": "revoked"}),
@@ -999,7 +999,7 @@ impl CustomerAccess {
             .mutations
             .begin(
                 &mut client,
-                Context::system(tenant, PRINCIPAL, "core.customer_access.invitation.accept"),
+                Context::system(tenant, PRINCIPAL, "core.portal.invitation.accept"),
             )
             .await?;
         // Locked and re-read: a racing redemption or revoke loses.
@@ -1071,7 +1071,7 @@ impl CustomerAccess {
                 Ok((
                     (),
                     vec![Change {
-                        kind: "customer_access.invitation".into(),
+                        kind: "portal.invitation".into(),
                         id,
                         old: json!({"status": "pending"}),
                         new: json!({"status": "accepted", "user_id": user}),
@@ -1087,7 +1087,7 @@ impl CustomerAccess {
 
 /// Who audit names for a redemption: this module, acting on the invitation a
 /// staff member made, since the customer has no account until it commits.
-pub(crate) const PRINCIPAL: &str = "customer_access";
+pub(crate) const PRINCIPAL: &str = "portal";
 
 pub(crate) async fn site_of_tenant(
     client: &(impl GenericClient + Sync),

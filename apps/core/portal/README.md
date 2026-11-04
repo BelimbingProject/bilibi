@@ -1,4 +1,4 @@
-# Core Customer Access
+# Portal
 
 A tenant's customers sign in to its portal (`/portal/...`), never to the staff application ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)). This module owns the portal site, the invitations that admit a customer, the requests people make for an account, the staff controls over the accounts invitations made, and the portal's own home and account pages.
 
@@ -6,7 +6,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 | Item | Value |
 | --- | --- |
-| Facade | `CustomerAccess`, service `core/customer_access.access` |
+| Facade | `PortalService`, service `core/portal.access` |
 | Staff page | `/customer-access` (`admin.customer-access.view`; writes need `admin.customer-access.manage`) |
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
 | Portal role | `portal_customer`, given to every customer an invitation admits |
@@ -18,7 +18,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 - One per tenant: an **address** (`acme`, lowercase letters, digits and inner hyphens) and a **title**.
 - The address names the tenant before anyone signs in: customers sign in at `/portal/sign-in/{address}`. It is unique across the installation.
 - The title brands the portal's anonymous cards, its layout and its emails.
-- The **logo** is a PNG, JPEG, GIF or WebP image of at most 1 MiB, chosen in the site form (or `logo_asset_id` / `remove_logo` on `core.customer_access.site.set`, naming an image already stored in Media). It is stored through `Media::put_public_image` on the attachment disk and shows on the anonymous cards and in the portal layout through a short-lived signed Media link (`Media::tenant_stream_url`, the tenant taken from the site record). A replaced logo's file stays in Media until an operator removes it.
+- The **logo** is a PNG, JPEG, GIF or WebP image of at most 1 MiB, chosen in the site form (or `logo_asset_id` / `remove_logo` on `core.portal.site.set`, naming an image already stored in Media). It is stored through `Media::put_public_image` on the attachment disk and shows on the anonymous cards and in the portal layout through a short-lived signed Media link (`Media::tenant_stream_url`, the tenant taken from the site record). A replaced logo's file stays in Media until an operator removes it.
 - Changing the address breaks links already emailed.
 - **Off until staff turn it on** (`enabled`, issue 137 behaviour 1). While off, its anonymous pages answer 404 (`portal_site` returns `None`), its signed-in customers' pages, downloads and live socket answer 404 (the host checks `site_of`), and no invitation is sent or redeemed.
 
@@ -28,7 +28,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 - The invite dialog finds the Person by name on the server (`base/records` search, with the actor's permission to see people), so any number of people can be invited. An agent Person is refused: agents act through Agent Access, never the portal.
 - The address must not already belong to a customer of the tenant. Inviting it again revokes the open invitation first.
 - The email carries a one-time link, `/portal/accept/{address}/{token}`. The token is stored hashed and never read back, not even by agents.
-- Accepting creates the account through Core User (`create_customer_in`, address verified), gives it `portal_customer` through Authz (`assign_portal_role_in`) and closes the invitation, in one transaction audited as `system · customer_access`. The host then signs the customer in with the password just chosen, through the ordinary portal sign-in; when that cannot finish (a tenant that requires a second step), the customer signs in on the next page.
+- Accepting creates the account through Core User (`create_customer_in`, address verified), gives it `portal_customer` through Authz (`assign_portal_role_in`) and closes the invitation, in one transaction audited as `system · portal`. The host then signs the customer in with the password just chosen, through the ordinary portal sign-in; when that cannot finish (a tenant that requires a second step), the customer signs in on the next page.
 - **Resend** sends a new link to an invitation's Person and address through the same contract as a new invitation, which revokes the old link.
 - A Person that retired, an affiliation that ended or a company that was archived since the invitation makes the link invalid.
 
@@ -38,13 +38,13 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 - Someone gives a name, an email and an optional company name. The answer is the same for known and unknown addresses. A live unverified request or one waiting for staff stays unchanged and sends no new mail, even for concurrent requests from different senders; only an expired unverified request is replaced. The existing token remains valid until `customer_portal.registration_days` expires. The tenant/normalized-recipient unique index arbitrates creation in the owner transaction. Requests are also bounded per sender with password recovery (`user.recovery.per_sender_per_minute`).
 - The emailed link (`/portal/verify/{address}/{token}`, hashed, single use) shows a button; pressing it confirms the address, so a mail scanner that opens links confirms nothing. An unconfirmed request expires after `customer_portal.registration_days`; a confirmed one waits.
 - Nothing is written to Person or Company. Staff **approve** a confirmed request by choosing the Person (matching or creating it first) and, for a business customer, its affiliation: this sends the ordinary invitation with the request's name and confirmed address, through the same checks. **Reject** closes it; the person is not told and may ask again.
-- Each step is audited: the request and its confirmation as `system · customer_access`, the decision as the staff member.
+- Each step is audited: the request and its confirmation as `system · portal`, the decision as the staff member.
 
 ## Portal access panel
 
 - A contact's record page (`core/person`) shows this panel (embed `person.portal-access`, `src/panel.rs`, `VIEW`): the Person's customer accounts and the invitations sent to them, with Invite, Resend, Revoke invitation, Revoke access and Restore.
 - Invite asks which of the Person's current affiliations the customer signs in under, or "as an individual", and an address (default: the chosen affiliation's work email, else the Person's email).
-- It writes through the same contracts as the staff page and agents (`core.customer_access.invitation.create`, `.invitation.revoke`, `.account.revoke`, `.account.restore`); there is no second code path.
+- It writes through the same contracts as the staff page and agents (`core.portal.invitation.create`, `.invitation.revoke`, `.account.revoke`, `.account.restore`); there is no second code path.
 
 ## Second sign-in step
 
@@ -53,7 +53,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 ## Delivery of the invitation email
 
-- A relay that refuses the message when it is sent (an unreachable server, a refused recipient) marks the open invitation **Not delivered**; a bounce an Extension reports through `base/mail`'s delivery reports (`DeliveryReports`, the message's `X-Bilibi-Reference` is `customer_access.invitation:<id>`) marks it **Bounced**. Either way the invitation stays open, the inviter gets one notification (`customer_access.invitation_failed`, linking to the contact) and the row is audited as `system · customer_access`.
+- A relay that refuses the message when it is sent (an unreachable server, a refused recipient) marks the open invitation **Not delivered**; a bounce an Extension reports through `base/mail`'s delivery reports (`DeliveryReports`, the message's `X-Bilibi-Reference` is `portal.invitation:<id>`) marks it **Bounced**. Either way the invitation stays open, the inviter gets one notification (`portal.invitation_failed`, linking to the contact) and the row is audited as `system · portal`.
 - A report for another address than the invitation's own changes nothing, and a second report is a no-op.
 - The contact's portal-access panel shows the status and offers **Invite again**: the invite dialog opens with the invitation's company and name and its address to correct. Revoke and Resend work on an open invitation in either state.
 
@@ -66,17 +66,17 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 | Key | Kind | Capability |
 | --- | --- | --- |
-| `core.customer_access.site.get` | read | view |
-| `core.customer_access.site.set` | safe write | manage |
-| `core.customer_access.invitation.list` | read | view |
-| `core.customer_access.invitation.create` | safe write | manage |
-| `core.customer_access.invitation.revoke` | safe write | manage |
-| `core.customer_access.account.list` | read | view |
-| `core.customer_access.account.revoke` | safe write | manage |
-| `core.customer_access.account.restore` | safe write | manage |
-| `core.customer_access.registration.list` | read | view |
-| `core.customer_access.registration.approve` | safe write | manage |
-| `core.customer_access.registration.reject` | safe write | manage |
+| `core.portal.site.get` | read | view |
+| `core.portal.site.set` | safe write | manage |
+| `core.portal.invitation.list` | read | view |
+| `core.portal.invitation.create` | safe write | manage |
+| `core.portal.invitation.revoke` | safe write | manage |
+| `core.portal.account.list` | read | view |
+| `core.portal.account.revoke` | safe write | manage |
+| `core.portal.account.restore` | safe write | manage |
+| `core.portal.registration.list` | read | view |
+| `core.portal.registration.approve` | safe write | manage |
+| `core.portal.registration.reject` | safe write | manage |
 
 The staff page writes through the same contracts.
 

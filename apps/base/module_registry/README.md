@@ -90,7 +90,7 @@ The portal's route space ([ADR 16](../../../docs/architecture/decisions/16-custo
 
 - `Access::Portal` on a route or download outside `/portal/`, or any other access under `/portal`.
 - A framed portal route.
-- A path whose section after `/portal/` is a host page (`PORTAL_HOST`: `sign-in`, `forgot`, `reset`, `accept`, `register`, `verify`, `live`) or a parameter; `/portal` itself and `/portal/account/...` from any module but Core Customer Access (`PORTAL_OWNER`).
+- A path whose section after `/portal/` is a host page (`PORTAL_HOST`: `sign-in`, `forgot`, `reset`, `accept`, `register`, `verify`, `live`) or a parameter; `/portal` itself and `/portal/account/...` from any module but Core Portal (`PORTAL_OWNER`).
 - An embed that pairs portal access with another context, or the portal context with other access.
 - A moved path into or out of `/portal`.
 

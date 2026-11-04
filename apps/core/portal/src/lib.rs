@@ -1,4 +1,4 @@
-//! Core Customer Access (issue 137, ADR 16): each tenant's customer portal
+//! Core Portal (issue 137, ADR 16): each tenant's customer portal
 //! site, the invitations that turn a Person into a customer account, the
 //! staff page that manages both, and the portal's own home and account pages.
 //! The host owns the portal's credential pages and asks this facade which
@@ -14,8 +14,8 @@ mod web;
 
 pub use bilibi_user::CustomerAccount;
 pub use facade::{
-    address_shaped, AcceptError, Checked, CustomerAccess, FieldError, Invitation, InvitationInput,
-    LogoChange, OpenInvitation, Site, SiteInput, Status, TITLE_MAX,
+    address_shaped, AcceptError, Checked, FieldError, Invitation, InvitationInput, LogoChange,
+    OpenInvitation, PortalService, Site, SiteInput, Status, TITLE_MAX,
 };
 pub use registration::{RegisterError, Registration, RegistrationStatus, COMPANY_MAX};
 
@@ -34,11 +34,11 @@ use serde_json::json;
 use std::sync::Arc;
 
 /// The registry service of the facade.
-pub const SERVICE: &str = "core/customer_access.access";
+pub const SERVICE: &str = "core/portal.access";
 /// The staff page.
-const PAGES: &str = "core/customer_access.pages";
+const PAGES: &str = "core/portal.pages";
 /// The portal home and account pages.
-const PORTAL_PAGES: &str = "core/customer_access.portal";
+const PORTAL_PAGES: &str = "core/portal.portal";
 
 /// See the portal site and the invitations.
 pub const VIEW: &str = "admin.customer-access.view";
@@ -84,7 +84,7 @@ const REGISTRATION_MIGRATION: (&str, &str) = (
 macro_rules! provenance {
     () => {
         Provenance {
-            module: "core/customer_access",
+            module: "core/portal",
             source: file!(),
             line: line!(),
         }
@@ -93,7 +93,7 @@ macro_rules! provenance {
 
 inventory::submit! {
     Module {
-        id: "core/customer_access", layer: Layer::Core,
+        id: "core/portal", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "core/company", "core/person", "core/affiliation", "core/user"],
         migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION],
         services: &[
@@ -105,7 +105,7 @@ inventory::submit! {
                     notifications: services.get("base/notifications.sink")?,
                 };
                 delivery::bind(desk.clone())?;
-                let access = Arc::new(CustomerAccess {
+                let access = Arc::new(PortalService {
                     delivery: desk,
                     db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
                     mutations: services.get("base/database.mutations")?,
@@ -140,11 +140,11 @@ inventory::submit! {
 }
 
 // A mail adapter's bounce report for an invitation's email lands here.
-inventory::submit! { Contribution::new(bilibi_mail::OBSERVERS, "core/customer_access.invitation_delivery", provenance!(), &bilibi_mail::Observer {
+inventory::submit! { Contribution::new(bilibi_mail::OBSERVERS, "core/portal.invitation_delivery", provenance!(), &bilibi_mail::Observer {
     kind: delivery::REFERENCE_KIND, observe: delivery::observe,
 }) }
 
-inventory::submit! { Contribution::new(VOCABULARY, "core/customer_access", provenance!(), &VocabularyContribution {
+inventory::submit! { Contribution::new(VOCABULARY, "core/portal", provenance!(), &VocabularyContribution {
     domains: &["portal"],
     verbs: &[],
     capabilities: &[
@@ -171,26 +171,26 @@ inventory::submit! { Contribution::new(DEFINITIONS, REGISTRATION_DAYS_KEY, prove
     editor: Some(Editor { group: "Customer portal", label: "Account request confirmation (days)", help: "How long the link that confirms a request for a customer account works. An unconfirmed request is dropped after that.", capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
 
-inventory::submit! { Contribution::new(ROUTES, "core/customer_access.staff", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-    method: Method::Get, path: STAFF_PATH, service: PAGES, operation: "customer_access",
+inventory::submit! { Contribution::new(ROUTES, "core/portal.staff", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+    method: Method::Get, path: STAFF_PATH, service: PAGES, operation: "portal",
     access: Access::Capability(VIEW), framed: true,
 }) }
-inventory::submit! { Contribution::new(ROUTES, "core/customer_access.home", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+inventory::submit! { Contribution::new(ROUTES, "core/portal.home", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: HOME_PATH, service: PORTAL_PAGES, operation: "home",
     access: Access::Portal(PORTAL_ACCOUNT), framed: false,
 }) }
-inventory::submit! { Contribution::new(ROUTES, "core/customer_access.two-factor", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+inventory::submit! { Contribution::new(ROUTES, "core/portal.two-factor", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: TWO_FACTOR_PATH, service: PORTAL_PAGES, operation: "two_factor",
     access: Access::Portal(PORTAL_ACCOUNT), framed: false,
 }) }
-inventory::submit! { Contribution::new(ROUTES, "core/customer_access.account", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+inventory::submit! { Contribution::new(ROUTES, "core/portal.account", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: ACCOUNT_PATH, service: PORTAL_PAGES, operation: "account",
     access: Access::Portal(PORTAL_ACCOUNT), framed: false,
 }) }
 
 // The Person record's portal-access panel; it writes through the same
 // contracts as the staff page below.
-inventory::submit! { Contribution::new(EMBEDS, "customer_access.person-portal-access", provenance!(), &Embed {
+inventory::submit! { Contribution::new(EMBEDS, "portal.person-portal-access", provenance!(), &Embed {
     slot: "person.portal-access", context: EmbedContext::Record { kind: "core/person" },
     service: PAGES, operation: "person_portal_access", access: Access::Capability(VIEW),
 }) }
@@ -222,7 +222,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PORTAL_PAGES, provenance!(),
 // invitation review as "+ Customer"; the review commits the invitation
 // contract (one Person at a time, as the invite dialog takes).
 bilibi_records::drop_target!(
-    "core/customer_access",
+    "core/portal",
     bilibi_records::DropTarget {
         id: web::INVITE_TARGET,
         service: PAGES,
@@ -236,15 +236,15 @@ bilibi_records::drop_target!(
 );
 
 bilibi_menu::contribute!(
-    "core/customer_access",
-    MenuItem::page("admin.customer_access", "Customer portal", STAFF_PATH)
+    "core/portal",
+    MenuItem::page("admin.portal", "Customer portal", STAFF_PATH)
         .under("admin")
         .icon("user-group")
         .requires(Requirement::Capability(VIEW))
         .order(57)
 );
 bilibi_menu::contribute!(
-    "core/customer_access",
+    "core/portal",
     MenuItem::page("portal.home", "Home", HOME_PATH)
         .under(PORTAL_ROOT)
         .icon("home")
@@ -252,7 +252,7 @@ bilibi_menu::contribute!(
         .order(0)
 );
 bilibi_menu::contribute!(
-    "core/customer_access",
+    "core/portal",
     MenuItem::page("portal.account", "My account", ACCOUNT_PATH)
         .under(PORTAL_ROOT)
         .icon("user-circle")

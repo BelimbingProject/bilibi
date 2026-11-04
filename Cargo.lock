@@ -665,11 +665,11 @@ dependencies = [
  "bilibi-agent-plugins",
  "bilibi-company",
  "bilibi-currency",
- "bilibi-customer-access",
  "bilibi-geonames",
  "bilibi-party",
  "bilibi-person",
- "bilibi-tenant-administration",
+ "bilibi-portal",
+ "bilibi-tenant",
  "bilibi-user",
  "bilibi-user-administration",
  "bilibi-work-calendar",
@@ -725,40 +725,6 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
- "tokio-postgres",
-]
-
-[[package]]
-name = "bilibi-customer-access"
-version = "0.2.1"
-dependencies = [
- "askama",
- "bilibi-affiliation",
- "bilibi-agent-api",
- "bilibi-authz",
- "bilibi-company",
- "bilibi-database",
- "bilibi-datetime",
- "bilibi-locale",
- "bilibi-mail",
- "bilibi-media",
- "bilibi-menu",
- "bilibi-module-registry",
- "bilibi-notifications",
- "bilibi-party-ids",
- "bilibi-person",
- "bilibi-records",
- "bilibi-settings",
- "bilibi-tenancy",
- "bilibi-ui",
- "bilibi-user",
- "getrandom 0.4.3",
- "inventory",
- "jiff",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tokio",
  "tokio-postgres",
 ]
 
@@ -1181,6 +1147,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-portal"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-affiliation",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-company",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
+ "bilibi-mail",
+ "bilibi-media",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-notifications",
+ "bilibi-party-ids",
+ "bilibi-person",
+ "bilibi-records",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-user",
+ "getrandom 0.4.3",
+ "inventory",
+ "jiff",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "bilibi-ports"
 version = "0.2.1"
 dependencies = [
@@ -1536,7 +1536,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bilibi-tenant-administration"
+name = "bilibi-tenant"
 version = "0.2.1"
 dependencies = [
  "askama",
@@ -1698,7 +1698,6 @@ dependencies = [
  "bilibi-base",
  "bilibi-company",
  "bilibi-core",
- "bilibi-customer-access",
  "bilibi-database",
  "bilibi-domains",
  "bilibi-extensions",
@@ -1706,6 +1705,7 @@ dependencies = [
  "bilibi-mail",
  "bilibi-module-registry",
  "bilibi-notifications",
+ "bilibi-portal",
  "bilibi-ports",
  "bilibi-queue",
  "bilibi-records",
