@@ -1,6 +1,7 @@
 //! Credentials, server sessions, preferences, and the user's notifications and bell.
 mod account_ui;
 mod accounts;
+mod administration;
 mod appearance;
 mod bootstrap;
 mod company_accounts;
@@ -51,6 +52,10 @@ mod web;
 
 pub use accounts::{
     AccountError, AccountField, AccountInput, FieldError, LandingPage, ProfileOutcome,
+};
+pub use administration::{
+    list_users, Entry, Membership, Options, Page, Role, Sort, MAX_PAGE, MAX_ROLE_IDS,
+    MAX_SEARCH_BYTES, PAGE_SIZES, PATH,
 };
 use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_security::{guard, Sessions};
@@ -285,7 +290,7 @@ inventory::submit! {
         bilibi_module_registry::Service{id:"core/user.sso-pages",factory:|services|Ok(std::sync::Arc::new(bilibi_ui::page::PageService(std::sync::Arc::new(sso::web::Pages{users:services.get("core/user.accounts")?,contracts:services.get(bilibi_agent_api::page::SERVICE)?}))))},
         bilibi_module_registry::Service {id:"core/user.pages",factory:|services| {
             Ok(std::sync::Arc::new(bilibi_ui::page::PageService(std::sync::Arc::new(web::Pages {users:services.get("core/user.accounts")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),grants:services.get("base/authz.grants")?,contracts:services.get(bilibi_agent_api::page::SERVICE)?}))))
-        }}],
+        }}, bilibi_module_registry::Service {id:administration::SERVICE,factory:administration::service}],
     }
 }
 

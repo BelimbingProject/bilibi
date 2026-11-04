@@ -4198,7 +4198,6 @@ core/geonames
 core/user
 core/user-owned
 core/user.
-core/user_administration
 core_admin
 core_agent_authorization_codes
 core_agent_authorization_codes_code_hash_index

@@ -199,9 +199,23 @@ The header carries the record-history panel (`audit.record-history`, kind
 `user`) and the pin control. Every command re-proves the actor, authorizes
 inside its `MutationTransaction`, and is audited as kind `user`.
 
-The tenant-wide `/users` index is `core/user_administration` (K13); Core
-User contributes the `admin.user` menu entry to it and the `users` Grid table
-(link `person`, inbound `accounts`).
+## Users index (`src/administration/`)
+
+Core User owns the bounded tenant-wide `/users` index, its `list_users` read facade, the `admin.user` menu entry and the `users` Grid table (link `person`, inbound `accounts`). The page and the read both require `admin.user.list`.
+
+The read covers live staff accounts and open invitations in the current tenant. Membership is **Home** when this tenant controls the platform sign-in, **Outside member** when another tenant does, and **Invited** before acceptance. The **Desks** column lists each person's live workplaces. Archiving one workplace does not make the account read-only or prevent work at another desk.
+
+`Options` bounds every query: `search` is `None` or 1–255 bytes; `role_ids` contains at most 100 unique positive IDs with OR semantics; `membership` is absent or home, outside or invited; `sort` is name, email, desks or created; `page` is 1 through 1,000,000; and `page_size` is 25, 50, 100 or 300. Anything else returns `Error::Invalid`. Search uses a parameterized `ILIKE` contains pattern and treats typed `%` and `_` as literal characters. Every ordering ends with the account ID descending, and an out-of-range page keeps the real total.
+
+One facade call runs one PostgreSQL statement. The CTE pipeline filters users, counts them, selects the bounded page and aggregates roles for that page only (`src/administration/query.rs`). The application never receives an unbounded tenant collection. Each row shows system roles and custom roles owned by a company the administrator may see. The Roles filter offers the same set.
+
+The page uses Grid `PageColumns` and keeps its state in the URL with `search`, `roleIds`, `membership`, `page`, `perPage`, `sortBy` and `sortDir`. The page sizes normalize to 25, 50, 100 or 300, with 25 as the fallback. An empty search and the PHP-falsey value `0` disable search. Changing search, roles, page size or sorting resets the page to 1. Created starts descending; Name, Email and Desks start ascending.
+
+The built-in columns are Name, Email, Desks, Roles and Created. Normal-height rows show initials beside the name, and `admin.user.view` makes the name a record link. The column picker also offers walked columns from the `users` Grid table and scalar facts from the account page.
+
+The toolbar contains search, Membership and the first 100 roles by name. Create (`admin.user.create`) opens `/users/new`; Invite (`admin.user.invite`) opens `/users/invite`; and the pin control pins `nav-admin-user`.
+
+Each row can offer impersonation, invitation revocation or deletion. Impersonation needs `admin.user.impersonate` and posts to `/admin/impersonate/{id}`; the current account is disabled with an explanation. Delete needs `admin.user.delete`, confirms the listed account and calls `delete_account`, which repeats authorization, refuses the current account, retires the row and ends its sessions. An invitation instead offers Revoke under `admin.user.invite`; the page passes its held invitation ID to `revoke_member_invitation`. Someone who may take none of these actions sees no actions column.
 
 ## Account panels (K13; `src/panels/`)
 

@@ -53,8 +53,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { mod
     system_principals: &[],
 }) }
 
-// The `admin.user` menu entry: Core User owns the navigation to the
-// tenant-wide `/users` index, whose page User Administration contributes.
+// The `admin.user` menu entry for the tenant-wide `/users` index.
 bilibi_menu::contribute!(
     "core/user",
     bilibi_menu::MenuItem::page("admin.user", "Users", "/users")
@@ -86,9 +85,8 @@ static GRID: bilibi_grid::GridContribution = bilibi_grid::GridContribution {
 };
 bilibi_grid::contribute!("core/user", "user.grid", &GRID);
 
-// The account administration pages. The
-// tenant-wide `/users` index is User Administration's (K13); these two are the
-// create form and the read-first detail page it links to.
+// The account administration pages. The tenant-wide `/users` index lives in
+// `crate::administration`; these are the create form and read-first detail page.
 inventory::submit! {
     Contribution::new(ROUTES, "core/user.create", Provenance { module: "core/user", source: file!(), line: line!() }, &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
         method: Method::Get, path: "/users/new", service: "core/user.pages", operation: "create", access: Access::Capability(CREATE), framed: true,

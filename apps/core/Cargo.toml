@@ -19,5 +19,4 @@ bilibi-person = { path = "person" }
 bilibi-portal = { path = "portal" }
 bilibi-tenant = { path = "tenant" }
 bilibi-user = { path = "user" }
-bilibi-user-administration = { path = "user_administration" }
 bilibi-work-calendar = { path = "work_calendar" }

@@ -301,8 +301,7 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | `core/agent_access.pages` | Device approval and connection revocation |
 | `core/company.pages` | Company edits, lifecycle, activities, departments, reference types; the create form records activities `core.company.create` does not take |
 | `core/geonames.pages` | Postcode corrections |
-| `core/user.pages`, `core/user.query-pages` | Accounts, passwords, two-factor, notifications, saved queries |
-| `core/user_administration.pages` | Account administration |
+| `core/user.pages`, `core/user.query-pages`, `core/user.administration-pages` | Accounts, passwords, 2FA, notifications, saved queries and account administration |
 
 ## Agent connection context
 
