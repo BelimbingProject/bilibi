@@ -12,10 +12,11 @@
 //! `/admin/impersonate/{id}` (the Web host adapter over Core User's
 //! `impersonate`); the control is drawn and disabled by the same rules as
 //! the other row actions.
-use crate::{
+use super::{
     list_users, Entry, Membership, Options, Sort, MAX_PAGE, MAX_ROLE_IDS, MAX_SEARCH_BYTES,
     PAGE_SIZES,
 };
+use crate::{contributions, AccountError, InvitationError, UserService};
 use askama::Template;
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
@@ -33,7 +34,6 @@ use bilibi_ui::{
     ListState, MultiSelect, PageCounts, Pagination, RecordLink, RowMode, SortDir, StatusKind,
     TableEmpty, ToolbarControl,
 };
-use bilibi_user::{self as contributions, AccountError, InvitationError, UserService};
 use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::{

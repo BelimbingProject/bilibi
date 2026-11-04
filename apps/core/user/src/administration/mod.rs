@@ -1,9 +1,5 @@
 //! The bounded tenant-wide Users administration index: one read facade, [`list_users`], and the
-//! `/users` page over it. Core User owns every account command and the
-//! `/users/new`, `/users/invite` and `/users/{id}` pages this index links to;
-//! this crate owns no migration, capability or menu entry. Revocation calls
-//! Core User's invitation command. The menu entry `admin.user` stays Core
-//! User's.
+//! `/users` page over it. Revocation calls Core User's invitation command.
 //!
 //! Visibility is the scope's tenant: every live staff account of the tenant,
 //! with its explicit desks and visible roles. Accounts without desks remain
@@ -16,7 +12,7 @@ use bilibi_tenancy::Scope;
 use std::time::SystemTime;
 use tokio_postgres::GenericClient;
 
-pub const SERVICE: &str = "core/user_administration.pages";
+pub const SERVICE: &str = "core/user.administration-pages";
 pub const PATH: &str = "/users";
 /// Page sizes and bounds for this index.
 pub const PAGE_SIZES: [u64; 4] = [25, 50, 100, 300];
@@ -135,42 +131,45 @@ pub async fn list_users(
     {
         return Err(Error::Invalid);
     }
-    bilibi_authz::authorize_key(client, scope, bilibi_user::LIST).await?;
+    bilibi_authz::authorize_key(client, scope, crate::LIST).await?;
     query::list(client, scope, companies, options).await
 }
 
-inventory::submit! {
-    bilibi_module_registry::Module {
-        id: "core/user_administration", layer: bilibi_module_registry::Layer::Core,
-        dependencies: &["base/database", "base/authz", "base/grid", "base/tenancy", "base/ui", "base/datetime", "base/locale", "core/company", "core/user"],
-        migrations: &[],
-        services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
-            Ok(std::sync::Arc::new(bilibi_ui::page::PageService::<Scope, Error>(std::sync::Arc::new(web::Pages {
-                db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
-                users: services.get("core/user.accounts")?,
-                grants: services.get("base/authz.grants")?,
-                views: services.get(bilibi_grid::PAGE_VIEWS)?,
-                display: services.get("base/datetime.display")?,
-                locales: services.get("base/locale.locales")?,
-            }))))
-        }}],
-    }
+pub(crate) fn service(
+    services: &bilibi_module_registry::Services,
+) -> bilibi_module_registry::Result<bilibi_module_registry::Value> {
+    Ok(std::sync::Arc::new(bilibi_ui::page::PageService::<
+        Scope,
+        Error,
+    >(std::sync::Arc::new(
+        web::Pages {
+            db: services
+                .get::<bilibi_database::Db>("base/database.pool")?
+                .as_ref()
+                .clone(),
+            users: services.get("core/user.accounts")?,
+            grants: services.get("base/authz.grants")?,
+            views: services.get(bilibi_grid::PAGE_VIEWS)?,
+            display: services.get("base/datetime.display")?,
+            locales: services.get("base/locale.locales")?,
+        },
+    ))))
 }
 
 inventory::submit! {
     bilibi_module_registry::Contribution::new(
-        bilibi_module_registry::contributions::ROUTES, "user_administration.index",
-        bilibi_module_registry::Provenance { module: "core/user_administration", source: file!(), line: line!() },
+        bilibi_module_registry::contributions::ROUTES, "core/user.index",
+        bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() },
         &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
             method: bilibi_module_registry::contributions::Method::Get, path: PATH, service: SERVICE, operation: "index",
-            access: bilibi_module_registry::contributions::Access::Capability(bilibi_user::LIST), framed: true,
+            access: bilibi_module_registry::contributions::Access::Capability(crate::LIST), framed: true,
         })
 }
 
 // ADR 01 gap, listed so it stays visible: these pages still write through
 // the facade rather than an operation contract (`base/agent_api` page).
-inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/user_administration.pages", bilibi_module_registry::Provenance { module: "core/user_administration", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
-    service: "core/user_administration.pages",
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
+    service: SERVICE,
     contracts: &[],
     pending: bilibi_module_registry::contributions::Pending::Every { reason: "Account administration writes through the User facade; no contract yet." },
 }) }

@@ -671,7 +671,6 @@ dependencies = [
  "bilibi-portal",
  "bilibi-tenant",
  "bilibi-user",
- "bilibi-user-administration",
  "bilibi-work-calendar",
 ]
 
@@ -1653,27 +1652,6 @@ dependencies = [
  "tokio-postgres",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "bilibi-user-administration"
-version = "0.2.1"
-dependencies = [
- "askama",
- "bilibi-authz",
- "bilibi-company",
- "bilibi-database",
- "bilibi-datetime",
- "bilibi-grid",
- "bilibi-locale",
- "bilibi-module-registry",
- "bilibi-tenancy",
- "bilibi-ui",
- "bilibi-user",
- "inventory",
- "jiff",
- "serde_json",
- "tokio-postgres",
 ]
 
 [[package]]

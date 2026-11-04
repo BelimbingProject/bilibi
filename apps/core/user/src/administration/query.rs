@@ -2,7 +2,7 @@
 //! visible roles, filtered, counted, ordered and paged in one PostgreSQL
 //! statement. Every physical
 //! source is named here and nowhere else in this crate; nothing is written.
-use crate::{Entry, Membership, Options, Page, Role, Sort};
+use super::{Entry, Membership, Options, Page, Role, Sort};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use tokio_postgres::{types::ToSql, GenericClient};
