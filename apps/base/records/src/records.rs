@@ -113,7 +113,7 @@ impl Refusal {
             Self::UnknownKind => "is not a kind of record that can be linked",
             Self::MalformedId => "is not a valid record id",
             Self::NotFound => "does not exist",
-            Self::Forbidden => "is not a record you may view",
+            Self::Forbidden => "is not a record you may select",
         }
     }
 }
@@ -274,7 +274,7 @@ impl Records {
             .await?
             .remove(&id)
             .unwrap_or(id);
-        Ok(match record.owner.authorize(client, scope, &id).await? {
+        Ok(match record.owner.select(client, scope, &id).await? {
             Access::Readable => Ok(Reference::new(kind, id)),
             Access::NotFound => Err(Refusal::NotFound),
             Access::Forbidden => Err(Refusal::Forbidden),
@@ -457,7 +457,11 @@ impl Records {
                     let Some(label) = resolved.label else {
                         continue;
                     };
-                    if seen.len() < limit && seen.insert(resolved.id.clone()) {
+                    let selectable = {
+                        let client = self.db.get().await?;
+                        kind.owner.select(&**client, scope, &resolved.id).await? == Access::Readable
+                    };
+                    if selectable && seen.len() < limit && seen.insert(resolved.id.clone()) {
                         hits.push(Hit {
                             label,
                             path: resolved.path,

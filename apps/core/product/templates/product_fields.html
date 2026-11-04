@@ -1,0 +1,2 @@
+{% import "forms.html" as form %}
+{% for row in rows %}{% call form::field_row(fields=row) %}{% endcall %}{% endfor %}

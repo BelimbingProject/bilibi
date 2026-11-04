@@ -669,6 +669,7 @@ dependencies = [
  "bilibi-party",
  "bilibi-person",
  "bilibi-portal",
+ "bilibi-product",
  "bilibi-tenant",
  "bilibi-user",
  "bilibi-work-calendar",
@@ -1245,6 +1246,35 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "zip",
+]
+
+[[package]]
+name = "bilibi-product"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-company",
+ "bilibi-currency",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-grid",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-records",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "inventory",
+ "jiff",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]
