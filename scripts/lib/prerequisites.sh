@@ -8,6 +8,16 @@ activate_cargo() {
     if [[ -f $HOME/.cargo/env ]]; then source "$HOME/.cargo/env"; fi
 }
 
+postgres_bin() {
+    if [[ -n ${PG18_BIN:-} ]]; then
+        printf '%s\n' "$PG18_BIN"
+    elif [[ ! -x /usr/lib/postgresql/18/bin/initdb && -x /usr/bin/initdb ]]; then
+        echo /usr/bin
+    else
+        echo /usr/lib/postgresql/18/bin
+    fi
+}
+
 development_prerequisites() {
     local tool current minimum pg_bin
     for tool in git python3 curl ss flock openssl cc pkg-config rustc cargo psql pg_isready node npm; do
@@ -27,8 +37,9 @@ development_prerequisites() {
     pkg-config --exists openssl || { echo 'OpenSSL development libraries are required.' >&2; return 1; }
     node -e "process.exit(Number(process.versions.node.split('.')[0]) < $NODE_MAJOR ? 1 : 0)" || { echo "Node.js $NODE_MAJOR+ is required." >&2; return 1; }
     if [[ -z ${DATABASE_URL:-} ]]; then
-        pg_bin=${PG18_BIN:-/usr/lib/postgresql/18/bin}
-        "$pg_bin/initdb" --version >/dev/null 2>&1 && "$pg_bin/pg_ctl" --version >/dev/null 2>&1 || {
+        pg_bin=$(postgres_bin)
+        [[ $("$pg_bin/initdb" --version 2>/dev/null | awk '{print $NF}' | cut -d. -f1) == "$POSTGRESQL_MAJOR" ]] &&
+            [[ $("$pg_bin/pg_ctl" --version 2>/dev/null | awk '{print $NF}' | cut -d. -f1) == "$POSTGRESQL_MAJOR" ]] || {
             echo "PostgreSQL $POSTGRESQL_MAJOR binaries are required at $pg_bin (or set DATABASE_URL)." >&2; return 1;
         }
     fi

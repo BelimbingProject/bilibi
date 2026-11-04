@@ -5,7 +5,12 @@ set -euo pipefail
 # shellcheck source=scripts/lib/install.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/../lib/install.sh"
 
-if apt_install mkcert libnss3-tools; then
+if [[ $SETUP_PACKAGE_MANAGER == pacman ]]; then
+    install_packages=(pacman_install mkcert nss)
+else
+    install_packages=(apt_install mkcert libnss3-tools)
+fi
+if "${install_packages[@]}"; then
     installed 'mkcert'
 else
     present mkcert
@@ -16,7 +21,8 @@ ca_root=$(mkcert -CAROOT)
 ca_pem=$ca_root/rootCA.pem
 trusted_here() {
     local f
-    for f in /usr/local/share/ca-certificates/mkcert_development_CA_*.crt; do
+    for f in /usr/local/share/ca-certificates/mkcert_development_CA_*.crt \
+        /etc/ca-certificates/trust-source/anchors/mkcert_development_CA_*.crt; do
         [[ -f $f ]] && cmp -s "$f" "$ca_pem" && return 0
     done
     return 1
