@@ -572,9 +572,7 @@ pub fn email_shaped(email: &str) -> bool {
 }
 
 /// Whether a jurisdiction ISO code names a known country. Geonames is the
-/// reference; an empty
-/// Geonames install knows no country, so a jurisdiction cannot be recorded
-/// until countries are imported.
+/// reference; a country it does not hold cannot be recorded as a jurisdiction.
 pub async fn known_country(client: &dyn ReadClient, iso: &str) -> Result<bool> {
     Ok(client
         .query_opt("SELECT 1 FROM geonames_countries WHERE iso=$1", &[&iso])

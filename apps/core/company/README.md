@@ -123,8 +123,8 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
 
 - `organisation::create` / `preview`: trims and defaults (`status` active, code from
   the name), refuses a field the actor's role restricts, proves the parent,
-  legal entity type, jurisdiction (`bilibi_geonames::country_known`, so no
-  jurisdiction is recordable until countries are imported) and code
+  legal entity type, jurisdiction (`bilibi_geonames::country_known`, so only
+  a country Geonames holds is recordable) and code
   uniqueness on the write's transaction under a per-code advisory lock. Automatic suggestions are allocated under the tenant lock.
 - `bilibi_company::require_writable` is the one archived check: a live company
   whose status is `archived` is read-only for good, for its own facts and

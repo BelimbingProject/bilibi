@@ -273,9 +273,8 @@ pub struct PostcodeCountrySummary {
     pub record_count: i64,
 }
 
-/// What an installation holds right now. A fresh install is `is_empty()`: the
-/// migration creates the tables and no rows, and every lookup answers with an
-/// empty result until an operator runs the explicit import.
+/// What an installation holds right now. Migrations seed countries and Admin1;
+/// cities and postcodes remain opt-in imports.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Presence {
     pub countries: i64,

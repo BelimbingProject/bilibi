@@ -277,17 +277,15 @@ async fn main() -> Result<(), Failure> {
 
     println!("== holiday sets: a national and a state set");
     show(
-        "a country before Geonames is imported",
+        "a country Geonames does not hold",
         admin
             .write(
                 "core.work_calendar.holiday_set.create",
-                json!({"code": "my-national", "name": "Malaysia national", "country_iso": "MY"}),
+                json!({"code": "zz-national", "name": "Unknown national", "country_iso": "ZZ"}),
             )
             .await,
     );
-    // Demonstration only: the rows a Geonames import would write.
     let client = db.get().await?;
-    client.batch_execute("INSERT INTO geonames_countries(iso,iso3,iso_numeric,country,continent) VALUES('MY','MYS','458','Malaysia','AS'); INSERT INTO geonames_admin1(code,name) VALUES('MY.14','Kuala Lumpur'),('MY.01','Johor')").await?;
     show(
         "national set",
         admin

@@ -44,7 +44,7 @@ impl Geonames {
         Self { db, boundary }
     }
 
-    /// What this installation holds. Fresh installs are empty by design.
+    /// What this installation holds, including the migration's reference snapshot.
     pub async fn presence(&self) -> Result<Presence> {
         let row = self
             .db
