@@ -167,7 +167,7 @@ static GRID: GridContribution = GridContribution {
             "documents",
             "Documents",
             VIEW,
-            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at FROM core_documents d WHERE d.tenant_id=$1 AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.principal_type='user' AND a.principal_id=$2 AND a.can_view)"),
+            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.principal_type='user' AND a.principal_id=$2 AND a.can_view)"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
@@ -191,7 +191,7 @@ static GRID: GridContribution = GridContribution {
             "document_revisions",
             "Document revisions",
             VIEW,
-            Source::tenant("SELECT r.id,r.document_id,r.revision,r.name,r.file_name,r.content_type,r.byte_size,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at FROM core_document_revisions r JOIN core_document_access a ON a.tenant_id=r.tenant_id AND a.document_id=r.document_id AND a.principal_type='user' AND a.principal_id=$2 AND a.can_view WHERE r.tenant_id=$1"),
+            Source::tenant("SELECT r.id,r.document_id,r.revision,r.name,r.file_name,r.content_type,r.byte_size,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=r.tenant_id AND a.document_id=r.document_id AND a.principal_type='user' AND a.principal_id=$2 AND a.can_view WHERE r.tenant_id=$1"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
@@ -212,7 +212,7 @@ static GRID: GridContribution = GridContribution {
             "document_links",
             "Document links",
             VIEW,
-            Source::tenant("SELECT l.id,l.document_id,l.record_kind,l.record_id,l.linked_by,l.linked_at FROM core_document_links l JOIN core_document_access a ON a.tenant_id=l.tenant_id AND a.document_id=l.document_id AND a.principal_type='user' AND a.principal_id=$2 AND a.can_view WHERE l.tenant_id=$1"),
+            Source::tenant("SELECT l.id,l.document_id,l.record_kind,l.record_id,l.linked_by,l.linked_at FROM core_document_links l JOIN core_documents d ON d.tenant_id=l.tenant_id AND d.id=l.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=l.tenant_id AND a.document_id=l.document_id AND a.principal_type='user' AND a.principal_id=$2 AND a.can_view WHERE l.tenant_id=$1"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),

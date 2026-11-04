@@ -199,10 +199,10 @@ async fn select(
 /// Whether the reader has explicit view access, for `base/records`.
 pub(crate) async fn filed_proof(client: &dyn ProofClient, scope: &Scope, id: i64) -> Result<()> {
     let reader = reader(client, scope).await?;
-    select(client, scope, id, false)
+    let document = select(client, scope, id, false)
         .await?
         .ok_or(Error::NotFound)?;
-    if reader.permission(client, id, "view").await? {
+    if document.deleting_at.is_none() && reader.permission(client, id, "view").await? {
         Ok(())
     } else {
         Err(Error::Forbidden)
@@ -354,6 +354,9 @@ impl Store<'_> {
         reader: &Reader,
         document: &Document,
     ) -> Result<bool> {
+        if document.deleting_at.is_some() {
+            return Ok(false);
+        }
         reader.permission(client, document.id, "view").await
     }
 
@@ -573,7 +576,7 @@ impl Store<'_> {
         let (related_kind, related_id) = related.as_ref().map_or((None, None), |r| {
             (Some(r.kind.as_str()), Some(r.id.as_str()))
         });
-        let conditions = "d.tenant_id=$1
+        let conditions = "d.tenant_id=$1 AND d.deleting_at IS NULL
              AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND ((a.principal_type='user' AND a.principal_id=$2) OR (a.principal_type='company' AND a.principal_id=$4)))
              AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$5))
              AND ($6 = '' OR d.name ILIKE $7)

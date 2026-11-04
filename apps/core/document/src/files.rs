@@ -192,7 +192,7 @@ impl Owner for DocumentFiles {
                             authorize_proof(client, scope, VIEW).await?;
                             let document = client
                                 .query_opt(
-                                    "SELECT document_id FROM core_document_revisions WHERE tenant_id=$1 AND artifact_id=$2",
+                                    "SELECT r.document_id FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id WHERE r.tenant_id=$1 AND r.artifact_id=$2 AND d.deleting_at IS NULL",
                                     &[&scope.tenant(), &row.artifact_id],
                                 )
                                 .await?
@@ -740,6 +740,9 @@ pub(crate) async fn read(
     revision: i32,
 ) -> WriteResult<File> {
     authorize_proof(&*client, scope, DOWNLOAD).await?;
+    if document.deleting_at.is_some() {
+        return Err(WriteError::NotFound);
+    }
     let row = client
         .query_opt(
             "SELECT artifact_id,file_name,scan_status FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND revision=$3",
