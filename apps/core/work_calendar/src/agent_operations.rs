@@ -414,7 +414,7 @@ fn write_schema(action: Action) -> Value {
         Action::CreateSet => json!({"type":"object","required":["code","name"],"properties":{
             "code":code_schema("Stable key: lowercase letters, digits, _ and -; not one an installation-wide set uses"),
             "name":{"type":"string","maxLength":120},
-            "country_iso":{"type":"string","maxLength":2,"description":"Optional ISO country, checked against imported countries"},
+            "country_iso":{"type":"string","maxLength":2,"description":"Optional ISO country, checked against Geonames countries"},
             "admin1_code":{"type":"string","maxLength":20,"description":"Optional division (state), such as MY.14; needs country_iso"},
             "installation":{"type":"boolean","description":"Default false. True: an installation-wide set every tenant may include and only the platform operator changes (needs admin.work-calendar.holiday-sets.manage in the operator's tenant); its code must be unused in every tenant"}
         }}),

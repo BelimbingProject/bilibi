@@ -58,7 +58,7 @@ A search looks at most 366 days ahead (`SEARCH_DAYS`) and never past the loaded 
 
 ## Holiday sets
 
-- Whole-day holidays a tenant keeps, optionally for a country and division (`country_iso`, `admin1_code` such as `MY.14`), checked against `core/geonames`: a set with a country can be saved only after countries are imported.
+- Whole-day holidays a tenant keeps, optionally for a country and division (`country_iso`, `admin1_code` such as `MY.14`), checked against `core/geonames`, whose migration seeds countries and divisions: a country or division it does not hold is refused.
 - A calendar includes several sets (national plus one state). No holiday data ships and nothing seeds: governments announce holidays late, some by moon sighting.
 
 ### Installation-wide sets
