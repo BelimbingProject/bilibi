@@ -1,9 +1,9 @@
 //! Manual walkthrough against an explicitly supplied disposable database. No
 //! test harness or assertions; prints each outcome for inspection.
 //!
-//! Migrates, shows that a fresh install answers every lookup with an empty
-//! result, then inserts a few rows by hand (the importer is C2/C3) and runs the
-//! bounded lookups, including hostile input, and the Grid catalog entry.
+//! Migrates, shows the installed country/Admin1 snapshot, then clears the
+//! disposable database's geography and demonstrates empty and sample lookups,
+//! including hostile input and the Grid catalog entry.
 use bilibi_database::{pool, Error, Result};
 use bilibi_geonames::{Geonames, IndexQuery, SERVICE};
 use bilibi_module_registry::Services;
@@ -21,9 +21,9 @@ async fn main() -> Result<()> {
     bilibi_base::link();
     bilibi_core::link();
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
-    bilibi_walkthrough_fixture::install(&db).await?;
     let modules = bilibi_module_registry::discover()?;
     bilibi_database::migrate(&db, &modules).await?;
+    bilibi_walkthrough_fixture::install(&db).await?;
     let mut services = Services::default();
     services.provide("bootstrap.database", Arc::new(db.clone()))?;
     services.provide(
@@ -33,12 +33,17 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let geo = services.get::<Geonames>(SERVICE)?;
     let client = db.get().await?;
-    // Re-runs start from the install state.
+    println!("== installed reference data (before resetting the walkthrough)");
+    show("presence", geo.presence().await?);
+    show("get_country(MY)", geo.get_country("MY").await?);
+    show("get_admin1(MY.14)", geo.get_admin1("MY.14").await?);
+    // Clear geography only for this disposable lookup walkthrough. A repeat
+    // migrate does not replay the snapshot after deliberate deletion.
     client
-        .batch_execute("TRUNCATE address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
+        .batch_execute("TRUNCATE address_person_subjects, address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
         .await?;
 
-    println!("== fresh install");
+    println!("== deliberately emptied reference tables");
     let presence = geo.presence().await?;
     show("presence", presence);
     show("is_empty", presence.is_empty());
