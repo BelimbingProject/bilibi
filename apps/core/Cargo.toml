@@ -12,6 +12,7 @@ bilibi-affiliation = { path = "affiliation" }
 bilibi-agent = { path = "agent" }
 bilibi-company = { path = "company" }
 bilibi-currency = { path = "currency" }
+bilibi-document = { path = "document" }
 bilibi-geonames = { path = "geonames" }
 bilibi-party = { path = "party" }
 bilibi-person = { path = "person" }

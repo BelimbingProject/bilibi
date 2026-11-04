@@ -1,0 +1,4 @@
+{#- A dialog's details form: changes raise its change event, Enter or Save
+    raises its submit event with every value. -#}
+{% import "forms.html" as form %}
+{% call form::form(id=id, event=change_event, change=true, actions=actions, submit_event=submit) %}{{ body }}{% endcall %}

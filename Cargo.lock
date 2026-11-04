@@ -647,6 +647,7 @@ dependencies = [
  "bilibi-agent",
  "bilibi-company",
  "bilibi-currency",
+ "bilibi-document",
  "bilibi-geonames",
  "bilibi-party",
  "bilibi-person",
@@ -776,6 +777,39 @@ dependencies = [
  "jiff",
  "serde_json",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "bilibi-document"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-artifacts",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-grid",
+ "bilibi-locale",
+ "bilibi-media",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-party-ids",
+ "bilibi-picklists",
+ "bilibi-principal-directory",
+ "bilibi-records",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "url",
+ "uuid",
 ]
 
 [[package]]

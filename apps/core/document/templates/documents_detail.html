@@ -1,0 +1,5 @@
+{#- A document's record page; announced so a following workspace tile can
+    select it. -#}
+{% import "workspace.html" as workspace %}
+{% call workspace::announce(kind="core/document", record_id=id) %}{% endcall %}
+{{ body }}
