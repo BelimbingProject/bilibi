@@ -109,6 +109,16 @@ async fn connect(
         .get(0);
     Ok((id, tokens))
 }
+/// The session row a browser sign-in writes; a credential reset ends it.
+async fn sign_in_session(client: &Client, tenant: i64, user: i64) -> Result<()> {
+    client
+        .execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours') ON CONFLICT (id) DO NOTHING",
+            &[&format!("walkthrough-{tenant}-{user}"), &tenant, &user],
+        )
+        .await?;
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // The explicit opt-in protects normal development data from fixture writes.
@@ -135,6 +145,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let users = services.get::<UserService>("core/user.accounts")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
     let client = db.get().await?;
+    // Approving a connection ties it to a real browser session, so give each
+    // stand-in login the session row its sign-in would have written.
+    for (tenant, user) in [(1_i64, 1_i64), (1, 3), (1, 4), (1, 6), (2, 5)] {
+        sign_in_session(&client, tenant, user).await?;
+    }
     let actor = authentication
         .authenticate(&**client, 1, 1, "walkthrough".into())
         .await?;
@@ -328,7 +343,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?
         .get(0);
     let provider_connection: i64 = client
-        .query_one("INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,client_id,expires_at,provider_public,provider_version,provider_link,provider_token_hash) VALUES(1,6,3,'Company identity provider','company-provider',now()+interval '1 hour','walkthrough-provider',1,$1,sha256(convert_to('walkthrough-provider-token','UTF8'))) RETURNING id", &[&link])
+        .query_one("INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,client_id,expires_at,provider_public,provider_version,provider_link,provider_token_hash,enabled_session_id) VALUES(1,6,3,'Company identity provider','company-provider',now()+interval '1 hour','walkthrough-provider',1,$1,sha256(convert_to('walkthrough-provider-token','UTF8')),'walkthrough-1-6') RETURNING id", &[&link])
         .await?
         .get(0);
     let provider_claims = AgentClaims {
@@ -337,7 +352,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         user: remembered_provider_actor.user(),
         organisation: remembered_provider_actor.actor().organisation(),
         person: remembered_provider_actor.actor().person(),
-        enabled_session: None,
+        enabled_session: Some("walkthrough-1-6".into()),
     };
     let provider_company = users
         .prove_provider_access(
@@ -726,6 +741,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         connection_state(&client, reset_id).await?
     );
 
+    sign_in_session(&client, 1, 3).await?;
     let (admin_id, admin_connection) =
         connect(&grants, &client, &staff, "Admin password agent").await?;
     users
@@ -742,6 +758,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         connection_state(&client, admin_id).await?
     );
 
+    sign_in_session(&client, 1, 3).await?;
     let (two_factor_id, two_factor_connection) =
         connect(&grants, &client, &staff, "2FA reset agent").await?;
     client
