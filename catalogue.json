@@ -98,6 +98,15 @@
           "platform": ">=0.1.0, <0.2.0"
         }
       }
+    },
+    "commerce": {
+      "name": "Commerce",
+      "description": "Products, quotations and sales orders.",
+      "repository": "https://github.com/BelimbingProject/bilibi-dom-commerce",
+      "modules": [
+        "sales"
+      ],
+      "versions": {}
     }
   },
   "plugins": {},
