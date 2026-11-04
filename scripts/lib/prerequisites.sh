@@ -11,10 +11,10 @@ activate_cargo() {
 postgres_bin() {
     if [[ -n ${PG18_BIN:-} ]]; then
         printf '%s\n' "$PG18_BIN"
-    elif [[ -x /usr/lib/postgresql/18/bin/initdb ]]; then
-        echo /usr/lib/postgresql/18/bin
-    else
+    elif [[ ! -x /usr/lib/postgresql/18/bin/initdb && -x /usr/bin/initdb ]]; then
         echo /usr/bin
+    else
+        echo /usr/lib/postgresql/18/bin
     fi
 }
 
