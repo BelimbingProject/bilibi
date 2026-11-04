@@ -25,7 +25,7 @@ Two steps in the owning module, nothing anywhere else.
    ```
 
    - Add `base/records` to the descriptor `dependencies` and `bilibi-records.workspace = true` to `Cargo.toml`.
-   - Core Person (`person`), Core Company (`company`), Core Address (`address`) and Core User (`user`, staff accounts only) are registered.
+   - Core Person (`person`), Core Company (`company`), Core Address (`address`), Core User (`user`, staff accounts only) and Core Product (`product`) are registered.
 
 ## Boot refusals
 
@@ -38,6 +38,8 @@ Each refusal names the kind and its source line.
 | Grid table | Exists, claims the key in `record_types`, and names a `label_field` (checked by the service factory). |
 | Page path | Exactly one `{id}`, and a contributed GET page route (checked by the service factory). |
 | Holder | Its Grid table exists with both named fields (checked by the service factory). |
+
+An owner may override `RecordOwner::select` to refuse a new choice while keeping earlier references readable through `authorize`. `check` and picker search use `select`; `resolve` uses `authorize`. Core Product uses this for retirement. The default selection rule is the existing read rule.
 
 ## Hold references (holder)
 
@@ -61,7 +63,7 @@ Each refusal names the kind and its source line.
 - **Ids are text,** at most 64 bytes in one path segment (`workspace::record_id`). A kind whose Grid key is a number only accepts numeric ids, so a forged id never reaches the owner's source as an error.
 - **One spelling per id:** a number key is read as plain decimal everywhere. `check` returns `01` as `1` for the holder to store, and `resolve`, `redirect` and `referrers` read `01` as `1` too.
 - **Unknown kinds fail closed:** `check` refuses them; `resolve` shows them as unavailable, never as an error, so unmounting a Domain leaves holders working.
-- **Names with the reader's permissions:** `resolve` projects each kind's `label_field` through `bilibi_grid::project` with the reader's scope, at most 100 ids per kind per call, then puts each named record to the owner's `RecordOwner::authorize`, the check `check` asks on save. A row Grid drops (no read capability on the table, a restricted label, a removed or soft-deleted record) and a record the owner refuses (a reader who may list companies but not view one) show as unavailable, so the pill, the picker and saving agree.
+- **Names with the reader's permissions:** `resolve` projects each kind's `label_field` through `bilibi_grid::project` with the reader's scope, at most 100 ids per kind per call, then puts each named record to the owner's `RecordOwner::authorize`, the read check (new selections also pass `select`). A row Grid drops (no read capability on the table, a restricted label, a removed or soft-deleted record) and a record the owner refuses (a reader who may list companies but not view one) show as unavailable, so the pill, the picker and saving agree.
 - **Previews take no connection:** a plan holds one pooled transaction while the owner previews, so a holder's preview checks on the client the plan hands it and calls nothing that takes another connection, `resolve` and `search` included. Show the checked reference and its page (`kind.path_of`); agents name it with `base.records.resolve`.
 - **Connections:** no facade method holds a pooled connection while Grid takes one, and the agent dispatcher holds none while a read runs (`apps/base/agent_api/README.md`), so concurrent resolves and searches, direct or through `/api/v1` and `/mcp`, cannot fill the pool and wait on each other.
 - **Removed records** are never cascaded and holders' rows are never deleted.

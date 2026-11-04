@@ -61,7 +61,7 @@ All Domains use the same product picker through [Records](../../../apps/base/rec
 
 ## Consequences
 
-The owner approved Core placement; no product module ships in this documentation change. Implementation replaces the shared product and dated-price parts of [the CX catalog proposal](https://github.com/cx2027/bilibi-dom-cx/pull/28) and the independent Commerce items master with `core/product`. CX retains the extensions listed above; Commerce item references become Core product references. Move every affected caller, picker and operation together, with companion changes for official Domains and upgrade instructions for other owners.
+The owner approved Core placement, and `core/product` now ships. It replaces the shared product and dated-price parts of [the CX catalog proposal](https://github.com/cx2027/bilibi-dom-cx/pull/28) and the independent Commerce items master with `core/product`. CX retains the extensions listed above; Commerce item references become Core product references. Move every affected caller, picker and operation together, with companion changes for official Domains and upgrade instructions for other owners.
 
 With no production users before 2027-01-01, replace or drop obsolete tables in new migrations and recreate disposable databases. Build no synchronization, imports of old records, backfills, dual writes or compatibility APIs. If implementation starts after that date, obtain the owner's renewed decision before relying on the no-users rule.
 

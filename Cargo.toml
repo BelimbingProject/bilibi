@@ -98,6 +98,7 @@ bilibi-workflow = { path = "apps/base/workflow" }
 bilibi-address = { path = "apps/core/address" }
 bilibi-currency = { path = "apps/core/currency" }
 bilibi-portal = { path = "apps/core/portal" }
+bilibi-product = { path = "apps/core/product" }
 bilibi-affiliation = { path = "apps/core/affiliation" }
 bilibi-agent-access = { path = "apps/core/agent_access" }
 bilibi-agent-plugins = { path = "apps/core/agent_plugins" }
