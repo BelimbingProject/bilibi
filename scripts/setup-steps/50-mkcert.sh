@@ -22,8 +22,7 @@ ca_pem=$ca_root/rootCA.pem
 trusted_here() {
     local f
     for f in /usr/local/share/ca-certificates/mkcert_development_CA_*.crt \
-        /etc/ca-certificates/trust-source/anchors/mkcert_development_CA_*.crt \
-        /etc/pki/ca-trust/source/anchors/mkcert_development_CA_*.pem; do
+        /etc/ca-certificates/trust-source/anchors/mkcert_development_CA_*.crt; do
         [[ -f $f ]] && cmp -s "$f" "$ca_pem" && return 0
     done
     return 1

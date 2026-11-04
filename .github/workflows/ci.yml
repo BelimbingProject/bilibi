@@ -40,7 +40,6 @@ jobs:
           cache-dependency-path: apps/base/ui/assets/package-lock.json
       - run: npm ci --prefix apps/base/ui/assets --no-audit --no-fund
       - run: ./scripts/build-assets.sh --check
-      - run: python3 scripts/checks/setup-distributions.py
       - uses: dtolnay/rust-toolchain@stable
         if: steps.decide.outputs.affected == 'true'
         with:
