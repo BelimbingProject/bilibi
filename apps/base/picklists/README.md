@@ -86,7 +86,7 @@ Starting values go in by code: a missing code is inserted, an existing one is le
 | When | How |
 | --- | --- |
 | Existing tenants | The declaring module's production seed (service `base/picklists.seeds`, operation `reconcile`) runs over every live tenant when `seed-production` first sees its version. |
-| A new tenant | `core/company` provisioning calls `bilibi_picklists::provision`, which returns one `Change` per inserted value: tenant administration records each on its `MutationTransaction`, attributed to the person or agent; the deployment helpers (`tenant-provision`, the platform operator) use `provision_deployment`, which lists every value in one retained system action, as their company rows are recorded. |
+| A new tenant | `core/company` provisioning calls `bilibi_picklists::provision`, which returns one `Change` per inserted value: Core Tenant records each on its `MutationTransaction`, attributed to the person or agent; the deployment helpers (`tenant-provision`, the platform operator) use `provision_deployment`, which lists every value in one retained system action, as their company rows are recorded. |
 | A module adds values later | It contributes the next seed version. |
 
 - Each seed inserts the missing codes of every linked list, so running one module's seed never harms another's lists.

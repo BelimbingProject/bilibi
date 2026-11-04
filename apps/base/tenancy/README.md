@@ -51,7 +51,7 @@ Agent self-report (ADR 01): `SelfReport` is an agent's `harness/model-version-ef
 
 ## Tenants page and operations
 
-[Core Tenant Administration](../../core/tenant_administration/README.md) composes the `/tenancy/tenants` page, search/read contracts and the reviewed tenant-and-companies create contract above Tenancy, Company and Agent API. Base Tenancy stays below those modules and owns no page adapter.
+[Core Tenant](../../core/tenant/README.md) composes the `/tenancy/tenants` page, search/read contracts and the reviewed tenant-and-companies create contract above Tenancy, Company and Agent API. Base Tenancy stays below those modules and owns no page adapter.
 
 The existing authorization rule is shared by browser and agent: the list requires operator standing and `admin.tenancy.tenant.list`; create requires operator standing and `admin.tenancy.tenant.create`. These platform capabilities are declared by Authz on Tenancy's behalf. `Authorization` is the once-bound seam into Authz; missing and duplicate bindings refuse startup. An agent acts for its person's live standing and capabilities, with direct denials preserved.
 

@@ -32,7 +32,7 @@ pub const MAX_DROP: usize = 100;
 /// One place a record may be dropped. Declared by the page's owner with
 /// [`drop_target!`](crate::drop_target).
 pub struct DropTarget {
-    /// A stable key, lower case with dots: `customer_access.invite`.
+    /// A stable key, lower case with dots: `portal.invite`.
     pub id: &'static str,
     /// The page service that receives the drop event; it must serve `path`.
     pub service: &'static str,
@@ -63,7 +63,7 @@ impl DropTarget {
 }
 
 /// Declares one drop target from module `$module`:
-/// `bilibi_records::drop_target!("core/customer_access", DropTarget { … });`
+/// `bilibi_records::drop_target!("core/portal", DropTarget { … });`
 #[macro_export]
 macro_rules! drop_target {
     ($module:literal, $target:expr) => {

@@ -3,7 +3,7 @@
 //! (`/portal/account`). Both ask for `PORTAL_ACCOUNT` again and read only what
 //! the scope names. The pages are built from
 //! the shared header, card and facts models.
-use crate::{facade::CustomerAccess, ACCOUNT_PATH, PORTAL_ACCOUNT, TWO_FACTOR_PATH};
+use crate::{facade::PortalService, ACCOUNT_PATH, PORTAL_ACCOUNT, TWO_FACTOR_PATH};
 use bilibi_database::{Db, Error, Result};
 use bilibi_tenancy::PortalScope;
 use bilibi_ui::{
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 pub struct Pages {
     pub db: Db,
-    pub access: Arc<CustomerAccess>,
+    pub access: Arc<PortalService>,
     pub users: Arc<bilibi_user::UserService>,
 }
 

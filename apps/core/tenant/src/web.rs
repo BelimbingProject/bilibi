@@ -1,4 +1,4 @@
-//! `/tenancy/tenants` (`core/tenant_administration.pages`, operation `tenants`): the platform
+//! `/tenancy/tenants` (`core/tenant.pages`, operation `tenants`): the platform
 //! tenant list and its Add Tenant dialog.
 //!
 //! The route is `OperatorCapability(LIST)`: the host proves the explicit

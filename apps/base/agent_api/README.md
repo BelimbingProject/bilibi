@@ -246,7 +246,7 @@ A page's write event calls the contract the agent doors call, through `base/agen
 
 - `Call` names the live request's scope and credential (`LiveRequest::credential`), the page service, the event and the contract. The browser session is the plan's credential: proved and held (key-share lock) on the plan's own transaction, so a sign-out cannot race the write.
 - Owner refusals come back typed: `InvalidInput(fields)`, `Forbidden`, `NotFound`, `Backend(Conflict)`, … Return `Backend(Unauthorized)` and `Backend(StepUpRequired { .. })` from the page unchanged: the host signs the browser in again or sends it to confirm and back.
-- Core Person, Core Affiliation, Core Company's relationship screens, Core Tenant Administration and Base Events' replay page are the running examples.
+- Core Person, Core Affiliation, Core Company's relationship screens, Core Tenant and Base Events' replay page are the running examples.
 
 ## Queued jobs as callers
 
@@ -310,7 +310,7 @@ MCP initialization and generated plugin workflow skills use `BUSINESS_CONTEXT` f
 
 ## Tenant provisioning
 
-[Core Tenant Administration](../../core/tenant_administration/README.md) registers `core.tenant_administration.tenant.list`, `.get` and `.create`. The Tenants page uses `PageContracts` for its directory reads and create event, with no pending write allowance. Search and describe discover these contracts through the same registry as the ChatGPT plugin; the plugin contains no tenant-specific logic.
+[Core Tenant](../../core/tenant/README.md) registers `core.tenant.tenant.list`, `.get` and `.create`. The Tenants page uses `PageContracts` for its directory reads and create event, with no pending write allowance. Search and describe discover these contracts through the same registry as the ChatGPT plugin; the plugin contains no tenant-specific logic.
 
 The create input names the tenant, a `primary_company` and optional `additional_companies` names. One reviewed commit creates the tenant, companies and primary assignment in the write transaction. Tenant-create permission requires the platform operator's standing and capability; its declared step-up policy applies to both doors. Company provisioning takes Tenancy's sealed receipt for a fresh insert, never an input tenant id or a retargeted scope. Creating a tenant does not switch the caller into it or grant access to its business data.
 

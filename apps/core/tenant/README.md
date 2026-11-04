@@ -1,4 +1,4 @@
-# Tenant administration
+# Tenant
 
 Create a customer's tenant and companies together, or search the platform tenant directory.
 
@@ -10,9 +10,9 @@ Every contract serves every channel through the operation registry.
 
 | Key | Input | Permission |
 | --- | --- | --- |
-| `core.tenant_administration.tenant.list` | Optional `search`, `page`, `page_size` (at most 100) | Operator standing and `admin.tenancy.tenant.list` |
-| `core.tenant_administration.tenant.get` | `tenant_id` | Same list permission |
-| `core.tenant_administration.tenant.create` | `name`, `primary_company`; optional `additional_companies`, `parent_id`, `status` | Operator standing and `admin.tenancy.tenant.create`, plus Base Step-up policy |
+| `core.tenant.tenant.list` | Optional `search`, `page`, `page_size` (at most 100) | Operator standing and `admin.tenancy.tenant.list` |
+| `core.tenant.tenant.get` | `tenant_id` | Same list permission |
+| `core.tenant.tenant.create` | `name`, `primary_company`; optional `additional_companies`, `parent_id`, `status` | Operator standing and `admin.tenancy.tenant.create`, plus Base Step-up policy |
 
 The create review shows normalized tenant input, parent facts, company names, generated company codes, status and the primary assignment. Status defaults to `active`; `suspended` is also accepted. At most 99 additional companies may be supplied. All names obey their owning module's validation; matching code suggestions receive `_2`, `_3` and so on within 12 characters.
 
@@ -24,7 +24,7 @@ An agent runs the dry-run check, shows the review to its person, waits for expli
 
 Administration → Tenancy → **Oversight** (`/tenancy/oversight`) shows the child's recorded parent, table levels, withheld/personal fields, expiry, status and latest reads. Editing requires `admin.tenancy.oversight.manage`; reading requires `.view`. Setup 2FA is offered before granting. Reviewed narrowing and **Revoke all access** remain available without enrollment. **Oversight received** (`/tenancy/oversight-received`) requires `tenancy.oversight.view` and shows only consenting direct children, never siblings or an unconsenting child's name.
 
-The shared browser/agent contracts are `core.tenant_administration.oversight.given`, `.received`, `.catalog` and reviewed `.update`. Update accepts `version`, `active`, optional `expires_at` and a bounded `tables` array of `{table, level, withheld, personal}`; levels are `aggregates` or `rows`. Every commit revalidates live catalog fields and consent version. Grant changes use the child's mutation boundary and audit; the sealed read proof grants no child write or record-page access.
+The shared browser/agent contracts are `core.tenant.oversight.given`, `.received`, `.catalog` and reviewed `.update`. Update accepts `version`, `active`, optional `expires_at` and a bounded `tables` array of `{table, level, withheld, personal}`; levels are `aggregates` or `rows`. Every commit revalidates live catalog fields and consent version. Grant changes use the child's mutation boundary and audit; the sealed read proof grants no child write or record-page access.
 
 Only fully classified sources enter the consent catalog ([Grid's classification contract](../../base/grid/README.md#parent-oversight)). Core Contacts, accounts, affiliations, addresses and companies are unavailable until their owners finish classification and required privacy/store contracts. An existing grant or forged personal opt-in cannot enable them, and masking/withholding unknown fields does not make a source eligible. The editor and report builder state this limitation instead of presenting unknown personal data as safe to share.
 

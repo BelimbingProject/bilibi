@@ -11,10 +11,10 @@ use bilibi_tenancy::{Scope, OVERSIGHT_GRANT, OVERSIGHT_MANAGE, OVERSIGHT_READ, O
 use serde_json::{json, Value};
 use tokio_postgres::GenericClient;
 
-pub(super) const GIVEN: &str = "core.tenant_administration.oversight.given";
-pub(super) const RECEIVED: &str = "core.tenant_administration.oversight.received";
-pub(super) const CATALOG: &str = "core.tenant_administration.oversight.catalog";
-pub(super) const UPDATE: &str = "core.tenant_administration.oversight.update";
+pub(super) const GIVEN: &str = "core.tenant.oversight.given";
+pub(super) const RECEIVED: &str = "core.tenant.oversight.received";
+pub(super) const CATALOG: &str = "core.tenant.oversight.catalog";
+pub(super) const UPDATE: &str = "core.tenant.oversight.update";
 
 pub(super) async fn catalog(
     client: &(impl GenericClient + Sync),
@@ -112,7 +112,7 @@ async fn validate(
 struct Update;
 impl WriteHandler for Update {
     fn owner(&self) -> &'static str {
-        "core/tenant_administration"
+        "core/tenant"
     }
     fn preview<'a>(
         &'a self,
@@ -171,7 +171,7 @@ enum Read {
 }
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
-        "core/tenant_administration"
+        "core/tenant"
     }
     fn call<'a>(
         &'a self,
@@ -222,7 +222,7 @@ fn update() -> Value {
         "tables":{"type":"array","items":{"type":"object","required":["table","level","withheld","personal"],"properties":{"table":{"type":"string","maxLength":100},"level":{"type":"string","enum":["aggregates","rows"]},"withheld":{"type":"array","items":{"type":"string","maxLength":100}},"personal":{"type":"array","items":{"type":"string","maxLength":100}}}}}
     }})
 }
-inventory::submit! { Contribution::new(DEFINITIONS,"core/tenant_administration.oversight",Provenance { module:"core/tenant_administration",source:file!(),line:line!() }, &Definitions {
+inventory::submit! { Contribution::new(DEFINITIONS,"core/tenant.oversight",Provenance { module:"core/tenant",source:file!(),line:line!() }, &Definitions {
     operations:&[
         Operation { key:GIVEN,title:"Read parent oversight consent",summary:"Read this tenant's consent to its recorded parent and its latest audited reads.",keywords:&["parent","oversight","consent"],capability:OVERSIGHT_VIEW,input:empty,output,handler:Handler::Read(&Read::Given),channels:Channels::Every,step_up:&[] },
         Operation { key:RECEIVED,title:"Read oversight received",summary:"List only live direct children which granted this parent consent. Hierarchy and operator standing confer nothing.",keywords:&["parent","oversight","children"],capability:OVERSIGHT_READ,input:empty,output,handler:Handler::Read(&Read::Received),channels:Channels::Every,step_up:&[] },

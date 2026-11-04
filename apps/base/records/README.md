@@ -78,8 +78,8 @@ A page can take records dropped from another tile as a shortcut for an action it
 **Declare a target (the page's owner),** beside the page's `PageWrites`:
 
    ```rust
-   bilibi_records::drop_target!("core/customer_access", bilibi_records::DropTarget {
-       id: "customer_access.invite", service: PAGES, contract: operations::INVITE,
+   bilibi_records::drop_target!("core/portal", bilibi_records::DropTarget {
+       id: "portal.invite", service: PAGES, contract: operations::INVITE,
        capability: MANAGE, path: STAFF_PATH, label: "Invite as customer",
        accepts: &["person"], max: 1,
    });
@@ -89,7 +89,7 @@ A page can take records dropped from another tile as a shortcut for an action it
 - Boot refuses a target that accepts a kind no mounted module declares, whose `path` is no contributed GET page route of its `service`, or whose contract the service does not declare.
 - **The page** wraps itself with `target.zone().wrap(id, html)` only while its own button shows, and handles two inputs the same way: the live event `drop_records` (`records` = `kind:id,kind:id`) and the address parameter `?drop=` (`DROP_EVENT`, `DROP_PARAM`). Both call `Records::receive(scope, target_id, text)`, which checks the count, the kinds and every record (read as `resolve` reads them, so a hidden, removed or forged record is refused), then the page opens its review with the record chosen, as its button and picker would. Show a refusal with `DropRefusal::message`.
 
-**Offer a source (a list's owner):** `Records::add_to(scope, kind)` lists the targets that accept the kind and that the person holds the capability for. When it is not empty, set `FlexRow::record(kind, id)` on each row and `AddTo::href(&records)` in a `bilibi_ui::AddToMenu` on the row and on the selection bar (a target that takes fewer records than are ticked stays in the menu, disabled with the reason). Dragging a ticked row takes every ticked row of its table that is on screen. Contacts (`person`, with a selection bar) and Companies (`company`, one row at a time) are the Platform's sources; Finance's Customers (`receivables.customer`) and Vendors (`payables.vendor`) accept both, up to 20 at a time, and Customer portal (`customer_access.invite`) takes one contact.
+**Offer a source (a list's owner):** `Records::add_to(scope, kind)` lists the targets that accept the kind and that the person holds the capability for. When it is not empty, set `FlexRow::record(kind, id)` on each row and `AddTo::href(&records)` in a `bilibi_ui::AddToMenu` on the row and on the selection bar (a target that takes fewer records than are ticked stays in the menu, disabled with the reason). Dragging a ticked row takes every ticked row of its table that is on screen. Contacts (`person`, with a selection bar) and Companies (`company`, one row at a time) are the Platform's sources; Finance's Customers (`receivables.customer`) and Vendors (`payables.vendor`) accept both, up to 20 at a time, and Customer portal (`portal.invite`) takes one contact.
 
 The browser half is `apps/base/ui/assets/drops.js`: the source frame tells the workspace what it carries (`assets/tiling.js` relays it) so every accepting tile lights up, the drop raises `drop_records` on the page, and a drag from another site carries none of the types it reads and is ignored.
 

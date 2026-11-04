@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-pub(super) const PAGES: &str = "core/tenant_administration.oversight_pages";
+pub(super) const PAGES: &str = "core/tenant.oversight_pages";
 const PATH: &str = "/tenancy/oversight";
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     ListSpec {
@@ -717,8 +717,8 @@ pub(super) fn service(
     }))))
 }
 macro_rules! route {($id:literal,$path:literal,$operation:literal,$cap:expr,$title:literal)=>{
-    inventory::submit! {Contribution::new(ROUTES,$id,Provenance {module:"core/tenant_administration",source:file!(),line:line!()},&Route {company_scope:CompanyScope::Tenant,method:Method::Get,path:$path,service:PAGES,operation:$operation,access:Access::Capability($cap),framed:true})}
-    bilibi_menu::contribute!("core/tenant_administration",bilibi_menu::MenuItem::page($id,$title,$path).under("admin.tenancy").requires(bilibi_menu::Requirement::Capability($cap)));
+    inventory::submit! {Contribution::new(ROUTES,$id,Provenance {module:"core/tenant",source:file!(),line:line!()},&Route {company_scope:CompanyScope::Tenant,method:Method::Get,path:$path,service:PAGES,operation:$operation,access:Access::Capability($cap),framed:true})}
+    bilibi_menu::contribute!("core/tenant",bilibi_menu::MenuItem::page($id,$title,$path).under("admin.tenancy").requires(bilibi_menu::Requirement::Capability($cap)));
 };}
 route!(
     "admin.tenancy.oversight",
@@ -734,4 +734,4 @@ route!(
     OVERSIGHT_READ,
     "Oversight received"
 );
-inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,Provenance {module:"core/tenant_administration",source:file!(),line:line!()},&PageWrites {service:PAGES,contracts:&[("review_grant",UPDATE),("review_revoke",UPDATE),("review_remove",UPDATE),("confirm_grant",UPDATE)],pending:Pending::None})}
+inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,Provenance {module:"core/tenant",source:file!(),line:line!()},&PageWrites {service:PAGES,contracts:&[("review_grant",UPDATE),("review_revoke",UPDATE),("review_remove",UPDATE),("confirm_grant",UPDATE)],pending:Pending::None})}

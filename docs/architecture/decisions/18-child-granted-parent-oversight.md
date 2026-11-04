@@ -24,6 +24,6 @@ Each successful child answer requires a durable action in that child, attributed
 
 ## Contracts
 
-The authoritative APIs are in [Tenancy](../../../apps/base/tenancy/README.md), [Grid](../../../apps/base/grid/README.md) and [Tenant Administration](../../../apps/core/tenant_administration/README.md). Reports and exports must use the same sealed read path; they cannot infer child identity from numeric IDs.
+The authoritative APIs are in [Tenancy](../../../apps/base/tenancy/README.md), [Grid](../../../apps/base/grid/README.md) and [Tenant](../../../apps/core/tenant/README.md). Reports and exports must use the same sealed read path; they cannot infer child identity from numeric IDs.
 
 Saved [Reports](../../../apps/base/reports/README.md), dashboard panels and direct downloads use this path and expose partial outcomes. Prepared exports and scheduled deliveries refuse oversight definitions because retaining child answers in the parent would defeat revocation. Row-level totals exclude aggregates-only children; files refuse a changing cohort or record count rather than joining incompatible pages.

@@ -12,14 +12,14 @@ use bilibi_tenancy::{CreateOutcome, NewTenant, Scope, TenantErrors, Tenants};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
-pub const SERVICE: &str = "core/tenant_administration.tenants";
-pub const CREATE: &str = "core.tenant_administration.tenant.create";
-pub const LIST: &str = "core.tenant_administration.tenant.list";
-pub const GET: &str = "core.tenant_administration.tenant.get";
-const PAGES: &str = "core/tenant_administration.pages";
+pub const SERVICE: &str = "core/tenant.tenants";
+pub const CREATE: &str = "core.tenant.tenant.create";
+pub const LIST: &str = "core.tenant.tenant.list";
+pub const GET: &str = "core.tenant.tenant.get";
+const PAGES: &str = "core/tenant.pages";
 
 /// The composition facade. No caller supplies a tenant or actor to act as.
-pub struct TenantAdministration {
+pub struct TenantService {
     db: Db,
     tenants: Arc<Tenants>,
     companies: Arc<CompanyService>,
@@ -62,7 +62,7 @@ fn tenant_json(tenant: &bilibi_tenancy::TenantIdentity) -> Value {
     json!({"id":tenant.id,"parent_id":tenant.parent_id,"name":tenant.name,"status":tenant.status,"is_platform_operator":tenant.is_platform_operator})
 }
 
-impl TenantAdministration {
+impl TenantService {
     async fn review(&self, scope: &Scope, input: &Value) -> Result<Value> {
         let client = self.db.get().await.map_err(Error::from)?;
         let proof =
@@ -121,17 +121,17 @@ impl TenantAdministration {
 }
 
 bilibi_step_up::declare!(
-    "core/tenant_administration",
+    "core/tenant",
     bilibi_step_up::Operation::new(CREATE, "Create a tenant and its companies").floor()
 );
 
 inventory::submit! {
     bilibi_module_registry::Module {
-        id:"core/tenant_administration", layer:bilibi_module_registry::Layer::Core,
+        id:"core/tenant", layer:bilibi_module_registry::Layer::Core,
         dependencies:&["base/agent_api","base/authz","base/audit","base/database","base/datetime","base/grid","base/locale","base/menu","base/module_registry","base/settings","base/step_up","base/system","base/tenancy","base/ui","core/company"], migrations:&[],
         services:&[
             bilibi_module_registry::Service { id:SERVICE, factory:|services| {
-                let facade = Arc::new(TenantAdministration {
+                let facade = Arc::new(TenantService {
                     db:services.get::<Db>("base/database.pool")?.as_ref().clone(),
                     tenants:services.get("base/tenancy.tenants")?, companies:services.get(bilibi_company::SERVICE)?,
                     step_up:services.get(bilibi_step_up::SERVICE)?,
@@ -148,22 +148,22 @@ inventory::submit! {
         ],
     }
 }
-inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::ROUTES, "core/tenant_administration.tenants", bilibi_module_registry::Provenance { module:"core/tenant_administration", source:file!(), line:line!() }, &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::ROUTES, "core/tenant.tenants", bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method:bilibi_module_registry::contributions::Method::Get, path:"/tenancy/tenants", service:PAGES, operation:"tenants", access:bilibi_module_registry::contributions::Access::OperatorCapability(bilibi_tenancy::LIST), framed:true,
 }) }
-inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, PAGES, bilibi_module_registry::Provenance { module:"core/tenant_administration", source:file!(), line:line!() }, &bilibi_module_registry::contributions::PageWrites {
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, PAGES, bilibi_module_registry::Provenance { module:"core/tenant", source:file!(), line:line!() }, &bilibi_module_registry::contributions::PageWrites {
     service:PAGES, contracts:&[("create",CREATE)], pending:bilibi_module_registry::contributions::Pending::None,
 }) }
 
 bilibi_menu::contribute!(
-    "core/tenant_administration",
+    "core/tenant",
     bilibi_menu::MenuItem::container("admin.tenancy", "Tenancy")
         .icon("building-library")
         .under("admin")
         .order(80)
 );
 bilibi_menu::contribute!(
-    "core/tenant_administration",
+    "core/tenant",
     bilibi_menu::MenuItem::page("admin.tenancy.tenant", "Tenants", "/tenancy/tenants")
         .under("admin.tenancy")
         .requires(bilibi_menu::Requirement::Capability(bilibi_tenancy::LIST))
