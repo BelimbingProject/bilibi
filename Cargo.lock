@@ -675,6 +675,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-consent"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-company",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-party-ids",
+ "bilibi-person",
+ "bilibi-picklists",
+ "bilibi-principal-directory",
+ "bilibi-records",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-user",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "thiserror",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "bilibi-core"
 version = "0.2.1"
 dependencies = [
@@ -683,6 +712,7 @@ dependencies = [
  "bilibi-affiliation",
  "bilibi-agent",
  "bilibi-company",
+ "bilibi-consent",
  "bilibi-currency",
  "bilibi-document",
  "bilibi-geonames",

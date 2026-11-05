@@ -4,6 +4,7 @@ pub use bilibi_address as address;
 pub use bilibi_affiliation as affiliation;
 pub use bilibi_agent as agent;
 pub use bilibi_company as company;
+pub use bilibi_consent as consent;
 pub use bilibi_currency as currency;
 pub use bilibi_document as document;
 pub use bilibi_geonames as geonames;
