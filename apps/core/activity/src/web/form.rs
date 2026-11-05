@@ -1,4 +1,4 @@
-//! The New call, New task and New note dialog, shared by the list, the
+//! The Log call, New meeting, New task and New note dialog, shared by the list, the
 //! record page (Close and create new) and the record panels. Changes keep the
 //! server's draft; Enter or Save submits it to the kind's create contract.
 use super::{refusal, render, Clock, Pages, Refusal};
@@ -65,6 +65,9 @@ fn label_of(field: &str) -> &'static str {
         "status" => "Status",
         "direction" => "Direction",
         "outcome" => "Outcome",
+        "location" => "Location",
+        "join_url" => "Join link",
+        "meeting_type" => "Meeting type",
         "assignee" => "Assigned to",
         "description" => "Description",
         "internal_notes" => "Internal notes",
@@ -124,6 +127,12 @@ impl Dialog {
         put("starts_at", clock.local(draft.starts_at));
         put("ends_at", clock.local(draft.ends_at));
         put("outcome", String::new());
+        put("location", draft.location.clone().unwrap_or_default());
+        put("join_url", draft.join_url.clone().unwrap_or_default());
+        put(
+            "meeting_type",
+            draft.meeting_type.clone().unwrap_or_default(),
+        );
         if let Some(priority) = draft.priority {
             put("priority", priority.code().into());
         }
@@ -143,15 +152,17 @@ impl Dialog {
     pub fn submit_event(&self) -> &'static str {
         match self.kind {
             Kind::Call => "log_call",
+            Kind::Meeting => "create_meeting",
             Kind::Note => "create_note",
-            _ => "create_task",
+            Kind::Task => "create_task",
         }
     }
     fn contract(&self) -> &'static str {
         match self.kind {
             Kind::Call => "core.activity.log_call",
+            Kind::Meeting => "core.activity.create_meeting",
             Kind::Note => "core.activity.create_note",
-            _ => "core.activity.create_task",
+            Kind::Task => "core.activity.create_task",
         }
     }
     fn value(&self, key: &str) -> &str {
@@ -204,6 +215,9 @@ impl Dialog {
             "status",
             "direction",
             "outcome",
+            "location",
+            "join_url",
+            "meeting_type",
             "description",
             "internal_notes",
         ] {
@@ -275,7 +289,20 @@ impl Dialog {
                     input["outcome"] = json!(self.value("outcome"));
                 }
             }
-            _ => {}
+            Kind::Meeting => {
+                for key in ["starts_at", "ends_at"] {
+                    match time(key) {
+                        Some(at) => input[key] = json!(at),
+                        None => input[key] = json!(""),
+                    }
+                }
+                for key in ["location", "join_url", "meeting_type"] {
+                    if !self.value(key).trim().is_empty() {
+                        input[key] = json!(self.value(key));
+                    }
+                }
+            }
+            Kind::Note => {}
         }
         for key in ["description", "internal_notes"] {
             if !self.value(key).trim().is_empty()
@@ -298,6 +325,7 @@ impl Dialog {
                 .guests
                 .iter()
                 .map(|g| match g {
+                    Guest::User(id) => json!({"user_id": id}),
                     Guest::Person(id) => json!({"person_id": id.get()}),
                     Guest::Address { email, related } =>
                         json!({"email": email, "related": related}),
@@ -442,7 +470,34 @@ impl Dialog {
                         .attr("maxlength", "100"),
                 );
             }
-            _ => {}
+            Kind::Meeting => {
+                fields.push(
+                    self.field(prefix, "starts_at", "Starts")
+                        .kind(InputKind::DatetimeLocal)
+                        .required()
+                        .hint(&zone),
+                );
+                fields.push(
+                    self.field(prefix, "ends_at", "Ends")
+                        .kind(InputKind::DatetimeLocal)
+                        .required(),
+                );
+                fields.push(
+                    self.field(prefix, "location", "Location")
+                        .attr("maxlength", "255"),
+                );
+                fields.push(
+                    self.field(prefix, "join_url", "Join link")
+                        .kind(InputKind::Url)
+                        .attr("maxlength", "2000")
+                        .hint("An https:// link to the video call, if there is one."),
+                );
+                fields.push(
+                    self.field(prefix, "meeting_type", "Meeting type")
+                        .attr("maxlength", "100"),
+                );
+            }
+            Kind::Note => {}
         }
         let mut assignees = vec![("Me".to_owned(), "me".to_owned())];
         if let Some((user, name)) = &self.assignee {
@@ -554,8 +609,9 @@ impl Dialog {
             working: "Saving…",
             body: Html::text(match self.kind {
                 Kind::Call => "Save call",
+                Kind::Meeting => "Save meeting",
                 Kind::Note => "Save note",
-                _ => "Save task",
+                Kind::Task => "Save task",
             }),
             ..Button::default()
         })?);
@@ -567,8 +623,9 @@ impl Dialog {
         })?;
         let title = match self.kind {
             Kind::Call => "Log a call",
+            Kind::Meeting => "New meeting",
             Kind::Note => "New note",
-            _ => "New task",
+            Kind::Task => "New task",
         };
         render(Modal {
             id: &format!("{prefix}-modal"),

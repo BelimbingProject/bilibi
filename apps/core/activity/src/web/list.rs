@@ -179,6 +179,7 @@ impl Index {
                 if self.pages.activities.may_create(scope).await? {
                     let kind = match value["kind"].as_str() {
                         Some("call") => Kind::Call,
+                        Some("meeting") => Kind::Meeting,
                         Some("note") => Kind::Note,
                         _ => Kind::Task,
                     };
@@ -202,7 +203,7 @@ impl Index {
                 }
             }
             "close_modal" => self.dialog = None,
-            "create_task" | "log_call" | "create_note" => {
+            "create_task" | "log_call" | "create_meeting" | "create_note" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
@@ -358,6 +359,7 @@ impl Index {
         if may_create {
             for (kind, label) in [
                 ("call", "Log call"),
+                ("meeting", "New meeting"),
                 ("task", "New task"),
                 ("note", "New note"),
             ] {

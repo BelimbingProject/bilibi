@@ -60,6 +60,15 @@ codes! {
     }
 }
 codes! {
+    /// A guest's answer to an invitation.
+    Response {
+        NoResponse => "none", "No answer",
+        Accepted => "accepted", "Accepted",
+        Declined => "declined", "Declined",
+        Tentative => "tentative", "Tentative",
+    }
+}
+codes! {
     /// Which way a call went.
     Direction {
         Inbound => "inbound", "Inbound",
@@ -104,7 +113,9 @@ impl Kind {
             Self::Note => None,
         }
     }
-    fn timed(self) -> bool {
+    /// Calls and meetings: they have a start and an end, guests may be
+    /// invited to them and they can overlap.
+    pub fn timed(self) -> bool {
         matches!(self, Self::Call | Self::Meeting)
     }
 }
@@ -118,14 +129,19 @@ impl Status {
     }
 }
 
-/// Someone invited who has no account: a Core person, or an email address
-/// (a lead with no Core person yet). `related` marks the address of the
-/// record the activity is about, which lead conversion replaces with the new
-/// person.
+/// Someone invited: a colleague's account, a Core person, or an email
+/// address (a lead with no Core person yet). `related` marks the address of
+/// the record the activity is about, which lead conversion replaces with the
+/// new person.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Guest {
+    /// An active account of the tenant: told and reminded in the bell.
+    User(i64),
     Person(PersonId),
-    Address { email: String, related: bool },
+    Address {
+        email: String,
+        related: bool,
+    },
 }
 
 /// How a logged call ended: held, or planned for later.
@@ -171,6 +187,21 @@ pub struct CallInput {
     pub direction: Direction,
 }
 
+/// `create_meeting`. A held meeting has ended: `ends_at` is not in the
+/// future.
+#[derive(Clone, Debug)]
+pub struct MeetingInput {
+    pub common: Common,
+    pub starts_at: Timestamp,
+    pub ends_at: Timestamp,
+    /// Where it takes place, up to 255 characters.
+    pub location: Option<String>,
+    /// An `https://` or `http://` link to join it, up to 2,000 characters.
+    pub join_url: Option<String>,
+    /// Plain text up to 100 characters (a pick-list later).
+    pub meeting_type: Option<String>,
+}
+
 /// A note: a title and its text, about a record.
 #[derive(Clone, Debug, Default)]
 pub struct NoteInput {
@@ -190,6 +221,9 @@ pub struct Patch {
     pub due_at: Option<Option<Timestamp>>,
     pub start_at: Option<Option<Timestamp>>,
     pub outcome: Option<Option<String>>,
+    pub location: Option<Option<String>>,
+    pub join_url: Option<Option<String>>,
+    pub meeting_type: Option<Option<String>>,
     pub description: Option<Option<String>>,
     pub internal_notes: Option<Option<String>>,
     pub related: Option<Option<Reference>>,
@@ -207,6 +241,9 @@ impl Patch {
             && self.due_at.is_none()
             && self.start_at.is_none()
             && self.outcome.is_none()
+            && self.location.is_none()
+            && self.join_url.is_none()
+            && self.meeting_type.is_none()
             && self.description.is_none()
             && self.internal_notes.is_none()
             && self.related.is_none()
@@ -248,6 +285,9 @@ pub struct Draft {
     pub due_at: Option<Timestamp>,
     pub start_at: Option<Timestamp>,
     pub outcome: Option<String>,
+    pub location: Option<String>,
+    pub join_url: Option<String>,
+    pub meeting_type: Option<String>,
     pub description: Option<String>,
     pub internal_notes: Option<String>,
     pub related: Option<Reference>,
@@ -271,6 +311,9 @@ impl Draft {
             due_at: None,
             start_at: None,
             outcome: None,
+            location: None,
+            join_url: None,
+            meeting_type: None,
             description: None,
             internal_notes: None,
             related: None,
@@ -310,6 +353,16 @@ impl Draft {
             outcome: clean(input.outcome.as_deref()),
             direction: Some(input.direction),
             ..Self::common(Kind::Call, &input.common)
+        }
+    }
+    pub fn meeting(input: &MeetingInput) -> Self {
+        Self {
+            starts_at: Some(input.starts_at),
+            ends_at: Some(input.ends_at),
+            location: clean(input.location.as_deref()),
+            join_url: clean(input.join_url.as_deref()),
+            meeting_type: clean(input.meeting_type.as_deref()),
+            ..Self::common(Kind::Meeting, &input.common)
         }
     }
     pub fn note(input: &NoteInput) -> Self {
@@ -410,11 +463,32 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
             }
         }
     }
-    errors.extend(held_call_ended(kind, values.status, values.ends_at));
+    errors.extend(held_ended(kind, values.status, values.ends_at));
     if kind != Kind::Call && values.outcome.is_some() {
         errors.push(FieldError::new("outcome", "is only for calls"));
     }
     text(&mut errors, "outcome", &values.outcome, 100);
+    for (field, value, max) in [
+        ("location", &values.location, 255),
+        ("join_url", &values.join_url, 2000),
+        ("meeting_type", &values.meeting_type, 100),
+    ] {
+        if kind != Kind::Meeting && value.is_some() {
+            errors.push(FieldError::new(field, "is only for meetings"));
+        }
+        text(&mut errors, field, value, max);
+    }
+    if let Some(url) = &values.join_url {
+        let scheme = url.get(..8).map(str::to_ascii_lowercase);
+        let link = scheme.as_deref() == Some("https://")
+            || url.get(..7).map(str::to_ascii_lowercase).as_deref() == Some("http://");
+        if !link || url.chars().any(char::is_whitespace) {
+            errors.push(FieldError::new(
+                "join_url",
+                "must be a link that starts with https:// or http://",
+            ));
+        }
+    }
     text(&mut errors, "description", &values.description, 10_000);
     text(
         &mut errors,
@@ -438,6 +512,11 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
         ));
     }
     for guest in &values.guests {
+        if let Guest::User(user) = guest {
+            if *user <= 0 {
+                errors.push(FieldError::new("guests", "must name an account by its id"));
+            }
+        }
         if let Guest::Address { email, .. } = guest {
             if !email_shape(email) {
                 errors.push(FieldError::new(
@@ -450,19 +529,28 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
     errors
 }
 
-/// A held call has ended: every write that leaves a call held (a create, an
-/// update, Close) refuses an end in the future. Five minutes' grace covers a
-/// call logged as it ends and a clock that runs ahead.
-pub(crate) fn held_call_ended(
+/// A held call or meeting has ended: every write that leaves one held (a
+/// create, an update, Close) refuses an end in the future, so its timeline
+/// line is never written before it happened. Five minutes' grace covers one
+/// logged as it ends and a clock that runs ahead.
+pub(crate) fn held_ended(
     kind: Kind,
     status: Option<Status>,
     ends_at: Option<Timestamp>,
 ) -> Option<FieldError> {
     let grace = jiff::SignedDuration::from_mins(5);
-    (kind == Kind::Call
+    (kind.timed()
         && status == Some(Status::Held)
         && ends_at.is_some_and(|ends| ends > Timestamp::now() + grace))
-    .then(|| FieldError::new("ends_at", "must not be in the future for a held call"))
+    .then(|| {
+        FieldError::new(
+            "ends_at",
+            format!(
+                "must not be in the future for a held {}",
+                kind.label().to_lowercase()
+            ),
+        )
+    })
 }
 
 /// The shape of an email address a guest may be invited by.
@@ -510,6 +598,15 @@ pub(crate) fn patched(before: &Draft, patch: &Patch) -> Draft {
     }
     if let Some(outcome) = &patch.outcome {
         after.outcome = clean(outcome.as_deref());
+    }
+    if let Some(location) = &patch.location {
+        after.location = clean(location.as_deref());
+    }
+    if let Some(url) = &patch.join_url {
+        after.join_url = clean(url.as_deref());
+    }
+    if let Some(meeting_type) = &patch.meeting_type {
+        after.meeting_type = clean(meeting_type.as_deref());
     }
     if let Some(description) = &patch.description {
         after.description = clean(description.as_deref());
