@@ -403,7 +403,7 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    if command == "enqueue-system" {
+    if matches!(command.as_str(), "enqueue-system" | "enqueue-delayed") {
         // SP1: the specimen job as the declared principal, the way a scheduler
         // or a connector's poll enqueues unattended work.
         let mode = std::env::args().nth(2).unwrap_or_else(|| "secret".into());
@@ -414,14 +414,34 @@ async fn main() -> Result<()> {
                 system.mutation_context("queue.specimen.enqueue-system"),
             )
             .await?;
-        let job = queue
-            .enqueue_system(
-                &mut tx,
-                &system,
-                "queue/execution-walkthrough",
-                json!({"mode":mode}),
-            )
-            .await?;
+        let job = if command == "enqueue-delayed" {
+            let seconds = std::env::args()
+                .nth(3)
+                .map(|value| value.parse::<u64>().map_err(|_| Error::Invalid))
+                .transpose()?
+                .unwrap_or(60);
+            let at = std::time::SystemTime::now()
+                .checked_add(std::time::Duration::from_secs(seconds))
+                .ok_or(Error::Invalid)?;
+            queue
+                .enqueue_system_at_within(
+                    &mut tx,
+                    &system,
+                    "queue/execution-walkthrough",
+                    json!({"mode":mode}),
+                    at,
+                )
+                .await?
+        } else {
+            queue
+                .enqueue_system(
+                    &mut tx,
+                    &system,
+                    "queue/execution-walkthrough",
+                    json!({"mode":mode}),
+                )
+                .await?
+        };
         tx.commit().await?;
         println!(
             "enqueued job={} mode={mode} principal={PRINCIPAL}",
