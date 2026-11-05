@@ -379,6 +379,7 @@ pub(crate) struct Store<'s> {
     pub records: &'s Records,
     pub directory: &'s PrincipalDirectory,
     pub events: &'s Events,
+    pub notifications: &'s bilibi_notifications::NotificationBoundary,
 }
 /// Which references a change touches, so unchanged ones are not rechecked
 /// (a record the actor can no longer view does not block other edits).
@@ -704,7 +705,7 @@ impl Store<'_> {
                             &format!(
                                 "UPDATE core_activities a SET subject=$4,status=$5,priority=$6,direction=$7,starts_at=$8,ends_at=$9,due_at=$10,start_at=$11,call_outcome=$12,description=$13,internal_notes=$14,related_kind=$15,related_id=$16,shared=$17,assignee_user_id=$18,
                                    closed_at=CASE WHEN NOT $19 THEN NULL WHEN a.closed_at IS NULL THEN now() ELSE a.closed_at END,
-                                   reminded_at=CASE WHEN $20 THEN NULL ELSE a.reminded_at END,
+                                   reminded_at=CASE WHEN $20 OR a.assignee_user_id<>$18 THEN NULL ELSE a.reminded_at END,
                                    version=a.version+1,updated_at=now()
                                  WHERE a.tenant_id=$1 AND a.id=$2 AND a.version=$3 AND a.deleted_at IS NULL RETURNING {COLUMNS}"
                             ),
@@ -759,7 +760,27 @@ impl Store<'_> {
             .await
             .map_err(stale)?;
         self.announce(tx, &activity, Some(&earlier)).await?;
+        self.refresh_bells(tx, &earlier, Some(&activity))?;
         Ok(activity)
+    }
+
+    /// A reminded, open activity is on its assignee's To do; when it closes,
+    /// goes away or changes hands, re-read the bell of each person it was or
+    /// now is on.
+    fn refresh_bells(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        before: &Activity,
+        after: Option<&Activity>,
+    ) -> Result<()> {
+        let mut people = Vec::new();
+        if before.reminded_at.is_some() && !before.is_closed() {
+            people.push(before.assignee_user_id);
+        }
+        if let Some(after) = after {
+            people.push(after.assignee_user_id);
+        }
+        self.notifications.todos_changed_for(tx, &people)
     }
 
     pub(crate) async fn repoint(
@@ -1183,6 +1204,7 @@ impl Store<'_> {
             .await
             .map_err(stale)?;
         self.announce(tx, &activity, Some(&earlier)).await?;
+        self.refresh_bells(tx, &earlier, None)?;
         Ok(activity)
     }
 }
@@ -1222,33 +1244,39 @@ pub(crate) async fn prepare_delete(
     editable(client, scope, id, version, false).await
 }
 
-pub(crate) async fn delete(
-    tx: &mut MutationTransaction<'_>,
-    scope: &Scope,
-    id: i64,
-    version: i64,
-) -> WriteResult<()> {
-    let before = editable(tx.sql(), scope, id, version, true).await?;
-    let tenant = scope.tenant();
-    tx.mutate(move |sql| {
-        Box::pin(async move {
-            let row = sql
-                .query_opt(
-                    &format!("UPDATE core_activities a SET deleted_at=now(),version=a.version+1,updated_at=now() WHERE a.tenant_id=$1 AND a.id=$2 AND a.version=$3 AND a.deleted_at IS NULL RETURNING {COLUMNS}"),
-                    &[&tenant, &before.id, &before.version],
-                )
-                .await?
-                .ok_or(Error::Conflict)?;
-            let after = from_row(&row)?;
-            let change = Change {
-                kind: RECORD.into(),
-                id: after.id,
-                old: audit_values(&before),
-                new: json!({}),
-            };
-            Ok(((), vec![change]))
+impl Store<'_> {
+    pub(crate) async fn delete(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+    ) -> WriteResult<()> {
+        let before = editable(tx.sql(), scope, id, version, true).await?;
+        let tenant = scope.tenant();
+        let earlier = before.clone();
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let row = sql
+                    .query_opt(
+                        &format!("UPDATE core_activities a SET deleted_at=now(),version=a.version+1,updated_at=now() WHERE a.tenant_id=$1 AND a.id=$2 AND a.version=$3 AND a.deleted_at IS NULL RETURNING {COLUMNS}"),
+                        &[&tenant, &before.id, &before.version],
+                    )
+                    .await?
+                    .ok_or(Error::Conflict)?;
+                let after = from_row(&row)?;
+                let change = Change {
+                    kind: RECORD.into(),
+                    id: after.id,
+                    old: audit_values(&before),
+                    new: json!({}),
+                };
+                Ok(((), vec![change]))
+            })
         })
-    })
-    .await
-    .map_err(stale)
+        .await
+        .map_err(stale)?;
+        self.refresh_bells(tx, &earlier, None)?;
+        Ok(())
+    }
 }

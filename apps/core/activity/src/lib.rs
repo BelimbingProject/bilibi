@@ -212,6 +212,7 @@ pub struct Activities {
     records: Arc<Records>,
     directory: Arc<PrincipalDirectory>,
     events: Arc<Events>,
+    notifications: Arc<bilibi_notifications::NotificationBoundary>,
 }
 impl Activities {
     async fn fresh(
@@ -229,6 +230,7 @@ impl Activities {
             records: &self.records,
             directory: &self.directory,
             events: &self.events,
+            notifications: &self.notifications,
         }
     }
 
@@ -446,7 +448,7 @@ impl Activities {
         version: i64,
     ) -> WriteResult<()> {
         let scope = self.fresh(tx.sql(), scope).await?;
-        store::delete(tx, &scope, id, version).await
+        self.store().delete(tx, &scope, id, version).await
     }
     /// Moves every live activity related to `from` to `to`, in the caller's
     /// transaction, after `base/records.check` of both for the caller. When
@@ -480,6 +482,7 @@ inventory::submit! { Module {
             records: records.clone(),
             directory: s.get("base/principal_directory.directory")?,
             events: s.get(bilibi_events::SERVICE)?,
+            notifications: s.get("base/notifications.sink")?,
         });
         agent_operations::bind(activities.clone())?;
         s.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?

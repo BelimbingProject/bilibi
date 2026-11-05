@@ -44,7 +44,7 @@ Not here: customer roll-ups, the customer timeline, lead conversion, sales caden
 | `related_kind`, `related_id` | The `base/records` reference, both or neither |
 | `shared` | Readers of the related record see it too. Default `false` |
 | `assignee_user_id` | An active account of the tenant; the creator by default |
-| `reminded_at` | When the sweep reminded the assignee; cleared when `starts_at` or `due_at` changes |
+| `reminded_at` | When the sweep reminded the assignee; cleared when `starts_at`, `due_at` or the assignee changes |
 | `created_by`, `created_at`, `updated_at`, `closed_at`, `deleted_at`, `version` | `closed_at` is set exactly while the status is a closing one |
 
 `core_activity_guests`: one row per guest. A guest is an account, a Core person or an email address; `role` is `creator`, `assignee`, `related` or `invited`.
@@ -73,7 +73,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 2. In one audited transaction per 200 it sets `reminded_at` and rings each assignee's bell after commit (`NotificationBoundary::todos_changed_for`). A run reminds at most 2,000; the next run takes the rest.
 3. When `core.activity.reminder_email` is on (default off), it then emails each assignee the kind, subject, time and a link to the activity. Mail is sent after commit; a refused message is logged and not retried, because the bell already holds the reminder.
 
-**The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from that person's To do; moving its due time waits for a new reminder. See all opens `/activities?mine=assignee`.
+**The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from that person's To do and refreshes their bell at once; moving its due time or reassigning it waits for a new reminder to the new assignee. See all opens `/activities?mine=assignee`.
 
 ## Events
 
