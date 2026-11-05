@@ -114,8 +114,8 @@ async fn main() -> Result<()> {
     for spelling in [
         "+60123456790",
         "0060123456790",
-        "60 12 345 6790",
         "+60 (12)-345.6790",
+        "00 60 (12)-345.6790",
     ] {
         let found = people
             .match_contact_in(sql, &manager, &phone(spelling), 100)
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         assert_eq!(found.entries, [person.id]);
         assert!(found.complete());
     }
-    for spelling in ["+60123456791", "0060123456791", "60 12 345 6791"] {
+    for spelling in ["+60123456791", "0060123456791", "+60 (12)-345.6791"] {
         let found = work
             .match_contact_in(sql, &manager, &phone(spelling), 100)
             .await?;
@@ -410,14 +410,60 @@ async fn main() -> Result<()> {
         .match_contact_in(tx.sql(), &manager, &phone("+60129999999"), 100)
         .await?;
     assert!(found.entries.is_empty() && found.uncomparable && !found.complete());
-    assert!(matches!(
-        people
-            .match_contact_in(tx.sql(), &manager, &phone("0123456790"), 100)
-            .await,
-        Err(Error::Invalid)
-    ));
+    for bare in [
+        "0123456790",
+        "60 12 345 6790",
+        "(212) 555-1234",
+        "2125551234",
+    ] {
+        assert!(matches!(
+            people
+                .match_contact_in(tx.sql(), &manager, &phone(bare), 100)
+                .await,
+            Err(Error::Invalid)
+        ));
+        assert!(matches!(
+            work.match_contact_in(tx.sql(), &manager, &phone(bare), 100)
+                .await,
+            Err(Error::Invalid)
+        ));
+    }
     tx.rollback().await?;
-    println!("PASS bounded overflow and explicit incompleteness for unsupported national phones");
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("contact.lookup.no_trunk_zero"),
+        )
+        .await?;
+    let mut bare = personal();
+    bare.phone = Some("(212) 555-1234".into());
+    let bare_person = people.create_in(&mut tx, &manager, &bare).await?;
+    let mut bare_work = input.clone();
+    bare_work.work_phone = Some("(212) 555-1234".into());
+    let bare_work = work.create_in(&mut tx, &manager, &bare_work).await?;
+    assert_eq!(bare_person.phone.as_deref(), Some("(212) 555-1234"));
+    assert_eq!(
+        bare_work.affiliation.work_phone.as_deref(),
+        Some("(212) 555-1234")
+    );
+    for (criterion, country) in [("+12125551234", "US"), ("+2125551234", "Morocco")] {
+        let personal = people
+            .match_contact_in(tx.sql(), &manager, &phone(criterion), 100)
+            .await?;
+        assert!(
+            personal.entries.is_empty() && personal.uncomparable && !personal.complete(),
+            "{country}"
+        );
+        let current = work
+            .match_contact_in(tx.sql(), &manager, &phone(criterion), 100)
+            .await?;
+        assert!(
+            current.entries.is_empty() && current.uncomparable && !current.complete(),
+            "{country}"
+        );
+    }
+    tx.rollback().await?;
+    println!("PASS bounded overflow, incompleteness for bare stored phones, bare-input refusal");
 
     for dates in [
         EffectiveDates::new(Some(date(today.tomorrow()?)), None)?,

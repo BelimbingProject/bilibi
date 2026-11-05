@@ -33,9 +33,13 @@ impl AffiliationService {
             authorize_key(client, &scope, capability).await?;
         }
         let restrictions = restrictions_for(client, &scope, "person_affiliations").await?;
-        let (field, expression) = match address {
-            ContactAddress::Email(_) => ("work_email", "lower(work_email)"),
-            ContactAddress::Phone(_) => ("work_phone", "core_person_phone_key(work_phone)"),
+        let (field, expression, uncomparable) = match address {
+            ContactAddress::Email(_) => ("work_email", "lower(work_email)", "false"),
+            ContactAddress::Phone(_) => (
+                "work_phone",
+                "core_person_phone_key(work_phone)",
+                "EXISTS(SELECT 1 FROM source WHERE original IS NOT NULL AND key IS NULL)",
+            ),
         };
         if restrictions.contains(field) {
             return Err(Error::Forbidden);
@@ -51,7 +55,7 @@ impl AffiliationService {
                 AND (effective_from IS NULL OR effective_from <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date)
                 AND (effective_to IS NULL OR effective_to >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date)),
              candidates AS (SELECT id,person_id FROM source WHERE key=$2 ORDER BY id LIMIT $3),
-             status AS (SELECT EXISTS(SELECT 1 FROM source WHERE original IS NOT NULL AND key IS NULL) AS uncomparable)
+             status AS (SELECT {uncomparable} AS uncomparable)
              SELECT candidates.id,candidates.person_id,status.uncomparable FROM status LEFT JOIN candidates ON true ORDER BY candidates.id"
         ), &[&scope.tenant(), &key, &(limit + 1)]).await?;
         let uncomparable = rows[0].get("uncomparable");

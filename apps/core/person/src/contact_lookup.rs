@@ -14,8 +14,8 @@ pub enum ContactAddress {
 }
 impl ContactAddress {
     /// Owner comparison key on the supplied client. Email follows Person's
-    /// validator and case-insensitive comparison. Phone follows Consent's
-    /// international policy; a national number has no inferred country.
+    /// validator and case-insensitive comparison. Phone requires an explicit
+    /// `+` or `00` international prefix; bare digits are refused.
     pub async fn canonical_in(&self, client: &impl GenericClient) -> Result<String> {
         let (value, sql) = match self {
             Self::Email(value) => {
@@ -52,8 +52,8 @@ pub struct ContactMatches<T> {
     pub entries: Vec<T>,
     /// More exact candidates exist than the caller's limit.
     pub overflow: bool,
-    /// At least one non-null source value cannot be compared under the phone
-    /// country policy. Even an empty result is then not a complete negative.
+    /// At least one non-null source phone lacks an explicit international
+    /// prefix and cannot be compared. Even an empty result is then not a complete negative.
     pub uncomparable: bool,
 }
 impl<T> ContactMatches<T> {
@@ -91,14 +91,17 @@ impl PersonService {
         let key = address.canonical_in(client).await?;
         // Only fixed owner expressions reach SQL. The status and candidates
         // share one statement snapshot, including uncommitted caller writes.
-        let expression = match address {
-            ContactAddress::Email(_) => "lower(email)",
-            ContactAddress::Phone(_) => "core_person_phone_key(phone)",
+        let (expression, uncomparable) = match address {
+            ContactAddress::Email(_) => ("lower(email)", "false"),
+            ContactAddress::Phone(_) => (
+                "core_person_phone_key(phone)",
+                "EXISTS(SELECT 1 FROM source WHERE original IS NOT NULL AND key IS NULL)",
+            ),
         };
         let rows = client.query(&format!(
             "WITH source AS NOT MATERIALIZED (SELECT id,{field} AS original,{expression} AS key FROM persons WHERE tenant_id=$1),
              candidates AS (SELECT id FROM source WHERE key=$2 ORDER BY id LIMIT $3),
-             status AS (SELECT EXISTS(SELECT 1 FROM source WHERE original IS NOT NULL AND key IS NULL) AS uncomparable)
+             status AS (SELECT {uncomparable} AS uncomparable)
              SELECT candidates.id,status.uncomparable FROM status LEFT JOIN candidates ON true ORDER BY candidates.id"
         ), &[&scope.tenant(), &key, &(limit + 1)]).await?;
         let uncomparable = rows[0].get("uncomparable");
