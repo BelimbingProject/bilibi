@@ -1,0 +1,5 @@
+{%- import "components.html" as ui -%}
+{% call ui::card(id="specimen-mail", title="Received mail", inner_class="p-4") %}
+<p class="mb-3 text-xs text-ink-muted">Sanitised mail HTML in a sandboxed frame: no script runs, nothing is fetched from elsewhere, and only data images show. A clicked link opens a new tab. Inline styles are kept in storage but not applied here, because the frame takes the page's policy.</p>
+{{ mail_frame }}
+{% endcall %}

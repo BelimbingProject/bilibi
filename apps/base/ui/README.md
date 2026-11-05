@@ -171,6 +171,14 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 `RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md).
 
+## Received mail
+
+**Show received mail HTML with `MailFrame::new(id, title, html)`**, never `Html::raw`. `html` is `bilibi_mail::sanitise_html` output, with `cid:` images rewritten by `bilibi_mail::inline_images` (see [Mail](../mail/README.md#received-html)).
+
+- The document is escaped into an `<iframe sandbox srcdoc>`; the sandbox only lets a clicked link open in a new tab, so no script, form or same-origin access.
+- The frame keeps the page's CSP and adds its own: images only from `data:`, nothing fetched from elsewhere. Inline `style` attributes are not applied; `/assets/mail-frame.css` gives a paper surface in both themes.
+- Give it a stable `id` (the live patcher keys an iframe by it). The component specimen's Received mail card is the running example.
+
 ## Where to go next
 
 See [`base/system`](../system/README.md) for Banner colour on Instance settings.

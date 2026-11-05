@@ -293,7 +293,7 @@ fn header(name: &str, value: &str) -> Result<HeaderValue> {
         value.to_owned(),
     ))
 }
-fn valid_id(value: &str) -> Result<()> {
+pub(crate) fn valid_id(value: &str) -> Result<()> {
     let inner = value
         .strip_prefix('<')
         .and_then(|s| s.strip_suffix('>'))
