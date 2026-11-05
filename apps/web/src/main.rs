@@ -18,6 +18,13 @@ async fn main() -> Result<()> {
             for version in &migrated.applied {
                 println!("  applied {version}");
             }
+            let mut moved = std::collections::BTreeMap::<(&str, &str), usize>::new();
+            for item in &migrated.moved {
+                *moved.entry((item.from.as_str(), item.to)).or_default() += 1;
+            }
+            for ((from, to), versions) in moved {
+                println!("  moved {versions} migrations recorded under {from} to {to} (same SQL)");
+            }
             for (version, module) in &migrated.unmounted {
                 println!("  kept {version} of unmounted {module}");
             }

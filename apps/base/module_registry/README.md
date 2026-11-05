@@ -1,5 +1,7 @@
 # Registry contracts
 
+Renaming a module needs no declaration: the migration ledger accepts a changed owner when the SQL is unchanged (`apps/base/database/README.md`, "Renaming a module").
+
 Module IDs are `base/<module>` and `core/<module>` for the Platform layers, and
 `<name>/<module>`, where `<name>` is the Domain or Extension (both snake_case, `<name>` not `base`, `core`, `web`
 or `src`) for Domains and Extensions, matching the mounted folders; a mounted
