@@ -3,7 +3,16 @@
 # shellcheck source=scripts/lib/versions.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/versions.sh"
 
+# A parent Cargo or make advertises its jobserver in these variables as inherited
+# pipe descriptors. A launcher that closes those descriptors (Python Popen, a
+# cargo-watch shell) leaves Cargo printing "failed to connect to jobserver".
+# Call this first in every launcher path that starts cargo; Cargo then makes its own.
+clear_stale_jobserver() {
+    unset CARGO_MAKEFLAGS MAKEFLAGS MFLAGS
+}
+
 activate_cargo() {
+    clear_stale_jobserver
     # shellcheck disable=SC1091
     if [[ -f $HOME/.cargo/env ]]; then source "$HOME/.cargo/env"; fi
 }

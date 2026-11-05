@@ -14,6 +14,10 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$root"
+# cargo-watch starts this script from its own Cargo environment.
+# shellcheck source=scripts/lib/prerequisites.sh
+source "$root/scripts/lib/prerequisites.sh"
+clear_stale_jobserver
 state="$root/.local/dev-run.state"
 mkdir -p "$root/.local"
 case $(cat "$state" 2>/dev/null || true) in
