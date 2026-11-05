@@ -18,7 +18,7 @@
 {%- endif -%}
 {% call f::connection_banners(id=id) %}{% endcall %}
 {%- if !description.is_empty() -%}
-<p id="{{ id }}-description" class="mt-1 text-xs text-ink-subtle">{{ description }}</p>
+<p id="{{ id }}-description" class="mt-1 mb-3 text-xs text-ink-subtle">{{ description }}</p>
 {%- endif -%}
 {{ caller() }}</div></dialog>
 {% endmacro %}
