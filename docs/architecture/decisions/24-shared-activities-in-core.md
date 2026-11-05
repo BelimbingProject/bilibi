@@ -3,7 +3,7 @@
 **Document Type:** Architecture Decision Record
 **Status:** Accepted; implemented
 **Agents:** claude-code/opus-5.5-high (author)
-**Scope:** Tasks, calls, notes and their reminders in `apps/core/activity`; customer workflows stay in CX
+**Scope:** Tasks, calls, meetings, notes, guests, invitations and reminders in `apps/core/activity`; customer workflows stay in CX
 **Last Updated:** 2026-11-05 (meetings and invitations)
 
 ## Context
