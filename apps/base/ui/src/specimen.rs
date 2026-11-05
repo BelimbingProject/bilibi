@@ -19,6 +19,10 @@ use askama::Template;
 #[template(path = "ui_components_specimen.html")]
 pub struct ComponentsSpecimen {
     header_actions: Html,
+    markdown: Html,
+    markdown_source: Field,
+    markdown_unsafe: Html,
+    markdown_plain: Html,
     header_title_actions: Html,
     section_title_actions: Html,
     section_actions: Html,
@@ -61,6 +65,7 @@ sections! {
     ComponentsSpecimen {
         layout: "ui_components_specimen/layout.html",
         records: "ui_components_specimen/records.html",
+        markdown: "ui_components_specimen/markdown.html",
         buttons: "ui_components_specimen/buttons.html",
         links: "ui_components_specimen/links.html",
         day_tiles: "ui_components_specimen/day_tiles.html",
@@ -560,7 +565,17 @@ impl ComponentsSpecimen {
             ("pick_record", "clear_record"),
             Vec::new(),
         ))?);
+        let markdown_source = "# Reading notes\n\nA **strong** point with *emphasis* and `literal <code>`.\n\n## Steps\n\n1. Open the record\n2. Read the [linked page](/assets/ui-components.html#specimen-markdown)\n\n- First item\n  - Nested item\n- Second item\n\n> Keep the original source.\n\n```text\n<script>alert(1)</script> & literal code\n```\n";
         Ok(Self {
+            markdown: Html::render(&crate::Markdown::new(markdown_source))?,
+            markdown_source: Field::named("markdown_source")
+                .label("Markdown source")
+                .kind(InputKind::Textarea)
+                .value(markdown_source),
+            markdown_unsafe: Html::render(&crate::Markdown::new(
+                "<script>alert(1)</script>\n\n<img src=\"https://example.invalid/pixel\" onerror=\"alert(1)\">\n\n[Unsafe](javascript:alert(1)) [Entity](java&#x73;cript:alert(1)) [Data](data:text/html,unsafe) [File](file:///etc/passwd) [Protocol relative](//example.invalid)\n\n![Remote image](https://example.invalid/pixel)\n\n[HTTPS](https://example.test) [Mail](mailto:help@example.test) [Fragment](#specimen-markdown)\n\n~~unsupported~~ | plain table syntax |",
+            ))?,
+            markdown_plain: Html::render(&crate::Markdown::new("Plain text remains readable.\nA second line with <literal> text & punctuation."))?,
             header_actions,
             related,
             card_titled,

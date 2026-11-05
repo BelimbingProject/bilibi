@@ -24,6 +24,7 @@ libc = "0.2.190"
 thiserror = "2"
 argon2 = "0.6"
 askama = "0.16"
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Release archives: gzip-compressed tar files, checked with SHA-256.
 tar = "0.4.44"

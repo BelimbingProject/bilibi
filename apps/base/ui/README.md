@@ -12,6 +12,26 @@ List toolbars put search first and filter boxes to its right, wrapping below sea
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+## Markdown
+
+Use `Markdown::new(source)` for a reading view of untrusted plain-text Markdown; render it with `Html::render` like other typed components.
+
+```rust
+use bilibi_ui::{Html, Markdown};
+
+let reading = Html::render(&Markdown::new(&stored_source))?;
+// Pass stored_source itself to Field::value or InlineLongText for editing.
+```
+
+- **Syntax:** CommonMark paragraphs, headings (levels 1–6), emphasis/strong emphasis, ordered/unordered and nested lists, blockquotes, links (including reference links and autolinks), fenced/indented code and inline code. Soft line breaks follow ordinary paragraph layout; CommonMark hard breaks produce a line break.
+- **Literal content:** raw HTML, image syntax and thematic breaks display as escaped text. Optional extensions (tables, task lists, strikethrough, footnotes, math) are disabled; their punctuation remains plain text under CommonMark rules. Code stays literal, without highlighting or execution.
+- **Links:** only `http`, `https`, `mailto`, relative paths, query links and fragments become anchors. Unsafe links keep their readable labels without an anchor. Protocol-relative destinations, backslashes, whitespace and control characters are refused. Links open in the current tab; rendering never fetches destinations.
+- **Trust boundary:** `pulldown-cmark` parses the source on the server. Base UI converts raw HTML to text, keeps images literal, checks destinations, then uses the parser's escaping HTML writer. Only that filtered output enters the shared `markdown` macro. Domain code passes source into `Markdown`, never into `Html::raw` or a `safe` filter. No media, scripts, styles or browser hooks come from the source.
+- **Source and editing:** store the original Markdown and pass it unchanged to the existing textarea/`InlineLongText`. The component borrows input during rendering and retains only the reading view; it does not normalize or save source. Owners retain their field limits, authorization and write operations. No editor toolbar or WYSIWYG is added.
+- **Typography:** the shared `ui-markdown` rules reuse the compact type scale, link, ink, line and sunken code roles in both themes. No Domain CSS or JavaScript is needed.
+
+The running specimen at `/assets/ui-components.html#specimen-markdown` pairs the reading view with an ordinary textarea and includes literal HTML, unsafe links, images and plain text.
+
 ## Signed-in standalone reviews
 
 Return `PageChrome::StandaloneReview` from a page operation that needs the signed-in credential layout instead of the workspace shell. Web keeps the normal route guard, session binding, CSRF and live transport, then `StandaloneReview` draws the Bilibi mark, the installation banner and one review card. OAuth consent is the running use. The page supplies only the card body; it never draws its own logo, instance banner or shell.
