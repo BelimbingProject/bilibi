@@ -516,6 +516,9 @@ impl Store<'_> {
             .chain(source_ids.iter().copied())
             .map(|id| id.to_string())
             .collect();
+        for task in check.sources.iter().filter_map(|d| d.expiry_activity_id) {
+            self.remove_reminder(tx, scope, task).await;
+        }
         let before = check.survivor.clone();
         let sources_in = check.sources.clone();
         let (document, revisions) = tx
@@ -638,7 +641,7 @@ impl Store<'_> {
                             let ends: Option<std::time::SystemTime> = row.get(7);
                             let existing = sql
                                 .query_opt(
-                                    "SELECT id,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 FOR UPDATE",
+                                    "SELECT id,can_download,can_manage,can_share,expires_at::text FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 FOR UPDATE",
                                     &[&tenant, &before.id, &user],
                                 )
                                 .await?;
@@ -646,13 +649,13 @@ impl Store<'_> {
                             let new = sql
                                 .query_one(
                                     "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,granted_by,expires_at) VALUES($1,$2,$3,true,$4,$5,$6,$7,$8)
-                                     ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_download=core_document_access.can_download OR EXCLUDED.can_download,can_manage=core_document_access.can_manage OR EXCLUDED.can_manage,can_share=core_document_access.can_share OR EXCLUDED.can_share,expires_at=CASE WHEN core_document_access.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL ELSE GREATEST(core_document_access.expires_at,EXCLUDED.expires_at) END
-                                     RETURNING id,can_download,can_manage,can_share",
+                                     ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_download=CASE WHEN (core_document_access.expires_at IS NOT NULL AND core_document_access.expires_at <= now()) THEN EXCLUDED.can_download ELSE core_document_access.can_download OR EXCLUDED.can_download END,can_manage=CASE WHEN (core_document_access.expires_at IS NOT NULL AND core_document_access.expires_at <= now()) THEN EXCLUDED.can_manage ELSE core_document_access.can_manage OR EXCLUDED.can_manage END,can_share=CASE WHEN (core_document_access.expires_at IS NOT NULL AND core_document_access.expires_at <= now()) THEN EXCLUDED.can_share ELSE core_document_access.can_share OR EXCLUDED.can_share END,expires_at=CASE WHEN (core_document_access.expires_at IS NOT NULL AND core_document_access.expires_at <= now()) THEN EXCLUDED.expires_at WHEN core_document_access.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL ELSE GREATEST(core_document_access.expires_at,EXCLUDED.expires_at) END
+                                     RETURNING id,can_download,can_manage,can_share,expires_at::text",
                                     &[&tenant, &before.id, &user, &download, &manage, &share, &granted_by, &ends],
                                 )
                                 .await?;
-                            let now = json!({"document_id":before.id,"user_id":user,"view":true,"download":new.get::<_,bool>(1),"manage":new.get::<_,bool>(2),"share":new.get::<_,bool>(3)});
-                            let was = existing.map_or_else(|| json!({}), |old| json!({"document_id":before.id,"user_id":user,"view":true,"download":old.get::<_,bool>(1),"manage":old.get::<_,bool>(2),"share":old.get::<_,bool>(3)}));
+                            let now = json!({"document_id":before.id,"user_id":user,"view":true,"download":new.get::<_,bool>(1),"manage":new.get::<_,bool>(2),"share":new.get::<_,bool>(3),"expires_at":new.get::<_,Option<String>>(4)});
+                            let was = existing.map_or_else(|| json!({}), |old| json!({"document_id":before.id,"user_id":user,"view":true,"download":old.get::<_,bool>(1),"manage":old.get::<_,bool>(2),"share":old.get::<_,bool>(3),"expires_at":old.get::<_,Option<String>>(4)}));
                             if was != now {
                                 changes.push(Change { kind: ACCESS_RECORD.into(), id: new.get(0), old: was, new: now });
                             }
