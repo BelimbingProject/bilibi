@@ -27,6 +27,7 @@ bilibi-notifications.workspace = true
 bilibi-party-ids.workspace = true
 bilibi-picklists.workspace = true
 bilibi-principal-directory.workspace = true
+bilibi-queue.workspace = true
 bilibi-records.workspace = true
 bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true

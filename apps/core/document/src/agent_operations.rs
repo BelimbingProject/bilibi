@@ -500,7 +500,14 @@ impl WriteHandler for Share {
                 .share(tx, scope, id(input)?, &share_input(input)?)
                 .await
                 .map_err(|e| invalid(e, "", "user_id"))?;
-            Ok(access_record(&grant).into())
+            let mut value = access_record(&grant.grant);
+            if let Some(email) = grant.email {
+                value["email"] = json!(email.code());
+                if let crate::EmailOutcome::RateLimited(reason) = email {
+                    value["email_refused"] = json!(reason);
+                }
+            }
+            Ok(value.into())
         })
     }
 }

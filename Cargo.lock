@@ -883,6 +883,7 @@ dependencies = [
  "bilibi-party-ids",
  "bilibi-picklists",
  "bilibi-principal-directory",
+ "bilibi-queue",
  "bilibi-records",
  "bilibi-settings",
  "bilibi-tenancy",

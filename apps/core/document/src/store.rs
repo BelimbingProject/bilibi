@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row, Transaction};
 
-pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on::text AS expires_on,d.expiry_activity_id,d.custom_fields,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
+pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on::text AS expires_on,d.expiry_activity_id,d.expiry_user_id,d.custom_fields,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
 pub(crate) const REVISION_COLUMNS: &str = "r.id,r.document_id,r.revision,r.name,r.artifact_id,r.file_name,r.content_type,r.byte_size,r.sha256,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at";
 pub(crate) const LINK_COLUMNS: &str = "l.id,l.record_kind,l.record_id,l.linked_by,l.linked_at";
 
@@ -56,6 +56,7 @@ pub(crate) fn from_row(row: &Row) -> Result<Document> {
         status: row.get("status"),
         expires_on: date(row.get("expires_on"))?,
         expiry_activity_id: row.get("expiry_activity_id"),
+        expiry_user_id: row.get("expiry_user_id"),
         custom: row
             .get::<_, Value>("custom_fields")
             .as_object()
@@ -128,6 +129,7 @@ pub(crate) fn audit_values(d: &Document) -> Value {
         "status": d.status,
         "expires_on": d.expires_on.map(|d| d.to_string()),
         "expiry_activity_id": d.expiry_activity_id,
+        "expiry_user_id": d.expiry_user_id,
         "custom_fields": d.custom,
         "revision": d.revision,
         "deleting": d.deleting_at.is_some(),
@@ -305,7 +307,7 @@ impl<'c> On<'c> {
             Self::Commit(tx) => tx,
         }
     }
-    fn locks(self) -> bool {
+    pub(crate) fn locks(self) -> bool {
         matches!(self, Self::Commit(_))
     }
 }
@@ -377,6 +379,8 @@ pub(crate) struct Store<'s> {
     pub settings: &'s Settings,
     pub custom: &'s CustomFields,
     pub activities: &'s Activities,
+    pub artifacts: &'s bilibi_artifacts::Artifacts,
+    pub queue: &'s bilibi_queue::Queue,
 }
 impl Store<'_> {
     /// Links are filing aids only. They never grant document access.
@@ -528,10 +532,25 @@ impl Store<'_> {
         id: i64,
         grant: i64,
     ) -> WriteResult<()> {
-        self.editable(On::Commit(tx.sql()), scope, id, None, MANAGE)
+        let document = self
+            .editable(On::Commit(tx.sql()), scope, id, None, MANAGE)
             .await?;
         if !permission(tx.sql(), scope, id, "share").await? {
             return Err(WriteError::Forbidden);
+        }
+        // The grantee's reminder task goes before their access does.
+        let grantee: i64 = tx
+            .sql()
+            .query_opt(
+                "SELECT user_id FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
+                &[&scope.tenant(), &id, &grant],
+            )
+            .await
+            .map_err(Error::from)?
+            .ok_or(WriteError::NotFound)?
+            .get(0);
+        if grantee != scope.user() {
+            self.drop_reminder_of(tx, scope, &document, grantee).await?;
         }
         let tenant = scope.tenant();
         let actor = scope.user();
@@ -1463,7 +1482,7 @@ impl Store<'_> {
             .prepare_delete(On::Commit(tx.sql()), scope, id, version)
             .await?;
         if let (None, Some(task)) = (before.deleting_at, before.expiry_activity_id) {
-            self.remove_reminder(tx, scope, task).await;
+            self.remove_reminder(tx, scope, id, task).await?;
         }
         let tenant = scope.tenant();
         tx.mutate(move |sql| {

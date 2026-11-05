@@ -478,7 +478,17 @@ impl Detail {
                         )
                         .await?
                     {
-                        Ok(_) => (StatusKind::Success, "Access saved.".into()),
+                        Ok(saved) => match saved["result"]["email"].as_str() {
+                            Some("rate_limited") => (
+                                StatusKind::Warning,
+                                "Access saved. The email was not sent: a limit on emailed links was reached. Try again later.".into(),
+                            ),
+                            Some(_) => (
+                                StatusKind::Success,
+                                "Access saved. The email is on its way.".into(),
+                            ),
+                            None => (StatusKind::Success, "Access saved.".into()),
+                        },
                         Err(refusal) => (StatusKind::Error, refusal.text()),
                     },
                 );

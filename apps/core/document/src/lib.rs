@@ -6,6 +6,7 @@
 mod agent_operations;
 mod contributions;
 mod custom;
+mod email;
 mod files;
 mod library;
 mod model;
@@ -33,6 +34,7 @@ pub use contributions::{
     ALLOWED_TYPES, DOWNLOAD, LIST_CATEGORY, LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE, MANAGE,
     MAX_UPLOAD_BYTES, MERGE, VIEW,
 };
+pub use email::{ACTOR_PER_HOUR, EMAIL_RECORD, RECIPIENT_PER_DAY, TENANT_PER_HOUR};
 pub use model::{
     Custom, Draft, FieldError, Patch, RevisionInput, ScanStatus, Source, Upload, FILE_TYPES,
     FIRST_CHANGE_LOG,
@@ -74,6 +76,8 @@ pub struct Document {
     pub expires_on: Option<Date>,
     /// The Core Activity task that reminds of the expiry, when there is one.
     pub expiry_activity_id: Option<i64>,
+    /// Whose task that is: the person who set the expiry date.
+    pub expiry_user_id: Option<i64>,
     /// The tenant's custom field values (`base/custom_fields`).
     pub custom: Custom,
     /// The latest revision's number.
@@ -118,6 +122,32 @@ pub struct AccessGrant {
     pub can_share: bool,
     /// When the grant ends; `None` for one that does not expire.
     pub expires_at: Option<Timestamp>,
+}
+
+/// What a share did: the grant, and what became of the email request.
+#[derive(Clone, Debug)]
+pub struct Shared {
+    pub grant: AccessGrant,
+    /// `None` when no email was asked for.
+    pub email: Option<EmailOutcome>,
+}
+
+/// What became of a request to email a link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmailOutcome {
+    /// Recorded and queued for delivery.
+    Queued,
+    /// Not sent: a limit was reached (`actor_limit`, `recipient_limit` or
+    /// `tenant_limit`). The share itself stands.
+    RateLimited(&'static str),
+}
+impl EmailOutcome {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::RateLimited(_) => "rate_limited",
+        }
+    }
 }
 
 /// An explicit grant to give one active account. `until` is the last day it
@@ -399,9 +429,7 @@ pub struct Documents {
     notifications: Arc<NotificationBoundary>,
     custom: Arc<bilibi_custom_fields::CustomFields>,
     activities: Arc<bilibi_activity::Activities>,
-    mailer: Arc<bilibi_mail::Mailer>,
-    /// The public origin emailed links point at (`APP_ORIGIN`).
-    origin: String,
+    queue: Arc<bilibi_queue::Queue>,
 }
 impl Documents {
     async fn fresh(
@@ -421,6 +449,8 @@ impl Documents {
             settings: &self.settings,
             custom: &self.custom,
             activities: &self.activities,
+            artifacts: &self.artifacts,
+            queue: &self.queue,
         }
     }
 
@@ -979,81 +1009,30 @@ impl Documents {
     }
 
     /// Adds or replaces one explicit user grant, optionally ending after a
-    /// day (`until`, UTC). With `email`, the person is mailed a link to the
-    /// document once the change commits; the link opens the document only for
-    /// that account, while the grant lasts. The grant is never inferred from
-    /// the email and nobody else can use the link.
+    /// day (`until`, UTC). With `email`, the request to mail the person a link
+    /// to the document is recorded (audited) and queued as a durable job
+    /// unless a limit is reached (`EmailOutcome::RateLimited`; the grant still
+    /// stands). The link carries no token: it opens the document only for
+    /// that account, while the grant lasts, and delivery rechecks both.
     pub async fn share(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         id: i64,
         input: &ShareInput,
-    ) -> WriteResult<AccessGrant> {
+    ) -> WriteResult<Shared> {
         let scope = self.fresh(tx.sql(), scope).await?;
         let (grant, document) = self.store().share(tx, &scope, id, input).await?;
-        if input.email {
-            self.email_link(tx, &scope, &document, &grant);
-        }
-        Ok(grant)
-    }
-
-    /// Mails the grantee a link after the share commits. A refused message is
-    /// logged, never retried: the grant stands either way.
-    fn email_link(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        scope: &Scope,
-        document: &Document,
-        grant: &AccessGrant,
-    ) {
-        let (db, authentication, mailer) = (
-            self.db.clone(),
-            self.authentication.clone(),
-            self.mailer.clone(),
-        );
-        let (sender, tenant) = (scope.user(), scope.tenant());
-        let (recipient, name, id, until) = (
-            grant.user_id,
-            document.name.clone(),
-            document.id,
-            grant.expires_at,
-        );
-        let link = format!("{}{}", self.origin, web::path(id));
-        tx.after_commit(move || {
-            tokio::spawn(async move {
-                let Ok(client) = db.get().await else { return };
-                let to = authentication
-                    .authenticate(&**client, tenant, recipient, String::new())
-                    .await
-                    .ok();
-                let from = authentication
-                    .authenticate(&**client, tenant, sender, String::new())
-                    .await
-                    .ok();
-                let (Some(to), Some(from)) = (to, from) else {
-                    return;
-                };
-                let Ok(address) = bilibi_mail::Address::new(Some(&to.user_name), &to.email) else {
-                    return;
-                };
-                let name: String = name.chars().take(150).collect();
-                let ends = until
-                    .map(|t| format!("\nYour access ends {}.", t.strftime("%Y-%m-%d %H:%M UTC")))
-                    .unwrap_or_default();
-                let message = bilibi_mail::Message::text(
-                    address,
-                    format!("{} shared a document with you: {name}", from.user_name),
-                    format!(
-                        "{} shared “{name}” with you.{ends}\n\nOpen it, signed in:\n{link}\n\nThe link works only for your account and only while your access lasts.\n",
-                        from.user_name
-                    ),
-                );
-                if mailer.deliver(&message).await.is_err() {
-                    eprintln!("error: the link to document {id} could not be emailed");
-                }
-            });
-        });
+        let email = if input.email {
+            Some(
+                self.store()
+                    .request_email(tx, &scope, &document, grant.user_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        Ok(Shared { grant, email })
     }
 
     /// The explicit grant `share` would add or replace, without writing it.
@@ -1093,11 +1072,12 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
         ("core-document-003-expiry-sharing-custom", include_str!("../migrations/003-expiry-sharing-custom.sql")),
+        ("core-document-004-email-outbox", include_str!("../migrations/004-email-outbox.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
@@ -1115,11 +1095,17 @@ inventory::submit! { Module {
             notifications: s.get("base/notifications.sink")?,
             custom: s.get(bilibi_custom_fields::SERVICE)?,
             activities: s.get(bilibi_activity::SERVICE)?,
-            mailer: s.get("base/mail.mailer")?,
-            origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
+            queue: s.get("base/queue.store")?,
         });
         agent_operations::bind(documents.clone())?;
         Ok(documents)
+    }}, Service { id: email::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(email::EmailJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            mailer: s.get("base/mail.mailer")?,
+            authentication: s.get("base/tenancy.authentication")?,
+            origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
+        }))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
     }}, Service { id: web::FILES, factory: |s| {

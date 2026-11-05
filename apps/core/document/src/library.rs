@@ -435,6 +435,40 @@ impl Store<'_> {
                 "they are filed under different companies",
             ));
         }
+        // A retained or legally held revision keeps its document, number,
+        // change log and file (ADR 23): merging would move and rewrite it.
+        let source_ids: Vec<i64> = documents.iter().map(|d| d.id).collect();
+        let artifacts: Vec<String> = client
+            .query(
+                "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id = ANY($2) AND artifact_id IS NOT NULL ORDER BY artifact_id",
+                &[&scope.tenant(), &source_ids],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let company = bilibi_party_ids::OrganisationId::new(survivor_document.company_id)
+            .map_err(|_| Error::Internal)?;
+        match self
+            .artifacts
+            .for_owner(scope, company, &crate::files::FILES)
+            .ensure_unprotected(client, &artifacts, on.locks())
+            .await
+        {
+            Ok(()) => {}
+            Err(bilibi_artifacts::Error::Retained) => {
+                return Err(WriteError::MergeRefused(
+                    "a revision is retained and cannot be moved or changed yet",
+                ))
+            }
+            Err(bilibi_artifacts::Error::LegalHold) => {
+                return Err(WriteError::MergeRefused(
+                    "a revision is under legal hold and cannot be moved or changed",
+                ))
+            }
+            Err(bilibi_artifacts::Error::Database(error)) => return Err(error.into()),
+            Err(_) => return Err(Error::Internal.into()),
+        }
         Ok(MergeCheck {
             survivor: survivor_document,
             sources: documents,
@@ -516,8 +550,10 @@ impl Store<'_> {
             .chain(source_ids.iter().copied())
             .map(|id| id.to_string())
             .collect();
-        for task in check.sources.iter().filter_map(|d| d.expiry_activity_id) {
-            self.remove_reminder(tx, scope, task).await;
+        for source in &check.sources {
+            if let Some(task) = source.expiry_activity_id {
+                self.remove_reminder(tx, scope, source.id, task).await?;
+            }
         }
         let before = check.survivor.clone();
         let sources_in = check.sources.clone();

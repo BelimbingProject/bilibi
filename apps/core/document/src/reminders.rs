@@ -2,12 +2,19 @@
 //! expiry date, due the tenant's lead time before it
 //! (`core.document.expiry_reminder_days`). Core Activity's own sweep rings the
 //! assignee's bell and optionally emails; there is no second reminder system.
-//! The task is private to the person who set the date, so it is kept only when
-//! that person may create activities; otherwise the date is stored without a
-//! reminder. Changing or clearing the date, or deleting the document, removes
-//! the old task when its owner may still change it.
+//! The task is private to the person who set the date (`expiry_user_id`), so it
+//! is made only when that person may create activities.
+//!
+//! The task names no document and no date: its title is "Document <id>
+//! expiry", so a bell or an email it sends discloses nothing a reader who has
+//! lost access could not already have, and its related-record pill names the
+//! document only to someone who may still view it. Whoever changes or clears
+//! the date, deletes or merges the document, or removes the reminder person's
+//! access removes the task through Core Activity's owner-scoped
+//! `delete_related`, in the same transaction and whoever created it; a failure
+//! to remove it fails the change.
 use crate::store::Store;
-use crate::{Document, WriteResult, RECORD};
+use crate::{Document, WriteError, WriteResult, RECORD};
 use bilibi_activity::{Common, Reference, TaskInput};
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_settings::Target;
@@ -21,7 +28,7 @@ const DEFAULT_DAYS: i64 = 14;
 impl Store<'_> {
     /// Replaces the reminder of `document` after its expiry date changed:
     /// removes `previous`, creates a task when there is a date, and stores
-    /// the new task's id. Returns the document as stored.
+    /// the new task's id and owner. Returns the document as stored.
     pub(crate) async fn refresh_reminder(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -30,7 +37,7 @@ impl Store<'_> {
         previous: Option<i64>,
     ) -> WriteResult<Document> {
         if let Some(id) = previous {
-            self.remove_reminder(tx, scope, id).await;
+            self.remove_reminder(tx, scope, document.id, id).await?;
         }
         let mut activity = None;
         if let Some(expires_on) = document.expires_on {
@@ -56,18 +63,13 @@ impl Store<'_> {
                     .in_tz(&zone)
                     .map_err(|_| Error::Internal)?
                     .timestamp();
-                let title: String = format!("Document expires: {}", document.name)
-                    .chars()
-                    .take(160)
-                    .collect();
                 let input = TaskInput {
                     common: Common {
                         related: Some(Reference::new(RECORD, document.id.to_string())),
-                        title,
-                        description: Some(format!(
-                            "“{}” expires on {expires_on}. Open it to renew or replace it.",
-                            document.name
-                        )),
+                        title: format!("Document {} expiry", document.id),
+                        description: Some(
+                            "Open the related document to renew or replace it.".to_owned(),
+                        ),
                         ..Common::default()
                     },
                     due_at: Some(due),
@@ -84,17 +86,31 @@ impl Store<'_> {
                 }
             }
         }
-        if activity == previous {
+        let user = activity.map(|_| scope.user());
+        if activity == document.expiry_activity_id && user == document.expiry_user_id {
             return Ok(document.clone());
         }
+        self.store_reminder(tx, scope, document, activity, user)
+            .await
+    }
+
+    /// Records the reminder task and its owner on the document, audited.
+    async fn store_reminder(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        document: &Document,
+        activity: Option<i64>,
+        user: Option<i64>,
+    ) -> WriteResult<Document> {
         let (tenant, id) = (scope.tenant(), document.id);
         let before = document.clone();
         tx.mutate(move |sql| {
             Box::pin(async move {
                 let row = sql
                     .query_one(
-                        &format!("UPDATE core_documents d SET expiry_activity_id=$3 WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {}", crate::store::COLUMNS),
-                        &[&tenant, &id, &activity],
+                        &format!("UPDATE core_documents d SET expiry_activity_id=$3,expiry_user_id=$4 WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {}", crate::store::COLUMNS),
+                        &[&tenant, &id, &activity, &user],
                     )
                     .await?;
                 let after = crate::store::from_row(&row)?;
@@ -111,26 +127,44 @@ impl Store<'_> {
         .map_err(crate::store::write_error)
     }
 
-    /// Deletes a reminder task when its owner may; a task already gone or not
-    /// the actor's to delete is left alone.
+    /// Removes task `task` of `document`, whoever owns it.
     pub(crate) async fn remove_reminder(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
-        id: i64,
-    ) {
-        if let Ok(task) = self.activities.get(scope, id).await {
-            if self
-                .activities
-                .may_edit(scope, &task)
-                .await
-                .unwrap_or(false)
-            {
-                let _ = self
-                    .activities
-                    .delete(tx, scope, task.id, task.version)
-                    .await;
-            }
+        document: i64,
+        task: i64,
+    ) -> WriteResult<()> {
+        self.activities
+            .delete_related(tx, scope, task, &Reference::new(RECORD, document.to_string()))
+            .await
+            .map_err(|error| match error {
+                bilibi_activity::WriteError::Stale => WriteError::Stale,
+                bilibi_activity::WriteError::Access(error) => WriteError::Access(error),
+                error => {
+                    eprintln!("error: the expiry reminder of document {document} could not be removed: {error}");
+                    WriteError::Access(Error::Internal)
+                }
+            })
+    }
+
+    /// Removes the document's reminder when `user` is the person it belongs
+    /// to, before that person's access to the document goes: a task that
+    /// outlives its owner's access would still ring their bell.
+    pub(crate) async fn drop_reminder_of(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        document: &Document,
+        user: i64,
+    ) -> WriteResult<()> {
+        if document.expiry_user_id != Some(user) {
+            return Ok(());
         }
+        if let Some(task) = document.expiry_activity_id {
+            self.remove_reminder(tx, scope, document.id, task).await?;
+        }
+        self.store_reminder(tx, scope, document, None, None).await?;
+        Ok(())
     }
 }

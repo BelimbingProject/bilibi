@@ -20,7 +20,7 @@ Use `core.document.mark` to favourite or follow a document: marks are yours alon
 
 ## Share safely
 
-Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission, `until` (the last day it works, UTC) and `email` (mail them a link that opens the document only for their account). Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
+Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission, `until` (the last day it works, UTC) and `email` (queue an email with a link that opens the document only for their account; it is audited and limited, and the result says `rate_limited` when a limit stopped it). Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
 
 ## Expiry and custom fields
 
