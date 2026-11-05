@@ -22,6 +22,8 @@ sessions and passwords are never copied. These are historical references, not
 proofs of current authority. There are no foreign keys to Core identities: a job
 survives deletion so execution can record an explicit refusal.
 
+`Queue::enqueue_system_at_within` takes the same principal, worker and arguments as `enqueue_system_within`, plus a UTC `SystemTime`. The job commits with the caller's writes and is eligible only at that instant. A future instant starts in `scheduled`; an instant already past runs immediately. This controls the first eligible instant of that job. Infrastructure failures and expired leases continue to use Queue's existing retry policy. Owners can use a new delayed job for each business retry, recording their retry count and chosen delay in their own transaction.
+
 Owners also contribute a `HandlerBinding` through `HANDLERS`, using
 exactly the same worker ID and module provenance. Its `service` must belong to
 that module and resolve to `HandlerService(Arc<dyn Handler>)`; its `capability`
@@ -136,6 +138,8 @@ then runs it as `System · queue-specimen`, reads the encrypted company setting
 decrypted and its length), and records its effect; `revoke-secret` keeps the
 job running but makes Settings refuse the secret (`secret_refused`).
 `inspect` prints the audit rows of the effects with their principal.
+
+`enqueue-delayed complete 60` queues the same principal's specimen for one minute later. Run the worker immediately and inspect the job while it waits. It stays `scheduled` with no effect until its `available_at`, then runs once. A cancelled scheduled job remains cancelled after its due instant. An enqueue rolled back by its caller leaves no scheduled job.
 
 
 ## Private executor walkthrough

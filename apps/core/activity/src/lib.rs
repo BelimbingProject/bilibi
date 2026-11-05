@@ -32,6 +32,14 @@ pub const RECORD: &str = "core.activity.activity";
 pub const GUEST_RECORD: &str = "core.activity.guest";
 /// The event a shared activity that has happened records (README, Events).
 pub const HAPPENED: &str = "core/activity.happened";
+/// Named background principal permission to create a task for an originating account.
+pub const SYSTEM_CREATE: &str = "core.activity.system.create";
+
+pub struct SystemTaskInput {
+    pub company: bilibi_party_ids::OrganisationId,
+    pub originating_user: i64,
+    pub task: TaskInput,
+}
 
 /// Base Records, for the shared-activity rule inside `base/records`' own
 /// access check of an activity, which has no facade to reach.
@@ -347,6 +355,16 @@ impl Activities {
         input: &TaskInput,
     ) -> WriteResult<Activity> {
         self.create(tx, scope, &Draft::task(input)).await
+    }
+    /// Creates a follow-up task inside the caller's transaction as a named system principal.
+    pub async fn create_system_task(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: SystemTaskInput,
+    ) -> WriteResult<Activity> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().create_system_task(tx, &scope, input).await
     }
     /// A call that was held or is planned; a held call has ended.
     pub async fn log_call(

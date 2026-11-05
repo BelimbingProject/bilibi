@@ -46,7 +46,7 @@ macro_rules! provenance {
 // `view` and `manage` are the Platform's verbs.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
     domains: &["core"], verbs: &[],
-    capabilities: &[C::tenant(VIEW), C::tenant(VIEW_ALL), C::tenant(MANAGE), C::tenant(MANAGE_ALL)],
+    capabilities: &[C::tenant(VIEW), C::tenant(VIEW_ALL), C::tenant(MANAGE), C::tenant(MANAGE_ALL), C::tenant(crate::SYSTEM_CREATE)],
     roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: OWNER_CAPABILITIES }],
     system_principals: &[],
 }) }

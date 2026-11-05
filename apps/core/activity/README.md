@@ -56,6 +56,7 @@ Every write runs in the caller's `MutationTransaction` with its sealed scope and
 | Method | Does |
 | --- | --- |
 | `create_task`, `log_call`, `create_note`, `create` | Creates; the creator and assignee become guests, a related person the `related` guest |
+| `create_system_task` | A named principal with `core.activity.system.create` creates a task for an active originating account in an explicitly checked company, within the caller's transaction. The account is the creator and defaults as assignee. |
 | `update` | Changes the fields a `Patch` names, fenced on `version`; reassigning keeps the old assignee as a guest |
 | `close` | Calls and meetings to `held`, tasks to `completed` |
 | `close_and_create_new` | Closes, and returns an unsaved copy with the same values and guests |
