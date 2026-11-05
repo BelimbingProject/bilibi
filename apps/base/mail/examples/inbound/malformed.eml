@@ -1,0 +1,12 @@
+From customer@example.test
+To: <<<broken
+Subject:
+Date: not a date
+Message-ID: not-an-id
+References: <ok-1@example.test> garbage <ok-2@example.test>
+Content-Type: multipart/mixed; boundary="never-closed"
+
+--never-closed
+Content-Type: text/plain
+
+Hello, this boundary is never closed.
