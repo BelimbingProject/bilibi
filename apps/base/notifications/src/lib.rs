@@ -141,6 +141,25 @@ impl NotificationBoundary {
         tx.after_commit(move || sink.committed(tenant, &[user]));
         Ok(())
     }
+    /// Re-read these accounts' bells, in the transaction's tenant, after it
+    /// commits, without creating a notification: an owner's work (a reminder sweep, or
+    /// closing or reassigning a reminded activity) changed their to-dos. Nothing wakes on rollback.
+    pub fn todos_changed_for(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        recipients: &[i64],
+    ) -> Result<()> {
+        let mut recipients: Vec<i64> = recipients.iter().copied().filter(|u| *u > 0).collect();
+        recipients.sort_unstable();
+        recipients.dedup();
+        if recipients.is_empty() {
+            return Ok(());
+        }
+        let sink = self.sink.get().cloned().ok_or(Error::Internal)?;
+        let tenant = tx.context().tenant;
+        tx.after_commit(move || sink.committed(tenant, &recipients));
+        Ok(())
+    }
     /// Install an owner adapter at boot, without coupling the bell to that owner.
     pub fn register_todos(
         &self,

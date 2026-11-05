@@ -1,0 +1,4 @@
+{#- The new-activity form inside its dialog: changes raise activity_change,
+    Enter or Save raises the kind's create event with every value. -#}
+{% import "forms.html" as form %}
+{% call form::form(id=id, event="activity_change", change=true, actions=actions, submit_event=submit) %}{{ body }}{% endcall %}
