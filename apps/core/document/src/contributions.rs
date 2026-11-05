@@ -296,6 +296,7 @@ inventory::submit! { Contribution::new(DOWNLOADS, "core/document.export", proven
 bilibi_menu::contribute!(
     "core/document",
     bilibi_menu::MenuItem::page("core.document", "Documents", "/documents")
+        .under("core")
         .company_scoped()
         .icon("document-text")
         .requires(bilibi_menu::Requirement::Capability(VIEW))

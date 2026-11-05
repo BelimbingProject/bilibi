@@ -413,6 +413,12 @@ inventory::submit! {
 // visible child exists. Unported Domain roots therefore never render.
 contribute!(
     "base/menu",
+    MenuItem::container("core", "Core")
+        .icon("squares-2x2")
+        .order(100)
+);
+contribute!(
+    "base/menu",
     MenuItem::container("admin", "Administration")
         .icon("cog-6-tooth")
         .order(900)

@@ -1433,6 +1433,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
 bilibi_menu::contribute!(
     "base/reports",
     bilibi_menu::MenuItem::page("reports", "Reports", web::INDEX)
+        .under("core")
         .company_scoped()
         .icon("chart-bar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))

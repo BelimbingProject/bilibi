@@ -82,7 +82,7 @@ The settings editor groups the two pairs as **Reports · Interactive reads** and
 - The editor and the Sharing form are drafts of the version they opened at: a save after someone else's is refused as a conflict, and the draft stays in the form until saved or discarded. Every filter, measure and sort a definition holds opens in the editor, and each field is read by name, so a definition at its bounds saves whole. A `one_of` filter is typed as comma-separated text, with `"quotes"` around a value that holds a comma (`"North, East", West` is two values), so a saved list reopens and saves unchanged. Sharing's Discard changes is a submit of its form, so the browser resets the controls with the server's draft; Enter in the editor saves through the form's `data-submit-event`.
 - A date value, and a range on a timestamp, is a day picker; an equals on a timestamp is its exact instant as text with its offset (`2025-01-31T09:30:00Z`), so a stored default survives editing other fields.
 - Every write goes through the operation contracts below (`PAGE_WRITES`: `create`, `save_definition`, `copy`, `save_sharing`, `delete`, `prepare_export`, `subscribe`, `pause_schedule`, `unsubscribe`).
-- The menu entry Reports needs `reports.view`.
+- The menu entry Reports sits under Core and needs `reports.view`.
 
 ## Agent operations
 

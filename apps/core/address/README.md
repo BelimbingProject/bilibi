@@ -117,7 +117,7 @@ proof; the shell does so on the first operator page that finds these facts
 
 ## Pages and owner panels (K12)
 
-`src/web/` holds the address pages and owner panels; the Addresses menu entry sits under Administration.
+`src/web/` holds the address pages and owner panels; the Addresses menu entry sits under Core.
 
 - `/addresses`: search, sort (label, country, status) and 25/50/100-row pages
   in the URL under `search`/`sortBy`/`sortDir`/`perPage`, built-in

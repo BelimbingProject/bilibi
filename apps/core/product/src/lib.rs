@@ -60,7 +60,7 @@ inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,provenance!(),&PageWrite
 bilibi_menu::contribute!(
     "core/product",
     bilibi_menu::MenuItem::page("products", "Products", "/products")
-        .under("admin")
+        .under("core")
         .icon("cube")
         .requires(bilibi_menu::Requirement::Capability(VIEW))
         .order(65)
