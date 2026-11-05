@@ -12,13 +12,13 @@ use bilibi_ui::{
     list_state::{PageCounts, FILTERS_FORM},
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
-    ColumnsOutcome, CreateButton, ErrorSummary, Field, FilterToolbar, FlashMap, FlexRow, FlexTable,
-    Header, Html, InputKind, ListColumns, ListSpec, ListState, Modal, Pagination, RecordLink,
-    StatusKind, TableEmpty, ToolbarControl,
+    ColumnsOutcome, CreateButton, ErrorSummary, Field, Filter, FilterToolbar, FlashMap, FlexRow,
+    FlexTable, Header, Html, InputKind, ListColumns, ListSpec, ListState, Modal, Pagination,
+    RecordLink, StatusKind, TableEmpty, ToolbarControl,
 };
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, LazyLock},
 };
 
@@ -33,6 +33,10 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         default_page_size: 25,
         page_size_param: "per_page".into(),
         omit_defaults: true,
+        filters: BTreeMap::from([
+            ("area".into(), Filter::string("")),
+            ("record".into(), Filter::string("")),
+        ]),
         ..ListSpec::default()
     }
     .shared()
@@ -254,6 +258,44 @@ impl Index {
         // that match follow them, so both count toward the pages.
         let search = self.state.search.trim().to_owned();
         let needle = search.to_lowercase();
+        // Area and Records offer only what the reader's catalog holds; a
+        // value from an old link that is no longer offered clears.
+        let sources = pages
+            .reports
+            .record_sources(scope)
+            .await
+            .map_err(super::page_error)?;
+        let mut areas: Vec<(&str, &str)> = sources
+            .iter()
+            .map(|s| (s.area.as_str(), s.area_label.as_str()))
+            .collect();
+        areas.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(b.0)));
+        areas.dedup();
+        let mut area = self.state.filters.get("area").cloned().unwrap_or_default();
+        if !areas.iter().any(|(id, _)| *id == area) {
+            area.clear();
+        }
+        let in_area = |s: &&crate::RecordSource| area.is_empty() || s.area == area;
+        let mut record = self
+            .state
+            .filters
+            .get("record")
+            .cloned()
+            .unwrap_or_default();
+        if !sources.iter().filter(in_area).any(|s| s.id == record) {
+            record.clear();
+        }
+        self.state.filters.insert("area".into(), area.clone());
+        self.state.filters.insert("record".into(), record.clone());
+        let narrowed: Option<Vec<String>> = (!area.is_empty() || !record.is_empty()).then(|| {
+            sources
+                .iter()
+                .filter(in_area)
+                .filter(|s| record.is_empty() || s.id == record)
+                .map(|s| s.id.clone())
+                .collect()
+        });
+        let filtered = narrowed.is_some();
         let builtins: Vec<_> = pages
             .reports
             .builtins(scope)
@@ -261,13 +303,22 @@ impl Index {
             .map_err(super::page_error)?
             .into_iter()
             .filter(|r| {
+                narrowed
+                    .as_ref()
+                    .is_none_or(|types| types.contains(&r.record_type))
+            })
+            .filter(|r| {
                 needle.is_empty()
                     || r.name.to_lowercase().contains(&needle)
                     || r.description.to_lowercase().contains(&needle)
             })
             .collect();
         let size = self.state.page_size.max(1);
-        let read = |offset: u64| pages.reports.page(scope, &search, offset, size);
+        let read = |offset: u64| {
+            pages
+                .reports
+                .page(scope, &search, narrowed.as_deref(), offset, size)
+        };
         let (mut entries, mut stored) =
             read(self.state.offset()).await.map_err(super::page_error)?;
         let mut total = stored + builtins.len() as u64;
@@ -301,15 +352,39 @@ impl Index {
             ..Header::default()
         })?;
         let form = self.state.filters_form();
+        let all = |label: &str| bilibi_ui::Choice::new(label, "");
+        let mut area_options = vec![all("All areas")];
+        area_options.extend(
+            areas
+                .iter()
+                .map(|(id, label)| bilibi_ui::Choice::new(*label, *id)),
+        );
+        let mut record_options = vec![all("All records")];
+        record_options.extend(
+            sources
+                .iter()
+                .filter(in_area)
+                .map(|s| bilibi_ui::Choice::new(s.label.as_str(), s.id.as_str())),
+        );
         let toolbar = render(FilterToolbar::new(
             "reports-filters",
-            vec![ToolbarControl::search(
-                "reports-search",
-                "search",
-                "Search reports",
-                &form["search"],
-                "Search by name...",
-            )],
+            vec![
+                ToolbarControl::search(
+                    "reports-search",
+                    "search",
+                    "Search reports",
+                    &form["search"],
+                    "Search by name...",
+                ),
+                ToolbarControl::select("reports-area", "area", "Area", &area, area_options),
+                ToolbarControl::select(
+                    "reports-record",
+                    "record",
+                    "Records",
+                    &record,
+                    record_options,
+                ),
+            ],
         ))?;
         let mut rows = Vec::with_capacity(self.rows.len());
         for report in &self.rows {
@@ -371,13 +446,15 @@ impl Index {
         table.caption = "Reports";
         table.framed = false;
         if counts.total_entries == 0 {
-            table.empty = Some(TableEmpty::Content(Html::text(if !search.is_empty() {
-                "No reports match this search."
-            } else if can.author {
-                "No reports yet. Build one with New report."
-            } else {
-                "No reports are shared with you yet."
-            })));
+            table.empty = Some(TableEmpty::Content(Html::text(
+                if !search.is_empty() || filtered {
+                    "No reports match this search."
+                } else if can.author {
+                    "No reports yet. Build one with New report."
+                } else {
+                    "No reports are shared with you yet."
+                },
+            )));
         }
         let mut body = render(table)?;
         body.push(&render(Pagination::new(
