@@ -627,7 +627,18 @@ impl Index {
         drawn.day_marks = marks;
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
         drawn.moving = self.moving.clone();
-        drawn.notice = self.notice.clone();
+        drawn.notice = self.notice.clone().or_else(|| {
+            (page.total > page.entries.len() as i64).then(|| {
+                (
+                    StatusKind::Warning,
+                    format!(
+                        "Showing the first {} of {} activities in this range. Narrow the view or the filters to see the rest.",
+                        page.entries.len(),
+                        page.total
+                    ),
+                )
+            })
+        });
         drawn.move_errors = self.move_errors.clone();
         let html = drawn.render().map_err(|_| Error::Internal)?;
         query.extend(state.to_params());
