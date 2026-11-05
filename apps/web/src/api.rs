@@ -18,6 +18,10 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
+use bilibi_agent::{
+    AgentAccess, AgentClaims, ClientRegistration, CodeExchange, OAuthError, Throttle, CLIENT_ID,
+    DEVICE_GRANT, OAUTH_REQUESTS_PER_MINUTE, OAUTH_SCOPE,
+};
 use bilibi_base::{
     agent_api::{
         plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
@@ -26,10 +30,6 @@ use bilibi_base::{
     integration::{Incoming, Integration, Target},
     settings::Settings,
     tenancy::{ClientIdentity, ProofFuture, Scope, SelfReport},
-};
-use bilibi_core::agent::{
-    AgentAccess, AgentClaims, ClientRegistration, CodeExchange, OAuthError, Throttle, CLIENT_ID,
-    DEVICE_GRANT, OAUTH_REQUESTS_PER_MINUTE, OAUTH_SCOPE,
 };
 use bilibi_database::Error;
 use serde_json::{json, Map, Value};
@@ -266,7 +266,7 @@ pub(crate) fn client_identity(headers: &HeaderMap, mcp: bool) -> Option<ClientId
 pub(crate) fn label(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let value = values.next()?.to_str().ok()?;
-    (values.next().is_none() && bilibi_core::agent::valid_label(value)).then(|| value.to_owned())
+    (values.next().is_none() && bilibi_agent::valid_label(value)).then(|| value.to_owned())
 }
 
 /// Absolute links belong to the host; operations return paths. Every record

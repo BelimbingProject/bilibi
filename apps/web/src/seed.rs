@@ -22,7 +22,7 @@
 //! receipt is never revisited.
 use bilibi_authz::grants::Grants;
 use bilibi_base::audit::{record_action, Attribution};
-use bilibi_core::company::{self as primary, NewCompany, ProvisionOutcome};
+use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::BootstrapAffiliation;
 use serde_json::json;

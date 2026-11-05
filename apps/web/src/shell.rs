@@ -212,7 +212,7 @@ async fn context<'a>(
     // no primary company; a failed lookup paints no warning.
     let operator_company_missing = platform_operator
         && matches!(
-            bilibi_core::company::platform_operator_company(&**client).await,
+            bilibi_company::platform_operator_company(&**client).await,
             Ok(None)
         );
     let pins = bilibi_user::list_pins(&**client, scope).await?;
@@ -1023,7 +1023,7 @@ async fn adopt_installation_locale(app: &App, scope: &Scope) {
         // Address takes a connection of its own: hold none across it.
         let Some(facts) = app
             .services
-            .get::<bilibi_core::address::AddressService>(bilibi_core::address::SERVICE)?
+            .get::<bilibi_address::AddressService>(bilibi_address::SERVICE)?
             .platform_operator_bootstrap()
             .await?
         else {

@@ -11,7 +11,7 @@
 //! history or a process list: it is typed at the terminal with echo off, or
 //! read from the first line of standard input with `--password-stdin`.
 use bilibi_authz::grants::Grants;
-use bilibi_core::company::{self as primary, NewCompany, ProvisionOutcome};
+use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::{
     validate_first_administrator, BootstrapAffiliation, FieldError, FirstAdministrator,

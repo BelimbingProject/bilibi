@@ -21,6 +21,15 @@ A company build mounts Domain and Extension containers at chosen revisions.
 manifest into the program. `--restore` rebuilds exactly that composition
 (containers at the pinned HEADs, the pinned `Cargo.lock`) so that
 `cargo build --release --locked` is reproducible.
+
+Every Core module is on demand (docs/architecture/decisions/25-core-modules-on-demand.md).
+An unmounted Platform composes all of Core, so its own build and CI cover every
+module. Once a Domain or Extension is mounted, `apps/core` composes only what the
+host (`PLATFORM_MANIFESTS`) and the mounted modules name in their Cargo
+`[dependencies]`, closed over the Core modules those need. A crate whose source
+names a Core module outside its own declared closure is refused here, before
+Cargo, so the gap shows as one plain line instead of a link or boot failure.
+`--explain` prints the composed Core modules and who asked for each.
 """
 import argparse
 import hashlib
@@ -127,6 +136,134 @@ def discovered(root):
     return result
 
 
+COMPOSITION_CRATE = 'bilibi-core'
+# A Core module used in code: a service ID (`"core/<module>.<service>"`), a path
+# through the composition crate, or the module's own crate. A bare
+# `"core/<module>"` elsewhere is a record kind or slot owner, an optional
+# coupling that simply stays empty when the module is absent.
+CORE_REFERENCE = re.compile(r'"core/([a-z][a-z0-9_]*)\.|\bbilibi_core::([a-z][a-z0-9_]*)|\b(bilibi_[a-z0-9_]+)\b')
+# A descriptor's `dependencies: &[...]` list, which boot also checks.
+DESCRIPTOR_DEPENDENCIES = re.compile(r'\bdependencies\s*:\s*&\[([^\]]*)\]')
+ADR = 'docs/architecture/decisions/25-core-modules-on-demand.md'
+
+
+def dependencies(manifest):
+    """Package names in a manifest's normal [dependencies], including target-specific ones."""
+    data = tomllib.loads(manifest.read_text())
+    tables = [data.get('dependencies', {})]
+    tables += [target.get('dependencies', {}) for target in data.get('target', {}).values()]
+    return {value.get('package', key) if isinstance(value, dict) else key
+            for table in tables for key, value in table.items()}
+
+
+def core_graph(root, modules):
+    """Map each Core crate to (module ID, the Core crates it depends on)."""
+    crates = {name: path for path, name in modules['core']}
+    return {name: (f'core/{path}', dependencies(root / 'apps/core' / path / 'Cargo.toml') & set(crates))
+            for name, path in crates.items()}
+
+
+def core_closure(graph, start):
+    seen, pending = set(), [name for name in start if name in graph]
+    while pending:
+        name = pending.pop()
+        if name not in seen:
+            seen.add(name)
+            pending.extend(graph[name][1] - seen)
+    return seen
+
+
+def host_manifests(root):
+    return [manifest for pattern in PLATFORM_MANIFESTS for manifest in sorted(root.glob(pattern))]
+
+
+def mounted_manifests(root, modules):
+    return [(f'apps/{layer}/{path}', root / 'apps' / layer / path / 'Cargo.toml')
+            for layer in CONTAINER_LAYERS for path, _ in modules[layer]]
+
+
+def core_requests(root, modules):
+    """Map each composing crate's label to the Core crates it names directly; None when nothing is mounted."""
+    mounted = mounted_manifests(root, modules)
+    if not mounted:
+        return None
+    graph = core_graph(root, modules)
+    requests = {str(manifest.parent.relative_to(root)): dependencies(manifest) & set(graph)
+                for manifest in host_manifests(root)}
+    requests.update({label: dependencies(manifest) & set(graph) for label, manifest in mounted})
+    return requests
+
+
+def composed_core(root, modules):
+    """The Core (path, crate) pairs this composition links: all of them unmounted, else the declared closure."""
+    requests = core_requests(root, modules)
+    if requests is None:
+        return modules['core']
+    wanted = core_closure(core_graph(root, modules), set().union(*requests.values()))
+    return [(path, name) for path, name in modules['core'] if name in wanted]
+
+
+def core_uses(folder):
+    """Yield (file, line number, kind, name) for each Core module named in Rust sources under folder."""
+    for source in sorted(folder.rglob('*.rs')):
+        text = source.read_text(errors='replace')
+        for match in DESCRIPTOR_DEPENDENCIES.finditer(text):
+            number = text.count('\n', 0, match.start()) + 1
+            for module in re.findall(r'"core/([a-z][a-z0-9_]*)"', match.group(1)):
+                yield source, number, 'id', module
+        for number, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith('//'):
+                continue
+            for match in CORE_REFERENCE.finditer(line):
+                service, through_core, ident = match.groups()
+                yield source, number, *(('id', service) if service else ('id', through_core) if through_core
+                                        else ('crate', ident))
+
+
+def check_core_use(root, modules):
+    """Refuse a crate whose src/ names a Core module it does not declare, directly or through a declared one."""
+    graph = core_graph(root, modules)
+    by_id = {module_id: name for name, (module_id, _) in graph.items()}
+    by_ident = {name.replace('-', '_'): name for name in graph}
+    # Base may not depend on Core at all (the registry refuses it), so it is not scanned.
+    crates = [(f'apps/core/{path}', root / 'apps/core' / path / 'Cargo.toml', {name}) for path, name in modules['core']]
+    crates += [(str(manifest.parent.relative_to(root)), manifest, set()) for manifest in host_manifests(root)]
+    for label, manifest in mounted_manifests(root, modules):
+        if COMPOSITION_CRATE in dependencies(manifest):
+            raise Refused(f'{label}/Cargo.toml depends on {COMPOSITION_CRATE}, which holds only what the application '
+                          'composes; depend on each Core module crate you use instead, for example '
+                          f'bilibi-work-calendar.workspace = true (see {ADR})')
+        crates.append((label, manifest, set()))
+    for label, manifest, own in crates:
+        allowed = core_closure(graph, own | (dependencies(manifest) & set(graph)))
+        for source, number, kind, value in core_uses(manifest.parent / 'src'):
+            name = by_id.get(f'core/{value}') if kind == 'id' else by_ident.get(value)
+            if name and name not in allowed:
+                used = graph[name][0]
+                raise Refused(f'{source.relative_to(root)}:{number} uses {used}, but {label}/Cargo.toml does not declare it. '
+                              f'Add {name}.workspace = true to its [dependencies] (and "{used}" to its descriptor '
+                              f'dependencies when it looks up {used} services); an application links a Core module only '
+                              f'when something that uses it declares it (see {ADR})')
+
+
+def explain(root, modules):
+    requests = core_requests(root, modules)
+    if requests is None:
+        print("Core: every module (nothing is mounted, so this is the Platform's own build)")
+        return
+    graph = core_graph(root, modules)
+    composed = {name for _, name in composed_core(root, modules)}
+    print(f'Core modules in this composition ({len(composed)} of {len(graph)}), each with who declares it:')
+    for path, name in modules['core']:
+        module_id = graph[name][0]
+        if name not in composed:
+            print(f'  -  {module_id}: nothing declares it')
+            continue
+        askers = sorted(label for label, wanted in requests.items() if name in wanted)
+        askers += sorted(graph[other][0] for other in composed if name in graph[other][1])
+        print(f'  +  {module_id}: {", ".join(askers)}')
+
+
 def composition(layer, modules):
     text = (f'# Generated by scripts/discover-modules.py; edit deep-module manifests.\n'
             f'[package]\nname = "bilibi-{layer}"\nversion.workspace = true\n'
@@ -146,9 +283,11 @@ def composition(layer, modules):
 
 
 def outputs(root, modules):
+    check_core_use(root, modules)
     result = {}
     for layer in LAYERS:
-        result.update({root / path: text for path, text in composition(layer, modules[layer]).items()})
+        members = composed_core(root, modules) if layer == 'core' else modules[layer]
+        result.update({root / path: text for path, text in composition(layer, members).items()})
     return result
 
 
@@ -326,6 +465,8 @@ def main():
                       help='record the mounted container HEADs and the resolved Cargo.lock in .local/composition')
     mode.add_argument('--restore', action='store_true',
                       help='rebuild the pinned composition, refusing any container or Platform drift')
+    mode.add_argument('--explain', action='store_true',
+                      help='print the Core modules this composition links and who declares each')
     parser.add_argument('--staged', action='store_true',
                         help='with --check, judge only the staged composition and Cargo.lock, not HEAD')
     args = parser.parse_args()
@@ -334,7 +475,9 @@ def main():
     try:
         modules = discovered(ROOT)
         files = outputs(ROOT, modules)
-        if args.restore:
+        if args.explain:
+            explain(ROOT, modules)
+        elif args.restore:
             restore(ROOT, modules, files)
         elif args.pin:
             write_outputs(files)
