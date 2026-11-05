@@ -79,6 +79,11 @@ fn catalogue() -> &'static [StaticAsset] {
                 &include_bytes!("../assets/static/fonts/OFL.txt")[..],
             ),
             (
+                "/assets/mail-frame.css",
+                "text/css; charset=utf-8",
+                &include_bytes!("../assets/static/mail-frame.css")[..],
+            ),
+            (
                 "/assets/logo.svg",
                 "image/svg+xml",
                 &include_bytes!("../assets/static/logo.svg")[..],

@@ -5,6 +5,7 @@
 //! page exercises both the macro and the Rust paths.
 use crate::inline_specimen::InlineSamples;
 use crate::section::sections;
+use crate::MailFrame;
 use crate::{
     choices, error_sentence, ActionLink, AddMore, BadgeKind, Button, ButtonVariant, Card, Choice,
     Chrome, ClientEntry, CodeInput, Combobox, DayKind, DayMonth, DayTile, ErrorSummary, Field,
@@ -13,6 +14,17 @@ use crate::{
     Uploads,
 };
 use askama::Template;
+
+/// Mostly sanitiser output, plus what the frame must refuse by itself.
+const MAIL_SAMPLE: &str = r#"<p>Hello Support,</p>
+<p>The part arrived <b>cracked</b>. Photo below, invoice details in the table.</p>
+<p><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAGklEQVR4nGP4z8DAwMDAxMDAwMDAwMDAwAAAPgABEsn3QQAAAABJRU5ErkJggg==" width="48" height="48" alt="Photo of the part"></p>
+<table border="1"><tr><th>Item</th><th>Amount</th></tr><tr><td>Bracket</td><td>12.00</td></tr></table>
+<p><a href="https://example.test/cases/7" rel="noopener noreferrer">Open the case</a> or <a href="mailto:support@example.test">write back</a>.</p>
+<p style="color:#b91c1c">Inline style: not applied inside the frame.</p>
+<img src="https://tracker.example.test/open.gif" width="1" height="1" alt="">
+<script>document.body.append("script ran")</script>
+<p>Regards,<br>Customer</p>"#;
 
 /// The page is cut into sections, each its own template; see `section`.
 #[derive(Template)]
@@ -55,6 +67,10 @@ pub struct ComponentsSpecimen {
     location_secondary: LocationAction,
     location_primary: LocationAction,
     location_disabled: LocationAction,
+    /// Received mail in its sandboxed frame. The sample keeps a script, a
+    /// remote image and an inline style that the sanitiser would remove, to
+    /// show that the frame refuses them on its own as well.
+    mail_frame: Html,
 }
 
 sections! {
@@ -86,6 +102,7 @@ sections! {
         inline_facts: "ui_components_specimen/inline_facts.html",
         flex_tables: "ui_components_specimen/flex_tables.html",
         charts: "ui_components_specimen/charts.html",
+        mail_frame: "ui_components_specimen/mail_frame.html",
     }
 }
 
@@ -607,6 +624,11 @@ impl ComponentsSpecimen {
             )
             .value("clock_type", "out")
             .disabled(),
+            mail_frame: Html::render(&MailFrame::new(
+                "specimen-mail-frame",
+                "Received mail: Broken part, photo attached",
+                MAIL_SAMPLE,
+            ))?,
         })
     }
 

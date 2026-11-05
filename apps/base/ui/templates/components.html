@@ -191,6 +191,14 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 <div{% if !id.is_empty() %} id="{{ id }}"{% endif %} data-card class="{% if !bilibi_ui::card_flat(inner_class) %}rounded-xl {% endif %}border border-line bg-surface shadow-xs{% if !class.is_empty() %} {{ class }}{% endif %}"{% if !role.is_empty() %} role="{{ role }}"{% endif %}{% if !labelledby.is_empty() %} aria-labelledby="{{ labelledby }}"{% endif %}>{% if !title.is_empty() %}<div class="border-b border-line px-panel py-2"><h3 class="text-sm font-semibold text-ink">{{ title }}</h3></div>{% endif %}<div data-card-body class="{{ bilibi_ui::card_body_class(inner_class) }}">{{ caller() }}</div></div>
 {% endmacro %}
 
+{#- Received mail (bilibi_ui::MailFrame): sanitised HTML as a whole document
+    escaped into srcdoc. The sandbox only lets a clicked link open a new tab;
+    the frame takes the page's CSP and adds its own, so nothing runs or loads
+    from elsewhere. A paper surface in both themes, as mail expects. -#}
+{% macro mail_frame(id, title, document) %}
+<iframe id="{{ id }}" title="{{ title }}" srcdoc="{{ document }}" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" loading="lazy" class="block h-96 w-full rounded-xl border border-line bg-white"></iframe>
+{% endmacro %}
+
 {#- A rarely needed part of a form folded under its title and a one-line
     summary of what it holds (bilibi_ui::Fold). data-open follows the server,
     and the Fold hook opens the details when it appears; the patcher never
