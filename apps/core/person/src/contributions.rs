@@ -133,7 +133,7 @@ moved!("person.detail.persons", "/persons/{id}", "/contacts/{id}");
 bilibi_menu::contribute!(
     "core/person",
     bilibi_menu::MenuItem::page("admin.contacts", "Contacts", "/contacts")
-        .under("admin")
+        .under("core")
         .icon("user-group")
         .requires(bilibi_menu::Requirement::Capability(LIST))
         .order(15)

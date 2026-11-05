@@ -83,7 +83,7 @@ page!("address.detail", "/addresses/{id}", "detail", VIEW);
 bilibi_menu::contribute!(
     "core/address",
     bilibi_menu::MenuItem::page("admin.address", "Addresses", "/addresses")
-        .under("admin")
+        .under("core")
         .icon("map-pin")
         .requires(bilibi_menu::Requirement::Capability(LIST))
         .order(40)

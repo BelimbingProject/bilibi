@@ -58,7 +58,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 - Settings: `core.document.max_upload_bytes` and `core.document.allowed_types`.
 - Record kind: `core.document.document`; holder table `document_links`.
 - Routes: `/documents`, `/documents/{id}`, revision downloads and `/documents/export.csv`.
-- Menu item: `Documents`.
+- Menu item: `Documents`, under Core.
 - Media subject: `core.document.upload`.
 
 Run `core.document.list`, `.get`, `.access`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share`, `.unshare` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes is the declared page-write exception because operation input is bounded.
