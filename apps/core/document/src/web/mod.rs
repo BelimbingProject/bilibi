@@ -7,6 +7,7 @@
 //! `cx/activities` and Core Person's list and record pages.
 mod dialog;
 mod list;
+mod panel;
 mod record;
 
 use crate::{Document, Documents, Filter, Sort};
@@ -321,6 +322,9 @@ impl Pages {
                 record::Detail::new(self.shared(), scope, record_id(request)?, request.framed)
                     .await?,
             ),
+            "company_panel" | "person_panel" | "record_panel" => {
+                Box::new(panel::Panel::new(self.shared(), request)?)
+            }
             _ => return Err(Error::NotFound),
         })
     }
