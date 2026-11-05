@@ -208,7 +208,7 @@ impl ReadHandler for Read {
                         let size = usize::try_from(page_size).unwrap_or(usize::MAX);
                         (all.into_iter().skip(start).take(size).collect(), total)
                     } else {
-                        reports.page(scope, search, offset, page_size).await?
+                        reports.page(scope, search, None, offset, page_size).await?
                     };
                     return Ok(Output::Page(Page {
                         entries: Data::Array(list.iter().map(|r| listed(r).into()).collect()),

@@ -57,27 +57,29 @@ fn report(row: &Row, reader: i64) -> Result<Report> {
 /// One page of the reports the reader may run, by name, whose name or
 /// description holds `search` (any case; empty matches all), and how many
 /// match in all: the search and the page are one query, so no report is
-/// out of reach behind a cutoff.
+/// out of reach behind a cutoff. `record_types` narrows to reports over those
+/// record types (`None` keeps all).
 pub async fn page(
     sql: &impl GenericClient,
     tenant: i64,
     reader: i64,
     search: &str,
+    record_types: Option<&[String]>,
     offset: i64,
     limit: i64,
 ) -> Result<(Vec<Report>, i64)> {
-    const MATCH: &str = "($3 = '' OR position(lower($3) in lower(r.name)) > 0 OR position(lower($3) in lower(r.description)) > 0)";
+    const MATCH: &str = "(($3 = '' OR position(lower($3) in lower(r.name)) > 0 OR position(lower($3) in lower(r.description)) > 0) AND ($4::text[] IS NULL OR r.record_type = ANY($4)))";
     let total: i64 = sql
         .query_one(
             &format!("SELECT count(*) FROM base_reports r WHERE {VISIBLE} AND {MATCH}"),
-            &[&tenant, &reader, &search],
+            &[&tenant, &reader, &search, &record_types],
         )
         .await?
         .get(0);
     let rows = sql
         .query(
-            &format!("SELECT {COLUMNS} FROM base_reports r WHERE {VISIBLE} AND {MATCH} ORDER BY lower(r.name), r.id OFFSET $4 LIMIT $5"),
-            &[&tenant, &reader, &search, &offset, &limit],
+            &format!("SELECT {COLUMNS} FROM base_reports r WHERE {VISIBLE} AND {MATCH} ORDER BY lower(r.name), r.id OFFSET $5 LIMIT $6"),
+            &[&tenant, &reader, &search, &record_types, &offset, &limit],
         )
         .await?;
     let reports = rows

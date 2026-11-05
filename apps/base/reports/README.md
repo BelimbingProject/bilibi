@@ -23,7 +23,7 @@ Oversight reads are live, read-only and bounded. Prepared exports and scheduled 
 
 | Call | Needs | Does |
 |---|---|---|
-| `page`, `get` | `reports.view` | Reports the reader may run: their own, shared with everyone, or shared with one of their roles. `page` answers one page by name, searched by name and description in the same query, with the number that match. |
+| `page`, `get` | `reports.view` | Reports the reader may run: their own, shared with everyone, or shared with one of their roles. `page` answers one page by name, searched by name and description in the same query, with the number that match; `record_types` narrows it to reports over those record types. `record_sources` lists the record types the reader can report on with the area (Core or a Domain) that owns each. |
 | `run` | `reports.view` | One page of rows (each row linking to its record's page where the owner registers a Base Records kind for the table and the reader may open it, and the totals line), or a grouped summary or matrix with subtotals and a total. Answers ask-when-run filters by position; `as_rows` with drill filters lists the records behind a group; agents drill as the page does (`equals`, `empty`, or a date bucket's `range` of days). |
 | `export` | `reports.export` | The whole result as CSV or a text PDF, up to the download bound, for the same `RunInput` as the page (answers, drill-downs, records view). Audited as `base.reports.exported` with report, format and row count, never the data. CSV neutralises a leading `=`, `+`, `-`, `@`; a PDF holds 20 columns and Latin-1 text and refuses anything else in words. A matrix file has the page's layout, column totals included. |
 | `exportable` | `reports.export` | Whether that file can be made now, without making or auditing it: the page asks before sending the browser to a PDF, so a refusal is shown in words with CSV beside it. |
@@ -83,6 +83,7 @@ The settings editor groups the two pairs as **Reports · Interactive reads** and
 - A date value, and a range on a timestamp, is a day picker; an equals on a timestamp is its exact instant as text with its offset (`2025-01-31T09:30:00Z`), so a stored default survives editing other fields.
 - Every write goes through the operation contracts below (`PAGE_WRITES`: `create`, `save_definition`, `copy`, `save_sharing`, `delete`, `prepare_export`, `subscribe`, `pause_schedule`, `unsubscribe`).
 - The menu entry Reports sits under Core and needs `reports.view`.
+- The list filters by Area (Core or a Domain) and Records, both derived from the module that declared each report's Grid table. Only areas and record types the reader's catalog holds are offered; the filters combine with the search and stay in the address.
 
 ## Agent operations
 

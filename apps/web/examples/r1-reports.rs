@@ -302,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reports.share(tx, &manager, id, 1, false, &[2]).await
     })
     .await?;
-    let (listed, _) = reports.page(&viewer, "", 0, 100).await?;
+    let (listed, _) = reports.page(&viewer, "", None, 0, 100).await?;
     checks.check(
         "shared with the viewer's role, it is listed",
         listed.iter().any(|r| r.id == id && !r.owned),
@@ -1072,14 +1072,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reports.create(tx, &manager, &late).await
     })
     .await?;
-    let (found, matched) = reports.page(&manager, "ZZ LATE", 0, 25).await?;
+    let (found, matched) = reports.page(&manager, "ZZ LATE", None, 0, 25).await?;
     checks.check(
         "search finds a report after the first 500, in any case",
         matched == 1 && found.first().is_some_and(|r| r.id == late_id),
         format!("{matched} match(es)"),
     );
-    let (_, all) = reports.page(&manager, "", 0, 25).await?;
-    let (last, _) = reports.page(&manager, "", all - 1, 25).await?;
+    let (_, all) = reports.page(&manager, "", None, 0, 25).await?;
+    let (last, _) = reports.page(&manager, "", None, all - 1, 25).await?;
     checks.check(
         "and the last page of all reports holds it",
         all > 500 && last.first().is_some_and(|r| r.id == late_id),

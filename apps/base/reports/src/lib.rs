@@ -138,6 +138,42 @@ pub struct RunInput {
     pub background: bool,
 }
 
+/// A record type with the area that owns it, derived from the module that
+/// declared its Grid table: `core/company` and `base/...` are Core, a Domain's
+/// module is that Domain.
+#[derive(Clone, Debug)]
+pub struct RecordSource {
+    pub id: String,
+    pub label: String,
+    /// The owning container (`core`, `finance`), the filter's value.
+    pub area: String,
+    pub area_label: String,
+}
+
+/// `(container, label)` of a module ID: Base and Core modules are "Core";
+/// a Domain reads as its container with short words in capitals (`cx` is CX).
+fn area_of(module: &str) -> (String, String) {
+    let container = module.split_once('/').map_or(module, |(c, _)| c);
+    if matches!(container, "base" | "core") {
+        return ("core".into(), "Core".into());
+    }
+    let label = container
+        .split('_')
+        .map(|word| {
+            if word.len() <= 2 {
+                word.to_uppercase()
+            } else {
+                let mut chars = word.chars();
+                chars.next().map_or(String::new(), |c| {
+                    c.to_uppercase().collect::<String>() + chars.as_str()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (container.to_owned(), label)
+}
+
 /// One column of a result, as the reader's catalog names it.
 #[derive(Clone, Debug, Serialize)]
 pub struct ColumnInfo {
@@ -378,11 +414,13 @@ impl Reports {
     }
 
     /// One page of the reports the reader may run, searched by name and
-    /// description, with the number that match. Needs `reports.view`.
+    /// description, with the number that match. `record_types` narrows to
+    /// reports over those record types (`None` keeps all). Needs `reports.view`.
     pub async fn page(
         &self,
         scope: &Scope,
         search: &str,
+        record_types: Option<&[String]>,
         offset: u64,
         limit: u64,
     ) -> Outcome<(Vec<Report>, u64)> {
@@ -394,6 +432,7 @@ impl Reports {
             scope.tenant(),
             scope.user(),
             search,
+            record_types,
             clamp(offset),
             clamp(limit),
         )
@@ -598,6 +637,29 @@ impl Reports {
             .collect();
         types.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(types)
+    }
+
+    /// The record types the reader can report on with the Domain or Core
+    /// area that owns each, by label. Needs `reports.view`.
+    pub async fn record_sources(&self, scope: &Scope) -> Outcome<Vec<RecordSource>> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        authorize(&**client, scope, VIEW).await?;
+        drop(client);
+        let catalog = self.catalog(scope, false, false).await?;
+        let mut sources: Vec<_> = catalog
+            .tables()
+            .map(|table| {
+                let (area, area_label) = area_of(table.owner);
+                RecordSource {
+                    id: table.id().to_owned(),
+                    label: table.label().to_owned(),
+                    area,
+                    area_label,
+                }
+            })
+            .collect();
+        sources.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+        Ok(sources)
     }
 
     /// The columns a report on `record_type` can use for this reader: the
