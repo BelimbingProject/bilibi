@@ -1,10 +1,12 @@
-# Rust files stay under 800 lines; bigger ones may shrink but never grow
-# (scripts/file-length-ratchet.py). Its own workflow so it is vendored unchanged
-# into every Bilibi repository and runs without compiling.
+# Warns about Rust files over 800 lines that are new or grew; fails only when the
+# pull request body gives no keep/split line for one (scripts/file-length-ratchet.py).
+# Its own workflow so it is vendored unchanged into every Bilibi repository,
+# re-runs when the body is edited, and runs without compiling.
 name: File length
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -22,3 +24,5 @@ jobs:
         with:
           fetch-depth: 0
       - run: python3 scripts/file-length-ratchet.py --base "origin/${{ github.base_ref }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

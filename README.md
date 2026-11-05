@@ -206,11 +206,13 @@ cargo build --workspace --release --locked
 
 ### File length
 
-A pull request may not add a Rust file over 800 lines, and may not make a file that is already over 800 lines longer. Split it or keep it from growing.
+CI warns about a Rust file over 800 lines that is new or got longer in your pull request. It fails only when the pull request body gives no reason for a listed file.
 
-- Run `python3 scripts/file-length-ratchet.py` before you push; it compares your branch with `origin/main`.
+- Under `## File length` in the pull request body, add one line per listed file: `<path>: keep: <reason>` or `<path>: split: <what was split along which responsibility>`.
+- Split by responsibility (one screen, one job), never by line count and never into `part1`/`part2`.
+- Run `python3 scripts/file-length-ratchet.py` to see the list locally; it compares your branch with `origin/main`.
 - Files under `fixtures/`, `examples/`, `migrations/` and `generated/` are skipped.
-- CI runs it as `.github/workflows/file-length.yml`. The same script is copied unchanged into every Bilibi repository.
+- CI runs it as `.github/workflows/file-length.yml`; editing the body re-runs it. The same script is copied unchanged into every Bilibi repository.
 
 ## Limits
 
