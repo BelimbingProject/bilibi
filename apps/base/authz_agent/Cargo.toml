@@ -14,7 +14,9 @@ bilibi-events.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-schedule.workspace = true
-bilibi-tenancy = { path = "../tenancy" }
+bilibi-settings.workspace = true
+bilibi-system.workspace = true
+bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true
 inventory.workspace = true
 serde_json.workspace = true

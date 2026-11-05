@@ -536,6 +536,8 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-system",
  "bilibi-tenancy",
  "bilibi-ui",
  "inventory",

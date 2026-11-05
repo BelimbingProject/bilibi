@@ -1,4 +1,4 @@
-{#- Both lists and their controls are shared UI fragments built in src/web.rs. -#}
+{#- Lists and their controls are shared UI fragments built in src/web.rs. -#}
 {%- import "components.html" as ui -%}
 {%- import "feedback.html" as feedback -%}
 <div data-shared-ui>
@@ -6,8 +6,8 @@
 {% call ui::page(id="automation-access") %}
 {{ header|safe }}
 {{ toolbar|safe }}
-{{ schedules|safe }}
-{{ events|safe }}
+{% call ui::stack(parts=cards, wide=true) %}{% endcall %}
+{{ principal_dialog|safe }}
 {{ dialog|safe }}
 {% endcall %}
 </div>
