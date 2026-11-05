@@ -9,9 +9,16 @@ license.workspace = true
 bilibi-database.workspace = true
 bilibi-security.workspace = true
 bilibi-ui.workspace = true
-bilibi-user.workspace = true
-bilibi-portal.workspace = true
+# The Core modules every application runs: the host declares them as a Domain
+# does, and scripts/discover-modules.py composes their closure (ADR 25).
+bilibi-address.workspace = true
+bilibi-agent.workspace = true
 bilibi-company.workspace = true
+bilibi-geonames.workspace = true
+bilibi-portal.workspace = true
+# The operator's Tenants page, where every tenant starts.
+bilibi-tenant.workspace = true
+bilibi-user.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 tokio.workspace = true

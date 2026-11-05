@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
             println!("Authorization system roles reconciled");
         }
         Some("geonames-import") => {
-            use bilibi_core::geonames::{ImportOptions, ReferenceImport, IMPORT_SERVICE, USAGE};
+            use bilibi_geonames::{ImportOptions, ReferenceImport, IMPORT_SERVICE, USAGE};
             let args: Vec<String> = std::env::args().skip(2).collect();
             let options = ImportOptions::from_args(&args).map_err(|message| {
                 eprintln!("{message}\n{USAGE}");
@@ -68,9 +68,7 @@ async fn main() -> Result<()> {
             bilibi_web::provision(&db, command, &args).await?;
         }
         Some("plugin-export") => {
-            use bilibi_core::agent::{
-                AgentPlugins, ExportError, PluginError, PLUGIN_SERVICE, USAGE,
-            };
+            use bilibi_agent::{AgentPlugins, ExportError, PluginError, PLUGIN_SERVICE, USAGE};
             let args: Vec<String> = std::env::args().skip(2).collect();
             let Some([harness, output]) = flags(&args, ["--harness", "--output"]) else {
                 eprintln!("{USAGE}");

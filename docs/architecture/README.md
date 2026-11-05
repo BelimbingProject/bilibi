@@ -3,7 +3,7 @@
 **Document Type:** Architecture overview
 **Status:** Active
 **Scope:** Layers, modules, composition, data, audit and security of Bilibi. The UI rules are in [`DESIGN.md`](../../DESIGN.md).
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-05
 
 Bilibi is a business application platform written in Rust: a set of small modules that plug into one web host, each owning its own data, pages and rules.
 
@@ -45,18 +45,19 @@ Bilibi's code sits in four layers inside one Cargo workspace, plus the web host 
 | Layer | Path | Role | Mounted from |
 | --- | --- | --- | --- |
 | Base | `apps/base/<module>` | Infrastructure and cross-cutting mechanisms | this repository |
-| Core | `apps/core/<module>` | The required enterprise domain | this repository |
+| Core | `apps/core/<module>` | Shared enterprise records; an application links the ones it uses | this repository |
 | Domains | `apps/domains/<name>/<module>` | Optional business capabilities | one repository per Domain |
 | Extensions | `apps/extensions/<name>/<module>` | Operator-chosen adaptations | one repository per Extension |
 | Web | `apps/web` | Executable host: routes, sockets, seed command | this repository |
 | Installer | `apps/installer` | Separate service that puts releases into service and takes them back (`apps/installer/README.md`) | this repository |
 
-Think of it as a building. Base is the plumbing and wiring. Core is the rooms every company needs, such as companies, people and addresses. Domains are optional wings, such as Finance or Factory. Extensions are fittings one customer chose, such as a connector to their old system.
+Think of it as a building. Base is the plumbing and wiring. Core is the shared rooms, such as companies, people and addresses; each application gets the rooms its wings use. Domains are optional wings, such as Finance or Factory. Extensions are fittings one customer chose, such as a connector to their old system.
 
 A few rules follow from that order:
 
 - The order is fixed: Base, Core, Domains, Extensions.
 - Base never depends on Core.
+- An application links only the Core modules that the host and its mounted Domains and Extensions declare as Cargo dependencies, closed over what those need; the Platform alone links all of them ([ADR 25](decisions/25-core-modules-on-demand.md)). *built*: `python3 scripts/discover-modules.py --explain`.
 - Domains and Extensions are empty in this repository. Each one is mounted from its own repository. *built*: mounting, pinning and CI (`apps/domains/AGENTS.md`).
 - The composition crates `apps/base`, `apps/core`, `apps/domains` and `apps/extensions` hold no business code. They are generated linkage only.
 
@@ -134,7 +135,7 @@ Each Domain and each Extension lives in its own repository, with one or more mod
 | Layer | Modules |
 | --- | --- |
 | Base | `agent_api`, `artifacts`, `audit`, `audit_views`, `authz`, `authz_agent`, `custom_fields`, `dashboard`, `database`, `datetime`, `design_library`, `events`, `grid`, `integration`, `locale`, `mail`, `media`, `menu`, `module_registry`, `notifications`, `party_ids`, `perf`, `personal_data`, `picklists`, `ports`, `principal_directory`, `privacy`, `queue`, `records`, `schedule`, `search`, `security`, `session`, `settings`, `settings_editor`, `software`, `step_up`, `system`, `tenancy`, `tiling`, `ui`, `workflow` |
-| Core | `address`, `affiliation`, `agent`, `company`, `currency`, `geonames`, `party`, `person`, `portal`, `product`, `tenant`, `user` |
+| Core | `activity`, `address`, `affiliation`, `agent`, `company`, `currency`, `document`, `geonames`, `party`, `person`, `portal`, `product`, `tenant`, `user`, `work_calendar` |
 
 - `base/security` is a compatibility facade over Session, Tenancy and Authz.
 - Not ported: a plugin system, a Laravel compatibility layer, adoption of a Belimbing database.

@@ -107,6 +107,7 @@ bilibi-geonames = { path = "apps/core/geonames" }
 bilibi-party = { path = "apps/core/party" }
 bilibi-person = { path = "apps/core/person" }
 bilibi-tenant = { path = "apps/core/tenant" }
+bilibi-work-calendar = { path = "apps/core/work_calendar" }
 
 # Money and quantities in numeric(20,4) columns, for Domain modules.
 rust_decimal = { version = "1.43.0", features = ["db-tokio-postgres"] }
