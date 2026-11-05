@@ -58,6 +58,22 @@ Contacts shows Work email, Role and Company from current affiliations by default
 
 The owner contributes Grid's `persons.work` many-link and `person_affiliations.company` one-link. The work link excludes unlinked, upcoming and ended affiliations, using inclusive dates on the UTC calendar. Multiple current affiliations roll up distinct values rather than choosing one. Grid checks affiliation and company list access and work-contact restrictions for both columns and search. History remains available in the record's Affiliations panel.
 
+## Exact current work contact lookup
+
+`AffiliationService::match_contact_in(client, scope, &bilibi_person::ContactAddress, limit)` returns `bilibi_person::ContactMatches<WorkContactMatch>`. Each entry identifies the exact affiliation and its Person. Combine it with Person's personal-contact lookup through the two public facades, without joining their tables outside the owners.
+
+- Scope is reproved on this client. Both Affiliation and Person list/detail permissions are required live. A hidden or masked work criterion refuses before comparing any source value; missing access is an error even when there would be no match.
+- The [Person comparison and completeness contract](../person/README.md#exact-contact-lookup-on-a-caller-client) applies unchanged, including international-only phone comparison, preserved spelling, a 1–100 limit, `overflow`, `uncomparable`, and caller-transaction visibility. Entries count affiliations: several current positions can identify the same Person, and callers deduplicate only after preserving completeness.
+- Current means linked (`unlinked_at IS NULL`) with inclusive date bounds on the UTC calendar at PostgreSQL transaction time, as in the owner's Contacts Grid link. Null bounds are unbounded. Ended, future and unlinked records do not participate, including in `uncomparable`.
+- Current dated affiliations of retired Persons or archived companies remain readable under the owner's existing historical-read policy. The lookup does not issue a writable endpoint proof. Erasure clears work contacts and their derived index entries while retaining links and dates.
+- The lookup never reserves an address. The [concurrency boundary](../person/README.md#concurrency-boundary) remains unresolved for intake versus independent owner writers; default Read Committed, a caller advisory lock or a single Serializable participant must not be advertised as a uniqueness guarantee.
+
+### Contact matching walkthrough
+
+Use a fresh disposable `DATABASE_URL`, a configured `APP_ORIGIN`, separate `BILIBI_INSTANCE_DIR`/`BILIBI_MAIL_DIR` folders, and a disposable `BILIBI_SETTINGS_KEY` ([Settings key setup](../../base/settings/README.md)). Run `BILIBI_CONTACT_MATCHING=disposable cargo run -p bilibi-affiliation --example contact-matching-walkthrough --locked -- seed`, then the same command without `-- seed`.
+
+It migrates and installs the native walkthrough fixture and production reference flows, then calls real owner facades for formatted personal/work contacts, complete nonmatches, same-client uncommitted writes and rollback, tenant separation, live permission and field refusals, inclusive UTC dates, unlink/retire policy, unsupported stored phones and bounded overflow. It also runs an independently approved native privacy erasure through actual queue/store handlers and proves the old personal/work addresses no longer match. Optional Step-up is disabled only in its own disposable process; the always-protected erasure uses a real authenticator enrollment/code and an explicit desk for the disposable approver. Actor withdrawal verifies held-Scope eligibility reproof; credential validation remains the caller edge's contract. No unit-test runner or lead workflow is involved.
+
 ## Account and People integration
 
 Call `AffiliationService::lock_for_account_binding` inside the consumer's

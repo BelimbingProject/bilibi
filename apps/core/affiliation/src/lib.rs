@@ -1,5 +1,6 @@
 //! Person ↔ Organisation work affiliations, independent of People employment.
 mod agent_operations;
+mod contact_lookup;
 pub mod contributions;
 pub mod identity;
 pub mod model;
@@ -7,6 +8,7 @@ mod privacy;
 pub mod web;
 use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_tenancy::{Authentication, Scope};
+pub use contact_lookup::WorkContactMatch;
 pub use identity::{LockedAffiliation, OwnCompanyAffiliation};
 pub use model::{
     Affiliation, AffiliationId, AffiliationInput, CalendarDate, ContactFacts, EffectiveDates,
@@ -190,7 +192,8 @@ inventory::submit! {
         id: "core/affiliation", layer: bilibi_module_registry::Layer::Core,
         dependencies: &["base/audit", "base/database", "base/tenancy", "base/authz", "base/grid", "base/agent_api", "base/ui", "base/datetime", "base/locale", "base/principal_directory", "base/bulk_data", "base/personal_data", "core/party", "core/person", "core/company"],
         migrations: &[("001-core-affiliation", include_str!("../migrations/001-affiliation.sql")),
-            ("core-affiliation-002-personal-data", include_str!("../migrations/002-personal-data.sql"))],
+            ("core-affiliation-002-personal-data", include_str!("../migrations/002-personal-data.sql")),
+            ("core-affiliation-003-contact-lookup", include_str!("../migrations/003-contact-lookup.sql"))],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             CHANGES.set(broadcast::channel(128).0).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate affiliation change sender".into()))?;
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();

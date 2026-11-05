@@ -1,5 +1,6 @@
 //! Core identities and personal contacts. No HR or implicit account creation.
 mod agent_operations;
+mod contact_lookup;
 mod contributions;
 mod directory;
 mod files;
@@ -13,6 +14,7 @@ mod web;
 
 use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_tenancy::{Authentication, Scope};
+pub use contact_lookup::{ContactAddress, ContactMatches};
 pub use contributions::{CAPS, CREATE, LIST, RETIRE, SYSTEM_MANAGE, UPDATE, VIEW};
 pub use files::{PersonFiles, ARTIFACT_OWNER, ATTACHMENT_SUBJECT, FILES};
 // Other owners' transactions: a person read, searched, previewed or created
@@ -194,6 +196,7 @@ inventory::submit! {
             ("core-person-002-search", include_str!("../migrations/002-search.sql")),
             ("core-person-003-code", include_str!("../migrations/003-code.sql")),
             ("core-person-004-erasure", include_str!("../migrations/004-erasure.sql")),
+            ("core-person-005-contact-lookup", include_str!("../migrations/005-contact-lookup.sql")),
         ],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let parties = services.get::<bilibi_tenancy::PartyProofs>("base/tenancy.parties")?;
