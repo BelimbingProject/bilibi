@@ -8,6 +8,7 @@ pub mod definition;
 mod fan_out;
 mod occurrence;
 mod phrase;
+mod principals;
 pub mod recurrence;
 mod retention;
 pub mod scheduler;
@@ -18,6 +19,7 @@ pub mod worker;
 pub use board::{Availability, Diagnostics, DueWork, Pruned, RunPage, RunQuery, RunSort};
 pub use definition::{Definition, Misfire, Overlap, Reach, DEFINITIONS, RESERVED_ARGUMENT};
 pub use occurrence::{Refusal, Run, Trigger, TriggeredBy};
+pub use principals::{ExecutionPrincipal, EXECUTION_PRINCIPALS};
 pub use scheduler::Scheduler;
 pub use tenant::{Audience, OwnTenant, TenantCounts, TenantFacts};
 
@@ -37,8 +39,8 @@ use tokio_postgres::{Client, GenericClient, Transaction};
 pub const VIEW: &str = "admin.system.schedule.view";
 pub const EXECUTE: &str = "admin.system.schedule.execute";
 pub const MANAGE: &str = "admin.system.schedule.manage";
-/// What the `scheduler` principal needs in a tenant other than the operator's to
-/// run an [`Reach::EachTenant`] definition there. A tenant administrator grants
+/// What a definition's execution principal needs outside the operator tenant to
+/// run a [`Reach::EachTenant`] definition there. A tenant administrator grants
 /// it (`Grants::set_system`); declaration, provisioning and the operator's own
 /// `EXECUTE` grant never confer it. In the operator tenant the principal uses
 /// [`EXECUTE`].
@@ -56,7 +58,7 @@ pub const TENANT_POLICY: bilibi_queue::CapabilityPolicy = bilibi_queue::Capabili
     tenant_system: TENANT_WORK,
     tenant_user: TENANT_RUN,
 };
-/// The system principal recurrences are enqueued and executed as. It must be
+/// The default execution principal, and the principal of every fan-out. It must be
 /// granted [`EXECUTE`] in the operator tenant (`Grants::set_system`) before
 /// any claimed job can run; declaration alone grants nothing.
 pub const PRINCIPAL: &str = "scheduler";
@@ -70,6 +72,7 @@ pub struct Registered {
     zone: TimeZone,
     args: Value,
     fingerprint: String,
+    execution_principal: Option<SystemPrincipalDefinition>,
 }
 impl Registered {
     pub fn key(&self) -> &'static str {
@@ -81,6 +84,12 @@ impl Registered {
     }
     pub fn definition(&self) -> &'static Definition {
         self.definition
+    }
+    /// Principal of automatic tenant jobs. Fan-out always runs as PRINCIPAL;
+    /// a person's tenant Run now keeps that person's own authority.
+    pub fn execution_principal(&self) -> &'static str {
+        self.execution_principal
+            .map_or(PRINCIPAL, |principal| principal.name)
     }
     pub fn zone(&self) -> &TimeZone {
         &self.zone
@@ -132,6 +141,8 @@ pub struct Task {
     pub overlap: Overlap,
     pub misfire: Misfire,
     pub reach: Reach,
+    pub execution_principal: &'static str,
+    pub execution_capabilities: Vec<&'static str>,
     pub fingerprint: String,
     pub review: ReviewState,
     pub suppressed: bool,
@@ -183,6 +194,7 @@ impl Schedule {
         db: Db,
     ) -> bilibi_module_registry::Result<Self> {
         let mut definitions = BTreeMap::new();
+        let principals = principals::from_catalog(catalog)?;
         for entry in catalog.entries::<Definition>(DEFINITIONS)? {
             let fail = |reason: &str| {
                 RegistryError::Contribution(format!(
@@ -223,6 +235,12 @@ impl Schedule {
             }
             let fingerprint =
                 definition::fingerprint(entry.id, entry.provenance.module, definition, &args);
+            let execution_principal = principals.get(entry.id).copied();
+            let fingerprint = execution_principal
+                .as_ref()
+                .map_or(fingerprint.clone(), |principal| {
+                    principals::fingerprint(&fingerprint, principal)
+                });
             // The claim enqueues these arguments plus the reserved metadata; a
             // validator that strips or rejects it would refuse every claim.
             let mut probe = normalized.clone();
@@ -245,6 +263,7 @@ impl Schedule {
                     cron,
                     zone,
                     fingerprint,
+                    execution_principal,
                     args: normalized,
                 },
             );
@@ -347,6 +366,16 @@ impl Schedule {
                     overlap: item.definition.overlap,
                     misfire: item.definition.misfire,
                     reach: item.definition.reach,
+                    execution_principal: item.execution_principal(),
+                    execution_capabilities: item.execution_principal.map_or_else(
+                        Vec::new,
+                        |principal| {
+                            let mut capabilities = principal.capabilities.to_vec();
+                            capabilities.sort_unstable();
+                            capabilities.dedup();
+                            capabilities
+                        },
+                    ),
                     tenants: facts.get(item.key).cloned(),
                     fingerprint: item.fingerprint.clone(),
                     review: review_state(item, reviews.get(item.key)),

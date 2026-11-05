@@ -7,8 +7,8 @@ use crate::{
     definition::Overlap,
     lock,
     occurrence::{self, Refusal, Trigger, TriggeredBy},
-    worker, Claimed, Eligibility, Reach, Schedule, EXECUTE, PRINCIPAL, RESERVED_ARGUMENT,
-    TENANT_RUN, TENANT_VIEW, TENANT_WORK, VIEW,
+    worker, Claimed, Eligibility, Reach, Schedule, EXECUTE, RESERVED_ARGUMENT, TENANT_RUN,
+    TENANT_VIEW, TENANT_WORK, VIEW,
 };
 use bilibi_authz::{authorize_key, decide_system, in_operator_tenant, SystemScope};
 use bilibi_database::{Change, Error, Result};
@@ -46,7 +46,7 @@ impl TenantCounts {
 /// This tenant's standing for one definition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnTenant {
-    /// Whether the `scheduler` principal may act here (the tenant's consent).
+    /// Whether this definition's execution principal may act here (consent).
     pub granted: bool,
     /// The latest run row: its status and bounded code.
     pub latest: Option<(String, Option<String>)>,
@@ -128,8 +128,11 @@ impl Schedule {
                     .into_iter()
                     .map(|row| (row.get(0), (row.get(1), row.get(2))))
                     .collect();
-                let granted = self.consented(client, tenant).await?;
                 for key in keys {
+                    let item = self.definitions.get(key).ok_or(Error::NotFound)?;
+                    let granted = self
+                        .consented(client, tenant, item.execution_principal())
+                        .await?;
                     facts.insert(
                         (*key).to_owned(),
                         TenantFacts::Own(OwnTenant {
@@ -143,10 +146,15 @@ impl Schedule {
         Ok(facts)
     }
 
-    /// Whether the scheduler principal may run here: the tenant's grant, or in
+    /// Whether the selected principal may run here: the tenant's grant, or in
     /// the operator tenant its `EXECUTE`. Read through Authz's one decision.
-    async fn consented(&self, client: &impl GenericClient, tenant: i64) -> Result<bool> {
-        let scope = SystemScope::rehydrate(client, tenant, Some(PRINCIPAL)).await?;
+    async fn consented(
+        &self,
+        client: &impl GenericClient,
+        tenant: i64,
+        principal: &str,
+    ) -> Result<bool> {
+        let scope = SystemScope::rehydrate(client, tenant, Some(principal)).await?;
         let key = if in_operator_tenant(client, tenant).await? {
             EXECUTE
         } else {

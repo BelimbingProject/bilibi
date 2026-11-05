@@ -2,7 +2,7 @@
 //! the operator tenant, like any other; its Queue job is this Platform worker
 //! (`base/schedule-fan-out`), which walks the tenant directory and queues the
 //! owner's worker once in every tenant that has consented, as that tenant's
-//! `scheduler` principal. The owner's worker never enumerates tenants.
+//! selected execution principal. The owner's worker never enumerates tenants.
 //!
 //! Each tenant gets exactly one `base_schedule_tenant_runs` row per occurrence
 //! (unique on `(occurrence, tenant)`): a queued job written in the same audited
@@ -12,7 +12,7 @@
 use crate::{
     definition::{Overlap, Reach},
     worker::{self, Metadata},
-    Registered, Schedule, EXECUTE, PRINCIPAL, RESERVED_ARGUMENT, TENANT_WORK,
+    Registered, Schedule, EXECUTE, RESERVED_ARGUMENT, TENANT_WORK,
 };
 use bilibi_authz::{decide_system, SystemScope};
 use bilibi_database::{Change, Error, Result};
@@ -169,7 +169,9 @@ impl Schedule {
         // this tenant's own scope; Authz logs it and a deny beats any allow.
         let scope = {
             let client = self.db.get().await?;
-            match SystemScope::rehydrate(&**client, target.id, Some(PRINCIPAL)).await {
+            match SystemScope::rehydrate(&**client, target.id, Some(item.execution_principal()))
+                .await
+            {
                 Ok(scope) => scope,
                 // Suspended or deleted since the page was read.
                 Err(Error::Unauthorized) => {
@@ -273,7 +275,7 @@ impl Schedule {
     }
 
     /// The tenant's run row and its job commit together in that tenant's audit
-    /// context, as the tenant's `scheduler` principal. Under the tenant's
+    /// context, as the definition's execution principal. Under the tenant's
     /// advisory lock a forbid-overlap definition whose previous run is still
     /// unfinished gets a `skipped` row instead of a job.
     async fn queue_tenant_run(

@@ -4,6 +4,8 @@ Other modules send notifications through `NotificationBoundary`; Core User store
 
 Call `notify` inside the owner's mutation transaction with a validated `Notice` and explicit recipients. The boundary records each recipient once and wakes them only after commit. Core binds the persistence adapter through `bind` at boot.
 
+`record` tells the acting account about its own write. For a named system principal it validates the title and records no self-notification, because that identity has no account or bell. Ordinary account writes retain their transactional self-notification. A system worker can still call `notify` for explicit people; empty, non-positive and ineligible recipients remain refused.
+
 ## To-do sources
 
 The bell keeps actionable work separate from unread notifications.
