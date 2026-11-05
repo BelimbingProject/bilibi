@@ -8,12 +8,14 @@ use mail_parser::{HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 const MAX_PARTS: usize = 200;
 const MAX_DEPTH: usize = 20;
 const MAX_HEADER_BYTES: usize = 512 * 1024;
+const MAX_HEADERS: usize = 1_000;
+const MAX_HEADER_FIELD_BYTES: usize = 64 * 1024;
 const MAX_REFERENCES: usize = 50;
 
 /// What `parse` accepts. Build it from the installation limits
 /// (`Mailer::parse_limits`, or `ParseLimits::from(limits)`); a caller may lower
-/// any value, and parts, depth and header bytes never go above 200, 20 and
-/// 512 KiB.
+/// any value. Structural limits never go above 200 parts, depth 20, 512 KiB
+/// of header text, 1,000 fields and 64 KiB in one unfolded field.
 #[derive(Clone, Copy, Debug)]
 pub struct ParseLimits {
     pub max_bytes: usize,
@@ -21,6 +23,10 @@ pub struct ParseLimits {
     pub max_depth: usize,
     /// Every header block together: the message's own and each part's.
     pub max_header_bytes: usize,
+    /// Header fields across the message and all parts.
+    pub max_headers: usize,
+    /// Bytes in one unfolded field, including its name.
+    pub max_header_field_bytes: usize,
 }
 impl From<Limits> for ParseLimits {
     fn from(limits: Limits) -> Self {
@@ -29,6 +35,8 @@ impl From<Limits> for ParseLimits {
             max_parts: MAX_PARTS,
             max_depth: MAX_DEPTH,
             max_header_bytes: MAX_HEADER_BYTES,
+            max_headers: MAX_HEADERS,
+            max_header_field_bytes: MAX_HEADER_FIELD_BYTES,
         }
     }
 }
@@ -107,12 +115,16 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<Parsed> {
         return Err(Error::Invalid);
     }
     let max_parts = limits.max_parts.min(MAX_PARTS);
-    // Header text and part count are budgeted before mail-parser allocates
-    // anything that grows with them; `within` re-checks the built tree.
+    let max_depth = limits.max_depth.min(MAX_DEPTH);
+    // Every structural budget is applied before mail-parser allocates the full
+    // tree; `within` re-checks its exact part count and depth afterwards.
     bounds::check(
         bytes,
         limits.max_header_bytes.min(MAX_HEADER_BYTES),
+        limits.max_headers.min(MAX_HEADERS),
+        limits.max_header_field_bytes.min(MAX_HEADER_FIELD_BYTES),
         max_parts,
+        max_depth,
     )?;
     // The parser promises not to panic; a panic is still refused, never fatal.
     std::panic::catch_unwind(|| {
@@ -128,7 +140,7 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<Parsed> {
         {
             return Err(Error::Invalid);
         }
-        within(&message, max_parts, limits.max_depth.min(MAX_DEPTH))?;
+        within(&message, max_parts, max_depth)?;
         Ok(read(&message))
     })
     .unwrap_or(Err(Error::Invalid))

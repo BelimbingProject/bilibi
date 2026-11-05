@@ -10,7 +10,10 @@ use bilibi_mail::{
     header_block, inline_images, parse, render, sanitise_html, Address, Attachment, InlineImage,
     Limits, Message, ParseLimits, Parsed, Report,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = PathBuf::from(
@@ -103,13 +106,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let refuse = |name: &str, bytes: &[u8], limits: &ParseLimits| -> std::io::Result<()> {
         let path = out.join(name);
         std::fs::write(&path, bytes)?;
+        let started = Instant::now();
         let result = parse(&std::fs::read(&path)?, limits);
+        let elapsed = started.elapsed();
+        if result.is_ok() {
+            return Err(std::io::Error::other(format!(
+                "{name} parsed but must be refused"
+            )));
+        }
         println!(
-            "{name}: {}",
+            "{name}: {} in {:.3} ms",
             match result {
                 Ok(_) => "parsed (expected a refusal)".to_owned(),
                 Err(error) => format!("refused ({error})"),
-            }
+            },
+            elapsed.as_secs_f64() * 1_000.0,
         );
         Ok(())
     };
@@ -131,7 +142,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     refuse("many-headers.eml", &many_headers(false), &limits)?;
     refuse("many-part-headers.eml", &many_headers(true), &limits)?;
     refuse("many-addresses.eml", &many_addresses(), &limits)?;
+    refuse("long-header.eml", &long_header(), &limits)?;
     refuse("encoded-message.eml", &encoded_message(), &limits)?;
+    let no_headers = ParseLimits {
+        max_header_bytes: 0,
+        ..limits
+    };
+    refuse(
+        "no-header-budget.eml",
+        b"Subject: none\r\n\r\nbody\r\n",
+        &no_headers,
+    )?;
     refuse("not-a-message.bin", &[0xff, 0x00, 0xfe, 0x01], &limits)?;
     refuse("empty.eml", b"", &limits)?;
     println!(
@@ -392,6 +413,14 @@ fn many_addresses() -> Vec<u8> {
     for _ in 0..300_000 {
         bytes.extend(b"a@b,");
     }
+    bytes.extend(b"\r\n\r\nbody\r\n");
+    bytes
+}
+
+/// One field below the total header budget but above the unfolded-field limit.
+fn long_header() -> Vec<u8> {
+    let mut bytes = b"From: flood@example.test\r\nSubject: ".to_vec();
+    bytes.extend(std::iter::repeat_n(b'x', 128 * 1024));
     bytes.extend(b"\r\n\r\nbody\r\n");
     bytes
 }
