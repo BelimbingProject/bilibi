@@ -293,6 +293,7 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
+ "bilibi-work-calendar",
  "inventory",
  "jiff",
  "serde",

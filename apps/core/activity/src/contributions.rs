@@ -213,6 +213,14 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
         ("close", "core.activity.close"),
         ("close_and_new", "core.activity.close"),
         ("delete", "core.activity.delete"),
+        ("update_series", "core.activity.update_series"),
+        ("delete_series", "core.activity.delete_series"),
+        // Delete on an occurrence asks which: "only this one" is the plain delete.
+        ("delete_series", "core.activity.delete"),
+        // The calendar's drag, resize and Move dialog reschedule through
+        // the same change contract.
+        (bilibi_ui::calendar::MOVE, "core.activity.update"),
+        (bilibi_ui::calendar::MOVE_SUBMIT, "core.activity.update"),
     ],
     pending: Pending::None,
 }) }

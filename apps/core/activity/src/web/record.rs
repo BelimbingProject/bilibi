@@ -2,7 +2,9 @@
 //! its guests (add, remove, answers, Send invites) and a warning when its
 //! time overlaps another call or meeting of the same people. Close, Close
 //! and create new, Delete and Send invites ask first; every write calls its
-//! contract through `PageContracts`.
+//! contract through `PageContracts`. An occurrence of a repeating series is
+//! edited in place on its own (an exception); Change series reaches it and
+//! the later ones, or all of them, and Delete asks which.
 use super::{
     event, field_of, form::Dialog, icon, label, refusal, render, sentences, status_badge,
     BrowserZone, Clock, Pages, Refusal, Region, FIELDS,
@@ -13,10 +15,10 @@ use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, page::*, params, Alert, BackLink, Badge, BadgeKind, Button, ButtonVariant, Card,
-    CommitStates, CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, Form, Header, Html,
-    Icon, InlineChoice, InlineEdit, InlineField, InlineLongText, InputKind, PageVariant,
-    RecordPicker, SectionHeading, StatusKind, NO_FLASH,
+    choices, page::*, params, ActionLink, Alert, BackLink, Badge, BadgeKind, Button, ButtonVariant,
+    Card, CommitStates, CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, Form, Header,
+    Html, Icon, InlineChoice, InlineEdit, InlineField, InlineLongText, InputKind, Modal,
+    ModalWidth, PageVariant, RecordPicker, SectionHeading, StatusKind, NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -24,6 +26,91 @@ use std::collections::HashMap;
 const FORBIDDEN: &str = "You do not have permission to change this activity.";
 const PRIVATE: &str = "People taking part";
 const SHARED: &str = "Also readers of the related record";
+/// Long text in the series dialog posts up to this many characters.
+const LIMIT: usize = 10_000;
+
+/// The Change series dialog: which occurrences, the values to give them,
+/// and what the last save refused.
+struct SeriesForm {
+    values: HashMap<String, String>,
+    errors: Vec<String>,
+}
+impl SeriesForm {
+    fn new(a: &Activity, clock: &Clock) -> Self {
+        let values = HashMap::from([
+            ("apply".to_owned(), "following".to_owned()),
+            ("title".to_owned(), a.title.clone()),
+            ("starts_at".to_owned(), clock.local(a.starts_at)),
+            ("ends_at".to_owned(), clock.local(a.ends_at)),
+            ("due_at".to_owned(), clock.local(a.due_at)),
+            (
+                "location".to_owned(),
+                a.location.clone().unwrap_or_default(),
+            ),
+            (
+                "description".to_owned(),
+                a.description.clone().unwrap_or_default(),
+            ),
+        ]);
+        Self {
+            values,
+            errors: Vec::new(),
+        }
+    }
+    fn value(&self, key: &str) -> &str {
+        self.values.get(key).map_or("", String::as_str)
+    }
+    /// The patch: only the values that differ from this occurrence's.
+    fn patch(&self, a: &Activity, clock: &Clock) -> std::result::Result<Value, Vec<String>> {
+        let mut patch = json!({});
+        let mut errors = Vec::new();
+        let title = self.value("title").trim();
+        if title != a.title {
+            patch["title"] = json!(title);
+        }
+        let keys: &[&str] = match a.kind {
+            Kind::Call | Kind::Meeting => &["starts_at", "ends_at"],
+            Kind::Task => &["due_at"],
+            Kind::Note => &[],
+        };
+        for key in keys {
+            let stored = match *key {
+                "starts_at" => a.starts_at,
+                "ends_at" => a.ends_at,
+                _ => a.due_at,
+            };
+            match clock.parse(self.value(key)) {
+                Ok(at) if at != stored => {
+                    patch[*key] = json!(at.map(|t| t.to_string()).unwrap_or_default())
+                }
+                Ok(_) => {}
+                Err(()) => errors.push(bilibi_ui::error_sentence(
+                    label(key),
+                    "is not a date and time",
+                )),
+            }
+        }
+        for (key, stored) in [
+            ("location", a.location.as_deref()),
+            ("description", a.description.as_deref()),
+        ] {
+            if key == "location" && a.kind != Kind::Meeting {
+                continue;
+            }
+            let value = self.value(key).trim();
+            if value != stored.unwrap_or_default() {
+                patch[key] = json!(value);
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        if patch.as_object().is_none_or(|p| p.is_empty()) {
+            return Err(vec!["Change at least one value first.".to_owned()]);
+        }
+        Ok(patch)
+    }
+}
 
 #[derive(Template)]
 #[template(path = "activities_detail.html")]
@@ -53,6 +140,11 @@ pub(crate) struct Detail {
     guest_query: String,
     guest_hits: Vec<Hit>,
     guest_email: String,
+    /// The Change series dialog, when open.
+    series_form: Option<SeriesForm>,
+    /// The Delete dialog of an occurrence (which ones to delete), when
+    /// open, with what the last attempt refused.
+    delete_dialog: Option<Vec<String>>,
     flash: Option<(StatusKind, String)>,
 }
 
@@ -73,8 +165,124 @@ impl Detail {
             guest_query: String::new(),
             guest_hits: Vec::new(),
             guest_email: String::new(),
+            series_form: None,
+            delete_dialog: None,
             flash: None,
         })
+    }
+
+    /// Change series: the dialog's values to this occurrence and the later
+    /// ones, or to all of them.
+    async fn update_series(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        value: &Value,
+    ) -> Result<()> {
+        let form = params::form_values_checked(value, "series", LIMIT).map_err(Error::refused)?;
+        let Some(dialog) = &mut self.series_form else {
+            return Ok(());
+        };
+        for (key, value) in form {
+            dialog.values.insert(key, value);
+        }
+        let a = self.pages.activities.get(scope, self.id).await?;
+        let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+        let patch = match dialog.patch(&a, &clock) {
+            Ok(patch) => patch,
+            Err(errors) => {
+                dialog.errors = errors;
+                return Ok(());
+            }
+        };
+        let apply = match dialog.value("apply") {
+            "all" => "all",
+            _ => "following",
+        };
+        let input = json!({"id": self.id, "version": a.version, "apply": apply, "patch": patch});
+        match self
+            .submit(
+                scope,
+                credential,
+                "update_series",
+                "core.activity.update_series",
+                input,
+            )
+            .await?
+        {
+            Ok(result) => {
+                let count = result["result"]["updated"].as_array().map_or(0, Vec::len);
+                self.series_form = None;
+                self.flash = Some((
+                    StatusKind::Success,
+                    match count {
+                        1 => "1 occurrence changed.".to_owned(),
+                        n => format!("{n} occurrences changed."),
+                    },
+                ));
+            }
+            Err(refusal) => {
+                if let Some(dialog) = &mut self.series_form {
+                    dialog.errors = vec![Self::refused(refusal)];
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete on an occurrence: only it, it and the later ones, or all.
+    async fn delete_series(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        value: &Value,
+    ) -> Result<Option<LiveBody>> {
+        if self.delete_dialog.is_none() {
+            return Ok(None);
+        }
+        let form = params::form_values_checked(value, "delete", params::FIELD_LIMIT)
+            .map_err(Error::refused)?;
+        let a = self.pages.activities.get(scope, self.id).await?;
+        let apply = form.get("apply").map_or("one", String::as_str);
+        let outcome = match apply {
+            "following" | "all" => self
+                .submit(
+                    scope,
+                    credential,
+                    "delete_series",
+                    "core.activity.delete_series",
+                    json!({"id": self.id, "version": a.version, "apply": apply}),
+                )
+                .await?
+                .map(|result| result["result"]["deleted"].as_array().map_or(0, Vec::len)),
+            _ => self
+                .submit(
+                    scope,
+                    credential,
+                    "delete_series",
+                    "core.activity.delete",
+                    json!({"id": self.id, "version": a.version}),
+                )
+                .await?
+                .map(|_| 1),
+        };
+        match outcome {
+            Ok(count) => Ok(Some(LiveBody {
+                redirect: Some("/activities".into()),
+                flash: Some((
+                    StatusKind::Success,
+                    match count {
+                        1 => "Activity deleted.".to_owned(),
+                        n => format!("{n} occurrences deleted."),
+                    },
+                )),
+                ..LiveBody::default()
+            })),
+            Err(refusal) => {
+                self.delete_dialog = Some(vec![Self::refused(refusal)]);
+                Ok(None)
+            }
+        }
     }
 
     /// A refused contract call as one sentence for the flash.
@@ -428,7 +636,29 @@ impl Detail {
             "clear_related" => self.save_related(scope, credential, name, None).await?,
             "request_close" => self.confirm = Some(Confirm::Close),
             "request_close_and_new" => self.confirm = Some(Confirm::CloseAndNew),
-            "request_delete" => self.confirm = Some(Confirm::Delete),
+            "request_delete" => {
+                let a = self.pages.activities.get(scope, self.id).await?;
+                if a.series_id.is_some() {
+                    self.delete_dialog = Some(Vec::new());
+                } else {
+                    self.confirm = Some(Confirm::Delete);
+                }
+            }
+            "cancel_delete_series" => self.delete_dialog = None,
+            "delete_series" => {
+                if let Some(body) = self.delete_series(scope, credential, value).await? {
+                    return Ok(Some(body));
+                }
+            }
+            "request_series_edit" => {
+                let a = self.pages.activities.get(scope, self.id).await?;
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                if a.series_id.is_some() {
+                    self.series_form = Some(SeriesForm::new(&a, &clock));
+                }
+            }
+            "cancel_series" => self.series_form = None,
+            "update_series" => self.update_series(scope, credential, value).await?,
             "cancel_confirm" => self.confirm = None,
             "close" | "close_and_new" | "delete" => {
                 let wanted = match name {
@@ -500,11 +730,11 @@ impl Detail {
                     .submit(&pages, scope, credential, &clock, value)
                     .await?
                 {
-                    let noun = dialog.kind.label();
+                    let message = dialog.created_message();
                     self.dialog = None;
                     return Ok(Some(LiveBody {
                         redirect: Some(format!("/activities/{id}")),
-                        flash: Some((StatusKind::Success, format!("{noun} created."))),
+                        flash: Some((StatusKind::Success, message)),
                         ..LiveBody::default()
                     }));
                 }
@@ -585,6 +815,7 @@ impl Detail {
         scope: &Scope,
         clock: &Clock,
         a: &Activity,
+        series: Option<&crate::Series>,
         editable: bool,
     ) -> Result<Html> {
         let names = self
@@ -759,6 +990,24 @@ impl Detail {
                 editable && a.related.is_some(),
             )?,
         ));
+        if let (Some(series), Some(index)) = (series, a.series_index) {
+            let mut repeats = Html::text(&format!(
+                "{}. This is occurrence {index}; {} in the series now. ",
+                series.describe(),
+                match series.live {
+                    1 => "1 remains".to_owned(),
+                    n => format!("{n} remain"),
+                }
+            ));
+            repeats.push(&render(ActionLink {
+                id: "activity-series-all",
+                title: "See every occurrence of this series",
+                href: &format!("/activities?series={}&state=all", series.id),
+                body: Html::text("See all"),
+                ..ActionLink::default()
+            })?);
+            items.push(("Repeats", "repeats".into(), repeats));
+        }
         if let (Some(reminded), false) = (a.reminded_at, a.is_closed()) {
             items.push((
                 "Reminded",
@@ -1118,6 +1367,7 @@ impl Detail {
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let a = self.pages.activities.get(scope, self.id).await?;
         let editable = self.pages.activities.may_edit(scope, &a).await?;
+        let series = self.pages.activities.series(scope, &a).await?;
         let mut actions = Html::EMPTY;
         if editable && !a.is_closed() && a.kind.closing().is_some() {
             actions.push(&render(Button {
@@ -1145,6 +1395,15 @@ impl Detail {
                 button_type: "button",
                 event: "request_send_invites",
                 body: Html::text("Send invites"),
+                ..Button::default()
+            })?);
+        }
+        if editable && series.is_some() {
+            actions.push(&render(Button {
+                id: "activity-series-edit",
+                button_type: "button",
+                event: "request_series_edit",
+                body: Html::text("Change series"),
                 ..Button::default()
             })?);
         }
@@ -1185,7 +1444,11 @@ impl Detail {
             title: "Details",
             ..SectionHeading::default()
         })?;
-        details.push(&self.facts(scope, &clock, &a, editable).await?);
+        details.push(
+            &self
+                .facts(scope, &clock, &a, series.as_ref(), editable)
+                .await?,
+        );
         body.push(&render(Card {
             id: "activity-details",
             role: "region",
@@ -1310,6 +1573,12 @@ impl Detail {
                 self.framed,
             )?);
         }
+        if let (Some(form), true) = (&self.series_form, editable) {
+            body.push(&series_dialog(&a, form)?);
+        }
+        if let (Some(errors), true) = (&self.delete_dialog, editable) {
+            body.push(&delete_dialog(&a, errors)?);
+        }
         let region = render(Region {
             id: "activity-region",
             target: false,
@@ -1349,4 +1618,139 @@ impl LiveState<Scope, Error> for Detail {
             self.view(request.scope).await
         })
     }
+}
+
+/// An error list above a dialog's fields.
+fn dialog_errors(id: &str, errors: &[String]) -> Result<Html> {
+    if errors.is_empty() {
+        return Ok(Html::EMPTY);
+    }
+    render(Alert {
+        kind: StatusKind::Error,
+        id,
+        class: "mb-3",
+        body: Html::text(&errors.join(" ")),
+    })
+}
+
+/// Change series: which occurrences, and the values to give them.
+fn series_dialog(a: &Activity, form: &SeriesForm) -> Result<Html> {
+    let field = |key: &str, title: &str| {
+        Field::in_form("series", key)
+            .id(format!("activity-series-{}", key.replace('_', "-")))
+            .label(title)
+            .value(form.value(key))
+    };
+    let mut fields = vec![
+        field("apply", "Change")
+            .kind(InputKind::Select)
+            .options(choices(&[
+                ("This occurrence and the later ones", "following"),
+                ("Every occurrence", "all"),
+            ])),
+        field("title", "Subject")
+            .required()
+            .attr("maxlength", "160"),
+    ];
+    match a.kind {
+        Kind::Call | Kind::Meeting => {
+            fields.push(field("starts_at", "Starts").kind(InputKind::DatetimeLocal));
+            fields.push(field("ends_at", "Ends").kind(InputKind::DatetimeLocal));
+        }
+        Kind::Task => fields.push(field("due_at", "Due").kind(InputKind::DatetimeLocal)),
+        Kind::Note => {}
+    }
+    if a.kind == Kind::Meeting {
+        fields.push(field("location", "Location").attr("maxlength", "255"));
+    }
+    fields.push(
+        field("description", "Description")
+            .kind(InputKind::Textarea)
+            .attr("rows", "3"),
+    );
+    let mut body = dialog_errors("activity-series-errors", &form.errors)?;
+    for field in fields {
+        body.push(&render(field)?);
+    }
+    let mut actions = render(Button {
+        id: "activity-series-cancel",
+        button_type: "button",
+        event: "cancel_series",
+        body: Html::text("Cancel"),
+        ..Button::default()
+    })?;
+    actions.push(&render(Button {
+        id: "activity-series-save",
+        button_type: "submit",
+        variant: ButtonVariant::Primary,
+        working: "Saving…",
+        body: Html::text("Change series"),
+        ..Button::default()
+    })?);
+    let form = render(Form {
+        id: "activity-series-form",
+        event: "update_series",
+        change: false,
+        body,
+        actions,
+        ..Form::default()
+    })?;
+    render(Modal {
+        id: "activity-series-dialog",
+        title: "Change the series",
+        cancel_event: "cancel_series",
+        width: ModalWidth::Wide,
+        description: "Only the values you change are copied. A new time moves each open occurrence by the same amount; held and completed ones keep theirs. Status changes one occurrence at a time.",
+        body: form,
+        ..Modal::default()
+    })
+}
+
+/// Delete on an occurrence of a series: which ones.
+fn delete_dialog(a: &Activity, errors: &[String]) -> Result<Html> {
+    let mut body = dialog_errors("activity-delete-errors", errors)?;
+    body.push(&render(
+        Field::in_form("delete", "apply")
+            .id("activity-delete-apply")
+            .label("Delete")
+            .kind(InputKind::Select)
+            .value("one")
+            .options(choices(&[
+                ("Only this occurrence", "one"),
+                ("This occurrence and the later ones", "following"),
+                ("Every occurrence, held and completed ones too", "all"),
+            ])),
+    )?);
+    let mut actions = render(Button {
+        id: "activity-delete-cancel",
+        button_type: "button",
+        event: "cancel_delete_series",
+        body: Html::text("Cancel"),
+        ..Button::default()
+    })?;
+    actions.push(&render(Button {
+        id: "activity-delete-confirm",
+        button_type: "submit",
+        variant: ButtonVariant::Danger,
+        working: "Deleting…",
+        body: Html::text("Delete"),
+        ..Button::default()
+    })?);
+    let form = render(Form {
+        id: "activity-delete-form",
+        event: "delete_series",
+        change: false,
+        body,
+        actions,
+        ..Form::default()
+    })?;
+    render(Modal {
+        id: "activity-delete-dialog",
+        title: &format!("Delete “{}”", a.title),
+        cancel_event: "cancel_delete_series",
+        width: ModalWidth::Narrow,
+        description: "This is one occurrence of a repeating series. Deleted occurrences disappear from every list and record page.",
+        body: form,
+        ..Modal::default()
+    })
 }

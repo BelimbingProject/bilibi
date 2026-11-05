@@ -7,6 +7,7 @@ mod contributions;
 mod invitations;
 mod model;
 mod reminders;
+mod series;
 mod store;
 mod web;
 
@@ -25,6 +26,9 @@ pub use model::{
     CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
     NoteInput, Patch, Priority, Response, Status, TaskInput, MAX_GUESTS,
 };
+pub use series::{
+    weekday, weekday_code, Apply, Frequency, Repeat, Series, MAX_OCCURRENCES, WEEKDAYS,
+};
 
 pub const MODULE: &str = "core/activity";
 pub const SERVICE: &str = "core/activity.activities";
@@ -32,6 +36,11 @@ pub const SERVICE: &str = "core/activity.activities";
 pub const RECORD: &str = "core.activity.activity";
 /// The audit kind of a guest row.
 pub const GUEST_RECORD: &str = "core.activity.guest";
+/// The audit kind of a repeating series' rule.
+pub const SERIES_RECORD: &str = "core.activity.series";
+/// Activities one calendar read returns at most: the calendar draws 500 and
+/// says so past that.
+pub const CALENDAR_LIMIT: i64 = 501;
 /// The event a shared activity that has happened records (README, Events).
 pub const HAPPENED: &str = "core/activity.happened";
 /// Named background principal permission to create a task for an originating account.
@@ -81,6 +90,9 @@ pub struct Activity {
     pub closed_at: Option<jiff::Timestamp>,
     /// When the assignee was reminded; cleared when the time it is due moves.
     pub reminded_at: Option<jiff::Timestamp>,
+    /// The repeating series it is an occurrence of, and its number there.
+    pub series_id: Option<i64>,
+    pub series_index: Option<i16>,
     pub version: i64,
 }
 impl Activity {
@@ -160,6 +172,11 @@ pub struct Filter {
     /// Shared activities on it count only when the reader may view it
     /// (`base/records.check`, which `list` asks).
     pub related: Option<Reference>,
+    /// Calls and meetings that overlap this half-open range, and tasks due
+    /// in it (a calendar). The page may then hold up to `CALENDAR_LIMIT`.
+    pub between: Option<(jiff::Timestamp, jiff::Timestamp)>,
+    /// The occurrences of one repeating series.
+    pub series: Option<i64>,
     pub sort: Sort,
     pub descending: bool,
     pub page: i64,
@@ -173,6 +190,8 @@ impl Default for Filter {
             state: State::Open,
             mine: Mine::Any,
             related: None,
+            between: None,
+            series: None,
             sort: Sort::When,
             descending: false,
             page: 1,
@@ -255,6 +274,7 @@ pub struct Activities {
     events: Arc<Events>,
     notifications: Arc<bilibi_notifications::NotificationBoundary>,
     queue: Arc<bilibi_queue::Queue>,
+    calendars: Arc<bilibi_work_calendar::WorkCalendars>,
 }
 impl Activities {
     async fn fresh(
@@ -274,6 +294,7 @@ impl Activities {
             events: &self.events,
             notifications: &self.notifications,
             queue: &self.queue,
+            calendars: &self.calendars,
         }
     }
 
@@ -380,6 +401,31 @@ impl Activities {
     pub async fn may_create(&self, scope: &Scope) -> Result<bool> {
         let client = self.db.get().await?;
         store::may_create(&**client, scope).await
+    }
+    /// Whether the reader may change anyone's activities they can see
+    /// (`core.activity.manage` with `core.activity.all.manage`), so a page
+    /// with many rows asks once.
+    pub async fn may_edit_all(&self, scope: &Scope) -> Result<bool> {
+        let client = self.db.get().await?;
+        Ok(store::may_create(&**client, scope).await?
+            && bilibi_authz::holds_proof(&**client, scope, MANAGE_ALL).await?)
+    }
+    /// The dates from `first` to `last` (at most 731 days) as the work
+    /// calendar of the reader's company resolves them; empty when the
+    /// company has no default work calendar.
+    pub async fn work_days(
+        &self,
+        scope: &Scope,
+        first: jiff::civil::Date,
+        last: jiff::civil::Date,
+    ) -> Result<Vec<bilibi_work_calendar::Day>> {
+        let Some(company) = scope.current_company().or(scope.actor().organisation()) else {
+            return Ok(Vec::new());
+        };
+        match self.calendars.default_for(scope, company).await? {
+            Some(code) => self.calendars.days(scope, &code, first, last).await,
+            None => Ok(Vec::new()),
+        }
     }
     /// Whether the reader may change, close or delete `activity`.
     pub async fn may_edit(&self, scope: &Scope, activity: &Activity) -> Result<bool> {
@@ -636,6 +682,115 @@ impl Activities {
         let scope = self.fresh(tx.sql(), scope).await?;
         self.store().send_invites(tx, &scope, id).await
     }
+    /// The repeating series `activity` is an occurrence of, with its rule
+    /// and how many occurrences are still live. The caller read `activity`
+    /// under the visibility rule.
+    pub async fn series(&self, scope: &Scope, activity: &Activity) -> Result<Option<Series>> {
+        let Some(id) = activity.series_id else {
+            return Ok(None);
+        };
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        store::series(&**client, &scope, id).await.map(Some)
+    }
+    /// The checks a repeating create makes, with no write: the validated
+    /// draft and one draft per occurrence.
+    pub async fn preview_create_series(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        draft: &Draft,
+        repeat: &Repeat,
+    ) -> WriteResult<(Draft, Vec<Draft>)> {
+        let plan = self
+            .store()
+            .prepare_series(client, scope, draft, repeat)
+            .await?;
+        Ok((plan.draft, plan.occurrences))
+    }
+    /// Creates a repeating call, meeting or task in the caller's mutation
+    /// transaction: the series' rule and one activity per occurrence, each
+    /// with the same guests and its own status and reminder. Returns the
+    /// occurrences in order.
+    pub async fn create_series(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: &Draft,
+        repeat: &Repeat,
+    ) -> WriteResult<Vec<Activity>> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().create_series(tx, &scope, draft, repeat).await
+    }
+    /// What `update_series` would store, with no write: each occurrence it
+    /// reaches before and after.
+    pub async fn preview_update_series(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+        patch: &Patch,
+    ) -> WriteResult<Vec<(Activity, Draft)>> {
+        let plans = self
+            .store()
+            .prepare_update_series(client, scope, id, version, apply, patch)
+            .await?;
+        let mut changes = Vec::with_capacity(plans.len());
+        for (member, patch) in plans {
+            changes.push(
+                self.store()
+                    .prepare_update(client, scope, member.id, member.version, &patch)
+                    .await?,
+            );
+        }
+        Ok(changes)
+    }
+    /// Changes the fields `patch` names on occurrence `id` (fenced on
+    /// `version`) and on the later ones, or on every live occurrence. A new
+    /// time moves each open occurrence by the same wall-clock amount; closed
+    /// ones keep their times. Status changes one occurrence at a time.
+    pub async fn update_series(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+        patch: &Patch,
+    ) -> WriteResult<Vec<Activity>> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .update_series(tx, &scope, id, version, apply, patch)
+            .await
+    }
+    /// The occurrences `delete_series` would remove, with no write.
+    pub async fn preview_delete_series(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+    ) -> WriteResult<Vec<Activity>> {
+        store::prepare_delete_series(client, scope, id, version, apply).await
+    }
+    /// Removes occurrence `id` (fenced on `version`) and the later ones, or
+    /// every live occurrence, held and completed ones included.
+    pub async fn delete_series(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+    ) -> WriteResult<Vec<Activity>> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .delete_series(tx, &scope, id, version, apply)
+            .await
+    }
     /// Moves every live activity related to `from` to `to`, in the caller's
     /// transaction, after `base/records.check` of both for the caller. When
     /// `to` is a person, they become the `related` guest of the moved open
@@ -656,10 +811,11 @@ impl Activities {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
+        ("core-activity-003-series", include_str!("../migrations/003-series.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;
@@ -673,6 +829,7 @@ inventory::submit! { Module {
             events: s.get(bilibi_events::SERVICE)?,
             notifications: s.get("base/notifications.sink")?,
             queue: s.get("base/queue.store")?,
+            calendars: s.get(bilibi_work_calendar::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;
         s.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?

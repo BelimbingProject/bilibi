@@ -29,6 +29,7 @@ bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true
 bilibi-user.workspace = true
+bilibi-work-calendar.workspace = true
 inventory.workspace = true
 jiff.workspace = true
 serde.workspace = true

@@ -3,10 +3,11 @@
 //! returns its `Change`s. Checks run before a write, so a refusal never
 //! poisons the caller's transaction.
 use crate::model::{self, Draft, FieldError, Guest, Kind, Response, Status};
+use crate::series::{self, Apply, Frequency, Repeat, Series};
 use crate::{
     Activity, Conflict, Direction, Filter, GuestRow, Invites, Mine, Page, Patch, Priority,
     Reference, Sort, State, WriteError, WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD,
-    VIEW, VIEW_ALL,
+    SERIES_RECORD, VIEW, VIEW_ALL,
 };
 use bilibi_authz::{authorize_proof, holds_proof};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -22,7 +23,7 @@ use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row};
 
-const COLUMNS: &str = "a.id,a.company_id,a.kind,a.subject,a.status,a.priority,a.direction,a.starts_at,a.ends_at,a.due_at,a.start_at,a.location,a.join_url,a.meeting_type,a.call_outcome,a.description,a.internal_notes,a.related_kind,a.related_id,a.shared,a.assignee_user_id,a.created_by,a.created_at,a.updated_at,a.closed_at,a.reminded_at,a.version";
+const COLUMNS: &str = "a.id,a.company_id,a.kind,a.subject,a.status,a.priority,a.direction,a.starts_at,a.ends_at,a.due_at,a.start_at,a.location,a.join_url,a.meeting_type,a.call_outcome,a.description,a.internal_notes,a.related_kind,a.related_id,a.shared,a.assignee_user_id,a.created_by,a.created_at,a.updated_at,a.closed_at,a.reminded_at,a.series_id,a.series_index,a.version";
 /// The activities the reader takes part in, with `$2` the reader's account:
 /// they created it, are assigned it or are an account guest. Nothing else
 /// (filing company, a related record) reaches a private activity.
@@ -80,6 +81,8 @@ fn from_row(row: &Row) -> Result<Activity> {
         updated_at: time(Some(row.get("updated_at")))?.ok_or(Error::Internal)?,
         closed_at: time(row.get("closed_at"))?,
         reminded_at: time(row.get("reminded_at"))?,
+        series_id: row.get("series_id"),
+        series_index: row.get("series_index"),
         version: row.get("version"),
     })
 }
@@ -107,6 +110,8 @@ fn audit_values(a: &Activity) -> Value {
         "shared": a.shared,
         "assignee_user_id": a.assignee_user_id,
         "closed_at": iso(a.closed_at),
+        "series_id": a.series_id,
+        "series_index": a.series_index,
         "version": a.version,
     })
 }
@@ -284,7 +289,13 @@ pub(crate) async fn list(
     related_readable: bool,
 ) -> Result<Page> {
     let reader = reader(client, scope).await?;
-    let page_size = filter.page_size.clamp(1, 300);
+    // A calendar reads the whole range it shows, up to what it can draw.
+    let largest = if filter.between.is_some() {
+        crate::CALENDAR_LIMIT
+    } else {
+        300
+    };
+    let page_size = filter.page_size.clamp(1, largest);
     let offset = (filter.page.max(1) - 1).saturating_mul(page_size);
     let search = filter.search.trim().chars().take(200).collect::<String>();
     let pattern = format!(
@@ -315,6 +326,9 @@ pub(crate) async fn list(
         .filter(|r| r.kind == "person")
         .and_then(|r| r.id.parse::<i64>().ok());
     let shared = related_readable && filter.related.is_some();
+    let (from, to) = filter.between.map_or((None, None), |(from, to)| {
+        (Some(SystemTime::from(from)), Some(SystemTime::from(to)))
+    });
     // Visible: oversight, taking part, or shared on the record the list is
     // narrowed to when the reader may view that record.
     let conditions = format!(
@@ -328,9 +342,13 @@ pub(crate) async fn list(
               OR ($9 = 'guest' AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.role IN ('related','invited'))))
          AND ($10::text IS NULL
               OR (a.related_kind = $10 AND a.related_id = $11)
-              OR ($12::bigint IS NOT NULL AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_person_id=$12)))"
+              OR ($12::bigint IS NOT NULL AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_person_id=$12)))
+         AND ($13::timestamptz IS NULL
+              OR (a.kind IN ('call','meeting') AND a.starts_at < $14 AND a.ends_at > $13)
+              OR (a.kind = 'task' AND a.due_at >= $13 AND a.due_at < $14))
+         AND ($15::bigint IS NULL OR a.series_id = $15)"
     );
-    let params: [&(dyn ToSql + Sync); 12] = [
+    let params: [&(dyn ToSql + Sync); 15] = [
         &reader.tenant,
         &reader.user,
         &reader.all,
@@ -343,6 +361,9 @@ pub(crate) async fn list(
         &related_kind,
         &related_id,
         &person,
+        &from,
+        &to,
+        &filter.series,
     ];
     let total: i64 = client
         .query_opt(
@@ -353,6 +374,7 @@ pub(crate) async fn list(
         .ok_or(Error::Internal)?
         .get(0);
     let order = match filter.sort {
+        Sort::When if filter.series.is_some() => "a.series_index",
         Sort::When => "COALESCE(a.starts_at, a.due_at, a.created_at)",
         Sort::Title => "lower(a.subject)",
         Sort::Status => "a.status",
@@ -477,6 +499,7 @@ pub(crate) struct Store<'s> {
     pub events: &'s Events,
     pub notifications: &'s bilibi_notifications::NotificationBoundary,
     pub queue: &'s bilibi_queue::Queue,
+    pub calendars: &'s bilibi_work_calendar::WorkCalendars,
 }
 /// Which references a change touches, so unchanged ones are not rechecked
 /// (a record the actor can no longer view does not block other edits).
@@ -651,7 +674,7 @@ impl Store<'_> {
         let draft = self.prepare_create(tx.sql(), scope, draft).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let company = filing_company(scope).ok_or(Error::Internal)?;
-        self.insert(tx, draft, tenant, company, user).await
+        self.insert(tx, draft, tenant, company, user, None).await
     }
 
     pub(crate) async fn create_system_task(
@@ -704,8 +727,15 @@ impl Store<'_> {
                 },
             )
             .await?;
-        self.insert(tx, draft, scope.tenant(), company, input.originating_user)
-            .await
+        self.insert(
+            tx,
+            draft,
+            scope.tenant(),
+            company,
+            input.originating_user,
+            None,
+        )
+        .await
     }
 
     async fn insert(
@@ -715,8 +745,10 @@ impl Store<'_> {
         tenant: i64,
         company: i64,
         user: i64,
+        series: Option<(i64, i16)>,
     ) -> WriteResult<Activity> {
         let assignee = draft.assignee.ok_or(Error::Internal)?;
+        let (series_id, series_index) = series.unzip();
         let closed = draft.status.is_some_and(Status::closed);
         // The people taking part: the creator, the assignee, a related
         // person and the invited guests, one row each.
@@ -759,8 +791,8 @@ impl Store<'_> {
                     let row = sql
                         .query_one(
                             &format!(
-                                "INSERT INTO core_activities AS a (tenant_id,company_id,kind,subject,status,priority,direction,starts_at,ends_at,due_at,start_at,call_outcome,description,internal_notes,related_kind,related_id,shared,assignee_user_id,created_by,closed_at,location,join_url,meeting_type)
-                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,CASE WHEN $20 THEN now() END,$21,$22,$23)
+                                "INSERT INTO core_activities AS a (tenant_id,company_id,kind,subject,status,priority,direction,starts_at,ends_at,due_at,start_at,call_outcome,description,internal_notes,related_kind,related_id,shared,assignee_user_id,created_by,closed_at,location,join_url,meeting_type,series_id,series_index)
+                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,CASE WHEN $20 THEN now() END,$21,$22,$23,$24,$25)
                                  RETURNING {COLUMNS}"
                             ),
                             &[
@@ -787,6 +819,8 @@ impl Store<'_> {
                                 &draft.location,
                                 &draft.join_url,
                                 &draft.meeting_type,
+                                &series_id,
+                                &series_index,
                             ],
                         )
                         .await?;
@@ -1882,4 +1916,459 @@ impl Store<'_> {
             emailable: invites.emailable,
         })
     }
+}
+
+// ---- Repeating series -------------------------------------------------------
+//
+// A series is its rule and one activity per occurrence. Every check runs on
+// every occurrence before the first write, so a refusal writes nothing.
+
+/// What a repeating create will store: the checked draft, one draft per
+/// occurrence, and the rule's resolved parts.
+pub(crate) struct SeriesPlan {
+    pub draft: Draft,
+    pub occurrences: Vec<Draft>,
+    pub weekdays: Vec<i16>,
+    pub month_day: Option<i16>,
+    pub work_calendar: Option<String>,
+}
+
+fn invalid(error: FieldError) -> WriteError {
+    WriteError::Invalid(vec![error])
+}
+
+/// A series' rule and how many of its occurrences are live.
+pub(crate) async fn series(client: &dyn ReadClient, scope: &Scope, id: i64) -> Result<Series> {
+    let row = client
+        .query_opt(
+            "SELECT s.id,s.frequency,s.every,s.weekdays,s.month_day,s.until::text AS until,s.occurrences,s.work_calendar,s.timezone,s.created_by,s.created_at,
+                    (SELECT count(*) FROM core_activities a WHERE a.tenant_id=s.tenant_id AND a.series_id=s.id AND a.deleted_at IS NULL) AS live
+               FROM core_activity_series s WHERE s.tenant_id=$1 AND s.id=$2",
+            &[&scope.tenant(), &id],
+        )
+        .await?
+        .ok_or(Error::NotFound)?;
+    let weekdays = row
+        .get::<_, Vec<i16>>("weekdays")
+        .into_iter()
+        .map(|day| {
+            i8::try_from(day)
+                .ok()
+                .and_then(|day| jiff::civil::Weekday::from_monday_one_offset(day).ok())
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(Error::Internal)?;
+    let until = row
+        .get::<_, Option<String>>("until")
+        .map(|until| {
+            until
+                .parse::<jiff::civil::Date>()
+                .map_err(|_| Error::Internal)
+        })
+        .transpose()?;
+    let work_calendar: Option<String> = row.get("work_calendar");
+    Ok(Series {
+        id: row.get("id"),
+        repeat: Repeat {
+            frequency: Frequency::parse(row.get("frequency")).ok_or(Error::Internal)?,
+            every: row.get("every"),
+            weekdays,
+            until,
+            count: row.get("occurrences"),
+            working_days_only: work_calendar.is_some(),
+            timezone: row.get("timezone"),
+        },
+        month_day: row.get("month_day"),
+        work_calendar,
+        live: row.get("live"),
+        created_by: row.get("created_by"),
+        created_at: time(Some(row.get("created_at")))?.ok_or(Error::Internal)?,
+    })
+}
+
+/// The live occurrences of `series` a change reaches: from number `from`
+/// on, or all of them.
+async fn members(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    series: i64,
+    apply: Apply,
+    from: i16,
+) -> Result<Vec<Activity>> {
+    client
+        .query(
+            &format!("SELECT {COLUMNS} FROM core_activities a WHERE a.tenant_id=$1 AND a.series_id=$2 AND a.deleted_at IS NULL AND ($3 OR a.series_index >= $4) ORDER BY a.series_index"),
+            &[&scope.tenant(), &series, &(apply == Apply::All), &from],
+        )
+        .await?
+        .iter()
+        .map(from_row)
+        .collect()
+}
+
+/// The occurrence a series change is named by: one the actor may change, at
+/// `version`, in a series. Returns it with its series and number.
+async fn series_anchor(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    id: i64,
+    version: i64,
+) -> WriteResult<(Activity, i64, i16)> {
+    let anchor = editable(client, scope, id, version, false).await?;
+    match (anchor.series_id, anchor.series_index) {
+        (Some(series), Some(index)) => Ok((anchor, series, index)),
+        _ => Err(invalid(FieldError::new(
+            "id",
+            "is not an occurrence of a repeating series",
+        ))),
+    }
+}
+
+/// The patch one occurrence gets from a change made on `anchor`. A new time
+/// moves an open occurrence by the same wall-clock amount in the series'
+/// zone and gives it the same length; a closed one keeps the times it
+/// happened at.
+fn member_patch(
+    patch: &Patch,
+    anchor: &Activity,
+    member: &Activity,
+    zone: &jiff::tz::TimeZone,
+) -> Patch {
+    let mut out = Patch {
+        starts_at: None,
+        ends_at: None,
+        due_at: None,
+        start_at: None,
+        ..patch.clone()
+    };
+    if member.is_closed() {
+        return out;
+    }
+    if member.kind.timed() && (patch.starts_at.is_some() || patch.ends_at.is_some()) {
+        if let (Some(old_start), Some(old_end), Some(start)) =
+            (anchor.starts_at, anchor.ends_at, member.starts_at)
+        {
+            let new_start = patch.starts_at.unwrap_or(old_start);
+            let new_end = patch.ends_at.unwrap_or(old_end);
+            let moved = series::wall_gap(old_start, new_start, zone);
+            let length = series::wall_gap(new_start, new_end, zone);
+            if let Some(start) = series::shifted(start, moved, zone) {
+                out.starts_at = Some(start);
+                out.ends_at = series::shifted(start, length, zone);
+            }
+        }
+    }
+    if member.kind == Kind::Task {
+        let new_due = patch.due_at.unwrap_or(anchor.due_at);
+        if patch.due_at.is_some() {
+            out.due_at = Some(match (new_due, anchor.due_at, member.due_at) {
+                (Some(new), Some(old), Some(due)) => {
+                    series::shifted(due, series::wall_gap(old, new, zone), zone)
+                }
+                (new, _, _) => new,
+            });
+        }
+        let member_due = out.due_at.unwrap_or(member.due_at);
+        match patch.start_at {
+            Some(Some(start)) => {
+                out.start_at = Some(match (new_due, member_due) {
+                    (Some(due), Some(own)) => {
+                        series::shifted(own, series::wall_gap(due, start, zone), zone)
+                    }
+                    _ => Some(start),
+                });
+            }
+            Some(None) => out.start_at = Some(None),
+            None => {
+                if let (true, Some(start), Some(old), Some(new)) = (
+                    patch.due_at.is_some(),
+                    member.start_at,
+                    member.due_at,
+                    member_due,
+                ) {
+                    out.start_at = Some(series::shifted(
+                        start,
+                        series::wall_gap(old, new, zone),
+                        zone,
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+impl Store<'_> {
+    pub(crate) async fn prepare_series(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        draft: &Draft,
+        repeat: &Repeat,
+    ) -> WriteResult<SeriesPlan> {
+        let mut errors = repeat.check();
+        if !draft.kind.timed() && draft.kind != Kind::Task {
+            errors.push(FieldError::new(
+                "repeat",
+                "is for calls, meetings and tasks; a note does not repeat",
+            ));
+        }
+        if draft.status.is_some_and(Status::closed) {
+            errors.push(FieldError::new(
+                "status",
+                "must be planned for a repeating call; a held call happened once",
+            ));
+        }
+        if draft.kind == Kind::Task && draft.due_at.is_none() {
+            errors.push(FieldError::new("due_at", "is needed for a repeating task"));
+        }
+        let checked = match self.prepare_create(client, scope, draft).await {
+            Ok(checked) => Some(checked),
+            Err(WriteError::Invalid(more)) => {
+                errors.extend(more);
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if !errors.is_empty() {
+            return Err(WriteError::Invalid(errors));
+        }
+        let draft = checked.ok_or(Error::Internal)?;
+        let zone = jiff::tz::TimeZone::get(&repeat.timezone).map_err(|_| {
+            invalid(FieldError::new(
+                "repeat.timezone",
+                "is not a time zone name such as Asia/Kuala_Lumpur",
+            ))
+        })?;
+        let first = series::anchor(&draft, &zone).ok_or_else(|| {
+            invalid(FieldError::new(
+                "repeat",
+                "needs a start time for a call or meeting, or a due date for a task",
+            ))
+        })?;
+        let work_calendar = if repeat.working_days_only {
+            let company = scope
+                .current_company()
+                .or(scope.actor().organisation())
+                .ok_or(Error::Internal)?;
+            match self.calendars.default_for(scope, company).await? {
+                Some(code) => Some(code),
+                None => {
+                    return Err(invalid(FieldError::new(
+                        "repeat.working_days_only",
+                        "needs a default work calendar for your company; ask an administrator to set one",
+                    )))
+                }
+            }
+        } else {
+            None
+        };
+        let dates = match &work_calendar {
+            Some(code) => {
+                let last = repeat.working_window(first);
+                let days = self.calendars.days(scope, code, first, last).await?;
+                let working: std::collections::HashMap<jiff::civil::Date, bool> = days
+                    .iter()
+                    .map(|day| {
+                        (
+                            day.date,
+                            day.day_type == bilibi_work_calendar::DayType::Working,
+                        )
+                    })
+                    .collect();
+                let answer = |date: jiff::civil::Date| working.get(&date).copied();
+                repeat.dates(first, Some(&answer))
+            }
+            None => repeat.dates(first, None),
+        }
+        .map_err(invalid)?;
+        let occurrences = series::occurrences(&draft, &zone, &dates).map_err(invalid)?;
+        let mut weekdays: Vec<i16> = repeat
+            .weekdays
+            .iter()
+            .map(|day| i16::from(day.to_monday_one_offset()))
+            .collect();
+        if repeat.frequency == Frequency::Weekly && weekdays.is_empty() {
+            weekdays.push(i16::from(first.weekday().to_monday_one_offset()));
+        }
+        weekdays.sort_unstable();
+        weekdays.dedup();
+        Ok(SeriesPlan {
+            draft,
+            occurrences,
+            weekdays,
+            month_day: (repeat.frequency == Frequency::Monthly).then(|| i16::from(first.day())),
+            work_calendar,
+        })
+    }
+
+    pub(crate) async fn create_series(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: &Draft,
+        repeat: &Repeat,
+    ) -> WriteResult<Vec<Activity>> {
+        let plan = self.prepare_series(tx.sql(), scope, draft, repeat).await?;
+        let (tenant, user) = (scope.tenant(), scope.user());
+        let company = filing_company(scope).ok_or(Error::Internal)?;
+        let rule = repeat.clone();
+        let (weekdays, month_day, work_calendar) = (
+            plan.weekdays.clone(),
+            plan.month_day,
+            plan.work_calendar.clone(),
+        );
+        let series_id = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let until = rule.until.map(|until| until.to_string());
+                    let id: i64 = sql
+                        .query_one(
+                            "INSERT INTO core_activity_series(tenant_id,frequency,every,weekdays,month_day,until,occurrences,work_calendar,timezone,created_by)
+                             VALUES ($1,$2,$3,$4,$5,$6::text::date,$7,$8,$9,$10) RETURNING id",
+                            &[
+                                &tenant,
+                                &rule.frequency.code(),
+                                &rule.every,
+                                &weekdays,
+                                &month_day,
+                                &until,
+                                &rule.count,
+                                &work_calendar,
+                                &rule.timezone,
+                                &user,
+                            ],
+                        )
+                        .await?
+                        .get(0);
+                    let change = Change {
+                        kind: SERIES_RECORD.into(),
+                        id,
+                        old: json!({}),
+                        new: json!({
+                            "frequency": rule.frequency.code(),
+                            "every": rule.every,
+                            "weekdays": weekdays,
+                            "month_day": month_day,
+                            "until": until,
+                            "occurrences": rule.count,
+                            "work_calendar": work_calendar,
+                            "timezone": rule.timezone,
+                        }),
+                    };
+                    Ok((id, vec![change]))
+                })
+            })
+            .await?;
+        let mut created = Vec::with_capacity(plan.occurrences.len());
+        for (index, occurrence) in plan.occurrences.into_iter().enumerate() {
+            let index = i16::try_from(index + 1).map_err(|_| Error::Internal)?;
+            created.push(
+                self.insert(
+                    tx,
+                    occurrence,
+                    tenant,
+                    company,
+                    user,
+                    Some((series_id, index)),
+                )
+                .await?,
+            );
+        }
+        Ok(created)
+    }
+
+    /// Each occurrence a series change reaches, with the patch it gets.
+    pub(crate) async fn prepare_update_series(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+        patch: &Patch,
+    ) -> WriteResult<Vec<(Activity, Patch)>> {
+        let (anchor, series_id, index) = series_anchor(client, scope, id, version).await?;
+        if patch.is_empty() {
+            return Err(invalid(FieldError::new(
+                "patch",
+                "names no field to change",
+            )));
+        }
+        if patch.status.is_some() {
+            return Err(invalid(FieldError::new(
+                "status",
+                "changes one occurrence at a time; change it on that occurrence",
+            )));
+        }
+        let rule = series(client, scope, series_id).await?;
+        let zone =
+            jiff::tz::TimeZone::get(&rule.repeat.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+        Ok(members(client, scope, series_id, apply, index)
+            .await?
+            .into_iter()
+            .map(|member| {
+                let patch = member_patch(patch, &anchor, &member, &zone);
+                (member, patch)
+            })
+            .filter(|(_, patch)| !patch.is_empty())
+            .collect())
+    }
+
+    pub(crate) async fn update_series(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+        patch: &Patch,
+    ) -> WriteResult<Vec<Activity>> {
+        let plans = self
+            .prepare_update_series(tx.sql(), scope, id, version, apply, patch)
+            .await?;
+        for (member, patch) in &plans {
+            self.prepare_update(tx.sql(), scope, member.id, member.version, patch)
+                .await?;
+        }
+        let mut updated = Vec::with_capacity(plans.len());
+        for (member, patch) in plans {
+            updated.push(
+                self.update(tx, scope, member.id, member.version, &patch)
+                    .await?,
+            );
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn delete_series(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        apply: Apply,
+    ) -> WriteResult<Vec<Activity>> {
+        let members = prepare_delete_series(tx.sql(), scope, id, version, apply).await?;
+        for member in &members {
+            self.delete(tx, scope, member.id, member.version).await?;
+        }
+        Ok(members)
+    }
+}
+
+/// The occurrences a series delete removes, each one the actor may change.
+pub(crate) async fn prepare_delete_series(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    id: i64,
+    version: i64,
+    apply: Apply,
+) -> WriteResult<Vec<Activity>> {
+    let (_, series_id, index) = series_anchor(client, scope, id, version).await?;
+    let members = members(client, scope, series_id, apply, index).await?;
+    for member in &members {
+        editable(client, scope, member.id, member.version, false).await?;
+    }
+    Ok(members)
 }

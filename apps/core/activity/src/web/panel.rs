@@ -144,10 +144,7 @@ impl Panel {
                     .await?
                     .is_some()
                 {
-                    self.notice = Some((
-                        NoticeKind::Success,
-                        format!("{} created.", dialog.kind.label()),
-                    ));
+                    self.notice = Some((NoticeKind::Success, dialog.created_message()));
                     self.dialog = None;
                     self.history = false;
                 }
