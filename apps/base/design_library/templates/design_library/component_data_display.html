@@ -30,6 +30,7 @@
               {% call ui::card(id="component-card", title="Card", inner_class="space-y-3 p-3") %}{{ self.card_component_card()? }}{% endcall %}
               {% call ui::card(id="component-list", title="Record facts", inner_class="space-y-3 px-3") %}{{ self.card_component_list()? }}{% endcall %}
             </div>
+            {% call ui::card(id="component-markdown", title="Markdown", inner_class="space-y-3") %}{{ self.markdown()? }}{% endcall %}
             {% call ui::card(id="component-stat-strip", title="Statistics", inner_class="space-y-3 p-3") %}{{ self.card_component_stat_strip()? }}{% endcall %}
             <div class="grid items-start gap-3 lg:grid-cols-2">
               {% call ui::card(id="component-datetime", title="Date and time", inner_class="space-y-2 p-3") %}{{ self.card_component_datetime()? }}{% endcall %}

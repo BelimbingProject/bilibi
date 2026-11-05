@@ -108,6 +108,11 @@ impl View<'_> {
     pub fn body(&self) -> askama::Result<String> {
         self.render()
     }
+    fn markdown(&self) -> askama::Result<Html> {
+        render(bilibi_ui::Markdown::new(
+            "## Reading notes\n\nKeep **plain-text Markdown** in the textarea. Read *formatted text* here.\n\n- One shared reading view\n- A [local link](#component-markdown) and `literal <code>`\n\n> Keep the original source.\n\n```text\n<script> stays literal\n```",
+        ))
+    }
     fn action_flash(&self) -> askama::Result<Html> {
         render(bilibi_ui::FlashGroup {
             id: "flash-group",

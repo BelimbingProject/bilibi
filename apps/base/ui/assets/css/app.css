@@ -1171,3 +1171,20 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
   font-size: 0.75rem;
   pointer-events: none;
 }
+
+/* Plain Markdown uses the same compact type scale and semantic roles as pages. */
+.ui-markdown { font-size: var(--text-sm); line-height: var(--text-sm--line-height); overflow-wrap: anywhere; }
+.ui-markdown > * + * { margin-top: 0.75rem; }
+.ui-markdown :is(h1, h2, h3, h4, h5, h6) { font-weight: 600; color: var(--color-ink-strong); }
+.ui-markdown h1 { font-size: var(--text-base); line-height: var(--text-base--line-height); }
+.ui-markdown :is(h2, h3, h4, h5, h6) { font-size: var(--text-sm); line-height: var(--text-sm--line-height); }
+.ui-markdown :is(ul, ol) { padding-inline-start: 1.25rem; }
+.ui-markdown ul { list-style-type: disc; }
+.ui-markdown ol { list-style-type: decimal; }
+.ui-markdown li + li, .ui-markdown li > :is(p, ul, ol) + * { margin-top: 0.25rem; }
+.ui-markdown blockquote { border-inline-start: 2px solid var(--color-line); padding-inline-start: 0.75rem; color: var(--color-ink-muted); }
+.ui-markdown a { color: var(--color-link); text-decoration: underline; text-underline-offset: 2px; }
+.ui-markdown a:focus-visible { outline: 2px solid var(--color-link); outline-offset: 2px; }
+.ui-markdown code { border-radius: var(--radius-sm); background: var(--color-surface-sunken); padding: 0.125rem 0.25rem; font-size: var(--text-xs); }
+.ui-markdown pre { max-width: 100%; overflow-x: auto; border-radius: var(--radius-md); background: var(--color-surface-sunken); padding: 0.75rem; }
+.ui-markdown pre code { padding: 0; }

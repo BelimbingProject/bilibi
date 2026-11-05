@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 askama.workspace = true
+pulldown-cmark.workspace = true
 bilibi-module-registry.workspace = true
 inventory.workspace = true
 jiff.workspace = true

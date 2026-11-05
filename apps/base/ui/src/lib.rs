@@ -37,6 +37,8 @@ mod instance;
 pub mod list_columns;
 pub mod list_state;
 pub mod lists;
+mod markdown;
+pub use markdown::Markdown;
 mod live_transport;
 pub use live_transport::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
 mod page_search;
