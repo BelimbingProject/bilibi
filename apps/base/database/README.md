@@ -69,6 +69,10 @@ reported as kept, so unmounting and remounting a Domain neither replays nor
 loses its schema. Rows applied before the ledger kept provenance adopt the
 owner and hash of the module that declares them on the next run.
 
+## Renaming a module
+
+A module ID is stored in the ledger as the owner of each version, but a version name is unique across modules and its SQL hash is stored beside it. So renaming or moving a module needs no list of old names: `migrate` finds a version recorded under another owner whose recorded SHA-256 equals the declared file, moves the owner to the declaring module in the same transaction, and `bilibi-web migrate` prints one `moved N migrations recorded under <old> to <new> (same SQL)` line per old ID. A version whose SQL changed under another owner is refused as before (`MigrationOwner`). Keep the version names when you rename; change the module ID and every caller together. The ledger holds the only stored module ID that stops start-up. Audit event names, mail reference kinds and the like are labels a rename may change; they have no hash to prove them, so they are not rewritten.
+
 # Production seeds
 
 `cargo run -p bilibi-web -- seed-production` runs only the production seeds;
