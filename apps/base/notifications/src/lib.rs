@@ -142,8 +142,8 @@ impl NotificationBoundary {
         Ok(())
     }
     /// Re-read these accounts' bells, in the transaction's tenant, after it
-    /// commits, without creating a notification: an owner's background work
-    /// (a reminder sweep) added to their to-dos. Nothing wakes on rollback.
+    /// commits, without creating a notification: an owner's work (a reminder sweep, or
+    /// closing or reassigning a reminded activity) changed their to-dos. Nothing wakes on rollback.
     pub fn todos_changed_for(
         &self,
         tx: &mut MutationTransaction<'_>,
