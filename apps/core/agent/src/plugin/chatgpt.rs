@@ -1,0 +1,79 @@
+//! ChatGPT, the first harness. Only the manifest format and file
+//! layout live here. The ZIP is for a ChatGPT administrator; the settings page
+//! offers the AI connections prompt instead (`core/agent`).
+use super::{
+    harness::{Harness, PackageFile},
+    package::Package,
+};
+use serde_json::{json, Value};
+
+pub struct ChatGpt;
+
+fn pretty(value: &Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_default();
+    bytes.push(b'\n');
+    bytes
+}
+
+impl Harness for ChatGpt {
+    fn key(&self) -> &'static str {
+        "chatgpt"
+    }
+    fn name(&self) -> &'static str {
+        "ChatGPT"
+    }
+    fn archive_name(&self, package: &Package) -> String {
+        format!("{}-chatgpt-plugin.zip", package.name)
+    }
+    fn files(&self, package: &Package) -> Vec<PackageFile> {
+        let connection = &package.connection;
+        let manifest = json!({
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": package.name,
+            "version": package.version,
+            "description": package.description,
+            "extensions": {
+                "com.openai": {
+                    "onboardingSkill": format!("./skills/{}/SKILL.md", package.setup_skill()),
+                    "interface": {
+                        "displayName": package.display_name,
+                        "shortDescription": package.short_description,
+                        "defaultPrompt": [package.default_prompt]
+                    }
+                }
+            }
+        });
+        let mcp = json!({
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                (package.name.as_str()): {
+                    "type": "streamable-http",
+                    "url": connection.server_url(),
+                    "extensions": {
+                        "com.openai": {
+                            "auth": {
+                                "type": "oauth",
+                                "client": {
+                                    "mode": "dcr",
+                                    "tokenEndpointAuthMethod": "none"
+                                },
+                                "registrationUrl": format!("{}/oauth/register", connection.origin()),
+                                "authorizationUrl": connection.authorization_url(),
+                                "tokenUrl": connection.token_url(),
+                                "baseScopes": [connection.scope()]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let mut files = vec![
+            PackageFile::new("plugin.json", pretty(&manifest)),
+            PackageFile::new("mcp.json", pretty(&mcp)),
+        ];
+        files.extend(package.skills.iter().map(|skill| {
+            PackageFile::new(format!("skills/{}/SKILL.md", skill.name), skill.markdown())
+        }));
+        files
+    }
+}

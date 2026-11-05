@@ -42,7 +42,7 @@ A relay that takes a message says nothing later, and Base reads no mailbox, so a
 - An owner tags a message with `X-Bilibi-Reference: <kind>:<its record>` (`reference(kind, record)`, `REFERENCE_HEADER`) and contributes an `Observer { kind, observe }` under `OBSERVERS`.
 - The adapter reads the header back from the provider's event and calls `report(&DeliveryReport { reference, address, outcome: Outcome::Bounced, detail })`. It names no owner and the owner names no provider.
 - `report` hands it to the observer of that kind, which re-reads its own record (and its tenant) and answers whether it still held it. `Ok(false)` means an unknown kind or record, an old or foreign message; the adapter ignores it. A malformed report is `Error::Invalid`.
-- `apps/web/examples/delivery-walkthrough.rs` stands in for an adapter against a disposable database. Core Customer Access is the first observer (`customer_access.invitation`): it marks the open invitation `bounced` and tells the inviter.
+- `apps/web/examples/delivery-walkthrough.rs` stands in for an adapter against a disposable database. Core Portal is the first observer (`portal.invitation`): it marks the open invitation `bounced` and tells the inviter.
 
 ## Receiving a message
 

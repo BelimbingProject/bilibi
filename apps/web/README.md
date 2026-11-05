@@ -17,7 +17,7 @@ Register HTTP pages with `Contribution::new(ROUTES, ...)` from
 `bilibi_ui::page::PageService<bilibi_tenancy::Scope, bilibi_database::Error>`,
 wrapping an owner implementation of `Page<Scope, Error>`. The generic UI contract
 imports no identity/database crate. Pages that call operation contracts live above
-Agent API, as Core Tenant Administration does for `/tenancy/tenants`.
+Agent API, as Core Tenant does for `/tenancy/tenants`.
 Company's adapter in `apps/core/company/src/web.rs` is the current example.
 Do not add module page paths or business dispatch switches to the host router.
 
@@ -42,7 +42,7 @@ proof, never a tenant-ID convention or an admin grant. OperatorCapability
 requires both proof and capability; direct denials still win. Browser GETs
 without a valid session redirect to login. Authenticated refusals return 403.
 
-**Portal pages** ([ADR 16](../../docs/architecture/decisions/16-customer-accounts-and-portal.md), `src/portal.rs`). `Portal(key)` opens a page, download or `EmbedContext::Portal` embed to a customer holding portal capability `key`. Such routes live only under `/portal/`, are never framed, and are bound apart from staff routes, so page search, the shell and the live socket never list one. The host reads only the `bilibi_portal` cookie there and only `bilibi_session` elsewhere; a session resolves only for the account kind its cookie serves (`Sessions::check` staff, `check_portal` customer). The owner's service is a `PageService<PortalScope, Error>` or `DownloadService<PortalScope, Error>`, and the host wraps its page in the portal layout (`bilibi_ui::PortalLayout`): the portal site's title (Core Customer Access; the tenant's name while it has no site), the portal menu (`Menu::visible_portal_tree` against the customer's effective capabilities) and the account's links. `GET /portal/live` is the portal's live socket (`live::run::<portal::Portal>`, `docs/live-pages.md`). `POST /portal/sign-out` ends the customer's own session (`UserService::portal_logout`) and clears the portal cookie. A GET with no customer session, or with a staff one, goes to `/portal/sign-in`, which returns to the portal the browser last signed in to. A portal step-up still owed is refused with 403 until the portal has its own prompt. Boot refuses the wrong shapes listed in `apps/base/module_registry/README.md`; `examples/portal-reference.rs --refusals` shows each.
+**Portal pages** ([ADR 16](../../docs/architecture/decisions/16-customer-accounts-and-portal.md), `src/portal.rs`). `Portal(key)` opens a page, download or `EmbedContext::Portal` embed to a customer holding portal capability `key`. Such routes live only under `/portal/`, are never framed, and are bound apart from staff routes, so page search, the shell and the live socket never list one. The host reads only the `bilibi_portal` cookie there and only `bilibi_session` elsewhere; a session resolves only for the account kind its cookie serves (`Sessions::check` staff, `check_portal` customer). The owner's service is a `PageService<PortalScope, Error>` or `DownloadService<PortalScope, Error>`, and the host wraps its page in the portal layout (`bilibi_ui::PortalLayout`): the portal site's title (Core Portal; the tenant's name while it has no site), the portal menu (`Menu::visible_portal_tree` against the customer's effective capabilities) and the account's links. `GET /portal/live` is the portal's live socket (`live::run::<portal::Portal>`, `docs/live-pages.md`). `POST /portal/sign-out` ends the customer's own session (`UserService::portal_logout`) and clears the portal cookie. A GET with no customer session, or with a staff one, goes to `/portal/sign-in`, which returns to the portal the browser last signed in to. A portal step-up still owed is refused with 403 until the portal has its own prompt. Boot refuses the wrong shapes listed in `apps/base/module_registry/README.md`; `examples/portal-reference.rs --refusals` shows each.
 
 **Portal credential pages** (`src/portal_auth.rs`). Each sits under the address of its tenant's portal site, which names the tenant and brands the card (`PortalCard` around a `PortalForm`); an unknown address, or a site that is off, is a 404 card naming no tenant. While a site is off, its signed-in customers' portal pages, downloads and live socket answer 404 too.
 
@@ -51,9 +51,9 @@ without a valid session redirect to login. Authenticated refusals return 403.
 | `/portal/sign-in/{site}` | `UserService::portal_login` among that tenant's customers; throttled per sender like `/login` |
 | `/portal/forgot/{site}` | `request_portal_password_reset`; one answer whether or not the address is a customer |
 | `/portal/reset/{site}/{token}` | `portal_reset_password`, then back to sign-in |
-| `/portal/accept/{site}/{token}` | Core Customer Access redeems the invitation, then the customer is signed in through `portal_login` (or sent to sign-in when a second step is required) |
+| `/portal/accept/{site}/{token}` | Core Portal redeems the invitation, then the customer is signed in through `portal_login` (or sent to sign-in when a second step is required) |
 | `/portal/sign-in/{site}/challenge` | The second sign-in step for a tenant that turned on `core.user.portal_sign_in`: the pending sign-in's cookie (`bilibi_portal_sign_in`, `Path=/portal/sign-in`), start or resend a challenge, verify the code, cancel |
-| `/portal/register/{site}` | Core Customer Access takes a request for an account (404 unless the site takes them); one answer for known and unknown addresses; bounded per sender with recovery |
+| `/portal/register/{site}` | Core Portal takes a request for an account (404 unless the site takes them); one answer for known and unknown addresses; bounded per sender with recovery |
 | `/portal/verify/{site}/{token}` | A button that confirms the request's address (the GET alone confirms nothing) |
 
 - Sign-in (the form, or accepting an invitation) alone sets `bilibi_portal`: `HttpOnly`, `SameSite=Lax`, `Path=/portal`, `Max-Age` one day, `Secure` on an `https` origin, holding the fresh token each sign-in issues.
@@ -85,6 +85,7 @@ scope, `X-CSRF-Token`. The secret rotates when the session switches identity
 the live socket likewise binds the identity, the secret and the current company it was opened under (`live::Identity`) and reloads its page, without acting, once they differ. The company is the one the page was rendered under: stamped as `data-company-id` on the shell root and sent by `live.js` as the `company` query of `/live`, so a reconnect after the session switched company reloads the page rather than re-rendering under a stale top bar. Owners must reauthorize mutations inside their transaction.
 The adapter receives the operation, proven optional scope, path/query values,
 bounded request body and presentation flag. HTML escaping belongs to the owner.
+An authenticated page uses the workspace shell by default. A page operation may return `PageChrome::StandaloneReview`; Web then keeps the same guarded live transport, CSRF and session binding but wraps it in Base UI's credential-style review layout with the Bilibi mark and instance banner. Core Agent Access uses this for OAuth consent.
 
 Framing comes from `Sec-Fetch-Dest: iframe` (or `frame`) on each HTTP navigation,
 never a cookie, account setting or query parameter. A route with `framed: false`
@@ -132,7 +133,7 @@ The host owns the machine endpoints; discovered pages cannot claim them
   `/.well-known/oauth-protected-resource[/mcp]` and `/.well-known/bilibi`, all
   built from `APP_ORIGIN`, never the Host header.
 - `POST /oauth/device_authorization` and `POST /oauth/token` take urlencoded or
-  JSON fields and delegate every decision to `core/agent_access.grants`
+  JSON fields and delegate every decision to `core/agent.grants`
   (device, refresh and PKCE code grants). Errors are `400 {"error":code}`;
   storage failure is `503 temporarily_unavailable`. Each endpoint has its own
   per-sender bucket from `agent_access.oauth_requests_per_minute`. The sender
@@ -141,7 +142,7 @@ The host owns the machine endpoints; discovered pages cannot claim them
 - `/api/v1`: `GET search` (`q`, `limit` 1–50, `kind` read|write,
   `include_unavailable`), `GET operations/{key}`, `GET guides/{key}`,
   `POST operations/{key}/call` (`{"input":{…}}`), `POST plans`
-  (`{"operations":[…]}`) and `POST plans/commit` (`{"plan_code","operations"}`),
+  (`{"operations":[…]}`) and `POST plans/commit` (`{"operations":[…]}` with optional `step_up_code`),
   with status codes and `{"error":…}` bodies. Unknown paths and
   methods also answer JSON. Bodies are capped at 2 MiB.
 
@@ -149,7 +150,7 @@ Every `/api/v1` request proves the actor live: `AgentAccess::authenticate` maps
 the bearer to claims, then `AgentAccess::seal` reproves the grant, the account
 and its party facets and seals a fresh scope with the agent facet. Plans use
 the `Grant` `PlanAuthority`, which runs `AgentAccess::prove` again with the
-grant row locked inside the plan transaction. A revocation that commits
+grant row locked inside the write transaction. A revocation that commits
 mid-request therefore refuses the commit with 401. A missing, invalid or no-longer-eligible bearer gets
 `401 invalid_token` with `WWW-Authenticate: Bearer`. API tokens carry no
 resource, so an MCP-bound token is refused here, and an API token is refused
@@ -183,19 +184,22 @@ the two notifications are public: the tool list and a card's HTML hold no data
 and no credential, and an MCP Apps host may fetch them before the person signs
 in. Every other message passes `api::authenticate` with the MCP resource
 (`APP_ORIGIN/mcp`) as audience; a missing, invalid or no-longer-eligible bearer gets `401 invalid_token` with
-`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`.
-The protocol adapter is `bilibi_base::agent_api::mcp`: six generic tools
-(`search`, `describe`, `guide`, `read`, `plan`, `commit`) over the one Agent
+`WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`. An authenticated request refused because its connection switch is off returns `ai_switched_off`, a plain instruction, and the exact AI connections settings URL.
+The protocol adapter is `bilibi_base::agent_api::mcp`: generic tools
+(`search`, `describe`, `guide`, `read`, `plan`, `commit`, `review_entries` and
+`review_status`) over the one Agent
 API, so permission and domain decisions happen exactly where `/api/v1` makes
 them, plus one tool per registered MCP App (`open_software`), which is that
 module's read operation under the tool's name and points the host at the
 card's `ui://` resource (`apps/base/agent_api/README.md`, "MCP Apps"). Business refusals are tool results with `isError: true` and these
 bodies (`invalid_input`, `forbidden`/`missing_capability`, `writes_not_enabled`,
 `plan_already_used`, …); wrong tool arguments and unknown tools are JSON-RPC
-`-32602`. A grant that stops proving live inside a plan transaction is `401`,
+`-32602`. A grant that stops proving live inside a write transaction is `401`,
 as at `/api/v1`; storage failure is `503`. Commit results whose items carry a
 `path` get an absolute `url` from `APP_ORIGIN`. Each request is one exchange
 row with operation `mcp.<tool>` or `mcp.<method>`.
+
+`review_entries` always returns its MCP App resource metadata and a same-origin browser link. The public `initialize` response explains the inline path only when the client advertises the MCP Apps MIME type, but no authorization decision relies on that public metadata. The browser route belongs to `core/agent`; it proves the review's owning account and the live browser-session switch on its originating connection, then bridges the shared card back to these same tools. `review_status` provides a bounded wait for text-only clients. See [Agent API](../base/agent_api/README.md#editable-write-reviews) for the security and outcome contract.
 
 MCP uses the same retryable lock-contention body as `/api/v1`. Authentication returns it as an HTTP 422 refusal, while `plan` or `commit` returns it as an `isError` tool result.
 
@@ -209,13 +213,13 @@ The status bar shows the same facts through `bilibi_ui::version_badges`. The sch
 
 # Agent plugins
 
-AI connections (`/settings/ai-connections`) is a `core/agent_access` page, not a host route. `/settings/mcp`, `/settings/agent-connections` and `/settings/chatgpt-plugin` redirect there. The page shows this `/mcp` edge from `APP_ORIGIN`. The ChatGPT plugin download stays a `core/agent_plugins` contribution. The package is named after the instance (`bilibi-staging`, "Bilibi Staging", `bilibi-staging-chatgpt-plugin.zip`), so a person can hold a Dev, a Staging and a Production connection in one harness. The host only parses the exporter subcommand:
+AI connections (`/settings/ai-connections`) is a `core/agent` page, not a host route. `/settings/mcp`, `/settings/agent-connections` and `/settings/chatgpt-plugin` redirect there. The page shows this `/mcp` edge from `APP_ORIGIN`. The ChatGPT plugin download is another `core/agent` contribution. The package is named after the instance (`bilibi-staging`, "Bilibi Staging", `bilibi-staging-chatgpt-plugin.zip`), so a person can hold a Dev, a Staging and a Production connection in one harness. The host only parses the exporter subcommand:
 
 ```sh
 bilibi-web plugin-export --harness chatgpt --output <new-directory>
 ```
 
-See `apps/core/agent_plugins/README.md`.
+See `apps/core/agent/README.md`.
 
 # Webhooks (`src/webhooks.rs`)
 
@@ -260,7 +264,7 @@ The host compresses textual responses (`text/*`, JSON, JavaScript, XML and `+jso
 
 Shared templates use `bilibi_ui::Assets::url` for CSS, scripts and icons; CSS also links versioned fonts. See [the UI asset contract](../base/ui/assets/README.md#urls-and-browser-caching) for the catalogue and hashing rules.
 
-OAuth discovery advertises `/oauth/register` and client ID metadata documents. Public client registration, redirect matching and receipt retention belong to [Agent Access](../core/agent_access/README.md#client-registration). Startup requires HTTPS for Staging and Production; Dev permits HTTP only on loopback. Token issuance rechecks the same policy if the stored instance role changes.
+OAuth discovery advertises `/oauth/register` and client ID metadata documents. Public client registration, redirect matching and receipt retention belong to [Agent](../core/agent/README.md#client-registration). Startup requires HTTPS for Staging and Production; Dev permits HTTP only on loopback. Token issuance rechecks the same policy if the stored instance role changes.
 
 ## Desk context
 

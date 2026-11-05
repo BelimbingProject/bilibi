@@ -1,8 +1,8 @@
-//! Stateless MCP protocol adapter over the one Agent API. Six generic tools discover and call installed
+//! Stateless MCP protocol adapter over the one Agent API. Generic tools discover and call installed
 //! operations; no transport duplicates domain handlers or permission
-//! evaluation. Reads cannot call writes. Plan results are the host's immutable
-//! review evidence; commit requires the exact plan and a human go in that
-//! host, which Bilibi does not attest. The host owns transport
+//! evaluation. Reads cannot call writes. Dry-run results let a host show a
+//! complete review; the host waits for a human go before sending the same
+//! operations to commit, which Bilibi does not attest. The host owns transport
 //! negotiation, authentication and the per-sender limit; it hands a private
 //! message a `Session` proven live for that request alone.
 //!
@@ -12,7 +12,7 @@
 //! tools through the host, so it adds no permission path of its own.
 use crate::{
     plans::{PlanAuthority, PlannedOperation, Plans},
-    App, AppSource, Error, Registry, SearchOptions, APP_MIME_TYPE,
+    App, AppSource, Error, Registry, Reviews, SearchOptions, APP_MIME_TYPE,
 };
 use bilibi_system::Instance;
 use bilibi_tenancy::{Scope, SelfReport};
@@ -24,8 +24,17 @@ pub const VERSIONS: [&str; 2] = ["2025-11-25", "2025-06-18"];
 /// Global operator setting: MCP requests per sender address per minute per node.
 pub const REQUESTS_PER_MINUTE: &str = "agent_api.mcp_requests_per_minute";
 const NOTIFICATIONS: [&str; 2] = ["notifications/initialized", "notifications/cancelled"];
-/// The six generic tools; an [`App`] tool may not take one of these names.
-pub const GENERIC_TOOLS: [&str; 6] = ["search", "describe", "guide", "read", "plan", "commit"];
+/// Generic tools; an [`App`] tool may not take one of these names.
+pub const GENERIC_TOOLS: [&str; 8] = [
+    "search",
+    "describe",
+    "guide",
+    "read",
+    "plan",
+    "commit",
+    "review_status",
+    "review_outcome",
+];
 /// JSON-RPC: the resource does not exist (MCP `resources/read`).
 const RESOURCE_NOT_FOUND: i64 = -32_002;
 const SELF_REPORT_INSTRUCTION: &str = "Report yourself on every tool call, including review_entries and the other card tools, with optional `agent_self_report` as `harness/model-version-effort`, asking your user for unknown parts and never guessing.";
@@ -55,6 +64,7 @@ pub struct Session<'a> {
     pub authority: &'a dyn PlanAuthority,
     /// Read-only presentation of the caller's enrolled 2FA methods.
     pub step_up: &'a bilibi_step_up::StepUp,
+    pub reviews: &'a Reviews,
 }
 
 pub enum Outcome {
@@ -174,7 +184,11 @@ pub async fn dispatch(
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 match invoke(registry, plans, session, name, arguments).await {
-                    Ok(value) => result(id, tool_result(value, false)),
+                    Ok(value) => {
+                        let text =
+                            (name == "review_entries").then(|| crate::review::text_summary(&value));
+                        result(id, tool_result_text(value, false, text))
+                    }
                     Err(Invoke::Protocol(code, message)) => error(id, code, message),
                     Err(Invoke::Refusal(body)) => result(id, tool_result(body, true)),
                     Err(Invoke::Failed(Error::Backend(bilibi_database::Error::Unauthorized))) => {
@@ -205,15 +219,31 @@ fn initialize(id: Value, params: &Map<String, Value>, instance: &Instance) -> Ou
     } else {
         VERSIONS[0]
     };
+    // MCP Apps extension 2026-01-26: clients advertise support at
+    // capabilities.extensions["io.modelcontextprotocol/ui"].mimeTypes.
+    let app_instruction = match params
+        .get("capabilities")
+        .and_then(|value| value.pointer("/extensions/io.modelcontextprotocol~1ui/mimeTypes"))
+    {
+        Some(Value::Array(types)) if types.iter().any(|kind| kind == APP_MIME_TYPE) => {
+            "This client advertises MCP Apps; review_entries opens the inline card and also returns its browser fallback."
+        }
+        Some(Value::Array(_)) | None => {
+            "This client does not advertise MCP Apps; review_entries returns a compact text review and a signed-in browser link."
+        }
+        Some(_) => {
+            "This client's MCP Apps capability is unknown; review_entries returns both the inline resource and browser link."
+        }
+    };
     result(
         id,
         json!({
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": false}, "resources": {"subscribe": false, "listChanged": false}},
-            // The name is the plugin package's (`core/agent_plugins`), so a
+            // The name is the plugin package's (`core/agent`), so a
             // host that lists servers by name tells Dev from Production.
             "serverInfo": {"name": format!("bilibi-{}", instance.slug()), "title": format!("Bilibi {} ({}) at {}", instance.label, instance.role.label(), instance.origin), "version": env!("CARGO_PKG_VERSION")},
-            "instructions": format!("{} {INSTRUCTIONS} {SELF_REPORT_INSTRUCTION} {} {} {}", crate::BUSINESS_CONTEXT, instance.agent_notice(), crate::INSTANCE_INSTRUCTIONS, crate::REVIEW_INSTRUCTIONS),
+            "instructions": format!("{} {INSTRUCTIONS} {SELF_REPORT_INSTRUCTION} {app_instruction} {} {} {}", crate::BUSINESS_CONTEXT, instance.agent_notice(), crate::INSTANCE_INSTRUCTIONS, crate::REVIEW_INSTRUCTIONS),
         }),
     )
 }
@@ -313,8 +343,7 @@ async fn invoke(
             let operations = operations(args.remove("operations").ok_or_else(mismatch)?)?;
             Ok(plans.preview(session.authority, &operations).await?)
         }
-        "commit" if (2..=3).contains(&args.len()) => {
-            let code = string(&args, "plan_code").ok_or_else(mismatch)?;
+        "commit" if (1..=2).contains(&args.len()) => {
             let operations = operations(args.remove("operations").ok_or_else(mismatch)?)?;
             // The account holder's step-up code, when an operation asked for it.
             let scope = match args.remove("step_up_code") {
@@ -322,12 +351,36 @@ async fn invoke(
                 Some(Value::String(step_up)) => session.scope.clone().presenting_step_up(&step_up),
                 Some(_) => return Err(mismatch()),
             };
-            if args.len() != 1 {
+            if !args.is_empty() {
                 return Err(mismatch());
             }
-            Ok(plans
-                .commit(&scope, session.authority, &code, &operations)
+            Ok(plans.commit(&scope, session.authority, &operations).await?)
+        }
+        "review_status" if (1..=2).contains(&args.len()) => {
+            let review_id = string(&args, "review_id").ok_or_else(mismatch)?;
+            let wait_seconds = args.remove("wait_seconds").map_or(Ok(0), |value| {
+                value
+                    .as_u64()
+                    .filter(|seconds| *seconds <= 25)
+                    .ok_or_else(mismatch)
+            })?;
+            Ok(session
+                .reviews
+                .status(session.scope, &review_id, wait_seconds)
                 .await?)
+        }
+        "review_outcome" if args.len() == 3 => {
+            let review_id = string(&args, "review_id").ok_or_else(mismatch)?;
+            let status = string(&args, "status").ok_or_else(mismatch)?;
+            let outcome = args
+                .remove("outcome")
+                .filter(Value::is_object)
+                .ok_or_else(mismatch)?;
+            session
+                .reviews
+                .finish_agent(session.scope, &review_id, &status, outcome)
+                .await?;
+            Ok(json!({"review_id":review_id,"status":status}))
         }
         _ if GENERIC_TOOLS.contains(&name) => Err(mismatch()),
         // An app's tool is its module's read operation under the tool's
@@ -341,6 +394,28 @@ async fn invoke(
             }
         },
         _ => Err(Invoke::Protocol(-32_602, "Unknown tool")),
+    }
+}
+
+/// The browser frame adapter calls the exact tool dispatcher an MCP App host
+/// calls. Protocol and business refusals remain tool results; storage faults
+/// stay errors for the live page boundary.
+pub async fn card_call(
+    registry: &Registry,
+    plans: &Plans,
+    session: Session<'_>,
+    name: &str,
+    arguments: Value,
+) -> std::result::Result<Value, bilibi_database::Error> {
+    match invoke(registry, plans, Some(session), name, arguments).await {
+        Ok(value) => Ok(tool_result(value, false)),
+        Err(Invoke::Protocol(_, message)) => Ok(tool_result(
+            json!({"error":"invalid_request","reason":message}),
+            true,
+        )),
+        Err(Invoke::Refusal(body)) => Ok(tool_result(body, true)),
+        Err(Invoke::Failed(Error::Backend(backend))) if storage(&backend) => Err(backend),
+        Err(Invoke::Failed(reason)) => Ok(tool_result(failure(reason), true)),
     }
 }
 
@@ -379,7 +454,7 @@ fn failure(error: Error) -> Value {
 }
 
 /// The tools as this installation lists them: the six generic ones, `plan`
-/// and `commit` naming the instance so a host's own confirmation of either
+/// and `commit` naming the instance so a host's own review of either
 /// says where the change lands, then one tool per registered app.
 fn listed(registry: &Registry, instance: &Instance) -> Vec<Value> {
     let mut tools = tools();
@@ -527,9 +602,20 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "commit",
-            &format!("Commit the exact unchanged reviewed plan. {} Send a requested 2FA code as step_up_code.", crate::REVIEW_INSTRUCTIONS),
-            json!({"plan_code": {"type": "string"}, "operations": operations, "step_up_code": {"type": "string", "description": "The account holder's current authenticator code, only when a commit answered step_up_required."}}),
+            &format!("Recheck and write the exact unchanged operations after explicit approval. {} Send a requested 2FA code as step_up_code.", crate::REVIEW_INSTRUCTIONS),
+            json!({"operations": operations, "step_up_code": {"type": "string", "description": "The account holder's current authenticator code, only when a commit answered step_up_required."}}),
             false,
+        ),
+        tool(
+            "review_status",
+            "Learn the outcome of a review_entries card or browser review without asking the person to retype it. Wait at most 25 seconds, then call again while status is open.",
+            json!({"review_id": {"type":"string","pattern":"^[0-9a-f]{32}$"}, "wait_seconds":{"type":"integer","minimum":0,"maximum":25}}),
+            true,
+        ),
+        app_tool(
+            "review_outcome",
+            "Record what the shared review card showed its person.",
+            json!({"review_id":{"type":"string","pattern":"^[0-9a-f]{32}$"},"status":{"type":"string","enum":["saved","edited_and_saved","cancelled","refused","uncertain"]},"outcome":{"type":"object"}}),
         ),
     ]
 }
@@ -539,7 +625,7 @@ fn tool(name: &str, description: &str, mut properties: Value, read: bool) -> Val
         .as_object()
         .map(|p| {
             p.keys()
-                .filter(|key| key.as_str() != "step_up_code")
+                .filter(|key| !matches!(key.as_str(), "step_up_code" | "wait_seconds"))
                 .cloned()
                 .collect()
         })
@@ -567,12 +653,21 @@ fn tool(name: &str, description: &str, mut properties: Value, read: bool) -> Val
         }
     })
 }
+fn app_tool(name: &str, description: &str, properties: Value) -> Value {
+    let mut result = tool(name, description, properties, false);
+    result["_meta"]["ui"] = json!({"visibility":["app"]});
+    result
+}
 
 /// Structured content plus the same JSON as text, for clients without
 /// structured-content support.
 pub fn tool_result(value: Value, failed: bool) -> Value {
+    tool_result_text(value, failed, None)
+}
+fn tool_result_text(value: Value, failed: bool, text: Option<String>) -> Value {
+    let text = text.unwrap_or_else(|| value.to_string());
     json!({
-        "content": [{"type": "text", "text": value.to_string()}],
+        "content": [{"type": "text", "text": text}],
         "structuredContent": value,
         "isError": failed
     })

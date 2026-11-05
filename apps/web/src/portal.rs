@@ -263,12 +263,12 @@ pub async fn dispatch(
     Ok(response)
 }
 
-/// The title of the customer's portal: its site's (Core Customer Access),
+/// The title of the customer's portal: its site's (Core Portal),
 /// or the tenant's name while the tenant has none.
 /// Whether the customer's portal site is on.
 async fn portal_on(app: &App, portal: &PortalScope) -> Result<bool> {
-    let access: std::sync::Arc<bilibi_customer_access::CustomerAccess> =
-        app.services.get(bilibi_customer_access::SERVICE)?;
+    let access: std::sync::Arc<bilibi_portal::PortalService> =
+        app.services.get(bilibi_portal::SERVICE)?;
     Ok(access
         .site_of(portal)
         .await?
@@ -278,8 +278,8 @@ async fn portal_on(app: &App, portal: &PortalScope) -> Result<bool> {
 /// The portal's title (the tenant's name until its site names another) and
 /// its logo link, if it has one.
 async fn site_brand(app: &App, portal: &PortalScope) -> Result<(String, Option<String>)> {
-    let access: std::sync::Arc<bilibi_customer_access::CustomerAccess> =
-        app.services.get(bilibi_customer_access::SERVICE)?;
+    let access: std::sync::Arc<bilibi_portal::PortalService> =
+        app.services.get(bilibi_portal::SERVICE)?;
     Ok(match access.site_of(portal).await? {
         Some(site) => (site.title, site.logo_url),
         None => (portal.scope().tenant_name.clone(), None),

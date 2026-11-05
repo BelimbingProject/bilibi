@@ -73,6 +73,8 @@ A reply that sets `LiveBody.redirect` to a local path may also set `LiveBody.fla
 (`apps/web/src/landing.rs`, 60 seconds, text never leaves the server) and the
 session's next navigation to that path renders it once in the flash group. A
 flash without a redirect is dropped; an OAuth callback never carries one.
+Closing that message only hides it: it belongs to no page, so the page it
+landed on receives no `clear-flash` event and needs no handler for it.
 
 The browser adapter supports `data-target` on event buttons/forms; a button or
 form without one reports to the nearest `data-target` ancestor (a mounted
@@ -175,6 +177,8 @@ the event that acts on the files takes the completed bytes with
 means nothing has finished arriving. Nothing else ever reads the bytes, and
 they go with the state when it is dropped. The Design Library's File input
 card is the running specimen.
+
+For a single-file form where choosing a file is the action, `FileInput::immediate()` draws its label as a button and submits the enclosing form after the file arrives. A refused or interrupted upload does not submit. The form's event consumes the file as usual.
 
 The host owns the stream. A chosen file is announced as an `upload` intent
 (`{"type":"upload","target":"page","upload":"statement","entries":[{"ref":"1","name":"x.csv","size":1200,"content_type":"text/csv"}]}`),

@@ -1,7 +1,7 @@
 //! The portal's credential pages (ADR 16): sign-in, forgotten password, reset
 //! and invitation, each under the address of its tenant's portal site
 //! (`/portal/sign-in/{site}`), which names the tenant and brands the card.
-//! Core Customer Access answers which site an address names and redeems
+//! Core Portal answers which site an address names and redeems
 //! invitations; Core User proves credentials. Like the staff pages in
 //! `auth.rs`, these are plain forms: a POST re-renders the card with its
 //! errors and a completed step redirects, here with a fixed `done` key in the
@@ -26,8 +26,8 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
-use bilibi_customer_access::{AcceptError, CustomerAccess, RegisterError, Site};
 use bilibi_database::Error;
+use bilibi_portal::{AcceptError, PortalService, RegisterError, Site};
 use bilibi_ui::{
     Attrs, Field, FlashMap, Html, InputKind, PortalCard, PortalCardLink, PortalDocument,
     PortalForm, SecretInput, COMPANY_ARCHIVED, CREDENTIALS_REJECTED, PASSWORD_RESET,
@@ -57,10 +57,10 @@ const DONE: [(&str, &str); 2] = [
     ("accepted", "Your account is ready. Sign in to continue."),
 ];
 
-fn access(app: &App) -> Result<Arc<CustomerAccess>, HttpError> {
+fn access(app: &App) -> Result<Arc<PortalService>, HttpError> {
     Ok(app
         .services
-        .get(bilibi_customer_access::SERVICE)
+        .get(bilibi_portal::SERVICE)
         .map_err(Error::from)?)
 }
 async fn site(app: &App, address: &str) -> Result<Option<Site>, HttpError> {
@@ -132,7 +132,7 @@ fn remembered(headers: &HeaderMap) -> Option<String> {
         .ok()?
         .split(';')
         .find_map(|part| part.trim().strip_prefix(SITE_COOKIE)?.strip_prefix('='))
-        .filter(|address| bilibi_customer_access::address_shaped(address))
+        .filter(|address| bilibi_portal::address_shaped(address))
         .map(str::to_owned)
 }
 /// The tenant of the portal session this browser holds, if one is live.
@@ -1002,7 +1002,7 @@ pub struct AcceptSubmission {
     #[serde(rename = "accept[password_confirmation]", default)]
     password_confirmation: String,
 }
-/// `POST /portal/accept/{site}/{token}`: Core Customer Access redeems the
+/// `POST /portal/accept/{site}/{token}`: Core Portal redeems the
 /// invitation; the customer then signs in.
 pub async fn accept(
     State(app): State<App>,

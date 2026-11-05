@@ -99,8 +99,10 @@ pub async fn require_live(client: &impl GenericClient, scope: &Scope, id: i64) -
 
 /// The guard every write to a company or into it begins with: a live row
 /// whose status is `archived` is read-only for good (`WriteError::Archived`).
-/// `lock` takes the row `FOR UPDATE`, so the status judged is the one the
-/// caller's transaction will see until it commits.
+/// `lock` takes the row `FOR NO KEY UPDATE`, so the status judged is the one
+/// the caller's transaction will see until it commits. The weaker row lock is
+/// compatible with Queue's `FOR KEY SHARE` workplace proof while still
+/// excluding company updates, archival and deletion.
 pub async fn require_writable(
     client: &impl GenericClient,
     scope: &Scope,
@@ -121,7 +123,7 @@ pub async fn require_writable_in(
     }
     let sql = format!(
         "SELECT status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL{}",
-        if lock { " FOR UPDATE" } else { "" }
+        if lock { " FOR NO KEY UPDATE" } else { "" }
     );
     let row = client
         .query_opt(&sql, &[&tenant, &id])
@@ -570,9 +572,7 @@ pub fn email_shaped(email: &str) -> bool {
 }
 
 /// Whether a jurisdiction ISO code names a known country. Geonames is the
-/// reference; an empty
-/// Geonames install knows no country, so a jurisdiction cannot be recorded
-/// until countries are imported.
+/// reference; a country it does not hold cannot be recorded as a jurisdiction.
 pub async fn known_country(client: &dyn ReadClient, iso: &str) -> Result<bool> {
     Ok(client
         .query_opt("SELECT 1 FROM geonames_countries WHERE iso=$1", &[&iso])

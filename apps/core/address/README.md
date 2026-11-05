@@ -42,8 +42,7 @@ snake_case here.
   four places, then checks against Geonames that the country is imported and
   the division belongs to it. Postcode and locality stay free text.
   Failures are `WriteError::Invalid` with per-field messages for a form.
-- Country and division are foreign keys into Geonames, which is empty on
-  install: an address can have no country until an operator imports countries.
+- Country and division are foreign keys into Geonames; its migrations install countries and Admin1 divisions so both are available on a fresh install. See [Geonames](../geonames/README.md#initial-reference-data).
 - `suggest`/`options` (`src/location.rs`) serve the create form, the detail page's grouped Apply and a panel's
   create-and-attach form: a country change clears the dependents; a postcode
   change fills the division and a single unambiguous locality and clears what
@@ -118,7 +117,7 @@ proof; the shell does so on the first operator page that finds these facts
 
 ## Pages and owner panels (K12)
 
-`src/web/` holds the address pages and owner panels; the Addresses menu entry sits under Administration.
+`src/web/` holds the address pages and owner panels; the Addresses menu entry sits under Core.
 
 - `/addresses`: search, sort (label, country, status) and 25/50/100-row pages
   in the URL under `search`/`sortBy`/`sortDir`/`perPage`, built-in

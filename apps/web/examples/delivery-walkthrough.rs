@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         outcome: Outcome::Bounced,
         detail: "550 5.1.1 mailbox unavailable".into(),
     };
-    let invitation = reference("customer_access.invitation", &id);
+    let invitation = reference("portal.invitation", &id);
     let cases = [
         (
             "another address",

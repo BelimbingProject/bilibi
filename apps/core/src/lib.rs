@@ -1,16 +1,17 @@
 // Generated composition links. Runtime inventory owns discovery.
+pub use bilibi_activity as activity;
 pub use bilibi_address as address;
 pub use bilibi_affiliation as affiliation;
-pub use bilibi_agent_access as agent_access;
-pub use bilibi_agent_plugins as agent_plugins;
+pub use bilibi_agent as agent;
 pub use bilibi_company as company;
 pub use bilibi_currency as currency;
-pub use bilibi_customer_access as customer_access;
+pub use bilibi_document as document;
 pub use bilibi_geonames as geonames;
 pub use bilibi_party as party;
 pub use bilibi_person as person;
-pub use bilibi_tenant_administration as tenant_administration;
+pub use bilibi_portal as portal;
+pub use bilibi_product as product;
+pub use bilibi_tenant as tenant;
 pub use bilibi_user as user;
-pub use bilibi_user_administration as user_administration;
 pub use bilibi_work_calendar as work_calendar;
 pub fn link() {}

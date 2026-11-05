@@ -27,7 +27,6 @@ use std::{
     sync::{Arc, LazyLock},
     time::SystemTime,
 };
-use tokio_postgres::GenericClient;
 
 /// The bell lists this many of the newest notifications.
 const RECENT: i64 = 5;
@@ -65,11 +64,41 @@ struct BellView {
     badge: String,
     aria_label: String,
     items: Vec<Item>,
+    todos: Vec<bilibi_notifications::TodoList>,
+    todo_badge: String,
+    todo_count: usize,
+    todo_tab: bool,
+    tabs: Tabs<'static>,
 }
 
-async fn bell_html(client: &impl GenericClient, scope: &Scope) -> Result<String> {
-    let unread = notifications::unread(client, scope).await?;
-    let items = notifications::list(client, scope, Status::All, RECENT, 0).await?;
+async fn bell_html(users: &UserService, scope: &Scope, todo_tab: bool) -> Result<String> {
+    let (unread, items) = {
+        let client = users.db.get().await?;
+        (
+            notifications::unread(&**client, scope).await?,
+            notifications::list(&**client, scope, Status::All, RECENT, 0).await?,
+        )
+    };
+    // Owner adapters acquire their own connections. Never hold one of ours
+    // while invoking them: concurrent bells could otherwise exhaust the pool.
+    let todos = users.notification_boundary.todos(scope).await?;
+    let todo_count: usize = todos.iter().map(|list| list.count).sum();
+    let todo_badge = format!(
+        "{todo_count}{}",
+        if todos.iter().any(|list| list.more) {
+            "+"
+        } else {
+            ""
+        }
+    );
+    let tabs = Tabs {
+        id: "bell-tabs",
+        tabs: vec![
+            Tab::button("todo_tab", "", "To do", todo_tab),
+            Tab::button("notifications_tab", "", "Notifications", !todo_tab),
+        ],
+        ..Tabs::default()
+    };
     let badge = if unread > 99 {
         "99+".to_owned()
     } else {
@@ -80,7 +109,13 @@ async fn bell_html(client: &impl GenericClient, scope: &Scope) -> Result<String>
         1 => "1 unread notification".to_owned(),
         _ => format!("{badge} unread notifications"),
     };
+    let aria_label = format!("{todo_badge} to do, {aria_label}");
     BellView {
+        todos,
+        todo_badge,
+        todo_count,
+        todo_tab,
+        tabs,
         unread,
         badge,
         aria_label,
@@ -91,9 +126,8 @@ async fn bell_html(client: &impl GenericClient, scope: &Scope) -> Result<String>
 }
 
 pub(crate) async fn render_bell(pages: &Pages, scope: &Scope) -> Result<PageBody> {
-    let client = pages.users.db.get().await?;
     Ok(PageBody {
-        html: bell_html(&**client, scope).await?,
+        html: bell_html(&pages.users, scope, true).await?,
         live: true,
         title: None,
     })
@@ -102,16 +136,21 @@ pub(crate) async fn render_bell(pages: &Pages, scope: &Scope) -> Result<PageBody
 pub(crate) fn mount_bell(pages: &Pages) -> Box<dyn LiveState<Scope, Error>> {
     Box::new(Bell {
         users: pages.users.clone(),
+        todo_tab: true,
     })
 }
 
 struct Bell {
     users: Arc<UserService>,
+    todo_tab: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum BellEvent {
+    RefreshTodos,
+    TodoTab,
+    NotificationsTab,
     MarkAllRead,
     Visit { id: String },
 }
@@ -125,6 +164,9 @@ impl LiveState<Scope, Error> for Bell {
                 LiveInput::Params(_) => return Err(Error::Invalid),
                 LiveInput::Event(value) => {
                     match BellEvent::deserialize(value).map_err(|_| Error::Invalid)? {
+                        BellEvent::RefreshTodos => {}
+                        BellEvent::TodoTab => self.todo_tab = true,
+                        BellEvent::NotificationsTab => self.todo_tab = false,
                         BellEvent::MarkAllRead => {
                             self.users.mark_all_read(request.credential).await?;
                         }
@@ -138,9 +180,8 @@ impl LiveState<Scope, Error> for Bell {
                     }
                 }
             }
-            let client = self.users.db.get().await?;
             Ok(LiveBody {
-                html: bell_html(&**client, request.scope).await?,
+                html: bell_html(&self.users, request.scope, self.todo_tab).await?,
                 redirect,
                 ..LiveBody::default()
             })

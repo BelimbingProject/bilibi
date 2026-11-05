@@ -287,7 +287,7 @@ impl Grants {
     }
     /// Gives a customer a contributed portal role inside the caller's audited
     /// transaction (ADR 16: a customer's portal role is its owner's to
-    /// assign). Core Customer Access calls it when a customer redeems the
+    /// assign). Core Portal calls it when a customer redeems the
     /// invitation a staff member made, so the authority is that invitation,
     /// not the customer. The role must be a contributed role whose every
     /// capability is a portal one, reconciled into the customer's tenant;

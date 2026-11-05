@@ -194,7 +194,11 @@ impl TwoFactorPage {
                 match self.users.confirm_move(scope, to, &code).await {
                     Ok(()) => {
                         self.reload(scope).await?;
-                        self.success = "Your new phone is set up. The old phone no longer works.";
+                        self.success = if self.portal {
+                            "Your new phone is set up. The old phone no longer works."
+                        } else {
+                            "Your new phone is set up. You can no longer use the old phone."
+                        };
                     }
                     Err(TwoFactorError::NotEnabled) => {
                         self.reload(scope).await?;
@@ -251,23 +255,39 @@ impl TwoFactorPage {
             Stage::On => ("on", None),
             Stage::Move(enrollment) => ("move", Some(enrollment)),
         };
-        let (heading, first) = match self.stage {
-            Stage::Off | Stage::Setup(_) => (
+        let (heading, first) = match (&self.stage, self.portal) {
+            (Stage::Off | Stage::Setup(_), true) => (
                 "Set up your authenticator app",
                 "Link an authenticator app, such as Google Authenticator or Microsoft Authenticator. Some actions require its 6-digit code.",
             ),
-            Stage::Move(_) => (
+            (Stage::Off | Stage::Setup(_), false) => (
+                "Set up an authenticator app",
+                "Connect an app such as Google Authenticator or Microsoft Authenticator. Some actions require a 6-digit code from the authenticator app.",
+            ),
+            (Stage::Move(_), true) => (
                 "Move to a new phone",
                 "Link the authenticator app on your new phone. Once its first code is confirmed, the old phone stops working.",
             ),
-            Stage::On => (
+            (Stage::Move(_), false) => (
+                "Move to a new phone",
+                "Connect the app on your new phone. Once you confirm the first code from that app, you can no longer use the old phone.",
+            ),
+            (Stage::On, true) => (
                 "Authenticator app",
                 "Your authenticator app is set up. Some actions require its 6-digit code.",
+            ),
+            (Stage::On, false) => (
+                "Authenticator app",
+                "Your app is set up. Some actions require a 6-digit code from the authenticator app.",
             ),
         };
         let password = fragment(Html::render(
             &SecretInput::in_form("two_factor", "password", "password")
-                .label("Confirm your password")
+                .label(if self.portal {
+                    "Confirm your password"
+                } else {
+                    "Current password"
+                })
                 .errors(if stage == "off" {
                     self.errors.clone()
                 } else {
@@ -290,7 +310,7 @@ impl TwoFactorPage {
                 title: Html::text(if self.portal {
                     "Authenticator app"
                 } else {
-                    "My Settings"
+                    "My settings"
                 }),
                 subtitle: "",
                 title_actions: Html::EMPTY,
@@ -299,7 +319,14 @@ impl TwoFactorPage {
             current: bilibi_ui::SettingsTab::TwoFactor,
             portal: self.portal,
             heading,
-            description: fragment(Html::render(&Bullets { first }))?,
+            description: fragment(Html::render(&Bullets {
+                first,
+                second: if self.portal {
+                    "Lost your phone? Ask an admin to reset your 2FA, then set it up again."
+                } else {
+                    "If you lose your phone, ask your admin to reset your 2FA, then set it up again."
+                },
+            }))?,
             stage,
             notice: &self.notice,
             password,
@@ -330,11 +357,12 @@ impl TwoFactorPage {
 
 #[derive(Template)]
 #[template(
-    source = r#"<ul class="mt-1 list-disc space-y-0.5 pl-4"><li>{{ first }}</li><li>Lost your phone? Ask an admin to reset your 2FA, then set it up again.</li></ul>"#,
+    source = r#"<ul class="mt-1 list-disc space-y-0.5 pl-4"><li>{{ first }}</li><li>{{ second }}</li></ul>"#,
     ext = "html"
 )]
 struct Bullets<'a> {
     first: &'a str,
+    second: &'a str,
 }
 
 impl LiveState<Scope, Error> for TwoFactorPage {

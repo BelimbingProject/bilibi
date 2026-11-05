@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Set up a Bilibi server: one or more instances (dev, staging, production) under
 # /opt/bilibi, each with its own database, system service, address and release
-# folders. Run as root on Ubuntu or Debian. Safe to rerun: it keeps what exists.
+# folders. Run as root on Ubuntu, Debian, Rocky Linux 10 or RHEL 10. Safe to
+# rerun: it keeps what exists.
 # The layout, and why it is this way, is in docs/server-install.md.
 #
-#   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal]
-#   install-server.sh release <instance> <bilibi-web binary, or a folder holding it>
+#   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
+#   install-server.sh release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
 #   install-server.sh two-factor-reset <instance> --email <address>
-#   install-server.sh installer <bilibi-installer binary>
+#   install-server.sh installer <bilibi-installer binary> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
 #   install-server.sh status [<instance>]
 #
 # Only the layout, the first release and the installer service live here.
-# Build releases in your local Bilibi copy, then install a tested release here.
+# Build releases in a separate development checkout, then install a tested release here.
 # Backing up before a switch, checking the new release, switching back and Undo
 # are the installer's work once a server owner asks on the Software page
 # (apps/installer/README.md).
@@ -29,7 +30,9 @@ installer_unit='bilibi-installer@'
 installer_bin=$root/build/bin/bilibi-installer
 pg=$POSTGRESQL_MAJOR
 log=/var/log/bilibi-install-server.log
-export DEBIAN_FRONTEND=noninteractive
+os_family=
+pg_bin=
+pg_service=
 
 usage() {
     sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
@@ -39,6 +42,8 @@ fail() { printf 'install-server: %s\n' "$1" >&2; [[ -n ${2:-} ]] && printf 'Next
 say() { printf '%s\n' "$*"; }
 need_root() { [[ $(id -u) -eq 0 ]] || fail 'run this as root' "sudo $0 $*"; }
 valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; }
+valid_repository() { [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
+valid_setup_tag() { [[ $1 =~ ^setup-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
 instance_dir() { printf '%s/%s' "$root" "$1"; }
 instance_exists() { [[ -f $(instance_dir "$1")/env ]]; }
 # env_value <instance> <KEY>: one value from the instance's env file.
@@ -47,13 +52,13 @@ env_value() { sed -n "s/^$2=//p" "$(instance_dir "$1")/env" | head -n1; }
 # still uses the install input. An unavailable database cannot announce Dev.
 role_of() {
     local saved port has_settings
-    port=$(pg_lsclusters -h | awk -v v="$pg" '$1 == v {print $3; exit}')
-    if [[ -z $port ]] || ! has_settings=$(runuser -u postgres -- psql -p "$port" -d "$(database_name "$1")" -Atq -c "SELECT to_regclass('public.base_settings') IS NOT NULL" 2>/dev/null); then
+    port=$(postgres_port)
+    if [[ -z $port ]] || ! has_settings=$(runuser -u postgres -- "$pg_bin/psql" -p "$port" -d "$(database_name "$1")" -Atq -c "SELECT to_regclass('public.base_settings') IS NOT NULL" 2>/dev/null); then
         echo unavailable
         return
     fi
     if [[ $has_settings == t ]]; then
-        if ! saved=$(runuser -u postgres -- psql -p "$port" -d "$(database_name "$1")" -Atq -c "SELECT value #>> '{}' FROM base_settings WHERE key='instance.role' AND tenant_id=0 AND scope_type='global' AND scope_id=0" 2>/dev/null); then
+        if ! saved=$(runuser -u postgres -- "$pg_bin/psql" -p "$port" -d "$(database_name "$1")" -Atq -c "SELECT value #>> '{}' FROM base_settings WHERE key='instance.role' AND tenant_id=0 AND scope_type='global' AND scope_id=0" 2>/dev/null); then
             echo unavailable
             return
         fi
@@ -96,6 +101,19 @@ service_state() { systemctl is-active "$unit_name$1" 2>/dev/null || true; }
 installer_state() { systemctl is-active "$installer_unit$1" 2>/dev/null || true; }
 
 # ---------------------------------------------------------------- packages
+detect_os() {
+    [[ -r /etc/os-release ]] || fail 'cannot detect this operating system: /etc/os-release is missing'
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    case " ${ID:-} ${ID_LIKE:-} " in
+        *' debian '*) os_family=debian; pg_bin=/usr/bin; pg_service=postgresql ;;
+        *' rocky '*|*' rhel '*|*' centos '*|*' almalinux '*)
+            [[ ${VERSION_ID%%.*} == 10 ]] || fail "${PRETTY_NAME:-This RHEL-family system} is not supported" 'use Rocky Linux 10 or RHEL 10'
+            os_family=rhel; pg_bin="/usr/pgsql-$pg/bin"; pg_service="postgresql-$pg"
+            ;;
+        *) fail "${PRETTY_NAME:-This operating system} is not supported" 'use Ubuntu, Debian, Rocky Linux 10 or RHEL 10' ;;
+    esac
+}
 apt_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q '^install ok installed$'; }
 apt_candidate() { [[ -n $(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ && $2 != "(none)" {print $2}') ]]; }
 apt_updated=
@@ -121,7 +139,8 @@ apt_repo() {
     apt_updated=
     apt_update
 }
-install_packages() {
+install_debian_packages() {
+    export DEBIAN_FRONTEND=noninteractive
     apt_install ca-certificates curl openssl python3 iproute2 sudo
     if ! apt_candidate "postgresql-$pg"; then
         apt_repo pgdg https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -134,8 +153,78 @@ install_packages() {
     fi
     apt_install caddy
 }
+dnf_install() {
+    local p missing=()
+    for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 || missing+=("$p"); done
+    ((${#missing[@]})) || return 0
+    say "installing ${missing[*]} (details in $log)"
+    dnf install -y -q "${missing[@]}" >>"$log" 2>&1 || fail "could not install ${missing[*]}" "see $log"
+}
+install_rhel_packages() {
+    dnf_install ca-certificates curl openssl python3 iproute sudo policycoreutils-python-utils firewalld dnf-plugins-core
+    if ! rpm -q pgdg-redhat-repo >/dev/null 2>&1; then
+        say "installing the PostgreSQL PGDG repository (details in $log)"
+        dnf install -y -q "https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm" >>"$log" 2>&1 ||
+            fail 'could not install the PostgreSQL PGDG repository' "see $log"
+    fi
+    # Migrations use trusted extensions such as btree_gist from PGDG's contrib package.
+    dnf_install "postgresql${pg}" "postgresql${pg}-server" "postgresql${pg}-contrib"
+    if ! rpm -q caddy >/dev/null 2>&1; then
+        say "enabling the official Caddy COPR repository (details in $log)"
+        dnf copr enable -y @caddy/caddy >>"$log" 2>&1 || fail 'could not enable the Caddy repository' "see $log"
+        dnf_install caddy
+    fi
+}
+install_packages() {
+    case $os_family in
+        debian) install_debian_packages ;;
+        rhel) install_rhel_packages ;;
+    esac
+}
+ensure_github_cli() {
+    gh attestation verify --help >/dev/null 2>&1 && return 0
+    say "installing GitHub CLI with artifact-attestation support (details in $log)"
+    case $os_family in
+        debian)
+            apt_repo github-cli https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                "deb [arch=$(dpkg --print-architecture) signed-by=@KEYRING@] https://cli.github.com/packages stable main"
+            apt-get install -y -qq --no-install-recommends gh >>"$log" 2>&1 ||
+                fail 'could not install GitHub CLI' "see $log"
+            ;;
+        rhel)
+            [[ -f /etc/yum.repos.d/gh-cli.repo ]] ||
+                dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo >>"$log" 2>&1 ||
+                fail 'could not add the GitHub CLI repository' "see $log"
+            dnf install -y -q gh >>"$log" 2>&1 || fail 'could not install GitHub CLI' "see $log"
+            ;;
+    esac
+    gh attestation verify --help >/dev/null 2>&1 ||
+        fail 'the installed GitHub CLI cannot verify release provenance' 'update GitHub CLI, then rerun this command'
+}
+hold_caddy_package() {
+    if [[ $os_family == debian ]]; then
+        apt-mark hold caddy >>"$log" 2>&1 || fail 'could not hold the caddy package' "see $log"
+    else
+        dnf_install python3-dnf-plugin-versionlock
+        dnf versionlock add caddy >>"$log" 2>&1 || fail 'could not lock the caddy package' "see $log"
+    fi
+}
+caddy_restart=
+ensure_cloudflare_module() {
+    hold_caddy_package
+    caddy list-modules 2>/dev/null | grep -qx dns.providers.cloudflare && return 0
+    say "adding Caddy's Cloudflare DNS module (details in $log)"
+    caddy add-package github.com/caddy-dns/cloudflare >>"$log" 2>&1 || fail "could not add Caddy's Cloudflare DNS module" "see $log"
+    caddy_restart=1
+    if [[ $os_family == rhel ]] && selinuxenabled; then
+        semanage fcontext -a -t bin_t /usr/bin/caddy 2>/dev/null || semanage fcontext -m -t bin_t /usr/bin/caddy
+        restorecon /usr/bin/caddy
+    fi
+}
 # ---------------------------------------------------------------- users
 ensure_users() {
+    # RHEL useradd does not create missing parents of a new home directory.
+    install -d -m 0755 -o root -g root "$root"
     getent group bilibi >/dev/null || groupadd --system bilibi
     getent passwd bilibi >/dev/null ||
         useradd --system --gid bilibi --no-create-home --home-dir "$root" --shell /usr/sbin/nologin bilibi
@@ -170,16 +259,32 @@ retire_worker() {
 }
 
 # ---------------------------------------------------------------- database
+postgres_port() {
+    case $os_family in
+        debian) pg_lsclusters -h | awk -v v="$pg" '$1 == v {print $3; exit}' ;;
+        rhel) runuser -u postgres -- "$pg_bin/psql" -d postgres -Atq -c 'SHOW port' 2>/dev/null || true ;;
+    esac
+}
 ensure_cluster() {
-    if ! pg_lsclusters -h | awk '{print $1}' | grep -qx "$pg"; then
-        pg_createcluster "$pg" main >>"$log" 2>&1
-    fi
-    pg_ctlcluster "$pg" main start 2>/dev/null || true
-    systemctl enable --now postgresql >/dev/null 2>&1 || true
+    case $os_family in
+        debian)
+            if ! pg_lsclusters -h | awk '{print $1}' | grep -qx "$pg"; then
+                pg_createcluster "$pg" main >>"$log" 2>&1
+            fi
+            pg_ctlcluster "$pg" main start 2>/dev/null || true
+            systemctl enable --now "$pg_service" >/dev/null 2>&1 || true
+            ;;
+        rhel)
+            if [[ ! -s "/var/lib/pgsql/$pg/data/PG_VERSION" ]]; then
+                "$pg_bin/postgresql-$pg-setup" initdb >>"$log" 2>&1 || fail "could not initialize PostgreSQL $pg" "see $log"
+            fi
+            systemctl enable --now "$pg_service" >/dev/null 2>&1 || fail "could not start PostgreSQL $pg" "check systemctl status $pg_service"
+            ;;
+    esac
     local port
-    port=$(pg_lsclusters -h | awk -v v="$pg" '$1 == v {print $3; exit}')
-    [[ -n $port ]] || fail "PostgreSQL $pg has no cluster" "check pg_lsclusters"
-    pg_isready -q -h 127.0.0.1 -p "$port" || fail "PostgreSQL $pg is not accepting connections on port $port" 'check "systemctl status postgresql"'
+    port=$(postgres_port)
+    [[ -n $port ]] || fail "PostgreSQL $pg has no cluster" "check systemctl status $pg_service"
+    "$pg_bin/pg_isready" -q -h 127.0.0.1 -p "$port" || fail "PostgreSQL $pg is not accepting connections on port $port" "check systemctl status $pg_service"
     echo "$port"
 }
 # database_name <instance>
@@ -187,7 +292,7 @@ database_name() { printf 'bilibi_%s' "${1//-/_}"; }
 # ensure_database <instance> <password>: a role and a database of its own.
 # psql interpolates :variables only from standard input, never from -c.
 ensure_database() {
-    local name psql=(runuser -u postgres -- psql -v ON_ERROR_STOP=1 -Atq)
+    local name psql=(runuser -u postgres -- "$pg_bin/psql" -v ON_ERROR_STOP=1 -Atq)
     name=$(database_name "$1")
     if [[ $("${psql[@]}" -c "SELECT 1 FROM pg_roles WHERE rolname = '$name'") != 1 ]]; then
         echo "CREATE ROLE :\"name\" LOGIN PASSWORD :'password'" | "${psql[@]}" -v name="$name" -v password="$2" >/dev/null
@@ -237,12 +342,25 @@ swap('<p class="hint" id="waiting-hint">Taking longer than usual. If you started
 open(out, "w", encoding="utf-8").write(page)
 PY
 }
-write_caddy_site() { # <instance> <site> <port> <tls>
-    local tls=''
-    [[ $4 == internal ]] && tls='tls internal'
+cloudflare_env_key() { printf 'BILIBI_CLOUDFLARE_API_TOKEN_%s' "$(tr '[:lower:]-' '[:upper:]_' <<<"$1")"; }
+write_caddy_site() { # <instance> <site> <port> <tls> <caddy env>
+    local tls='' token_key
+    case $4 in
+        internal) tls='tls internal' ;;
+        cloudflare)
+            token_key=$(cloudflare_env_key "$1")
+            tls=$(printf 'tls {\n\t\tdns cloudflare {env.%s}\n\t}' "$token_key")
+            ;;
+    esac
     install -d /etc/caddy/sites
-    sed -e "s|@INSTANCE@|$1|g" -e "s|@SITE@|$2|g" -e "s|@PORT@|$3|g" -e "s|@TLS@|$tls|" \
-        "$here/server/site.caddy" >"/etc/caddy/sites/bilibi-$1.caddy"
+    python3 - "$here/server/site.caddy" "/etc/caddy/sites/bilibi-$1.caddy" "$1" "$2" "$3" "$tls" <<'PY'
+import sys
+source, out, instance, site, port, tls = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+for old, new in (("@INSTANCE@", instance), ("@SITE@", site), ("@PORT@", port), ("@TLS@", tls)):
+    text = text.replace(old, new)
+open(out, "w", encoding="utf-8").write(text)
+PY
     local caddyfile=/etc/caddy/Caddyfile import='import /etc/caddy/sites/*.caddy'
     if [[ ! -f $caddyfile ]] || grep -q "Set this path to your site's directory" "$caddyfile"; then
         [[ ! -f $caddyfile || -f $caddyfile.dist ]] || cp "$caddyfile" "$caddyfile.dist"
@@ -250,10 +368,50 @@ write_caddy_site() { # <instance> <site> <port> <tls>
     elif ! grep -qF "$import" "$caddyfile"; then
         printf '\n# Added by Bilibi scripts/install-server.sh\n%s\n' "$import" >>"$caddyfile"
     fi
-    caddy validate --config "$caddyfile" >/dev/null 2>&1 ||
+    local validate=(caddy validate --config "$caddyfile")
+    [[ ! -f $5 ]] || validate+=(--envfile "$5")
+    "${validate[@]}" >/dev/null 2>&1 ||
         fail "/etc/caddy/Caddyfile does not validate" "run: caddy validate --config $caddyfile"
-    systemctl enable --now caddy >/dev/null 2>&1
-    systemctl reload caddy
+    systemctl enable caddy >/dev/null 2>&1
+    if [[ -n $caddy_restart ]] || ! systemctl is-active --quiet caddy; then
+        systemctl restart caddy
+    else
+        systemctl reload caddy
+    fi
+}
+configure_selinux() { # <instance>
+    [[ $os_family == rhel ]] || return 0
+    selinuxenabled || fail 'SELinux must stay enabled on Rocky Linux and RHEL' 'enable SELinux enforcing, reboot, then rerun this command'
+    [[ $(getenforce) == Enforcing ]] || fail "SELinux is $(getenforce), not Enforcing" 'set SELINUX=enforcing, reboot, then rerun this command'
+    getsebool httpd_can_network_connect | grep -q -- '--> on' || setsebool -P httpd_can_network_connect on
+    local dir; dir=$(instance_dir "$1")
+    semanage fcontext -a -t var_lib_t "$dir/data(/.*)?" 2>/dev/null || semanage fcontext -m -t var_lib_t "$dir/data(/.*)?"
+    semanage fcontext -a -t var_lib_t "$dir/incoming(/.*)?" 2>/dev/null || semanage fcontext -m -t var_lib_t "$dir/incoming(/.*)?"
+    semanage fcontext -a -t httpd_sys_content_t "$dir/site(/.*)?" 2>/dev/null || semanage fcontext -m -t httpd_sys_content_t "$dir/site(/.*)?"
+    restorecon -R "$dir/data" "$dir/incoming" "$dir/site"
+}
+configure_caddy_environment() {
+    install -d -m 0755 /etc/systemd/system/caddy.service.d
+    local dropin=/etc/systemd/system/caddy.service.d/bilibi.conf new
+    new=$(mktemp)
+    printf '%s\n' \
+        '[Service]' \
+        'EnvironmentFile=-/opt/bilibi/*/caddy-env' \
+        '# The packaged unit uses --environ, which would write DNS tokens to the journal.' \
+        'ExecStart=' \
+        'ExecStart=/usr/bin/caddy run --config /etc/caddy/Caddyfile' \
+        >"$new"
+    cmp -s "$new" "$dropin" || { install -m 0644 "$new" "$dropin"; caddy_restart=1; }
+    rm -f "$new"
+    systemctl daemon-reload
+}
+configure_firewall() {
+    [[ $os_family == rhel ]] || return 0
+    systemctl enable --now firewalld >/dev/null 2>&1 || fail 'could not start firewalld' 'check systemctl status firewalld'
+    local changed=
+    firewall-cmd --permanent --query-service=http >/dev/null || { firewall-cmd --permanent --add-service=http >/dev/null; changed=1; }
+    firewall-cmd --permanent --query-service=https >/dev/null || { firewall-cmd --permanent --add-service=https >/dev/null; changed=1; }
+    [[ -z $changed ]] || firewall-cmd --reload >/dev/null
 }
 install_unit() {
     local name reload=
@@ -273,7 +431,7 @@ start_installer() {
 }
 # ================================================================ create
 create() {
-    local instance=${1:-} role='' site='' port='' tls=''
+    local instance=${1:-} role='' site='' port='' tls='' cloudflare_token_stdin='' cloudflare_token=''
     [[ -n $instance ]] || usage
     shift
     while (($#)); do
@@ -282,6 +440,7 @@ create() {
             --site) site=${2:-}; shift 2 ;;
             --port) port=${2:-}; shift 2 ;;
             --tls) tls=${2:-}; shift 2 ;;
+            --cloudflare-token-stdin) cloudflare_token_stdin=1; shift ;;
             *) usage ;;
         esac
     done
@@ -289,16 +448,19 @@ create() {
     [[ $role =~ ^(dev|staging|production)$ ]] || fail '--role must be dev, staging or production'
     [[ $site =~ ^[a-z0-9.-]+$ ]] || fail '--site must be a host name, like erp.example.com'
     [[ -z $port || $port =~ ^[0-9]+$ ]] || fail '--port must be a number'
-    [[ -z $tls || $tls == internal ]] || fail '--tls takes only "internal" (a certificate from Caddy for a private name)'
+    [[ -z $tls || $tls == internal || $tls == cloudflare ]] || fail '--tls takes "internal" or "cloudflare"'
+    [[ -z $cloudflare_token_stdin || $tls == cloudflare ]] || fail '--cloudflare-token-stdin requires --tls cloudflare'
     need_root create "$@"
     [[ -f $here/waiting-page.html && -f $here/server/site.caddy ]] || fail "run this from a Bilibi checkout: $here/server is missing"
 
     install_packages
+    ensure_github_cli
+    [[ $tls == cloudflare ]] && ensure_cloudflare_module
     ensure_users
     install_unit
     retire_worker
-    local dir env created=
-    dir=$(instance_dir "$instance"); env=$dir/env
+    local dir env caddy_env created=
+    dir=$(instance_dir "$instance"); env=$dir/env; caddy_env=$dir/caddy-env
     install -d -m 0755 "$root" "$dir" "$dir/site"
     install -d -m 0755 -o bilibi-build -g bilibi "$dir/releases"
     install -d -m 0750 -o bilibi-build -g bilibi-build "$dir/backups"
@@ -316,6 +478,14 @@ create() {
     fi
     [[ -n $password ]] || fail "$env has no DATABASE_URL password" "remove the file to generate a new one"
     ensure_database "$instance" "$password"
+    local token_key; token_key=$(cloudflare_env_key "$instance")
+    if [[ $tls == cloudflare && -n $cloudflare_token_stdin ]]; then
+        IFS= read -r cloudflare_token || true
+        [[ $cloudflare_token =~ ^[A-Za-z0-9_-]+$ ]] || fail 'the Cloudflare API token on standard input is empty or invalid'
+    fi
+    if [[ $tls == cloudflare && -z $cloudflare_token && ! -f $caddy_env ]]; then
+        fail '--tls cloudflare needs a zone-scoped API token on standard input' 'pipe the token to this command and add --cloudflare-token-stdin'
+    fi
     if [[ ! -f $env ]]; then
         created=1
         [[ -n $port ]] || port=$(free_port)
@@ -349,21 +519,157 @@ EOF
         # Older layouts gain the instance path used by release transport.
         grep -q '^BILIBI_INSTANCE_DIR=' "$env" || printf 'BILIBI_INSTANCE_DIR=%s\n' "$dir" >>"$env"
     fi
+    if [[ -n $cloudflare_token ]]; then
+        [[ $(cat "$caddy_env" 2>/dev/null) == "$token_key=$cloudflare_token" ]] || caddy_restart=1
+        umask 027
+        printf '%s=' "$token_key" >"$caddy_env"
+        printf '%s\n' "$cloudflare_token" >>"$caddy_env"
+        umask 022
+    elif [[ $tls != cloudflare && -f $caddy_env ]]; then
+        rm -f "$caddy_env"
+        caddy_restart=1
+    fi
+    if [[ $tls == cloudflare ]] && ! grep -q "^$token_key=" "$caddy_env"; then
+        fail '--tls cloudflare needs a zone-scoped API token on standard input' 'pipe the token to this command and add --cloudflare-token-stdin'
+    fi
     chown root:bilibi "$env"; chmod 0640 "$env"
+    [[ ! -f $caddy_env ]] || { chown root:caddy "$caddy_env"; chmod 0640 "$caddy_env"; }
 
     render_waiting_page "$instance" "$site" "$dir/site/waiting.html"
     chmod 0644 "$dir/site/waiting.html"
-    write_caddy_site "$instance" "$site" "$port" "$tls"
+    configure_selinux "$instance"
+    configure_caddy_environment
+    write_caddy_site "$instance" "$site" "$port" "$tls" "$caddy_env"
+    configure_firewall
     systemctl enable "$unit_name$instance" >/dev/null 2>&1
     start_installer "$instance"
 
     say "$instance: $([[ -n $created ]] && echo created || echo updated) as $role at https://$site (backend 127.0.0.1:$port), files under $dir"
     if [[ -z $(current_release "$instance") ]]; then
-        say "Next: put a release into service with: $0 release $instance <path to bilibi-web>"
+        say "Next: put a verified release into service with: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     fi
     if [[ ! -x $installer_bin ]]; then
-        say "Then let the Software page install releases here with: $0 installer <path to bilibi-installer>"
+        say "Then let the Software page install releases here with: $0 installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     fi
+}
+
+# expected_repository_id <repository> <given id>: the GitHub repository number
+# the signature must come from, so a reused repository name cannot pass. Only
+# the official repositories are pinned here; an application repository needs
+# its number from --repo-id, copied from its GitHub Settings page or another
+# trusted record before the install, never looked up from its name at install time.
+expected_repository_id() {
+    local repository=$1 given=$2 pinned=''
+    case $repository in
+        BelimbingProject/bilibi) pinned=1418519406 ;;
+        BelimbingProject/bilibi-app-maker) pinned=1426391840 ;;
+    esac
+    if [[ -n $given ]]; then
+        [[ $given =~ ^[1-9][0-9]*$ ]] || fail '--repo-id must be the GitHub repository number'
+        [[ -z $pinned || $given == "$pinned" ]] || fail "--repo-id $given is not the official number for $repository; nothing was installed"
+        printf '%s' "$given"
+    elif [[ -n $pinned ]]; then
+        printf '%s' "$pinned"
+    else
+        fail "$repository is not an official repository, so its GitHub repository number is needed" "rerun with --repo-id <number>, taken from a trusted source"
+    fi
+}
+
+# stage_source <file>: copy the operator's file once into a private folder only
+# root can enter, set $staged to that copy, and remove the folder on every exit.
+# Verify and use only the copy, so the original cannot change in between.
+staging=''
+staged=''
+stage_source() {
+    staging=$(mktemp -d /tmp/bilibi-stage.XXXXXX) || fail 'cannot create a private staging folder'
+    trap 'rm -rf -- "$staging"' EXIT
+    staged=$staging/artifact
+    install -m 0700 -o root -g root "$1" "$staged" || fail "cannot copy $1 for verification; nothing was installed"
+}
+
+# verify_provenance <artifact> <repository> <repository id> <tag>: GitHub
+# verifies the file's digest, signing repository, release workflow and tag, and
+# the signing repository's number must equal the expected one. Public
+# repositories do not need a login. For a private repository, pass its read
+# token as GH_TOKEN; it is inherited only by this command and is never printed.
+verify_provenance() {
+    local artifact=$1 repository=$2 repository_id=$3 tag=$4 ids id found=0
+    command -v gh >/dev/null || fail 'GitHub CLI is not installed, so release provenance cannot be checked' 'rerun create to install the server packages, then retry'
+    valid_repository "$repository" || fail 'the release repository must be owner/name'
+    valid_setup_tag "$tag" || fail 'the release tag must be setup-vX.Y.Z'
+    repository_id=$(expected_repository_id "$repository" "$repository_id")
+    ids=$(gh attestation verify "$artifact" --repo "$repository" \
+        --signer-workflow "$repository/.github/workflows/release.yml" \
+        --source-ref "refs/tags/$tag" \
+        --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryIdentifier' 2>>"$log") ||
+        fail "GitHub build provenance did not verify for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+    while IFS= read -r id; do
+        [[ -n $id ]] || continue
+        found=1
+        [[ $id == "$repository_id" ]] || fail "the release was signed by a different GitHub repository number than $repository_id; nothing was installed" 'use the asset from the repository you intend, or check the --repo-id you gave'
+    done <<<"$ids"
+    ((found)) || fail "GitHub returned no verified provenance for $repository tag $tag; nothing was installed" 'download the asset from the official Release setup workflow and retry'
+}
+
+# unpack_release <archive> <folder>: accept only the release archive's plain
+# files and verify its own checksum list before root copies anything from it.
+unpack_release() {
+    python3 - "$1" "$2" <<'PY'
+import hashlib
+from pathlib import Path, PurePosixPath
+import shutil
+import sys
+import tarfile
+
+archive, target = Path(sys.argv[1]), Path(sys.argv[2])
+allowed = {'bilibi-web', 'SHA256SUMS', 'manifest.txt', 'Cargo.lock', 'release.json', 'bundle.json'}
+seen = set()
+with tarfile.open(archive, 'r:gz') as source:
+    members = source.getmembers()
+    for member in members:
+        name = member.name.removeprefix('./')
+        path = PurePosixPath(name)
+        parts = path.parts
+        safe_plugin = len(parts) > 1 and parts[0] == 'plugins' and all(
+            part and not part.startswith('.') and len(part) <= 128 and
+            all(c.isalnum() or c in '._-' for c in part) for part in parts[1:])
+        if path.is_absolute() or '..' in parts or (name not in allowed and name != 'plugins' and not safe_plugin):
+            raise SystemExit(f'Release archive contains an unexpected path: {member.name}')
+        if name in seen or not (member.isfile() or (member.isdir() and (name == 'plugins' or safe_plugin))):
+            raise SystemExit(f'Release archive contains an unsafe or duplicate entry: {member.name}')
+        seen.add(name)
+    if not {'bilibi-web', 'SHA256SUMS'} <= seen:
+        raise SystemExit('Release archive is missing bilibi-web or SHA256SUMS')
+    target.mkdir(mode=0o700)
+    for member in members:
+        name = member.name.removeprefix('./')
+        destination = target.joinpath(*PurePosixPath(name).parts)
+        if member.isdir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        opened = source.extractfile(member)
+        if opened is None:
+            raise SystemExit(f'Release archive entry cannot be read: {name}')
+        with opened, destination.open('wb') as output:
+            shutil.copyfileobj(opened, output)
+        destination.chmod(0o755 if name == 'bilibi-web' else 0o644)
+
+checks = {}
+for line in (target / 'SHA256SUMS').read_text().splitlines():
+    digest, separator, name = line.partition('  ')
+    if not separator or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise SystemExit('Release checksum list is invalid')
+    if name not in seen or name in checks or not (target / name).is_file():
+        raise SystemExit(f'Release checksum list names an unexpected file: {name}')
+    checks[name] = digest
+    with (target / name).open('rb') as checked:
+        actual = hashlib.file_digest(checked, 'sha256').hexdigest()
+    if actual != digest:
+        raise SystemExit(f'Release checksum failed for {name}')
+if 'bilibi-web' not in checks:
+    raise SystemExit('Release checksum list does not name bilibi-web')
+PY
 }
 
 # ================================================================ installer
@@ -372,15 +678,26 @@ EOF
 # restart, and a job one of them was running is settled by the rules in
 # apps/installer/README.md ("If the server restarts mid-way").
 installer() {
-    local source=${1:-}
-    [[ -n $source ]] || usage
+    local source=${1:-} repository='' repository_id='' tag=''
+    [[ -n $source ]] || usage; shift
+    while (($#)); do
+        case $1 in
+            --repo) repository=${2:-}; shift 2 ;;
+            --repo-id) repository_id=${2:-}; shift 2 ;;
+            --tag) tag=${2:-}; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ -n $repository && -n $tag ]] || usage
     need_root installer "$@"
-    [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it on your own machine with: cargo build --release --locked -p bilibi-installer, then copy target/release/bilibi-installer to this server"
+    [[ -f $source && -x $source ]] || fail "$source is not an executable bilibi-installer" "build it in your development checkout with: cargo build --release --locked -p bilibi-installer, then install target/release/bilibi-installer here"
+    stage_source "$source"
+    verify_provenance "$staged" "$repository" "$repository_id" "$tag"
     [[ -d $root/build ]] || fail "no instance exists yet" "create one first: $0 create <instance> --role ... --site ..."
     install_unit
     retire_worker
     install -d -m 0755 -o root -g root "$root/build/bin"
-    install -m 0755 -o root -g root "$source" "$installer_bin.new" && mv -T "$installer_bin.new" "$installer_bin"
+    install -m 0755 -o root -g root "$staged" "$installer_bin.new" && mv -T "$installer_bin.new" "$installer_bin"
     say "installer: $installer_bin updated"
     local instance
     for instance in $(instances); do
@@ -439,14 +756,29 @@ put_in_service() {
     return 1
 }
 release() {
-    local instance=${1:-} source=${2:-}
-    [[ -n $instance && -n $source ]] || usage
+    local instance=${1:-} source=${2:-} repository='' repository_id='' tag=''
+    [[ -n $instance && -n $source ]] || usage; shift 2
+    while (($#)); do
+        case $1 in
+            --repo) repository=${2:-}; shift 2 ;;
+            --repo-id) repository_id=${2:-}; shift 2 ;;
+            --tag) tag=${2:-}; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+    [[ -n $repository && -n $tag ]] || usage
     need_root release "$@"
     instance_exists "$instance" || fail "no instance named $instance" "create it first: $0 create $instance --role ... --site ..."
     retire_worker
-    local binary dir n previous
-    if [[ -d $source ]]; then binary=$source/bilibi-web; else binary=$source; fi
-    [[ -f $binary && -x $binary ]] || fail "$binary is not an executable bilibi-web"
+    [[ -f $source ]] || fail "$source is not a setup release archive"
+    stage_source "$source"
+    verify_provenance "$staged" "$repository" "$repository_id" "$tag"
+    local unpacked binary dir n previous
+    unpacked=$staging/unpacked
+    if ! unpack_release "$staged" "$unpacked"; then
+        fail 'the setup release archive or its checksum is invalid; nothing was installed' 'download the asset again and retry'
+    fi
+    binary=$unpacked/bilibi-web
     dir=$(instance_dir "$instance")
     previous=$(current_release "$instance")
     n=$(( $(release_numbers "$instance" | tail -n1) + 1 ))
@@ -454,10 +786,15 @@ release() {
     install -m 0755 -o bilibi-build -g bilibi "$binary" "$dir/releases/$n/bilibi-web"
     # The release's recipe, when the build wrote one (scripts/discover-modules.py --pin).
     local extra
-    for extra in manifest.txt Cargo.lock; do
-        [[ -d $source && -f $source/$extra ]] && install -m 0644 -o bilibi-build -g bilibi "$source/$extra" "$dir/releases/$n/$extra"
+    for extra in manifest.txt Cargo.lock release.json bundle.json; do
+        [[ -f $unpacked/$extra ]] && install -m 0644 -o bilibi-build -g bilibi "$unpacked/$extra" "$dir/releases/$n/$extra"
     done
-    (cd "$dir/releases/$n" && sha256sum bilibi-web > SHA256SUMS && chown bilibi-build:bilibi SHA256SUMS)
+    install -m 0644 -o bilibi-build -g bilibi "$unpacked/SHA256SUMS" "$dir/releases/$n/SHA256SUMS"
+    if [[ -d $unpacked/plugins ]]; then
+        cp -R -- "$unpacked/plugins" "$dir/releases/$n/plugins"
+        chown -R bilibi-build:bilibi "$dir/releases/$n/plugins"
+    fi
+    rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
     # The database must be up to date before the new program serves; nothing
     # migrates on boot. The service pauses from here: Caddy shows the waiting page.
@@ -483,7 +820,7 @@ create_owner() {
     shift
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <path to bilibi-web>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" create-owner "$@"
 }
 # ========================================================= two-factor-reset
@@ -497,7 +834,7 @@ two_factor_reset() {
     shift
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")
-    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <path to bilibi-web>"
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" two-factor-reset "$@"
 }
 switch() {
@@ -530,6 +867,7 @@ status() {
     done
 }
 
+detect_os
 case ${1:-} in
     create) shift; create "$@" ;;
     release) shift; release "$@" ;;

@@ -102,12 +102,19 @@
       this.generation = 0;
       this.resume = null;
       this.resumable = this.el.hasAttribute('data-resumable');
+      this.immediate = this.el.hasAttribute('data-immediate');
+      this.autoSubmit = false;
       this.wrapper = this.el.closest('[data-file-input]') || this.el.parentElement;
       this.onChange = () => this.select([...this.el.files]);
       this.onAck = (event) => this.acked(event.detail || {});
       this.onDrop = () => this.reset();
       this.onRemount = () => this.carry();
       this.onClick = (event) => {
+        const choose = event.target.closest('button[name="upload-choose"]');
+        if (choose && this.wrapper.contains(choose) && !choose.disabled) {
+          if (!this.busy()) this.el.click();
+          return;
+        }
         const button = event.target.closest('button[name="upload-cancel"]');
         if (!button || !this.wrapper.contains(button) || button.disabled) return;
         this.cancel(Number(button.value), button);
@@ -200,6 +207,7 @@
               continue;
             }
             if (!chosenFile) continue;
+            if (this.immediate) this.autoSubmit = true;
             if (chosenFile.sha256) this.files.set(registration.id, chosenFile);
             if (registration.done) continue;
             const {file} = chosenFile;
@@ -232,6 +240,7 @@
       }, () => {
         // The file changed or vanished under the person; the server marks the
         // entry interrupted when the stream stops, and the row says so.
+        this.autoSubmit = false;
         this.pending.delete(id);
         this.files.delete(id);
         this.pump();
@@ -243,6 +252,7 @@
       const entry = this.pending.get(detail.id);
       if (!entry) return;
       if (detail.error) {
+        this.autoSubmit = false;
         this.pending.delete(detail.id);
         this.files.delete(detail.id);
       } else {
@@ -263,6 +273,7 @@
     },
 
     cancel(id, button) {
+      this.autoSubmit = false;
       this.pending.delete(id);
       this.files.delete(id);
       window.BilibiLive.send({type: 'upload_cancel', target: ownerTarget(this.el), id}, {source: button});
@@ -279,7 +290,15 @@
 
     // The held submit goes once every stream has ended, whatever ended it.
     settle() {
-      if (!this.resume || this.busy()) return;
+      if (this.busy()) return;
+      if (this.autoSubmit && this.form) {
+        this.autoSubmit = false;
+        this.resume = null;
+        this.form.removeAttribute('aria-busy');
+        this.form.requestSubmit();
+        return;
+      }
+      if (!this.resume) return;
       const {submitter} = this.resume;
       this.resume = null;
       if (!this.form) return;
@@ -302,6 +321,7 @@
       if (listed.length) this.carried = listed;
       this.files.clear();
       this.generation += 1;
+      this.autoSubmit = false;
       this.pending.clear();
       this.announced = 0;
       // A held submit waits for files that carry on; otherwise it is gone.

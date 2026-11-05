@@ -15,28 +15,20 @@ use bilibi_ui::{
 };
 use std::sync::Arc;
 
-const SAVED: &str = "Appearance settings saved.";
+const SAVED: &str = "Settings saved.";
 const THEME_CHOICES: [(&str, &str, &str); 3] = [
-    (
-        "light",
-        "Light",
-        "Light theme with light surfaces and dark text.",
-    ),
-    (
-        "dark",
-        "Dark",
-        "Dark theme with dark surfaces and light text.",
-    ),
+    ("light", "Light", "Light background and dark text."),
+    ("dark", "Dark", "Dark background and light text."),
     (
         "system",
         "System",
-        "Automatically follow the light or dark preference on this device.",
+        "Follow this device’s light or dark setting.",
     ),
 ];
 const MODE_CHOICES: [(&str, &str); 3] = [
     ("company", "Company time"),
     ("local", "This device's local time"),
-    ("utc", "Stored UTC"),
+    ("utc", "UTC (no conversion)"),
 ];
 
 struct ThemeChoice {
@@ -92,14 +84,14 @@ pub fn render(stored: &Stored, flash: FlashMap<'_>) -> Result<String, Error> {
             flash,
         }))?,
         header: fragment(Html::render(&Header {
-            title: Html::text("My Settings"),
+            title: Html::text("My settings"),
             subtitle: "",
             title_actions: Html::EMPTY,
             actions: Html::EMPTY,
         }))?,
         current: bilibi_ui::SettingsTab::Appearance,
-        heading: "Appearance Settings",
-        subheading: "Choose your theme, language and time zone.",
+        heading: "Theme",
+        subheading: "Choose your theme, language, region and time display.",
         themes: THEME_CHOICES
             .map(|(value, label, detail)| ThemeChoice {
                 value,
@@ -136,7 +128,7 @@ pub fn render(stored: &Stored, flash: FlashMap<'_>) -> Result<String, Error> {
                         .map(|(value, label)| Choice::new(label, value))
                         .into(),
                 )
-                .hint("Show dates and times in your company's time zone, this device's time zone, or UTC.")
+                .hint("Choose which time zone to use for dates and times.")
                 .wrapper_class("mb-0"),
         ))?,
     };

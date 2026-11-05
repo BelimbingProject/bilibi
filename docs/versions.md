@@ -43,7 +43,7 @@ The numbers follow [semantic versioning](https://semver.org), read for software 
 
 ## How to release
 
-The Platform and every official Domain and Extension stay in step. [ADR 02](architecture/decisions/02-build-in-development-keep-everything-in-step.md) is the decision. A release tag is created only after **Official compatibility** has passed for that exact commit, against every catalogue entry at its latest release. Nobody adds a version to the catalogue by hand: the Catalogue workflow lists each release from its tag.
+The Platform and every official Domain and Extension stay in step. [ADR 02](architecture/decisions/02-build-in-development-keep-everything-in-step.md) is the decision. **Every release starts with an owner-created, protected version tag on the default branch.** The release workflow checks the tagged commit before it publishes anything. Nobody adds a version to the catalogue by hand: the Catalogue workflow lists each release from its tag.
 
 **The Platform.** `Cargo.toml` on `main` already says the version you are releasing, for example `0.1.1`. Every merged pull request since the previous tag has an `Upgrade notes for agents` section. Gather them and commit the file:
 
@@ -54,13 +54,13 @@ git commit -m "Document upgrade notes for v0.1.1"
 git push origin main
 ```
 
-Then run **Release** from the Actions tab, on `main`. The workflow refuses any other branch. It refuses when the notes file is missing or when Official compatibility is not green for that commit. When the check passes, the workflow pushes the tag `v0.1.1`, publishes the GitHub release and lists the version in the published catalogue. The release body is `docs/upgrade-notes/v0.1.1.md`.
+An owner now creates `v0.1.1` on that reviewed `main` commit and pushes the tag. The protected `v*` tag rule allows only owners to create it and allows nobody to update or delete it. The tag starts **Release**. The workflow refuses a tag that is not on `main`, a version that differs from `Cargo.toml`, missing notes or failed Official compatibility. It publishes the GitHub release through the `release` environment and lists the version in the catalogue. The release body is `docs/upgrade-notes/v0.1.1.md`.
 
-Do not run `git tag` and `git push` for a release tag yourself. A hand-pushed `v*` tag skips the gate. The tag push from the Release workflow uses the built-in token, which does not start a second run, so the tested sets are recorded in that same run.
+Only a repository owner acting as the release maintainer creates the tag. Contributors do not create release tags. If any check fails, leave the tag unchanged, fix the problem on `main`, and release the next version. Never move or replace a release tag.
 
 After the tag exists, open a pull request that bumps `Cargo.toml` to the next number, so `main` never claims a number that was released.
 
-**A Domain or Extension.** Copy [`docs/domain-ci/ci.yml`](domain-ci/ci.yml) to `.github/workflows/ci.yml`. No secret is needed. From a commit whose CI is green:
+**A Domain or Extension.** Copy [`docs/domain-ci/ci.yml`](domain-ci/ci.yml) to `.github/workflows/ci.yml`. No secret is needed. An owner creates the protected `vX.Y.Z` tag only on a reviewed default-branch commit whose CI is green:
 
 ```sh
 git tag v0.1.1 <commit>
@@ -81,9 +81,9 @@ To record the pair as tested before the next Platform release, run `Domains on t
 
 In the application root, commit and push component changes in their owning repositories, then run `./bilibi check` and `./bilibi build`. Each asks whether to use new commits since the saved record: yes uses them and saves the record; no uses the saved versions. Uncommitted source changes stop the command. Scripts can use `--yes` to accept new commits; without it, a command with no keyboard stops rather than guessing. Checks and builds use independently fetchable commits and the saved dependency lock. Checks need their own empty disposable database.
 
-Run `./bilibi release` to commit `setup.toml`, `composition/manifest.txt` and `composition/Cargo.lock` and start the release workflow. GitHub builds only from that record.
+Commit `setup.toml`, `composition/manifest.txt` and `composition/Cargo.lock`, review them, and merge them into the application's default branch. Then run `./bilibi release` to create the protected `setup-vX.Y.Z` tag. The command and workflow both refuse a commit outside the remote default branch. GitHub builds with the saved lock, publishes SHA-256 checksums and creates signed build provenance for every release asset.
 
-Follow the generated application's README and release workflow to publish its verified archive. Validate it on Staging and promote that same archive to Production under ADR 02. This does not replace the Platform release workflow above or the server installer's backup and rollback rules.
+Follow the generated application's README and release workflow to publish its verified archive through the `release` environment. The server checks the archive's SHA-256 and GitHub provenance against the application repository, its exact release workflow and setup tag before unpacking it. A failed check leaves the running release untouched. Validate the verified archive on Staging and promote that same archive to Production under ADR 02. This does not replace the Platform release workflow above or the server installer's backup and rollback rules.
 
 ## Upgrade notes for agents
 

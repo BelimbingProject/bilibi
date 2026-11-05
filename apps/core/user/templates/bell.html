@@ -8,14 +8,25 @@
     it open across patches, as it does for the account and time panels. Below
     `sm` the bell sits mid-bar, so the panel spans the viewport under the bar. -#}
 {%- import "components.html" as ui -%}
-<div id="app-notifications" class="relative">
-<button type="button" id="app-notifications-bell" data-notifications-toggle class="relative inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-action transition hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong cursor-pointer" aria-haspopup="true" aria-expanded="false" aria-controls="app-notifications-dropdown" aria-label="{{ aria_label }}" title="Notifications">{% call ui::icon(name="notify", class="size-4") %}{% endcall %}{% if unread > 0 %}<span id="app-notifications-unread-badge" class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 inline-flex items-center justify-center rounded-full bg-brand-strong text-white text-[9px] font-semibold leading-none tabular-nums">{{ badge }}</span>{% endif %}</button>
+{%- import "tabs.html" as tab_ui -%}
+<div id="app-notifications" data-target="app-notifications" class="relative">
+<button type="button" id="app-notifications-bell" data-event="refresh_todos" data-notifications-toggle class="relative inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-action transition hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong cursor-pointer" aria-haspopup="true" aria-expanded="false" aria-controls="app-notifications-dropdown" aria-label="{{ aria_label }}" title="To do and notifications">{% call ui::icon(name="notify", class="size-4") %}{% endcall %}{% if todo_count > 0 %}<span id="app-todo-badge" title="To do" class="absolute -bottom-1 -left-1 min-w-3.5 h-3.5 px-0.5 inline-flex items-center justify-center rounded-full bg-action text-action-ink text-[9px] font-semibold tabular-nums">{{ todo_badge }}</span>{% endif %}{% if unread > 0 %}<span id="app-notifications-unread-badge" class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 inline-flex items-center justify-center rounded-full bg-brand-strong text-white text-[9px] font-semibold leading-none tabular-nums">{{ badge }}</span>{% endif %}</button>
 <div id="app-notifications-dropdown" data-notifications-panel hidden class="fixed inset-x-2 top-8 z-50 overflow-hidden rounded-lg border border-line bg-surface shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-1 sm:w-80">
+{% call tab_ui::tabs(id=tabs.id, items=tabs.tabs, label="To do and notifications") %}{% endcall %}
+{% if todo_tab %}
+<ul class="max-h-80 overflow-y-auto divide-y divide-line" aria-label="To do">
+{% for list in todos %}
+{% for item in list.items %}<li><a href="{{ item.url }}" class="block px-3 py-2 text-sm text-link hover:bg-surface-sunken">{{ item.title }}</a></li>{% endfor %}
+{% if let Some(url) = list.see_all %}<li><a href="{{ url }}" class="block px-3 py-2 text-sm text-link">See all</a></li>{% endif %}
+{% endfor %}
+{% if todo_count == 0 %}<li class="px-3 py-6 text-center text-xs text-ink-subtle">Nothing to do right now.</li>{% endif %}
+</ul>
+{% else %}
 <div class="flex items-center justify-between border-b border-line px-3 py-2 bg-surface-muted/50">
 <span class="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Notifications</span>
 <div class="flex items-center gap-2">
 {% if unread > 0 %}<button id="bell-mark-all-read" type="button" data-event="mark_all_read" data-target="app-notifications" class="text-xs text-brand font-medium hover:underline cursor-pointer">Mark all read</button>{% endif %}
-<a href="/notifications" class="text-xs text-ink-muted hover:text-ink hover:underline">View all</a>
+
 </div>
 </div>
 <ul class="max-h-80 overflow-y-auto divide-y divide-line py-0.5" aria-label="Recent notifications">
@@ -33,7 +44,8 @@
 {% if items.is_empty() %}<li class="px-3 py-6 text-center text-xs text-ink-subtle">You're all caught up.</li>{% endif %}
 </ul>
 <div class="border-t border-line bg-surface-muted/30 px-3 py-1.5 text-center">
-<a href="/notifications" class="text-xs font-medium text-brand hover:underline">Open notifications page →</a>
+<a href="/notifications" class="text-xs font-medium text-brand hover:underline">See all</a>
 </div>
+{% endif %}
 </div>
 </div>

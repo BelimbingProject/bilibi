@@ -18,7 +18,7 @@ There were three choices to make. Customer accounts could live in a second accou
 
 **A customer account is a row in `users` with `kind = 'customer'`. It signs in to its tenant's portal at `/portal/...` and is kept out of the staff application by three independent barriers: the first two each stop it on every staff path, and the third on every path that asks for a capability.**
 
-- **One account store with a kind.** `users.kind` is `staff` (every existing row) or `customer`. A customer always names a Person and names an affiliation, and so a company, only for a business customer; a private individual has neither. Core User stays the only writer of `users` and credentials, and invitations and registration live in `core/customer_access`, which calls Core User's account commands.
+- **One account store with a kind.** `users.kind` is `staff` (every existing row) or `customer`. A customer always names a Person and names an affiliation, and so a company, only for a business customer; a private individual has neither. Core User stays the only writer of `users` and credentials, and invitations and registration live in `core/portal`, which calls Core User's account commands.
 - **Customer email is unique per tenant; the portal address names the tenant.** Staff email stays unique across the installation, because staff sign in by email alone. Customer email is unique among one tenant's customers. The portal sign-in therefore names its tenant through a site address (`/portal/sign-in/{site}`), which also brands the anonymous pages and lets one person be a customer of two tenants without either learning of the other. Signed-in portal pages need no address: the session names the tenant.
 - **Three barriers.**
   1. *Cookie path.* The portal session lives in its own cookie, `bilibi_portal`, with `Path=/portal`. The browser never sends it to a staff path, so there a customer is anonymous.
@@ -47,7 +47,7 @@ The decision is built in parts under issue 137; until all have landed, only what
 | 2 | Capability audiences in Authz (`denied_audience`, the boot refusals of mixed-audience and grant-all portal roles) and Core Agent Access refusing customers. |
 | 3 | The `/portal` route space, the portal cookie and the host's kind check per cookie. |
 | 4 | The portal layout and menu root; the portal live socket in its own pull request. |
-| 5 | Core Customer Access: sites, invitations, the staff screen and the portal credential pages (sign-in, forgotten password, reset, invitation), the portal home and account, and `PortalScope`'s narrow entry points. |
+| 5 | Core Portal: sites, invitations, the staff screen and the portal credential pages (sign-in, forgotten password, reset, invitation), the portal home and account, and `PortalScope`'s narrow entry points. |
 | 6 | Staff control of the portal: turning a site on and off (off by default; while off its pages answer 404), the customer accounts list with revoking and restoring access, resending an invitation, and signing a customer in on accepting one. |
 | 7 | Self-registration: the site's request setting, the register and confirmation pages, and staff approval (which sends an invitation) or rejection. |
 | 8 | Audit labels for customers (delivered), the portal-access panel on a contact's record (delivered), the portal logo (delivered), the portal second sign-in step (delivered) and mail delivery reports (delivered). |

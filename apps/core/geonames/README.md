@@ -4,15 +4,15 @@ Global geographic reference data: countries, first-level divisions (Admin1),
 postcodes and cities. No tenant column, no owner. Callers use `Geonames`
 (registry service `core/geonames.lookup`); table layout and SQL stay private.
 
-## Empty on install
+## Initial reference data
 
-The migrations (`migrations/001-geonames.sql`, `002-postcode-overrides.sql`)
-create the four reference tables and the postcode-correction sidecar with **no
-rows**. Every lookup answers with an empty result (`None`, `[]`, a zero-total
-`Page`) until an operator imports; `Geonames::presence()` reports what is there
-and `Presence::is_empty()` is the install state. There is no unconditional
-seed: the import below is an explicit operational action. Address forms must
-treat an empty lookup as "type it yourself", not an error.
+`bilibi-web migrate` installs countries and Admin1 divisions in the same transaction as the schema, ready for address forms before the app starts. `migrations/003-countries-admin1.sql` embeds a GeoNames snapshot of 251 countries and 3,865 divisions. Cities and postcodes stay empty until an operator imports them. `Geonames::presence()` reports the current counts; lookups with no matching data still return `None`, `[]` or a zero-total `Page`.
+
+- **Offline and once.** The snapshot is part of the binary, with no download, cache, background worker or service seed. The existing migration runner serializes concurrent migration/seed commands with its transaction advisory lock and commits the snapshot together with the migration receipt. A failure or interruption rolls both back; retry applies the whole migration. Repeated migrations skip it, preserving edits, refreshes and deliberate deletions.
+- **Startup paths.** `./bilibi start` runs migrations after a successful build, on launch and watched rebuilds; server installation and software installation also run migrations explicitly. Direct application boot performs no migration or seeding. Seeding adds no network phase or extra database lock to those commands.
+- **Existing identities.** The new migration leaves conflicting unique identities untouched, including operator names and imported facts. The historical migrations are unchanged. This is an initial reference snapshot, not a recurring refresh; use the import command or the Update controls below for current upstream data.
+
+The snapshot is adapted from [GeoNames](https://www.geonames.org/), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), retrieved on 2026-11-04 from [`countryInfo.txt`](https://download.geonames.org/export/dump/countryInfo.txt) and [`admin1CodesASCII.txt`](https://download.geonames.org/export/dump/admin1CodesASCII.txt). Its SQL maps the same upstream fields as the importer, omits blank optional values, and preserves Unicode and postal-code regular expressions. As in the importer, the `XK` country row is omitted because its upstream numeric code (`0`) fails the schema's three-character requirement. Source SHA-256 hashes are recorded in the migration. Never regenerate an applied migration; publish a new version if the bundled baseline changes.
 
 ## Import
 
@@ -179,8 +179,7 @@ DATABASE_URL=<disposable db> BILIBI_DISPOSABLE_GEONAMES_DEMO=yes \
   cargo run -p bilibi-geonames --example geonames-walkthrough
 ```
 
-Shows the fresh-install behaviour, then lookups over a few hand-inserted rows,
-hostile input and the Grid catalog entry.
+Shows the installed snapshot, then deliberately empties the disposable database's geography to demonstrate empty lookups, a few hand-inserted rows, hostile input and the Grid catalog entry. Run on a fresh database to inspect initial seeding; the snapshot is not replayed after the walkthrough clears it.
 
 ```bash
 DATABASE_URL=<disposable migrated db> BILIBI_DISPOSABLE_GEONAMES_DEMO=yes \

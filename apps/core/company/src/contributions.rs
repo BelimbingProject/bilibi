@@ -64,7 +64,7 @@ bilibi_menu::contribute!(
     "core/company",
     MenuItem::page("admin.company", "Companies", "/companies")
         .icon("building-office-2")
-        .under("admin")
+        .under("core")
         .requires(Requirement::Capability(LIST))
         .order(10)
 );

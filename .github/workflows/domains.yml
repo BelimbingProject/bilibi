@@ -1,16 +1,16 @@
 # Mount every official Domain and Extension from catalogue.json and run the
 # shared mounted gates. Companion branches are selected only on pull requests
-# (docs/versions.md); main pushes always check main HEADs. Tags and manual runs
-# retain the existing Domain tested-set recording and catalogue publishing.
+# (docs/versions.md); main pushes always check main HEADs. Manual runs retain
+# the existing Domain tested-set recording and catalogue publishing.
 # The Release workflow calls this with domains at their latest release, and
-# records the sets, before it creates the tag.
+# records the sets in its publish job after the reviewed tag passes.
 #
 # A pull request is checked as the change on top of its live base branch, not
 # on GitHub's merge ref, which can be older than the Domains it is mounted with.
 #
 # A pull request whose files cannot affect a mount passes Official compatibility
-# without mounting. Other pull requests lint and boot a debug build. main, tags
-# and manual runs still do the locked release build. A push to main also runs
+# without mounting. Other pull requests lint and boot a debug build. main and
+# manual runs still do the locked release build. A push to main also runs
 # the debug build, to save the cache a pull request restores.
 name: Domains on this change
 
@@ -20,8 +20,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       domains_at:
@@ -38,7 +36,7 @@ on:
         type: string
         default: latest-release
       platform_version:
-        description: Cargo.toml version to record. Set by the Release workflow before the tag exists.
+        description: Cargo.toml version to record. Set by the Release workflow from the reviewed tag.
         type: string
         default: ''
     outputs:
@@ -205,7 +203,7 @@ jobs:
       - name: Describe the tested set
         if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release'
         env:
-          # Only the Release workflow's call sets a version before the tag exists.
+          # The Release workflow passes the version from its reviewed tag.
           PLATFORM_VERSION: ${{ inputs.platform_version }}
         run: |
           args=(--run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
@@ -266,19 +264,15 @@ jobs:
           fi
 
   # Publishes catalogue.json from this change plus every tested set so far to
-  # the `catalogue` branch (docs/versions.md). Release tags and hand runs
-  # record, and so does the Release workflow's call once compatibility has
-  # passed. A pull request or a push to main never writes anything.
-  # The Release workflow pushes the tag with the built-in token, which does
-  # not start a second run, so this call is the recording for that release.
+  # the `catalogue` branch (docs/versions.md). Hand runs record. A caller such
+  # as Release receives the artifacts and records them in its one publish job.
+  # A pull request or a push to main never writes.
   record:
     name: Record the tested sets
     needs: [domain, compatibility]
     if: >-
-      always() && (
-        (inputs.platform_version != '' && needs.compatibility.result == 'success') ||
-        (inputs.platform_version == '' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'))
-      )
+      always() && inputs.platform_version == '' &&
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

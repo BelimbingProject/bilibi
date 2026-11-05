@@ -2250,13 +2250,3 @@ route!(
 inventory::submit! {bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES,SERVICE,bilibi_module_registry::Provenance{module:"base/workflow",source:file!(),line:line!()},&bilibi_module_registry::contributions::PageWrites{service:SERVICE,contracts:&[],pending:bilibi_module_registry::contributions::Pending::None})}
 inventory::submit! {bilibi_module_registry::Contribution::new(bilibi_agent_api::page::PAGE_FAMILIES,SERVICE,bilibi_module_registry::Provenance{module:"base/workflow",source:file!(),line:line!()},&bilibi_agent_api::page::PageFamily{service:SERVICE,event_prefix:"approval."})}
 inventory::submit! {bilibi_module_registry::Contribution::new(bilibi_authz::VOCABULARY,"workflow.approval.view",bilibi_module_registry::Provenance{module:"base/workflow",source:file!(),line:line!()},&bilibi_authz::VocabularyContribution{domains:&[],verbs:&[],capabilities:&[bilibi_authz::CapabilityDefinition::tenant(VIEW)],roles:&[],system_principals:&[]})}
-bilibi_menu::contribute!(
-    "base/workflow",
-    bilibi_menu::MenuItem::page(
-        "workflow.approvals",
-        "Waiting for my approval",
-        "/workflow/approvals"
-    )
-    .icon("check")
-    .requires(bilibi_menu::Requirement::Capability(VIEW))
-);

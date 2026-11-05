@@ -10,7 +10,7 @@
     reconnecting arrow; connection ("client" | "server") binds it to the drop. -#}
 {% macro flash(kind, id="", title="", message="", spinner=false, hidden=false, auto_dismiss=false, connection="", local=false) %}
 {%- if !message.is_empty() -%}
-<div id="{% if id.is_empty() %}flash-{{ kind.name() }}{% else %}{{ id }}{% endif %}" data-flash{% if local %} data-local-flash{% endif %} {% if !local %}data-event="clear-flash" data-value-key="{{ kind.name() }}"{% endif %} role="{{ kind.role() }}" aria-live="{{ kind.live() }}" class="w-full"{% if hidden %} hidden{% endif %}{% if !connection.is_empty() %} data-connection="{{ connection }}"{% endif %}{% if auto_dismiss %} data-hook="FlashAutoDismiss" data-auto-dismiss-ms="{{ bilibi_ui::AUTO_DISMISS_MS }}"{% endif %}><div class="flex items-start gap-2 rounded-xl border px-panel py-feedback text-sm shadow-xl shadow-ink/[0.08] backdrop-blur {{ kind.flash_class() }}">{% call c::icon(name=kind.icon(), class="mt-1 size-4 shrink-0") %}{% endcall %}<div class="min-w-0 flex-1">{% if !title.is_empty() %}<p class="font-semibold">{{ title }}</p>{% endif %}<p data-flash-message>{{ message }}{% if spinner %} {% call c::icon(name="arrow-path", class="ml-1 size-3 animate-spin") %}{% endcall %}{% endif %}</p></div><button type="button" class="ui-icon-button group grid size-6 shrink-0 place-items-center self-start rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong/40" aria-label="close">{% call c::icon(name="close", class="size-4 opacity-40 group-hover:opacity-70") %}{% endcall %}</button></div></div>
+<div id="{% if id.is_empty() %}flash-{{ kind.name() }}{% else %}{{ id }}{% endif %}" data-flash{% if local %} data-local-flash{% endif %} {% if !local %}data-event="clear-flash" data-value-key="{{ kind.name() }}"{% endif %} role="{{ kind.role() }}" aria-live="{{ kind.live() }}" class="w-full"{% if hidden %} hidden{% endif %}{% if !connection.is_empty() %} data-connection="{{ connection }}"{% endif %}{% if auto_dismiss %} data-hook="FlashAutoDismiss" data-auto-dismiss-ms="{{ bilibi_ui::AUTO_DISMISS_MS }}"{% endif %}><div class="flex items-start gap-2 rounded-xl border px-panel py-feedback text-sm shadow-xl shadow-ink/[0.08] backdrop-blur {{ kind.flash_class() }}">{% call c::icon(name=kind.icon(), class="size-4 shrink-0") %}{% endcall %}<div class="min-w-0 flex-1">{% if !title.is_empty() %}<p class="font-semibold">{{ title }}</p>{% endif %}<p data-flash-message>{{ message }}{% if spinner %} {% call c::icon(name="arrow-path", class="ml-1 size-3 animate-spin") %}{% endcall %}{% endif %}</p></div><button type="button" class="ui-icon-button group grid size-6 shrink-0 -my-1 place-items-center self-start rounded-sm cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong/40" aria-label="close">{% call c::icon(name="close", class="size-4 opacity-40 group-hover:opacity-70") %}{% endcall %}</button></div></div>
 {%- endif -%}
 {% endmacro %}
 
@@ -30,13 +30,15 @@
 {#- The layout's flash outlet: a permanent polite live region stacking the
     messages most severe first. Only a success times out. In flow by default so
     an approval notice cannot cover the next action (for example Post); floating
-    pins it top right for the outlet that sits outside the page body. -#}
-{% macro flash_group(id="flash-group", messages=bilibi_ui::NO_FLASH, floating=false) %}
+    pins it top right for the outlet that sits outside the page body. Local
+    messages only hide when closed and send the page no `clear-flash`: the
+    landing outlet's, which belong to no page. -#}
+{% macro flash_group(id="flash-group", messages=bilibi_ui::NO_FLASH, floating=false, local=false) %}
 <div id="{{ id }}" aria-live="polite" class="{% if floating %}fixed right-4 top-4{% else %}relative ml-auto mr-4{% endif %} z-50 flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2">
-{% call flash(kind=bilibi_ui::StatusKind::Error, message=messages.error) %}{% endcall %}
-{% call flash(kind=bilibi_ui::StatusKind::Warning, message=messages.warning) %}{% endcall %}
-{% call flash(kind=bilibi_ui::StatusKind::Success, message=messages.success, auto_dismiss=true) %}{% endcall %}
-{% call flash(kind=bilibi_ui::StatusKind::Info, message=messages.info) %}{% endcall %}
+{% call flash(kind=bilibi_ui::StatusKind::Error, message=messages.error, local=local) %}{% endcall %}
+{% call flash(kind=bilibi_ui::StatusKind::Warning, message=messages.warning, local=local) %}{% endcall %}
+{% call flash(kind=bilibi_ui::StatusKind::Success, message=messages.success, auto_dismiss=true, local=local) %}{% endcall %}
+{% call flash(kind=bilibi_ui::StatusKind::Info, message=messages.info, local=local) %}{% endcall %}
 {% call connection_banners(id="connection") %}{% endcall %}
 </div>
 {% endmacro %}

@@ -89,7 +89,7 @@ Bilibi opens in your browser at the sign-in page when it is ready. Sign in as `a
 
 ### Supported environment
 
-Use apt-based Ubuntu or Debian, including either distribution in WSL2, with Git, Bash and network access. Installing missing packages needs root or sudo privileges. Setup may ask for your sudo password in the terminal; one command does not mean unattended installation.
+Use apt-based Ubuntu or Debian, or Arch Linux and its derivatives (including Omarchy), with Git, Bash and network access. These distributions also work in WSL2. On Arch, setup performs a full system upgrade when it installs missing packages, as required by pacman. Installing missing packages needs root or sudo privileges. Setup may ask for your sudo password in the terminal; one command does not mean unattended installation.
 
 Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. If local HTTPS trust needs manual setup (including Windows trust in WSL2), use the printed loopback HTTP address. The launcher falls back to HTTP when local HTTPS is unavailable.
 
@@ -183,8 +183,11 @@ A Domain such as Finance is its own repository, mounted as a real folder (not a 
 
 ```sh
 ./bilibi add finance
+./bilibi add commerce
 ./bilibi start
 ```
+
+Commerce adds Products, Quotations and Sales orders under the Commerce menu.
 
 `add` uses the official repository's default branch. Repeating it keeps an existing checkout, branch and edits, and refreshes discovery and the working dependency lock. A conflicting destination or different origin is refused for you to inspect. Generated composition and lock changes stay local to Platform. Software's developer commands add `--kind`, `--source` and `--commit` so the clone is the exact repository and release commit it shows; an existing folder at another commit is left unchanged with the steps to move it.
 

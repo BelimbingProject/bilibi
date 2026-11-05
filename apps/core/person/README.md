@@ -106,13 +106,13 @@ duplicate candidates, concurrent stale saves, cross-tenant IDs, masked contacts,
 live capability revocation, retirement, system-agent protection, optional binding
 locks, transactional rollback and a deliberately refused audit action. It also
 executes create/update/retire through the real safe-write plan service and prints
-replay refusal without printing credentials or plan codes. It creates a temporary
+write refusal without printing credentials or 2FA codes. It creates a temporary
 operator marker only in the disposable DB and removes it. No People module,
 unit tests, test runner or mocks are involved.
 
 ## Person screens and record panels (K8)
 
-The Contacts menu entry (`admin.contacts`) is a Core contact directory. It has no employee number,
+The Contacts menu entry (`admin.contacts`, under Core) is a Core contact directory. It has no employee number,
 employment type/status/dates, supervisor, department or automatic account
 controls. Human/agent is identity kind; current/retired is identity availability.
 Retirement preserves history and is independent of HR employment.

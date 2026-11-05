@@ -6,7 +6,7 @@ Platform-only automation.
   release.py ready            refuse unless this commit may be released
   release.py require-notes    refuse a pull request that omits upgrade notes
   release.py gather           write docs/upgrade-notes/vX.Y.Z.md from merged pull requests
-  release.py publish          tag and publish after Official compatibility has passed
+  release.py publish          publish the existing tag after Official compatibility has passed
 """
 import json
 import os
@@ -93,15 +93,19 @@ def assert_tag_free(tag, sha):
 
 
 def ready():
-    """Print the version when this commit is allowed to start the release gate."""
+    """Print the version when this reviewed tag may start the release gate."""
     ref = os.environ.get('GITHUB_REF', '')
-    if ref:
-        expect(ref == 'refs/heads/main', 'Run the Release workflow from main (docs/versions.md).')
     version = workspace_version()
+    tag = f'v{version}'
+    if ref:
+        expect(ref == f'refs/tags/{tag}', f'Release runs only for {tag} (docs/versions.md).')
     require_notes_file(version)
     assert_clean()
     sha = git_out(['rev-parse', 'HEAD']).stdout.strip()
-    assert_tag_free(f'v{version}', sha)
+    expect(assert_tag_free(tag, sha), f'{tag} is missing. An owner creates the protected tag on a reviewed main commit.')
+    git_out(['fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'])
+    on_main = git_out(['merge-base', '--is-ancestor', sha, 'origin/main'], check=False)
+    expect(on_main.returncode == 0, f'{tag} does not point to a commit on main.')
     write_output('version', version)
     print(version)
 
@@ -215,10 +219,7 @@ def publish():
     if expected:
         expect(sha == expected, 'HEAD is not the commit Official compatibility checked.')
     tag = f'v{version}'
-    if not assert_tag_free(tag, sha):
-        git_out(['-c', 'user.name=github-actions', '-c', 'user.email=github-actions@github.com',
-                 'tag', '-a', tag, sha, '-m', f'Bilibi {tag}'])
-        git_out(['push', 'origin', f'refs/tags/{tag}'])
+    expect(assert_tag_free(tag, sha), f'{tag} is missing. An owner creates the protected tag before this workflow runs.')
     ensure_release(tag, sha, notes)
     print(f'published {tag}')
 

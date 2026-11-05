@@ -4,8 +4,10 @@ set -euo pipefail
 # shellcheck source=scripts/lib/install.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/../lib/install.sh"
 
-if apt_package_installed caddy || command -v caddy >/dev/null; then
+if command -v caddy >/dev/null || { [[ $SETUP_PACKAGE_MANAGER == apt ]] && apt_package_installed caddy; }; then
     present caddy
+elif [[ $SETUP_PACKAGE_MANAGER == pacman ]]; then
+    if pacman_install caddy; then installed caddy; else present caddy; fi
 else
     apt_update
     if ! apt_candidate caddy; then

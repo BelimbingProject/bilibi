@@ -123,12 +123,15 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
 
 - `organisation::create` / `preview`: trims and defaults (`status` active, code from
   the name), refuses a field the actor's role restricts, proves the parent,
-  legal entity type, jurisdiction (`bilibi_geonames::country_known`, so no
-  jurisdiction is recordable until countries are imported) and code
+  legal entity type, jurisdiction (`bilibi_geonames::country_known`, so only
+  a country Geonames holds is recordable) and code
   uniqueness on the write's transaction under a per-code advisory lock. Automatic suggestions are allocated under the tenant lock.
 - `bilibi_company::require_writable` is the one archived check: a live company
   whose status is `archived` is read-only for good, for its own facts and
-  every record it owns. Reads never ask it.
+  every record it owns. With locking enabled it uses `FOR NO KEY UPDATE`: this
+  holds the judged status through commit and remains compatible with Queue's
+  `FOR KEY SHARE` workplace proof. Reads never ask it.
+- Company's field, primary and eligibility writes lock with `FOR NO KEY UPDATE`, so a queued job holding its `Execution::begin` fence can make them. Archiving keeps `FOR UPDATE` on purpose: it waits for jobs fenced on that company, so none keeps writing into a company being archived. A queued job therefore cannot archive the company its own fence covers. Changing a company code is not fence-compatible (`code` is a unique key column, so its update waits on the fence's `FOR KEY SHARE`): a job working on that company is refused at once with a message pointing to the company page. Saving other fields with an unchanged code works.
 - `organisation::Provider` is the `OrganisationProvider` Tenancy's
   `PartyProofs` proves targets with: a live, unarchived company of the
   actor's tenant, bound at the service factory.
@@ -582,7 +585,7 @@ Company scalar facts share a record-field schema with Grid. Optional columns inc
 
 ## Companies in a newly created tenant
 
-`CompanyService::preview_tenant_companies` and `provision_new_tenant_in` compose tenant provisioning with [Core Tenant Administration](../tenant_administration/README.md). Names use ordinary Company validation, short generated codes and the person's field restrictions; duplicate suggestions receive numeric suffixes. The first company becomes primary.
+`CompanyService::preview_tenant_companies` and `provision_new_tenant_in` compose tenant provisioning with [Core Tenant](../tenant/README.md). Names use ordinary Company validation, short generated codes and the person's field restrictions; duplicate suggestions receive numeric suffixes. The first company becomes primary.
 
 The write requires Tenancy's sealed `CreatedTenant` receipt, bound to the current transaction and original actor. It accepts no arbitrary target tenant id and never changes the caller's scope. Tenant-create capability and live operator standing authorize the complete provisioning action; its contract enforces Base Step-up. Every company and primary assignment is a `Change` on that same transaction. Existing tenant business data remains behind its ordinary scoped facade.
 
@@ -615,7 +618,7 @@ The create path checks under `admin.company.create`, not `admin.company.list`. `
 
 ## Company hierarchies
 
-**Use `CompanyService::hierarchy(scope, id)` or `core.company.hierarchy` to read relatives.** Both require `admin.company.view`, use current Company's tenant-wide read visibility, and return id, name, status and level. Ancestors are root first and keep their true depth from the root; when the limit cuts the chain, the nearest ancestors stay with their real levels and `truncated` is set. Descendant levels count the requested company as level 1. The read caps traversal at the tenant's depth limit and the returned relatives at 1,000 nodes, with `truncated` when more exist. The requested company is not repeated in either list. The record page links its parent chain, starting with “… N higher levels” when the limit hid some.
+**Use `CompanyService::hierarchy(scope, id)` or `core.company.hierarchy` to read relatives.** Both require `admin.company.view`, use current Company's tenant-wide read visibility, and return id, name, status, level and `parent_id`, so a caller can draw the tree (`None` at the root; outside the list when the limit cut the chain). Ancestors are root first and keep their true depth from the root; when the limit cuts the chain, the nearest ancestors stay with their real levels and `truncated` is set. Descendant levels count the requested company as level 1. The read caps traversal at the tenant's depth limit and the returned relatives at 1,000 nodes, with `truncated` when more exist. The requested company is not repeated in either list. The record page links its parent chain, starting with “… N higher levels” when the limit hid some.
 
 Every ordinary create with a parent and every parent edit shares the tenant lock and the same hierarchy checks. A loop returns `Parent company cannot be one of its own subsidiaries.` The new parent's chain depth plus the moving company's subtree height must fit the limit. The default refusal is `Parent company would make the company tree deeper than 10 levels.` Existing deep trees can remain or become shallower; a move is refused only if it increases depth beyond the limit. `save_fact` returns `WriteError::Invalid` with these field messages, preserving the inline draft.
 

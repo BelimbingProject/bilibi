@@ -1,6 +1,6 @@
 //! Global geographic reference data: countries, first-level divisions,
-//! postcodes and cities. A fresh install creates the tables and no rows; every
-//! lookup answers empty until an operator imports. See `README.md`.
+//! postcodes and cities. Migrations install a bundled country and Admin1
+//! snapshot; cities and postcodes require an operator import. See `README.md`.
 mod contributions;
 mod corrections;
 mod download;
@@ -49,7 +49,10 @@ inventory::submit! {
     Module {
         id: "core/geonames", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/authz", "base/grid", "base/integration", "base/tenancy", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[MIGRATION, MIGRATION_OVERRIDES],
+        migrations: &[MIGRATION, MIGRATION_OVERRIDES, (
+            "core-geonames-003-countries-admin1",
+            include_str!("../migrations/003-countries-admin1.sql"),
+        )],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 Ok(Arc::new(Geonames::new(

@@ -24,6 +24,16 @@ pub enum Access {
 /// sealed scope and check the owner's own view capability; an id is a
 /// request, never proof. Like Media's `SubjectOwner::authorize`.
 pub trait RecordOwner: Send + Sync {
+    /// Check a new selection. Owners may refuse retired records here while
+    /// keeping earlier references readable through `authorize`.
+    fn select<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        id: &'a str,
+    ) -> ProofFuture<'a, Access> {
+        self.authorize(client, scope, id)
+    }
     fn authorize<'a>(
         &'a self,
         client: &'a dyn ProofClient,

@@ -19,7 +19,6 @@ bilibi-queue = { path = "../queue" }
 bilibi-schedule = { path = "../schedule" }
 bilibi-settings = { path = "../settings" }
 bilibi-ui.workspace = true
-bilibi-menu.workspace = true
 bilibi-system.workspace = true
 bilibi-datetime = { path = "../datetime" }
 bilibi-locale = { path = "../locale" }

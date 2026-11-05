@@ -1,0 +1,5 @@
+{#- An activity's record page; announced so a following workspace tile can
+    select it. -#}
+{% import "workspace.html" as workspace %}
+{% call workspace::announce(kind="core/activity", record_id=id) %}{% endcall %}
+{{ body }}

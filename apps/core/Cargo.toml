@@ -7,17 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bilibi-activity = { path = "activity" }
 bilibi-address = { path = "address" }
 bilibi-affiliation = { path = "affiliation" }
-bilibi-agent-access = { path = "agent_access" }
-bilibi-agent-plugins = { path = "agent_plugins" }
+bilibi-agent = { path = "agent" }
 bilibi-company = { path = "company" }
 bilibi-currency = { path = "currency" }
-bilibi-customer-access = { path = "customer_access" }
+bilibi-document = { path = "document" }
 bilibi-geonames = { path = "geonames" }
 bilibi-party = { path = "party" }
 bilibi-person = { path = "person" }
-bilibi-tenant-administration = { path = "tenant_administration" }
+bilibi-portal = { path = "portal" }
+bilibi-product = { path = "product" }
+bilibi-tenant = { path = "tenant" }
 bilibi-user = { path = "user" }
-bilibi-user-administration = { path = "user_administration" }
 bilibi-work-calendar = { path = "work_calendar" }

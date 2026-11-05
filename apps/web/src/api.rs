@@ -18,6 +18,10 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
+use bilibi_agent::{
+    AgentAccess, AgentClaims, ClientRegistration, CodeExchange, OAuthError, Throttle, CLIENT_ID,
+    DEVICE_GRANT, OAUTH_REQUESTS_PER_MINUTE, OAUTH_SCOPE,
+};
 use bilibi_base::{
     agent_api::{
         plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
@@ -26,10 +30,6 @@ use bilibi_base::{
     integration::{Incoming, Integration, Target},
     settings::Settings,
     tenancy::{ClientIdentity, ProofFuture, Scope, SelfReport},
-};
-use bilibi_core::agent_access::{
-    AgentAccess, AgentClaims, ClientRegistration, CodeExchange, OAuthError, Throttle, CLIENT_ID,
-    DEVICE_GRANT, OAUTH_REQUESTS_PER_MINUTE, OAUTH_SCOPE,
 };
 use bilibi_database::Error;
 use serde_json::{json, Map, Value};
@@ -70,6 +70,7 @@ pub struct Edge {
     pub(crate) access: Arc<AgentAccess>,
     pub(crate) registry: Arc<Registry>,
     pub(crate) plans: Arc<Plans>,
+    pub(crate) reviews: Arc<bilibi_base::agent_api::Reviews>,
     /// Names the record kind an operation acts on, for the exchange row.
     pub(crate) records: Arc<bilibi_base::records::Records>,
     integration: Arc<Integration>,
@@ -79,9 +80,10 @@ pub struct Edge {
 impl Edge {
     pub fn new(services: &bilibi_module_registry::Services) -> bilibi_database::Result<Self> {
         Ok(Self {
-            access: services.get("core/agent_access.grants")?,
+            access: services.get("core/agent.grants")?,
             registry: services.get("base/agent_api.registry")?,
             plans: services.get("base/agent_api.plans")?,
+            reviews: services.get("base/agent_api.reviews")?,
             records: services.get(bilibi_base::records::SERVICE)?,
             integration: services.get(bilibi_base::integration::SERVICE)?,
             settings: services.get("base/settings.store")?,
@@ -264,8 +266,7 @@ pub(crate) fn client_identity(headers: &HeaderMap, mcp: bool) -> Option<ClientId
 pub(crate) fn label(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let value = values.next()?.to_str().ok()?;
-    (values.next().is_none() && bilibi_core::agent_access::valid_label(value))
-        .then(|| value.to_owned())
+    (values.next().is_none() && bilibi_agent::valid_label(value)).then(|| value.to_owned())
 }
 
 /// Absolute links belong to the host; operations return paths. Every record
@@ -750,11 +751,13 @@ pub(crate) async fn authenticate(
         None => false,
     };
     if !allowed {
+        let settings_url = format!("{}/settings/ai-connections", origin(app));
         return Err(refusal(
             StatusCode::FORBIDDEN,
             json!({
                 "error": "ai_switched_off",
-                "error_description": "AI is switched off in Bilibi for this connection. Sign in and turn it on to continue."
+                "error_description": format!("AI access is off for this connection. Open {settings_url}, switch it on, then try again."),
+                "settings_url": settings_url,
             }),
         ));
     }
@@ -855,12 +858,7 @@ fn api_error(error: bilibi_base::agent_api::Error) -> Refusal {
             };
             self::error(StatusCode::NOT_FOUND, code)
         }
-        E::InvalidPlanCode
-        | E::PlanMismatch
-        | E::PlanAlreadyUsed
-        | E::PlanExpired
-        | E::StalePlan
-        | E::WritesNotEnabled => self::error(StatusCode::CONFLICT, &error.to_string()),
+        E::WritesNotEnabled => self::error(StatusCode::CONFLICT, &error.to_string()),
         E::ChannelNotAllowed => self::error(StatusCode::FORBIDDEN, "channel_not_allowed"),
         E::PlanRejected(results) => refusal(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1068,9 +1066,6 @@ async fn commit(State(app): State<App>, request: Request) -> Response {
     let mut targets = Vec::new();
     let result = async {
         let mut fields = body(request).await?;
-        let Some(Value::String(code)) = fields.remove("plan_code") else {
-            return Err(invalid_request());
-        };
         let operations = operations(fields.remove("operations").ok_or_else(invalid_request)?)?;
         // The account holder's step-up code, sent after a `step_up_required`.
         let scope = match fields.remove("step_up_code") {
@@ -1078,16 +1073,15 @@ async fn commit(State(app): State<App>, request: Request) -> Response {
             Some(Value::String(step_up)) => agent.scope.clone().presenting_step_up(&step_up),
             Some(_) => return Err(invalid_request()),
         };
+        if !fields.is_empty() {
+            return Err(invalid_request());
+        }
         let authority = Grant {
             access: &app.api.access,
             claims: &agent.claims,
             trace: &agent.trace,
         };
-        let committed = app
-            .api
-            .plans
-            .commit(&scope, &authority, &code, &operations)
-            .await;
+        let committed = app.api.plans.commit(&scope, &authority, &operations).await;
         if let Ok(answer) = &committed {
             targets = planned_targets(&app, &operations, Some(answer));
         }

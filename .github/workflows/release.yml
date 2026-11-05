@@ -1,11 +1,10 @@
-# Tag vX.Y.Z and publish the GitHub release only after Official compatibility
-# has passed for this exact commit against every official Domain and Extension.
-# Run it from the Actions tab on main. Pushing a release tag by hand skips
-# this gate (docs/versions.md).
+# Publish a reviewed vX.Y.Z tag only after Official compatibility has passed
+# for its exact commit against every official Domain and Extension.
 name: Release
 
 on:
-  workflow_dispatch:
+  push:
+    tags: ['v*.*.*']
 
 permissions:
   contents: read
@@ -30,8 +29,7 @@ jobs:
     name: Official compatibility at the latest releases
     needs: guard
     permissions:
-      # The called workflow's record job publishes the catalogue branch.
-      contents: write
+      contents: read
     uses: ./.github/workflows/domains.yml
     with:
       domains_at: latest-release
@@ -43,6 +41,9 @@ jobs:
     if: needs.compatibility.outputs.compatible == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: release
+    concurrency:
+      group: catalogue
     permissions:
       contents: write
       actions: read
@@ -51,18 +52,39 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - name: Tag and publish
+      - name: Publish the tagged release
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release.py publish
-
-  # The tag exists now. List it in the published catalogue, so adopters see it
-  # without waiting for the daily run.
-  catalogue:
-    name: List the release in the catalogue
-    needs: [guard, publish]
-    permissions:
-      contents: write
-    uses: ./.github/workflows/catalogue.yml
-    with:
-      platform_version: ${{ needs.guard.outputs.version }}
+      - name: Collect the tested sets
+        uses: actions/download-artifact@v7
+        with:
+          pattern: tested-*
+          path: sets
+      - name: Record the tested sets and list the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM_VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          records=$(find sets -name tested-set.json | sort)
+          for attempt in 1 2 3; do
+            rm -rf published
+            if git clone --quiet --branch catalogue --single-branch --depth 1 "$remote" published 2>/dev/null; then
+              :
+            else
+              git init --quiet --initial-branch catalogue published
+            fi
+            # shellcheck disable=SC2086
+            python3 scripts/catalogue.py publish --from catalogue.json --into published/catalogue.json --record $records
+            python3 scripts/catalogue.py refresh --from catalogue.json --into published/catalogue.json --platform-version "$PLATFORM_VERSION"
+            git -C published add catalogue.json
+            git -C published -c user.name=github-actions -c user.email=github-actions@github.com \
+              commit --quiet --allow-empty -m "Publish Bilibi v$PLATFORM_VERSION ($GITHUB_RUN_ID)"
+            if git -C published push --quiet "$remote" HEAD:refs/heads/catalogue; then
+              exit 0
+            fi
+            echo "Push rejected on attempt $attempt; another catalogue run wrote first, retrying"
+          done
+          exit 1

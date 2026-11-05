@@ -41,7 +41,7 @@ mod notes;
 
 use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
 use bilibi_base::authz::grants::Grants;
-use bilibi_core::agent_access::{
+use bilibi_core::agent::{
     code_challenge, AgentAccess, AuthorizeParams, ClientRegistration, CodeExchange, Decision,
     CLIENT_ID,
 };
@@ -521,9 +521,7 @@ async fn agent_token(
     db: &bilibi_database::Db,
     scope: &Scope,
 ) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let access = app
-        .services
-        .get::<AgentAccess>("core/agent_access.grants")?;
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
     let start = access.start_device(CLIENT_ID, "records-reference").await?;
     access
         .decide(scope, &start.user_code, Decision::Approve)
@@ -767,19 +765,16 @@ async fn plan_doors(door: &Door) -> Outcome {
     )
     .await?;
     // Each commit re-runs the owner's preview inside its own transaction.
-    let mut codes = Vec::new();
     for _ in 0..16 {
-        let plan = door.plan(false, &ops).await?;
-        codes.push(plan["plan_code"].as_str().unwrap_or_default().to_owned());
+        let _review = door.plan(false, &ops).await?;
     }
-    let codes = Arc::new(codes);
     let (door, ops) = (door.clone(), ops.clone());
     concurrently(
         "16 x /api/v1 commit of a previewed plan",
         16,
         Duration::from_secs(8),
-        move |index| {
-            let (door, ops, codes) = (door.clone(), ops.clone(), codes.clone());
+        move |_index| {
+            let (door, ops) = (door.clone(), ops.clone());
             Box::pin(async move {
                 let committed = post(
                     door.addr,
@@ -787,7 +782,7 @@ async fn plan_doors(door: &Door) -> Outcome {
                     &door.api,
                     "/api/v1/plans/commit",
                     "",
-                    json!({"plan_code": codes[index], "operations": ops}),
+                    json!({"operations": ops}),
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -840,9 +835,7 @@ async fn mcp_token(
     scope: &Scope,
     origin: &str,
 ) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let access = app
-        .services
-        .get::<AgentAccess>("core/agent_access.grants")?;
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
     let resource = format!("{}/mcp", origin.trim_end_matches('/'));
     let callback = "https://agent.example/callback";
     let registration: ClientRegistration = serde_json::from_value(
@@ -1063,8 +1056,7 @@ async fn main() -> Outcome {
         }];
         let plan = plans.preview(&browser, &ops).await?;
         if plan["valid"] == true {
-            let code = plan["plan_code"].as_str().ok_or("no plan code")?;
-            let committed = plans.commit(&scope, &browser, code, &ops).await;
+            let committed = plans.commit(&scope, &browser, &ops).await;
             println!(
                 "{email} notes {person_or_company} {id}: preview {}, commit {}",
                 plan["results"][0]["preview"]["result"]["summary"],
@@ -1232,7 +1224,7 @@ async fn main() -> Outcome {
         ]);
         let mcp_call = |tool: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}});
         let mcp_headers = "Accept: application/json, text/event-stream\r\n";
-        let planned = if mcp {
+        let _planned = if mcp {
             post(
                 addr,
                 &host,
@@ -1254,7 +1246,6 @@ async fn main() -> Outcome {
             )
             .await?
         };
-        let code = planned["plan_code"].as_str().unwrap_or_default().to_owned();
         // Fixture setup (plain SQL): the second record goes away before commit.
         db.get()
             .await?
@@ -1270,7 +1261,7 @@ async fn main() -> Outcome {
                 &door.mcp,
                 "/mcp",
                 mcp_headers,
-                mcp_call("commit", json!({"plan_code": code, "operations": ops})),
+                mcp_call("commit", json!({"operations": ops})),
             )
             .await?["result"]["structuredContent"]
                 .clone()
@@ -1281,7 +1272,7 @@ async fn main() -> Outcome {
                 &door.api,
                 "/api/v1/plans/commit",
                 "",
-                json!({"plan_code": code, "operations": ops}),
+                json!({"operations": ops}),
             )
             .await?
         };

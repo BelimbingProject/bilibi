@@ -1,0 +1,4 @@
+{#- A region that reports the browser's time zone (base/ui BrowserTimeZone),
+    so times are read and entered in the reader's zone. A panel's region is
+    its anchor: every control inside reaches the panel. -#}
+<div id="{{ id }}"{% if target %} data-target="{{ id }}"{% endif %} data-hook="BrowserTimeZone" data-timezone-request="{{ timezone_request }}">{{ body }}</div>

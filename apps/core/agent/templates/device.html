@@ -1,0 +1,63 @@
+{#- Signed-in device consent. Opening a link only
+    fills the code; the person checks it, reviews the stated agent and decides.
+    The flash outlet renders here until the shared shell owns it (P10); the
+    root carries data-shared-ui so the legacy compatibility sheet stops at it. -#}
+{%- import "components.html" as ui -%}
+{%- import "forms.html" as forms -%}
+{%- import "feedback.html" as feedback -%}
+{%- import "datetime.html" as time -%}
+<div data-shared-ui>
+{% call feedback::flash_group(messages=flash) %}{% endcall %}
+{% call ui::header(pin=false) %}Connect an agent{% endcall %}
+{% if let Some(error) = error %}
+{% call feedback::panel_notice(id="device-error", kind=bilibi_ui::NoticeKind::Error, dismiss_event="dismiss") %}{{ error }}{% endcall %}
+{% endif %}
+{% if completed.is_none() %}
+<form id="device-code-form" data-event="lookup">
+{% call forms::code_input(code=code_input) %}{% endcall %}
+{% call ui::button(id="device-lookup", button_type="submit") %}Check code{% endcall %}
+</form>
+{% endif %}
+{% if let Some(device) = device %}
+<section id="device-consent" class="mt-4">
+{% call ui::section_heading(title="Review connection") %}{% endcall %}
+{% call ui::facts() %}
+{% call ui::fact(title="Code") %}{{ code }}{% endcall %}
+{% call ui::fact(title="Stated agent") %}{{ device.agent_id }}{% endcall %}
+{% endcall %}
+<p class="text-sm text-muted">
+  Approve only a code you asked for. The agent can read what you can read in the companies you may act in, names the company on every call, and never follows the company you choose in the top bar. Its name does not prove who runs it.
+</p>
+<form id="device-approval-form" data-event="approve">
+{% if !duplicates.is_empty() %}
+{% for duplicate in duplicates %}
+{% call ui::facts() %}{% call ui::fact(title="Already connected") %}{{ duplicate.name }} · approved {% call time::datetime(instant=duplicate.approved) %}{% endcall %} · from {{ duplicate.approved_from }} · {{ duplicate.last_used }}{% endcall %}{% endcall %}
+{% endfor %}
+{% call forms::radio_group(group=replacement) %}{% endcall %}
+{% endif %}
+{% call ui::button(id="device-approve", button_type="submit") %}Approve connection{% endcall %}
+{% call ui::button(id="device-deny", button_type="button", event="deny") %}Refuse{% endcall %}
+</form>
+<p id="device-approval-ai" class="mt-3 text-xs text-ink-muted">Approving also turns AI on in this browser.</p>
+</section>
+{% endif %}
+{% if let Some(done) = completed %}
+<section id="device-completed" class="mt-4">
+<div role="status">
+{% call ui::section_heading(title=done.title()) %}{% endcall %}
+<p id="device-completed-agent" class="text-sm text-ink">{{ done.agent_id }}</p>
+{% if done.approved %}
+{% call ui::facts(id="device-completed-state") %}
+{% call ui::fact(title="OAuth approval") %}Approved{% endcall %}
+{% call ui::fact(title="AI access") %}On{% endcall %}
+{% endcall %}
+<p class="text-sm text-muted">Return to {{ done.agent_id }}. It will verify the connection.</p>
+{% else %}
+<p class="text-sm text-muted">Return to {{ done.agent_id }}. It will report that you refused the connection.</p>
+{% endif %}
+</div>
+{% call ui::button(id="device-another", button_type="button", event="another") %}Connect another device{% endcall %}
+</section>
+{% endif %}
+<a id="device-connections" href="/settings/ai-connections">Your connections</a>
+</div>

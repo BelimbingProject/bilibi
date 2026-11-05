@@ -84,13 +84,27 @@ impl Profile {
             "password" => "Password",
             "person_id" => "Person",
             "affiliation_id" => "Company",
-            "landing_menu_id" => "Landing page",
+            "landing_menu_id" => "Page after sign-in",
             _ => "",
         };
         self.errors
             .iter()
             .filter(|e| e.field == field)
-            .map(|e| bilibi_ui::error_sentence(label, &e.message))
+            .map(|e| match (field, e.message.as_str()) {
+                ("name", "can't be blank") => "Enter your name.".into(),
+                ("name", "should be at most 255 character(s)") => {
+                    "Name must be 255 characters or fewer.".into()
+                }
+                ("email", "can't be blank") => "Enter your email address.".into(),
+                ("email", "must be an email address") => "Enter a valid email address.".into(),
+                ("email", "has already been taken") => {
+                    "This email address is already in use.".into()
+                }
+                ("landing_menu_id", "is not a page you can open") => {
+                    "Choose a page you can open.".into()
+                }
+                _ => bilibi_ui::error_sentence(label, &e.message),
+            })
             .collect()
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
@@ -117,7 +131,7 @@ impl Profile {
                 .label("Email")
                 .value(&self.email)
                 .autocomplete("email")
-                .hint("Verify your new email address after changing it.")
+                .hint("Changing your email marks it as unverified.")
                 .errors(self.errors_for("email"))
                 .attr("data-debounce", "300"),
         )?;
@@ -125,7 +139,7 @@ impl Profile {
             &Field::in_form("profile", "landing_menu_id")
                 .id("profile-landing")
                 .kind(InputKind::Select)
-                .label("Landing page")
+                .label("Page after sign-in")
                 .prompt("Default (first page you can open)")
                 .value(&self.landing)
                 .options(
@@ -134,7 +148,7 @@ impl Profile {
                         .map(|page| Choice::new(page.label, page.id))
                         .collect(),
                 )
-                .hint("The page you see after signing in.")
+                .hint("Choose what you see after signing in.")
                 .errors(self.errors_for("landing_menu_id")),
         )?;
         let initials = self
@@ -150,20 +164,13 @@ impl Profile {
                 &self
                     .uploads
                     .input(PROFILE_IMAGE_UPLOAD, "profile-image-input")
-                    .label("Profile picture")
-                    .hint("PNG, JPEG or WebP, up to 1 MiB."),
+                    .label("Upload")
+                    .hint("PNG, JPEG or WebP, up to 1 MiB.")
+                    .immediate(),
             )?,
             has_image: image_url.is_some(),
         })?;
-        let upload = render(&Button {
-            id: "profile-image-upload",
-            button_type: "submit",
-            variant: ButtonVariant::Primary,
-            working: "Uploading…",
-            body: Html::text("Upload"),
-            ..Button::default()
-        })?;
-        let mut image_actions = vec![upload];
+        let mut image_actions = Vec::new();
         if image_url.is_some() {
             image_actions.push(render(&Button {
                 id: "profile-image-remove",
@@ -206,12 +213,12 @@ impl Profile {
                 flash: self.flash.map(),
             })?,
             header: render(&Header {
-                title: Html::text("My Settings"),
+                title: Html::text("My settings"),
                 subtitle: "",
                 ..Header::default()
             })?,
             current: bilibi_ui::SettingsTab::Profile,
-            heading: "Profile Information",
+            heading: "Profile",
             subheading: "",
             image_card: render(&Card {
                 title: "Profile picture",
@@ -284,7 +291,7 @@ impl Profile {
                     Ok(()) => {
                         self.flash
                             .success(if saved.email_changed && self.email != previous {
-                                "Profile saved. Confirm your new email address to verify it."
+                                "Profile saved. Your new email address is unverified."
                             } else {
                                 "Profile saved."
                             })
@@ -296,25 +303,25 @@ impl Profile {
                             .unwrap_or_default();
                         self.errors = errors;
                         self.flash
-                            .error(format!("Landing page was not saved: {message}"));
+                            .error(format!("Your name and email were saved, but your page after sign-in was not: {message}"));
                     }
                     Err(AccountError::Access(Error::Unauthorized)) => {
                         return Err(Error::Unauthorized)
                     }
                     Err(_) => self
                         .flash
-                        .error("Landing page was not saved. Reload the page and try again."),
+                        .error("Your name and email were saved, but your page after sign-in was not. Reload and try again."),
                 }
                 self.load(request.scope).await?;
             }
             Err(AccountError::Validation(errors)) => self.errors = errors,
             Err(AccountError::Access(Error::Unauthorized)) => return Err(Error::Unauthorized),
-            Err(AccountError::Access(Error::Forbidden)) => {
-                self.flash.error("Profile was not saved (forbidden).")
-            }
-            Err(error) => {
+            Err(AccountError::Access(Error::Forbidden)) => self
+                .flash
+                .error("Your profile was not saved. Check your access or try again."),
+            Err(_) => {
                 self.flash
-                    .error(format!("Profile was not saved ({error})."));
+                    .error("Your profile was not saved. Check your access or try again.");
                 self.load(request.scope).await?;
             }
         }
@@ -350,6 +357,12 @@ impl Profile {
             Err(bilibi_media::Error::InvalidSize) => {
                 self.flash.error("That image is empty or too large.")
             }
+            Err(bilibi_media::Error::StorageNotConfigured) => self.flash.error(
+                "Your profile picture was not saved. Ask an administrator to configure the private attachment disk under Media storage disks in Administration → System → Settings.",
+            ),
+            Err(bilibi_media::Error::UnsafeStorageRoot) => self.flash.error(
+                "Your profile picture was not saved. Ask an administrator to check the private folder and its permissions under Media storage disks in Administration → System → Settings.",
+            ),
             Err(bilibi_media::Error::Database(Error::Unauthorized)) => {
                 return Err(Error::Unauthorized)
             }
@@ -414,7 +427,7 @@ impl LiveState<Scope, Error> for Profile {
 
 #[derive(Template)]
 #[template(
-    source = r#"<div class="flex items-center gap-3"><span class="shrink-0">{{ preview|safe }}</span><span class="text-xs text-ink-muted">{% if has_image %}Current profile picture{% else %}Your initials are shown until you upload a picture{% endif %}</span></div><div class="mt-3">{{ input|safe }}</div>"#,
+    source = r#"<div class="flex items-center gap-3"><span class="shrink-0">{{ preview|safe }}</span>{% if !has_image %}<span class="text-xs text-ink-muted">You see your initials until you upload a picture.</span>{% endif %}</div><div class="mt-3">{{ input|safe }}</div>"#,
     ext = "html"
 )]
 struct ProfileImageFields {

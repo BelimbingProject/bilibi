@@ -811,7 +811,7 @@ pub(crate) async fn update(
     let updated = tx.mutate(move |sql| {
         Box::pin(async move {
             let row = sql.query_opt(
-                "SELECT version,status,custom_fields FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE",
+                "SELECT version,status,custom_fields FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
                 &[&scope.tenant(), &company_id],
             ).await?.ok_or(Error::NotFound)?;
             if row.get::<_, i64>(0) != version { return Err(Error::Conflict); }

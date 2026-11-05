@@ -22,6 +22,8 @@ absolute directories with mode `0700`, not under a `static`, `public` or
 `media.scan.policy` and `media.scan.timeout_seconds` (see Malware scanning),
 `media.upload.staging_disk` and `media.upload.staging_hours` (see Resumable
 uploads).
+The production seed sets `local` to `data/media` under `BILIBI_INSTANCE_DIR`, or under the working directory when no instance directory is set. The first upload creates that default folder with mode `0700`; a custom disk folder must already exist. The seed preserves an operator's saved mapping, including an empty one.
+
 Keep disk roots stable while assets reference them; `external` is a reserved
 sentinel for linked (not stored) assets and cannot be a disk name.
 

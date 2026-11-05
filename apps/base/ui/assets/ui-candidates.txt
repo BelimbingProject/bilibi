@@ -4184,7 +4184,7 @@ core-user-test
 core/a
 core/address
 core/address-owned
-core/agent_access
+core/agent
 core/ai
 core/b
 core/company
@@ -4198,7 +4198,6 @@ core/geonames
 core/user
 core/user-owned
 core/user.
-core/user_administration
 core_admin
 core_agent_authorization_codes
 core_agent_authorization_codes_code_hash_index
@@ -10228,11 +10227,8 @@ plainest
 plainly
 plaintext
 plan
-plan-code
 plan/2
-plan_code
 plan_endpoint
-plan_expiry_seconds
 plan_hash
 plan_id
 plan_max_operations

@@ -25,8 +25,8 @@ use std::sync::Arc;
 const BLANK: &str = "can't be blank";
 const INCORRECT: &str = "is incorrect";
 const CONFIRMATION_MISMATCH: &str = "does not match password";
-const UPDATED: &str = "Password updated. This also disconnects your AI apps.";
-const NOT_UPDATED: &str = "Could not update password.";
+const UPDATED: &str = "Password changed. Your AI apps have been disconnected.";
+const NOT_UPDATED: &str = "Your password was not changed. Try again.";
 
 /// The field errors of the last attempt; values are never echoed back.
 #[derive(Clone, Debug, Default)]
@@ -59,7 +59,20 @@ impl PasswordView {
                     .errors(
                         errors
                             .iter()
-                            .map(|message| bilibi_ui::error_sentence(label, message))
+                            .map(|message| {
+                                if label == "New password"
+                                    && message == "should be at least 8 character(s)"
+                                {
+                                    "Password must be 8 characters or more.".into()
+                                } else {
+                                    let error_label = if label == "Confirm new password" {
+                                        "Confirm password"
+                                    } else {
+                                        label
+                                    };
+                                    bilibi_ui::error_sentence(error_label, message)
+                                }
+                            })
                             .collect(),
                     )
                     .attrs(Attrs {
@@ -76,14 +89,14 @@ impl PasswordView {
                 flash,
             }))?,
             header: fragment(Html::render(&Header {
-                title: Html::text("My Settings"),
+                title: Html::text("My settings"),
                 subtitle: "",
                 title_actions: Html::EMPTY,
                 actions: Html::EMPTY,
             }))?,
             current: bilibi_ui::SettingsTab::Password,
             heading: "Update Password",
-            subheading: "At least 8 characters.",
+            subheading: "At least 8 characters. Changing password will disconnect AI apps.",
             current_password: secret(
                 "current_password",
                 "Current password",
@@ -98,7 +111,7 @@ impl PasswordView {
             )?,
             password_confirmation: secret(
                 "password_confirmation",
-                "Confirm password",
+                "Confirm new password",
                 "new-password",
                 &form.confirmation_errors,
             )?,

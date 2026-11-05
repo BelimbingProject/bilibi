@@ -4,8 +4,15 @@ set -euo pipefail
 # shellcheck source=scripts/lib/install.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/../lib/install.sh"
 
-if apt_install ca-certificates curl gnupg lsb-release build-essential pkg-config libssl-dev \
-    python3 openssl iproute2 util-linux git; then
+if [[ $SETUP_PACKAGE_MANAGER == pacman ]]; then
+    packages=(ca-certificates curl gnupg base-devel pkgconf python openssl iproute2 util-linux git)
+    install_packages=pacman_install
+else
+    packages=(ca-certificates curl gnupg lsb-release build-essential pkg-config libssl-dev
+        python3 openssl iproute2 util-linux git)
+    install_packages=apt_install
+fi
+if "$install_packages" "${packages[@]}"; then
     installed 'base packages'
 else
     present 'base packages'

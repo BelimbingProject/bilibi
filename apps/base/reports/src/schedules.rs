@@ -75,6 +75,8 @@ pub struct Plan {
     pub include_owner: bool,
     pub skip_empty: bool,
     pub roles: Vec<i64>,
+    /// Accounts named directly, beside the holders of `roles`.
+    pub people: Vec<i64>,
 }
 
 /// A subscription as its owner sees it.
@@ -92,6 +94,7 @@ pub struct Subscription {
     pub skip_empty: bool,
     pub paused: bool,
     pub roles: Vec<i64>,
+    pub people: Vec<i64>,
     pub next_run_at: String,
     pub last_run_at: Option<String>,
     /// The latest delivery to the owner: `sent`, `skipped` with its reason.
@@ -145,16 +148,19 @@ fn check(plan: &Plan) -> Outcome<()> {
         }
         _ => {}
     }
-    if !plan.include_owner && plan.roles.is_empty() {
-        return bad("recipients", "must include you or at least one role");
+    if !plan.include_owner && plan.roles.is_empty() && plan.people.is_empty() {
+        return bad("recipients", "must include you, a role or a person");
     }
     if plan.roles.len() > 50 {
         return bad("roles", "names at most 50 roles");
     }
+    if plan.people.len() > 50 {
+        return bad("people", "names at most 50 people");
+    }
     Ok(())
 }
 
-const COLUMNS: &str = "s.id, s.report_id, s.frequency, s.at_minute, s.weekday, s.monthday, s.timezone, s.format, s.include_owner, s.skip_empty, s.paused, COALESCE((SELECT array_agg(r.role_id ORDER BY r.role_id) FROM base_report_subscription_roles r WHERE r.tenant_id=s.tenant_id AND r.subscription_id=s.id), '{}'), to_char(s.next_run_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(s.last_run_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), d.state, d.reason, s.version";
+const COLUMNS: &str = "s.id, s.report_id, s.frequency, s.at_minute, s.weekday, s.monthday, s.timezone, s.format, s.include_owner, s.skip_empty, s.paused, COALESCE((SELECT array_agg(r.role_id ORDER BY r.role_id) FROM base_report_subscription_roles r WHERE r.tenant_id=s.tenant_id AND r.subscription_id=s.id), '{}'), COALESCE((SELECT array_agg(q.user_id ORDER BY q.user_id) FROM base_report_subscription_people q WHERE q.tenant_id=s.tenant_id AND q.subscription_id=s.id), '{}'), to_char(s.next_run_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(s.last_run_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), d.state, d.reason, s.version";
 const LAST: &str = "LEFT JOIN LATERAL (SELECT state, reason FROM base_report_deliveries x WHERE x.tenant_id=s.tenant_id AND x.subscription_id=s.id AND x.recipient_id=s.owner_id ORDER BY x.due_at DESC LIMIT 1) d ON true";
 
 fn subscription(row: &tokio_postgres::Row) -> Subscription {
@@ -172,11 +178,12 @@ fn subscription(row: &tokio_postgres::Row) -> Subscription {
         skip_empty: row.get(9),
         paused: row.get(10),
         roles: row.get(11),
-        next_run_at: row.get(12),
-        last_run_at: row.get(13),
-        last_state: row.get(14),
-        last_reason: row.get(15),
-        version: row.get(16),
+        people: row.get(12),
+        next_run_at: row.get(13),
+        last_run_at: row.get(14),
+        last_state: row.get(15),
+        last_reason: row.get(16),
+        version: row.get(17),
     }
 }
 
@@ -215,6 +222,23 @@ impl Reports {
                 "Scheduled reports need a workplace. Choose a workplace and try again.".into(),
             )
         })?;
+        let mut people = plan.people.clone();
+        people.sort_unstable();
+        people.dedup();
+        if !people.is_empty() {
+            let known: Vec<i64> = self
+                .share_people(scope)
+                .await?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            if people.iter().any(|id| !known.contains(id)) {
+                return Err(ReportError::Invalid(std::collections::BTreeMap::from([(
+                    "people".to_owned(),
+                    vec!["names someone who cannot run reports".to_owned()],
+                )])));
+            }
+        }
         if !plan.roles.is_empty() {
             authorize(tx.sql(), scope, crate::SHARE).await?;
             let mut roles = plan.roles.clone();
@@ -281,7 +305,12 @@ impl Reports {
                         &[&tenant, &id, &plan.roles],
                     )
                     .await?;
-                    let new = json!({"report_id": report, "company_id": company.get(), "frequency": plan.frequency.key(), "at_minute": plan.at_minute, "format": plan.format.key(), "roles": plan.roles});
+                    sql.execute(
+                        "INSERT INTO base_report_subscription_people(tenant_id,subscription_id,user_id) SELECT $1,$2,person FROM unnest($3::bigint[]) person",
+                        &[&tenant, &id, &people],
+                    )
+                    .await?;
+                    let new = json!({"report_id": report, "company_id": company.get(), "frequency": plan.frequency.key(), "at_minute": plan.at_minute, "format": plan.format.key(), "roles": plan.roles, "people": people});
                     Ok((id, vec![Change { kind: KIND.into(), id, old: Value::Null, new }]))
                 })
             })
@@ -513,6 +542,7 @@ impl Reports {
                 include_owner: row.get(2),
                 skip_empty: row.get(9),
                 roles: Vec::new(),
+                people: Vec::new(),
             };
             let zone: String = row.get(7);
             let due_at: String = row.get(10);
@@ -528,7 +558,7 @@ impl Reports {
                 Box::pin(async move {
                     let mut recipients: Vec<i64> = sql
                         .query(
-                            "SELECT DISTINCT p.user_id FROM base_report_subscription_roles r JOIN effective_principal_roles p ON p.company_id IS NULL AND p.tenant_id=r.tenant_id AND p.role_id=r.role_id WHERE r.tenant_id=$1 AND r.subscription_id=$2 ORDER BY 1 LIMIT $3",
+                            "SELECT user_id FROM (SELECT p.user_id FROM base_report_subscription_roles r JOIN effective_principal_roles p ON p.company_id IS NULL AND p.tenant_id=r.tenant_id AND p.role_id=r.role_id WHERE r.tenant_id=$1 AND r.subscription_id=$2 UNION SELECT q.user_id FROM base_report_subscription_people q WHERE q.tenant_id=$1 AND q.subscription_id=$2) x ORDER BY 1 LIMIT $3",
                             &[&tenant, &id, &(MAX_RECIPIENTS as i64)],
                         )
                         .await?

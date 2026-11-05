@@ -86,7 +86,7 @@ Starting values go in by code: a missing code is inserted, an existing one is le
 | When | How |
 | --- | --- |
 | Existing tenants | The declaring module's production seed (service `base/picklists.seeds`, operation `reconcile`) runs over every live tenant when `seed-production` first sees its version. |
-| A new tenant | `core/company` provisioning calls `bilibi_picklists::provision`, which returns one `Change` per inserted value: tenant administration records each on its `MutationTransaction`, attributed to the person or agent; the deployment helpers (`tenant-provision`, the platform operator) use `provision_deployment`, which lists every value in one retained system action, as their company rows are recorded. |
+| A new tenant | `core/company` provisioning calls `bilibi_picklists::provision`, which returns one `Change` per inserted value: Core Tenant records each on its `MutationTransaction`, attributed to the person or agent; the deployment helpers (`tenant-provision`, the platform operator) use `provision_deployment`, which lists every value in one retained system action, as their company rows are recorded. |
 | A module adds values later | It contributes the next seed version. |
 
 - Each seed inserts the missing codes of every linked list, so running one module's seed never harms another's lists.
@@ -160,7 +160,7 @@ DATABASE_URL=… cargo run -p bilibi-web --example picklists-reference
 | Review cases | Two default changes at once: the second waits and saves, one default left. A tenant holding 500 values with four starting codes missing is refused with the list's name and keeps 500. Staff (only `installation.manage`) add to Region and are refused on a tenant list, by the facade and the contract. Codes `a.b`, `a_b`, `a-b` get distinct element ids; after editing `a_b` focus stays on it. |
 | Audit | One `picklist_value` row per change, attributed to the actor: `created` for a new value, `updated` otherwise. |
 | Agent reads | `base.picklists.lists` shows each list's locked codes; `base.picklists.values` lists the codes in order. |
-| Agent writes | A create's preview is valid and writes no row; its commit saves one; replaying the plan code is refused. |
+| Agent writes | A create's dry run is valid and writes no row; commit reruns the checks and saves one. |
 | Operator page | Serve the fixture with `APP_ORIGIN` and `BIND_ADDR`, sign in as `admin@example.test`: add, rename, translate, reorder, set the default, retire and restore on `/admin/picklists`; `viewer@example.test` gets 403 and no menu entry. |
 | Case form | `/reference/cases` (`cases.rs`) as `manager@example.test`, who reads in Malay: the category options show the Malay labels; choosing a category narrows the sub-categories, changing it clears the chosen one; after retiring `feedback`, case #1 still shows it marked retired and saves unchanged, a new case cannot choose it; a forged retired value and a forged mismatched pair are refused on their fields. |
 | Installation-wide list | Region is kept on the platform operator: `admin@example.test` edits it; `manager@other.example.test` (tenant 2) sees the operator's labels read-only, picks from them on the case form, and a forged write is refused. |

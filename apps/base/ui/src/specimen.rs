@@ -638,6 +638,13 @@ impl ComponentsSpecimen {
             .label("Bank statement")
             .hint("A CSV export, at most 5 MiB.")
     }
+    fn file_immediate(&self) -> FileInput<'_> {
+        self.uploads
+            .input("statement", "specimen-file-immediate")
+            .label("Upload")
+            .hint("A CSV export, at most 5 MiB.")
+            .immediate()
+    }
     fn file_arriving(&self) -> FileInput<'_> {
         self.uploads
             .input("documents", "specimen-file-arriving")

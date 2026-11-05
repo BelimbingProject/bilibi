@@ -18,6 +18,13 @@ async fn main() -> Result<()> {
             for version in &migrated.applied {
                 println!("  applied {version}");
             }
+            let mut moved = std::collections::BTreeMap::<(&str, &str), usize>::new();
+            for item in &migrated.moved {
+                *moved.entry((item.from.as_str(), item.to)).or_default() += 1;
+            }
+            for ((from, to), versions) in moved {
+                println!("  moved {versions} migrations recorded under {from} to {to} (same SQL)");
+            }
             for (version, module) in &migrated.unmounted {
                 println!("  kept {version} of unmounted {module}");
             }
@@ -31,7 +38,7 @@ async fn main() -> Result<()> {
             println!("Authorization system roles reconciled");
         }
         Some("geonames-import") => {
-            use bilibi_core::geonames::{ImportOptions, ReferenceImport, IMPORT_SERVICE, USAGE};
+            use bilibi_geonames::{ImportOptions, ReferenceImport, IMPORT_SERVICE, USAGE};
             let args: Vec<String> = std::env::args().skip(2).collect();
             let options = ImportOptions::from_args(&args).map_err(|message| {
                 eprintln!("{message}\n{USAGE}");
@@ -61,9 +68,7 @@ async fn main() -> Result<()> {
             bilibi_web::provision(&db, command, &args).await?;
         }
         Some("plugin-export") => {
-            use bilibi_core::agent_plugins::{
-                AgentPlugins, ExportError, PluginError, SERVICE, USAGE,
-            };
+            use bilibi_agent::{AgentPlugins, ExportError, PluginError, PLUGIN_SERVICE, USAGE};
             let args: Vec<String> = std::env::args().skip(2).collect();
             let Some([harness, output]) = flags(&args, ["--harness", "--output"]) else {
                 eprintln!("{USAGE}");
@@ -75,7 +80,7 @@ async fn main() -> Result<()> {
                 Error::Invalid
             })?;
             let app = bilibi_web::App::new(db.clone(), &origin)?;
-            let plugins = app.services.get::<AgentPlugins>(SERVICE)?;
+            let plugins = app.services.get::<AgentPlugins>(PLUGIN_SERVICE)?;
             match plugins
                 .export(harness, std::path::Path::new(output))
                 .await

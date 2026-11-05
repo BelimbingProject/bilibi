@@ -20,8 +20,8 @@ use bilibi_module_registry::contributions::{
 use bilibi_security::Scope;
 use bilibi_ui::page::{PageRequest, PageService};
 use bilibi_ui::{
-    AppShell, CompanyChoice, DisplayPreferences, Framed, Html, NavNode, SearchPage, ShellContext,
-    TenantChoice,
+    page::PageChrome, AppShell, CompanyChoice, DisplayPreferences, Framed, Html, NavNode,
+    SearchPage, ShellContext, StandaloneReview, TenantChoice,
 };
 use bilibi_user::{ChoiceRefusal, PreferenceError, Presentation};
 use serde::Deserialize;
@@ -40,7 +40,7 @@ pub async fn render(
     app: &App,
     scope: Option<&Scope>,
     path: &str,
-    framed: bool,
+    chrome: PageChrome,
     live: bool,
     body: &str,
     topbar_actions: Html,
@@ -53,7 +53,7 @@ pub async fn render(
         .as_ref()
         .map_or_else(DisplayPreferences::default, preferences);
     let theme = presentation.as_ref().map_or("system", |p| p.theme);
-    let html = if framed {
+    let html = if chrome == PageChrome::Framed {
         Framed {
             body,
             live,
@@ -63,6 +63,24 @@ pub async fn render(
             preferences: &preferences,
             csrf: scope.map_or("", |scope| scope.csrf.as_str()),
             impersonating: scope.is_some_and(|scope| scope.impersonator().is_some()),
+        }
+        .render()
+    } else if let (Some(scope), PageChrome::StandaloneReview) = (scope, chrome) {
+        let client = app.db.get().await?;
+        let instance = bilibi_base::system::Instance::resolve(&app.settings, &**client)
+            .await?
+            .banner("standalone-instance", "")
+            .map_err(|_| Error::Internal)?;
+        StandaloneReview {
+            body,
+            instance: &instance,
+            live,
+            tenant_id: scope.tenant(),
+            user_id: scope.user(),
+            company_id: scope.current_company().map(|id| id.get()),
+            preferences: &preferences,
+            csrf: &scope.csrf,
+            impersonating: scope.impersonator().is_some(),
         }
         .render()
     } else if let Some(scope) = scope {
@@ -194,7 +212,7 @@ async fn context<'a>(
     // no primary company; a failed lookup paints no warning.
     let operator_company_missing = platform_operator
         && matches!(
-            bilibi_core::company::platform_operator_company(&**client).await,
+            bilibi_company::platform_operator_company(&**client).await,
             Ok(None)
         );
     let pins = bilibi_user::list_pins(&**client, scope).await?;
@@ -843,7 +861,7 @@ pub async fn tenant_changed(
         &app,
         Some(&scope),
         TENANT_CHANGED_PATH,
-        false,
+        PageChrome::Workspace,
         false,
         body.as_str(),
         Html::EMPTY,
@@ -1005,7 +1023,7 @@ async fn adopt_installation_locale(app: &App, scope: &Scope) {
         // Address takes a connection of its own: hold none across it.
         let Some(facts) = app
             .services
-            .get::<bilibi_core::address::AddressService>(bilibi_core::address::SERVICE)?
+            .get::<bilibi_address::AddressService>(bilibi_address::SERVICE)?
             .platform_operator_bootstrap()
             .await?
         else {

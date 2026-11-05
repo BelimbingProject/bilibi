@@ -23,7 +23,7 @@ You may already have questions: what if the new release does not work, what does
 
 | Step | What we do | If it fails |
 | --- | --- | --- |
-| **Check the release and copy it into place** | Find the release: the folder the program downloaded from GitHub (`incoming/job-<n>/`), or an uploaded release file (`incoming/upload-<n>/`). Check its checksum; check it was built for this kind of server (a Linux program for this processor, and a system library this server has); check it is not already the program in service; check there is disk for the program and a backup. Copy it into the next number here (`releases/2`), check the copy, run its `status` to prove it runs on this server, and remove it from `incoming/`. A downloaded `incoming/job-<n>/` is removed whatever the outcome; an uploaded `incoming/upload-<n>/` is removed once installed or when it fails its checks, and stays for another try otherwise. | Nothing changed. The instance never paused. The message says what to fix. |
+| **Check the release and copy it into place** | Find the release: the folder the program downloaded from GitHub (`incoming/job-<n>/`), or an uploaded release file (`incoming/upload-<n>/`). The program has already verified GitHub build provenance for the complete archive. Check its checksum; check it was built for this kind of server (a Linux program for this processor, and a system library this server has); check it is not already the program in service; check there is disk for the program and a backup. Copy it into the next number here (`releases/2`), check the copy, run its `status` to prove it runs on this server, and remove it from `incoming/`. A downloaded `incoming/job-<n>/` is removed whatever the outcome; an uploaded `incoming/upload-<n>/` is removed once installed or when it fails its checks, and stays for another try otherwise. | Nothing changed. The instance never paused. The message says what to fix. |
 | **Back up the database** (the pause starts) | Stop the service. Caddy shows the waiting page from here. Dump the database with PostgreSQL's own `pg_dump` into `backups/job-<n>/`. | The service is started again. Nothing changed. |
 | **Update the database** | Run the new program's `migrate` and then its production seeds, as one step. `migrate` is one transaction: all of it or none of it. The step is judged on the migration ledger (the table that lists the migrations applied): we count it before and after. | If the ledger did not grow, nothing changed: the previous release is started again. If it grew (`migrate` committed and a seed then failed), the database has changed shape, so the step goes back like a failed check: restore the backup, then start the previous release. |
 | **Switch to the new program** | Point `releases/current` at the new release (the instance's `current` is a fixed link to it) and start the service. | **Switch back by itself.** See below. |
@@ -37,7 +37,7 @@ If the backup cannot be restored, the job ends `failed` with the service **left 
 
 The app downloads GitHub assets before the installer claims the job. The installer leaves a queued download alone until that step is complete. See [release archives](../base/software/README.md#release-archives).
 
-A GitHub download is another folder under `incoming/job-<n>/`. The download step checks that the archive still matches the reviewed check code before it is opened. The installer compares the program with the downloader’s recorded SHA-256 before executing it. The files inside are checked against their own check codes, the same way as an upload. The job result keeps the GitHub repository number, release, file, tag, target, archive SHA-256, program SHA-256 and setup commit from `release.json`. It also retains any agent-supplied Staging report for the owner, without enforcing its program checksum or setup commit. Undo does not call GitHub.
+A GitHub download is another folder under `incoming/job-<n>/`. Before the archive is opened, the download step checks its reviewed SHA-256 and GitHub build provenance, bound to the accepted repository number, setup tag and `.github/workflows/release.yml`. An upload passes the same provenance check before it is kept. The installer compares the program with the downloader’s recorded SHA-256 before executing it. The files inside are checked against their own check codes. The job result keeps the GitHub repository number, release, file, tag, target, archive SHA-256, program SHA-256 and setup commit from `release.json`. It also retains any agent-supplied Staging report for the owner, without enforcing its program checksum or setup commit. Undo does not call GitHub.
 
 ### "Switch as soon as it is ready" or "ask me first"
 
@@ -123,13 +123,13 @@ The audit trail is the app's job, not the installer's: `base/software` records e
 
 ## Running it
 
-Build `bilibi-installer` on your own machine, then copy the finished program to the server ([local builds](../../docs/server-install.md#build-locally)). On the server, run:
+Build `bilibi-installer` on your build machine, which may be a separate account on a Dev server, then install the finished program ([build releases](../../docs/server-install.md#build-releases)). On the server, run:
 
 ```sh
-sudo scripts/install-server.sh installer /path/to/bilibi-installer
+sudo scripts/install-server.sh installer /path/to/bilibi-installer-x86_64-unknown-linux-gnu --repo your-company/my-bilibi --repo-id 123456789 --tag setup-v1.0.0
 ```
 
-That copies the program to `/opt/bilibi/build/bin/bilibi-installer` and starts `bilibi-installer@<instance>` for every instance. A later `create` starts one for the new instance too. Rerun `installer` with a newer program to update it; the services restart and a job in progress is settled as in "If the server restarts mid-way".
+Copy `--repo-id` beforehand from the application repository's GitHub **Settings › General** page or another trusted record; never derive it from the repository name during the install. The command verifies GitHub build provenance and that repository number, copies the program to `/opt/bilibi/build/bin/bilibi-installer` and starts `bilibi-installer@<instance>` for every instance. Nothing is replaced when verification fails. A later `create` starts one for the new instance too. Rerun `installer` with a newer verified program to update it; the services restart and a job in progress is settled as in "If the server restarts mid-way".
 
 By hand, for one instance, with its `env` file loaded:
 

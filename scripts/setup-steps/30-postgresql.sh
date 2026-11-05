@@ -6,6 +6,20 @@ set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/../lib/install.sh"
 
 pg=$POSTGRESQL_MAJOR
+if [[ $SETUP_PACKAGE_MANAGER == pacman ]]; then
+    if pacman -Q postgresql >/dev/null 2>&1 &&
+        [[ $(postgres --version | awk '{print $3}' | cut -d. -f1) == "$pg" ]]; then
+        present "postgresql-$pg"
+        exit 0
+    fi
+    # Arch ships one PostgreSQL major. Do not silently install a different one.
+    candidate=$(pacman -Si postgresql | awk '/^Version / {print $3; exit}')
+    [[ ${candidate%%.*} == "$pg" ]] || fail postgresql "the configured Arch repositories offer PostgreSQL ${candidate:-unknown}, not $pg" "use a repository providing PostgreSQL $pg"
+    if pacman_install postgresql; then installed "postgresql-$pg"; else present "postgresql-$pg"; fi
+    [[ $(postgres --version | awk '{print $3}' | cut -d. -f1) == "$pg" ]] ||
+        fail postgresql "the installed PostgreSQL is not version $pg" "upgrade the installed PostgreSQL package to version $pg"
+    exit 0
+fi
 if apt_package_installed "postgresql-$pg" && apt_package_installed "postgresql-client-$pg"; then
     present "postgresql-$pg"
     exit 0

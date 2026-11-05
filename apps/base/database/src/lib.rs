@@ -154,6 +154,18 @@ pub fn pool(url: &str) -> Result<Db> {
 pub struct Migrated {
     pub applied: Vec<&'static str>,
     pub unmounted: Vec<(String, String)>,
+    /// Versions whose recorded owner was another module ID but whose SQL is
+    /// unchanged: the module was renamed, and the ledger now names its new ID.
+    pub moved: Vec<Moved>,
+}
+
+/// One version re-attributed from the module ID it was recorded under to the
+/// module that declares it now.
+#[derive(Debug)]
+pub struct Moved {
+    pub version: &'static str,
+    pub from: String,
+    pub to: &'static str,
 }
 
 /// The host supplies modules in dependency order. A ledger and advisory
@@ -164,7 +176,12 @@ pub struct Migrated {
 /// publish a new version instead. Versions recorded by a module that is no
 /// longer mounted are kept and accepted, so unmounting and remounting a Domain
 /// never replays or loses its schema. Rows written before the ledger kept
-/// provenance adopt the owner and hash of the module that declares them.
+/// provenance adopt the owner and hash of the module that declares them. A
+/// version recorded under another module ID whose SQL is byte-identical to the
+/// declared file moves to the declaring module in the same transaction
+/// (`Migrated::moved`): the hash proves it is the same migration, so renaming a
+/// module needs no list of old names. A changed file under another owner is
+/// still refused.
 pub async fn migrate(db: &Db, modules: &[&'static Module]) -> Result<Migrated> {
     let mut client = db.get().await?;
     let tx = client.transaction().await?;
@@ -197,32 +214,51 @@ pub async fn migrate(db: &Db, modules: &[&'static Module]) -> Result<Migrated> {
                     .await?;
                     migrated.applied.push(version);
                 }
-                Some(row) => match (
-                    row.get::<_, Option<String>>(0),
-                    row.get::<_, Option<String>>(1),
-                ) {
-                    (None, None) => {
-                        tx.execute(
-                            "UPDATE bilibi_migrations SET module_id=$2, sha256=$3 WHERE version=$1",
-                            &[version, &module.id, &digest],
-                        )
-                        .await?;
+                Some(row) => {
+                    let owner = row.get::<_, Option<String>>(0);
+                    let hash = row.get::<_, Option<String>>(1);
+                    match owner {
+                        None if hash.is_none() => {
+                            tx.execute(
+                                "UPDATE bilibi_migrations SET module_id=$2, sha256=$3 WHERE version=$1",
+                                &[version, &module.id, &digest],
+                            )
+                            .await?;
+                            continue;
+                        }
+                        // A version has one global name, so the same name with
+                        // the same SQL under another owner is the same
+                        // migration after its module was renamed or moved.
+                        Some(owner)
+                            if owner != module.id && hash.as_deref() == Some(digest.as_str()) =>
+                        {
+                            tx.execute(
+                                "UPDATE bilibi_migrations SET module_id=$2 WHERE version=$1",
+                                &[version, &module.id],
+                            )
+                            .await?;
+                            migrated.moved.push(Moved {
+                                version,
+                                from: owner,
+                                to: module.id,
+                            });
+                        }
+                        Some(owner) if owner != module.id => {
+                            return Err(Error::MigrationOwner {
+                                version: (*version).into(),
+                                recorded: owner,
+                                module: module.id.into(),
+                            })
+                        }
+                        _ => {}
                     }
-                    (Some(owner), _) if owner != module.id => {
-                        return Err(Error::MigrationOwner {
-                            version: (*version).into(),
-                            recorded: owner,
-                            module: module.id.into(),
-                        })
-                    }
-                    (_, hash) if hash.as_deref() != Some(digest.as_str()) => {
+                    if hash.as_deref() != Some(digest.as_str()) {
                         return Err(Error::MigrationDefinition(format!(
                             "{version} of {}",
                             module.id
-                        )))
+                        )));
                     }
-                    _ => {}
-                },
+                }
             }
         }
     }

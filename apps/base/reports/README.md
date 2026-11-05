@@ -3,7 +3,7 @@
 Operator-built reports: a saved question over one Grid table, run as each reader.
 ## Parent oversight
 
-Set `definition.oversight: true` (Definition → **Read consenting child tenants**) to run a saved report through Grid's sealed, audited oversight facade. `fields` takes `oversight: true`; Rust `record_types` and `columns` take an explicit oversight boolean. Builders intersect the fields of consenting children granting each table; withheld fields, non-granted personal fields and child-user-bound sources are not offered. Execution independently rechecks every child. A hidden filter, grouping or sort refuses the question, rather than silently changing it.
+Set `definition.oversight: true` (Definition → **Include subsidiaries**) to run a saved report through Grid's sealed, audited oversight facade. `fields` takes `oversight: true`; Rust `record_types` and `columns` take an explicit oversight boolean. Builders intersect the fields of consenting children granting each table; withheld fields, non-granted personal fields and child-user-bound sources are not offered. Execution independently rechecks every child. A hidden filter, grouping or sort refuses the question, rather than silently changing it.
 
 Unclassified sources are also absent and refused, even with old or crafted grants: [Grid requires owner classification of the complete declaration](../../base/grid/README.md#parent-oversight), before masks or withholding. Core Contacts, accounts, affiliations, addresses and companies are unavailable until their owners complete classification and privacy/store contracts. This applies to saved reports, agents, panels and direct downloads as well as the builder; ordinary same-tenant reports are unchanged.
 
@@ -23,7 +23,7 @@ Oversight reads are live, read-only and bounded. Prepared exports and scheduled 
 
 | Call | Needs | Does |
 |---|---|---|
-| `page`, `get` | `reports.view` | Reports the reader may run: their own, shared with everyone, or shared with one of their roles. `page` answers one page by name, searched by name and description in the same query, with the number that match. |
+| `page`, `get` | `reports.view` | Reports the reader may run: their own, shared with everyone, or shared with one of their roles. `page` answers one page by name, searched by name and description in the same query, with the number that match; `record_types` narrows it to reports over those record types. `record_sources` lists the record types the reader can report on with the area (Core or a Domain) that owns each. |
 | `run` | `reports.view` | One page of rows (each row linking to its record's page where the owner registers a Base Records kind for the table and the reader may open it, and the totals line), or a grouped summary or matrix with subtotals and a total. Answers ask-when-run filters by position; `as_rows` with drill filters lists the records behind a group; agents drill as the page does (`equals`, `empty`, or a date bucket's `range` of days). |
 | `export` | `reports.export` | The whole result as CSV or a text PDF, up to the download bound, for the same `RunInput` as the page (answers, drill-downs, records view). Audited as `base.reports.exported` with report, format and row count, never the data. CSV neutralises a leading `=`, `+`, `-`, `@`; a PDF holds 20 columns and Latin-1 text and refuses anything else in words. A matrix file has the page's layout, column totals included. |
 | `exportable` | `reports.export` | Whether that file can be made now, without making or auditing it: the page asks before sending the browser to a PDF, so a refusal is shown in words with CSV beside it. |
@@ -72,8 +72,8 @@ The settings editor groups the two pairs as **Reports · Interactive reads** and
 | Path | What |
 |---|---|
 | `/reports` | The reports the reader may run (`FlexTable`), with New report for authors: name, record type and kind create a starter report that opens on its Definition tab. |
-| `/reports/{id}` | Read first. **Result** runs it as the reader, with ask-when-run answers, a left-out note, and drill-down: a group, a date bucket (as its period's first and last day), the total or a chart bar opens the records behind it, with a way back. Below it, Prepare CSV/PDF and the reader's own exports. **Definition** is the editor, live for the author, read-only for others. **Schedule** holds the reader's own deliveries. **Sharing** is the author's. Copy and Delete confirm with `ConfirmDialog`. |
-| `/built-in-reports/{key}` | A built-in report: Result and a read-only Definition, and Copy. |
+| `/reports/{id}` | Read first. **Result** runs it as the reader, with ask-when-run answers, a left-out note, and drill-down: a group, a date bucket (as its period's first and last day), the total or a chart bar opens the records behind it, with a way back. Below it, Prepare CSV/PDF and the reader's own exports. **Definition** is the editor, live for the author, read-only for others. **Schedule** holds the reader's own deliveries. **Sharing** is the author's. Make a copy and Delete confirm with `ConfirmDialog`. |
+| `/built-in-reports/{key}` | A built-in report: Result and a read-only Definition, and Make a copy. |
 | `/report-exports/{id}` | A prepared or delivered export, for its requester only, until it expires. |
 | Dashboard | Customize offers the first 100 unplaced reports the reader may run, by name (provider `report`, embed `base/reports.dashboard`); outside Customize only placed reports are read. Each provider call shares one fresh reader catalog across their access revisions (report version and which columns resolve), and a changed revision remounts the panel without its cached HTML. A placed report runs as the reader with its stored answers and shows its chart, or its total as a number, and names any column their access leaves out. It reruns at most once a minute unless its revision changes. Hidden pins survive intervening arrangement edits and return when access does. |
 | `/reports/{id}/export` | The CSV download, or a PDF with `format=pdf` (`reports.export`), with the answers, drill-downs and records view in the address (`a<i>`, `a<i>_to`, `d<n>`, `v<n>`, `rows`). |
@@ -82,7 +82,8 @@ The settings editor groups the two pairs as **Reports · Interactive reads** and
 - The editor and the Sharing form are drafts of the version they opened at: a save after someone else's is refused as a conflict, and the draft stays in the form until saved or discarded. Every filter, measure and sort a definition holds opens in the editor, and each field is read by name, so a definition at its bounds saves whole. A `one_of` filter is typed as comma-separated text, with `"quotes"` around a value that holds a comma (`"North, East", West` is two values), so a saved list reopens and saves unchanged. Sharing's Discard changes is a submit of its form, so the browser resets the controls with the server's draft; Enter in the editor saves through the form's `data-submit-event`.
 - A date value, and a range on a timestamp, is a day picker; an equals on a timestamp is its exact instant as text with its offset (`2025-01-31T09:30:00Z`), so a stored default survives editing other fields.
 - Every write goes through the operation contracts below (`PAGE_WRITES`: `create`, `save_definition`, `copy`, `save_sharing`, `delete`, `prepare_export`, `subscribe`, `pause_schedule`, `unsubscribe`).
-- The menu entry Reports needs `reports.view`.
+- The menu entry Reports sits under Core and needs `reports.view`.
+- The list filters by Area (Core or a Domain) and Records, both derived from the module that declared each report's Grid table. Only areas and record types the reader's catalog holds are offered; the filters combine with the search and stay in the address.
 
 ## Agent operations
 
@@ -90,7 +91,7 @@ Reads: `base.reports.list` (one page by name: `search`, `page` from 1, `page_siz
 
 ## Schedules
 
-- A subscription keeps the workplace where it was created and delivers one report there daily, weekly (a weekday) or monthly (day 1–28) at a wall-clock time in the subscriber's display zone, as CSV or PDF, to the subscriber and, with `reports.share`, to the holders of chosen roles.
+- A subscription keeps the workplace where it was created and delivers one report there daily, weekly (a weekday) or monthly (day 1–28) at a wall-clock time in the subscriber's display zone, as CSV or PDF, to the subscriber and, with `reports.share`, to the holders of chosen roles and to chosen staff who can run reports (CC roles, CC people); each receives it under their own access.
 - Schedule's recurrence `base/reports.deliveries` (every 15 minutes, the `scheduler` principal) sweeps due subscriptions: one delivery per recipient (unique per due time), audited in each tenant as `scheduler`. Like every contributed recurrence it runs nothing until an operator enables it on `/system/schedule` and grants the `scheduler` principal `admin.system.schedule.execute`; see [Schedule setup](../schedule/README.md).
 - Each delivery is queued as its recipient in the subscription's workplace (`base/reports-deliver`, re-proved by Queue on every attempt) after their account, desk, `reports.view` and `reports.export` prove (a delivered file is an export, downloaded like one). It runs the report under their own access, keeps the file as their prepared export, rings their bell and mails a link that needs sign-in (`APP_ORIGIN`). The mail carries no data.
 - Nothing is sent, and the delivery records why, when the recipient's account no longer proves, they lost their desk in the subscription's workplace, they lost `reports.view` or `reports.export`, the report is no longer shared with them, a filter hides a field from them, or no record matched and the subscription skips empty results (decided before the file is stored or the bell rings; an ungrouped summary is one line however many records it counts). Pausing cancels deliveries not yet started. A delivery whose job Queue ended without running it is closed as skipped by the next sweep. Every delivery's creation, export, cancellation and removal is audited.
@@ -104,7 +105,7 @@ A module contributes one in code with `bilibi_reports::builtin!` (key, name, des
 - `base_reports`: tenant, owner, name, description, record type, kind, definition (JSON, at most 32 KB), `shared_with_everyone`, `version`.
 - `base_report_shares`: one row per role; it goes with its report or role.
 - `base_report_exports`: a prepared export's request and outcome (its artifact, file name, row count or why it failed, its Queue job, and what the requester could see when it was made), read only by its requester.
-- `base_report_subscriptions`, `base_report_subscription_roles`, `base_report_deliveries`: workplace-bound schedules, their extra recipients, and each delivery's state, reason and Queue job.
+- `base_report_subscriptions`, `base_report_subscription_roles`, `base_report_subscription_people`, `base_report_deliveries`: workplace-bound schedules, their extra recipients, and each delivery's state, reason and Queue job.
 - Audited as kind `base_report`.
 
 ## Proof

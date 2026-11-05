@@ -59,6 +59,7 @@ fn allowlist(args: Value) -> Result<Value> {
                     | "timeout"
                     | "late-write"
                     | "fenced-write"
+                    | "company-write"
                     | "secret"
             )
         })
@@ -71,6 +72,8 @@ fn allowlist(args: Value) -> Result<Value> {
 // linked Platform binds; this executable binds none of its own.
 struct Specimen {
     db: Db,
+    boundary: Arc<MutationBoundary>,
+    companies: Arc<bilibi_core::company::CompanyService>,
     settings: Arc<Settings>,
 }
 impl Handler for Specimen {
@@ -101,7 +104,7 @@ impl Handler for Specimen {
                 }
                 _ => {}
             }
-            let result = self.effect(execution).await;
+            let result = self.effect(execution, mode).await;
             match result {
                 Ok(()) => Outcome::Completed,
                 Err(Error::Unauthorized | Error::Forbidden) => {
@@ -170,7 +173,10 @@ impl Specimen {
             }
         }
     }
-    async fn effect(&self, execution: &Execution) -> Result<()> {
+    async fn effect(&self, execution: &Execution, mode: &str) -> Result<()> {
+        if mode == "company-write" {
+            return self.company_effect(execution).await;
+        }
         let mut client = self.db.get().await?;
         let mut tx = execution
             .begin(&mut client, "queue.specimen.effect")
@@ -183,6 +189,111 @@ impl Specimen {
             Ok(((),vec![Change {kind:"queue.specimen.effect".into(),id,old:Value::Null,new:json!({"applied":inserted == 1})}]))
         })).await?;
         tx.commit().await
+    }
+
+    async fn company_effect(&self, execution: &Execution) -> Result<()> {
+        let scope = execution.scope().ok_or(Error::Forbidden)?;
+        let mut fence_client = self.db.get().await?;
+        let _fence = execution
+            .begin(&mut fence_client, "queue.specimen.company-effect-fence")
+            .await?;
+        println!("company write fence acquired job={}", execution.job_id);
+        let mut owner_client = self.db.get().await?;
+        let mut tx = self
+            .boundary
+            .begin(
+                &mut owner_client,
+                scope.mutation_context("queue.specimen.company-effect"),
+            )
+            .await?;
+        bilibi_core::company::authorize_work_target(tx.sql(), scope, COMPANY, "companies.update")
+            .await?;
+        bilibi_core::company::require_writable(tx.sql(), scope, COMPANY, true)
+            .await
+            .map_err(|error| match error {
+                bilibi_core::company::WriteError::Access(error) => error,
+                _ => Error::Forbidden,
+            })?;
+        println!("company write guard acquired job={}", execution.job_id);
+        let (id, company) = (execution.job_id, COMPANY);
+        tx.mutate(move |sql| Box::pin(async move {
+            let inserted = sql.execute("INSERT INTO queue_company_effects(job_id,company_id) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&id,&company]).await?;
+            Ok(((),vec![Change {kind:"queue.specimen.company-effect".into(),id,old:Value::Null,new:json!({"company":company,"applied":inserted == 1})}]))
+        })).await?;
+        tx.commit().await?;
+        self.companies
+            .assign_primary_company(scope, COMPANY, true)
+            .await
+            .map_err(|error| match error {
+                bilibi_core::company::WriteError::Access(error) => error,
+                _ => Error::Forbidden,
+            })?;
+        println!(
+            "company primary assigned under fence job={}",
+            execution.job_id
+        );
+        let read_client = self.db.get().await?;
+        let (name, code) = {
+            let row = read_client
+                .query_one(
+                    "SELECT name,code FROM companies WHERE tenant_id=$1 AND id=$2",
+                    &[&scope.tenant(), &COMPANY],
+                )
+                .await?;
+            (row.get::<_, String>(0), row.get::<_, String>(1))
+        };
+        let current = |tenant: i64| {
+            let read = &read_client;
+            async move {
+                Ok::<i64, Error>(
+                    read.query_one(
+                        "SELECT version FROM companies WHERE tenant_id=$1 AND id=$2",
+                        &[&tenant, &COMPANY],
+                    )
+                    .await?
+                    .get(0),
+                )
+            }
+        };
+        let edit = |field: &str, value: String, version: i64| bilibi_core::company::Edit {
+            id: COMPANY,
+            field: field.into(),
+            value,
+            version,
+        };
+        self.companies
+            .save_as(scope, &edit("name", name, current(scope.tenant()).await?))
+            .await?;
+        println!("company field saved under fence job={}", execution.job_id);
+        self.companies
+            .save_as(
+                scope,
+                &edit("code", code.clone(), current(scope.tenant()).await?),
+            )
+            .await?;
+        println!(
+            "company unchanged code saved under fence job={}",
+            execution.job_id
+        );
+        match self
+            .companies
+            .save_as(
+                scope,
+                &edit(
+                    "code",
+                    format!("{code}-changed"),
+                    current(scope.tenant()).await?,
+                ),
+            )
+            .await
+        {
+            Err(Error::Refused(message)) => println!(
+                "company code change refused under fence job={} message={message}",
+                execution.job_id
+            ),
+            _ => return Err(Error::Internal),
+        }
+        Ok(())
     }
 }
 inventory::submit! { Contribution::new(WORKERS,"queue/execution-walkthrough",Provenance {module:"base/queue",source:file!(),line:line!()},&Worker {max_attempts:3,validate:allowlist}) }
@@ -220,26 +331,32 @@ async fn main() -> Result<()> {
         .get::<StepUp>(bilibi_base::step_up::SERVICE)?
         .set_enforced(false);
     let settings = services.get::<Settings>("base/settings.store")?;
+    let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
     services.provide(
         "base/queue.specimen",
         Arc::new(HandlerService(Arc::new(Specimen {
             db: db.clone(),
+            boundary: boundary.clone(),
+            companies: services
+                .get::<bilibi_core::company::CompanyService>(bilibi_core::company::SERVICE)?,
             settings: settings.clone(),
         }))),
     )?;
     let command = std::env::args().nth(1).unwrap_or_else(|| "inspect".into());
     let queue = services.get::<Queue>("base/queue.store")?;
-    let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
     let grants = services.get::<Grants>("base/authz.grants")?;
     let mut client = db.get().await?;
-    client.batch_execute("CREATE TABLE IF NOT EXISTS queue_execution_effects(job_id bigint PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())").await?;
+    client.batch_execute("CREATE TABLE IF NOT EXISTS queue_execution_effects(job_id bigint PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()); CREATE TABLE IF NOT EXISTS queue_company_effects(job_id bigint PRIMARY KEY, company_id bigint NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())").await?;
     if command == "worker" {
         drop(client);
         let config = Config {
             concurrency: 2,
             poll_interval: Duration::from_millis(100),
-            lease_seconds: 3,
+            lease_seconds: std::env::var("QUEUE_DEMO_LEASE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
             max_runtime: Duration::from_secs(
                 std::env::var("QUEUE_DEMO_RUNTIME")
                     .ok()
@@ -256,11 +373,11 @@ async fn main() -> Result<()> {
         return running.await.map_err(|_| Error::Internal)?;
     }
     if command == "inspect" {
-        let rows = client.query("SELECT j.id,j.tenant_id,j.state,j.attempt,j.failure_code,j.actor_kind,j.system_principal,count(e.job_id)::bigint AS effects FROM base_queue_jobs j LEFT JOIN queue_execution_effects e ON e.job_id=j.id WHERE j.worker_id='queue/execution-walkthrough' GROUP BY j.id ORDER BY j.id",&[]).await?;
+        let rows = client.query("SELECT j.id,j.tenant_id,j.state,j.attempt,j.failure_code,j.actor_kind,j.system_principal,count(e.job_id)::bigint AS effects,(SELECT count(*) FROM queue_company_effects c WHERE c.job_id=j.id)::bigint AS company_effects FROM base_queue_jobs j LEFT JOIN queue_execution_effects e ON e.job_id=j.id WHERE j.worker_id='queue/execution-walkthrough' GROUP BY j.id ORDER BY j.id",&[]).await?;
         for row in rows {
             let state = store::lookup(&**client, row.get("tenant_id"), row.get("id")).await?;
             println!(
-                "job={} state={:?} terminal={} attempt={} code={:?} actor={} principal={:?} effects={}",
+                "job={} state={:?} terminal={} attempt={} code={:?} actor={} principal={:?} effects={} company_effects={}",
                 state.id,
                 state.state,
                 state.state.terminal(),
@@ -268,7 +385,8 @@ async fn main() -> Result<()> {
                 state.failure_code,
                 row.get::<_, String>("actor_kind"),
                 row.get::<_, Option<String>>("system_principal"),
-                row.get::<_, i64>("effects")
+                row.get::<_, i64>("effects"),
+                row.get::<_, i64>("company_effects")
             );
         }
         // The effects' audit rows: a system job's name its principal (SP1).

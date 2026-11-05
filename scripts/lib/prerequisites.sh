@@ -3,9 +3,28 @@
 # shellcheck source=scripts/lib/versions.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/versions.sh"
 
+# A parent Cargo or make advertises its jobserver in these variables as inherited
+# pipe descriptors. A launcher that closes those descriptors (Python Popen, a
+# cargo-watch shell) leaves Cargo printing "failed to connect to jobserver".
+# Call this first in every launcher path that starts cargo; Cargo then makes its own.
+clear_stale_jobserver() {
+    unset CARGO_MAKEFLAGS MAKEFLAGS MFLAGS
+}
+
 activate_cargo() {
+    clear_stale_jobserver
     # shellcheck disable=SC1091
     if [[ -f $HOME/.cargo/env ]]; then source "$HOME/.cargo/env"; fi
+}
+
+postgres_bin() {
+    if [[ -n ${PG18_BIN:-} ]]; then
+        printf '%s\n' "$PG18_BIN"
+    elif [[ ! -x /usr/lib/postgresql/18/bin/initdb && -x /usr/bin/initdb ]]; then
+        echo /usr/bin
+    else
+        echo /usr/lib/postgresql/18/bin
+    fi
 }
 
 development_prerequisites() {
@@ -27,8 +46,9 @@ development_prerequisites() {
     pkg-config --exists openssl || { echo 'OpenSSL development libraries are required.' >&2; return 1; }
     node -e "process.exit(Number(process.versions.node.split('.')[0]) < $NODE_MAJOR ? 1 : 0)" || { echo "Node.js $NODE_MAJOR+ is required." >&2; return 1; }
     if [[ -z ${DATABASE_URL:-} ]]; then
-        pg_bin=${PG18_BIN:-/usr/lib/postgresql/18/bin}
-        "$pg_bin/initdb" --version >/dev/null 2>&1 && "$pg_bin/pg_ctl" --version >/dev/null 2>&1 || {
+        pg_bin=$(postgres_bin)
+        [[ $("$pg_bin/initdb" --version 2>/dev/null | awk '{print $NF}' | cut -d. -f1) == "$POSTGRESQL_MAJOR" ]] &&
+            [[ $("$pg_bin/pg_ctl" --version 2>/dev/null | awk '{print $NF}' | cut -d. -f1) == "$POSTGRESQL_MAJOR" ]] || {
             echo "PostgreSQL $POSTGRESQL_MAJOR binaries are required at $pg_bin (or set DATABASE_URL)." >&2; return 1;
         }
     fi

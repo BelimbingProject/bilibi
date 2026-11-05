@@ -46,7 +46,7 @@ const EXPORTED: &str = "base/reports.exported";
 const PREPARER: &str = "base/reports.preparer";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 6] = [
+const MIGRATIONS: [(&str, &str); 7] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -70,6 +70,10 @@ const MIGRATIONS: [(&str, &str); 6] = [
     (
         "base-reports-006-subscription-company",
         include_str!("../migrations/006-subscription-company.sql"),
+    ),
+    (
+        "base-reports-007-subscription-people",
+        include_str!("../migrations/007-subscription-people.sql"),
     ),
 ];
 const KIND: &str = "base_report";
@@ -134,6 +138,42 @@ pub struct RunInput {
     pub background: bool,
 }
 
+/// A record type with the area that owns it, derived from the module that
+/// declared its Grid table: `core/company` and `base/...` are Core, a Domain's
+/// module is that Domain.
+#[derive(Clone, Debug)]
+pub struct RecordSource {
+    pub id: String,
+    pub label: String,
+    /// The owning container (`core`, `finance`), the filter's value.
+    pub area: String,
+    pub area_label: String,
+}
+
+/// `(container, label)` of a module ID: Base and Core modules are "Core";
+/// a Domain reads as its container with short words in capitals (`cx` is CX).
+fn area_of(module: &str) -> (String, String) {
+    let container = module.split_once('/').map_or(module, |(c, _)| c);
+    if matches!(container, "base" | "core") {
+        return ("core".into(), "Core".into());
+    }
+    let label = container
+        .split('_')
+        .map(|word| {
+            if word.len() <= 2 {
+                word.to_uppercase()
+            } else {
+                let mut chars = word.chars();
+                chars.next().map_or(String::new(), |c| {
+                    c.to_uppercase().collect::<String>() + chars.as_str()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (container.to_owned(), label)
+}
+
 /// One column of a result, as the reader's catalog names it.
 #[derive(Clone, Debug, Serialize)]
 pub struct ColumnInfo {
@@ -194,6 +234,7 @@ pub struct Reports {
     authentication: Arc<bilibi_tenancy::Authentication>,
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
+    directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
     origin: String,
     builtins: Vec<&'static Builtin>,
@@ -373,11 +414,13 @@ impl Reports {
     }
 
     /// One page of the reports the reader may run, searched by name and
-    /// description, with the number that match. Needs `reports.view`.
+    /// description, with the number that match. `record_types` narrows to
+    /// reports over those record types (`None` keeps all). Needs `reports.view`.
     pub async fn page(
         &self,
         scope: &Scope,
         search: &str,
+        record_types: Option<&[String]>,
         offset: u64,
         limit: u64,
     ) -> Outcome<(Vec<Report>, u64)> {
@@ -389,6 +432,7 @@ impl Reports {
             scope.tenant(),
             scope.user(),
             search,
+            record_types,
             clamp(offset),
             clamp(limit),
         )
@@ -595,6 +639,29 @@ impl Reports {
         Ok(types)
     }
 
+    /// The record types the reader can report on with the Domain or Core
+    /// area that owns each, by label. Needs `reports.view`.
+    pub async fn record_sources(&self, scope: &Scope) -> Outcome<Vec<RecordSource>> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        authorize(&**client, scope, VIEW).await?;
+        drop(client);
+        let catalog = self.catalog(scope, false, false).await?;
+        let mut sources: Vec<_> = catalog
+            .tables()
+            .map(|table| {
+                let (area, area_label) = area_of(table.owner);
+                RecordSource {
+                    id: table.id().to_owned(),
+                    label: table.label().to_owned(),
+                    area,
+                    area_label,
+                }
+            })
+            .collect();
+        sources.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+        Ok(sources)
+    }
+
     /// The columns a report on `record_type` can use for this reader: the
     /// table's own fields, then each field of a table one link away. Fields
     /// the reader cannot see are not offered. Needs `reports.view`.
@@ -644,6 +711,59 @@ impl Reports {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, SHARE).await?;
         Ok(store::roles(&**client, scope.tenant()).await?)
+    }
+
+    /// The staff who can run reports, as `(id, name)`, for choosing whom a
+    /// schedule also goes to. Needs `reports.share`; at most 500 are offered.
+    pub async fn share_people(&self, scope: &Scope) -> Outcome<Vec<(i64, String)>> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        authorize(&**client, scope, SHARE).await?;
+        let mut accounts = Vec::new();
+        let mut after = 0_i64;
+        while accounts.len() < 500 {
+            let page = bilibi_authz::holder_page(&**client, scope, after, VIEW, 100).await?;
+            for id in &page {
+                after = *id;
+                if self
+                    .authentication
+                    .account_identity(&**client, scope, *id)
+                    .await
+                    .is_ok_and(|identity| identity.kind == bilibi_tenancy::AccountKind::Staff)
+                {
+                    accounts.push(*id);
+                }
+            }
+            if page.len() < 100 {
+                break;
+            }
+        }
+        accounts.truncate(500);
+        let principals = accounts
+            .iter()
+            .filter_map(|id| {
+                bilibi_principal_directory::PrincipalRef::new(
+                    bilibi_principal_directory::PrincipalKind::User,
+                    *id,
+                )
+                .ok()
+            })
+            .collect::<Vec<_>>();
+        let names = self
+            .directory
+            .rank(
+                &**client,
+                scope,
+                &principals,
+                &bilibi_principal_directory::Query::default(),
+            )
+            .await
+            .map_err(|_| Error::Internal)?;
+        let mut people: Vec<(i64, String)> = principals
+            .into_iter()
+            .map(|principal| (principal.id(), names.label(principal)))
+            .collect();
+        people.sort_by_key(|(id, name)| (name.to_lowercase(), *id));
+        Ok(people)
     }
 
     /// What this reader may see of a report now, as a key that changes when
@@ -1307,7 +1427,7 @@ fn line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/reports", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory"],
         migrations: &MIGRATIONS,
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let reports = Arc::new(Reports {
@@ -1322,6 +1442,7 @@ inventory::submit! {
                 authentication: services.get("base/tenancy.authentication")?,
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
+                directory: services.get("base/principal_directory.directory")?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
                 builtins: builtin::validate(bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?.entries::<Builtin>(BUILTINS)?)?,
             });
@@ -1374,6 +1495,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
 bilibi_menu::contribute!(
     "base/reports",
     bilibi_menu::MenuItem::page("reports", "Reports", web::INDEX)
+        .under("core")
         .company_scoped()
         .icon("chart-bar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))

@@ -1,6 +1,6 @@
 //! Personal settings navigation. All six pages use the
 //! same layout and typed active tab, including the pages owned by
-//! `core/agent_access` and `base/search`.
+//! `core/agent` and `base/search`.
 use crate::Tab;
 
 /// The active section of the signed-in account's settings.
@@ -38,7 +38,7 @@ const PAGES: [(SettingsTab, &str, &str, &str); 6] = [
     (
         SettingsTab::Appearance,
         "settings-nav-appearance",
-        "Appearance",
+        "Theme",
         "/settings/appearance",
     ),
     (
@@ -56,7 +56,7 @@ const PAGES: [(SettingsTab, &str, &str, &str); 6] = [
 ];
 
 /// Where the personal settings pages live, as the page search names it.
-pub const SETTINGS_LOCATION: [&str; 2] = ["Account", "My Settings"];
+pub const SETTINGS_LOCATION: [&str; 2] = ["Account", "My settings"];
 
 impl SettingsTab {
     pub fn tabs(&self) -> [Tab<'static>; 6] {

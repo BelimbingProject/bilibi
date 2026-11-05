@@ -78,13 +78,17 @@ setup_os_like() { (. /etc/os-release && echo "${ID:-} ${ID_LIKE:-}"); }
 is_wsl() { grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; }
 
 require_supported_system() {
-    [[ $(uname -s) == Linux ]] || fail platform "$(uname -s) is not supported" 'use Ubuntu, Debian or WSL2 with Ubuntu or Debian'
-    if [[ ! -r /etc/os-release ]] || ! command -v apt-get >/dev/null; then
-        fail platform 'no apt-based distribution found' 'use Ubuntu, Debian or WSL2 with Ubuntu or Debian'
-    fi
+    local advice='use Ubuntu, Debian, Arch Linux or an Arch derivative (including WSL2)'
+    [[ $(uname -s) == Linux ]] || fail platform "$(uname -s) is not supported" "$advice"
+    [[ -r /etc/os-release ]] || fail platform 'cannot read /etc/os-release' "$advice"
     case " $(setup_os_like) " in
-        *' ubuntu '* | *' debian '*) ;;
-        *) fail platform "$(setup_os_id) is not supported" 'use Ubuntu, Debian or WSL2 with Ubuntu or Debian' ;;
+        *' ubuntu '* | *' debian '*)
+            command -v apt-get >/dev/null || fail platform 'apt-get not found' "$advice"
+            SETUP_PACKAGE_MANAGER=apt ;;
+        *' arch '*)
+            command -v pacman >/dev/null || fail platform 'pacman not found' "$advice"
+            SETUP_PACKAGE_MANAGER=pacman ;;
+        *) fail platform "$(setup_os_id) is not supported" "$advice" ;;
     esac
 }
 require_supported_system
@@ -117,6 +121,16 @@ apt_install() {
     ((${#missing[@]})) || return 1
     apt_update
     as_root apt-get install -y -qq --no-install-recommends "${missing[@]}"
+}
+
+# A full upgrade avoids pacman's unsupported partial upgrades. Do nothing when
+# all packages are already installed, including on a passwordless rerun.
+pacman_install() {
+    local p missing=()
+    for p in "$@"; do pacman -Q "$p" >/dev/null 2>&1 || missing+=("$p"); done
+    ((${#missing[@]})) || return 1
+    as_root pacman -Syu --needed --noconfirm "${missing[@]}" ||
+        fail packages "pacman could not install ${missing[*]}" "fix the cause in the log, then rerun ./bilibi setup"
 }
 
 # Third-party apt repository: apt_repo <name> <key url> <sources line>

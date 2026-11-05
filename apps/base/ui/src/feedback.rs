@@ -220,9 +220,12 @@ pub struct FlashGroup<'a> {
 
 /// The flash outlet that arrives after the app shell, outside any page body:
 /// pinned to the top right so a message that came with a redirect stays in view.
+/// Its messages belong to no page, so closing one only hides it: no
+/// `clear-flash` event reaches the page it landed on (Bilimbi: LiveView clears
+/// a landing flash itself, `lv:clear-flash`).
 #[derive(Template, Debug, Default)]
 #[template(
-    source = r#"{% import "feedback.html" as ui %}{% call ui::flash_group(id=id, messages=flash, floating=true) %}{% endcall %}"#,
+    source = r#"{% import "feedback.html" as ui %}{% call ui::flash_group(id=id, messages=flash, floating=true, local=true) %}{% endcall %}"#,
     ext = "html"
 )]
 pub struct FloatingFlashGroup<'a> {

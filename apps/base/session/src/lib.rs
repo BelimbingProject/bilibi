@@ -81,6 +81,14 @@ pub struct Terminated {
     /// different tenant. Ordinary endings return through the page they held.
     pub redirect: Option<&'static str>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRevocationReason {
+    PasswordChanged,
+    PasswordReset,
+    SignedOut,
+    AdminAction,
+    AccountChanged,
+}
 #[derive(Clone, Debug)]
 pub struct SessionClient {
     pub id: String,
@@ -176,6 +184,7 @@ pub enum Termination {
 pub struct RevocationAccount {
     tenant: i64,
     user: i64,
+    reason: CredentialRevocationReason,
 }
 impl RevocationAccount {
     pub fn tenant(self) -> i64 {
@@ -183,6 +192,9 @@ impl RevocationAccount {
     }
     pub fn user(self) -> i64 {
         self.user
+    }
+    pub fn reason(self) -> CredentialRevocationReason {
+        self.reason
     }
 }
 
@@ -268,6 +280,13 @@ impl Sessions {
         let account = RevocationAccount {
             tenant: tx.context().tenant,
             user,
+            reason: match tx.context().action.as_str() {
+                "user.change_password" => CredentialRevocationReason::PasswordChanged,
+                "user.reset_password" => CredentialRevocationReason::PasswordReset,
+                "user.sso.backchannel_logout" => CredentialRevocationReason::SignedOut,
+                "user.password_reset" => CredentialRevocationReason::AdminAction,
+                _ => CredentialRevocationReason::AccountChanged,
+            },
         };
         let revokers = self.credential_revokers()?;
         tx.mutate(move |sql| {
