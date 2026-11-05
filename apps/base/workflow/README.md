@@ -235,10 +235,11 @@ Use `Engine::transition(scope, kind, id, to, request)` for a standalone
 transition, or `transition_in(&mut MutationTransaction, ...)` when the owner's
 other business writes must commit with the transition. The engine runs inside
 the owner's audited `mutate`, so a guard denial after an earlier owner write
-poisons the whole transaction and the outer commit fails. The mutation context
-must carry the same tenant and user as the scope; the scope is re-authenticated
-inside the transaction. Lock order is owner row, then flow and status
-definitions (`FOR SHARE`), then the subject binding (`FOR UPDATE`).
+poisons the whole transaction and the outer commit fails.
+
+A queued or scheduled job may transition a subject with the named system principal from its sealed `Scope`. The owner declares the principal and the capabilities it may use; an administrator grants those capabilities in the same tenant. Workflow rechecks the owner policy, the edge capability and every guard. The mutation context must name the same tenant and exact principal, with no impersonator or agent. History and audit then name `System · <principal>`. Other Workflow writes, including comments, adoption and human actions, still require a person.
+
+Lock order is owner row, then flow and status definitions (`FOR SHARE`), then the subject binding (`FOR UPDATE`).
 
 `Request` accepts `expected_version`, `comment` (≤ 16,000 bytes),
 `comment_tag` (≤ 255 bytes), JSON arrays `assignees`/`attachments`, and JSON
@@ -289,6 +290,16 @@ cargo run -p bilibi-workflow --example owner -- available 4 1
 cargo run -p bilibi-workflow --example owner -- approve 4 1
 cargo run -p bilibi-workflow --example owner -- history 4 1
 ```
+
+To prove an unattended transition, use the reference principal from this disposable fixture:
+
+```sh
+cargo run -p bilibi-workflow --example owner -- init 4 1
+cargo run -p bilibi-workflow --example owner -- approve system/reference-workflow 1
+cargo run -p bilibi-workflow --example owner -- attribution system/reference-workflow 1
+```
+
+The transition passes the same `companies.update` owner and edge checks as the person-driven command. `attribution` prints `system` and `reference-workflow` for Workflow history, and prints the same principal with actor ID `0` for the mutation audit. The fixture gives this reference-only principal standing grants for `companies.update` and `workflow.transition.deliver`; production owners declare their principal and an administrator grants it in each tenant.
 
 To demonstrate versioned starts and reads in the same fresh disposable
 database, run the process commands in order:

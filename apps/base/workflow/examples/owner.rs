@@ -1,5 +1,6 @@
 //! Operator-driven private owner specimen. Commands execute real PostgreSQL
 //! transactions; this is not a unit-test runner or an application route.
+use bilibi_authz::{SystemAuthentication, SystemScope};
 use bilibi_database::{pool, Change, Error, MutationBoundary, Result};
 use bilibi_module_registry::{Contribution as Registration, Services};
 use bilibi_tenancy::{Authentication, Scope};
@@ -123,9 +124,9 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>();
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
     let scope = if actor.first() == Some(&"system") {
-        authentication
-            .for_principal(&**client, 1, actor.get(1).ok_or(Error::Invalid)?)
-            .await?
+        let system =
+            SystemScope::rehydrate(&**client, 1, Some(actor.get(1).ok_or(Error::Invalid)?)).await?;
+        authentication.for_system(&**client, &system).await?
     } else {
         let operator = if actor.get(1) == Some(&"impersonator") {
             Some(
@@ -466,7 +467,10 @@ async fn main() -> Result<()> {
             let client = db.get().await?;
             client.execute("INSERT INTO workflow_reference_records(id,tenant_id) SELECT n,1 FROM generate_series(1,20) n ON CONFLICT DO NOTHING",&[]).await?;
             client.execute("INSERT INTO workflow_reference_records(id,tenant_id) VALUES(100,2) ON CONFLICT DO NOTHING",&[]).await?;
-            println!("Reference definitions/records initialized (insert only)");
+            println!(
+                "Reference definitions/records initialized for {} (insert only)",
+                reference::SYSTEM_PRINCIPAL
+            );
         }
         "show" => {
             let client = db.get().await?;
@@ -479,6 +483,23 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&page.entries).map_err(|_| Error::Internal)?
+            );
+        }
+        "attribution" => {
+            let client = db.get().await?;
+            let row = client.query_one(
+                "SELECT h.actor_type,h.actor_id,h.impersonator,m.actor_type,m.actor_id,m.system_principal,m.impersonator_id FROM base_workflow_status_history h JOIN base_workflow_bindings b ON b.id=h.binding_id JOIN base_audit_mutations m ON m.tenant_id=b.tenant_id AND m.auditable_type='workflow.history' AND m.auditable_id=h.id::text WHERE b.tenant_id=$1 AND b.subject_type='reference.record' AND b.subject_id=$2 ORDER BY h.id DESC,m.id DESC LIMIT 1",
+                &[&scope.tenant(), &id],
+            ).await?;
+            println!(
+                "history actor_type={} actor_id={} impersonator={:?}; audit actor_type={} actor_id={} system_principal={:?} impersonator={:?}",
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, Option<serde_json::Value>>(2),
+                row.get::<_, String>(3),
+                row.get::<_, i64>(4),
+                row.get::<_, Option<String>>(5),
+                row.get::<_, Option<i64>>(6),
             );
         }
         "adopt" => println!(

@@ -16,6 +16,7 @@ use bilibi_workflow::{
 use serde_json::json;
 use tokio_postgres::Transaction;
 mod followup;
+pub const SYSTEM_PRINCIPAL: &str = "reference-workflow";
 struct Owner;
 impl SubjectAdapter for Owner {
     fn maintenance_load<'a>(
@@ -390,7 +391,7 @@ pub static DRIFTED_V1: Contribution = Contribution::Process(Process {
 });
 inventory::submit! { bilibi_module_registry::Module {
     id:"extensions/workflow_reference",layer:bilibi_module_registry::Layer::Extensions,
-    dependencies:&["base/workflow","base/tenancy","base/step_up","base/notifications","base/queue","base/database"],services:&[bilibi_module_registry::Service{id:"extensions/workflow_reference.approvals",factory:|services|{
+    dependencies:&["base/workflow","base/tenancy","base/authz","base/step_up","base/notifications","base/queue","base/database"],services:&[bilibi_module_registry::Service{id:"extensions/workflow_reference.approvals",factory:|services|{
         let engine=services.get::<bilibi_workflow::Engine>("base/workflow.engine")?;
         let adapter=std::sync::Arc::new(ApprovalOwner{parties:services.get("base/tenancy.parties")?,notices:services.get("base/notifications.sink")?,queue:services.get("base/queue.store")?});
         engine.bind_approval_case("extensions/workflow_reference",APPROVAL_CASE.key,adapter.clone())?;
@@ -403,6 +404,27 @@ inventory::submit! { bilibi_module_registry::Module {
     ("extensions-workflow-reference-003-approval-facts","CREATE TABLE workflow_reference_approval_facts(record_id bigint PRIMARY KEY,tenant_id bigint NOT NULL,company_id bigint NOT NULL,prepared_by bigint NOT NULL,manager_id bigint NOT NULL DEFAULT 1,amount text NOT NULL DEFAULT '12500.00',currency text NOT NULL DEFAULT 'MYR',resource_type text NOT NULL DEFAULT 'controlled',revision text NOT NULL DEFAULT '1',closed boolean NOT NULL DEFAULT false,fail_effect boolean NOT NULL DEFAULT false)"),
     ("extensions-workflow-reference-004-followups","CREATE TABLE workflow_reference_followups(id bigserial PRIMARY KEY,tenant_id bigint NOT NULL,record_id bigint NOT NULL,revision text NOT NULL,UNIQUE(tenant_id,record_id,revision))")],
 } }
+inventory::submit! { Registration::new(
+    bilibi_authz::VOCABULARY,
+    "reference.system-principal",
+    Provenance {module:"extensions/workflow_reference",source:file!(),line:line!()},
+    &bilibi_authz::VocabularyContribution {
+        domains:&[],verbs:&[],capabilities:&[],roles:&[],
+        system_principals:&[bilibi_authz::SystemPrincipalDefinition {
+            name:SYSTEM_PRINCIPAL,
+            capabilities:&["companies.update","workflow.transition.deliver"],
+        }],
+    }
+) }
+inventory::submit! { Registration::new(
+    bilibi_authz::STANDING_GRANTS,
+    SYSTEM_PRINCIPAL,
+    Provenance {module:"extensions/workflow_reference",source:file!(),line:line!()},
+    &bilibi_authz::StandingGrant {
+        principal:SYSTEM_PRINCIPAL,
+        capabilities:&["companies.update","workflow.transition.deliver"],
+    }
+) }
 // The reference flow's production seed: `seed` inserts it without the
 // operator's `initialize`, once per version.
 inventory::submit! { Registration::new(bilibi_module_registry::contributions::SEEDS, "reference.flow.seed",

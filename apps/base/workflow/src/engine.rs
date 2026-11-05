@@ -2,6 +2,7 @@ use crate::{
     definitions::{Flow, OwnedSubject, Registry, Transition},
     history, Load, Operation, Subject,
 };
+use bilibi_authz::SystemScope;
 use bilibi_database::{Change, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_tenancy::{Authentication, Scope};
 use serde::{Deserialize, Serialize};
@@ -246,6 +247,31 @@ impl Engine {
         }
         Ok(())
     }
+    /// A transition may be driven by an account or by a named system
+    /// principal. The latter must be the exact principal sealed on the scope:
+    /// it cannot borrow user, agent or impersonator attribution.
+    fn transition_writer(
+        &self,
+        context: &bilibi_database::Context,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<()> {
+        let Some(principal) = scope.principal() else {
+            return self.writer(context, scope, id);
+        };
+        if context.tenant != scope.tenant()
+            || context.actor.kind != "system"
+            || context.actor.id != principal
+            || context.impersonator.is_some()
+            || context.agent_connection.is_some()
+            || scope.impersonator().is_some()
+            || scope.agent().is_some()
+            || id <= 0
+        {
+            return Err(Error::Forbidden);
+        }
+        Ok(())
+    }
     async fn apply_in(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -263,7 +289,11 @@ impl Engine {
         let delivery_scope = scope.clone();
         let fact = tx.mutate(move |sql|Box::pin(async move {
             request.validate()?;
-            engine.writer(&context,&scope,id)?;
+            if matches!(operation, Operation::Transition) {
+                engine.transition_writer(&context,&scope,id)?;
+            } else {
+                engine.writer(&context,&scope,id)?;
+            }
             let scope=engine.live(sql,&scope).await?;
             let (owner,flow)=engine.registry.subject(&kind)?;
             let subject=engine.load(sql,&scope,owner,id,Load::Lock,operation).await?;
@@ -298,16 +328,34 @@ impl Engine {
             Ok((fact,changes))
         })).await?;
         if matches!(operation, Operation::Transition) {
-            if let Err(error) = self
-                .queue
-                .enqueue_for(
-                    tx,
-                    &delivery_scope,
-                    crate::outbox::DELIVERY_WORKER,
-                    json!({"history_id":fact.id}),
-                )
-                .await
-            {
+            let queued = if let Some(principal) = delivery_scope.principal() {
+                let system =
+                    SystemScope::rehydrate(tx.sql(), delivery_scope.tenant(), Some(principal))
+                        .await;
+                match system {
+                    Ok(system) => {
+                        self.queue
+                            .enqueue_system(
+                                tx,
+                                &system,
+                                crate::outbox::DELIVERY_WORKER,
+                                json!({"history_id":fact.id}),
+                            )
+                            .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.queue
+                    .enqueue_for(
+                        tx,
+                        &delivery_scope,
+                        crate::outbox::DELIVERY_WORKER,
+                        json!({"history_id":fact.id}),
+                    )
+                    .await
+            };
+            if let Err(error) = queued {
                 // Even a pre-insert queue refusal must poison the caller's
                 // owner transaction, just like a kernel callback refusal.
                 return tx
