@@ -299,7 +299,7 @@ fn duplicates_output() -> Value {
     json!({"type":"array","description":"Candidate id, name, status, score and matched_facts. Archived companies are included. Never chooses or merges."})
 }
 fn hierarchy_output() -> Value {
-    json!({"type":"object","description":"Ancestors root first and descendants as id, name, status and level, with truncated when the tenant depth or 1000-node limit is reached."})
+    json!({"type":"object","description":"Ancestors root first and descendants as id, name, status, level and parent_id, with truncated when the tenant depth or 1000-node limit is reached."})
 }
 
 struct Create;

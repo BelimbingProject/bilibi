@@ -12,6 +12,11 @@ pub struct HierarchyNode {
     pub status: String,
     /// Ancestors count from the root (level 1), even when the limit cuts the chain; the requested company is level 1 for descendants.
     pub level: i32,
+    /// The node's parent, so a caller can draw the tree: for a descendant,
+    /// the requested company or another descendant; for an ancestor, the next
+    /// ancestor up, `None` at the root, or a company outside the list when
+    /// the limit cut the chain (`truncated`).
+    pub parent_id: Option<i64>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Hierarchy {
@@ -77,7 +82,7 @@ pub async fn hierarchy(
     organisation::require_live(client, scope, id).await?;
     let max_depth = policy::depth(client, scope).await?;
     // Company view is tenant-wide, matching the existing detail read.
-    let rows = client.query("WITH RECURSIVE up AS (SELECT id,parent_id,name,status,1 AS level,ARRAY[id] AS path FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL UNION ALL SELECT c.id,c.parent_id,c.name,c.status,u.level+1,u.path||c.id FROM up u JOIN companies c ON c.id=u.parent_id AND c.tenant_id=$1 AND c.deleted_at IS NULL WHERE NOT c.id=ANY(u.path)), down AS (SELECT id,parent_id,name,status,1 AS level,ARRAY[id] AS path FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL UNION ALL SELECT c.id,c.parent_id,c.name,c.status,d.level+1,d.path||c.id FROM down d JOIN companies c ON c.parent_id=d.id AND c.tenant_id=$1 AND c.deleted_at IS NULL WHERE d.level<=$3 AND NOT c.id=ANY(d.path)) SELECT id,name,status,level,-1 AS direction,EXISTS(SELECT 1 FROM companies c WHERE c.tenant_id=$1 AND c.deleted_at IS NULL AND c.id=u.parent_id) AS more FROM up u WHERE level>1 UNION ALL SELECT id,name,status,level,1,EXISTS(SELECT 1 FROM companies c WHERE c.tenant_id=$1 AND c.deleted_at IS NULL AND c.parent_id=d.id AND NOT c.id=ANY(d.path)) FROM down d WHERE level>1 LIMIT 1001", &[&scope.tenant(), &id, &max_depth]).await?;
+    let rows = client.query("WITH RECURSIVE up AS (SELECT id,parent_id,name,status,1 AS level,ARRAY[id] AS path FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL UNION ALL SELECT c.id,c.parent_id,c.name,c.status,u.level+1,u.path||c.id FROM up u JOIN companies c ON c.id=u.parent_id AND c.tenant_id=$1 AND c.deleted_at IS NULL WHERE NOT c.id=ANY(u.path)), down AS (SELECT id,parent_id,name,status,1 AS level,ARRAY[id] AS path FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL UNION ALL SELECT c.id,c.parent_id,c.name,c.status,d.level+1,d.path||c.id FROM down d JOIN companies c ON c.parent_id=d.id AND c.tenant_id=$1 AND c.deleted_at IS NULL WHERE d.level<=$3 AND NOT c.id=ANY(d.path)) SELECT id,name,status,level,parent_id,-1 AS direction,EXISTS(SELECT 1 FROM companies c WHERE c.tenant_id=$1 AND c.deleted_at IS NULL AND c.id=u.parent_id) AS more FROM up u WHERE level>1 UNION ALL SELECT id,name,status,level,parent_id,1,EXISTS(SELECT 1 FROM companies c WHERE c.tenant_id=$1 AND c.deleted_at IS NULL AND c.parent_id=d.id AND NOT c.id=ANY(d.path)) FROM down d WHERE level>1 LIMIT 1001", &[&scope.tenant(), &id, &max_depth]).await?;
     let mut result = Hierarchy {
         ancestors: Vec::new(),
         descendants: Vec::new(),
@@ -103,6 +108,7 @@ pub async fn hierarchy(
             name: row.get("name"),
             status: row.get("status"),
             level,
+            parent_id: row.get("parent_id"),
         };
         if row.get::<_, i32>("direction") < 0 {
             result.ancestors.push(node);
