@@ -20,7 +20,8 @@ pub const VIEW: &str = "core.document.view";
 pub const DOWNLOAD: &str = "core.document.download";
 /// Create, edit, revise, link and delete the documents the actor may see.
 pub const MANAGE: &str = "core.document.manage";
-/// Merge duplicate documents (slice 3).
+/// Merge duplicate documents into one survivor. A merge also needs the manage
+/// and share grants on every document it unites.
 pub const MERGE: &str = "core.document.merge";
 const CAPABILITIES: &[&str] = &[VIEW, DOWNLOAD, MANAGE, MERGE];
 
@@ -353,6 +354,9 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("delete", "core.document.delete"),
         ("share", "core.document.share"),
         ("unshare", "core.document.unshare"),
+        ("mark", "core.document.mark"),
+        ("copy", "core.document.copy"),
+        ("merge", "core.document.merge"),
     ],
-    pending: Pending::Events { events: &["upload"], reason: "Receiving a file stores it as a private artifact: Artifacts takes bytes outside a contract, whose input is bounded at 1 MiB. Agent-supplied files come later (issue 133)." },
+    pending: Pending::Events { events: &["upload", "copy_file"], reason: "Receiving a file, or copying a revision's file, stores it as a private artifact: Artifacts takes bytes outside a contract, whose input is bounded at 1 MiB. Agent-supplied files come later (issue 133)." },
 }) }

@@ -6,6 +6,7 @@
 mod agent_operations;
 mod contributions;
 mod files;
+mod library;
 mod model;
 mod store;
 mod web;
@@ -15,6 +16,7 @@ use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_media::Media;
 use bilibi_module_registry::{Layer, Module, Service};
+use bilibi_notifications::NotificationBoundary;
 use bilibi_picklists::PickLists;
 use bilibi_principal_directory::PrincipalDirectory;
 use bilibi_records::Records;
@@ -150,6 +152,104 @@ pub struct Deleted {
     pub files: Vec<String>,
 }
 
+/// One reader's own favourite and follow marks on one document. Marks are
+/// personal: they grant nothing and nobody else sees them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    pub favourite: bool,
+    pub following: bool,
+}
+
+/// The marks a change sets; `None` leaves a mark as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkPatch {
+    pub favourite: Option<bool>,
+    pub following: Option<bool>,
+}
+
+/// Narrows the library to the reader's own marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkFilter {
+    Favourites,
+    Following,
+}
+impl MarkFilter {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Favourites => "favourites",
+            Self::Following => "following",
+        }
+    }
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "favourites" => Some(Self::Favourites),
+            "following" => Some(Self::Following),
+            _ => None,
+        }
+    }
+}
+
+/// Why another document looks like the one asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DuplicateReason {
+    /// Some revision holds a file with the same content.
+    SameFile,
+    /// An external document with the same latest link.
+    SameLink,
+    /// The same name, ignoring case and spaces at the ends.
+    SameName,
+}
+impl DuplicateReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::SameFile => "same_file",
+            Self::SameLink => "same_link",
+            Self::SameName => "same_name",
+        }
+    }
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::SameFile => "Same file",
+            Self::SameLink => "Same link",
+            Self::SameName => "Same name",
+        }
+    }
+}
+
+/// A document the reader may see that looks like another one.
+#[derive(Clone, Debug)]
+pub struct Duplicate {
+    pub document: Document,
+    pub reasons: Vec<DuplicateReason>,
+}
+
+/// One document a merge removes, fenced on the version the reader saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MergeSource {
+    pub id: i64,
+    pub version: i64,
+}
+
+/// What a merge does, as its preview shows it.
+#[derive(Clone, Debug)]
+pub struct MergePlan {
+    pub survivor: Document,
+    /// The documents that go, in id order.
+    pub sources: Vec<Document>,
+    /// Revisions that move to the survivor, renumbered after its latest.
+    pub revisions: i64,
+    /// Links the survivor does not have yet.
+    pub links: i64,
+}
+
+/// What a merge did.
+#[derive(Clone, Debug)]
+pub struct Merged {
+    pub survivor: Document,
+    pub removed: Vec<i64>,
+    pub revisions: i64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Sort {
     #[default]
@@ -169,6 +269,8 @@ pub struct Filter {
     pub status: Option<String>,
     /// Related to this record.
     pub related: Option<Reference>,
+    /// Only the reader's own favourites or follows.
+    pub marked: Option<MarkFilter>,
     pub sort: Sort,
     pub descending: bool,
     pub page: i64,
@@ -182,6 +284,7 @@ impl Default for Filter {
             document_type: None,
             status: None,
             related: None,
+            marked: None,
             sort: Sort::LastRevision,
             descending: true,
             page: 1,
@@ -215,6 +318,8 @@ pub enum WriteError {
     TooLarge { max_bytes: u64 },
     #[error("This file is quarantined and cannot be downloaded.")]
     Quarantined,
+    #[error("The documents cannot be merged: {0}.")]
+    MergeRefused(&'static str),
     #[error("This file is retained until its retain-until date and cannot be deleted yet.")]
     Retained,
     #[error("This file is under legal hold and cannot be deleted.")]
@@ -241,6 +346,7 @@ pub struct Documents {
     settings: Arc<Settings>,
     display: Arc<DisplayPolicy>,
     directory: Arc<PrincipalDirectory>,
+    notifications: Arc<NotificationBoundary>,
 }
 impl Documents {
     async fn fresh(
@@ -256,6 +362,7 @@ impl Documents {
             picklists: &self.picklists,
             display: &self.display,
             directory: &self.directory,
+            notifications: &self.notifications,
         }
     }
 
@@ -596,6 +703,171 @@ impl Documents {
             .prepare_delete(On::Preview(client), scope, id, version)
             .await
     }
+    /// The reader's own favourite and follow marks on `ids`, in one read.
+    /// Only documents the reader may see are answered; a document without
+    /// marks is `Marks::default()`.
+    pub async fn marks(
+        &self,
+        scope: &Scope,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Marks>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        library::marks(&**client, &scope, ids).await
+    }
+
+    /// Sets the reader's own marks on a document they may see. Needs
+    /// `core.document.view` and an explicit view grant; it changes nothing but
+    /// the reader's marks.
+    pub async fn mark(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        patch: MarkPatch,
+    ) -> WriteResult<Marks> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().mark(tx, &scope, id, patch).await
+    }
+
+    /// The document and the marks `mark` would leave, with no write.
+    pub async fn preview_mark(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        patch: MarkPatch,
+    ) -> WriteResult<(Document, Marks)> {
+        self.store().preview_mark(client, scope, id, patch).await
+    }
+
+    /// The other documents the reader may see that look like `id`: the same
+    /// file in any revision, the same latest link or the same name. A document
+    /// the reader has no grant on is never named and never counted.
+    pub async fn duplicates(&self, scope: &Scope, id: i64) -> Result<Vec<Duplicate>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().duplicates(&**client, &scope, id).await
+    }
+
+    /// The documents the reader may see that already hold a file with this
+    /// SHA-256, for the warning after an upload.
+    pub async fn duplicates_of_file(&self, scope: &Scope, sha256: &str) -> Result<Vec<Document>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        library::duplicates_of_file(&**client, &scope, sha256).await
+    }
+
+    /// Stores a private copy of the document's latest file under the actor's
+    /// company, for `copy`. Like `store_file` it works outside any business
+    /// transaction (the page-write exception for bytes) and the cleanup job
+    /// removes the file if it is never attached. Needs `core.document.manage`
+    /// and the download grant on the source. A link has no file to copy.
+    pub async fn copy_file(&self, scope: &Scope, id: i64) -> WriteResult<StoredFile> {
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let scope = self.fresh(&**client, scope).await?;
+        let document = self.store().copyable(&**client, &scope, id).await?;
+        let file = files::read(
+            &mut client,
+            &scope,
+            &self.artifacts,
+            &document,
+            document.revision,
+        )
+        .await?;
+        files::store(
+            &mut client,
+            &scope,
+            &self.boundary,
+            &self.artifacts,
+            &self.media,
+            &self.settings,
+            Upload {
+                bytes: &file.bytes,
+                file_name: &file.file_name,
+            },
+        )
+        .await
+    }
+
+    /// Copies the document: the same name (prefixed "Copy of"), publication
+    /// date, category, sub-category and type, and only the latest revision,
+    /// whose change log is "Document created". `artifact_id` is the file
+    /// `copy_file` returned; a link needs none. The copy is filed under the
+    /// actor's company with the list's default status. Links, access grants
+    /// and marks are not copied: only the actor can see the copy until they
+    /// share it. Needs `core.document.manage`.
+    pub async fn copy(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        artifact_id: Option<&str>,
+    ) -> WriteResult<Document> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().copy(tx, &scope, id, artifact_id).await
+    }
+
+    /// The draft `copy` would create, with no write.
+    pub async fn preview_copy(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        artifact_id: Option<&str>,
+    ) -> WriteResult<Draft> {
+        self.store()
+            .preview_copy(client, scope, id, artifact_id)
+            .await
+    }
+
+    /// What merging `sources` into `survivor` would do, with no write.
+    pub async fn preview_merge(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        survivor: MergeSource,
+        sources: &[MergeSource],
+    ) -> WriteResult<MergePlan> {
+        self.store()
+            .preview_merge(client, scope, survivor, sources)
+            .await
+    }
+
+    /// Merges duplicate documents into `survivor`. Each source's revisions
+    /// move to the survivor after its latest, renumbered and with the change
+    /// log saying where they came from; links, explicit grants of active
+    /// accounts and marks are combined; each source is removed and
+    /// `base/records` repoints every reference to it. Needs
+    /// `core.document.merge` and, on every document, `core.document.manage`
+    /// with the explicit manage and share grants, because a merge unites who
+    /// may read them. The documents must be of one source (files or links) and
+    /// filed under one company. Files stay where they are.
+    pub async fn merge(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        survivor: MergeSource,
+        sources: &[MergeSource],
+    ) -> WriteResult<Merged> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().merge(tx, &scope, survivor, sources).await
+    }
+
+    /// Whether the reader may merge: the capability, plus manage and share
+    /// grants on `document`.
+    pub async fn may_merge(&self, scope: &Scope, document: &Document) -> Result<bool> {
+        let client = self.db.get().await?;
+        if !bilibi_authz::holds_proof(&**client, scope, MERGE).await?
+            || !bilibi_authz::holds_proof(&**client, scope, MANAGE).await?
+        {
+            return Ok(false);
+        }
+        Ok(
+            store::permission(&**client, scope, document.id, "manage").await?
+                && store::permission(&**client, scope, document.id, "share").await?,
+        )
+    }
     /// Names references with the reader's permissions (`base/records`).
     pub(crate) fn records(&self) -> &Records {
         &self.records
@@ -696,7 +968,7 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/database", "base/datetime", "base/grid", "base/locale", "base/media", "base/menu", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/database", "base/datetime", "base/grid", "base/locale", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
@@ -714,6 +986,7 @@ inventory::submit! { Module {
             settings: s.get("base/settings.store")?,
             display: s.get("base/datetime.display")?,
             directory: s.get("base/principal_directory.directory")?,
+            notifications: s.get("base/notifications.sink")?,
         });
         agent_operations::bind(documents.clone())?;
         Ok(documents)

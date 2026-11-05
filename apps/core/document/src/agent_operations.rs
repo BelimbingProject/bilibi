@@ -4,8 +4,9 @@
 //! the pages' uploads (`store_file`): an agent names a file by its
 //! `artifact_id` or keeps an external document's link.
 use crate::{
-    AccessGrant, Document, Documents, Draft, Filter, Link, Patch, PlannedRevision, Reference,
-    Revision, RevisionInput, Sort, Source, WriteError, MANAGE, VIEW,
+    AccessGrant, Document, Documents, Draft, Duplicate, Filter, Link, MarkFilter, MarkPatch, Marks,
+    MergeSource, Patch, PlannedRevision, Reference, Revision, RevisionInput, Sort, Source,
+    WriteError, MANAGE, MERGE, VIEW,
 };
 use bilibi_agent_api::{
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
@@ -193,6 +194,7 @@ pub(crate) fn invalid(error: WriteError, prefix: &str, field: &str) -> bilibi_ag
         WriteError::Forbidden => bilibi_agent_api::Error::Forbidden,
         WriteError::Stale => Error::Conflict.into(),
         WriteError::RelatedRefused(message) => one(field, message.into()),
+        error @ WriteError::MergeRefused(_) => one("merge", error.to_string()),
         error @ (WriteError::TooLarge { .. }
         | WriteError::Quarantined
         | WriteError::Retained
@@ -240,6 +242,23 @@ pub(crate) fn record(d: &Document) -> Value {
         "version": d.version,
         "path": crate::web::path(d.id),
     })
+}
+fn marks_record(marks: Marks) -> Value {
+    json!({"favourite": marks.favourite, "following": marks.following})
+}
+fn with_marks(mut value: Value, marks: Marks) -> Value {
+    value["favourite"] = json!(marks.favourite);
+    value["following"] = json!(marks.following);
+    value
+}
+fn duplicate_record(duplicate: &Duplicate) -> Value {
+    let mut value = record(&duplicate.document);
+    value["reasons"] = json!(duplicate
+        .reasons
+        .iter()
+        .map(|reason| reason.code())
+        .collect::<Vec<_>>());
+    value
 }
 fn revision_record(document: i64, r: &Revision) -> Value {
     json!({
@@ -319,14 +338,22 @@ impl ReadHandler for List {
                 document_type: reader.text("document_type"),
                 status: reader.text("status"),
                 related: input.get("related").map(|r| reader.reference(r)),
+                marked: reader.text("mark").as_deref().and_then(MarkFilter::parse),
                 sort,
                 descending: sort != Sort::Name,
                 page: input["page"].as_i64().unwrap_or(1).max(1),
                 page_size: input["page_size"].as_i64().unwrap_or(25).clamp(1, 100),
             };
             let filter = reader.done(filter)?;
-            let page = owner()?.list(scope, &filter).await?;
-            let documents: Vec<Value> = page.entries.iter().map(record).collect();
+            let owner = owner()?;
+            let page = owner.list(scope, &filter).await?;
+            let ids: Vec<i64> = page.entries.iter().map(|d| d.id).collect();
+            let marks = owner.marks(scope, &ids).await?;
+            let documents: Vec<Value> = page
+                .entries
+                .iter()
+                .map(|d| with_marks(record(d), marks.get(&d.id).copied().unwrap_or_default()))
+                .collect();
             Ok(json!({"documents": documents, "total": page.total, "page": filter.page, "page_size": filter.page_size}).into())
         })
     }
@@ -351,7 +378,11 @@ impl ReadHandler for Get {
             let links = owner.links(scope, id).await?;
             let records: Vec<Reference> = links.iter().map(|l| l.record.clone()).collect();
             let named = owner.records().resolve(scope, &records).await?;
-            let mut value = record(&document);
+            let marks = owner.marks(scope, &[id]).await?;
+            let mut value = with_marks(
+                record(&document),
+                marks.get(&id).copied().unwrap_or_default(),
+            );
             value["revisions"] = json!(revisions
                 .iter()
                 .map(|r| revision_record(id, r))
@@ -717,6 +748,174 @@ impl WriteHandler for Delete {
     }
 }
 
+struct Duplicates;
+impl ReadHandler for Duplicates {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn call<'a>(
+        &'a self,
+        _: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let duplicates = owner()?.duplicates(scope, id(input)?).await?;
+            Ok(
+                json!({"duplicates": duplicates.iter().map(duplicate_record).collect::<Vec<_>>()})
+                    .into(),
+            )
+        })
+    }
+}
+
+struct Mark;
+impl WriteHandler for Mark {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (document, marks) = owner()?
+                .preview_mark(client, scope, id(input)?, mark_patch(input))
+                .await
+                .map_err(|e| invalid(e, "", "id"))?;
+            Ok(json!({"document": record(&document), "marks": marks_record(marks)}).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let marks = owner()?
+                .mark(tx, scope, id(input)?, mark_patch(input))
+                .await
+                .map_err(|e| invalid(e, "", "id"))?;
+            Ok(marks_record(marks).into())
+        })
+    }
+}
+
+struct Copy;
+impl WriteHandler for Copy {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let draft = owner()?
+                .preview_copy(client, scope, id(input)?, input["artifact_id"].as_str())
+                .await
+                .map_err(|e| invalid(e, "", "artifact_id"))?;
+            Ok(json!({"creates": draft_record(&draft)}).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let document = owner()?
+                .copy(tx, scope, id(input)?, input["artifact_id"].as_str())
+                .await
+                .map_err(|e| invalid(e, "", "artifact_id"))?;
+            Ok(record(&document).into())
+        })
+    }
+}
+
+fn mark_patch(input: &Value) -> MarkPatch {
+    MarkPatch {
+        favourite: input["favourite"].as_bool(),
+        following: input["following"].as_bool(),
+    }
+}
+/// The survivor and the documents merged into it, each with the version the
+/// caller read.
+fn merge_input(input: &Value) -> bilibi_agent_api::Result<(MergeSource, Vec<MergeSource>)> {
+    let named = |value: &Value| -> bilibi_agent_api::Result<MergeSource> {
+        Ok(MergeSource {
+            id: value["id"]
+                .as_i64()
+                .filter(|id| *id > 0)
+                .ok_or(Error::Invalid)?,
+            version: value["version"]
+                .as_i64()
+                .filter(|v| *v > 0)
+                .ok_or(Error::Invalid)?,
+        })
+    };
+    let survivor = named(input)?;
+    let sources = input["merge"]
+        .as_array()
+        .ok_or(Error::Invalid)?
+        .iter()
+        .map(named)
+        .collect::<bilibi_agent_api::Result<Vec<_>>>()?;
+    Ok((survivor, sources))
+}
+
+struct Merge;
+impl WriteHandler for Merge {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (survivor, sources) = merge_input(input)?;
+            let plan = owner()?
+                .preview_merge(client, scope, survivor, &sources)
+                .await
+                .map_err(|e| invalid(e, "", "merge"))?;
+            Ok(json!({
+                "survivor": record(&plan.survivor),
+                "removes": plan.sources.iter().map(record).collect::<Vec<_>>(),
+                "revisions_moved": plan.revisions,
+                "links_added": plan.links,
+            })
+            .into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (survivor, sources) = merge_input(input)?;
+            let merged = owner()?
+                .merge(tx, scope, survivor, &sources)
+                .await
+                .map_err(|e| invalid(e, "", "merge"))?;
+            let mut value = record(&merged.survivor);
+            value["removed"] = json!(merged.removed);
+            value["revisions_moved"] = json!(merged.revisions);
+            Ok(value.into())
+        })
+    }
+}
+
 // ---- Schemas ----------------------------------------------------------------
 
 fn reference_schema(description: &str) -> Value {
@@ -785,6 +984,29 @@ fn unshare_schema() -> Value {
         "grant":{"type":"integer","minimum":1,"description":"The access grant ID returned by core.document.access."}
     }})
 }
+fn mark_schema() -> Value {
+    json!({"type":"object","required":["id"],"properties":{
+        "id":{"type":"integer","minimum":1},
+        "favourite":{"type":"boolean","description":"Your own favourite mark; unchanged when omitted."},
+        "following":{"type":"boolean","description":"Follow the document to be notified of new revisions; unchanged when omitted."}
+    }})
+}
+fn copy_schema() -> Value {
+    json!({"type":"object","required":["id"],"properties":{
+        "id":{"type":"integer","minimum":1,"description":"The document to copy."},
+        "artifact_id":{"type":"string","maxLength":64,"description":"A file document's copy needs its own file: the Documents page's Copy action stores it. A link needs none."}
+    }})
+}
+fn merge_schema() -> Value {
+    json!({"type":"object","required":["id","version","merge"],"properties":{
+        "id":{"type":"integer","minimum":1,"description":"The document that stays."},
+        "version":{"type":"integer","minimum":1,"description":"The survivor's stored version."},
+        "merge":{"type":"array","description":"One to twenty duplicates to merge into it; each is removed.","items":{"type":"object","required":["id","version"],"properties":{
+            "id":{"type":"integer","minimum":1},
+            "version":{"type":"integer","minimum":1}
+        }}}
+    }})
+}
 fn version_schema() -> Value {
     json!({"type":"object","required":["id","version"],"properties":{
         "id":{"type":"integer","minimum":1},
@@ -801,6 +1023,7 @@ fn list_schema() -> Value {
         "document_type":{"type":"string","maxLength":64},
         "status":{"type":"string","maxLength":64},
         "related":reference_schema("Only documents linked to this record."),
+        "mark":{"type":"string","enum":["favourites","following"],"description":"Only your own favourites or the documents you follow."},
         "sort":{"type":"string","enum":["last_revision","name","publish_date","created"],"description":"Newest revision first by default."},
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}
@@ -827,6 +1050,10 @@ static ADD_REVISION: AddRevision = AddRevision;
 static LINK: LinkRecord = LinkRecord;
 static UNLINK: Unlink = Unlink;
 static DELETE: Delete = Delete;
+static DUPLICATES: Duplicates = Duplicates;
+static MARK: Mark = Mark;
+static COPY: Copy = Copy;
+static MERGE_HANDLER: Merge = Merge;
 const KEYWORDS: &[&str] = &[
     "document",
     "file",
@@ -847,6 +1074,10 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/document.operations", 
         Operation { key: "core.document.add_revision", title: "Add a revision", summary: "A new file (or link) for a document, with a change log.", keywords: KEYWORDS, capability: MANAGE, input: revision_schema, output: review_output, handler: Handler::SafeWrite(&ADD_REVISION), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.link", title: "Relate a document to a record", summary: "Link a document to a record in any area, such as a company or a contact.", keywords: KEYWORDS, capability: MANAGE, input: link_schema, output: review_output, handler: Handler::SafeWrite(&LINK), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.unlink", title: "Remove a document's link to a record", summary: "The document stays; only its link to the record goes.", keywords: KEYWORDS, capability: MANAGE, input: link_schema, output: review_output, handler: Handler::SafeWrite(&UNLINK), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.duplicates", title: "Find duplicate documents", summary: "Other documents you may see with the same file, link or name as this one.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: list_output, handler: Handler::Read(&DUPLICATES), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.mark", title: "Favourite or follow a document", summary: "Set your own favourite and follow marks. Followers are notified of new revisions.", keywords: KEYWORDS, capability: VIEW, input: mark_schema, output: review_output, handler: Handler::SafeWrite(&MARK), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.copy", title: "Copy a document", summary: "A new document with the latest revision only; only you can see it until you share it.", keywords: KEYWORDS, capability: MANAGE, input: copy_schema, output: review_output, handler: Handler::SafeWrite(&COPY), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.merge", title: "Merge duplicate documents", summary: "Merge duplicates into one survivor: revisions, links, access of active accounts and marks are combined and the duplicates are removed.", keywords: KEYWORDS, capability: MERGE, input: merge_schema, output: review_output, handler: Handler::SafeWrite(&MERGE_HANDLER), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.delete", title: "Delete a document", summary: "Remove a document with every revision and file, using the stored version.", keywords: KEYWORDS, capability: MANAGE, input: version_schema, output: review_output, handler: Handler::SafeWrite(&DELETE), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "core.document", title: "Documents", summary: "The shared document library: files and links with revisions and explicit access.", keywords: KEYWORDS, capability: VIEW, body: include_str!("../guide.md") }],

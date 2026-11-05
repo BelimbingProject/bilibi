@@ -14,6 +14,10 @@ Use `core.document.create` for an internal file already stored through the Docum
 
 Use `core.document.update` for the document's name, publication date, category, subcategory, type or status. Link and unlink work records with `core.document.link` and `core.document.unlink`.
 
+## Favourites, duplicates, copy and merge
+
+Use `core.document.mark` to favourite or follow a document: marks are yours alone, `core.document.list` takes `mark` (`favourites` or `following`), and followers are notified of new revisions. Use `core.document.duplicates` to find documents you may see with the same file, link or name. Use `core.document.copy` for a new document with only the latest revision: a link copies directly; a file needs the Documents page's Copy action to store the file first. Use `core.document.merge` to fold duplicates into a survivor with each document's stored `version`: it needs merge, manage and share permission on every document, moves each duplicate's revisions after the survivor's latest, combines links, marks and access, and removes the duplicates.
+
 ## Share safely
 
 Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission. Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.

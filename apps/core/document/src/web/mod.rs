@@ -331,7 +331,8 @@ impl Pages {
 }
 
 /// The list's filters as the address carries them, for the list and its
-/// export: `search`, `category`, `type`, `status` and `related=<kind>:<id>`.
+/// export: `search`, `category`, `type`, `status`, `show` (`favourites` or
+/// `following`) and `related=<kind>:<id>`.
 pub(crate) fn filter_of(query: &HashMap<String, String>) -> Filter {
     let code = |key: &str| {
         query
@@ -349,6 +350,9 @@ pub(crate) fn filter_of(query: &HashMap<String, String>) -> Filter {
         document_type: code("type"),
         status: code("status"),
         related: related_of(query),
+        marked: query
+            .get("show")
+            .and_then(|v| crate::MarkFilter::parse(v.trim())),
         ..Filter::default()
     }
 }

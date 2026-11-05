@@ -5,7 +5,9 @@ use super::{
     dialog::{self, NewDocument},
     event, file_path, filter_of, path, related_of, render, Clock, Pages, Region, INDEX,
 };
-use crate::{Document, Filter, Reference, Sort, Source, LIST_CATEGORY, LIST_STATUS, LIST_TYPE};
+use crate::{
+    Document, Filter, Marks, Reference, Sort, Source, LIST_CATEGORY, LIST_STATUS, LIST_TYPE,
+};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
@@ -41,6 +43,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ("category".into(), ListFilter::string("all")),
             ("type".into(), ListFilter::string("all")),
             ("status".into(), ListFilter::string("all")),
+            ("show".into(), ListFilter::string("all")),
         ]),
         omit_blank: vec!["search".into()],
         ..ListSpec::default()
@@ -58,6 +61,7 @@ fn columns() -> Result<ListColumns> {
             BuiltinColumn::new("category", "Category"),
             BuiltinColumn::new("type", "Type"),
             BuiltinColumn::new("status", "Status"),
+            BuiltinColumn::new("marks", "Marks"),
             BuiltinColumn::new("revision", "Revision"),
             BuiltinColumn::new("publish_date", "Published").sortable("publish_date"),
             BuiltinColumn::new("last_revision", "Last revision").sortable("last_revision"),
@@ -174,6 +178,7 @@ impl Index {
                     ("category".into(), "all".into()),
                     ("type".into(), "all".into()),
                     ("status".into(), "all".into()),
+                    ("show".into(), "all".into()),
                 ]));
             }
             "page" => self
@@ -225,6 +230,7 @@ impl Index {
         clock: &Clock,
         d: &Document,
         latest: Option<&crate::Revision>,
+        marks: Marks,
     ) -> Result<FlexRow> {
         let id = d.id.to_string();
         let file = match (d.source, latest) {
@@ -273,6 +279,15 @@ impl Index {
                 "status",
                 Html::text(&label(&self.statuses, Some(&d.status))),
             )
+            .slot(
+                "marks",
+                Html::text(match (marks.favourite, marks.following) {
+                    (true, true) => "Favourite · Following",
+                    (true, false) => "Favourite",
+                    (false, true) => "Following",
+                    (false, false) => "",
+                }),
+            )
             .slot("revision", Html::text(&d.revision.to_string()))
             .slot("publish_date", Html::text(&clock.date(d.publish_date)));
         row.cells.insert(
@@ -299,10 +314,19 @@ impl Index {
         } else {
             HashMap::new()
         };
+        let ids: Vec<i64> = page.entries.iter().map(|d| d.id).collect();
+        let marks = self.pages.documents.marks(scope, &ids).await?;
         let rows = page
             .entries
             .iter()
-            .map(|d| self.row(&clock, d, latest.get(&d.id)))
+            .map(|d| {
+                self.row(
+                    &clock,
+                    d,
+                    latest.get(&d.id),
+                    marks.get(&d.id).copied().unwrap_or_default(),
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let mut actions = render(ActionLink {
@@ -373,6 +397,17 @@ impl Index {
                     "Status",
                     &form["status"],
                     with_all("All statuses", self.statuses.clone()),
+                ),
+                ToolbarControl::select(
+                    "documents-show",
+                    "show",
+                    "Show",
+                    &form["show"],
+                    vec![
+                        Choice::new("All documents", "all"),
+                        Choice::new("My favourites", "favourites"),
+                        Choice::new("Documents I follow", "following"),
+                    ],
                 ),
             ],
         ))?);
@@ -448,7 +483,7 @@ impl Index {
 
 /// The export's address: the list's filters, no paging.
 fn export_href(query: &HashMap<String, String>) -> String {
-    let mut pairs: Vec<String> = ["search", "category", "type", "status", "related"]
+    let mut pairs: Vec<String> = ["search", "category", "type", "status", "show", "related"]
         .iter()
         .filter_map(|key| {
             query

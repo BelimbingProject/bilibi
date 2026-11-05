@@ -8,7 +8,8 @@
 - Numbered revisions with their own date, change log and internal file or external HTTPS link.
 - Links to registered records. A link helps people find an already-authorized document; it never grants access.
 - Explicit user grants for view, download, manage and share permissions.
-- Personal favourite and follow marks.
+- Personal favourite and follow marks: a person's own flags, never shared. A follower is notified of a new revision while they can still see the document.
+- Library actions: find duplicates, copy and merge.
 - The file ledger and the `core.document` Artifact owner.
 - One Documents list, one document record page, metadata CSV export, file downloads and agent operations.
 - The Documents panel on Core company and Core person pages, and on any Domain record page that renders the `record.documents` slot.
@@ -22,6 +23,13 @@ Every metadata read starts with `core.document.view` and an explicit grant for t
 Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants. The creator's own grant cannot be removed through `unshare`.
 
 Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant.
+
+## Library actions
+
+- **Marks:** `mark` sets the reader's own favourite and follow flags on a document they may see. The list filters on them (`show=favourites` or `show=following`). Deleting or merging a document moves or removes its marks.
+- **Duplicates:** `duplicates` lists other documents the reader may see that share a file hash with any revision, the same latest link, or the same name. A document the reader has no grant on is never named or counted. After an upload the New document dialog warns with `duplicates_of_file`.
+- **Copy:** `copy_file` stores a private duplicate of the latest file (bytes cannot go through a contract, like `store_file`), then `copy` creates a new document named "Copy of …" with the same publish date, category, sub-category and type, the list's default status, and one revision whose change log is "Document created". A link is copied without a file. Links, grants and marks are not copied: only the person who copies can see the copy until they share it.
+- **Merge:** `merge` folds one or more duplicates into a survivor. Each source's revisions are renumbered after the survivor's latest with the change log saying where they came from, so no file is lost; links, marks and the explicit grants of active accounts are combined (permissions OR together); each source is removed and `base/records` redirects references to it. It needs `core.document.merge`, `core.document.manage` and the explicit manage and share grants on every document, because merging unites who may read them. The documents must all keep files or all keep links, and be filed under one company.
 
 ## Files and scanning
 
@@ -48,13 +56,17 @@ If any revision is retained or under legal hold, the whole batch is refused and 
 | `link`, `unlink` | Add or remove a record reference |
 | `access`, `preview_share`, `share`, `preview_unshare`, `unshare` | Read and change explicit access |
 | `preview_delete`, `delete` | Review and start retention-safe deletion |
+| `mark`, `preview_mark`, `marks` | The reader's own favourite and follow marks |
+| `duplicates`, `duplicates_of_file` | Look-alikes the reader may see |
+| `copy_file`, `preview_copy`, `copy` | A copy with its latest revision only |
+| `preview_merge`, `merge`, `may_merge` | Fold duplicates into a survivor |
 | `get`, `list`, `revisions`, `links`, `file` | Permission-checked reads |
 
 All writes use the caller's `MutationTransaction`, return audited changes and recheck authority inside the transaction. Inputs take a sealed `Scope`; callers never supply tenant or actor IDs.
 
 ## Contributions
 
-- Capabilities: `core.document.view`, `core.document.download`, `core.document.manage`, and the reserved future capability `core.document.merge`.
+- Capabilities: `core.document.view`, `core.document.download`, `core.document.manage` and `core.document.merge`.
 - Pick-lists: `core.document.category`, `core.document.sub_category`, `core.document.type`, and `core.document.status`.
 - Settings: `core.document.max_upload_bytes` and `core.document.allowed_types`.
 - Record kind: `core.document.document`; holder table `document_links`.
@@ -71,7 +83,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 
 Core company and Core person discover their panel by kind and pass `company_id` or `person_id`. A Domain record page (a case, an opportunity) renders the `record.documents` slot with `kind` and `id` in the panel path; it never registers a Documents panel of its own. The panel shows at most 10 documents linked to the record, newest first (name, category, revision, publish date), and **View all** opens `/documents?related=<kind>:<id>`. **Add document** (with `core.document.manage`) opens the same filtered list, where New document files and relates it, so the panel writes nothing. The panel reads through `Documents::list`: a document with no explicit grant for the reader is absent, with no hidden count.
 
-Run `core.document.list`, `.get`, `.access`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share`, `.unshare` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes is the declared page-write exception because operation input is bounded.
+Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share`, `.unshare`, `.mark`, `.copy`, `.merge` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes (and the `copy_file` step of Copy, which then calls `core.document.copy`) is the declared page-write exception because operation input is bounded; an agent copies a file document by naming a file the page stored.
 
 ## Database records
 
