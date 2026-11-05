@@ -255,6 +255,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-activity"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-company",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-events",
+ "bilibi-grid",
+ "bilibi-locale",
+ "bilibi-mail",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-notifications",
+ "bilibi-party-ids",
+ "bilibi-person",
+ "bilibi-principal-directory",
+ "bilibi-queue",
+ "bilibi-records",
+ "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-user",
+ "inventory",
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
 name = "bilibi-address"
 version = "0.2.1"
 dependencies = [
@@ -642,6 +678,7 @@ dependencies = [
 name = "bilibi-core"
 version = "0.2.1"
 dependencies = [
+ "bilibi-activity",
  "bilibi-address",
  "bilibi-affiliation",
  "bilibi-agent",

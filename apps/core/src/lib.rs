@@ -1,4 +1,5 @@
 // Generated composition links. Runtime inventory owns discovery.
+pub use bilibi_activity as activity;
 pub use bilibi_address as address;
 pub use bilibi_affiliation as affiliation;
 pub use bilibi_agent as agent;
