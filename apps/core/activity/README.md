@@ -5,12 +5,13 @@
 ## What this module owns
 
 - Activities and their guests (`core_activities`, `core_activity_guests`).
-- One Activities list (`/activities`), one record page (`/activities/{id}`) and the Activities panel on record pages.
+- Repeating series: the rule (`core_activity_series`) and one activity per occurrence.
+- One Activities list (`/activities`), shown as a table or as a calendar, one record page (`/activities/{id}`) and the Activities panel on record pages.
 - Reminders: a per-tenant scheduled sweep, the bell's To do rows and the optional reminder email.
 - Invitations: Send invites, the bell notice to colleagues, the invitation email worker, and the `core/activity.invitation_gates` registry a Domain contributes its contact rules to.
 - The `core/activity.happened` event, record kind `core.activity.activity` and the agent operations.
 
-Not here: customer roll-ups, the customer timeline, lead conversion, sales cadences, telephony and routing stay in the Domain that owns them. Related records belong to their owners (`base/records`); people and accounts to `core/person` and `core/user`; delivery to `base/mail` and `base/notifications`.
+Not here: syncing with outside calendars (Google, Outlook, iCalendar feeds), customer roll-ups, the customer timeline, lead conversion, sales cadences, telephony and routing stay in the Domain that owns them. Related records belong to their owners (`base/records`); people and accounts to `core/person` and `core/user`; delivery to `base/mail` and `base/notifications`.
 
 ## Who sees an activity
 
@@ -47,7 +48,10 @@ Not here: customer roll-ups, the customer timeline, lead conversion, sales caden
 | `shared` | Readers of the related record see it too. Default `false` |
 | `assignee_user_id` | An active account of the tenant; the creator by default |
 | `reminded_at` | When the sweep reminded the assignee; cleared when `starts_at`, `due_at` or the assignee changes |
+| `series_id`, `series_index` | The repeating series it is an occurrence of, and its number there (1–200); both or neither |
 | `created_by`, `created_at`, `updated_at`, `closed_at`, `deleted_at`, `version` | `closed_at` is set exactly while the status is a closing one |
+
+`core_activity_series`: the rule a series was created with (frequency, `every`, weekly `weekdays`, monthly `month_day`, `until` or `occurrences`, the `work_calendar` whose non-working days were left out, and the `timezone` the time repeats in). It is never changed; see [Repeating series](#repeating-series).
 
 `core_activity_guests`: one row per guest. A guest is an account, a Core person or an email address; `role` is `creator`, `assignee`, `related` or `invited`; `response` is `none`, `accepted`, `declined` or `tentative`; `invited_at` is when Send invites last included them and `invite_sent_at` when that invitation's email went out.
 
@@ -58,6 +62,9 @@ Every write runs in the caller's `MutationTransaction` with its sealed scope and
 | Method | Does |
 | --- | --- |
 | `create_task`, `log_call`, `create_meeting`, `create_note`, `create` | Creates; the creator and assignee become guests, a related person the `related` guest, and `guests` (accounts, people, addresses) are invited |
+| `create_series` | Creates a repeating call, meeting or task: the rule and one activity per occurrence ([Repeating series](#repeating-series)) |
+| `update_series`, `delete_series` | Change or delete one occurrence and the later ones (`Apply::Following`), or every live one (`Apply::All`) |
+| `series` | The rule of the series an activity belongs to, in words and parts, and how many occurrences are live |
 | `create_system_task` | A named principal with `core.activity.system.create` creates a task for an active originating account in an explicitly checked company, within the caller's transaction. The account is the creator and defaults as assignee. |
 | `update` | Changes the fields a `Patch` names, fenced on `version`; reassigning keeps the old assignee as a guest |
 | `close` | Calls and meetings to `held`, tasks to `completed` |
@@ -68,11 +75,36 @@ Every write runs in the caller's `MutationTransaction` with its sealed scope and
 | `send_invites` | For an open call or meeting still ahead: stamps every guest but the sender `invited_at`, tells account guests in the bell, and queues the invitation email to the others (Invitations) |
 | `conflicts(starts_at, ends_at, users, except)` | Other open calls and meetings those accounts take part in at that time (as assignee, or a guest who has not declined); another activity's title only for a reader who takes part in it |
 | `repoint(from, to)` | Moves every live activity related to `from` onto `to`, after `base/records.check` of both; used when a record is converted into another (a lead into a person) |
-| `get`, `guests`, `guest_emails`, `list(Filter)`, `for_record`, `follow_up`, `may_create`, `may_edit` | Reads under the rule above |
+| `get`, `guests`, `guest_emails`, `list(Filter)`, `for_record`, `follow_up`, `may_create`, `may_edit`, `may_edit_all` | Reads under the rule above. `Filter::between` reads calls and meetings that overlap a range and tasks due in it (up to `CALENDAR_LIMIT`, 501); `Filter::series` one series' occurrences in order |
+| `work_days(first, last)` | The dates as the reader's company's default work calendar resolves them; empty without one |
 
 - A held call or meeting has ended: every write that leaves one held refuses an `ends_at` more than five minutes ahead.
 
 Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyClosed`, `AssigneeNotRemovable`.
+
+## Repeating series
+
+**A repeating call, meeting or task is one activity per occurrence.** Each has its own status, guests' answers and reminder, so a held Monday meeting and next Monday's planned one are two records. The rule is kept beside them.
+
+- **Rule.** Daily, weekly (on chosen days; the start's own day when none is chosen) or monthly (the start's day of the month; a shorter month uses its last day), every 1–99 days, weeks or months. It ends on a last date or after a number of occurrences, never open-ended, and makes at most 200 (`MAX_OCCURRENCES`), all written in the creating transaction.
+- **Off-pattern start.** A first date that is not on the pattern (a Tuesday for a series on Mondays) moves to the first date that is.
+- **Wall-clock time.** The time repeats in the zone the creator gives (`timezone`; pages pass the reader's zone), so 09:00 stays 09:00 across a daylight-saving change.
+- **Working days only.** Leaves out the dates the filing company's default work calendar (`core/work_calendar`, setting `work_calendar.default`) makes rest, off or holiday; the count counts only the dates kept. Refused without a default calendar, and it reaches at most two years ahead.
+- Only a planned call or meeting and an open task with a due date repeat; a note and a held call do not. The guests, related record, assignee and sharing are the same on every occurrence.
+- **One occurrence.** Every write on one occurrence (Update, Close, Delete, guests, Send invites) touches only it: that is how a series gets an exception. Send invites invites to that occurrence.
+- **Change series** (`update_series`) copies the fields a patch names to one occurrence and the later ones, or to all. A new start, end or due time moves each open occurrence by the same wall-clock amount and gives it the same length; held and completed ones keep the times they happened at. Status changes one occurrence at a time. Each occurrence is checked first, so one refusal changes none.
+- **Delete series** (`delete_series`) removes one occurrence and the later ones, or all of them, held and completed ones included.
+- The rule itself never changes: to repeat differently, delete the later occurrences and create a new series.
+
+## Calendar
+
+**The Activities list shows as a calendar too** (`/activities?display=calendar`, the List and Calendar tabs): day, week, month and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
+
+- Calls and meetings are drawn from start to end; a task at its due time, 30 minutes long. Notes and tasks without a due date are not on it. Colour is the kind (call, meeting, task), never a status.
+- The shared view puts each assignee of the activities shown in a column, the reader first; nobody else's private activities appear.
+- Non-working days of the reader's company's default work calendar are marked (rest, off, holiday and its name).
+- Dragging, resizing and the Move dialog call `core.activity.update` with the version drawn, so a stale or refused move leaves the item where it was and says why. Only open activities the reader may change can be moved; moving one to another person's column is refused (change Assigned to on its page). Moving a task moves its start by the same amount.
+- It reads at most 501 activities for the range and asks for a narrower filter past 500.
 
 ## Reminders
 
@@ -84,7 +116,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 **The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count: those assigned to them, and calls and meetings they are an account guest of and have not declined. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from those people's To do and refreshes their bells at once; declining or being removed takes it off that guest's. Moving its due time or reassigning it waits for a new reminder. See all opens `/activities`.
 
-One activity has one reminder, at the tenant's lead time. There is no second reminder system for meetings.
+One activity has one reminder, at the tenant's lead time. There is no second reminder system for meetings. Each occurrence of a series is reminded on its own.
 
 ## Invitations
 
@@ -132,6 +164,7 @@ The subject is `core.activity.activity:<id>` and the key `<id>:<version>`. The p
 - Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`.
 - Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue worker `core/activity-invites`.
 - Registry `core/activity.invitation_gates` (declared here; Domains contribute).
+- Uses `core/work_calendar` (default calendar and resolved days) for "working days only" and the calendar's day marks.
 - Record kind `core.activity.activity` (page `/activities/{id}`); holder table `activities`.
 - Menu item Activities under Core.
 - Panels:
@@ -146,11 +179,11 @@ Any record page shows the generic panel by placing `core/activity.record` with i
 
 ## Agent operations
 
-Reads `core.activity.list` and `core.activity.get` (with guests and their ids). Reviewed writes `core.activity.create_task`, `.log_call`, `.create_meeting`, `.create_note`, `.update`, `.close`, `.add_guest`, `.remove_guest`, `.respond` (declares `view`: a guest answers for themselves), `.send_invites`, `.delete`. Guide `core.activity`. References are `{kind, id}`; reads add `label` and `path`. Pages and panels call the same write contracts.
+Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, with `series_id` one series) and `core.activity.get` (with guests and their ids, and the series rule). Reviewed writes `core.activity.create_task`, `.log_call`, `.create_meeting` (each with an optional `repeat`), `.create_note`, `.update`, `.close`, `.add_guest`, `.remove_guest`, `.respond` (declares `view`: a guest answers for themselves), `.send_invites`, `.delete`, `.update_series` and `.delete_series` (`apply`: `following` or `all`). Guide `core.activity`. References are `{kind, id}`; reads add `label` and `path`. Pages and panels call the same write contracts.
 
 ## Migrations
 
-`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests).
+`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`).
 
 ## How to try it
 
@@ -158,4 +191,5 @@ Reads `core.activity.list` and `core.activity.get` (with guests and their ids). 
 2. Open **Core › Activities** and choose **New task**: pick a related record, set a due time a few minutes ahead.
 3. Allow the scheduler on Administration › Authorization › Automation access, and enable **Activity reminders** on System › Schedule.
 4. When the reminder comes due, the bell's **To do** tab lists it; the row opens the related record.
-5. For a meeting, choose **New meeting**, set a time a few minutes ahead and save. On its page add a person or an email address as a guest, then **Send invites**: the email lands in the development mailbox (`.local/mailbox`) and a colleague guest gets the invitation in the bell, answers it on the page, and sees the reminder in To do.
+5. Choose **New meeting**, set **Repeats** to Weekly on two days, **Ends** after 6 times, and save: the record page says how it repeats, **See all** lists the six, and **Change series** moves the later ones to another hour. The **Calendar** tab shows them on the week, and dragging one moves only it.
+6. For a meeting, choose **New meeting**, set a time a few minutes ahead and save. On its page add a person or an email address as a guest, then **Send invites**: the email lands in the development mailbox (`.local/mailbox`) and a colleague guest gets the invitation in the bell, answers it on the page, and sees the reminder in To do.

@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 const FORM: &str = "activity";
+/// The weekly days, a multi-select: posted as an array under this key.
+const DAYS: &str = "activity[repeat_days][]";
 /// Long text fields post up to this many characters.
 const LIMIT: usize = 10_000;
 
@@ -39,9 +41,14 @@ pub(crate) struct Dialog {
     /// Readers of the related record see it too.
     shared: bool,
     guests: Vec<Guest>,
+    /// Weekly: the days chosen, by code.
+    days: Vec<String>,
     errors: BTreeMap<String, Vec<String>>,
     notice: String,
     submitted: bool,
+    /// How many activities the last save created (a repeating one makes
+    /// one per occurrence).
+    created: usize,
 }
 
 /// The posted field each contract input path refuses.
@@ -72,6 +79,7 @@ fn label_of(field: &str) -> &'static str {
         "description" => "Description",
         "internal_notes" => "Internal notes",
         "shared" => "Share with readers of the related record",
+        "repeat" | "repeat_every" | "repeat_count" | "repeat_until" => "Repeats",
         _ => "",
     }
 }
@@ -82,6 +90,10 @@ impl Dialog {
         values.insert("priority".into(), "medium".into());
         values.insert("status".into(), "held".into());
         values.insert("direction".into(), "outbound".into());
+        values.insert("repeat".into(), "none".into());
+        values.insert("repeat_every".into(), "1".into());
+        values.insert("repeat_end".into(), "count".into());
+        values.insert("repeat_count".into(), "10".into());
         Self {
             kind,
             values,
@@ -91,10 +103,26 @@ impl Dialog {
             assignee: None,
             shared: false,
             guests: Vec::new(),
+            days: Vec::new(),
             errors: BTreeMap::new(),
             notice: String::new(),
             submitted: false,
+            created: 0,
         }
+    }
+    /// What the page says after a save.
+    pub fn created_message(&self) -> String {
+        let noun = self.kind.label();
+        if self.created > 1 {
+            format!("{noun} created, repeating {} times.", self.created)
+        } else {
+            format!("{noun} created.")
+        }
+    }
+    fn repeats(&self) -> bool {
+        self.kind != Kind::Note
+            && self.value("repeat") != "none"
+            && !self.value("repeat").is_empty()
     }
     /// The dialog filled from a draft (Close and create new's copy).
     pub async fn from_draft(
@@ -220,10 +248,31 @@ impl Dialog {
             "meeting_type",
             "description",
             "internal_notes",
+            "repeat",
+            "repeat_every",
+            "repeat_end",
+            "repeat_count",
+            "repeat_until",
+            "repeat_working",
         ] {
             if let Some(v) = form.get(key) {
                 self.values.insert(key.into(), v.clone());
             }
+        }
+        // The weekly days come as an array; absent is none chosen.
+        if form.contains_key("repeat") && self.value("repeat") == "weekly" {
+            self.days = value
+                .get(DAYS)
+                .and_then(Value::as_array)
+                .map(|days| {
+                    days.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|day| crate::weekday(day).is_some())
+                        .map(str::to_owned)
+                        .take(7)
+                        .collect()
+                })
+                .unwrap_or_default();
         }
         if form.get("assignee").map(String::as_str) == Some("me") {
             self.assignee = None;
@@ -320,6 +369,45 @@ impl Dialog {
         if self.shared {
             input["shared"] = json!(true);
         }
+        if self.repeats() {
+            let mut repeat = json!({
+                "frequency": self.value("repeat"),
+                "timezone": clock.zone,
+                "working_days_only": self.value("repeat_working") == "true",
+            });
+            match self.value("repeat_every").trim().parse::<i64>() {
+                Ok(every) => repeat["every"] = json!(every),
+                Err(_) => errors
+                    .entry("repeat_every".into())
+                    .or_default()
+                    .push("must say how many days, weeks or months apart".into()),
+            }
+            if self.value("repeat") == "weekly" && !self.days.is_empty() {
+                repeat["weekdays"] = json!(self.days);
+            }
+            if self.value("repeat_end") == "until" {
+                match self
+                    .value("repeat_until")
+                    .trim()
+                    .parse::<jiff::civil::Date>()
+                {
+                    Ok(until) => repeat["until"] = json!(until.to_string()),
+                    Err(_) => errors
+                        .entry("repeat_until".into())
+                        .or_default()
+                        .push("needs the last date".into()),
+                }
+            } else {
+                match self.value("repeat_count").trim().parse::<i64>() {
+                    Ok(count) => repeat["count"] = json!(count),
+                    Err(_) => errors
+                        .entry("repeat_count".into())
+                        .or_default()
+                        .push("needs the number of times".into()),
+                }
+            }
+            input["repeat"] = repeat;
+        }
         if !self.guests.is_empty() {
             input["guests"] = json!(self
                 .guests
@@ -359,7 +447,12 @@ impl Dialog {
         let event = self.submit_event();
         let call = pages.call(scope, credential, event, self.contract());
         match pages.contracts.submit(&call, input).await {
-            Ok(result) => Ok(result["result"]["id"].as_i64()),
+            Ok(result) => {
+                self.created = result["result"]["occurrences"]
+                    .as_array()
+                    .map_or(1, Vec::len);
+                Ok(result["result"]["id"].as_i64())
+            }
             Err(error) => {
                 match refusal(
                     error,
@@ -404,6 +497,84 @@ impl Dialog {
             .value(self.value(key))
             .errors(self.sentences(key))
             .attr("data-debounce", "300")
+    }
+
+    /// How it repeats: the frequency, how far apart, the weekly days, when
+    /// it ends and whether only working days count.
+    fn repeat_fields(&self, prefix: &str) -> Vec<Field> {
+        let mut fields = vec![self
+            .field(prefix, "repeat", "Repeats")
+            .kind(InputKind::Select)
+            .options(choices(&[
+                ("Does not repeat", "none"),
+                ("Daily", "daily"),
+                ("Weekly", "weekly"),
+                ("Monthly", "monthly"),
+            ]))];
+        if !self.repeats() {
+            return fields;
+        }
+        let unit = match self.value("repeat") {
+            "daily" => "days",
+            "weekly" => "weeks",
+            _ => "months",
+        };
+        fields.push(
+            self.field(prefix, "repeat_every", "Every")
+                .kind(InputKind::Number)
+                .attr("min", "1")
+                .attr("max", "99")
+                .hint(format!("How many {unit} apart.")),
+        );
+        if self.value("repeat") == "weekly" {
+            fields.push(
+                Field::named(DAYS)
+                    .id(format!("{prefix}-repeat-days"))
+                    .label("On")
+                    .kind(InputKind::Select)
+                    .multiple()
+                    .values(self.days.clone())
+                    .options(choices(
+                        &crate::WEEKDAYS
+                            .iter()
+                            .map(|(_, code, label)| (*label, *code))
+                            .collect::<Vec<_>>(),
+                    ))
+                    .hint("None chosen: the day it starts on."),
+            );
+        }
+        fields.push(
+            self.field(prefix, "repeat_end", "Ends")
+                .kind(InputKind::Select)
+                .options(choices(&[
+                    ("After a number of times", "count"),
+                    ("On a date", "until"),
+                ])),
+        );
+        if self.value("repeat_end") == "until" {
+            fields.push(
+                self.field(prefix, "repeat_until", "Last date")
+                    .kind(InputKind::Date)
+                    .required(),
+            );
+        } else {
+            fields.push(
+                self.field(prefix, "repeat_count", "Times")
+                    .kind(InputKind::Number)
+                    .attr("min", "1")
+                    .attr("max", &crate::MAX_OCCURRENCES.to_string())
+                    .required(),
+            );
+        }
+        fields.push(
+            Field::in_form(FORM, "repeat_working")
+                .id(format!("{prefix}-repeat-working"))
+                .label("Working days only")
+                .kind(InputKind::Checkbox)
+                .checked(self.value("repeat_working") == "true")
+                .hint("Leaves out the days your company's work calendar marks as rest, off or holiday."),
+        );
+        fields
     }
 
     /// The dialog: its fields for the kind, the related-record picker, and
@@ -498,6 +669,9 @@ impl Dialog {
                 );
             }
             Kind::Note => {}
+        }
+        if self.kind != Kind::Note {
+            fields.extend(self.repeat_fields(prefix));
         }
         let mut assignees = vec![("Me".to_owned(), "me".to_owned())];
         if let Some((user, name)) = &self.assignee {

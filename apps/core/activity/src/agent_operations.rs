@@ -2,8 +2,9 @@
 //! contracts too, so every door shares one rule set. References are
 //! `{kind, id}` in input; reads add `label` and `path`.
 use crate::{
-    Activities, Activity, CallStatus, Common, Direction, Draft, Filter, Guest, GuestRow, Kind,
-    Mine, Patch, Priority, Reference, Response, State, Status, WriteError, MANAGE, VIEW,
+    Activities, Activity, Apply, CallStatus, Common, Direction, Draft, Filter, Frequency, Guest,
+    GuestRow, Kind, Mine, Patch, Priority, Reference, Repeat, Response, State, Status, WriteError,
+    MANAGE, MAX_OCCURRENCES, VIEW,
 };
 use bilibi_agent_api::{
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
@@ -169,6 +170,83 @@ fn guest(item: &Value) -> std::result::Result<Guest, (&'static str, &'static str
         }),
         _ => Err(("", "must name exactly one of user_id, person_id or email")),
     }
+}
+
+/// The optional `repeat` of a create: how a call, meeting or task repeats.
+fn repeat(input: &Value) -> bilibi_agent_api::Result<Option<Repeat>> {
+    if input.get("repeat").is_none_or(Value::is_null) {
+        return Ok(None);
+    }
+    let mut reader = Reader::new(input, "repeat");
+    let frequency = reader.code("frequency", Frequency::parse);
+    if !reader.present("frequency") {
+        reader.refuse("frequency", "can't be blank");
+    }
+    let at = reader.at();
+    let every = match at.get("every") {
+        None => 1,
+        Some(value) => match value.as_i64().and_then(|v| i16::try_from(v).ok()) {
+            Some(every) => every,
+            None => {
+                reader.refuse("every", "must be a whole number from 1 to 99");
+                1
+            }
+        },
+    };
+    let mut weekdays = Vec::new();
+    if let Some(days) = at.get("weekdays").and_then(Value::as_array) {
+        for day in days {
+            match day.as_str().and_then(crate::weekday) {
+                Some(day) => weekdays.push(day),
+                None => reader.refuse(
+                    "weekdays",
+                    "must name days as mon, tue, wed, thu, fri, sat or sun",
+                ),
+            }
+        }
+    }
+    let until = match reader.text("until") {
+        Some(text) if !text.trim().is_empty() => match text.trim().parse::<jiff::civil::Date>() {
+            Ok(date) => Some(date),
+            Err(_) => {
+                reader.refuse("until", "must be a date such as 2026-12-31");
+                None
+            }
+        },
+        _ => None,
+    };
+    let count = match at.get("count") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_i64().and_then(|v| i16::try_from(v).ok()) {
+            Some(count) => Some(count),
+            None => {
+                reader.refuse("count", &format!("must be from 1 to {MAX_OCCURRENCES}"));
+                None
+            }
+        },
+    };
+    let repeat = Repeat {
+        frequency: frequency.unwrap_or(Frequency::Daily),
+        every,
+        weekdays,
+        until,
+        count,
+        working_days_only: reader.flag("working_days_only").unwrap_or(false),
+        timezone: reader.text("timezone").unwrap_or_default(),
+    };
+    reader.done(Some(repeat))
+}
+
+fn apply(input: &Value) -> bilibi_agent_api::Result<Apply> {
+    input["apply"]
+        .as_str()
+        .and_then(Apply::parse)
+        .ok_or_else(|| {
+            bilibi_agent_api::Error::InvalidInput(BTreeMap::from([(
+                "apply".to_owned(),
+                vec!["must be following or all".to_owned()],
+            )]))
+        })
 }
 
 fn draft(kind: Kind, input: &Value) -> bilibi_agent_api::Result<Draft> {
@@ -343,7 +421,25 @@ pub(crate) fn record(activity: &Activity, related: Option<&Resolved>) -> Value {
         "created_at": activity.created_at.to_string(),
         "updated_at": activity.updated_at.to_string(),
         "closed_at": iso(activity.closed_at),
+        "series_id": activity.series_id,
+        "series_index": activity.series_index,
         "version": activity.version,
+    })
+}
+fn series_record(series: &crate::Series) -> Value {
+    json!({
+        "id": series.id,
+        "rule": series.describe(),
+        "frequency": series.repeat.frequency.code(),
+        "every": series.repeat.every,
+        "weekdays": series.repeat.weekdays.iter().map(|d| crate::weekday_code(*d)).collect::<Vec<_>>(),
+        "month_day": series.month_day,
+        "until": series.repeat.until.map(|d| d.to_string()),
+        "count": series.repeat.count,
+        "working_days_only": series.repeat.working_days_only,
+        "work_calendar": series.work_calendar,
+        "timezone": series.repeat.timezone,
+        "live_occurrences": series.live,
     })
 }
 fn draft_record(records: &bilibi_records::Records, draft: &Draft) -> Value {
@@ -421,15 +517,39 @@ impl ReadHandler for List {
                 _ => Mine::Any,
             };
             let related = reader.reference("related").flatten();
+            let from = reader.time("from").flatten();
+            let to = reader.time("to").flatten();
+            let between = match (from, to) {
+                (None, None) => None,
+                (Some(from), Some(to)) if from < to => Some((from, to)),
+                (Some(_), Some(_)) => {
+                    reader.refuse("to", "must be after from");
+                    None
+                }
+                _ => {
+                    reader.refuse("from", "needs both from and to");
+                    None
+                }
+            };
+            let series = input["series_id"].as_i64().filter(|id| *id > 0);
             let filter = Filter {
                 search: reader.text("search").unwrap_or_default(),
                 kind,
                 state,
                 mine,
                 related,
+                between,
+                series,
                 descending: state == State::Closed,
                 page: input["page"].as_i64().unwrap_or(1).max(1),
-                page_size: input["page_size"].as_i64().unwrap_or(25).clamp(1, 100),
+                page_size: input["page_size"].as_i64().unwrap_or(25).clamp(
+                    1,
+                    if between.is_some() {
+                        crate::CALENDAR_LIMIT - 1
+                    } else {
+                        100
+                    },
+                ),
                 ..Filter::default()
             };
             let filter = reader.done(filter)?;
@@ -479,6 +599,9 @@ impl ReadHandler for Get {
             };
             let mut value = record(&activity, named.first());
             value["guests"] = json!(guests.iter().map(guest_record).collect::<Vec<_>>());
+            if let Some(series) = owner.series(scope, &activity).await? {
+                value["series"] = series_record(&series);
+            }
             Ok(value.into())
         })
     }
@@ -498,6 +621,21 @@ impl WriteHandler for Create {
         Box::pin(async move {
             let draft = draft(self.0, input)?;
             let owner = owner()?;
+            if let Some(repeat) = repeat(input)? {
+                let (checked, occurrences) = owner
+                    .preview_create_series(client, scope, &draft, &repeat)
+                    .await
+                    .map_err(|e| invalid(e, ""))?;
+                let times: Vec<Value> = occurrences
+                    .iter()
+                    .map(|o| iso(o.starts_at.or(o.due_at)))
+                    .collect();
+                return Ok(json!({
+                    "creates": draft_record(owner.records(), &checked),
+                    "repeats": {"rule": repeat.describe(None), "occurrences": times.len(), "at": times},
+                })
+                .into());
+            }
             let checked = owner
                 .preview_create(client, scope, &draft)
                 .await
@@ -513,6 +651,19 @@ impl WriteHandler for Create {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let draft = draft(self.0, input)?;
+            if let Some(repeat) = repeat(input)? {
+                let created = owner()?
+                    .create_series(tx, scope, &draft, &repeat)
+                    .await
+                    .map_err(|e| invalid(e, ""))?;
+                let first = created.first().ok_or(Error::Internal)?;
+                let mut value = record(first, None);
+                value["occurrences"] = json!(created
+                    .iter()
+                    .map(|a| json!({"id": a.id, "at": iso(a.starts_at.or(a.due_at)), "version": a.version}))
+                    .collect::<Vec<_>>());
+                return Ok(value.into());
+            }
             let activity = owner()?
                 .create(tx, scope, &draft)
                 .await
@@ -631,6 +782,93 @@ impl WriteHandler for Delete {
                 .await
                 .map_err(|e| invalid(e, ""))?;
             Ok(json!({"id": id, "deleted": true}).into())
+        })
+    }
+}
+
+struct UpdateSeries;
+impl WriteHandler for UpdateSeries {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (id, version, apply, patch) =
+                (id(input)?, version(input)?, apply(input)?, patch(input)?);
+            let owner = owner()?;
+            let changes = owner
+                .preview_update_series(client, scope, id, version, apply, &patch)
+                .await
+                .map_err(|e| invalid(e, "patch"))?;
+            Ok(json!({"changes": changes
+                .iter()
+                .map(|(before, after)| json!({"before": record(before, None), "after": draft_record(owner.records(), after)}))
+                .collect::<Vec<_>>()})
+            .into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (id, version, apply, patch) =
+                (id(input)?, version(input)?, apply(input)?, patch(input)?);
+            let updated = owner()?
+                .update_series(tx, scope, id, version, apply, &patch)
+                .await
+                .map_err(|e| invalid(e, "patch"))?;
+            Ok(
+                json!({"updated": updated.iter().map(|a| record(a, None)).collect::<Vec<_>>()})
+                    .into(),
+            )
+        })
+    }
+}
+
+struct DeleteSeries;
+impl WriteHandler for DeleteSeries {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (id, version, apply) = (id(input)?, version(input)?, apply(input)?);
+            let members = owner()?
+                .preview_delete_series(client, scope, id, version, apply)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(
+                json!({"deletes": members.iter().map(|a| record(a, None)).collect::<Vec<_>>()})
+                    .into(),
+            )
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (id, version, apply) = (id(input)?, version(input)?, apply(input)?);
+            let members = owner()?
+                .delete_series(tx, scope, id, version, apply)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(json!({"deleted": members.iter().map(|a| a.id).collect::<Vec<_>>()}).into())
         })
     }
 }
@@ -870,6 +1108,17 @@ fn common_properties() -> serde_json::Map<String, Value> {
     );
     properties
 }
+fn repeat_schema() -> Value {
+    json!({"type":"object","required":["frequency","timezone"],"description":"Repeat it: one activity per occurrence, each with its own status, answers and reminder. Give until or count, not both.","properties":{
+        "frequency":{"type":"string","enum":["daily","weekly","monthly"]},
+        "every":{"type":"integer","minimum":1,"maximum":99,"description":"Every this many days, weeks or months; 1 when omitted."},
+        "weekdays":{"type":"array","items":{"type":"string","enum":["mon","tue","wed","thu","fri","sat","sun"]},"description":"Weekly: the days; the first occurrence's own day when omitted. A first date off these days moves to the next one that matches."},
+        "until":{"type":"string","maxLength":10,"description":"The last date an occurrence may fall on, YYYY-MM-DD in timezone."},
+        "count":{"type":"integer","minimum":1,"maximum":MAX_OCCURRENCES,"description":"How many occurrences."},
+        "working_days_only":{"type":"boolean","description":"Leave out the days your company's work calendar does not make working days (weekends, holidays)."},
+        "timezone":{"type":"string","maxLength":64,"description":"The IANA zone the time repeats in, such as Asia/Kuala_Lumpur, so 09:00 stays 09:00."}
+    }})
+}
 fn task_schema() -> Value {
     let mut properties = common_properties();
     properties.insert(
@@ -881,6 +1130,7 @@ fn task_schema() -> Value {
         time_schema("When work starts: a date and time with an offset."),
     );
     properties.insert("priority".into(), json!({"type":"string","enum":codes(&["high","medium","low"], false),"description":"Medium when omitted."}));
+    properties.insert("repeat".into(), repeat_schema());
     json!({"type":"object","required":["title"],"properties":properties})
 }
 fn call_schema() -> Value {
@@ -902,6 +1152,7 @@ fn call_schema() -> Value {
         "direction".into(),
         json!({"type":"string","enum":["inbound","outbound"]}),
     );
+    properties.insert("repeat".into(), repeat_schema());
     json!({"type":"object","required":["title","starts_at","ends_at","status","direction"],"properties":properties})
 }
 fn meeting_schema() -> Value {
@@ -926,6 +1177,7 @@ fn meeting_schema() -> Value {
         "meeting_type".into(),
         json!({"type":"string","maxLength":100,"description":"What kind of meeting, in plain words."}),
     );
+    properties.insert("repeat".into(), repeat_schema());
     json!({"type":"object","required":["title","starts_at","ends_at"],"properties":properties})
 }
 fn add_guest_schema() -> Value {
@@ -976,6 +1228,26 @@ fn update_schema() -> Value {
         }}
     }})
 }
+fn update_series_schema() -> Value {
+    let mut schema = update_schema();
+    schema["required"] = json!(["id", "version", "apply", "patch"]);
+    schema["properties"]["apply"] = apply_schema();
+    schema["properties"]["patch"]["description"] = json!("Only the fields to change; not status, which changes one occurrence at a time. A new starts_at, ends_at or due_at moves every open occurrence reached by the same wall-clock amount; closed ones keep their times.");
+    if let Some(patch) = schema["properties"]["patch"]["properties"].as_object_mut() {
+        patch.remove("status");
+    }
+    schema
+}
+fn apply_schema() -> Value {
+    json!({"type":"string","enum":["following","all"],"description":"following: this occurrence and the later ones; all: every live occurrence of the series, held and completed ones included."})
+}
+fn delete_series_schema() -> Value {
+    json!({"type":"object","required":["id","version","apply"],"properties":{
+        "id":{"type":"integer","minimum":1,"description":"An occurrence of the series."},
+        "version":{"type":"integer","minimum":1},
+        "apply":apply_schema()
+    }})
+}
 fn version_schema() -> Value {
     json!({"type":"object","required":["id","version"],"properties":{
         "id":{"type":"integer","minimum":1},
@@ -992,12 +1264,15 @@ fn list_schema() -> Value {
         "state":{"type":"string","enum":["open","closed","all"],"description":"Open by default."},
         "mine":{"type":"string","enum":["any","assignee","guest"],"description":"assignee: assigned to you; guest: you are invited."},
         "related":reference_schema(),
+        "from":time_schema("With to: calls and meetings that overlap from–to and tasks due in it (a calendar). Then page_size may be up to 500."),
+        "to":time_schema("The end of the range, after from."),
+        "series_id":{"type":"integer","minimum":1,"description":"The occurrences of one repeating series, in order (series_id from core.activity.get)."},
         "page":{"type":"integer","minimum":1},
-        "page_size":{"type":"integer","minimum":1,"maximum":100}
+        "page_size":{"type":"integer","minimum":1,"maximum":500,"description":"At most 100, or 500 with from and to."}
     }})
 }
 fn activity_output() -> Value {
-    json!({"type":"object","description":"An activity: id, kind (call, meeting, task, note), title, status, priority, direction, starts_at, ends_at, due_at, start_at, outcome, location, join_url, meeting_type, description, internal_notes, related {kind, id, label, path}, shared, reminded_at, assignee_user_id, created_by, company_id, created_at, updated_at, closed_at and version. Times are ISO UTC strings; get adds guests, each with id, user_id, person_id, email, role, response, invited_at and invite_sent_at."})
+    json!({"type":"object","description":"An activity: id, kind (call, meeting, task, note), title, status, priority, direction, starts_at, ends_at, due_at, start_at, outcome, location, join_url, meeting_type, description, internal_notes, related {kind, id, label, path}, shared, reminded_at, assignee_user_id, created_by, company_id, created_at, updated_at, closed_at, series_id and series_index (its number in a repeating series) and version. Times are ISO UTC strings; get adds guests, each with id, user_id, person_id, email, role, response, invited_at and invite_sent_at, and series (the rule in words and its parts, and how many occurrences are live) for an occurrence."})
 }
 fn list_output() -> Value {
     json!({"type":"object","description":"activities (each as core.activity.get without guests), total, page and page_size."})
@@ -1019,6 +1294,8 @@ static SEND_INVITES: SendInvites = SendInvites;
 static UPDATE: Update = Update;
 static CLOSE: Close = Close;
 static DELETE: Delete = Delete;
+static UPDATE_SERIES: UpdateSeries = UpdateSeries;
+static DELETE_SERIES: DeleteSeries = DeleteSeries;
 const KEYWORDS: &[&str] = &[
     "activity",
     "task",
@@ -1029,14 +1306,18 @@ const KEYWORDS: &[&str] = &[
     "follow-up",
     "invitation",
     "guest",
+    "repeat",
+    "recurring",
+    "series",
+    "calendar",
 ];
 inventory::submit! { Contribution::new(DEFINITIONS, "core/activity.operations", Provenance { module: crate::MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: "core.activity.list", title: "List activities", summary: "Calls, meetings, tasks and notes you may see, open or closed, optionally about one record or yours only.", keywords: KEYWORDS, capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&LIST), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.list", title: "List activities", summary: "Calls, meetings, tasks and notes you may see, open or closed, optionally about one record, in a date range (a calendar), one repeating series, or yours only.", keywords: KEYWORDS, capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&LIST), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.get", title: "Read an activity", summary: "One activity with its related record and guests.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: activity_output, handler: Handler::Read(&GET), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.activity.create_task", title: "Create a task", summary: "A task with a due date, priority and assignee, optionally about a record.", keywords: KEYWORDS, capability: MANAGE, input: task_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_TASK), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.create_task", title: "Create a task", summary: "A task with a due date, priority and assignee, optionally about a record and repeating.", keywords: KEYWORDS, capability: MANAGE, input: task_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_TASK), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.log_call", title: "Log a call", summary: "A call that was held or is planned, with its direction and outcome, optionally about a record.", keywords: KEYWORDS, capability: MANAGE, input: call_schema, output: review_output, handler: Handler::SafeWrite(&LOG_CALL), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.activity.create_meeting", title: "Schedule a meeting", summary: "A meeting with its time, place, join link and guests, optionally about a record. Send invites afterwards.", keywords: KEYWORDS, capability: MANAGE, input: meeting_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_MEETING), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.create_meeting", title: "Schedule a meeting", summary: "A meeting with its time, place, join link and guests, optionally about a record and repeating. Send invites afterwards.", keywords: KEYWORDS, capability: MANAGE, input: meeting_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_MEETING), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.create_note", title: "Add a note", summary: "A note about a record: a title and its text.", keywords: KEYWORDS, capability: MANAGE, input: note_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_NOTE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.update", title: "Change an activity", summary: "Change the fields named in patch, using the stored version.", keywords: KEYWORDS, capability: MANAGE, input: update_schema, output: review_output, handler: Handler::SafeWrite(&UPDATE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.close", title: "Close an activity", summary: "A call or meeting becomes held, a task completed. Refused when already closed.", keywords: KEYWORDS, capability: MANAGE, input: version_schema, output: review_output, handler: Handler::SafeWrite(&CLOSE), channels: Channels::Every, step_up: &[] },
@@ -1044,7 +1325,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/activity.operations", 
         Operation { key: "core.activity.remove_guest", title: "Remove a guest", summary: "Remove a guest from an activity you may change. The assignee stays until the activity is reassigned.", keywords: KEYWORDS, capability: MANAGE, input: guest_id_schema, output: review_output, handler: Handler::SafeWrite(&REMOVE_GUEST), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.respond", title: "Answer an invitation", summary: "Record a guest's answer: accepted, declined, tentative or none. You answer for yourself; recording someone else's needs the right to change the activity.", keywords: KEYWORDS, capability: VIEW, input: respond_schema, output: review_output, handler: Handler::SafeWrite(&RESPOND), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.send_invites", title: "Send invitations", summary: "Invite every guest but you to an open call or meeting still ahead: colleagues in the bell, everyone else by email.", keywords: KEYWORDS, capability: MANAGE, input: get_schema, output: review_output, handler: Handler::SafeWrite(&SEND_INVITES), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.activity.delete", title: "Delete an activity", summary: "Remove an activity, using the stored version.", keywords: KEYWORDS, capability: MANAGE, input: version_schema, output: review_output, handler: Handler::SafeWrite(&DELETE), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.delete", title: "Delete an activity", summary: "Remove an activity, using the stored version. In a repeating series it removes only this occurrence.", keywords: KEYWORDS, capability: MANAGE, input: version_schema, output: review_output, handler: Handler::SafeWrite(&DELETE), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.update_series", title: "Change a repeating series", summary: "Change the fields named in patch on one occurrence and the later ones, or on every occurrence of its series.", keywords: KEYWORDS, capability: MANAGE, input: update_series_schema, output: review_output, handler: Handler::SafeWrite(&UPDATE_SERIES), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.delete_series", title: "Delete a repeating series", summary: "Remove one occurrence and the later ones, or every occurrence of its series, held and completed ones included.", keywords: KEYWORDS, capability: MANAGE, input: delete_series_schema, output: review_output, handler: Handler::SafeWrite(&DELETE_SERIES), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "core.activity", title: "Activities", summary: "Tasks, calls, meetings and notes on any record: who does what, when, about which record, who takes part and who may see it.", keywords: KEYWORDS, capability: VIEW, body: include_str!("../guide.md") }],
 }) }
