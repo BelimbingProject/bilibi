@@ -11,6 +11,7 @@ use bilibi_module_registry::{Catalog, Module, Service};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Stable reference; transport arguments and actor metadata never escape here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,7 +61,7 @@ impl Queue {
             affiliation: scope.actor().affiliation().map(|id| id.get()),
             company: scope.current_company().map(|id| id.get()),
         };
-        self.insert(tx, scope.tenant(), actor, worker_id, args)
+        self.insert(tx, scope.tenant(), actor, worker_id, args, None)
             .await
     }
     /// Enqueue by a named system principal (a scheduler or maintenance edge),
@@ -86,7 +87,7 @@ impl Queue {
             return Err(Error::Forbidden);
         }
         let actor = Actor::System(principal.to_owned());
-        self.insert(tx, scope.tenant(), actor, worker_id, args)
+        self.insert(tx, scope.tenant(), actor, worker_id, args, None)
             .await
     }
     /// Enqueue, inside another actor's transaction, a job that runs as a named
@@ -113,8 +114,38 @@ impl Queue {
             return Err(Error::Forbidden);
         }
         let actor = Actor::System(principal.to_owned());
-        self.insert(tx, scope.tenant(), actor, worker_id, args)
+        self.insert(tx, scope.tenant(), actor, worker_id, args, None)
             .await
+    }
+    /// Enqueues a principal's job for an instant, in the caller's transaction.
+    /// Uses the same declaration and tenant checks as `enqueue_system_within`.
+    /// The job cannot be claimed before `available_at`. Past instants run now.
+    pub async fn enqueue_system_at_within(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &SystemScope,
+        worker_id: &str,
+        args: Value,
+        available_at: SystemTime,
+    ) -> Result<JobRef> {
+        let principal = scope.principal().ok_or(Error::Forbidden)?;
+        if tx.context().tenant != scope.tenant()
+            || tx.context().impersonator.is_some()
+            || !bilibi_authz::vocabulary()?
+                .system_principals
+                .contains_key(principal)
+        {
+            return Err(Error::Forbidden);
+        }
+        self.insert(
+            tx,
+            scope.tenant(),
+            Actor::System(principal.to_owned()),
+            worker_id,
+            args,
+            Some(available_at),
+        )
+        .await
     }
     async fn insert(
         &self,
@@ -123,6 +154,7 @@ impl Queue {
         actor: Actor,
         worker_id: &str,
         args: Value,
+        available_at: Option<SystemTime>,
     ) -> Result<JobRef> {
         let worker = self.workers.get(worker_id)?;
         arguments::validate(&args)?;
@@ -134,10 +166,11 @@ impl Queue {
                 Actor::User { user, person, organisation, affiliation, company } => ("user", *user, None, *person, *organisation, *affiliation, *company),
                 Actor::System(principal) => ("system", 0, Some(principal.as_str()), None, None, None, None),
             };
-            let row = sql.query_one("INSERT INTO base_queue_jobs(tenant_id,worker_id,worker_module,args,actor_kind,actor_id,system_principal,person_id,organisation_id,affiliation_id,trace_id,max_attempts,work_company_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id", &[&tenant,&worker.id,&worker.module,&args,&kind,&actor_id,&principal,&person,&organisation,&affiliation,&trace,&worker.definition.max_attempts,&company]).await?;
+            let row = sql.query_one("INSERT INTO base_queue_jobs(tenant_id,worker_id,worker_module,args,actor_kind,actor_id,system_principal,person_id,organisation_id,affiliation_id,trace_id,max_attempts,work_company_id,available_at,state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,clock_timestamp()),CASE WHEN $14::timestamptz > clock_timestamp() THEN 'scheduled' ELSE 'available' END) RETURNING id,state", &[&tenant,&worker.id,&worker.module,&args,&kind,&actor_id,&principal,&person,&organisation,&affiliation,&trace,&worker.definition.max_attempts,&company,&available_at]).await?;
             let id = row.get("id");
+            let state: &str = row.get("state");
             // No args, names, email or credential material enters audit evidence.
-            let change = Change {kind:"base/queue.job".into(),id,old:Value::Null,new:json!({"worker":worker.id,"state":"available","actor_kind":kind,"actor_id":actor_id,"system_principal":principal,"max_attempts":worker.definition.max_attempts})};
+            let change = Change {kind:"base/queue.job".into(),id,old:Value::Null,new:json!({"worker":worker.id,"state":state,"actor_kind":kind,"actor_id":actor_id,"system_principal":principal,"max_attempts":worker.definition.max_attempts})};
             Ok((JobRef{id},vec![change]))
         })).await
     }
