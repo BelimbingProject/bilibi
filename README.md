@@ -204,6 +204,14 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --release --locked
 ```
 
+### File length
+
+A pull request may not add a Rust file over 800 lines, and may not make a file that is already over 800 lines longer. Split it or keep it from growing.
+
+- Run `python3 scripts/file-length-ratchet.py` before you push; it compares your branch with `origin/main`.
+- Files under `fixtures/`, `examples/`, `migrations/` and `generated/` are skipped.
+- CI runs it as `.github/workflows/file-length.yml`. The same script is copied unchanged into every Bilibi repository.
+
 ## Limits
 
 - Bilibi creates its own schema; it does not adopt an existing database.
