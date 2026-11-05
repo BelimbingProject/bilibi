@@ -5,9 +5,11 @@
 //! are `base/records` references (the records reference holder).
 mod agent_operations;
 mod contributions;
+mod custom;
 mod files;
 mod library;
 mod model;
+mod reminders;
 mod store;
 mod web;
 
@@ -32,7 +34,7 @@ pub use contributions::{
     MAX_UPLOAD_BYTES, MERGE, VIEW,
 };
 pub use model::{
-    Draft, FieldError, Patch, RevisionInput, ScanStatus, Source, Upload, FILE_TYPES,
+    Custom, Draft, FieldError, Patch, RevisionInput, ScanStatus, Source, Upload, FILE_TYPES,
     FIRST_CHANGE_LOG,
 };
 
@@ -67,6 +69,13 @@ pub struct Document {
     pub sub_category: Option<String>,
     pub document_type: Option<String>,
     pub status: String,
+    /// When the document expires. Past that date it counts as expired
+    /// whatever its status says.
+    pub expires_on: Option<Date>,
+    /// The Core Activity task that reminds of the expiry, when there is one.
+    pub expiry_activity_id: Option<i64>,
+    /// The tenant's custom field values (`base/custom_fields`).
+    pub custom: Custom,
     /// The latest revision's number.
     pub revision: i32,
     pub last_revision_at: Timestamp,
@@ -107,6 +116,21 @@ pub struct AccessGrant {
     pub can_download: bool,
     pub can_manage: bool,
     pub can_share: bool,
+    /// When the grant ends; `None` for one that does not expire.
+    pub expires_at: Option<Timestamp>,
+}
+
+/// An explicit grant to give one active account. `until` is the last day it
+/// works, in the actor's zone; `email` sends the person a link to the
+/// document after the change commits.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShareInput {
+    pub user_id: i64,
+    pub can_download: bool,
+    pub can_manage: bool,
+    pub can_share: bool,
+    pub until: Option<Date>,
+    pub email: bool,
 }
 
 /// A record a document relates to.
@@ -165,6 +189,30 @@ pub struct Marks {
 pub struct MarkPatch {
     pub favourite: Option<bool>,
     pub following: Option<bool>,
+}
+
+/// Narrows the library by expiry date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpiryFilter {
+    /// The expiry date has passed.
+    Expired,
+    /// Expires within the next 30 days.
+    Soon,
+}
+impl ExpiryFilter {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::Soon => "soon",
+        }
+    }
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "expired" => Some(Self::Expired),
+            "soon" => Some(Self::Soon),
+            _ => None,
+        }
+    }
 }
 
 /// Narrows the library to the reader's own marks.
@@ -271,6 +319,7 @@ pub struct Filter {
     pub related: Option<Reference>,
     /// Only the reader's own favourites or follows.
     pub marked: Option<MarkFilter>,
+    pub expiry: Option<ExpiryFilter>,
     pub sort: Sort,
     pub descending: bool,
     pub page: i64,
@@ -285,6 +334,7 @@ impl Default for Filter {
             status: None,
             related: None,
             marked: None,
+            expiry: None,
             sort: Sort::LastRevision,
             descending: true,
             page: 1,
@@ -347,6 +397,11 @@ pub struct Documents {
     display: Arc<DisplayPolicy>,
     directory: Arc<PrincipalDirectory>,
     notifications: Arc<NotificationBoundary>,
+    custom: Arc<bilibi_custom_fields::CustomFields>,
+    activities: Arc<bilibi_activity::Activities>,
+    mailer: Arc<bilibi_mail::Mailer>,
+    /// The public origin emailed links point at (`APP_ORIGIN`).
+    origin: String,
 }
 impl Documents {
     async fn fresh(
@@ -363,6 +418,9 @@ impl Documents {
             display: &self.display,
             directory: &self.directory,
             notifications: &self.notifications,
+            settings: &self.settings,
+            custom: &self.custom,
+            activities: &self.activities,
         }
     }
 
@@ -586,7 +644,16 @@ impl Documents {
     pub async fn list(&self, scope: &Scope, filter: &Filter) -> Result<Page> {
         let client = self.db.get().await?;
         let scope = self.fresh(&**client, scope).await?;
-        self.store().list(&**client, &scope, filter).await
+        let zone = self
+            .display
+            .display(&**client, &scope, scope.current_company(), "en")
+            .await?
+            .timezone;
+        let today = Timestamp::now()
+            .in_tz(&zone)
+            .map_err(|_| Error::Internal)?
+            .date();
+        self.store().list(&**client, &scope, filter, today).await
     }
     /// The documents linked to `record`, newest revision first; the record
     /// must be one the reader may view.
@@ -886,6 +953,18 @@ impl Documents {
         }
         store::permission(&**client, scope, document.id, "manage").await
     }
+    /// The tenant's active custom fields for documents, in the order defined.
+    pub async fn custom_fields(
+        &self,
+        scope: &Scope,
+    ) -> Result<Vec<bilibi_custom_fields::Definition>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
+        self.custom
+            .active(&**client, &scope, custom::RECORD_TYPE)
+            .await
+    }
     /// Whether the reader may download files.
     pub async fn may_download(&self, scope: &Scope) -> Result<bool> {
         let client = self.db.get().await?;
@@ -899,47 +978,93 @@ impl Documents {
         self.store().access(&**client, &scope, id).await
     }
 
-    /// Adds or replaces one explicit user grant.
-    #[allow(clippy::too_many_arguments)]
+    /// Adds or replaces one explicit user grant, optionally ending after a
+    /// day (`until`, UTC). With `email`, the person is mailed a link to the
+    /// document once the change commits; the link opens the document only for
+    /// that account, while the grant lasts. The grant is never inferred from
+    /// the email and nobody else can use the link.
     pub async fn share(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         id: i64,
-        user_id: i64,
-        can_download: bool,
-        can_manage: bool,
-        can_share: bool,
+        input: &ShareInput,
     ) -> WriteResult<AccessGrant> {
         let scope = self.fresh(tx.sql(), scope).await?;
-        self.store()
-            .share(tx, &scope, id, user_id, can_download, can_manage, can_share)
-            .await
+        let (grant, document) = self.store().share(tx, &scope, id, input).await?;
+        if input.email {
+            self.email_link(tx, &scope, &document, &grant);
+        }
+        Ok(grant)
+    }
+
+    /// Mails the grantee a link after the share commits. A refused message is
+    /// logged, never retried: the grant stands either way.
+    fn email_link(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        document: &Document,
+        grant: &AccessGrant,
+    ) {
+        let (db, authentication, mailer) = (
+            self.db.clone(),
+            self.authentication.clone(),
+            self.mailer.clone(),
+        );
+        let (sender, tenant) = (scope.user(), scope.tenant());
+        let (recipient, name, id, until) = (
+            grant.user_id,
+            document.name.clone(),
+            document.id,
+            grant.expires_at,
+        );
+        let link = format!("{}{}", self.origin, web::path(id));
+        tx.after_commit(move || {
+            tokio::spawn(async move {
+                let Ok(client) = db.get().await else { return };
+                let to = authentication
+                    .authenticate(&**client, tenant, recipient, String::new())
+                    .await
+                    .ok();
+                let from = authentication
+                    .authenticate(&**client, tenant, sender, String::new())
+                    .await
+                    .ok();
+                let (Some(to), Some(from)) = (to, from) else {
+                    return;
+                };
+                let Ok(address) = bilibi_mail::Address::new(Some(&to.user_name), &to.email) else {
+                    return;
+                };
+                let name: String = name.chars().take(150).collect();
+                let ends = until
+                    .map(|t| format!("\nYour access ends {}.", t.strftime("%Y-%m-%d %H:%M UTC")))
+                    .unwrap_or_default();
+                let message = bilibi_mail::Message::text(
+                    address,
+                    format!("{} shared a document with you: {name}", from.user_name),
+                    format!(
+                        "{} shared “{name}” with you.{ends}\n\nOpen it, signed in:\n{link}\n\nThe link works only for your account and only while your access lasts.\n",
+                        from.user_name
+                    ),
+                );
+                if mailer.deliver(&message).await.is_err() {
+                    eprintln!("error: the link to document {id} could not be emailed");
+                }
+            });
+        });
     }
 
     /// The explicit grant `share` would add or replace, without writing it.
-    #[allow(clippy::too_many_arguments)]
     pub async fn preview_share(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
         id: i64,
-        user_id: i64,
-        can_download: bool,
-        can_manage: bool,
-        can_share: bool,
+        input: &ShareInput,
     ) -> WriteResult<AccessGrant> {
-        self.store()
-            .preview_share(
-                client,
-                scope,
-                id,
-                user_id,
-                can_download,
-                can_manage,
-                can_share,
-            )
-            .await
+        self.store().preview_share(client, scope, id, input).await
     }
 
     /// Removes one explicit grant. The caller's own grant cannot be removed.
@@ -968,10 +1093,11 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/database", "base/datetime", "base/grid", "base/locale", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
+        ("core-document-003-expiry-sharing-custom", include_str!("../migrations/003-expiry-sharing-custom.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
@@ -987,6 +1113,10 @@ inventory::submit! { Module {
             display: s.get("base/datetime.display")?,
             directory: s.get("base/principal_directory.directory")?,
             notifications: s.get("base/notifications.sink")?,
+            custom: s.get(bilibi_custom_fields::SERVICE)?,
+            activities: s.get(bilibi_activity::SERVICE)?,
+            mailer: s.get("base/mail.mailer")?,
+            origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
         });
         agent_operations::bind(documents.clone())?;
         Ok(documents)

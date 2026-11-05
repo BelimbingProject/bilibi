@@ -24,6 +24,27 @@ Creating a document gives its creator view, download, manage and share permissio
 
 Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant.
 
+## Sharing by email, and when access ends
+
+- **Share** gives one active account an explicit grant. With **Access until** (`until`, the last day, UTC) the grant stops working after that day: every read, download and edit rechecks it, so an ended grant hides the document like no grant at all. Your own access never ends this way.
+- **Email them a link** (`email`) mails the grantee, after the change commits, a link to `/documents/{id}`. The link carries no token and no file: it opens only for that account, only while the grant lasts, and the sharer needs the share permission as before. Nothing is emailed when the share is refused. A refused message is logged and not retried; the grant stands.
+- Still named people only: an email address gives no access by itself, there are no public links, and merge carries a source's live grants (an ended one is dropped; a grant with no end beats one with an end).
+
+## Expiry and its reminder
+
+- A document may have an **expiry date** (`expires_on`), edited in place on its page. Past it, the page and the list show it as expired whatever its status says (the status list stays the operator's); the list filters **Expired** and **Expiring in 30 days**.
+- Setting the date creates one Core Activity task, "Document expires: …", related to the document and due `core.document.expiry_reminder_days` (default 14, Settings › Documents) before the date at 09:00 in the actor's zone. It is private to the person who set the date and rings their bell through Core Activity's reminder sweep; there is no second reminder system. The task is made only when that person holds `core.activity.manage`; otherwise the date is saved without one.
+- Changing or clearing the date, or deleting the document, removes the old task when its owner may still change it.
+
+## Custom fields
+
+Documents is a `base/custom_fields` record type (`document`): an administrator adds text, number, date and pick-list fields without a release (ADR 21). Values live in `core_documents.custom_fields`, checked with `CustomFields::validate_locked` in the same write as every other change.
+
+- **Page:** the active fields show as facts that edit in place (`save_custom_field`, through `core.document.update`).
+- **Agents:** `core.document.create` and `.update` (inside `patch`) take `custom` as `{key, value}` pairs; `core.document.get` returns `custom` as `{key, label, type, value}` for the active fields. Find keys with `base.custom_fields.list`.
+- **Copy** carries the values over; **merge** keeps the survivor's.
+- Not yet: a custom field as a list column or filter, and a field in the New document dialog.
+
 ## Library actions
 
 - **Marks:** `mark` sets the reader's own favourite and follow flags on a document they may see. The list filters on them (`show=favourites` or `show=following`). Deleting or merging a document moves or removes its marks.
@@ -68,7 +89,8 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 
 - Capabilities: `core.document.view`, `core.document.download`, `core.document.manage` and `core.document.merge`.
 - Pick-lists: `core.document.category`, `core.document.sub_category`, `core.document.type`, and `core.document.status`.
-- Settings: `core.document.max_upload_bytes` and `core.document.allowed_types`.
+- Settings: `core.document.max_upload_bytes`, `core.document.allowed_types` and `core.document.expiry_reminder_days`.
+- Custom field record type `document`.
 - Record kind: `core.document.document`; holder table `document_links`.
 - Routes: `/documents`, `/documents/{id}`, revision downloads and `/documents/export.csv`.
 - Menu item: `Documents`, under Core.
@@ -83,8 +105,8 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 
 Core company and Core person discover their panel by kind and pass `company_id` or `person_id`. A Domain record page (a case, an opportunity) renders the `record.documents` slot with `kind` and `id` in the panel path; it never registers a Documents panel of its own. The panel shows at most 10 documents linked to the record, newest first (name, category, revision, publish date), and **View all** opens `/documents?related=<kind>:<id>`. **Add document** (with `core.document.manage`) opens the same filtered list, where New document files and relates it, so the panel writes nothing. The panel reads through `Documents::list`: a document with no explicit grant for the reader is absent, with no hidden count.
 
-Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share`, `.unshare`, `.mark`, `.copy`, `.merge` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes (and the `copy_file` step of Copy, which then calls `core.document.copy`) is the declared page-write exception because operation input is bounded; an agent copies a file document by naming a file the page stored.
+Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share` (with `until` and `email`), `.unshare`, `.mark`, `.copy`, `.merge` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes (and the `copy_file` step of Copy, which then calls `core.document.copy`) is the declared page-write exception because operation input is bounded; an agent copies a file document by naming a file the page stored.
 
 ## Database records
 
-The module owns `core_documents`, `core_document_revisions`, `core_document_links`, `core_document_access`, `core_document_marks` and `core_document_files`. Every query binds `tenant_id`. Applied migrations are immutable.
+The module owns `core_documents`, `core_document_revisions`, `core_document_links`, `core_document_access`, `core_document_marks` and `core_document_files`; documents also hold `expires_on`, the reminder task id and `custom_fields`, and a grant its `expires_at`. Every query binds `tenant_id`. Applied migrations are immutable.

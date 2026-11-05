@@ -44,6 +44,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ("type".into(), ListFilter::string("all")),
             ("status".into(), ListFilter::string("all")),
             ("show".into(), ListFilter::string("all")),
+            ("expiry".into(), ListFilter::string("all")),
         ]),
         omit_blank: vec!["search".into()],
         ..ListSpec::default()
@@ -62,6 +63,7 @@ fn columns() -> Result<ListColumns> {
             BuiltinColumn::new("type", "Type"),
             BuiltinColumn::new("status", "Status"),
             BuiltinColumn::new("marks", "Marks"),
+            BuiltinColumn::new("expires", "Expires"),
             BuiltinColumn::new("revision", "Revision"),
             BuiltinColumn::new("publish_date", "Published").sortable("publish_date"),
             BuiltinColumn::new("last_revision", "Last revision").sortable("last_revision"),
@@ -179,6 +181,7 @@ impl Index {
                     ("type".into(), "all".into()),
                     ("status".into(), "all".into()),
                     ("show".into(), "all".into()),
+                    ("expiry".into(), "all".into()),
                 ]));
             }
             "page" => self
@@ -286,6 +289,14 @@ impl Index {
                     (true, false) => "Favourite",
                     (false, true) => "Following",
                     (false, false) => "",
+                }),
+            )
+            .slot(
+                "expires",
+                Html::text(&match d.expires_on {
+                    Some(on) if on < clock.today() => format!("{} (expired)", clock.date(on)),
+                    Some(on) => clock.date(on),
+                    None => String::new(),
                 }),
             )
             .slot("revision", Html::text(&d.revision.to_string()))
@@ -409,6 +420,17 @@ impl Index {
                         Choice::new("Documents I follow", "following"),
                     ],
                 ),
+                ToolbarControl::select(
+                    "documents-expiry",
+                    "expiry",
+                    "Expiry",
+                    &form["expiry"],
+                    vec![
+                        Choice::new("Any expiry", "all"),
+                        Choice::new("Expired", "expired"),
+                        Choice::new("Expiring in 30 days", "soon"),
+                    ],
+                ),
             ],
         ))?);
         let mut table = FlexTable::new("documents", self.columns.flex_columns(), rows)
@@ -483,15 +505,17 @@ impl Index {
 
 /// The export's address: the list's filters, no paging.
 fn export_href(query: &HashMap<String, String>) -> String {
-    let mut pairs: Vec<String> = ["search", "category", "type", "status", "show", "related"]
-        .iter()
-        .filter_map(|key| {
-            query
-                .get(*key)
-                .filter(|v| !v.is_empty() && *v != "all")
-                .map(|v| format!("{key}={}", encode(v)))
-        })
-        .collect();
+    let mut pairs: Vec<String> = [
+        "search", "category", "type", "status", "show", "expiry", "related",
+    ]
+    .iter()
+    .filter_map(|key| {
+        query
+            .get(*key)
+            .filter(|v| !v.is_empty() && *v != "all")
+            .map(|v| format!("{key}={}", encode(v)))
+    })
+    .collect();
     pairs.sort();
     if pairs.is_empty() {
         format!("{INDEX}/export.csv")

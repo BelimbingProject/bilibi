@@ -46,6 +46,7 @@ const FIELDS: &[(&str, &str)] = &[
     ("sub_category", "Sub-category"),
     ("document_type", "Type"),
     ("status", "Status"),
+    ("expires_on", "Expires"),
 ];
 fn label(field: &str) -> &'static str {
     FIELDS
@@ -136,6 +137,51 @@ impl Detail {
         Ok(())
     }
 
+    /// One custom field's save: a patch of that key alone.
+    async fn save_custom_field(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        value: &Value,
+    ) -> Result<()> {
+        let field = value["field"].as_str().ok_or(Error::Invalid)?;
+        let key = field.strip_prefix("cf_").ok_or(Error::Invalid)?;
+        if value["id"].as_str() != Some(&self.id.to_string()) {
+            return Err(Error::Invalid);
+        }
+        let submitted = value["value"].as_str().ok_or(Error::Invalid)?;
+        let version = value["version"]
+            .as_str()
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or(Error::Invalid)?;
+        let input = json!({
+            "id": self.id,
+            "version": version,
+            "patch": {"custom": [{"key": key, "value": submitted}]},
+        });
+        let status = match self
+            .pages
+            .submit(
+                scope,
+                credential,
+                "save_custom_field",
+                "core.document.update",
+                input,
+                "The change was not saved. Try again.",
+            )
+            .await?
+        {
+            Ok(_) => CommitStatus::Saved,
+            Err(Refusal::Fields(fields)) => {
+                let reasons: Vec<&str> = fields.values().flatten().map(String::as_str).collect();
+                CommitStatus::refusal("Field", submitted, &reasons)
+            }
+            Err(Refusal::Message(message)) => CommitStatus::Error(message),
+        };
+        self.statuses.put(field, status);
+        Ok(())
+    }
+
     async fn search(&mut self, scope: &Scope, value: &Value) -> Result<()> {
         let form = params::form_values_checked(value, "related", params::FIELD_LIMIT)
             .map_err(Error::refused)?;
@@ -184,6 +230,7 @@ impl Detail {
         }
         match name {
             "save_field" => self.save_field(scope, credential, value).await?,
+            "save_custom_field" => self.save_custom_field(scope, credential, value).await?,
             "related_change" => self.search(scope, value).await?,
             "link" => {
                 let (kind, id) = value["record"]
@@ -403,13 +450,21 @@ impl Detail {
                     .get("account_id")
                     .and_then(|id| id.parse::<i64>().ok())
                     .ok_or(Error::Invalid)?;
-                let input = json!({
+                let mut input = json!({
                     "id": self.id,
                     "user_id": user_id,
                     "download": checked("download"),
                     "manage": checked("manage"),
                     "share": checked("allow_share"),
+                    "email": checked("email"),
                 });
+                if let Some(until) = form
+                    .get("until")
+                    .map(|u| u.trim())
+                    .filter(|u| !u.is_empty())
+                {
+                    input["until"] = json!(until);
+                }
                 self.flash = Some(
                     match self
                         .pages
@@ -630,11 +685,74 @@ impl Detail {
                 value.map(|v| v.to_string()).unwrap_or_default(),
                 editable,
             )
+            .allow_empty()
             .input_type("date");
         if let Some(value) = value {
             field = field.display_value(clock.date(value));
         }
         render(InlineEdit { field })
+    }
+
+    /// The tenant's custom fields as facts that edit in place: title, key
+    /// and value.
+    async fn custom_rows(
+        &self,
+        scope: &Scope,
+        d: &Document,
+        editable: bool,
+    ) -> Result<Vec<(String, String, Html)>> {
+        let mut rows = Vec::new();
+        for definition in self.pages.documents.custom_fields(scope).await? {
+            let name = format!("cf_{}", definition.key);
+            let value = d
+                .custom
+                .get(&definition.key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let mut field = InlineField::new(
+                format!("document-{}", name.replace('_', "-")),
+                name.clone(),
+                format!("Edit {}", definition.label),
+                value.clone(),
+            )
+            .version(d.version)
+            .allow_empty()
+            .status(self.statuses.get(&name));
+            field.save_event = "save_custom_field".into();
+            field.id_value = d.id.to_string();
+            if !editable {
+                field = field.readonly();
+            }
+            if let Some(help) = &definition.help {
+                field.hint = help.clone();
+            }
+            let html = match (definition.kind, definition.picklist.as_deref()) {
+                (bilibi_custom_fields::Kind::Choice, Some(list)) => {
+                    let shown = self.pages.label(scope, list, Some(&value)).await?;
+                    let editor = bilibi_ui::Combobox::new(format!("{name}-input"), &name)
+                        .value(&value)
+                        .options(self.pages.choices(scope, list, None).await?)
+                        .wrapper_class("mb-0");
+                    render(InlineChoice {
+                        field,
+                        display: Html::text(if shown.is_empty() { "—" } else { &shown }),
+                        editor: render(editor)?,
+                    })?
+                }
+                (bilibi_custom_fields::Kind::Date, _) => {
+                    field = field.input_type("date");
+                    render(InlineEdit { field })?
+                }
+                _ => render(InlineEdit { field })?,
+            };
+            rows.push((
+                definition.label.clone(),
+                format!("custom-{}", definition.key),
+                html,
+            ));
+        }
+        Ok(rows)
     }
 
     async fn facts(
@@ -734,6 +852,18 @@ impl Detail {
                 editable,
             )?,
         ));
+        let expiry = {
+            let mut html = self.date(clock, d, "expires_on", d.expires_on, editable)?;
+            if d.expires_on.is_some_and(|on| on < clock.today()) {
+                html.push(&Html::text(" · Expired"));
+            }
+            html
+        };
+        items.push(("Expires", "expires-on", expiry));
+        let custom_rows = self.custom_rows(scope, d, editable).await?;
+        for (title, key, html) in &custom_rows {
+            items.push((title.as_str(), key.as_str(), html.clone()));
+        }
         items.push((
             "Revision",
             "revision",
@@ -952,7 +1082,7 @@ impl Detail {
         })
     }
 
-    async fn sharing(&self, scope: &Scope, grants: &[AccessGrant]) -> Result<Html> {
+    async fn sharing(&self, scope: &Scope, clock: &Clock, grants: &[AccessGrant]) -> Result<Html> {
         let users: Vec<i64> = grants.iter().map(|grant| grant.user_id).collect();
         let names = self.pages.names(scope, &users).await?;
         let mut body = render(SectionHeading {
@@ -978,7 +1108,19 @@ impl Detail {
             if grant.can_share {
                 permissions.push("Share");
             }
-            let mut value = Html::text(&permissions.join(" · "));
+            let mut text = permissions.join(" · ");
+            if let Some(until) = grant.expires_at {
+                text.push_str(&format!(
+                    " · {} {}",
+                    if until <= jiff::Timestamp::now() {
+                        "Ended"
+                    } else {
+                        "Until"
+                    },
+                    clock.text(until)
+                ));
+            }
+            let mut value = Html::text(&text);
             if grant.user_id != scope.user() {
                 value.push(&render(Button {
                     id: &format!("document-access-{}-remove", grant.id),
@@ -1014,10 +1156,18 @@ impl Detail {
                 .kind(InputKind::Number)
                 .hint("Use an active account ID."),
         )?;
+        fields.push(&render(
+            Field::in_form("share", "until")
+                .id("document-share-until")
+                .label("Access until")
+                .kind(InputKind::Date)
+                .hint("The last day (UTC) it works. Leave empty for no end."),
+        )?);
         for (key, label, checked) in [
             ("download", "Allow downloads", true),
             ("manage", "Allow changes", false),
             ("allow_share", "Allow sharing", false),
+            ("email", "Email them a link", false),
         ] {
             fields.push(&render(
                 Field::in_form("share", key)
@@ -1151,7 +1301,7 @@ impl Detail {
             body.push(&self.duplicates(&duplicates, may_merge)?);
         }
         if let Ok(grants) = self.pages.documents.access(scope, self.id).await {
-            body.push(&self.sharing(scope, &grants).await?);
+            body.push(&self.sharing(scope, &clock, &grants).await?);
         }
         let merge_name = match &self.confirm {
             Some(Confirm::Merge(id)) => self

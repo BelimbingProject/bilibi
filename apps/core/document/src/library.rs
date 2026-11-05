@@ -41,7 +41,7 @@ pub(crate) async fn marks(
     Ok(client
         .query(
             "SELECT m.document_id,m.favourite,m.following FROM core_document_marks m WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.document_id = ANY($3)
-             AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=m.tenant_id AND a.document_id=m.document_id AND a.user_id=m.user_id AND a.can_view)",
+             AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=m.tenant_id AND a.document_id=m.document_id AND a.user_id=m.user_id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))",
             &[&reader.tenant, &reader.user, &ids],
         )
         .await?
@@ -72,7 +72,7 @@ pub(crate) async fn duplicates_of_file(
     client
         .query(
             &format!("SELECT {COLUMNS} FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL
-                      AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND a.user_id=$2)
+                      AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$2)
                       AND EXISTS (SELECT 1 FROM core_document_revisions r WHERE r.tenant_id=d.tenant_id AND r.document_id=d.id AND r.sha256=$3)
                       ORDER BY d.id LIMIT 10"),
             &[&reader.tenant, &reader.user, &sha256],
@@ -225,7 +225,7 @@ impl Store<'_> {
             .sql()
             .query(
                 "SELECT m.user_id FROM core_document_marks m WHERE m.tenant_id=$1 AND m.document_id=$2 AND m.following AND m.user_id <> $3
-                 AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=m.tenant_id AND a.document_id=m.document_id AND a.user_id=m.user_id AND a.can_view)",
+                 AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=m.tenant_id AND a.document_id=m.document_id AND a.user_id=m.user_id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))",
                 &[&tenant, &id, &actor],
             )
             .await
@@ -277,7 +277,7 @@ impl Store<'_> {
                       lower(btrim(d.name)) = lower(btrim($3::text)) AS same_name
                     FROM core_documents d
                     WHERE d.tenant_id=$1 AND d.id <> $2 AND d.deleting_at IS NULL
-                      AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND a.user_id=$5)
+                      AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$5)
                   ) x WHERE x.same_file OR x.same_link OR x.same_name ORDER BY x.id LIMIT {DUPLICATE_ROWS}"),
                 &[&tenant, &id, &document.name, &link, &user],
             )
@@ -346,6 +346,8 @@ impl Store<'_> {
             sub_category: source.sub_category,
             document_type: source.document_type,
             status: None,
+            expires_on: None,
+            custom: source.custom,
             change_log: None,
             related: Vec::new(),
         })
@@ -614,7 +616,7 @@ impl Store<'_> {
                         // Access: explicit grants of active accounts, unioned.
                         for row in sql
                             .query(
-                                "DELETE FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 RETURNING id,user_id,can_view,can_download,can_manage,can_share,granted_by",
+                                "DELETE FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 RETURNING id,user_id,can_view,can_download,can_manage,can_share,granted_by,expires_at,(expires_at IS NOT NULL AND expires_at <= now()) AS lapsed",
                                 &[&tenant, &source.id],
                             )
                             .await?
@@ -628,9 +630,12 @@ impl Store<'_> {
                                 old: json!({"document_id":source.id,"user_id":user,"view":row.get::<_,bool>(2),"download":download,"manage":manage,"share":share}),
                                 new: json!({}),
                             });
-                            if !active.contains(&user) {
+                            // An ended grant, or one of an account that can no
+                            // longer sign in, goes with the source.
+                            if !active.contains(&user) || row.get::<_, bool>(8) {
                                 continue;
                             }
+                            let ends: Option<std::time::SystemTime> = row.get(7);
                             let existing = sql
                                 .query_opt(
                                     "SELECT id,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 FOR UPDATE",
@@ -640,10 +645,10 @@ impl Store<'_> {
                             let granted_by: i64 = row.get(6);
                             let new = sql
                                 .query_one(
-                                    "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,granted_by) VALUES($1,$2,$3,true,$4,$5,$6,$7)
-                                     ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_download=core_document_access.can_download OR EXCLUDED.can_download,can_manage=core_document_access.can_manage OR EXCLUDED.can_manage,can_share=core_document_access.can_share OR EXCLUDED.can_share
+                                    "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,granted_by,expires_at) VALUES($1,$2,$3,true,$4,$5,$6,$7,$8)
+                                     ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_download=core_document_access.can_download OR EXCLUDED.can_download,can_manage=core_document_access.can_manage OR EXCLUDED.can_manage,can_share=core_document_access.can_share OR EXCLUDED.can_share,expires_at=CASE WHEN core_document_access.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL ELSE GREATEST(core_document_access.expires_at,EXCLUDED.expires_at) END
                                      RETURNING id,can_download,can_manage,can_share",
-                                    &[&tenant, &before.id, &user, &download, &manage, &share, &granted_by],
+                                    &[&tenant, &before.id, &user, &download, &manage, &share, &granted_by, &ends],
                                 )
                                 .await?;
                             let now = json!({"document_id":before.id,"user_id":user,"view":true,"download":new.get::<_,bool>(1),"manage":new.get::<_,bool>(2),"share":new.get::<_,bool>(3)});

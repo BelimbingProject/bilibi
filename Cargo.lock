@@ -865,14 +865,17 @@ name = "bilibi-document"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "bilibi-activity",
  "bilibi-agent-api",
  "bilibi-artifacts",
  "bilibi-authz",
  "bilibi-company",
+ "bilibi-custom-fields",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
  "bilibi-locale",
+ "bilibi-mail",
  "bilibi-media",
  "bilibi-menu",
  "bilibi-module-registry",

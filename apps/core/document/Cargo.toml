@@ -7,17 +7,20 @@ license.workspace = true
 
 [dependencies]
 askama.workspace = true
+bilibi-activity.workspace = true
 bilibi-agent-api.workspace = true
 bilibi-artifacts.workspace = true
 bilibi-authz.workspace = true
 # Documents reference companies and users (foreign keys and descriptor
 # dependencies), so an application with Documents links both.
 bilibi-company.workspace = true
+bilibi-custom-fields.workspace = true
 bilibi-database.workspace = true
 bilibi-datetime.workspace = true
 bilibi-grid.workspace = true
 bilibi-locale.workspace = true
 bilibi-menu.workspace = true
+bilibi-mail.workspace = true
 bilibi-media.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true

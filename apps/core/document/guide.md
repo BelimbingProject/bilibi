@@ -20,7 +20,11 @@ Use `core.document.mark` to favourite or follow a document: marks are yours alon
 
 ## Share safely
 
-Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission. Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
+Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission, `until` (the last day it works, UTC) and `email` (mail them a link that opens the document only for their account). Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
+
+## Expiry and custom fields
+
+Set `expires_on` in `core.document.create` or `core.document.update` (an empty string clears it): you get a reminder task through Core Activity, due the tenant's lead time before, and the list filters `expiry` (`expired` or `soon`). Tenant-defined custom fields travel as `custom` `{key, value}` pairs on create and in `patch`; `core.document.get` returns them with labels and types.
 
 ## Delete
 
