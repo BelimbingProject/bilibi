@@ -11,6 +11,7 @@
 - Personal favourite and follow marks.
 - The file ledger and the `core.document` Artifact owner.
 - One Documents list, one document record page, metadata CSV export, file downloads and agent operations.
+- The Documents panel on Core company and Core person pages, and on any Domain record page that renders the `record.documents` slot.
 
 Base owns private bytes, malware scanning, retention and legal holds. Domains own their approval, signature, employment, purchasing, fulfilment and customer-portal workflows.
 
@@ -60,6 +61,15 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 - Routes: `/documents`, `/documents/{id}`, revision downloads and `/documents/export.csv`.
 - Menu item: `Documents`, under Core.
 - Media subject: `core.document.upload`.
+- Record panels (embeds), the one Documents panel of each record kind:
+
+| Embed id | Slot | Context | Access |
+| --- | --- | --- | --- |
+| `company.documents` | `company.documents` | `Record { kind: "core/company" }` | `core.document.view` |
+| `person.documents` | `person.documents` | `Record { kind: "core/person" }` | `core.document.view` |
+| `document.record-documents` | `record.documents` | `Record { kind: "*" }` | `core.document.view` |
+
+Core company and Core person discover their panel by kind and pass `company_id` or `person_id`. A Domain record page (a case, an opportunity) renders the `record.documents` slot with `kind` and `id` in the panel path; it never registers a Documents panel of its own. The panel shows at most 10 documents linked to the record, newest first (name, category, revision, publish date), and **View all** opens `/documents?related=<kind>:<id>`. **Add document** (with `core.document.manage`) opens the same filtered list, where New document files and relates it, so the panel writes nothing. The panel reads through `Documents::list`: a document with no explicit grant for the reader is absent, with no hidden count.
 
 Run `core.document.list`, `.get`, `.access`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share`, `.unshare` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes is the declared page-write exception because operation input is bounded.
 

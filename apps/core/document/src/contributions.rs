@@ -4,8 +4,8 @@ use bilibi_database::Error;
 use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_media::{Subject as MediaSubject, SUBJECTS as MEDIA_SUBJECTS};
 use bilibi_module_registry::contributions::{
-    Access, CompanyScope, Download, Method, PageWrites, Pending, Route, Seed, SeedAction, SeedMode,
-    DOWNLOADS, PAGE_WRITES, ROUTES, SEEDS,
+    Access, CompanyScope, Download, Embed, EmbedContext, Method, PageWrites, Pending, Route, Seed,
+    SeedAction, SeedMode, DOWNLOADS, EMBEDS, PAGE_WRITES, ROUTES, SEEDS,
 };
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_picklists::{PickList, Start};
@@ -55,6 +55,43 @@ inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &Vocab
     roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: CAPABILITIES }],
     system_principals: &[],
 }) }
+
+// The Documents panel on record pages. Core company and Core person discover
+// their panel by record kind and pass `company_id` or `person_id`; neither
+// imports us. `kind: "*"` is the panel for a Domain's own record page: it
+// renders the `record.documents` slot with the record's `kind` and `id` in
+// its path. Each record kind has exactly one Documents panel, so a Domain
+// adds none of its own. The reader needs `core.document.view`, and
+// `Documents::list` still returns only documents the reader holds an explicit
+// grant on: a link to the record never shows a document, and the panel never
+// counts hidden ones.
+macro_rules! panel {
+    ($id:literal, $slot:literal, $kind:literal, $operation:literal) => {
+        inventory::submit! { Contribution::new(EMBEDS, $id, provenance!(), &Embed {
+            slot: $slot, context: EmbedContext::Record { kind: $kind },
+            service: crate::web::SERVICE, operation: $operation,
+            access: Access::Capability(VIEW),
+        }) }
+    };
+}
+panel!(
+    "company.documents",
+    "company.documents",
+    "core/company",
+    "company_panel"
+);
+panel!(
+    "person.documents",
+    "person.documents",
+    "core/person",
+    "person_panel"
+);
+panel!(
+    "document.record-documents",
+    "record.documents",
+    "*",
+    "record_panel"
+);
 
 // Operators curate these on the pick-lists page.
 bilibi_picklists::declare!(
