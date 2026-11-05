@@ -11,6 +11,7 @@
 //! Step-up operation declared by Authz, so an agent gets `step_up_required`
 //! and succeeds with its person's code.
 mod consent;
+mod principals;
 mod web;
 
 use bilibi_agent_api::{
@@ -128,6 +129,7 @@ async fn guard(
 enum Read {
     Roles,
     AutomationConsents,
+    SystemPrincipals,
 }
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
@@ -163,6 +165,7 @@ impl ReadHandler for Read {
                         "total": page.total_entries,
                     })
                 }
+                Self::SystemPrincipals => principals::list(bound, &**client, scope).await?,
                 Self::AutomationConsents => consent::list(bound, &**client, scope).await?,
             };
             Ok(Output::Data(Data::Json(value)))
@@ -176,6 +179,7 @@ enum Write {
     PrincipalCapability,
     RoleCapability,
     AutomationConsent,
+    SystemPrincipal,
 }
 
 /// What one write will do, read without writing: the review the plan shows
@@ -188,6 +192,7 @@ async fn review(
 ) -> bilibi_agent_api::Result<Value> {
     let bound = bound()?;
     match write {
+        Write::SystemPrincipal => principals::review(bound, client, scope, input).await,
         Write::AutomationConsent => consent::review(client, scope, input).await,
         Write::PrincipalRole | Write::GrantAllRole => {
             let user = positive(input, "user_id")?;
@@ -295,9 +300,32 @@ impl WriteHandler for Write {
         Box::pin(async move {
             // The review again on this transaction: the guard and the facts
             // hold at commit, not only when the person looked.
+            if matches!(self, Self::SystemPrincipal) {
+                // Match Authz's grant lock, including the absent-row case, before
+                // comparing the reviewed rule. The owner takes it reentrantly.
+                tx.sql()
+                    .execute(
+                        "SELECT pg_advisory_xact_lock(841318,$1::integer)",
+                        &[&i32::try_from(scope.tenant()).map_err(|_| Error::Invalid)?],
+                    )
+                    .await
+                    .map_err(Error::from)?;
+            }
             let facts = review(self, tx.sql(), scope, input).await?;
             let grants = bound()?.grants.clone();
             match self {
+                Self::SystemPrincipal => {
+                    let principal = facts["principal"].as_str().ok_or(Error::Internal)?;
+                    let key = facts["capability"].as_str().ok_or(Error::Internal)?;
+                    let allowed = match facts["rule"].as_str() {
+                        Some("allow") => Some(true),
+                        Some("deny") => Some(false),
+                        _ => None,
+                    };
+                    grants
+                        .set_system_in(tx, scope, principal, key, allowed)
+                        .await?;
+                }
                 Self::AutomationConsent => {
                     let kind = consent::Kind::from_input(input)?;
                     let granted = facts["granted"].as_bool().ok_or(Error::Internal)?;
@@ -377,6 +405,8 @@ fn consents_output() -> Value {
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/authz_agent", Provenance { module: "base/authz_agent", source: file!(), line: line!() }, &Definitions {
     operations: &[
+        Operation { key:principals::LIST, title:"List system principal access", summary:"Inspect every installed system principal's declared capabilities, this tenant's stored rules and effective access.", keywords:&["system","principal","automation","grant"], capability:SYSTEM_LIST, input:empty_schema, output:principals::output_schema, handler:Handler::Read(&Read::SystemPrincipals),channels:Channels::Every,step_up:&[] },
+        Operation { key:principals::SET, title:"Change system principal access", summary:"Allow, deny or clear a stored rule within an installed principal's declared bounds. Requires the latest stored rule as expected_rule; refuses stale reviews. Clearing restores any standing grant.", keywords:&["system","principal","automation","grant","withdraw","deny"], capability:SYSTEM_LIST, input:principals::input_schema, output:review_output, handler:Handler::SafeWrite(&Write::SystemPrincipal),channels:Channels::Every,step_up:&[STEP_UP_SYSTEM] },
         Operation { key:"base.authz_agent.role.list", title:"List roles", summary:"The tenant's authorization roles with their ids, codes and whether they grant full access.", keywords:&["role","authorization","access"], capability:LIST, input:list_schema, output:roles_output, handler:Handler::Read(&Read::Roles),channels:Channels::Every,step_up:&[] },
         Operation { key:consent::LIST, title:"List automation consent", summary:"List installation-wide schedules and event subscriptions that want to act in this tenant, with this tenant's consent state.", keywords:&["schedule","events","automation","consent"], capability:SYSTEM_LIST, input:empty_schema, output:consents_output, handler:Handler::Read(&Read::AutomationConsents),channels:Channels::Every,step_up:&[] },
         Operation { key:consent::SET, title:"Change automation consent", summary:"Grant or withdraw this tenant's consent for all installation-wide schedules or all event subscriptions through Authz's audited system-principal grant.", keywords:&["schedule","events","automation","consent","grant","withdraw"], capability:SYSTEM_LIST, input:consent_schema, output:review_output, handler:Handler::SafeWrite(&Write::AutomationConsent),channels:Channels::Every,step_up:&[STEP_UP_SYSTEM] },
@@ -386,7 +416,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/authz_agent", Provenan
         Operation { key:"base.authz_agent.role_capability.set", title:"Change a role's capabilities", summary:"Grant or remove one capability on a custom role. System roles are refused. Step-up: base.authz.role_capability.set.", keywords:&["role","capability","grant"], capability:UPDATE, input:role_capability_schema, output:review_output, handler:Handler::SafeWrite(&Write::RoleCapability),channels:Channels::Every,step_up:&[STEP_UP_ROLE_CAPABILITY] },
     ],
     guides: &[Guide { key:"base.authz_agent", title:"Roles, capability grants and automation consent", summary:"Who may do what in this tenant, including whether scheduled work and event subscriptions may act here.", keywords:&["role","capability","grant","access","core_admin","schedule","events","automation","consent"], capability:LIST,
-        body:"List roles with base.authz_agent.role.list to find a role id. Read base.authz_agent.automation_consent.list before changing whether installation-wide scheduled work or event subscriptions may act in this tenant; change either group through one reviewed base.authz_agent.automation_consent.set plan. Changes are reviewed plans: plan, show the review to the person, then commit. You can only grant what your person holds; a full-access role such as Core Administrator only if your person has full access. Every change is a two-factor (step-up) operation: a commit may answer step_up_required naming the operation; then ask the person for the current code from their authenticator app and commit the same plan again with step_up_code. A code is used once and opens a window for this connection, so further changes soon after may pass without one, unless the tenant asks every time. Impersonation is never available to agents." }],
+        body:"Read base.authz_agent.system_principal.list to inspect installed system principals and their declared capability bounds. Change a pair through reviewed base.authz_agent.system_principal.set with principal, capability, rule (allow, deny or clear), and expected_rule copied from the latest read. Allow requires grant authority and the capability without a company bound; deny requires grant authority; clear requires revoke authority and restores any standing grant. A deny wins. Declaration grants nothing. List roles with base.authz_agent.role.list to find a role id. Read base.authz_agent.automation_consent.list before changing whether installation-wide scheduled work or event subscriptions may act in this tenant; change either group through one reviewed base.authz_agent.automation_consent.set plan. Changes are reviewed plans: plan, show the review to the person, then commit. You can only grant what your person holds; a full-access role such as Core Administrator only if your person has full access. Every change is a two-factor (step-up) operation: a commit may answer step_up_required naming the operation; then ask the person for the current code from their authenticator app and commit the same plan again with step_up_code. A code is used once and opens a window for this connection, so further changes soon after may pass without one, unless the tenant asks every time. Impersonation is never available to agents." }],
 }) }
 
 inventory::submit! { Contribution::new(
@@ -417,7 +447,7 @@ inventory::submit! { Contribution::new(
     Provenance { module:"base/authz_agent", source:file!(), line:line!() },
     &bilibi_module_registry::contributions::PageWrites {
         service: web::PAGES,
-        contracts: &[("confirm-consent", consent::SET)],
+        contracts: &[("confirm-consent", consent::SET), ("request-principal", principals::SET), ("confirm-principal", principals::SET)],
         pending: bilibi_module_registry::contributions::Pending::None,
     }
 ) }
@@ -425,7 +455,7 @@ inventory::submit! { Contribution::new(
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/authz_agent", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/events", "base/schedule", "base/ui", "base/menu"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/events", "base/schedule", "base/ui", "base/menu", "base/settings", "base/system"],
         migrations: &[],
         services: &[bilibi_module_registry::Service { id: "base/authz_agent.binding", factory: |services| {
             let bound = Bound {
@@ -441,6 +471,8 @@ inventory::submit! {
         } }, bilibi_module_registry::Service { id: web::PAGES, factory: |services| {
             Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
                 contracts: services.get(bilibi_agent_api::page::SERVICE)?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+                settings: services.get("base/settings.store")?,
             }))))
         } }],
     }
