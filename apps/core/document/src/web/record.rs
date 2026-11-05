@@ -4,11 +4,11 @@
 //! calls its contract through `PageContracts`.
 use super::{
     dialog::{self, NewRevision},
-    event, file_path, render, size, Clock, Pages, Refusal, Region, INDEX,
+    event, file_path, path, render, size, store_refusal, Clock, Pages, Refusal, Region, INDEX,
 };
 use crate::{
-    AccessGrant, Document, Link, Reference, Revision, Source, LIST_CATEGORY, LIST_STATUS,
-    LIST_SUB_CATEGORY, LIST_TYPE, RECORD,
+    AccessGrant, Document, Duplicate, Link, Marks, Reference, Revision, Source, LIST_CATEGORY,
+    LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE, RECORD,
 };
 use askama::Template;
 use bilibi_database::{Error, Result};
@@ -34,6 +34,8 @@ enum Confirm {
     Delete,
     Unlink(Reference),
     Unshare(i64),
+    /// Merge this duplicate into the document on the page.
+    Merge(i64),
 }
 
 /// The fields a page edit may change, and their labels.
@@ -234,6 +236,112 @@ impl Detail {
                     .ok_or(Error::Invalid)?;
                 self.confirm = Some(Confirm::Unshare(grant));
             }
+            "mark" => {
+                let mark = value["mark"].as_str().ok_or(Error::Invalid)?;
+                let current = self.marks(scope).await?;
+                let input = match mark {
+                    "favourite" => json!({"id": self.id, "favourite": !current.favourite}),
+                    "following" => json!({"id": self.id, "following": !current.following}),
+                    _ => return Err(Error::Invalid),
+                };
+                if let Err(refusal) = self
+                    .pages
+                    .submit(
+                        scope,
+                        credential,
+                        "mark",
+                        "core.document.mark",
+                        input,
+                        "The mark was not saved. Try again.",
+                    )
+                    .await?
+                {
+                    self.flash = Some((StatusKind::Error, refusal.text()));
+                }
+            }
+            "copy_file" => {
+                let document = self.pages.documents.get(scope, self.id).await?;
+                let mut input = json!({"id": self.id});
+                if document.source == Source::Internal {
+                    match self.pages.documents.copy_file(scope, self.id).await {
+                        Ok(stored) => input["artifact_id"] = json!(stored.artifact_id),
+                        Err(error) => {
+                            self.flash = Some((StatusKind::Error, store_refusal(error)?));
+                            return Ok(None);
+                        }
+                    }
+                }
+                match self
+                    .pages
+                    .submit(
+                        scope,
+                        credential,
+                        "copy",
+                        "core.document.copy",
+                        input,
+                        "The document was not copied. Try again.",
+                    )
+                    .await?
+                {
+                    Ok(created) => {
+                        if let Some(id) = created["result"]["id"].as_i64() {
+                            return Ok(Some(LiveBody {
+                                redirect: Some(path(id)),
+                                flash: Some((
+                                    StatusKind::Success,
+                                    "Document copied. Only you can see the copy until you share it."
+                                        .into(),
+                                )),
+                                ..LiveBody::default()
+                            }));
+                        }
+                    }
+                    Err(refusal) => self.flash = Some((StatusKind::Error, refusal.text())),
+                }
+            }
+            "request_merge" => {
+                let duplicate = value["duplicate"]
+                    .as_str()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                self.confirm = Some(Confirm::Merge(duplicate));
+            }
+            "merge" => {
+                let Some(Confirm::Merge(duplicate)) = self.confirm.take() else {
+                    return Ok(None);
+                };
+                let survivor = self.pages.documents.get(scope, self.id).await?;
+                let source = self.pages.documents.get(scope, duplicate).await?;
+                let input = json!({
+                    "id": self.id,
+                    "version": survivor.version,
+                    "merge": [{"id": duplicate, "version": source.version}],
+                });
+                self.flash = Some(
+                    match self
+                        .pages
+                        .submit(
+                            scope,
+                            credential,
+                            "merge",
+                            "core.document.merge",
+                            input,
+                            "The documents were not merged. Try again.",
+                        )
+                        .await?
+                    {
+                        Ok(merged) => (
+                            StatusKind::Success,
+                            format!(
+                                "Merged “{}” into this document: {} revisions moved, and the duplicate was removed.",
+                                source.name,
+                                merged["result"]["revisions_moved"].as_i64().unwrap_or(0)
+                            ),
+                        ),
+                        Err(refusal) => (StatusKind::Error, refusal.text()),
+                    },
+                );
+            }
             "cancel_confirm" => self.confirm = None,
             "unlink" => {
                 let Some(Confirm::Unlink(record)) = self.confirm.take() else {
@@ -372,6 +480,81 @@ impl Detail {
             _ => return Err(Error::Invalid),
         }
         Ok(None)
+    }
+
+    /// The reader's own marks on this document.
+    async fn marks(&self, scope: &Scope) -> Result<Marks> {
+        Ok(self
+            .pages
+            .documents
+            .marks(scope, &[self.id])
+            .await?
+            .get(&self.id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    /// Possible duplicates, each with Merge when the reader may merge.
+    fn duplicates(&self, duplicates: &[Duplicate], may_merge: bool) -> Result<Html> {
+        let mut body = render(SectionHeading {
+            id: "document-duplicates-heading",
+            title: "Possible duplicates",
+            description: "Documents you may see with the same file, link or name.",
+            ..SectionHeading::default()
+        })?;
+        let mut ids = Vec::with_capacity(duplicates.len());
+        let mut items = Vec::with_capacity(duplicates.len());
+        for duplicate in duplicates {
+            let d = &duplicate.document;
+            let id = d.id.to_string();
+            let reasons = duplicate
+                .reasons
+                .iter()
+                .map(|reason| reason.text())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let mut value = render(bilibi_ui::lists::RecordLink {
+                workspace: self.framed,
+                kind: crate::MODULE,
+                record_id: &id,
+                href: &path(d.id),
+                class: "font-medium text-ink-strong hover:underline",
+                body: Html::text(&d.name),
+            })?;
+            if may_merge {
+                value.push(&render(Button {
+                    id: &format!("document-duplicate-{id}-merge"),
+                    button_type: "button",
+                    event: "request_merge",
+                    name: "duplicate",
+                    value: &id,
+                    body: Html::text("Merge into this document"),
+                    ..Button::default()
+                })?);
+            }
+            ids.push(format!("document-duplicate-{id}"));
+            items.push((reasons, value));
+        }
+        body.push(&render(Facts {
+            id: "document-duplicate-list",
+            items: items
+                .iter()
+                .zip(&ids)
+                .map(|((title, value), id)| Fact {
+                    title,
+                    id,
+                    value: value.clone(),
+                })
+                .collect(),
+        })?);
+        render(Card {
+            id: "document-duplicates",
+            class: "mt-6",
+            role: "region",
+            labelledby: "document-duplicates-heading",
+            body,
+            ..Card::default()
+        })
     }
 
     fn inline(
@@ -873,6 +1056,42 @@ impl Detail {
         let d = self.pages.documents.get(scope, self.id).await?;
         let editable = self.pages.documents.may_change(scope, &d).await?;
         let mut actions = Html::EMPTY;
+        let marks = self.marks(scope).await?;
+        for (id, event, mark, on, off) in [
+            (
+                "document-favourite",
+                "mark",
+                "favourite",
+                "Remove favourite",
+                "Favourite",
+            ),
+            ("document-follow", "mark", "following", "Unfollow", "Follow"),
+        ] {
+            let active = if mark == "favourite" {
+                marks.favourite
+            } else {
+                marks.following
+            };
+            actions.push(&render(Button {
+                id,
+                button_type: "button",
+                event,
+                name: "mark",
+                value: mark,
+                body: Html::text(if active { on } else { off }),
+                ..Button::default()
+            })?);
+        }
+        if self.pages.documents.may_manage(scope).await? {
+            actions.push(&render(Button {
+                id: "document-copy",
+                button_type: "button",
+                event: "copy_file",
+                working: "Copying…",
+                body: Html::text("Copy"),
+                ..Button::default()
+            })?);
+        }
         if editable {
             actions.push(&render(Button {
                 id: "document-delete",
@@ -926,11 +1145,37 @@ impl Detail {
         );
         let links = self.pages.documents.links(scope, self.id).await?;
         body.push(&self.related(scope, &links, editable).await?);
+        let duplicates = self.pages.documents.duplicates(scope, self.id).await?;
+        if !duplicates.is_empty() {
+            let may_merge = self.pages.documents.may_merge(scope, &d).await?;
+            body.push(&self.duplicates(&duplicates, may_merge)?);
+        }
         if let Ok(grants) = self.pages.documents.access(scope, self.id).await {
             body.push(&self.sharing(scope, &grants).await?);
         }
+        let merge_name = match &self.confirm {
+            Some(Confirm::Merge(id)) => self
+                .pages
+                .documents
+                .get(scope, *id)
+                .await
+                .ok()
+                .map(|d| d.name),
+            _ => None,
+        };
         if let Some(confirm) = &self.confirm {
             let (consequence, detail, verb, working, event) = match confirm {
+                Confirm::Merge(_) => (
+                    format!(
+                        "“{}” will be merged into “{}”.",
+                        merge_name.as_deref().unwrap_or("This document"),
+                        d.name
+                    ),
+                    "Its revisions follow this document's latest, with their change logs. Links, access for active accounts and favourites combine, then the duplicate is removed.",
+                    "Merge",
+                    "Merging…",
+                    "merge",
+                ),
                 Confirm::Delete => (
                     format!("“{}” will be deleted with all {} revisions.", d.name, revisions.len()),
                     "Every revision's file is deleted too, and the document leaves every record it relates to.",

@@ -13,7 +13,7 @@ use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, error_sentence, page::Uploads, params, upload::UploadSpec, Alert, Button,
+    choices, error_sentence, page::Uploads, params, upload::UploadSpec, ActionLink, Alert, Button,
     ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind, Modal, ModalWidth,
     RecordPicker, StatusKind,
 };
@@ -78,6 +78,8 @@ fn label_of(field: &str) -> &'static str {
 struct State {
     values: BTreeMap<String, String>,
     stored: Option<StoredFile>,
+    /// Documents the reader may see that already hold the stored file.
+    duplicates: Vec<(i64, String)>,
     errors: BTreeMap<String, Vec<String>>,
     notice: String,
     submitted: bool,
@@ -122,9 +124,19 @@ impl State {
                 if self.value("name").trim().is_empty() {
                     self.values.insert("name".into(), stored.file_name.clone());
                 }
+                self.duplicates = pages
+                    .documents
+                    .duplicates_of_file(scope, &stored.sha256)
+                    .await?
+                    .into_iter()
+                    .map(|d| (d.id, d.name))
+                    .collect();
                 self.stored = Some(stored);
             }
-            Err(error) => self.notice = store_refusal(error)?,
+            Err(error) => {
+                self.duplicates.clear();
+                self.notice = store_refusal(error)?;
+            }
         }
         Ok(())
     }
@@ -181,6 +193,27 @@ impl State {
                 }
             }
             body.push(&render(summary)?);
+        }
+        if !self.duplicates.is_empty() {
+            let mut warning = Html::text("A document with this file already exists: ");
+            for (index, (id, name)) in self.duplicates.iter().enumerate() {
+                if index > 0 {
+                    warning.push(&Html::text(", "));
+                }
+                warning.push(&render(ActionLink {
+                    id: &format!("{prefix}-duplicate-{id}"),
+                    href: &super::path(*id),
+                    body: Html::text(name),
+                    ..ActionLink::default()
+                })?);
+            }
+            warning.push(&Html::text(". Save only if you want another."));
+            body.push(&render(Alert {
+                kind: StatusKind::Warning,
+                id: &format!("{prefix}-duplicates"),
+                body: warning,
+                ..Alert::default()
+            })?);
         }
         if !self.notice.is_empty() {
             body.push(&render(Alert {

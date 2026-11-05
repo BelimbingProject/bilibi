@@ -876,6 +876,7 @@ dependencies = [
  "bilibi-media",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-notifications",
  "bilibi-party-ids",
  "bilibi-picklists",
  "bilibi-principal-directory",

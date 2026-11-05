@@ -13,6 +13,7 @@ use crate::{
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_datetime::DisplayPolicy;
+use bilibi_notifications::NotificationBoundary;
 use bilibi_picklists::PickLists;
 use bilibi_principal_directory::{
     DirectoryClient, DirectoryFuture, PrincipalDirectory, PrincipalKind, PrincipalRef, Query,
@@ -24,9 +25,9 @@ use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row, Transaction};
 
-const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
-const REVISION_COLUMNS: &str = "r.id,r.document_id,r.revision,r.name,r.artifact_id,r.file_name,r.content_type,r.byte_size,r.sha256,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at";
-const LINK_COLUMNS: &str = "l.id,l.record_kind,l.record_id,l.linked_by,l.linked_at";
+pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
+pub(crate) const REVISION_COLUMNS: &str = "r.id,r.document_id,r.revision,r.name,r.artifact_id,r.file_name,r.content_type,r.byte_size,r.sha256,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at";
+pub(crate) const LINK_COLUMNS: &str = "l.id,l.record_kind,l.record_id,l.linked_by,l.linked_at";
 
 fn time(value: SystemTime) -> Result<Timestamp> {
     Timestamp::try_from(value).map_err(|_| Error::Internal)
@@ -37,7 +38,7 @@ fn date(value: Option<&str>) -> Result<Option<Date>> {
         .transpose()
 }
 
-fn from_row(row: &Row) -> Result<Document> {
+pub(crate) fn from_row(row: &Row) -> Result<Document> {
     Ok(Document {
         id: row.get("id"),
         company_id: row.get("company_id"),
@@ -61,7 +62,7 @@ fn from_row(row: &Row) -> Result<Document> {
         version: row.get("version"),
     })
 }
-fn revision_from_row(row: &Row) -> Result<Revision> {
+pub(crate) fn revision_from_row(row: &Row) -> Result<Revision> {
     Ok(Revision {
         id: row.get("id"),
         document_id: row.get("document_id"),
@@ -92,7 +93,7 @@ fn link_from_row(row: &Row) -> Result<Link> {
 }
 
 /// The values audit keeps for a document.
-fn audit_values(d: &Document) -> Value {
+pub(crate) fn audit_values(d: &Document) -> Value {
     json!({
         "company_id": d.company_id,
         "name": d.name,
@@ -108,7 +109,7 @@ fn audit_values(d: &Document) -> Value {
         "version": d.version,
     })
 }
-fn revision_values(r: &Revision) -> Value {
+pub(crate) fn revision_values(r: &Revision) -> Value {
     json!({
         "document_id": r.document_id,
         "revision": r.revision,
@@ -123,16 +124,16 @@ fn revision_values(r: &Revision) -> Value {
         "scan_status": r.scan_status.code(),
     })
 }
-fn link_values(document: i64, l: &Link) -> Value {
+pub(crate) fn link_values(document: i64, l: &Link) -> Value {
     json!({"document_id": document, "record": {"kind": l.record.kind, "id": l.record.id}})
 }
 
 /// Who is reading, and how far their reach goes.
-struct Reader {
-    tenant: i64,
-    user: i64,
+pub(crate) struct Reader {
+    pub(crate) tenant: i64,
+    pub(crate) user: i64,
 }
-async fn reader(client: &dyn ProofClient, scope: &Scope) -> Result<Reader> {
+pub(crate) async fn reader(client: &dyn ProofClient, scope: &Scope) -> Result<Reader> {
     authorize_proof(client, scope, VIEW).await?;
     Ok(Reader {
         tenant: scope.tenant(),
@@ -140,7 +141,7 @@ async fn reader(client: &dyn ProofClient, scope: &Scope) -> Result<Reader> {
     })
 }
 impl Reader {
-    async fn permission(
+    pub(crate) async fn permission(
         &self,
         client: &dyn ProofClient,
         document: i64,
@@ -254,7 +255,7 @@ pub(crate) async fn links(client: &dyn ReadClient, scope: &Scope, id: i64) -> Re
 
 /// Directory reads on a borrowed client, so a write checks an assignee on
 /// its own transaction.
-struct Directory<'c>(&'c dyn ReadClient);
+pub(crate) struct Directory<'c>(pub(crate) &'c dyn ReadClient);
 impl DirectoryClient for Directory<'_> {
     fn query<'a>(
         &'a self,
@@ -342,6 +343,7 @@ pub(crate) struct Store<'s> {
     pub picklists: &'s PickLists,
     pub display: &'s DisplayPolicy,
     pub directory: &'s PrincipalDirectory,
+    pub notifications: &'s NotificationBoundary,
 }
 impl Store<'_> {
     /// Links are filing aids only. They never grant document access.
@@ -564,8 +566,10 @@ impl Store<'_> {
              AND ($5 = '' OR d.name ILIKE $6)
              AND ($7::text IS NULL OR d.category = $7)
              AND ($8::text IS NULL OR d.document_type = $8)
-             AND ($9::text IS NULL OR d.status = $9)";
-        let params: [&(dyn ToSql + Sync); 9] = [
+             AND ($9::text IS NULL OR d.status = $9)
+             AND ($10::text IS NULL OR EXISTS (SELECT 1 FROM core_document_marks m WHERE m.tenant_id=d.tenant_id AND m.document_id=d.id AND m.user_id=$2 AND CASE WHEN $10 = 'favourites' THEN m.favourite ELSE m.following END))";
+        let marked = filter.marked.map(|m| m.code());
+        let params: [&(dyn ToSql + Sync); 10] = [
             &reader.tenant,
             &reader.user,
             &related_kind,
@@ -575,6 +579,7 @@ impl Store<'_> {
             &filter.category,
             &filter.document_type,
             &filter.status,
+            &marked,
         ];
         let total: i64 = client
             .query_opt(
@@ -604,7 +609,7 @@ impl Store<'_> {
     }
 
     /// The document a write acts on, with explicit manage access.
-    async fn editable(
+    pub(crate) async fn editable(
         &self,
         on: On<'_>,
         scope: &Scope,
@@ -650,7 +655,7 @@ impl Store<'_> {
         Ok(document)
     }
 
-    async fn check_record(
+    pub(crate) async fn check_record(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
@@ -662,7 +667,7 @@ impl Store<'_> {
             .map_err(|refusal| WriteError::RelatedRefused(refusal.message()))
     }
 
-    async fn active_account(
+    pub(crate) async fn active_account(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
@@ -1208,7 +1213,7 @@ impl Store<'_> {
             .prepare_revision(On::Commit(tx.sql()), scope, id, version, input)
             .await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        tx.mutate(move |sql| {
+        let revision = tx.mutate(move |sql| {
             Box::pin(async move {
                 let RevisionPlan { document: before, revision: number, change_log, external_url, file } = plan;
                 let row = sql
@@ -1232,7 +1237,9 @@ impl Store<'_> {
             })
         })
         .await
-        .map_err(write_error)
+        .map_err(write_error)?;
+        self.notify_followers(tx, scope, &revision).await?;
+        Ok(revision)
     }
 
     /// Everything `link` checks, with no write: the document, the record in
@@ -1380,7 +1387,7 @@ impl Store<'_> {
 }
 
 /// A losing concurrent write is stale, never a database error.
-fn write_error(error: Error) -> WriteError {
+pub(crate) fn write_error(error: Error) -> WriteError {
     match error {
         Error::Conflict => WriteError::Stale,
         error => WriteError::Access(error),
@@ -1412,7 +1419,7 @@ async fn insert_revision(
 }
 
 /// Inserts a link; `None` when it already exists.
-async fn insert_link(
+pub(crate) async fn insert_link(
     sql: &Transaction<'_>,
     tenant: i64,
     user: i64,
