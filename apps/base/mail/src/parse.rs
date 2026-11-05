@@ -169,6 +169,7 @@ fn read(message: &Message<'_>) -> Parsed {
     let mut references = ids(message.references());
     let skip = references.len().saturating_sub(MAX_REFERENCES);
     references.drain(..skip);
+    let report = report::read(message);
     Parsed {
         message_id: message.message_id().and_then(id),
         in_reply_to: ids(message.in_reply_to()).pop(),
@@ -187,7 +188,7 @@ fn read(message: &Message<'_>) -> Parsed {
             .date()
             .filter(|date| date.is_valid())
             .and_then(|date| jiff::Timestamp::from_second(date.to_timestamp()).ok()),
-        auto_submitted: auto_submitted(message),
+        auto_submitted: report.is_some() || auto_submitted(message),
         text,
         html,
         attachments: message
@@ -219,7 +220,7 @@ fn read(message: &Message<'_>) -> Parsed {
                 }
             })
             .collect(),
-        report: report::read(message),
+        report,
     }
 }
 

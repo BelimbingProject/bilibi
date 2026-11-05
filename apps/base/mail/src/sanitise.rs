@@ -1,5 +1,6 @@
 //! The one allow-list for HTML written by a stranger (a received email body).
 //! Apply it before storing; show the stored result with `bilibi_ui::MailFrame`.
+use crate::{Error, Result};
 use std::{borrow::Cow, collections::HashSet, sync::LazyLock};
 
 /// Inline style properties kept: layout and text only. A value holding
@@ -143,9 +144,17 @@ pub struct InlineImage<'a> {
 
 /// Rewrites `src="cid:<id>"` in `sanitise_html` output to a `data:` URI for
 /// each matching image, so `MailFrame` can show inline images without a
-/// fetch. Parts that are not `image/*` are skipped; an unmatched `cid:` stays
-/// as it is, and the browser shows nothing for it.
-pub fn inline_images<'a>(html: &str, images: impl IntoIterator<Item = InlineImage<'a>>) -> String {
+/// fetch. The result is refused before encoding or replacement when it would
+/// exceed `max_output_bytes`. Parts that are not `image/*` are skipped; an
+/// unmatched `cid:` stays as it is, and the browser shows nothing for it.
+pub fn inline_images<'a>(
+    html: &str,
+    images: impl IntoIterator<Item = InlineImage<'a>>,
+    max_output_bytes: usize,
+) -> Result<String> {
+    if html.len() > max_output_bytes {
+        return Err(Error::Invalid);
+    }
     let mut html = html.to_owned();
     for image in images {
         let content_type = image.content_type.trim().to_ascii_lowercase();
@@ -165,11 +174,41 @@ pub fn inline_images<'a>(html: &str, images: impl IntoIterator<Item = InlineImag
                 .replace('"', "&quot;")
                 .replace('\u{a0}', "&nbsp;")
         );
+        let occurrences = html.matches(&reference).count();
+        if occurrences == 0 {
+            continue;
+        }
+        let encoded_len = image
+            .bytes
+            .len()
+            .checked_add(2)
+            .and_then(|len| len.checked_div(3))
+            .and_then(|len| len.checked_mul(4))
+            .ok_or(Error::Invalid)?;
+        let data_len = "src=\"data:"
+            .len()
+            .checked_add(content_type.len())
+            .and_then(|len| len.checked_add(";base64,".len()))
+            .and_then(|len| len.checked_add(encoded_len))
+            .and_then(|len| len.checked_add(1))
+            .ok_or(Error::Invalid)?;
+        let removed = occurrences
+            .checked_mul(reference.len())
+            .ok_or(Error::Invalid)?;
+        let added = occurrences.checked_mul(data_len).ok_or(Error::Invalid)?;
+        let output_len = html
+            .len()
+            .checked_sub(removed)
+            .and_then(|len| len.checked_add(added))
+            .ok_or(Error::Invalid)?;
+        if output_len > max_output_bytes || image.bytes.len() > usize::MAX / 512 {
+            return Err(Error::Invalid);
+        }
         let data = format!(
             "src=\"data:{content_type};base64,{}\"",
             data_encoding::BASE64.encode(image.bytes)
         );
         html = html.replace(&reference, &data);
     }
-    html
+    Ok(html)
 }

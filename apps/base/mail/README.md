@@ -61,7 +61,7 @@ let safe_html = parsed.html.as_deref().map(sanitise_html); // store this, never 
 | `message_id`, `in_reply_to`, `references` | `<local@domain>` ids, the form `render` writes, so a reply threads by exact match; up to 50 references, oldest first; malformed ids are dropped |
 | `from`, `sender`, `reply_to`, `to`, `cc` | `Address` values as the sender wrote them (RFC 2047 names decoded), not validated; `render` validates any address a reply sends to |
 | `subject`, `date` | Decoded subject; `Date` as a UTC `jiff::Timestamp` |
-| `auto_submitted` | `Auto-Submitted` other than `no`, `Precedence: bulk / junk / auto_reply`, `X-Autoreply` or `X-Autorespond`: never answer an auto-reply with another |
+| `auto_submitted` | A recognized delivery/complaint report, `Auto-Submitted` other than `no`, `Precedence: bulk / junk / auto_reply`, `X-Autoreply` or `X-Autorespond`: never answer it |
 | `text`, `html` | The message's own plain and HTML bodies, converted to UTF-8 from their declared charset, with `\n` line ends. Base never derives `text` from HTML |
 | `attachments` | `Part { filename, declared_type, content_id, disposition (Attachment / Inline), bytes }`: every non-body part, inline images and `text/calendar` included. `declared_type` is the sender's claim; detect the real type before storing it through its owner |
 | `report` | A bounce or complaint, below |
@@ -91,7 +91,7 @@ let safe_html = parsed.html.as_deref().map(sanitise_html); // store this, never 
 - Images: only `cid:` (an inline part) and `data:image/*`. Remote images are removed, so opening a message never fetches anything or fires a tracking pixel.
 - Inline `style`: only a fixed list of layout and text properties, never `url(...)` or an escape.
 
-**Show it with `bilibi_ui::MailFrame`**, never `Html::raw`. The frame is an `<iframe sandbox srcdoc>` that runs no script and fetches nothing from elsewhere; a clicked link opens a new tab. To show inline images, rewrite the stored HTML with `inline_images(&html, images)`, passing `InlineImage { content_id, content_type, bytes }` with the type detected when the part was stored. A `srcdoc` frame takes the page's CSP, which allows no inline styles, so kept `style` attributes are stored but not applied in the frame.
+**Show it with `bilibi_ui::MailFrame`**, never `Html::raw`. The frame is an `<iframe sandbox srcdoc>` that runs no script and fetches nothing from elsewhere; a clicked link opens a new tab. To show inline images, call `inline_images(&html, images, max_output_bytes)`. Pass each stored image as `InlineImage { content_id, content_type, bytes }`, using the detected content type. Set `max_output_bytes` no higher than `mail.max_message_bytes`. The function refuses before encoding or replacing when repeated CID references would exceed the limit. A `srcdoc` frame takes the page's CSP, which allows no inline styles, so kept `style` attributes are stored but not applied in the frame.
 
 ## Rendering for another transport
 

@@ -8,7 +8,7 @@
 //! `<output-dir>` and read back from there.
 use bilibi_mail::{
     header_block, inline_images, parse, render, sanitise_html, Address, Attachment, InlineImage,
-    Limits, Message, ParseLimits, Parsed,
+    Limits, Message, ParseLimits, Parsed, Report,
 };
 use std::path::{Path, PathBuf};
 
@@ -90,7 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "malformed.eml",
     ] {
         match parse(&std::fs::read(fixtures.join(name))?, &limits) {
-            Ok(parsed) => show(name, &parsed),
+            Ok(parsed) => {
+                assert_report_auto_submitted(name, &parsed);
+                show(name, &parsed);
+            }
             Err(error) => println!("\n== {name}\n  refused: {error}"),
         }
     }
@@ -197,13 +200,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bytes: &part.bytes,
             })
         }),
-    );
+        limits.max_bytes,
+    )?;
     println!("\n== inline_images(multipart-attachments.eml)\n{shown}");
     println!(
         "  cid: replaced by data:image/png: {}",
         shown.contains("src=\"data:image/png;base64,") && !shown.contains("cid:")
     );
+    let repeated = "<img src=\"cid:logo@example.test\">".repeat(128);
+    let image = InlineImage {
+        content_id: "logo@example.test",
+        content_type: "image/png",
+        bytes: &[0; 1024],
+    };
+    assert!(inline_images(&repeated, [image], repeated.len() * 2).is_err());
+    println!("  repeated cid expansion refused before allocation: true");
     Ok(())
+}
+
+fn assert_report_auto_submitted(name: &str, parsed: &Parsed) {
+    let recognized = match name {
+        "bounce-hard.eml" | "bounce-soft.eml" => {
+            matches!(parsed.report, Some(Report::Delivery { .. }))
+        }
+        "complaint.eml" => matches!(parsed.report, Some(Report::Complaint { .. })),
+        _ => return,
+    };
+    assert!(recognized, "{name} must be recognized as a report");
+    assert!(
+        parsed.auto_submitted,
+        "a recognized report must never be answered: {name}"
+    );
 }
 
 fn sample() -> Message {
