@@ -103,6 +103,15 @@ fn audit_values(a: &Activity) -> Value {
     })
 }
 
+/// The company an activity is filed under: the desk the creator works at,
+/// else their own company. It grants no access.
+fn filing_company(scope: &Scope) -> Option<i64> {
+    scope
+        .current_company()
+        .or(scope.actor().organisation())
+        .map(|company| company.get())
+}
+
 /// Who is reading, and whether they hold the tenant-wide oversight read.
 struct Reader {
     tenant: i64,
@@ -501,7 +510,7 @@ impl Store<'_> {
         if draft.kind.closing().is_none() {
             draft.status = None;
         }
-        if scope.actor().organisation().is_none() {
+        if filing_company(scope).is_none() {
             return Err(WriteError::Invalid(vec![FieldError::new(
                 "company",
                 "Your account has no company to file activities under.",
@@ -538,11 +547,7 @@ impl Store<'_> {
     ) -> WriteResult<crate::Activity> {
         let draft = self.prepare_create(tx.sql(), scope, draft).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let company = scope
-            .actor()
-            .organisation()
-            .map(|o| o.get())
-            .ok_or(Error::Internal)?;
+        let company = filing_company(scope).ok_or(Error::Internal)?;
         let assignee = draft.assignee.ok_or(Error::Internal)?;
         let closed = draft.status.is_some_and(Status::closed);
         // The people taking part: the creator, the assignee, a related
@@ -790,6 +795,19 @@ impl Store<'_> {
             .then(|| to.id.parse::<i64>().ok())
             .flatten();
         let moved_from = from.clone();
+        // A write with no change is refused: nothing related, nothing moves.
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM core_activities WHERE tenant_id=$1 AND related_kind=$2 AND related_id=$3 AND deleted_at IS NULL LIMIT 1",
+                &[&tenant, &from.kind, &from.id],
+            )
+            .await
+            .map_err(Error::from)?
+            .is_none()
+        {
+            return Ok(0);
+        }
         let moved = tx
             .mutate(move |sql| {
                 Box::pin(async move {

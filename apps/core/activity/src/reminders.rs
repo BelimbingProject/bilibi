@@ -141,20 +141,35 @@ impl Sweep {
             .await?;
         let lead = jiff::SignedDuration::from_mins(minutes);
         let horizon = SystemTime::from(jiff::Timestamp::now() + lead);
+        // Lock what is due first: a write with no change is refused, so a
+        // run with nothing due writes nothing.
+        let due: Vec<i64> = tx
+            .sql()
+            .query(
+                "SELECT b.id FROM core_activities b
+                 WHERE b.tenant_id=$1 AND b.deleted_at IS NULL AND b.closed_at IS NULL AND b.reminded_at IS NULL AND b.kind <> 'note'
+                   AND COALESCE(b.starts_at, b.due_at) <= $2
+                 ORDER BY COALESCE(b.starts_at, b.due_at), b.id
+                 LIMIT $3 FOR UPDATE SKIP LOCKED",
+                &[&tenant, &horizon, &BATCH],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if due.is_empty() {
+            tx.rollback().await?;
+            return Ok(Vec::new());
+        }
         let reminded = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let rows = sql
                         .query(
                             "UPDATE core_activities a SET reminded_at=now()
-                             WHERE a.tenant_id=$1 AND a.id IN (
-                               SELECT b.id FROM core_activities b
-                               WHERE b.tenant_id=$1 AND b.deleted_at IS NULL AND b.closed_at IS NULL AND b.reminded_at IS NULL AND b.kind <> 'note'
-                                 AND COALESCE(b.starts_at, b.due_at) <= $2
-                               ORDER BY COALESCE(b.starts_at, b.due_at), b.id
-                               LIMIT $3 FOR UPDATE SKIP LOCKED)
+                             WHERE a.tenant_id=$1 AND a.id=ANY($2) AND a.reminded_at IS NULL
                              RETURNING a.id, a.assignee_user_id, a.kind, a.subject, COALESCE(a.starts_at, a.due_at), a.reminded_at",
-                            &[&tenant, &horizon, &BATCH],
+                            &[&tenant, &due],
                         )
                         .await?;
                     let mut reminded = Vec::with_capacity(rows.len());
