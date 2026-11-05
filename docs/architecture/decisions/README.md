@@ -86,6 +86,12 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | --- | --- |
 | [05 Personal-data registry, data-subject requests and audit erasure](./05-personal-data-registry.md) | Proposed |
 
+### Communication
+
+| Record | Status |
+| --- | --- |
+| [26 Communication consent is an on-demand Core record](./26-communication-consent-in-core.md) | Accepted; implemented |
+
 ### Search
 
 | Record | Status |

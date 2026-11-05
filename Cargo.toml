@@ -97,6 +97,7 @@ bilibi-privacy = { path = "apps/base/privacy" }
 bilibi-workflow = { path = "apps/base/workflow" }
 bilibi-activity = { path = "apps/core/activity" }
 bilibi-address = { path = "apps/core/address" }
+bilibi-consent = { path = "apps/core/consent" }
 bilibi-currency = { path = "apps/core/currency" }
 bilibi-document = { path = "apps/core/document" }
 bilibi-portal = { path = "apps/core/portal" }

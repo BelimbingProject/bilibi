@@ -12,6 +12,7 @@ bilibi-address = { path = "address" }
 bilibi-affiliation = { path = "affiliation" }
 bilibi-agent = { path = "agent" }
 bilibi-company = { path = "company" }
+bilibi-consent = { path = "consent" }
 bilibi-currency = { path = "currency" }
 bilibi-document = { path = "document" }
 bilibi-geonames = { path = "geonames" }

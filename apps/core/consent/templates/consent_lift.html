@@ -1,0 +1,4 @@
+{#- The lift confirmation, with the reason form as its body (the shared
+    macro's body slot; the typed ConfirmDialog has none). -#}
+{% import "dialog.html" as dialog %}
+{% call dialog::confirm_dialog(id=id, consequence=consequence, detail=detail, confirm="Lift", working="Lifting…", confirm_event="confirm_lift", cancel_event="cancel_lift", body=body) %}{% endcall %}
