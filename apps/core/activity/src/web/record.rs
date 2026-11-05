@@ -1,22 +1,25 @@
-//! `/activities/{id}`: one activity, read first and edited in place. Close,
-//! Close and create new, and Delete ask first; every write calls its
+//! `/activities/{id}`: one activity, read first and edited in place, with
+//! its guests (add, remove, answers, Send invites) and a warning when its
+//! time overlaps another call or meeting of the same people. Close, Close
+//! and create new, Delete and Send invites ask first; every write calls its
 //! contract through `PageContracts`.
 use super::{
     event, field_of, form::Dialog, icon, label, refusal, render, sentences, status_badge,
     BrowserZone, Clock, Pages, Refusal, Region, FIELDS,
 };
-use crate::{Activity, Direction, GuestRow, Kind, Priority, Reference, RECORD};
+use crate::{Activity, Direction, GuestRow, Kind, Priority, Reference, Response, RECORD};
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, page::*, params, BackLink, Button, ButtonVariant, Card, CommitStates, CommitStatus,
-    ConfirmDialog, Fact, Facts, Field, FlashGroup, Form, Header, Html, Icon, InlineChoice,
-    InlineEdit, InlineField, InlineLongText, InputKind, PageVariant, RecordPicker, SectionHeading,
-    StatusKind, NO_FLASH,
+    choices, page::*, params, Alert, BackLink, Badge, BadgeKind, Button, ButtonVariant, Card,
+    CommitStates, CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, Form, Header, Html,
+    Icon, InlineChoice, InlineEdit, InlineField, InlineLongText, InputKind, PageVariant,
+    RecordPicker, SectionHeading, StatusKind, NO_FLASH,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 const FORBIDDEN: &str = "You do not have permission to change this activity.";
 const PRIVATE: &str = "People taking part";
@@ -34,6 +37,7 @@ enum Confirm {
     Close,
     CloseAndNew,
     Delete,
+    SendInvites,
 }
 
 pub(crate) struct Detail {
@@ -46,6 +50,9 @@ pub(crate) struct Detail {
     dialog: Option<Dialog>,
     query: String,
     hits: Vec<Hit>,
+    guest_query: String,
+    guest_hits: Vec<Hit>,
+    guest_email: String,
     flash: Option<(StatusKind, String)>,
 }
 
@@ -63,8 +70,48 @@ impl Detail {
             dialog: None,
             query: String::new(),
             hits: Vec::new(),
+            guest_query: String::new(),
+            guest_hits: Vec::new(),
+            guest_email: String::new(),
             flash: None,
         })
+    }
+
+    /// A refused contract call as one sentence for the flash.
+    fn refused(refusal: Refusal) -> String {
+        match refusal {
+            Refusal::Fields(fields) => sentences(&fields),
+            Refusal::Message(message) => message,
+        }
+    }
+
+    /// Adds a guest (`pick_guest`: a person; `add_guest_email`: an address).
+    async fn add_guest(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        event: &str,
+        guest: Value,
+    ) -> Result<()> {
+        match self
+            .submit(
+                scope,
+                credential,
+                event,
+                "core.activity.add_guest",
+                json!({"id": self.id, "guest": guest}),
+            )
+            .await?
+        {
+            Ok(_) => {
+                self.guest_query.clear();
+                self.guest_hits.clear();
+                self.guest_email.clear();
+                self.flash = Some((StatusKind::Success, "Guest added.".into()));
+            }
+            Err(refusal) => self.flash = Some((StatusKind::Error, Self::refused(refusal))),
+        }
+        Ok(())
     }
 
     async fn submit(
@@ -205,6 +252,141 @@ impl Detail {
         match name {
             "browser_timezone" => self.zone.accept(value),
             "save_field" => self.save_field(scope, credential, value).await?,
+            "respond" => {
+                let form = params::form_values_checked(value, "answer", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let guest = form
+                    .get("guest")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let response = form
+                    .get("response")
+                    .and_then(|v| Response::parse(v))
+                    .ok_or(Error::Invalid)?;
+                let key = format!("response-{guest}");
+                let status = match self
+                    .submit(
+                        scope,
+                        credential,
+                        "respond",
+                        "core.activity.respond",
+                        json!({"id": self.id, "guest_id": guest, "response": response.code()}),
+                    )
+                    .await?
+                {
+                    Ok(_) => CommitStatus::Saved,
+                    Err(refusal) => CommitStatus::Error(Self::refused(refusal)),
+                };
+                self.statuses.put(&key, status);
+            }
+            "guest_change" => {
+                let form = params::form_values_checked(value, "guest", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                self.guest_email = form
+                    .get("email")
+                    .cloned()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(254)
+                    .collect();
+                let query: String = form
+                    .get("person_search")
+                    .cloned()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(100)
+                    .collect();
+                if query != self.guest_query {
+                    self.guest_query = query;
+                    self.guest_hits = if self.guest_query.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        self.pages
+                            .records
+                            .search(scope, &["person"], &self.guest_query)
+                            .await?
+                    };
+                }
+            }
+            "pick_guest" => {
+                let person = value["record"]
+                    .as_str()
+                    .and_then(|v| v.strip_prefix("person:"))
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                self.add_guest(scope, credential, name, json!({"person_id": person}))
+                    .await?;
+            }
+            "clear_guest" => {
+                self.guest_query.clear();
+                self.guest_hits.clear();
+            }
+            "add_guest_email" => {
+                let form = params::form_values_checked(value, "guest", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let email = form.get("email").cloned().unwrap_or_default();
+                if email.trim().is_empty() {
+                    self.flash = Some((
+                        StatusKind::Error,
+                        "Enter an email address, or find a person to add.".into(),
+                    ));
+                } else {
+                    self.guest_email = email.clone();
+                    self.add_guest(scope, credential, name, json!({"email": email.trim()}))
+                        .await?;
+                }
+            }
+            "remove_guest" => {
+                let guest = value["guest"]
+                    .as_str()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                match self
+                    .submit(
+                        scope,
+                        credential,
+                        name,
+                        "core.activity.remove_guest",
+                        json!({"id": self.id, "guest_id": guest}),
+                    )
+                    .await?
+                {
+                    Ok(_) => self.flash = Some((StatusKind::Success, "Guest removed.".into())),
+                    Err(refusal) => self.flash = Some((StatusKind::Error, Self::refused(refusal))),
+                }
+            }
+            "request_send_invites" => self.confirm = Some(Confirm::SendInvites),
+            "send_invites" => {
+                if self.confirm.take() != Some(Confirm::SendInvites) {
+                    return Ok(None);
+                }
+                match self
+                    .submit(
+                        scope,
+                        credential,
+                        name,
+                        "core.activity.send_invites",
+                        json!({"id": self.id}),
+                    )
+                    .await?
+                {
+                    Ok(result) => {
+                        let emailed = result["result"]["emailed"].as_u64().unwrap_or(0);
+                        let told = result["result"]["notified_in_bell"].as_u64().unwrap_or(0);
+                        self.flash = Some((
+                            StatusKind::Success,
+                            format!("Invitations sent: {told} in the bell, {emailed} by email."),
+                        ));
+                    }
+                    Err(Refusal::Message(message)) if message == FORBIDDEN => {
+                        self.flash = Some((
+                            StatusKind::Error,
+                            "You do not have permission to send these invitations.".into(),
+                        ))
+                    }
+                    Err(refusal) => self.flash = Some((StatusKind::Error, Self::refused(refusal))),
+                }
+            }
             "related_change" => {
                 let form = params::form_values_checked(value, "related", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
@@ -305,7 +487,7 @@ impl Detail {
                 }
             }
             "close_modal" => self.dialog = None,
-            "create_task" | "log_call" | "create_note" => {
+            "create_task" | "log_call" | "create_meeting" | "create_note" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
                 let Some(dialog) = &mut self.dialog else {
@@ -512,6 +694,21 @@ impl Detail {
             }
             Kind::Note => {}
         }
+        if a.kind == Kind::Meeting {
+            for (title, key, value) in [
+                ("Location", "location", a.location.clone()),
+                ("Join link", "join_url", a.join_url.clone()),
+                ("Meeting type", "meeting_type", a.meeting_type.clone()),
+            ] {
+                let mut field = self
+                    .inline(a, key, value.unwrap_or_default(), editable)
+                    .allow_empty();
+                if key == "join_url" {
+                    field = field.input_type("url");
+                }
+                items.push((title, key.replace('_', "-"), render(InlineEdit { field })?));
+            }
+        }
         if a.kind == Kind::Call {
             items.push((
                 "Outcome",
@@ -661,7 +858,19 @@ impl Detail {
         })
     }
 
-    async fn guests(&self, scope: &Scope, guests: &[GuestRow]) -> Result<Html> {
+    /// The guests: who, their role, their answer, whether an invitation went
+    /// out, and a warning on a guest with no email address the reader may
+    /// use. Editors add a person or an address and remove anyone but the
+    /// assignee; an account guest answers for themselves.
+    async fn guests(
+        &self,
+        scope: &Scope,
+        a: &Activity,
+        guests: &[GuestRow],
+        emails: &HashMap<i64, String>,
+        clock: &Clock,
+        editable: bool,
+    ) -> Result<Html> {
         let users: Vec<i64> = guests.iter().filter_map(|g| g.user_id).collect();
         let names = self.pages.names(scope, &users).await?;
         let people: Vec<Reference> = guests
@@ -673,17 +882,104 @@ impl Detail {
             .collect();
         let named = self.pages.records.resolve(scope, &people).await?;
         let mut named = named.iter();
-        let mut items = Vec::new();
+        let options: Vec<(&str, &str)> = Response::ALL
+            .iter()
+            .map(|r| (r.label(), r.code()))
+            .collect();
+        let mut items: Vec<(String, &str, Html)> = Vec::new();
         for guest in guests {
-            let who = match (guest.user_id, guest.person, &guest.email) {
+            let mut who = match (guest.user_id, guest.person, &guest.email) {
                 (Some(user), _, _) => Html::text(&names.get(&user).cloned().unwrap_or_default()),
                 (_, Some(_), _) => match named.next() {
-                    Some(r) => render(r.pill(format!("activity-guest-{}", guest.id), self.framed))?,
+                    Some(r) => {
+                        render(r.pill(format!("activity-guest-{}-pill", guest.id), self.framed))?
+                    }
                     None => Html::text("—"),
                 },
                 (_, _, Some(email)) => Html::text(email),
                 _ => Html::text("—"),
             };
+            let key = format!("response-{}", guest.id);
+            let own = guest.user_id == Some(scope.user());
+            let response = Response::parse(&guest.response).unwrap_or(Response::NoResponse);
+            let badge = match response {
+                Response::Accepted => BadgeKind::Success,
+                Response::Declined => BadgeKind::Danger,
+                Response::Tentative => BadgeKind::Warning,
+                Response::NoResponse => BadgeKind::Neutral,
+            };
+            // An account guest answers for themselves; editors for anyone.
+            // A plain select in its own change form: an inline choice's
+            // trigger would cover the Remove button beside it.
+            let answer = if a.kind.timed() && (editable || own) {
+                let mut fields = render(
+                    Field::in_form("answer", "guest")
+                        .id(format!("activity-guest-{}-answer-guest", guest.id))
+                        .kind(InputKind::Hidden)
+                        .value(guest.id.to_string()),
+                )?;
+                fields.push(&render(
+                    Field::in_form("answer", "response")
+                        .id(format!("activity-guest-{}-answer", guest.id))
+                        .label("Answer")
+                        .kind(InputKind::Select)
+                        .value(response.code())
+                        .options(choices(&options))
+                        .errors(match self.statuses.get(&key) {
+                            CommitStatus::Error(message) => vec![message],
+                            _ => Vec::new(),
+                        }),
+                )?);
+                render(Form {
+                    id: &format!("activity-guest-{}-answer-form", guest.id),
+                    event: "respond",
+                    change: true,
+                    class: "mt-2",
+                    body: fields,
+                    ..Form::default()
+                })?
+            } else if a.kind.timed() {
+                render(Badge::status(badge, response.label()))?
+            } else {
+                Html::EMPTY
+            };
+            if a.kind.timed() && guest.user_id.is_none() && !emails.contains_key(&guest.id) {
+                who.push(&Html::text(" "));
+                who.push(&render(Badge::status(
+                    BadgeKind::Warning,
+                    "No email address",
+                ))?);
+            }
+            if let Some(at) = guest.invited_at {
+                let sent = if guest.user_id.is_some() {
+                    "told in the bell"
+                } else if !emails.contains_key(&guest.id) {
+                    "not emailed"
+                } else if guest.invite_sent_at.is_some_and(|sent| sent >= at) {
+                    "email sent"
+                } else {
+                    "email pending"
+                };
+                who.push(&Html::text(&format!(
+                    " Invited {} · {sent}",
+                    clock.text(at)
+                )));
+            }
+            if editable && guest.role != "assignee" {
+                who.push(&Html::text(" "));
+                let id = guest.id.to_string();
+                who.push(&render(Button {
+                    id: &format!("activity-guest-{}-remove", guest.id),
+                    button_type: "button",
+                    event: "remove_guest",
+                    name: "guest",
+                    value: &id,
+                    working: "Removing…",
+                    body: Html::text("Remove"),
+                    ..Button::default()
+                })?);
+            }
+            who.push(&answer);
             let role = match guest.role.as_str() {
                 "creator" => "Creator",
                 "assignee" => "Assignee",
@@ -703,12 +999,58 @@ impl Detail {
         let mut body = render(SectionHeading {
             id: "activity-guests-heading",
             title: "Guests",
+            description: if a.kind.timed() {
+                "Send invites tells colleagues in the bell and emails the others."
+            } else {
+                ""
+            },
             ..SectionHeading::default()
         })?;
         body.push(&render(Facts {
             id: "activity-guest-facts",
             items: facts,
         })?);
+        if editable && a.kind.timed() && !a.is_closed() {
+            let mut fields = render(RecordPicker::new(
+                "activity-guest",
+                "guest",
+                "person",
+                "Add a person",
+                &self.guest_query,
+                &self.pages.records.picker_hits(&self.guest_hits),
+                None,
+                ("pick_guest", "clear_guest"),
+                Vec::new(),
+            ))?;
+            fields.push(&render(
+                Field::in_form("guest", "email")
+                    .id("activity-guest-email")
+                    .label("Or an email address")
+                    .kind(InputKind::Email)
+                    .value(&self.guest_email)
+                    .attr("maxlength", "254")
+                    .attr("data-debounce", "300"),
+            )?);
+            let add = render(Button {
+                id: "activity-guest-add",
+                button_type: "submit",
+                working: "Adding…",
+                body: Html::text("Add guest"),
+                ..Button::default()
+            })?;
+            body.push(
+                &Form {
+                    id: "activity-guest-form",
+                    event: "guest_change",
+                    change: true,
+                    class: "mt-4",
+                    body: fields,
+                    actions: add,
+                }
+                .submit_event("add_guest_email")
+                .map_err(|_| Error::Internal)?,
+            );
+        }
         render(Card {
             id: "activity-guests",
             class: "mt-6",
@@ -716,6 +1058,59 @@ impl Detail {
             labelledby: "activity-guests-heading",
             body,
             ..Card::default()
+        })
+    }
+
+    /// Other open calls and meetings at the same time for the assignee or
+    /// an account guest who has not declined.
+    async fn overlaps(
+        &self,
+        scope: &Scope,
+        clock: &Clock,
+        a: &Activity,
+        guests: &[GuestRow],
+    ) -> Result<Html> {
+        let (Some(starts), Some(ends)) = (a.starts_at, a.ends_at) else {
+            return Ok(Html::EMPTY);
+        };
+        if !a.kind.timed() || a.is_closed() {
+            return Ok(Html::EMPTY);
+        }
+        let mut users: Vec<i64> = guests
+            .iter()
+            .filter(|g| g.response != Response::Declined.code())
+            .filter_map(|g| g.user_id)
+            .collect();
+        users.push(a.assignee_user_id);
+        users.sort_unstable();
+        users.dedup();
+        let conflicts = self
+            .pages
+            .activities
+            .conflicts(scope, starts, ends, &users, Some(a.id))
+            .await?;
+        if conflicts.is_empty() {
+            return Ok(Html::EMPTY);
+        }
+        let ids: Vec<i64> = conflicts.iter().map(|c| c.user).collect();
+        let names = self.pages.names(scope, &ids).await?;
+        let lines: Vec<String> = conflicts
+            .iter()
+            .map(|c| {
+                let what = c.title.as_deref().unwrap_or("another call or meeting");
+                format!(
+                    "{} has {what} from {} to {}.",
+                    names.get(&c.user).cloned().unwrap_or_default(),
+                    clock.text(c.starts_at),
+                    clock.text(c.ends_at)
+                )
+            })
+            .collect();
+        render(Alert {
+            kind: StatusKind::Warning,
+            id: "activity-conflicts",
+            class: "mt-6",
+            body: Html::text(&format!("This overlaps: {}", lines.join(" "))),
         })
     }
 
@@ -742,6 +1137,16 @@ impl Detail {
                     ..Button::default()
                 })?);
             }
+        }
+        let ahead = a.starts_at.is_some_and(|at| at > jiff::Timestamp::now());
+        if editable && a.kind.timed() && !a.is_closed() && ahead {
+            actions.push(&render(Button {
+                id: "activity-send-invites",
+                button_type: "button",
+                event: "request_send_invites",
+                body: Html::text("Send invites"),
+                ..Button::default()
+            })?);
         }
         if editable {
             actions.push(&render(Button {
@@ -841,9 +1246,15 @@ impl Detail {
             body: text,
             ..Card::default()
         })?);
-        body.push(&self.related(scope, &a, editable).await?);
         let guests = self.pages.activities.guests(scope, self.id).await?;
-        body.push(&self.guests(scope, &guests).await?);
+        body.push(&self.overlaps(scope, &clock, &a, &guests).await?);
+        body.push(&self.related(scope, &a, editable).await?);
+        let emails = self.pages.activities.guest_emails(scope, &guests).await?;
+        body.push(
+            &self
+                .guests(scope, &a, &guests, &emails, &clock, editable)
+                .await?,
+        );
         if let Some(confirm) = self.confirm {
             let closing = a
                 .kind
@@ -871,6 +1282,13 @@ impl Detail {
                     "Delete",
                     "Deleting…",
                     "delete",
+                ),
+                Confirm::SendInvites => (
+                    format!("Every guest but you will be invited to “{}”.", a.title),
+                    "Colleagues are told in the bell. The others are emailed the time, place, join link and description, never the internal notes.",
+                    "Send invites",
+                    "Sending…",
+                    "send_invites",
                 ),
             };
             body.push(&render(ConfirmDialog {

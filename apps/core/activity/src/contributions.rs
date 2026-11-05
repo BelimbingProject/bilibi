@@ -151,6 +151,9 @@ bilibi_records::holder!(
     }
 );
 
+// Invitations: queued by Send invites, run as the person who sent them
+// (`invitations.rs`).
+
 // Pages: the list and the activity's record page.
 inventory::submit! { Contribution::new(ROUTES, "core/activity.list", provenance!(), &Route {
     method: Method::Get, path: "/activities", service: crate::web::SERVICE, operation: "list",
@@ -197,7 +200,13 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
     contracts: &[
         ("create_task", "core.activity.create_task"),
         ("log_call", "core.activity.log_call"),
+        ("create_meeting", "core.activity.create_meeting"),
         ("create_note", "core.activity.create_note"),
+        ("respond", "core.activity.respond"),
+        ("pick_guest", "core.activity.add_guest"),
+        ("add_guest_email", "core.activity.add_guest"),
+        ("remove_guest", "core.activity.remove_guest"),
+        ("send_invites", "core.activity.send_invites"),
         ("save_field", "core.activity.update"),
         ("pick_related", "core.activity.update"),
         ("clear_related", "core.activity.update"),

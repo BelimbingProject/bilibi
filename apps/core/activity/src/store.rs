@@ -2,10 +2,11 @@
 //! tenant; every write goes through the caller's `MutationTransaction` and
 //! returns its `Change`s. Checks run before a write, so a refusal never
 //! poisons the caller's transaction.
-use crate::model::{self, Draft, FieldError, Guest, Kind, Status};
+use crate::model::{self, Draft, FieldError, Guest, Kind, Response, Status};
 use crate::{
-    Activity, Direction, Filter, GuestRow, Mine, Page, Patch, Priority, Reference, Sort, State,
-    WriteError, WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD, VIEW, VIEW_ALL,
+    Activity, Conflict, Direction, Filter, GuestRow, Invites, Mine, Page, Patch, Priority,
+    Reference, Sort, State, WriteError, WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD,
+    VIEW, VIEW_ALL,
 };
 use bilibi_authz::{authorize_proof, holds_proof};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -27,12 +28,16 @@ const COLUMNS: &str = "a.id,a.company_id,a.kind,a.subject,a.status,a.priority,a.
 /// (filing company, a related record) reaches a private activity.
 pub(crate) const MINE: &str = "(a.created_by=$2 OR a.assignee_user_id=$2 OR EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2))";
 
-fn time(value: Option<SystemTime>) -> Result<Option<Timestamp>> {
+/// The columns a guest row is read with.
+const GUEST_COLUMNS: &str =
+    "id,guest_user_id,guest_person_id,guest_email,role,response,invited_at,invite_sent_at";
+
+pub(crate) fn time(value: Option<SystemTime>) -> Result<Option<Timestamp>> {
     value
         .map(|t| Timestamp::try_from(t).map_err(|_| Error::Internal))
         .transpose()
 }
-fn system(value: Option<Timestamp>) -> Option<SystemTime> {
+pub(crate) fn system(value: Option<Timestamp>) -> Option<SystemTime> {
     value.map(SystemTime::from)
 }
 
@@ -93,6 +98,9 @@ fn audit_values(a: &Activity) -> Value {
         "due_at": iso(a.due_at),
         "start_at": iso(a.start_at),
         "call_outcome": a.outcome,
+        "location": a.location,
+        "join_url": a.join_url,
+        "meeting_type": a.meeting_type,
         "description": a.description,
         "internal_notes": a.internal_notes,
         "related": a.related.as_ref().map(|r| json!({"kind": r.kind, "id": r.id})),
@@ -187,22 +195,81 @@ pub(crate) async fn guests(
 ) -> Result<Vec<GuestRow>> {
     client
         .query(
-            "SELECT id,guest_user_id,guest_person_id,guest_email,role,response FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=$2 ORDER BY id",
+            &format!("SELECT {GUEST_COLUMNS} FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=$2 ORDER BY id"),
             &[&scope.tenant(), &id],
         )
         .await?
         .iter()
+        .map(guest_row)
+        .collect()
+}
+fn guest_row(row: &Row) -> Result<GuestRow> {
+    Ok(GuestRow {
+        id: row.get("id"),
+        user_id: row.get("guest_user_id"),
+        person: row
+            .get::<_, Option<i64>>("guest_person_id")
+            .map(|id| PersonId::new(id).map_err(|_| Error::Internal))
+            .transpose()?,
+        email: row.get("guest_email"),
+        role: row.get("role"),
+        response: row.get("response"),
+        invited_at: time(row.get("invited_at"))?,
+        invite_sent_at: time(row.get("invite_sent_at"))?,
+    })
+}
+
+/// Open calls and meetings between `starts_at` and `ends_at` that any of
+/// `users` takes part in (as assignee, or as an account guest who has not
+/// declined), other than `except`. The title shows only for an activity the
+/// reader takes part in or oversees: a busy colleague's private meeting stays
+/// private.
+pub(crate) async fn conflicts(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    starts_at: Timestamp,
+    ends_at: Timestamp,
+    users: &[i64],
+    except: Option<i64>,
+) -> Result<Vec<Conflict>> {
+    let reader = reader(client, scope).await?;
+    if users.is_empty() || starts_at >= ends_at {
+        return Ok(Vec::new());
+    }
+    let users: Vec<i64> = users.iter().copied().take(model::MAX_GUESTS).collect();
+    let except = except.unwrap_or(0);
+    let rows = client
+        .query(
+            &format!("SELECT p.user_id,a.id,a.subject,a.starts_at,a.ends_at,($3 OR {MINE}) AS visible
+               FROM core_activities a
+               JOIN LATERAL (
+                    SELECT a.assignee_user_id AS user_id
+                    UNION
+                    SELECT g.guest_user_id FROM core_activity_guests g
+                     WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id IS NOT NULL AND g.response<>'declined'
+               ) p ON p.user_id = ANY($4)
+              WHERE a.tenant_id=$1 AND a.deleted_at IS NULL AND a.kind IN ('call','meeting') AND a.status='scheduled'
+                AND a.starts_at < $6 AND a.ends_at > $5 AND a.id<>$7
+              ORDER BY a.starts_at,a.id,p.user_id LIMIT 50"),
+            &[
+                &reader.tenant,
+                &reader.user,
+                &reader.all,
+                &users,
+                &SystemTime::from(starts_at),
+                &SystemTime::from(ends_at),
+                &except,
+            ],
+        )
+        .await?;
+    rows.iter()
         .map(|row| {
-            Ok(GuestRow {
-                id: row.get(0),
-                user_id: row.get(1),
-                person: row
-                    .get::<_, Option<i64>>(2)
-                    .map(|id| PersonId::new(id).map_err(|_| Error::Internal))
-                    .transpose()?,
-                email: row.get(3),
-                role: row.get(4),
-                response: row.get(5),
+            Ok(Conflict {
+                user: row.get(0),
+                activity: row.get(1),
+                title: row.get::<_, bool>(5).then(|| row.get(2)),
+                starts_at: time(Some(row.get(3)))?.ok_or(Error::Internal)?,
+                ends_at: time(Some(row.get(4)))?.ok_or(Error::Internal)?,
             })
         })
         .collect()
@@ -360,9 +427,38 @@ async fn editable(
     Ok(activity)
 }
 
+/// The activity a guest change acts on: live, one the actor may see and
+/// change. Guest changes touch no field of the activity, so they name no
+/// version; `lock` queues them behind any other write to it.
+async fn editable_now(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    id: i64,
+    lock: bool,
+) -> WriteResult<Activity> {
+    let activity = seen(client, scope, id, lock).await?;
+    authorize_edit(client, scope, &activity).await?;
+    Ok(activity)
+}
+/// The live activity `id` the actor may see, for a write.
+async fn seen(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    id: i64,
+    lock: bool,
+) -> WriteResult<Activity> {
+    visible(client, scope, id, lock)
+        .await
+        .map_err(|error| match error {
+            Error::NotFound => WriteError::NotFound,
+            Error::Forbidden => WriteError::Forbidden,
+            error => WriteError::Access(error),
+        })
+}
+
 /// Directory reads on a borrowed client, so a preview checks an assignee on
 /// the plan's own transaction.
-struct Directory<'c>(&'c dyn ReadClient);
+pub(crate) struct Directory<'c>(pub &'c dyn ReadClient);
 impl DirectoryClient for Directory<'_> {
     fn query<'a>(
         &'a self,
@@ -380,6 +476,7 @@ pub(crate) struct Store<'s> {
     pub directory: &'s PrincipalDirectory,
     pub events: &'s Events,
     pub notifications: &'s bilibi_notifications::NotificationBoundary,
+    pub queue: &'s bilibi_queue::Queue,
 }
 /// Which references a change touches, so unchanged ones are not rechecked
 /// (a record the actor can no longer view does not block other edits).
@@ -451,6 +548,16 @@ impl Store<'_> {
             let mut guests: Vec<Guest> = Vec::new();
             for guest in &draft.guests {
                 let guest = match guest {
+                    Guest::User(user) => {
+                        if *user > 0 && !self.active_account(client, scope, *user).await? {
+                            errors.push(FieldError::new(
+                                "guests",
+                                format!("Account {user} is not an active account"),
+                            ));
+                            continue;
+                        }
+                        Guest::User(*user)
+                    }
                     Guest::Person(person) => {
                         let reference = Reference::new("person", person.get().to_string());
                         match self.check_reference(client, scope, &reference).await? {
@@ -477,6 +584,7 @@ impl Store<'_> {
                     },
                 };
                 let duplicate = guests.iter().any(|g| match (g, &guest) {
+                    (Guest::User(a), Guest::User(b)) => a == b,
                     (Guest::Person(a), Guest::Person(b)) => a == b,
                     // As the unique index compares them: `lower()`, not
                     // ASCII case alone.
@@ -518,12 +626,6 @@ impl Store<'_> {
             )]));
         }
         let mut errors = Vec::new();
-        if draft.kind == Kind::Meeting {
-            errors.push(FieldError::new(
-                "kind",
-                "Meetings are not available yet; log a call or create a task.",
-            ));
-        }
         let touched = Touched {
             related: true,
             assignee: true,
@@ -635,6 +737,10 @@ impl Store<'_> {
         }
         for guest in &draft.guests {
             match guest {
+                Guest::User(guest) if *guest != user && *guest != assignee => {
+                    guests.push((Some(*guest), None, None, "invited"))
+                }
+                Guest::User(_) => {}
                 Guest::Person(person) if Some(person.get()) != related_person => {
                     guests.push((None, Some(person.get()), None, "invited"))
                 }
@@ -653,8 +759,8 @@ impl Store<'_> {
                     let row = sql
                         .query_one(
                             &format!(
-                                "INSERT INTO core_activities AS a (tenant_id,company_id,kind,subject,status,priority,direction,starts_at,ends_at,due_at,start_at,call_outcome,description,internal_notes,related_kind,related_id,shared,assignee_user_id,created_by,closed_at)
-                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,CASE WHEN $20 THEN now() END)
+                                "INSERT INTO core_activities AS a (tenant_id,company_id,kind,subject,status,priority,direction,starts_at,ends_at,due_at,start_at,call_outcome,description,internal_notes,related_kind,related_id,shared,assignee_user_id,created_by,closed_at,location,join_url,meeting_type)
+                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,CASE WHEN $20 THEN now() END,$21,$22,$23)
                                  RETURNING {COLUMNS}"
                             ),
                             &[
@@ -678,6 +784,9 @@ impl Store<'_> {
                                 &assignee,
                                 &user,
                                 &closed,
+                                &draft.location,
+                                &draft.join_url,
+                                &draft.meeting_type,
                             ],
                         )
                         .await?;
@@ -768,7 +877,7 @@ impl Store<'_> {
                     let row = sql
                         .query_opt(
                             &format!(
-                                "UPDATE core_activities a SET subject=$4,status=$5,priority=$6,direction=$7,starts_at=$8,ends_at=$9,due_at=$10,start_at=$11,call_outcome=$12,description=$13,internal_notes=$14,related_kind=$15,related_id=$16,shared=$17,assignee_user_id=$18,
+                                "UPDATE core_activities a SET subject=$4,status=$5,priority=$6,direction=$7,starts_at=$8,ends_at=$9,due_at=$10,start_at=$11,call_outcome=$12,description=$13,internal_notes=$14,related_kind=$15,related_id=$16,shared=$17,assignee_user_id=$18,location=$21,join_url=$22,meeting_type=$23,
                                    closed_at=CASE WHEN NOT $19 THEN NULL WHEN a.closed_at IS NULL THEN now() ELSE a.closed_at END,
                                    reminded_at=CASE WHEN $20 OR a.assignee_user_id<>$18 THEN NULL ELSE a.reminded_at END,
                                    version=a.version+1,updated_at=now()
@@ -795,6 +904,9 @@ impl Store<'_> {
                                 &assignee,
                                 &closed_now,
                                 &due_moved,
+                                &after.location,
+                                &after.join_url,
+                                &after.meeting_type,
                             ],
                         )
                         .await?
@@ -825,14 +937,15 @@ impl Store<'_> {
             .await
             .map_err(stale)?;
         self.announce(tx, &activity, Some(&earlier)).await?;
-        self.refresh_bells(tx, &earlier, Some(&activity))?;
+        self.refresh_bells(tx, &earlier, Some(&activity)).await?;
         Ok(activity)
     }
 
-    /// A reminded, open activity is on its assignee's To do; when it closes,
-    /// goes away or changes hands, re-read the bell of each person it was or
-    /// now is on.
-    fn refresh_bells(
+    /// A reminded, open activity is on its assignee's To do, and a call's or
+    /// meeting's on its account guests' who have not declined; when it
+    /// closes, goes away or changes hands, re-read the bell of each person it
+    /// was or now is on.
+    async fn refresh_bells(
         &self,
         tx: &mut MutationTransaction<'_>,
         before: &Activity,
@@ -841,6 +954,16 @@ impl Store<'_> {
         let mut people = Vec::new();
         if before.reminded_at.is_some() && !before.is_closed() {
             people.push(before.assignee_user_id);
+            if before.kind.timed() {
+                let rows = tx
+                    .sql()
+                    .query(
+                        "SELECT guest_user_id FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=$2 AND guest_user_id IS NOT NULL AND response<>'declined'",
+                        &[&tx.context().tenant, &before.id],
+                    )
+                    .await?;
+                people.extend(rows.iter().map(|row| row.get::<_, i64>(0)));
+            }
         }
         if let Some(after) = after {
             people.push(after.assignee_user_id);
@@ -1228,7 +1351,7 @@ fn closable(activity: &Activity) -> WriteResult<Status> {
     if activity.is_closed() {
         return Err(WriteError::AlreadyClosed);
     }
-    if let Some(error) = model::held_call_ended(activity.kind, Some(status), activity.ends_at) {
+    if let Some(error) = model::held_ended(activity.kind, Some(status), activity.ends_at) {
         return Err(WriteError::Invalid(vec![error]));
     }
     Ok(status)
@@ -1269,7 +1392,7 @@ impl Store<'_> {
             .await
             .map_err(stale)?;
         self.announce(tx, &activity, Some(&earlier)).await?;
-        self.refresh_bells(tx, &earlier, None)?;
+        self.refresh_bells(tx, &earlier, None).await?;
         Ok(activity)
     }
 }
@@ -1287,10 +1410,12 @@ pub(crate) async fn follow_up(
         .await?
         .into_iter()
         .filter(|g| g.role == "invited" || g.role == "related")
-        .filter_map(|g| match (g.person, g.email) {
-            (Some(person), _) if g.role == "invited" => Some(Guest::Person(person)),
-            (Some(_), _) => None,
-            (None, Some(email)) => Some(Guest::Address {
+        .filter_map(|g| match (g.user_id, g.person, g.email) {
+            (Some(user), _, _) if g.role == "invited" => Some(Guest::User(user)),
+            (Some(_), _, _) => None,
+            (None, Some(person), _) if g.role == "invited" => Some(Guest::Person(person)),
+            (None, Some(_), _) => None,
+            (None, None, Some(email)) => Some(Guest::Address {
                 email,
                 related: g.role == "related",
             }),
@@ -1341,7 +1466,420 @@ impl Store<'_> {
         })
         .await
         .map_err(stale)?;
-        self.refresh_bells(tx, &earlier, None)?;
+        self.refresh_bells(tx, &earlier, None).await?;
         Ok(())
+    }
+}
+
+// ---- Guests and invitations -------------------------------------------------
+//
+// Guest changes touch no field of the activity, so they name no version and
+// leave it as it was; each locks the activity, so they queue behind any other
+// write to it.
+
+/// The one guest `guest` names on `activity`: a field error when it has none.
+async fn guest(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    activity: i64,
+    guest: i64,
+) -> WriteResult<GuestRow> {
+    let row = client
+        .query_opt(
+            &format!("SELECT {GUEST_COLUMNS} FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=$2 AND id=$3"),
+            &[&scope.tenant(), &activity, &guest],
+        )
+        .await?;
+    match row {
+        Some(row) => Ok(guest_row(&row)?),
+        None => Err(WriteError::Invalid(vec![FieldError::new(
+            "guest_id",
+            "is not a guest of this activity",
+        )])),
+    }
+}
+
+fn guest_values(guest: &GuestRow, activity: i64) -> Value {
+    json!({
+        "activity_id": activity,
+        "user_id": guest.user_id,
+        "person_id": guest.person.map(|p| p.get()),
+        "email": guest.email,
+        "role": guest.role,
+        "response": guest.response,
+    })
+}
+
+/// The assignee takes part until the activity is reassigned; anyone else may
+/// leave, the creator included.
+fn removable(guest: &GuestRow) -> WriteResult<()> {
+    if guest.role == "assignee" {
+        Err(WriteError::AssigneeNotRemovable)
+    } else {
+        Ok(())
+    }
+}
+
+/// The checks `respond` makes: an account guest answers for themselves;
+/// anyone who may change the activity records any guest's answer.
+pub(crate) async fn prepare_respond(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    id: i64,
+    guest_id: i64,
+) -> WriteResult<(Activity, GuestRow)> {
+    let activity = seen(client, scope, id, false).await?;
+    let row = guest(client, scope, id, guest_id).await?;
+    if row.user_id != Some(scope.user()) {
+        authorize_edit(client, scope, &activity).await?;
+    }
+    Ok((activity, row))
+}
+
+impl Store<'_> {
+    /// The checks `add_guest` makes: the activity is one the actor may
+    /// change, the guest is an active account, a person they may view or an
+    /// email address, not already taking part, and within `MAX_GUESTS`.
+    pub(crate) async fn prepare_add_guest(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        wanted: &Guest,
+    ) -> WriteResult<(Activity, Guest)> {
+        let activity = editable_now(client, scope, id, false).await?;
+        self.check_guest(client, scope, &activity, wanted).await
+    }
+    async fn check_guest(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        activity: &Activity,
+        wanted: &Guest,
+    ) -> WriteResult<(Activity, Guest)> {
+        let mut probe = activity.draft();
+        probe.guests = vec![wanted.clone()];
+        let touched = Touched {
+            related: false,
+            assignee: false,
+            guests: true,
+        };
+        // Only the guest's own rules: the activity's other fields were valid
+        // when stored, and a rule added since must not block a guest change.
+        let mut errors = model::check(&probe)
+            .into_iter()
+            .filter(|e| e.field == "guests")
+            .collect::<Vec<_>>();
+        let checked = match self.validate(client, scope, &probe, touched).await {
+            Ok(checked) => Some(checked),
+            Err(WriteError::Invalid(more)) => {
+                errors.extend(more.into_iter().filter(|e| e.field == "guests"));
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if !errors.is_empty() {
+            errors.dedup();
+            for error in &mut errors {
+                error.field = "guest";
+            }
+            return Err(WriteError::Invalid(errors));
+        }
+        let guest = checked
+            .and_then(|c| c.guests.into_iter().next())
+            .ok_or(Error::Internal)?;
+        let present = guests(client, scope, activity.id).await?;
+        let duplicate = present.iter().any(|g| match &guest {
+            Guest::User(user) => g.user_id == Some(*user),
+            Guest::Person(person) => g.person == Some(*person),
+            Guest::Address { email, .. } => g
+                .email
+                .as_ref()
+                .is_some_and(|e| e.to_lowercase() == email.to_lowercase()),
+        });
+        if duplicate {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "guest",
+                "already takes part in this activity",
+            )]));
+        }
+        if present.len() >= model::MAX_GUESTS {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "guest",
+                format!(
+                    "cannot be added: an activity has at most {} guests",
+                    model::MAX_GUESTS
+                ),
+            )]));
+        }
+        Ok((activity.clone(), guest))
+    }
+
+    /// Adds an invited guest. An address added here is never the related
+    /// record's: that one comes with the related record.
+    pub(crate) async fn add_guest(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        wanted: &Guest,
+    ) -> WriteResult<GuestRow> {
+        let activity = editable_now(tx.sql(), scope, id, true).await?;
+        let (_, guest) = self.check_guest(tx.sql(), scope, &activity, wanted).await?;
+        let (user, person, email) = match guest {
+            Guest::User(user) => (Some(user), None, None),
+            Guest::Person(person) => (None, Some(person.get()), None),
+            Guest::Address { email, .. } => (None, None, Some(email)),
+        };
+        let tenant = scope.tenant();
+        let row = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let change =
+                        insert_guest(sql, tenant, activity.id, user, person, email, "invited")
+                            .await?;
+                    let row = sql
+                        .query_one(
+                            &format!("SELECT {GUEST_COLUMNS} FROM core_activity_guests WHERE tenant_id=$1 AND id=$2"),
+                            &[&tenant, &change.id],
+                        )
+                        .await?;
+                    Ok((guest_row(&row)?, vec![change]))
+                })
+            })
+            .await?;
+        Ok(row)
+    }
+
+    pub(crate) async fn prepare_remove_guest(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        guest_id: i64,
+    ) -> WriteResult<(Activity, GuestRow)> {
+        let activity = editable_now(client, scope, id, false).await?;
+        let row = guest(client, scope, id, guest_id).await?;
+        removable(&row)?;
+        Ok((activity, row))
+    }
+
+    /// Removes a guest; a removed account guest loses the activity from
+    /// their To do.
+    pub(crate) async fn remove_guest(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        guest_id: i64,
+    ) -> WriteResult<GuestRow> {
+        let activity = editable_now(tx.sql(), scope, id, true).await?;
+        let row = guest(tx.sql(), scope, id, guest_id).await?;
+        removable(&row)?;
+        let tenant = scope.tenant();
+        let removed = row.clone();
+        let activity_id = activity.id;
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                sql.execute(
+                    "DELETE FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=$2 AND id=$3",
+                    &[&tenant, &activity_id, &removed.id],
+                )
+                .await?;
+                let change = Change {
+                    kind: GUEST_RECORD.into(),
+                    id: removed.id,
+                    old: guest_values(&removed, activity_id),
+                    new: json!({}),
+                };
+                Ok(((), vec![change]))
+            })
+        })
+        .await?;
+        if let Some(user) = row.user_id {
+            self.notifications.todos_changed_for(tx, &[user])?;
+        }
+        Ok(row)
+    }
+
+    pub(crate) async fn respond(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        guest_id: i64,
+        response: Response,
+    ) -> WriteResult<GuestRow> {
+        let activity = seen(tx.sql(), scope, id, true).await?;
+        let before = guest(tx.sql(), scope, id, guest_id).await?;
+        if before.user_id != Some(scope.user()) {
+            authorize_edit(tx.sql(), scope, &activity).await?;
+        }
+        if before.response == response.code() {
+            return Ok(before);
+        }
+        let tenant = scope.tenant();
+        let activity_id = activity.id;
+        let after = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let row = sql
+                        .query_one(
+                            &format!("UPDATE core_activity_guests SET response=$4 WHERE tenant_id=$1 AND activity_id=$2 AND id=$3 RETURNING {GUEST_COLUMNS}"),
+                            &[&tenant, &activity_id, &before.id, &response.code()],
+                        )
+                        .await?;
+                    let after = guest_row(&row)?;
+                    let change = Change {
+                        kind: GUEST_RECORD.into(),
+                        id: after.id,
+                        old: guest_values(&before, activity_id),
+                        new: guest_values(&after, activity_id),
+                    };
+                    Ok((after, vec![change]))
+                })
+            })
+            .await
+            .map_err(WriteError::from)?;
+        // Declining takes a reminded meeting off that guest's To do.
+        if let Some(user) = after.user_id {
+            if activity.reminded_at.is_some() {
+                self.notifications.todos_changed_for(tx, &[user])?;
+            }
+        }
+        Ok(after)
+    }
+
+    /// Who Send invites would reach, with no write: an open call or meeting
+    /// still ahead that the actor may change. Every guest but the actor.
+    pub(crate) async fn prepare_send_invites(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+    ) -> WriteResult<Invites> {
+        let activity = editable_now(client, scope, id, false).await?;
+        self.invitable(client, scope, activity).await
+    }
+    async fn invitable(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        activity: Activity,
+    ) -> WriteResult<Invites> {
+        if !activity.kind.timed() {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "id",
+                "is not a call or meeting; only those have invitations",
+            )]));
+        }
+        if activity.is_closed() {
+            return Err(WriteError::AlreadyClosed);
+        }
+        if activity.starts_at.is_none_or(|at| at <= Timestamp::now()) {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "starts_at",
+                "has passed; invitations are for a call or meeting still ahead",
+            )]));
+        }
+        let guests: Vec<GuestRow> = guests(client, scope, activity.id)
+            .await?
+            .into_iter()
+            .filter(|g| g.user_id != Some(scope.user()))
+            .collect();
+        if guests.is_empty() {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "guests",
+                "has nobody to invite but you; add a guest first",
+            )]));
+        }
+        // Emailing someone without an account asks every invitation gate as
+        // the sender (a consent check); the sender must be allowed to ask.
+        if guests.iter().any(|g| g.user_id.is_none())
+            && !crate::invitations::may_ask(client, scope).await?
+        {
+            return Err(WriteError::Forbidden);
+        }
+        let emailable = crate::invitations::guest_emails(client, scope, &guests)
+            .await
+            .len();
+        Ok(Invites {
+            activity,
+            guests,
+            emailable,
+        })
+    }
+
+    /// Stamps every guest but the actor as invited now, tells the account
+    /// guests in the bell, and queues the email to the others (the
+    /// invitation worker, which runs as the actor), all in the caller's
+    /// transaction.
+    pub(crate) async fn send_invites(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+    ) -> WriteResult<Invites> {
+        let activity = editable_now(tx.sql(), scope, id, true).await?;
+        let invites = self.invitable(tx.sql(), scope, activity).await?;
+        let (tenant, user, activity_id) = (scope.tenant(), scope.user(), invites.activity.id);
+        let (invited_at, invited) = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let rows = sql
+                        .query(
+                            &format!("UPDATE core_activity_guests SET invited_at=now() WHERE tenant_id=$1 AND activity_id=$2 AND guest_user_id IS DISTINCT FROM $3 RETURNING {GUEST_COLUMNS}"),
+                            &[&tenant, &activity_id, &user],
+                        )
+                        .await?;
+                    let invited = rows.iter().map(guest_row).collect::<Result<Vec<_>>>()?;
+                    let at = invited
+                        .iter()
+                        .find_map(|g| g.invited_at)
+                        .ok_or(Error::Internal)?;
+                    let changes = invited
+                        .iter()
+                        .map(|g| Change {
+                            kind: GUEST_RECORD.into(),
+                            id: g.id,
+                            old: json!({"activity_id": activity_id}),
+                            new: json!({"activity_id": activity_id, "invited_at": at.to_string()}),
+                        })
+                        .collect();
+                    Ok(((at, invited), changes))
+                })
+            })
+            .await?;
+        let accounts: Vec<i64> = invited.iter().filter_map(|g| g.user_id).collect();
+        let accounts = self.notifications.eligible(tx, &accounts).await?;
+        if !accounts.is_empty() {
+            let kind = invites.activity.kind.label().to_lowercase();
+            let title: String = invites.activity.title.chars().take(140).collect();
+            let notice = bilibi_notifications::Notice::new(format!("Invitation: {title}"))
+                .kind("core.activity.invitation")
+                .body(format!(
+                    "You are invited to this {kind}. Open it for the time and the details, and to answer."
+                ))
+                .url(format!("/activities/{activity_id}"))
+                .icon("calendar");
+            self.notifications
+                .notify(tx, scope, &accounts, &notice)
+                .await?;
+        }
+        if invited.iter().any(|g| g.user_id.is_none()) {
+            self.queue
+                .enqueue_for(
+                    tx,
+                    scope,
+                    crate::invitations::WORKER,
+                    json!({"activity_id": activity_id, "invited_at": invited_at.to_string()}),
+                )
+                .await?;
+        }
+        Ok(Invites {
+            activity: invites.activity,
+            guests: invited,
+            emailable: invites.emailable,
+        })
     }
 }

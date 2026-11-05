@@ -3,7 +3,7 @@
 //! `{kind, id}` in input; reads add `label` and `path`.
 use crate::{
     Activities, Activity, CallStatus, Common, Direction, Draft, Filter, Guest, GuestRow, Kind,
-    Mine, Patch, Priority, Reference, State, Status, WriteError, MANAGE, VIEW,
+    Mine, Patch, Priority, Reference, Response, State, Status, WriteError, MANAGE, VIEW,
 };
 use bilibi_agent_api::{
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
@@ -117,21 +117,16 @@ impl<'a> Reader<'a> {
         };
         let mut guests = Vec::new();
         for (index, item) in items.iter().enumerate() {
-            let person = item["person_id"].as_i64();
-            let email = item["email"].as_str().filter(|e| !e.trim().is_empty());
-            match (person, email) {
-                (Some(id), None) => match PersonId::new(id) {
-                    Ok(id) => guests.push(Guest::Person(id)),
-                    Err(_) => self.refuse(&format!("guests.{index}.person_id"), "must be positive"),
-                },
-                (None, Some(email)) => guests.push(Guest::Address {
-                    email: email.trim().to_owned(),
-                    related: item["related"].as_bool().unwrap_or(false),
-                }),
-                _ => self.refuse(
-                    &format!("guests.{index}"),
-                    "must name either a person_id or an email",
-                ),
+            match guest(item) {
+                Ok(guest) => guests.push(guest),
+                Err((key, message)) => {
+                    let path = if key.is_empty() {
+                        format!("guests.{index}")
+                    } else {
+                        format!("guests.{index}.{key}")
+                    };
+                    self.refuse(&path, message)
+                }
             }
         }
         guests
@@ -153,6 +148,26 @@ impl<'a> Reader<'a> {
         } else {
             Err(bilibi_agent_api::Error::InvalidInput(self.fields))
         }
+    }
+}
+
+/// One guest: an account by `user_id`, a person by `person_id`, or an
+/// `email`. A refusal names the key it is on (empty for the guest itself).
+fn guest(item: &Value) -> std::result::Result<Guest, (&'static str, &'static str)> {
+    let user = item["user_id"].as_i64();
+    let person = item["person_id"].as_i64();
+    let email = item["email"].as_str().filter(|e| !e.trim().is_empty());
+    match (user, person, email) {
+        (Some(id), None, None) if id > 0 => Ok(Guest::User(id)),
+        (Some(_), None, None) => Err(("user_id", "must be positive")),
+        (None, Some(id), None) => PersonId::new(id)
+            .map(Guest::Person)
+            .map_err(|_| ("person_id", "must be positive")),
+        (None, None, Some(email)) => Ok(Guest::Address {
+            email: email.trim().to_owned(),
+            related: item["related"].as_bool().unwrap_or(false),
+        }),
+        _ => Err(("", "must name exactly one of user_id, person_id or email")),
     }
 }
 
@@ -198,7 +213,22 @@ fn draft(kind: Kind, input: &Value) -> bilibi_agent_api::Result<Draft> {
             draft.ends_at = ends_at;
             draft
         }
-        _ => Draft::note(&crate::NoteInput { common }),
+        Kind::Meeting => {
+            let starts_at = reader.time("starts_at").flatten();
+            let ends_at = reader.time("ends_at").flatten();
+            let mut draft = Draft::meeting(&crate::MeetingInput {
+                common,
+                starts_at: starts_at.unwrap_or_default(),
+                ends_at: ends_at.unwrap_or_default(),
+                location: reader.text("location"),
+                join_url: reader.text("join_url"),
+                meeting_type: reader.text("meeting_type"),
+            });
+            draft.starts_at = starts_at;
+            draft.ends_at = ends_at;
+            draft
+        }
+        Kind::Note => Draft::note(&crate::NoteInput { common }),
     };
     reader.done(draft)
 }
@@ -215,6 +245,9 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
         due_at: reader.time("due_at"),
         start_at: reader.time("start_at"),
         outcome: reader.clearable_text("outcome"),
+        location: reader.clearable_text("location"),
+        join_url: reader.clearable_text("join_url"),
+        meeting_type: reader.clearable_text("meeting_type"),
         description: reader.clearable_text("description"),
         internal_notes: reader.clearable_text("internal_notes"),
         related: reader.reference("related"),
@@ -254,6 +287,9 @@ pub(crate) fn invalid(error: WriteError, prefix: &str) -> bilibi_agent_api::Erro
         WriteError::Forbidden => bilibi_agent_api::Error::Forbidden,
         WriteError::Stale => Error::Conflict.into(),
         WriteError::AlreadyClosed => field("already_closed", WriteError::AlreadyClosed.to_string()),
+        WriteError::AssigneeNotRemovable => {
+            field("guest_id", WriteError::AssigneeNotRemovable.to_string())
+        }
         WriteError::Invalid(errors) => {
             let mut fields = Fields::new();
             for e in errors {
@@ -293,6 +329,9 @@ pub(crate) fn record(activity: &Activity, related: Option<&Resolved>) -> Value {
         "due_at": iso(activity.due_at),
         "start_at": iso(activity.start_at),
         "outcome": activity.outcome,
+        "location": activity.location,
+        "join_url": activity.join_url,
+        "meeting_type": activity.meeting_type,
         "description": activity.description,
         "internal_notes": activity.internal_notes,
         "related": activity.related.as_ref().map(|r| reference(r, related)),
@@ -319,6 +358,9 @@ fn draft_record(records: &bilibi_records::Records, draft: &Draft) -> Value {
         "due_at": iso(draft.due_at),
         "start_at": iso(draft.start_at),
         "outcome": draft.outcome,
+        "location": draft.location,
+        "join_url": draft.join_url,
+        "meeting_type": draft.meeting_type,
         "description": draft.description,
         "internal_notes": draft.internal_notes,
         "related": draft.related.as_ref().map(|r| {
@@ -331,19 +373,26 @@ fn draft_record(records: &bilibi_records::Records, draft: &Draft) -> Value {
         }),
         "shared": draft.shared,
         "assignee_user_id": draft.assignee,
-        "guests": draft.guests.iter().map(|g| match g {
-            Guest::Person(id) => json!({"person_id": id.get()}),
-            Guest::Address { email, related } => json!({"email": email, "related": related}),
-        }).collect::<Vec<_>>(),
+        "guests": draft.guests.iter().map(guest_input).collect::<Vec<_>>(),
     })
+}
+fn guest_input(guest: &Guest) -> Value {
+    match guest {
+        Guest::User(id) => json!({"user_id": id}),
+        Guest::Person(id) => json!({"person_id": id.get()}),
+        Guest::Address { email, related } => json!({"email": email, "related": related}),
+    }
 }
 fn guest_record(guest: &GuestRow) -> Value {
     json!({
+        "id": guest.id,
         "user_id": guest.user_id,
         "person_id": guest.person.map(|p| p.get()),
         "email": guest.email,
         "role": guest.role,
         "response": guest.response,
+        "invited_at": iso(guest.invited_at),
+        "invite_sent_at": iso(guest.invite_sent_at),
     })
 }
 
@@ -586,6 +635,186 @@ impl WriteHandler for Delete {
     }
 }
 
+fn guest_id(input: &Value) -> bilibi_agent_api::Result<i64> {
+    Ok(input["guest_id"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .ok_or(Error::Invalid)?)
+}
+
+struct AddGuest;
+fn guest_of(input: &Value) -> bilibi_agent_api::Result<Guest> {
+    guest(&input["guest"]).map_err(|(key, message)| {
+        let path = if key.is_empty() {
+            "guest".to_owned()
+        } else {
+            format!("guest.{key}")
+        };
+        bilibi_agent_api::Error::InvalidInput(BTreeMap::from([(path, vec![message.to_owned()])]))
+    })
+}
+impl WriteHandler for AddGuest {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (id, guest) = (id(input)?, guest_of(input)?);
+            let (activity, guest) = owner()?
+                .preview_add_guest(client, scope, id, &guest)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(json!({"activity": record(&activity, None), "adds": guest_input(&guest)}).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (id, guest) = (id(input)?, guest_of(input)?);
+            let row = owner()?
+                .add_guest(tx, scope, id, &guest)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(guest_record(&row).into())
+        })
+    }
+}
+
+struct RemoveGuest;
+impl WriteHandler for RemoveGuest {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let (activity, row) = owner()?
+                .preview_remove_guest(client, scope, id(input)?, guest_id(input)?)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(json!({"activity": record(&activity, None), "removes": guest_record(&row)}).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let row = owner()?
+                .remove_guest(tx, scope, id(input)?, guest_id(input)?)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(json!({"removed": guest_record(&row)}).into())
+        })
+    }
+}
+
+struct Respond;
+fn response(input: &Value) -> bilibi_agent_api::Result<Response> {
+    input["response"]
+        .as_str()
+        .and_then(Response::parse)
+        .ok_or_else(|| {
+            bilibi_agent_api::Error::InvalidInput(BTreeMap::from([(
+                "response".to_owned(),
+                vec!["is not one of the allowed values".to_owned()],
+            )]))
+        })
+}
+impl WriteHandler for Respond {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let answer = response(input)?;
+            let (activity, row) = owner()?
+                .preview_respond(client, scope, id(input)?, guest_id(input)?)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(json!({"activity": record(&activity, None), "guest": guest_record(&row), "response": answer.code()}).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let answer = response(input)?;
+            let row = owner()?
+                .respond(tx, scope, id(input)?, guest_id(input)?, answer)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(guest_record(&row).into())
+        })
+    }
+}
+
+struct SendInvites;
+fn invites_record(invites: &crate::Invites) -> Value {
+    json!({
+        "activity": record(&invites.activity, None),
+        "guests": invites.guests.iter().map(guest_record).collect::<Vec<_>>(),
+        "notified_in_bell": invites.guests.iter().filter(|g| g.user_id.is_some()).count(),
+        "emailed": invites.emailable,
+    })
+}
+impl WriteHandler for SendInvites {
+    fn owner(&self) -> &'static str {
+        crate::MODULE
+    }
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let invites = owner()?
+                .preview_send_invites(client, scope, id(input)?)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(invites_record(&invites).into())
+        })
+    }
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            let invites = owner()?
+                .send_invites(tx, scope, id(input)?)
+                .await
+                .map_err(|e| invalid(e, ""))?;
+            Ok(invites_record(&invites).into())
+        })
+    }
+}
+
 // ---- Schemas ----------------------------------------------------------------
 
 fn codes(values: &[&'static str], empty: bool) -> Value {
@@ -607,12 +836,16 @@ fn reference_schema() -> Value {
 fn shared_schema() -> Value {
     json!({"type":"boolean","description":"true: people who may view the related record see it too. false (the default): only you, the assignee and account guests."})
 }
-fn guests_schema() -> Value {
-    json!({"type":"array","description":"People invited: a Core person by person_id, or an email address. Set related on the email address of the record the activity is about (a lead).","items":{"type":"object","properties":{
+fn guest_schema() -> Value {
+    json!({"type":"object","description":"Exactly one of user_id (a colleague's account), person_id (a Core person) or email. Set related on the email address of the record the activity is about (a lead).","properties":{
+        "user_id":{"type":"integer","minimum":1},
         "person_id":{"type":"integer","minimum":1},
         "email":{"type":"string","format":"email","maxLength":254},
         "related":{"type":"boolean"}
-    }}})
+    }})
+}
+fn guests_schema() -> Value {
+    json!({"type":"array","description":"People invited: colleagues by user_id, Core people by person_id, or email addresses.","items":guest_schema()})
 }
 fn common_properties() -> serde_json::Map<String, Value> {
     let mut properties = serde_json::Map::new();
@@ -671,6 +904,49 @@ fn call_schema() -> Value {
     );
     json!({"type":"object","required":["title","starts_at","ends_at","status","direction"],"properties":properties})
 }
+fn meeting_schema() -> Value {
+    let mut properties = common_properties();
+    properties.insert(
+        "starts_at".into(),
+        time_schema("When it starts, with an offset."),
+    );
+    properties.insert(
+        "ends_at".into(),
+        time_schema("When it ends, after starts_at."),
+    );
+    properties.insert(
+        "location".into(),
+        json!({"type":"string","maxLength":255,"description":"Where to meet."}),
+    );
+    properties.insert(
+        "join_url".into(),
+        json!({"type":"string","maxLength":2000,"description":"An https:// or http:// link to join it."}),
+    );
+    properties.insert(
+        "meeting_type".into(),
+        json!({"type":"string","maxLength":100,"description":"What kind of meeting, in plain words."}),
+    );
+    json!({"type":"object","required":["title","starts_at","ends_at"],"properties":properties})
+}
+fn add_guest_schema() -> Value {
+    json!({"type":"object","required":["id","guest"],"properties":{
+        "id":{"type":"integer","minimum":1},
+        "guest":guest_schema()
+    }})
+}
+fn guest_id_schema() -> Value {
+    json!({"type":"object","required":["id","guest_id"],"properties":{
+        "id":{"type":"integer","minimum":1},
+        "guest_id":{"type":"integer","minimum":1,"description":"The guest's id, from core.activity.get."}
+    }})
+}
+fn respond_schema() -> Value {
+    json!({"type":"object","required":["id","guest_id","response"],"properties":{
+        "id":{"type":"integer","minimum":1},
+        "guest_id":{"type":"integer","minimum":1,"description":"The guest's id, from core.activity.get."},
+        "response":{"type":"string","enum":["none","accepted","declined","tentative"]}
+    }})
+}
 fn note_schema() -> Value {
     json!({"type":"object","required":["title"],"properties":common_properties()})
 }
@@ -689,6 +965,9 @@ fn update_schema() -> Value {
             "due_at":time_schema("Tasks; empty clears."),
             "start_at":time_schema("Tasks; empty clears."),
             "outcome":{"type":"string","maxLength":100},
+            "location":{"type":"string","maxLength":255,"description":"Meetings; empty clears."},
+            "join_url":{"type":"string","maxLength":2000,"description":"Meetings; empty clears."},
+            "meeting_type":{"type":"string","maxLength":100,"description":"Meetings; empty clears."},
             "description":{"type":"string","maxLength":10000},
             "internal_notes":{"type":"string","maxLength":10000},
             "related":{"type":"object","properties":{"kind":{"type":"string","maxLength":100},"id":{"type":"string","maxLength":64}}},
@@ -718,7 +997,7 @@ fn list_schema() -> Value {
     }})
 }
 fn activity_output() -> Value {
-    json!({"type":"object","description":"An activity: id, kind (call, meeting, task, note), title, status, priority, direction, starts_at, ends_at, due_at, start_at, outcome, description, internal_notes, related {kind, id, label, path}, shared, reminded_at, assignee_user_id, created_by, company_id, created_at, updated_at, closed_at and version. Times are ISO UTC strings; get adds guests."})
+    json!({"type":"object","description":"An activity: id, kind (call, meeting, task, note), title, status, priority, direction, starts_at, ends_at, due_at, start_at, outcome, location, join_url, meeting_type, description, internal_notes, related {kind, id, label, path}, shared, reminded_at, assignee_user_id, created_by, company_id, created_at, updated_at, closed_at and version. Times are ISO UTC strings; get adds guests, each with id, user_id, person_id, email, role, response, invited_at and invite_sent_at."})
 }
 fn list_output() -> Value {
     json!({"type":"object","description":"activities (each as core.activity.get without guests), total, page and page_size."})
@@ -731,21 +1010,41 @@ static LIST: List = List;
 static GET: Get = Get;
 static CREATE_TASK: Create = Create(Kind::Task);
 static LOG_CALL: Create = Create(Kind::Call);
+static CREATE_MEETING: Create = Create(Kind::Meeting);
 static CREATE_NOTE: Create = Create(Kind::Note);
+static ADD_GUEST: AddGuest = AddGuest;
+static REMOVE_GUEST: RemoveGuest = RemoveGuest;
+static RESPOND: Respond = Respond;
+static SEND_INVITES: SendInvites = SendInvites;
 static UPDATE: Update = Update;
 static CLOSE: Close = Close;
 static DELETE: Delete = Delete;
-const KEYWORDS: &[&str] = &["activity", "task", "call", "note", "reminder", "follow-up"];
+const KEYWORDS: &[&str] = &[
+    "activity",
+    "task",
+    "call",
+    "meeting",
+    "note",
+    "reminder",
+    "follow-up",
+    "invitation",
+    "guest",
+];
 inventory::submit! { Contribution::new(DEFINITIONS, "core/activity.operations", Provenance { module: crate::MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
         Operation { key: "core.activity.list", title: "List activities", summary: "Calls, meetings, tasks and notes you may see, open or closed, optionally about one record or yours only.", keywords: KEYWORDS, capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&LIST), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.get", title: "Read an activity", summary: "One activity with its related record and guests.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: activity_output, handler: Handler::Read(&GET), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.create_task", title: "Create a task", summary: "A task with a due date, priority and assignee, optionally about a record.", keywords: KEYWORDS, capability: MANAGE, input: task_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_TASK), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.log_call", title: "Log a call", summary: "A call that was held or is planned, with its direction and outcome, optionally about a record.", keywords: KEYWORDS, capability: MANAGE, input: call_schema, output: review_output, handler: Handler::SafeWrite(&LOG_CALL), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.create_meeting", title: "Schedule a meeting", summary: "A meeting with its time, place, join link and guests, optionally about a record. Send invites afterwards.", keywords: KEYWORDS, capability: MANAGE, input: meeting_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_MEETING), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.create_note", title: "Add a note", summary: "A note about a record: a title and its text.", keywords: KEYWORDS, capability: MANAGE, input: note_schema, output: review_output, handler: Handler::SafeWrite(&CREATE_NOTE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.update", title: "Change an activity", summary: "Change the fields named in patch, using the stored version.", keywords: KEYWORDS, capability: MANAGE, input: update_schema, output: review_output, handler: Handler::SafeWrite(&UPDATE), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.close", title: "Close an activity", summary: "A call or meeting becomes held, a task completed. Refused when already closed.", keywords: KEYWORDS, capability: MANAGE, input: version_schema, output: review_output, handler: Handler::SafeWrite(&CLOSE), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.add_guest", title: "Invite a guest", summary: "Add a colleague's account, a person or an email address as a guest of an activity you may change.", keywords: KEYWORDS, capability: MANAGE, input: add_guest_schema, output: review_output, handler: Handler::SafeWrite(&ADD_GUEST), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.remove_guest", title: "Remove a guest", summary: "Remove a guest from an activity you may change. The assignee stays until the activity is reassigned.", keywords: KEYWORDS, capability: MANAGE, input: guest_id_schema, output: review_output, handler: Handler::SafeWrite(&REMOVE_GUEST), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.respond", title: "Answer an invitation", summary: "Record a guest's answer: accepted, declined, tentative or none. You answer for yourself; recording someone else's needs the right to change the activity.", keywords: KEYWORDS, capability: VIEW, input: respond_schema, output: review_output, handler: Handler::SafeWrite(&RESPOND), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.send_invites", title: "Send invitations", summary: "Invite every guest but you to an open call or meeting still ahead: colleagues in the bell, everyone else by email.", keywords: KEYWORDS, capability: MANAGE, input: get_schema, output: review_output, handler: Handler::SafeWrite(&SEND_INVITES), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.activity.delete", title: "Delete an activity", summary: "Remove an activity, using the stored version.", keywords: KEYWORDS, capability: MANAGE, input: version_schema, output: review_output, handler: Handler::SafeWrite(&DELETE), channels: Channels::Every, step_up: &[] },
     ],
-    guides: &[Guide { key: "core.activity", title: "Activities", summary: "Tasks, calls and notes on any record: who does what, when, about which record, and who may see it.", keywords: KEYWORDS, capability: VIEW, body: include_str!("../guide.md") }],
+    guides: &[Guide { key: "core.activity", title: "Activities", summary: "Tasks, calls, meetings and notes on any record: who does what, when, about which record, who takes part and who may see it.", keywords: KEYWORDS, capability: VIEW, body: include_str!("../guide.md") }],
 }) }

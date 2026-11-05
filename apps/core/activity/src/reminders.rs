@@ -1,6 +1,7 @@
 //! Reminders: a per-tenant scheduled sweep (ADR 17) marks each open task,
 //! call or meeting whose time has come as reminded, rings its assignee's
-//! bell and, when the tenant asks, emails them. The bell's To do lists the
+//! bell (and a call's or meeting's account guests' who have not declined)
+//! and, when the tenant asks, emails the assignee. The bell's To do lists the
 //! reader's reminded open activities until they close them; a row opens the
 //! related record. README, Reminders.
 use crate::contributions::{REMINDER_EMAIL, REMINDER_MINUTES};
@@ -199,10 +200,25 @@ impl Sweep {
                 })
             })
             .await?;
-        let mut assignees: Vec<i64> = reminded.iter().map(|r| r.assignee).collect();
-        assignees.sort_unstable();
-        assignees.dedup();
-        self.notifications.todos_changed_for(&mut tx, &assignees)?;
+        // The assignees, and the account guests of each call and meeting who
+        // have not declined: the same people its To do row shows for.
+        let mut people: Vec<i64> = reminded.iter().map(|r| r.assignee).collect();
+        let timed: Vec<i64> = reminded
+            .iter()
+            .filter(|r| r.kind.timed())
+            .map(|r| r.id)
+            .collect();
+        if !timed.is_empty() {
+            let rows = tx
+                .sql()
+                .query(
+                    "SELECT DISTINCT guest_user_id FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=ANY($2) AND guest_user_id IS NOT NULL AND response<>'declined'",
+                    &[&tenant, &timed],
+                )
+                .await?;
+            people.extend(rows.iter().map(|row| row.get::<_, i64>(0)));
+        }
+        self.notifications.todos_changed_for(&mut tx, &people)?;
         tx.commit().await?;
         Ok(reminded)
     }
@@ -264,9 +280,10 @@ fn what(kind: Kind) -> &'static str {
     }
 }
 
-/// The bell's To do: the reader's reminded open activities, soonest first.
-/// A row opens the related record when the reader may view it, else the
-/// activity.
+/// The bell's To do: the reader's reminded open activities, soonest first:
+/// those assigned to them, and calls and meetings they are an account guest
+/// of and have not declined. A row opens the related record when the reader
+/// may view it, else the activity.
 pub(crate) struct Todos {
     pub db: Db,
     pub authentication: Arc<Authentication>,
@@ -281,7 +298,8 @@ impl TodoSource for Todos {
                 if !holds_proof(&**client, &scope, VIEW).await? {
                     return Ok(TodoList::default());
                 }
-                const DUE: &str = "a.tenant_id=$1 AND a.assignee_user_id=$2 AND a.deleted_at IS NULL AND a.closed_at IS NULL AND a.reminded_at IS NOT NULL";
+                const DUE: &str = "a.tenant_id=$1 AND a.deleted_at IS NULL AND a.closed_at IS NULL AND a.reminded_at IS NOT NULL
+                    AND (a.assignee_user_id=$2 OR (a.kind IN ('call','meeting') AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.response<>'declined')))";
                 let rows = client
                     .query(
                         &format!("SELECT a.id, a.kind, a.subject, a.related_kind, a.related_id FROM core_activities a WHERE {DUE} ORDER BY COALESCE(a.starts_at, a.due_at) NULLS LAST, a.id LIMIT $3"),
@@ -330,7 +348,7 @@ impl TodoSource for Todos {
                 items,
                 count: count.min(TODO_COUNT) as usize,
                 more: count > TODO_COUNT,
-                see_all: Some("/activities?mine=assignee".into()),
+                see_all: Some("/activities".into()),
             })
         })
     }

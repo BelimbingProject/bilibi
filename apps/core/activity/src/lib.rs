@@ -4,6 +4,7 @@
 //! (Core Person), and the related record is a `base/records` reference.
 mod agent_operations;
 mod contributions;
+mod invitations;
 mod model;
 mod reminders;
 mod store;
@@ -19,9 +20,10 @@ use std::sync::{Arc, OnceLock};
 
 pub use bilibi_records::Reference;
 pub use contributions::{MANAGE, MANAGE_ALL, VIEW, VIEW_ALL};
+pub use invitations::{GateFuture, InvitationGate, Invitee, INVITATION_GATES};
 pub use model::{
-    CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, NoteInput, Patch,
-    Priority, Status, TaskInput, MAX_GUESTS,
+    CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
+    NoteInput, Patch, Priority, Response, Status, TaskInput, MAX_GUESTS,
 };
 
 pub const MODULE: &str = "core/activity";
@@ -103,6 +105,9 @@ impl Activity {
             due_at: self.due_at,
             start_at: self.start_at,
             outcome: self.outcome.clone(),
+            location: self.location.clone(),
+            join_url: self.join_url.clone(),
+            meeting_type: self.meeting_type.clone(),
             description: self.description.clone(),
             internal_notes: self.internal_notes.clone(),
             related: self.related.clone(),
@@ -193,6 +198,32 @@ pub struct GuestRow {
     pub role: String,
     /// `none`, `accepted`, `declined` or `tentative`.
     pub response: String,
+    /// When Send invites last included them.
+    pub invited_at: Option<jiff::Timestamp>,
+    /// When that invitation's email went out; account guests are told in the
+    /// bell and have none.
+    pub invite_sent_at: Option<jiff::Timestamp>,
+}
+
+/// Who Send invites reached: every guest but the sender. Account guests are
+/// told in the bell; `emailable` of the others have an address the sender
+/// may use and are emailed by the invitation worker.
+#[derive(Clone, Debug)]
+pub struct Invites {
+    pub activity: Activity,
+    pub guests: Vec<GuestRow>,
+    pub emailable: usize,
+}
+
+/// Another open call or meeting that `user` takes part in at the same time.
+/// `title` is `None` when the reader may not see that activity.
+#[derive(Clone, Debug)]
+pub struct Conflict {
+    pub user: i64,
+    pub activity: i64,
+    pub title: Option<String>,
+    pub starts_at: jiff::Timestamp,
+    pub ends_at: jiff::Timestamp,
 }
 
 pub type WriteResult<T> = std::result::Result<T, WriteError>;
@@ -206,6 +237,8 @@ pub enum WriteError {
     Stale,
     #[error("This activity is already closed.")]
     AlreadyClosed,
+    #[error("The assignee takes part until the activity is reassigned.")]
+    AssigneeNotRemovable,
     #[error("Invalid input")]
     Invalid(Vec<FieldError>),
     #[error(transparent)]
@@ -221,6 +254,7 @@ pub struct Activities {
     directory: Arc<PrincipalDirectory>,
     events: Arc<Events>,
     notifications: Arc<bilibi_notifications::NotificationBoundary>,
+    queue: Arc<bilibi_queue::Queue>,
 }
 impl Activities {
     async fn fresh(
@@ -239,6 +273,7 @@ impl Activities {
             directory: &self.directory,
             events: &self.events,
             notifications: &self.notifications,
+            queue: &self.queue,
         }
     }
 
@@ -255,6 +290,34 @@ impl Activities {
         let scope = self.fresh(&**client, scope).await?;
         store::get(&**client, &scope, id).await?;
         store::guests(&**client, &scope, id).await
+    }
+    /// The guests' email addresses the reader may use, by guest id: an
+    /// address guest's own, a person's as Core Person lets the reader read
+    /// it. Account guests are told in the bell and have none.
+    pub async fn guest_emails(
+        &self,
+        scope: &Scope,
+        guests: &[GuestRow],
+    ) -> Result<std::collections::HashMap<i64, String>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        Ok(invitations::guest_emails(&**client, &scope, guests).await)
+    }
+    /// Other open calls and meetings between `starts_at` and `ends_at` that
+    /// any of `users` takes part in (as assignee, or as an account guest who
+    /// has not declined), other than `except`. Another activity's title shows
+    /// only to a reader who may see it.
+    pub async fn conflicts(
+        &self,
+        scope: &Scope,
+        starts_at: jiff::Timestamp,
+        ends_at: jiff::Timestamp,
+        users: &[i64],
+        except: Option<i64>,
+    ) -> Result<Vec<Conflict>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        store::conflicts(&**client, &scope, starts_at, ends_at, users, except).await
     }
     /// The unsaved copy of a closed activity Close and create new offers:
     /// its values, related record and guests, with the status reset.
@@ -375,6 +438,16 @@ impl Activities {
     ) -> WriteResult<Activity> {
         self.create(tx, scope, &Draft::call(input)).await
     }
+    /// A meeting with its time, place and join link; a held meeting has
+    /// ended.
+    pub async fn create_meeting(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: &MeetingInput,
+    ) -> WriteResult<Activity> {
+        self.create(tx, scope, &Draft::meeting(input)).await
+    }
     /// A note about a record.
     pub async fn create_note(
         &self,
@@ -468,6 +541,101 @@ impl Activities {
         let scope = self.fresh(tx.sql(), scope).await?;
         self.store().delete(tx, &scope, id, version).await
     }
+    /// The checks `add_guest` makes, with no write.
+    pub async fn preview_add_guest(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        guest: &Guest,
+    ) -> WriteResult<(Activity, Guest)> {
+        self.store()
+            .prepare_add_guest(client, scope, id, guest)
+            .await
+    }
+    /// Invites an account, a person the actor may view, or an email address
+    /// to an activity the actor may change. Guest changes name no version and
+    /// leave the activity's as it was.
+    pub async fn add_guest(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        guest: &Guest,
+    ) -> WriteResult<GuestRow> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().add_guest(tx, &scope, id, guest).await
+    }
+    /// The guest `remove_guest` would remove, with no write.
+    pub async fn preview_remove_guest(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        guest: i64,
+    ) -> WriteResult<(Activity, GuestRow)> {
+        self.store()
+            .prepare_remove_guest(client, scope, id, guest)
+            .await
+    }
+    /// Removes a guest; the assignee stays until the activity is
+    /// reassigned (`AssigneeNotRemovable`).
+    pub async fn remove_guest(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        guest: i64,
+    ) -> WriteResult<GuestRow> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().remove_guest(tx, &scope, id, guest).await
+    }
+    /// The guest whose answer `respond` would record, with no write.
+    pub async fn preview_respond(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        guest: i64,
+    ) -> WriteResult<(Activity, GuestRow)> {
+        store::prepare_respond(client, scope, id, guest).await
+    }
+    /// Records a guest's answer. An account guest answers for themselves
+    /// with `core.activity.view`; anyone else's answer needs the right to
+    /// change the activity.
+    pub async fn respond(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        guest: i64,
+        response: Response,
+    ) -> WriteResult<GuestRow> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().respond(tx, &scope, id, guest, response).await
+    }
+    /// Who Send invites would reach, with no write.
+    pub async fn preview_send_invites(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+    ) -> WriteResult<Invites> {
+        self.store().prepare_send_invites(client, scope, id).await
+    }
+    /// Invites every guest but the sender to an open call or meeting still
+    /// ahead, in the caller's transaction: account guests are told in the
+    /// bell, and the invitation worker emails the others after commit, each
+    /// once every invitation gate allows it.
+    pub async fn send_invites(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+    ) -> WriteResult<Invites> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().send_invites(tx, &scope, id).await
+    }
     /// Moves every live activity related to `from` to `to`, in the caller's
     /// transaction, after `base/records.check` of both for the caller. When
     /// `to` is a person, they become the `related` guest of the moved open
@@ -489,7 +657,10 @@ impl Activities {
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
     dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
-    migrations: &[("core-activity-001-activities", include_str!("../migrations/001-activities.sql"))],
+    migrations: &[
+        ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
+        ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
+    ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;
         // One installation, one Records service; a second factory run gets the same.
@@ -501,6 +672,7 @@ inventory::submit! { Module {
             directory: s.get("base/principal_directory.directory")?,
             events: s.get(bilibi_events::SERVICE)?,
             notifications: s.get("base/notifications.sink")?,
+            queue: s.get("base/queue.store")?,
         });
         agent_operations::bind(activities.clone())?;
         s.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?
@@ -519,6 +691,14 @@ inventory::submit! { Module {
             settings: s.get("base/settings.store")?,
             mailer: s.get("base/mail.mailer")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
+        }))))
+    }}, Service { id: invitations::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(invitations::InviteJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            mailer: s.get("base/mail.mailer")?,
+            settings: s.get("base/settings.store")?,
+            directory: s.get("base/principal_directory.directory")?,
+            authentication: s.get("base/tenancy.authentication")?,
         }))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
