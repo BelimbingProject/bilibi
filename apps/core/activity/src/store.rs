@@ -549,6 +549,71 @@ impl Store<'_> {
         let draft = self.prepare_create(tx.sql(), scope, draft).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
         let company = filing_company(scope).ok_or(Error::Internal)?;
+        self.insert(tx, draft, tenant, company, user).await
+    }
+
+    pub(crate) async fn create_system_task(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        input: crate::SystemTaskInput,
+    ) -> WriteResult<Activity> {
+        authorize_proof(tx.sql(), scope, crate::SYSTEM_CREATE).await?;
+        if scope.actor().principal().is_none() || tx.context().tenant != scope.tenant() {
+            return Err(Error::Forbidden.into());
+        }
+        let company = input.company.get();
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL",
+                &[&scope.tenant(), &company],
+            )
+            .await
+            .map_err(Error::from)?
+            .is_none()
+        {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "company",
+                "does not exist",
+            )]));
+        }
+        if !self
+            .active_account(tx.sql(), scope, input.originating_user)
+            .await?
+        {
+            return Err(WriteError::Invalid(vec![FieldError::new(
+                "originating_user",
+                "is not an active account",
+            )]));
+        }
+        let mut draft = Draft::task(&input.task);
+        draft.title = draft.title.trim().to_owned();
+        draft.assignee = Some(draft.assignee.unwrap_or(input.originating_user));
+        let draft = self
+            .validate(
+                tx.sql(),
+                scope,
+                &draft,
+                Touched {
+                    related: true,
+                    assignee: true,
+                    guests: true,
+                },
+            )
+            .await?;
+        self.insert(tx, draft, scope.tenant(), company, input.originating_user)
+            .await
+    }
+
+    async fn insert(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        draft: Draft,
+        tenant: i64,
+        company: i64,
+        user: i64,
+    ) -> WriteResult<Activity> {
         let assignee = draft.assignee.ok_or(Error::Internal)?;
         let closed = draft.status.is_some_and(Status::closed);
         // The people taking part: the creator, the assignee, a related
