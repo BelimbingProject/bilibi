@@ -6,6 +6,7 @@
 //!
 //! Received mail: `parse` reads one message's bytes into its parts (bounces and
 //! complaints included) and `sanitise_html` makes its HTML safe to store and show.
+mod bounds;
 mod delivery;
 mod limits;
 mod mailbox;

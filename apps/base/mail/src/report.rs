@@ -61,7 +61,7 @@ pub(crate) fn read(message: &Message<'_>) -> Option<Report> {
         parts
             .iter()
             .find(|part| types.contains(&declared_type(part).as_str()))
-            .map(|part| part.contents())
+            .map(|part| head(part.contents()))
     };
     let original = parts.iter().find_map(|part| match &part.body {
         PartType::Message(nested) => Some(Original::Message(nested)),
@@ -69,7 +69,7 @@ pub(crate) fn read(message: &Message<'_>) -> Option<Report> {
             declared_type(part).as_str(),
             "text/rfc822-headers" | "message/rfc822-headers" | "message/global-headers"
         )
-        .then(|| Original::Headers(part.contents())),
+        .then(|| Original::Headers(head(part.contents()))),
     });
     let original_message_id = original.as_ref().and_then(Original::message_id);
     match kind.as_str() {
@@ -142,11 +142,28 @@ impl Original<'_, '_> {
     }
 }
 
+/// A report section or returned header block is read only this far, and only
+/// this many of its fields: a real one is a few KiB, and every field read is
+/// an allocation.
+const SECTION_BYTES: usize = 64 * 1024;
+const SECTION_FIELDS: usize = 1000;
+
+/// The first `SECTION_BYTES` of a section, cut after its last whole line.
+fn head(bytes: &[u8]) -> &[u8] {
+    if bytes.len() <= SECTION_BYTES {
+        return bytes;
+    }
+    let cut = &bytes[..SECTION_BYTES];
+    cut.iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(cut, |at| &cut[..=at])
+}
+
 /// Field groups separated by blank lines, folded lines joined; names lower case.
 fn groups(bytes: &[u8]) -> Vec<Vec<(String, String)>> {
     let text = String::from_utf8_lossy(bytes);
     let mut groups: Vec<Vec<(String, String)>> = vec![Vec::new()];
-    for line in text.lines() {
+    for line in text.lines().take(SECTION_FIELDS) {
         let Some(fields) = groups.last_mut() else {
             continue;
         };

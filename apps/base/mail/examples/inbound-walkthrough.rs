@@ -127,12 +127,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     refuse("too-deep.eml", &nested(25), &limits)?;
     refuse("too-many-parts.eml", &many(250), &limits)?;
+    // Header floods are refused before mail-parser allocates per header.
+    refuse("many-headers.eml", &many_headers(false), &limits)?;
+    refuse("many-part-headers.eml", &many_headers(true), &limits)?;
+    refuse("many-addresses.eml", &many_addresses(), &limits)?;
+    refuse("encoded-message.eml", &encoded_message(), &limits)?;
     refuse("not-a-message.bin", &[0xff, 0x00, 0xfe, 0x01], &limits)?;
     refuse("empty.eml", b"", &limits)?;
     println!(
         "within limits: nested(18) parsed = {}, many(150) parsed = {}",
         parse(&nested(18), &limits).is_ok(),
         parse(&many(150), &limits).is_ok()
+    );
+    let flooded = parse(&flooded_report(), &limits)?;
+    println!(
+        "flooded delivery status (1 MiB of fields) read as: {:?}",
+        flooded.report.map(|report| match report {
+            bilibi_mail::Report::Delivery { recipients, .. } => recipients.len(),
+            _ => 0,
+        })
     );
 
     // 4. Received HTML reduced to the allow-list.
@@ -353,5 +366,48 @@ fn many(parts: usize) -> Vec<u8> {
         bytes.extend(format!("--m\r\nContent-Type: text/plain; name=\"p{index}.txt\"\r\nContent-Disposition: attachment\r\n\r\npart {index}\r\n").as_bytes());
     }
     bytes.extend(b"--m--\r\n");
+    bytes
+}
+
+/// 250,000 one-letter headers (about 1.25 MiB), at the top or in a part.
+fn many_headers(in_part: bool) -> Vec<u8> {
+    let mut bytes =
+        b"From: flood@example.test\r\nTo: support@example.test\r\nSubject: Flood\r\n".to_vec();
+    if in_part {
+        bytes.extend(b"Content-Type: multipart/mixed; boundary=\"f\"\r\n\r\n--f\r\n");
+    }
+    for _ in 0..250_000 {
+        bytes.extend(b"a:\r\n");
+    }
+    bytes.extend(b"\r\nbody\r\n");
+    if in_part {
+        bytes.extend(b"--f--\r\n");
+    }
+    bytes
+}
+
+/// One To header listing 300,000 addresses.
+fn many_addresses() -> Vec<u8> {
+    let mut bytes = b"From: flood@example.test\r\nSubject: Flood\r\nTo: ".to_vec();
+    for _ in 0..300_000 {
+        bytes.extend(b"a@b,");
+    }
+    bytes.extend(b"\r\n\r\nbody\r\n");
+    bytes
+}
+
+/// A forwarded message in base64, which RFC 2046 forbids for message/rfc822.
+fn encoded_message() -> Vec<u8> {
+    b"From: fwd@example.test\r\nTo: support@example.test\r\nSubject: Fwd\r\nContent-Type: multipart/mixed; boundary=\"e\"\r\n\r\n--e\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n\r\nRnJvbTogYUBleGFtcGxlLnRlc3QNCg0KaGk=\r\n--e--\r\n".to_vec()
+}
+
+/// A bounce whose delivery-status part holds 1 MiB of recipient fields: only
+/// its first 64 KiB is read.
+fn flooded_report() -> Vec<u8> {
+    let mut bytes = b"From: mailer-daemon@example.test\r\nTo: support@example.test\r\nSubject: Bounce\r\nContent-Type: multipart/report; report-type=delivery-status; boundary=\"r\"\r\n\r\n--r\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; example.test\r\n".to_vec();
+    while bytes.len() < 1024 * 1024 {
+        bytes.extend(b"\r\nFinal-Recipient: rfc822; x@example.test\r\nAction: failed\r\n");
+    }
+    bytes.extend(b"\r\n--r--\r\n");
     bytes
 }

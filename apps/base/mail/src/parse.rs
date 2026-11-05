@@ -1,22 +1,26 @@
 //! Received mail: one RFC 5322 message read into its parts. No IO, best effort
 //! on malformed input, never trusted. Only input that is not a message at all,
 //! or that exceeds the limits, is refused.
-use crate::{message::valid_id, report, Address, Error, Limits, Report, Result};
+use crate::{bounds, message::valid_id, report, Address, Error, Limits, Report, Result};
 use mail_parser::{HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 
-/// Parts and nesting are bounded whatever the caller asks for.
+/// Parts, nesting and header text are bounded whatever the caller asks for.
 const MAX_PARTS: usize = 200;
 const MAX_DEPTH: usize = 20;
+const MAX_HEADER_BYTES: usize = 512 * 1024;
 const MAX_REFERENCES: usize = 50;
 
 /// What `parse` accepts. Build it from the installation limits
 /// (`Mailer::parse_limits`, or `ParseLimits::from(limits)`); a caller may lower
-/// any value, and parts and depth never go above 200 and 20.
+/// any value, and parts, depth and header bytes never go above 200, 20 and
+/// 512 KiB.
 #[derive(Clone, Copy, Debug)]
 pub struct ParseLimits {
     pub max_bytes: usize,
     pub max_parts: usize,
     pub max_depth: usize,
+    /// Every header block together: the message's own and each part's.
+    pub max_header_bytes: usize,
 }
 impl From<Limits> for ParseLimits {
     fn from(limits: Limits) -> Self {
@@ -24,6 +28,7 @@ impl From<Limits> for ParseLimits {
             max_bytes: limits.max_message_bytes,
             max_parts: MAX_PARTS,
             max_depth: MAX_DEPTH,
+            max_header_bytes: MAX_HEADER_BYTES,
         }
     }
 }
@@ -101,6 +106,14 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<Parsed> {
     if bytes.is_empty() || bytes.len() > limits.max_bytes {
         return Err(Error::Invalid);
     }
+    let max_parts = limits.max_parts.min(MAX_PARTS);
+    // Header text and part count are budgeted before mail-parser allocates
+    // anything that grows with them; `within` re-checks the built tree.
+    bounds::check(
+        bytes,
+        limits.max_header_bytes.min(MAX_HEADER_BYTES),
+        max_parts,
+    )?;
     // The parser promises not to panic; a panic is still refused, never fatal.
     std::panic::catch_unwind(|| {
         let message = MessageParser::default()
@@ -115,11 +128,7 @@ pub fn parse(bytes: &[u8], limits: &ParseLimits) -> Result<Parsed> {
         {
             return Err(Error::Invalid);
         }
-        within(
-            &message,
-            limits.max_parts.min(MAX_PARTS),
-            limits.max_depth.min(MAX_DEPTH),
-        )?;
+        within(&message, max_parts, limits.max_depth.min(MAX_DEPTH))?;
         Ok(read(&message))
     })
     .unwrap_or(Err(Error::Invalid))

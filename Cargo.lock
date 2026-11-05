@@ -1023,6 +1023,7 @@ dependencies = [
  "jiff",
  "lettre",
  "mail-parser",
+ "memchr",
  "serde_json",
  "thiserror",
  "tokio",

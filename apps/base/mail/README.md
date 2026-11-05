@@ -66,7 +66,11 @@ let safe_html = parsed.html.as_deref().map(sanitise_html); // store this, never 
 | `attachments` | `Part { filename, declared_type, content_id, disposition (Attachment / Inline), bytes }`: every non-body part, inline images and `text/calendar` included. `declared_type` is the sender's claim; detect the real type before storing it through its owner |
 | `report` | A bounce or complaint, below |
 
-**Limits.** `ParseLimits { max_bytes, max_parts, max_depth }`: bytes from `mail.max_message_bytes` (`Mailer::parse_limits`, or `ParseLimits::from(limits)`), 200 parts, nesting depth 20. A caller may lower any value; parts and depth never go above the defaults. An oversize message is refused before it is parsed; record its headers only with `parse(header_block(&raw), &limits)`. Input that is not a message (no standard header) or exceeds a limit is `Error::Invalid`. Parsing never panics.
+**Limits.** `ParseLimits { max_bytes, max_parts, max_depth, max_header_bytes }`: bytes from `mail.max_message_bytes` (`Mailer::parse_limits`, or `ParseLimits::from(limits)`), 200 parts, nesting depth 20, and 512 KiB of header text across the message and all its parts. A caller may lower any value; parts, depth and header bytes never go above the defaults. Input that is not a message (no standard header) or exceeds a limit is `Error::Invalid`. Parsing never panics.
+
+- **Budgets come before allocation.** An oversize message is refused before it is read; record its headers only with `parse(header_block(&raw), &limits)`. Header text and part starts are then counted on the raw bytes, at every place a header block can begin, before the MIME parser allocates per header, address or part. The exact part and depth limits are rechecked on the parsed tree.
+- **A `message/rfc822` or `message/global` part in base64 or quoted-printable is refused.** RFC 2046 forbids it, and it would hide a nested message from the budgets.
+- **At most 32 distinct MIME boundaries.** A report section or returned header block is read up to its first 64 KiB.
 
 **Round trip.** Parsing what `render` wrote returns the same addresses, subject, ids, bodies and attachment bytes.
 

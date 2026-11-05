@@ -18,4 +18,5 @@ jiff.workspace = true
 mail-parser.workspace = true
 ammonia.workspace = true
 data-encoding.workspace = true
+memchr.workspace = true
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
