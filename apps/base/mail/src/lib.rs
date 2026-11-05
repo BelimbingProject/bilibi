@@ -3,10 +3,17 @@
 //! message files, which would skip the header validation in `render`. SMTP is used
 //! when `MAIL_HOST` is configured; otherwise the dev mailbox keeps every message
 //! as an `.eml` file so a reset link can be read without a mail server.
+//!
+//! Received mail: `parse` reads one message's bytes into its parts (bounces and
+//! complaints included) and `sanitise_html` makes its HTML safe to store and show.
+mod bounds;
 mod delivery;
 mod limits;
 mod mailbox;
 mod message;
+mod parse;
+mod report;
+mod sanitise;
 mod smtp;
 
 pub use delivery::{
@@ -18,6 +25,9 @@ pub use mailbox::{Mailbox, MailboxEntry};
 pub use message::{
     render, Address, Attachment, Envelope, ListUnsubscribe, Message, Rendered, Sent,
 };
+pub use parse::{header_block, parse, Disposition, ParseLimits, Parsed, Part};
+pub use report::{Action, DeliveryRecipient, Report};
+pub use sanitise::{inline_images, sanitise_html, InlineImage};
 pub use smtp::{Smtp, SmtpConfig, Tls};
 
 use bilibi_database::Db;
@@ -99,6 +109,10 @@ impl Mailer {
             max_message_bytes: read(MAX_MESSAGE_BYTES).await?,
             max_recipients: read(MAX_RECIPIENTS).await?,
         })
+    }
+    /// Limits for `parse` from the current `mail.max_message_bytes`.
+    pub async fn parse_limits(&self) -> Result<ParseLimits> {
+        Ok(self.limits().await?.into())
     }
     pub async fn render(&self, message: &Message) -> Result<Rendered> {
         render(message, &self.sender, self.limits().await?)

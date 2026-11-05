@@ -41,6 +41,11 @@ sha1 = "0.11"
 data-encoding = "2.11"
 percent-encoding = "2.3"
 url = "2.5.8"
+# Received mail (base/mail): MIME parsing with every charset, and one HTML allow-list.
+mail-parser = { version = "0.11.9", features = ["full_encoding"] }
+ammonia = "4.2.4"
+# Fast substring search (base/mail boundary budget); already in the build through askama and axum.
+memchr = "2.8"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 bilibi-web = { path = "apps/web" }
 bilibi-database = { path = "apps/base/database" }
