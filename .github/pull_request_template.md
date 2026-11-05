@@ -9,3 +9,11 @@ Say what changed that a Domain or Extension owner must update, and the exact ste
 Write None when this change does not affect Domains or Extensions.
 Delete this comment and leave the note below.
 -->
+
+## File length
+
+<!--
+Only when CI lists a Rust file over 800 lines that is new or grew: one line per file,
+`<path>: keep: <reason>` or `<path>: split: <what was split along which responsibility>`.
+Otherwise delete this section.
+-->
