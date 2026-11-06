@@ -9,7 +9,10 @@
 //! - an operator holding only `base.picklists.installation.manage` curates
 //!   the installation-wide list and cannot change a tenant list, through the
 //!   facade and through the reviewed contract alike;
-//! - three codes that differ only in `.`, `_` and `-` for the page's ids.
+//! - three codes that differ only in `.`, `_` and `-` for the page's ids;
+//! - #406: with no stored `ui.locale`, more callers than the pool has
+//!   connections read a pick-list at once and all finish, because the locale
+//!   bootstrap reads on the caller's connection instead of taking a second.
 use super::{Browser, Proof, CATEGORY, REGION};
 use bilibi_base::agent_api::plans::{PlannedOperation, Plans};
 use bilibi_base::picklists::{self, NewValue};
@@ -27,6 +30,7 @@ pub async fn run(app: &bilibi_web::App, proof: &Proof, admin: &Scope, staff: &Sc
     cap(proof).await?;
     audited_tenant(app, proof, admin).await?;
     installation_curator(app, proof, staff).await?;
+    pool_pressure(proof, admin).await?;
     // Codes that differ only in punctuation, for the page's element ids.
     for code in ["a.b", "a_b", "a-b"] {
         let mut client = proof.db.get().await?;
@@ -246,5 +250,47 @@ async fn installation_curator(app: &bilibi_web::App, proof: &Proof, staff: &Scop
             }
         );
     }
+    Ok(())
+}
+
+/// #406: every caller holds one pooled connection while `Locales::resolve`
+/// asks the bootstrap source for the installation facts. A source that took a
+/// second connection would leave all of them waiting once there are more
+/// callers than connections, so each read must also finish inside a deadline.
+async fn pool_pressure(proof: &Proof, admin: &Scope) -> Outcome {
+    const CALLERS: usize = 40;
+    proof
+        .db
+        .get()
+        .await?
+        .execute(
+            "DELETE FROM base_settings WHERE key IN ('ui.locale','ui.locale_source','ui.locale_inferred_country')",
+            &[],
+        )
+        .await?;
+    let started = std::time::Instant::now();
+    let mut reads = tokio::task::JoinSet::new();
+    for _ in 0..CALLERS {
+        let (db, lists, admin) = (proof.db.clone(), proof.lists.clone(), admin.clone());
+        reads.spawn(async move {
+            let client = db.get().await?;
+            lists.choices(&**client, &admin, CATEGORY, None).await
+        });
+    }
+    let mut finished = 0;
+    let all = async {
+        while let Some(done) = reads.join_next().await {
+            done??;
+            finished += 1;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    tokio::time::timeout(Duration::from_secs(60), all)
+        .await
+        .map_err(|_| format!("pool deadlock: {finished} of {CALLERS} reads finished in 60 s"))??;
+    println!(
+        "pool pressure: {finished} of {CALLERS} concurrent pick-list reads finished with no stored locale in {} ms",
+        started.elapsed().as_millis()
+    );
     Ok(())
 }
