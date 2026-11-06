@@ -186,6 +186,25 @@ impl InlineField {
         }
         ids.join(" ")
     }
+    /// The date editor's box text for a `date` field: see
+    /// [`crate::forms::Field::date_text`].
+    pub fn date_text(&self) -> String {
+        crate::forms::date_text(self.input_type, &self.value)
+    }
+
+    /// Whether the editor is the shared typed date or time box.
+    pub fn is_date(&self) -> bool {
+        matches!(self.input_type, "date" | "datetime-local" | "time")
+    }
+
+    pub fn date_placeholder(&self) -> &'static str {
+        if self.placeholder.is_empty() {
+            crate::forms::date_placeholder(self.input_type)
+        } else {
+            ""
+        }
+    }
+
     pub fn display(&self) -> &str {
         if let Some(value) = self.display_value.as_deref() {
             return value;

@@ -202,6 +202,38 @@ fn join_classes(fixed: &str, extra: &str) -> String {
     }
 }
 
+/// A posted value as the shared typed box shows it: a `date` `yyyy-mm-dd`
+/// as "6 Nov 2026" (`bilibi_datetime`'s format), a `datetime-local`
+/// `yyyy-mm-ddTHH:MM` as "6 Nov 2026, 14:30" and a `time` as "14:30";
+/// anything else (a refused entry sent back with its error) as given.
+/// `DateInput` in `assets/hooks.js` writes the same.
+pub(crate) fn date_text(kind: &str, value: &str) -> String {
+    let shown = match kind {
+        "datetime-local" => jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M", value)
+            .or_else(|_| jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", value))
+            .ok()
+            .map(|at| at.strftime("%-d %b %Y, %H:%M").to_string()),
+        "time" => value
+            .get(..5)
+            .filter(|hm| hm.as_bytes().get(2) == Some(&b':'))
+            .map(str::to_owned),
+        _ => value
+            .parse::<jiff::civil::Date>()
+            .ok()
+            .map(|date| date.strftime("%-d %b %Y").to_string()),
+    };
+    shown.unwrap_or_else(|| value.to_owned())
+}
+
+/// The empty typed box's prompt for a date-like `kind` (an input type name).
+pub(crate) fn date_placeholder(kind: &str) -> &'static str {
+    match kind {
+        "datetime-local" => "d mmm yyyy, hh:mm",
+        "time" => "hh:mm",
+        _ => "d mmm yyyy",
+    }
+}
+
 /// The HTML `type` of an [`Field`]; `Select`, `Textarea`, `Checkbox` and
 /// `Hidden` render their own element.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -269,6 +301,26 @@ impl InputKind {
 
     pub fn is_password(&self) -> bool {
         matches!(self, Self::Password)
+    }
+
+    /// A date, a date and time, or a time: drawn as the shared typed box
+    /// (`DateInput` in `assets/hooks.js`), never the browser's own control.
+    pub fn is_date(&self) -> bool {
+        matches!(self, Self::Date | Self::DatetimeLocal | Self::Time)
+    }
+
+    /// What the typed box shows while empty, for a date-like kind.
+    pub fn date_placeholder(&self) -> &'static str {
+        date_placeholder(self.name())
+    }
+
+    /// The picker button's icon and name, for a date-like kind.
+    pub fn date_icon(&self) -> &'static str {
+        if matches!(self, Self::Time) {
+            "clock"
+        } else {
+            "calendar"
+        }
     }
 }
 
@@ -697,6 +749,14 @@ impl Field {
     /// Whether the label is drawn inside the box (floating or pinned).
     pub fn inset(&self) -> bool {
         self.placement() != LabelPlacement::Above
+    }
+
+    /// What the date box shows for this field's `yyyy-mm-dd` value: the one
+    /// date format, "6 Nov 2026" (`bilibi_datetime`'s `DATE`, and `DateInput`
+    /// in `assets/hooks.js`). A value that is not a date (a refused entry
+    /// sent back with its error) is shown as typed.
+    pub fn date_text(&self) -> String {
+        date_text(self.kind.name(), &self.value)
     }
 
     /// The placeholder an inset text field renders. `:placeholder-shown` is

@@ -143,7 +143,7 @@ impl DisplayContext {
 
     /// A calendar date is zone-free: no mode logic, no zone suffix.
     pub fn render_date(&self, date: civil::Date) -> String {
-        date.strftime("%d/%m/%Y").to_string()
+        date.strftime(DATE).to_string()
     }
 
     /// The calendar a period filter reads "today" against.
@@ -151,6 +151,12 @@ impl DisplayContext {
         Clock::resolve(self, browser_zone, now)
     }
 }
+
+/// The one date format every page shows: "6 Nov 2026". The day has no
+/// leading zero and the month is a short English word, so no reader takes
+/// 06/11 for 11 June; the shared date input (`base/ui`) reads and shows the
+/// same, and `assets/datetime.js` formats the `local` mode the same way.
+pub(crate) const DATE: &str = "%-d %b %Y";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
@@ -170,9 +176,9 @@ impl Format {
             Precision::Second => "%H:%M:%S",
         };
         match self {
-            Self::Date => "%d/%m/%Y".to_owned(),
+            Self::Date => DATE.to_owned(),
             Self::Time => clock.to_owned(),
-            Self::DateTime => format!("%d/%m/%Y, {clock}"),
+            Self::DateTime => format!("{DATE}, {clock}"),
         }
     }
 }

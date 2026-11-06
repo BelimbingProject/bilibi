@@ -629,7 +629,13 @@ impl State {
             for (p, row) in self.prices.iter().zip(&columns.rows) {
                 rows.push(
                     row.clone()
-                        .slot("effective_on", Html::text(&p.effective_on.to_string()))
+                        .slot(
+                            "effective_on",
+                            Html::text(
+                                &bilibi_datetime::DisplayContext::anonymous()
+                                    .render_date(p.effective_on),
+                            ),
+                        )
                         .slot("currency", Html::text(&p.currency))
                         .slot("amount", Html::text(&p.amount.to_string())),
                 );

@@ -852,6 +852,11 @@ impl<'a> FlexTable<'a> {
         self.columns.iter().any(|column| column.lens == Lens::Delta)
     }
 
+    /// The change-since date as its date box shows it ("6 Nov 2026").
+    pub fn since_text(&self) -> String {
+        crate::forms::date_text("date", self.since.unwrap_or_default())
+    }
+
     pub fn cost_text(&self, cost: &Cost) -> String {
         format!(
             "Heavy query: scaling these bars and colour bands reads the whole table, and the planner estimates a cost of {}. Fewer rollups under a bar or band lens would lighten it.",

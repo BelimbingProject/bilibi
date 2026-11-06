@@ -551,7 +551,13 @@ impl Rates {
                     "pair",
                     Html::text(&format!("1 {} → {}", rate.from, rate.to)),
                 )
-                .slot("effective", Html::text(&rate.effective_on.to_string()))
+                .slot(
+                    "effective",
+                    Html::text(
+                        &bilibi_datetime::DisplayContext::anonymous()
+                            .render_date(rate.effective_on),
+                    ),
+                )
                 .slot(
                     "rate",
                     render(InlineEdit {

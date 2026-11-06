@@ -59,15 +59,16 @@ impl InlineSpecimen {
             field.editable = !readonly;
             field
         };
-        // The specimen's date display is day/month/year, derived from the
-        // saved `YYYY-MM-DD` value so an edit shows what was stored.
-        let renewal_display = match values.get("renewal_date").map(String::as_str) {
-            Some(date) => match date.split('-').collect::<Vec<_>>()[..] {
-                [year, month, day] => format!("{day}/{month}/{year}"),
-                _ => date.to_string(),
-            },
-            None => String::new(),
-        };
+        // The specimen shows the saved `YYYY-MM-DD` value in the one date
+        // format, as the shared date input does.
+        let renewal_display = values
+            .get("renewal_date")
+            .map(|date| {
+                crate::forms::Field::named("renewal_date")
+                    .value(date.as_str())
+                    .date_text()
+            })
+            .unwrap_or_default();
         let kind_field = field("kind", "Edit relationship");
         let kind_editor = Field::named("kind")
             .id("inline-kind-input")
@@ -271,7 +272,7 @@ impl InlineSamples {
             date_read: Html::render(&InlineEdit {
                 field: edit("-date", "renewal_date", "Edit renewal date", "2026-12-31")
                     .input_type("date")
-                    .display_value("31/12/2026"),
+                    .display_value("31 Dec 2026"),
             })?,
             edit_saved: Html::render(&InlineEdit {
                 field: edit("-saved", "name", "Edit company name", "Example Industries")

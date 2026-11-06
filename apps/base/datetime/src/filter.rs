@@ -215,7 +215,9 @@ impl PeriodFilter {
                 "title",
                 &format!(
                     "{} – {} ({})",
-                    self.period.from, self.period.to, self.timezone
+                    self.period.from.strftime(crate::DATE),
+                    self.period.to.strftime(crate::DATE),
+                    self.timezone
                 ),
             )
     }

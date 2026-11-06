@@ -58,6 +58,15 @@
 {#- The bare control of a select, textarea or single-line input; field is a
     bilibi_ui::Field. A floating label reads the box's emptiness from
     :placeholder-shown, so a field with no example text gets a blank one. -#}
+{#- A compact date or time box outside a Field (an inline editor, a table's
+    "Change since"): the same three inputs as the date kinds of `input` and
+    the same DateInput hook. kind is the input type ("date",
+    "datetime-local", "time"); text is the value as the box shows it
+    (forms::date_text). -#}
+{% macro date_box(id, name, value, text, class, kind="date", wrapper_class="relative", aria_label="", placeholder="d mmm yyyy", data_role="", required=false) %}
+<div data-hook="DateInput" data-date-kind="{{ kind }}" class="{{ wrapper_class }}"><input id="{{ id }}"{% if !data_role.is_empty() %} data-role="{{ data_role }}"{% endif %} type="text" value="{{ text }}" autocomplete="off" spellcheck="false" placeholder="{{ placeholder }}"{% if !aria_label.is_empty() %} aria-label="{{ aria_label }}"{% endif %}{% if required %} required{% endif %} class="{{ class }}"><input type="hidden" name="{{ name }}" value="{{ value }}" data-date-value><input type="{{ kind }}" tabindex="-1" aria-hidden="true" data-date-picker value="{{ value }}" class="pointer-events-none absolute bottom-0 right-0 size-px opacity-0"><span class="absolute inset-y-0 right-0.5 flex items-center">{% if kind.eq_ignore_ascii_case("time") %}{% call ui::icon_button(icon="clock", label="Choose a time", context=bilibi_ui::IconContext::Inline, class="pointer-coarse:-my-2") %}{% endcall %}{% else %}{% call ui::icon_button(icon="calendar", label="Choose a date", context=bilibi_ui::IconContext::Inline, class="pointer-coarse:-my-2") %}{% endcall %}{% endif %}</span></div>
+{% endmacro %}
+
 {% macro control(field) %}
 {%- if field.kind.is_select() -%}
 {% if !field.multiple %}<div class="ui-select">{% endif %}
@@ -66,6 +75,15 @@
 {%- elif field.kind.is_textarea() -%}
 <textarea id="{{ field.id }}" name="{{ field.name }}"{% call aria(invalid=field.invalid(), described_by=field.described_by()) %}{% endcall %} class="{{ field.control_class() }}"{{ field.attrs.html() }}>
 {{ field.value }}</textarea>
+{%- elif field.kind.is_date() -%}
+{#- A date, date and time, or time is one text box in the shared format
+    ("6 Nov 2026", "6 Nov 2026, 14:30", "14:30"), never a native input,
+    which draws the browser's own order and clock (mm/dd/yyyy, 02:30 PM).
+    The box has no name: the hidden input beside it posts what the server
+    reads (yyyy-mm-dd, yyyy-mm-ddTHH:MM, HH:MM), and the DateInput hook
+    (assets/hooks.js) keeps the two in step as the person types and opens
+    the browser's picker on the native input for the icon button. -#}
+<div data-hook="DateInput" data-date-kind="{{ field.kind.name() }}" class="relative"><input type="text" id="{{ field.id }}" value="{{ field.date_text() }}" autocomplete="off" spellcheck="false"{% if field.attrs.placeholder.is_none() %} placeholder="{{ field.kind.date_placeholder() }}"{% endif %}{% call aria(invalid=field.invalid(), described_by=field.described_by()) %}{% endcall %} class="{{ field.control_class() }} pr-9"{{ field.attrs.html() }} /><input type="hidden" name="{{ field.name }}" value="{{ field.value }}" data-date-value{% if let Some(form) = field.attrs.form %} form="{{ form }}"{% endif %}{% if field.attrs.disabled %} disabled{% endif %} /><input type="{{ field.kind.name() }}" tabindex="-1" aria-hidden="true" data-date-picker value="{{ field.value }}"{% if let Some(min) = field.attrs.min %} min="{{ min }}"{% endif %}{% if let Some(max) = field.attrs.max %} max="{{ max }}"{% endif %}{% if let Some(step) = field.attrs.step %} step="{{ step }}"{% endif %} class="pointer-events-none absolute bottom-0 right-0 size-px opacity-0" /><span class="absolute inset-y-0 right-1 flex items-center">{% if field.kind.date_icon() == "clock" %}{% call ui::icon_button(icon="clock", label="Choose a time", context=bilibi_ui::IconContext::Inline, disabled=field.attrs.disabled || field.attrs.readonly, class="pointer-coarse:-my-2") %}{% endcall %}{% else %}{% call ui::icon_button(icon="calendar", label="Choose a date", context=bilibi_ui::IconContext::Inline, disabled=field.attrs.disabled || field.attrs.readonly, class="pointer-coarse:-my-2") %}{% endcall %}{% endif %}</span></div>
 {%- else -%}
 <input type="{{ field.kind.name() }}" name="{{ field.name }}" id="{{ field.id }}" value="{{ field.value }}"{% call aria(invalid=field.invalid(), described_by=field.described_by()) %}{% endcall %} class="{{ field.control_class() }}"{% if field.blank_placeholder() %} placeholder=" "{% endif %}{{ field.attrs.html() }} />
 {%- endif -%}
