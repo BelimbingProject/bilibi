@@ -6,7 +6,7 @@ use tokio_postgres::Transaction;
 
 // Redirects collapse on write (`redirect` runs only at READ COMMITTED), so the
 // survivor and its direct predecessors are the complete equivalence class. The reverse index serves this lookup.
-pub(crate) const IDS_SQL: &str = "SELECT $3::text AS id UNION ALL SELECT from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3";
+pub(crate) const MEMBERSHIP_SQL: &str = "SELECT $1::bigint AS tenant_id,$2::text AS record_kind,$3::text AS record_id UNION ALL SELECT tenant_id,kind,from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3";
 
 /// An owner-built membership subquery for existing stored references.
 /// Execute immediately on the transaction and scope passed to
@@ -22,12 +22,13 @@ impl ReferenceMatch {
         &self.reference
     }
 
-    /// One text column containing the survivor and every merged predecessor.
-    /// Embed as `record_id IN (...)` with `tenant_id=$1 AND record_kind=$2`.
-    /// This is owner SQL: use it whole, without inspecting or rewriting it.
-    /// It has no result cap and does not multiply holder rows.
+    /// Three columns containing `(tenant_id, record_kind, record_id)` for the
+    /// survivor and every merged predecessor. Embed the whole relation as
+    /// `(tenant_id, record_kind, record_id) IN (...)`. This is owner SQL: use
+    /// it whole, without inspecting or rewriting it. It has no result cap and
+    /// does not multiply holder rows.
     pub fn sql(&self) -> &'static str {
-        IDS_SQL
+        MEMBERSHIP_SQL
     }
 
     /// Bind these values to `$1` (tenant), `$2` (kind), `$3` (survivor).

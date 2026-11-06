@@ -14,7 +14,7 @@ use bilibi_records::{Records, ReferenceMatch};
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::Value;
 use std::time::Duration;
-use tokio_postgres::{types::ToSql, IsolationLevel, Transaction};
+use tokio_postgres::{error::SqlState, types::ToSql, IsolationLevel, Transaction};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -50,7 +50,10 @@ async fn read(
     assert!(limit as usize <= MAX_ROWS);
     let (tenant, kind, survivor) = matched.parameters();
     assert_eq!(tenant, scope.tenant());
-    let condition = format!("FROM records_equivalence_notes WHERE tenant_id=$1 AND record_kind=$2 AND record_id IN ({})", matched.sql());
+    let condition = format!(
+        "FROM records_equivalence_notes WHERE (tenant_id,record_kind,record_id) IN ({})",
+        matched.sql()
+    );
     let count = format!("SELECT count(*),count(*) FILTER (WHERE owner_id IS NOT NULL),count(*) FILTER (WHERE owner_id=$4) {condition}");
     let params: &[&(dyn ToSql + Sync)] = &[&tenant, &kind, &survivor, &scope.user()];
     admit(tx, &count, params).await?;
@@ -66,6 +69,56 @@ async fn read(
         .map(|r| r.get(0))
         .collect();
     Ok(((counts.get(0), counts.get(1), counts.get(2)), ids))
+}
+
+/// Whole-row membership carries the holder's tenant and kind boundary. An
+/// old ID-only holder query cannot consume this relation at all.
+async fn membership_scope(db: &Db, records: &Records, admin: &Scope, other: &Scope) -> Outcome {
+    let mut client = db.get().await?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await?;
+    tx.batch_execute(BOUNDS).await?;
+    // Keep a same-ID row from another tenant visible only in this disposable
+    // transaction. Row 8 already supplies the same ID under another kind.
+    tx.execute(
+        "INSERT INTO records_equivalence_notes(id,tenant_id,record_kind,record_id) VALUES(11,$1,'company','1')",
+        &[&other.tenant()],
+    )
+    .await?;
+    let overlaps: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM records_equivalence_notes WHERE record_id='1' AND (tenant_id<>$1 OR record_kind<>$2)",
+            &[&admin.tenant(), &"company"],
+        )
+        .await?
+        .get(0);
+    assert_eq!(overlaps, 2);
+    let matched = records
+        .matching(&tx, admin, "company", "1")
+        .await?
+        .ok_or(Error::Forbidden)?;
+    assert_eq!(
+        read(&tx, admin, &matched, 0).await?,
+        ((5, 3, 2), vec![1, 2])
+    );
+    let (tenant, kind, survivor) = matched.parameters();
+    let old_id_only = format!(
+        "SELECT count(*) FROM records_equivalence_notes WHERE record_id IN ({})",
+        matched.sql()
+    );
+    let error = tx
+        .query_one(&old_id_only, &[&tenant, &kind, &survivor])
+        .await
+        .expect_err("three-column membership must reject an ID-only holder query");
+    assert_eq!(error.code(), Some(&SqlState::SYNTAX_ERROR));
+    tx.rollback().await?;
+    println!(
+        "PASS whole-row membership excludes same-ID rows in another tenant and kind; ID-only use is invalid"
+    );
+    Ok(())
 }
 
 async fn expect(
@@ -353,6 +406,7 @@ async fn main() -> Outcome {
         .await?;
     }
     println!("PASS merged/chain/canonical source: exact total/taken/owned counts and every page");
+    membership_scope(&db, &records, &admin, &other).await?;
     snapshots(&db, &boundary, &records, &admin).await?;
     assert_eq!(holder::snapshot(&db, &admin).await?, original);
     assert_eq!(holder::snapshot(&db, &other).await?, other_original);

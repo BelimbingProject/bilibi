@@ -74,7 +74,7 @@ let Some(matched) = records.matching(&tx, scope, kind, id).await? else {
 };
 let (tenant, kind, survivor) = matched.parameters();
 let predicate = format!(
-    "tenant_id=$1 AND record_kind=$2 AND record_id IN ({})",
+    "(tenant_id, record_kind, record_id) IN ({})",
     matched.sql(),
 );
 // Your authorized holder read uses this same predicate in both statements:
@@ -85,7 +85,7 @@ let page = format!("SELECT id FROM notes WHERE {predicate} ORDER BY id LIMIT $4 
 // Bind the page's limit/offset to $4/$5; propagate a query failure.
 ```
 
-- **Owner boundary:** `ReferenceMatch::sql()` is a complete owner-built membership subquery with one text column. Embed it whole; do not inspect its implementation or query Records storage yourself. `reference()` identifies the readable survivor. All values are parameters; holder table/column names come from your code, never request input.
+- **Owner boundary:** `ReferenceMatch::sql()` is a complete owner-built membership subquery with the three columns `(tenant_id, record_kind, record_id)`. Compare all three holder columns with it as one row; an ID-only or otherwise partial membership test is invalid. Embed it whole; do not inspect its implementation or query Records storage yourself. `reference()` identifies the readable survivor. All values are parameters; holder table/column names come from your code, never request input.
 - **Exact membership:** the survivor and every predecessor from transitive merges participate in one SQL membership test. There is no alias cap, client-side enumeration, chunk arithmetic or holder-row multiplication. Keep the holder index on `(tenant_id, record_kind, record_id)` and apply membership before pagination and aggregation, including your own conditional counts.
 - **Uniform source denial:** unknown/unmounted kinds, malformed ids, missing/removed/other-tenant sources and unreadable survivors all return `None`. The survivor passes the owner's read check (`authorize`, as in `resolve`), so a retired record may still filter its existing references. This grants no holder access or write authority; the holder authorizes its own read, and new selections still use `check`.
 - **Connection and snapshot:** pass your existing PostgreSQL transaction. `matching` takes no pooled connection and starts, commits or rolls back nothing. It refuses `READ COMMITTED`/`READ UNCOMMITTED` with `Error::Invalid`; use `REPEATABLE READ` or `SERIALIZABLE`, then execute the subquery immediately on that same transaction and scope. Source access, redirects, count and pages see that transaction's snapshot, including its own holder writes. Merges never run in such a transaction (`redirect` requires `READ COMMITTED`); concurrent merges become visible in a fresh transaction. Do not cache a match or reuse it after the transaction. The transaction must allow owner authorization decision-log writes; use `READ WRITE` even for these business reads.

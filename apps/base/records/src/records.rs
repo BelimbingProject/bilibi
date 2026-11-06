@@ -643,10 +643,13 @@ impl Records {
             .remove(&id)
             .unwrap_or(id);
         let ids: Vec<String> = client
-            .query(crate::matching::IDS_SQL, &[&scope.tenant(), &kind, &id])
+            .query(
+                crate::matching::MEMBERSHIP_SQL,
+                &[&scope.tenant(), &kind, &id],
+            )
             .await?
             .iter()
-            .map(|row| row.get(0))
+            .map(|row| row.get("record_id"))
             .collect();
         drop(client);
         let mut counts = Vec::new();
