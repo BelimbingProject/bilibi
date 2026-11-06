@@ -84,7 +84,8 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 - Name variants through the enums (`ButtonVariant`, `BadgeKind`, `PageVariant`), not class strings.
 - Icons use bare names from `base/ui` (`edit`, `pencil`, `bookmark-solid`), rendered as inline SVG. Use the Belimbing equivalent for a familiar action; see `apps/base/ui/README.md` for names and missing-icon behaviour.
 - Icon-only actions need an accessible label and a title. Inline controls are 24 px; table and toolbar controls are 28 px. Touch screens expand icon, tab, pager and choice targets to 40 px; the labelled button stays 24 px.
-- Links navigate; buttons act.
+- Links navigate; buttons act. Navigation in a page header ("Chart of accounts", "Open book") is the standard `button` with `href`, a link drawn as a button, never a bare text link. Back is always `BackLink`, never a button naming the parent list.
+- **On/off is a `Toggle`**, never a badge beside a check-mark action or a button whose label flips ("Enabled" + ✓ → one On/Off switch).
 - Destructive actions use calm danger text, never a solid red button.
 - Secrets use `SecretInput`. It starts masked. A stored value shows a keep-current mask, never plaintext.
 - Specimens: the Design Library (`/assets/ui-components.html`, `/assets/ui-feedback.html`) is the screenshot baseline. Extend it with each new primitive.
@@ -121,6 +122,13 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 - Never set a page's own max width.
 - Compact does not mean cramped. Keep related controls close and the primary action clear.
+- **Standard gaps only.** Sections, cards, toolbars and tables are spaced by the shared stack and the Compact scale, never page-owned margins. No element touches another; a missing gap is a bug, not a style.
+- **Touch screens.** Coarse pointers grow icon buttons to 40 px; every close button and icon button must still sit inside its box (a flash's ✕ once hung outside the message). Check each page in touch mode.
+- **Flow.** Every page leads somewhere and never in a circle:
+  - No loop between two pages (Book → Chart of accounts → Book). Each link leads forward or Back.
+  - A "Go to X" button lands where the person acts (the company's open-book form), not on a list of all of them.
+  - After a step is finished, land on the next step.
+  - Set a prerequisite in place rather than sending people elsewhere first: a combobox of every currency that enables the chosen one, not "Enable it on the Currencies page first".
 - Layouts are responsive. There is no separate mobile product.
 
 ## Forms
@@ -142,6 +150,9 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - After a refused save, `ErrorSummary` lists the problems above the form, each linking to its field. Inline errors stay.
 - Keep rarely used parts out of the way: `Fold` folds a part under a one-line summary of what it holds and opens itself on an error; `AddMore` ("+ Add address line 2") reveals one more optional field.
 - A greyed field says why, in one line near the field that unlocks it.
+- **Coded choices are a searchable `Combobox`** showing code and name ("MYR · Malaysian ringgit"), never a plain select of codes. Typing also finds the common name people use (RMB for CNY, RM for MYR); the field stores the standard code.
+- **Show results live.** A calculator or preview updates as the person types or chooses; no Convert or Calculate button.
+- **Familiar patterns win.** A currency converter is two rows of amount + currency, as on Google, with the rate's date and source in one small muted line under them.
 - This departs from the label-above layout on purpose; the shared macros own it, so no page styles its own label.
 
 ## Lists
@@ -155,7 +166,9 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Corners:** table frames are square. A card is flat only where it frames the table.
 - **Pagination:** the results count shows whenever there are rows. The rows-per-page selector and pager show only when another page exists; an empty list shows none. They live in the component.
 - **Settings:** the operator and company settings table opens each Value cell as a form with Save and Cancel (`InlineForm`). Enter saves; Escape cancels. Protected values ask for 2FA in the row.
-- **Empty:** `EmptyState` says why and what to do next.
+- **Empty:** `EmptyState` says why and offers the fix itself: a button straight to the form that clears it. Its words stay true: "Enable the currencies first" shows only while none is enabled.
+- **Every row has a next step.** A row whose obvious action is not visible gets one ("Open book" on a company without a book).
+- **Row actions:** one "Actions…" icon button (Carbon `perform-action`, `AddToMenu` in `apps/base/ui/src/drops.rs`) per row and on the selection bar, listing every action other modules register for that kind of record. No row of separate action links.
 - **Bulk actions:** a list whose records may be exported or changed together sets `FlexTable.selection`: a tick at the start of each row and one for the page, and, while anything is ticked, a bar above the table saying how many, offering every row the filters match, a Clear, and the bulk actions. The page keeps the ticks on the server and clears them when the filters or sort change. People who may take no bulk action see no ticks.
 
 ### Flexible columns
@@ -210,7 +223,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 | Pattern | Rule |
 | --- | --- |
-| Modal | Native `<dialog>`. Focus enters, stays, and returns. Escape and Cancel are one action. A click on the backdrop does nothing |
+| Modal | Native `<dialog>`. Focus enters, stays, and returns. Escape and Cancel are one action. A click on the backdrop does nothing. Every popup can always be closed (Close or Cancel, and Escape) in every state: loading, after an error, after a dismissed error |
 | Confirmation | `ConfirmDialog` for irreversible actions: consequence first, Cancel beside the destructive verb. Its shared macro accepts a body for a reason field. Never `window.confirm` |
 | Flash | Stacks at the right above the page, most severe first, reserving space so messages never cover page actions. A message that arrives with a redirect floats top right instead. Info, warning and error stay until dismissed. Success clears after 8 s |
 | Shell preferences | Theme and time-display saves use the shared floating flash, with the same success timeout and persistent errors |
@@ -274,7 +287,10 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
 - **Calm.** No urgency, no badge spam, no dark patterns.
-- **Plain language.** Write for the person doing the work. Show the idea, not its internal code.
+- **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator".
+- **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Enable the currencies first" is false once one is enabled.
+- **No product notes.** Notes for builders ("Draft, awaiting accountant review" on a template) never show to users.
+- **No internals in hints.** Do not explain how the system works behind the page (how filters relate to the top bar, how reports roll up, which rows are hidden). Say what the person can do.
 - **Help text** (subtitles, section descriptions, field hints, empty states) is one short sentence a business user would say, telling them what they can do here. Leave it out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
 
 | Before | After |
@@ -282,6 +298,39 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 | Which operations ask for the account holder's 2FA code before they go ahead | Set the actions that require 2FA. |
 | Every live company in this tenant | *(removed: the title says it)* |
 | Lowercase letters, digits and underscores. Unique within this tenant. | Lowercase letters, digits and underscores; must be unique. |
+| This filter does not change the current company in the top bar. Each account opens in its named company. | *(removed: explains internals)* |
+| Reports roll amounts up in the base currency. A company can use its own. | *(removed: explains internals)* |
+| Companies you cannot work in are not listed. A row shows one company in its own currency; figures are never added across companies… | *(removed: explains internals)* |
+| The book and fiscal calendar of each company you can work in | Company books you can access |
+| Leave empty to set it when you issue. | Leave empty to use the actual date of issue. |
+| The numbering the document takes when it is issued | Issued ref no, settings *(with a link icon to the setting)* |
+| A draft has no number and posts nothing until you issue it. | Draft: no ref no and no posting until issued. |
+| Switch on the currencies you trade in. Rates and forms offer only those. | Enable the currencies you use. Only enabled currencies appear in forms and rates. |
+| Not set. Conversions to the base currency are refused until you choose one. | Required for currency conversions. |
+| No exchange rates yet. Enable the currencies you trade in, then add a rate. | No exchange rates yet. Enable the currencies first. *(only while none is enabled)* |
+| Check a conversion / Try the conversion other modules use… | Currency conversion calculator *(no hint)* |
+
+## Page review checklist
+
+Run this on every page you changed, in the browser at `APP_ORIGIN`, once with a mouse and once in touch mode (DevTools device emulation, coarse pointer). Every answer must be yes.
+
+1. Does every subtitle, hint and empty state say something the title and labels do not?
+2. Is every word true for this page and this reader (no "manage" on read-only, no "first" once done)?
+3. Is every hint free of internals and product notes, and short enough to read at a glance?
+4. Is each thing named for what it is, in the words a business user would say?
+5. Does every page lead forward, with no loop between two pages and no dead end?
+6. Does every "Go to X" land on the exact place to act, and does a finished step land on the next one?
+7. Does every empty state and every list row offer its next step?
+8. Is every prerequisite settable in place, rather than "do it on another page first"?
+9. Can every popup be closed with Close and Escape in every state, including after an error?
+10. Is every on/off a `Toggle`?
+11. Is header navigation the standard button, and Back the standard `BackLink`?
+12. Is every coded choice a searchable combobox with code and name, finding common names too?
+13. Do results update live, with no Convert or Calculate button?
+14. Are row actions one "Actions…" button?
+15. Do sections, cards, toolbars and tables keep the standard gaps, with nothing touching, and do icon and close buttons stay inside their box on a touch screen?
+
+How to build each part with the shared components: `apps/base/ui/AGENTS.md`.
 
 ## Accessibility and resilience
 
