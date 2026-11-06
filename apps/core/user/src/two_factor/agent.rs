@@ -14,10 +14,7 @@ use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_notifications::Notice;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static USERS: OnceLock<Arc<UserService>> = OnceLock::new();
 
@@ -59,10 +56,6 @@ struct Account {
     home: bool,
 }
 
-fn field(message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([("user_id".into(), vec![message.into()])]))
-}
-
 /// Staff accounts only: a customer's factor is not a staff reset (ADR 16).
 const TARGET_SQL: &str =
     "SELECT u.id, u.tenant_id, u.name, i.email, u.status='active',i.home_tenant_id=u.tenant_id AND i.home_user_id=u.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.kind='staff'";
@@ -98,16 +91,28 @@ fn user_id(input: &Value) -> i64 {
 
 fn refuse(scope: &Scope, account: &Account, enrolled: bool) -> Result<(), AgentError> {
     if scope.impersonator().is_some() {
-        return Err(field("Leave impersonation before resetting 2FA."));
+        return Err(bilibi_agent_api::invalid(
+            "user_id",
+            "Leave impersonation before resetting 2FA.",
+        ));
     }
     if scope.user() == account.id {
-        return Err(field("You cannot reset your own 2FA."));
+        return Err(bilibi_agent_api::invalid(
+            "user_id",
+            "You cannot reset your own 2FA.",
+        ));
     }
     if !account.home {
-        return Err(field("This workspace cannot reset this member's 2FA."));
+        return Err(bilibi_agent_api::invalid(
+            "user_id",
+            "This workspace cannot reset this member's 2FA.",
+        ));
     }
     if !enrolled {
-        return Err(field("2FA is not on for this account."));
+        return Err(bilibi_agent_api::invalid(
+            "user_id",
+            "2FA is not on for this account.",
+        ));
     }
     Ok(())
 }
@@ -264,7 +269,9 @@ impl WriteHandler for Reset {
             let ended = clear_confirmed(service, tx, &account, by)
                 .await
                 .map_err(|error| match error {
-                    Error::Conflict => field("2FA is not on for this account."),
+                    Error::Conflict => {
+                        bilibi_agent_api::invalid("user_id", "2FA is not on for this account.")
+                    }
                     other => other.into(),
                 })?;
             notify_target(tx, scope, &account, ADMIN_BODY).await?;

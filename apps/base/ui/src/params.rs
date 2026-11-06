@@ -10,9 +10,12 @@ pub fn positive_id(value: Option<&str>) -> Option<i64> {
     positive_integer(value).and_then(|n| i64::try_from(n).ok())
 }
 
-/// Whitespace is significant here; only the empty string becomes absent.
-pub fn blank_to_none(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.is_empty())
+/// Trim text; `None` when it is absent or only whitespace.
+///
+/// Shared helper: `let note = bilibi_ui::params::blank_to_none(Some(&draft.note));`
+pub fn blank_to_none(value: Option<&str>) -> Option<String> {
+    let text = value?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 pub fn trimmed(value: Option<&str>) -> Option<&str> {

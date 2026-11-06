@@ -35,15 +35,10 @@ pub fn bind(db: Db, proofs: Arc<PartyProofs>) -> bilibi_module_registry::Result<
 fn bound() -> bilibi_agent_api::Result<&'static Bound> {
     BOUND.get().ok_or(Error::Internal.into())
 }
-fn invalid(field: &str, message: &str) -> bilibi_agent_api::Error {
-    let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    fields.insert(field.into(), vec![message.into()]);
-    bilibi_agent_api::Error::InvalidInput(fields)
-}
 fn not_found(error: Error) -> bilibi_agent_api::Error {
     match error {
         Error::NotFound => bilibi_agent_api::Error::NotFound,
-        Error::Conflict => invalid("version", "is not the current version"),
+        Error::Conflict => bilibi_agent_api::invalid("version", "is not the current version"),
         other => other.into(),
     }
 }
@@ -51,11 +46,11 @@ fn positive(input: &Value, field: &str) -> bilibi_agent_api::Result<i64> {
     input[field]
         .as_i64()
         .filter(|value| *value > 0)
-        .ok_or_else(|| invalid(field, "must be a positive integer"))
+        .ok_or_else(|| bilibi_agent_api::invalid(field, "must be a positive integer"))
 }
 fn id(input: &Value) -> bilibi_agent_api::Result<AffiliationId> {
     AffiliationId::new(positive(input, "affiliation_id")?)
-        .map_err(|_| invalid("affiliation_id", "must be a positive integer"))
+        .map_err(|_| bilibi_agent_api::invalid("affiliation_id", "must be a positive integer"))
 }
 fn date(input: &Value, field: &str) -> bilibi_agent_api::Result<Option<CalendarDate>> {
     match &input[field] {
@@ -63,31 +58,28 @@ fn date(input: &Value, field: &str) -> bilibi_agent_api::Result<Option<CalendarD
         Value::String(text) if text.trim().is_empty() => Ok(None),
         Value::String(text) => CalendarDate::try_from(text.trim().to_owned())
             .map(Some)
-            .map_err(|_| invalid(field, "must be a YYYY-MM-DD calendar date")),
-        _ => Err(invalid(field, "must be a YYYY-MM-DD calendar date")),
+            .map_err(|_| bilibi_agent_api::invalid(field, "must be a YYYY-MM-DD calendar date")),
+        _ => Err(bilibi_agent_api::invalid(
+            field,
+            "must be a YYYY-MM-DD calendar date",
+        )),
     }
 }
 fn dates(input: &Value) -> bilibi_agent_api::Result<EffectiveDates> {
-    EffectiveDates::new(date(input, "effective_from")?, date(input, "effective_to")?)
-        .map_err(|_| invalid("effective_to", "must be on or after effective_from"))
-}
-fn text(input: &Value, field: &str) -> bilibi_agent_api::Result<Option<String>> {
-    match &input[field] {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text.clone())),
-        _ => Err(invalid(field, "must be a string")),
-    }
+    EffectiveDates::new(date(input, "effective_from")?, date(input, "effective_to")?).map_err(
+        |_| bilibi_agent_api::invalid("effective_to", "must be on or after effective_from"),
+    )
 }
 fn organisation(input: &Value) -> bilibi_agent_api::Result<OrganisationId> {
     OrganisationId::new(positive(input, "organisation_id")?)
-        .map_err(|_| invalid("organisation_id", "must be a positive integer"))
+        .map_err(|_| bilibi_agent_api::invalid("organisation_id", "must be a positive integer"))
 }
 /// A namecard: a new human Person (name only; personal contacts stay with
 /// `core.person.*`) and the work facts of their affiliation.
 fn contact_input(input: &Value) -> bilibi_agent_api::Result<(PersonInput, ContactFacts)> {
     let name = input["name"]
         .as_str()
-        .ok_or_else(|| invalid("name", "must be a string"))?;
+        .ok_or_else(|| bilibi_agent_api::invalid("name", "must be a string"))?;
     Ok((
         PersonInput {
             name: name.to_owned(),
@@ -97,9 +89,9 @@ fn contact_input(input: &Value) -> bilibi_agent_api::Result<(PersonInput, Contac
         },
         ContactFacts {
             organisation_id: organisation(input)?,
-            title: text(input, "title")?,
-            work_email: text(input, "work_email")?,
-            work_phone: text(input, "work_phone")?,
+            title: bilibi_agent_api::optional_text_field(input, "title"),
+            work_email: bilibi_agent_api::optional_text_field(input, "work_email"),
+            work_phone: bilibi_agent_api::optional_text_field(input, "work_phone"),
             dates: dates(input)?,
         },
     ))
@@ -124,11 +116,11 @@ fn person_error(error: WriteError) -> bilibi_agent_api::Error {
 fn create_input(input: &Value) -> bilibi_agent_api::Result<AffiliationInput> {
     Ok(AffiliationInput {
         person_id: PersonId::new(positive(input, "person_id")?)
-            .map_err(|_| invalid("person_id", "must be a positive integer"))?,
+            .map_err(|_| bilibi_agent_api::invalid("person_id", "must be a positive integer"))?,
         organisation_id: organisation(input)?,
-        title: text(input, "title")?,
-        work_email: text(input, "work_email")?,
-        work_phone: text(input, "work_phone")?,
+        title: bilibi_agent_api::optional_text_field(input, "title"),
+        work_email: bilibi_agent_api::optional_text_field(input, "work_email"),
+        work_phone: bilibi_agent_api::optional_text_field(input, "work_phone"),
         dates: dates(input)?,
     })
 }
@@ -139,16 +131,16 @@ fn update_input(before: &Affiliation, input: &Value) -> bilibi_agent_api::Result
         affiliation: AffiliationInput {
             person_id: before.affiliation.person_id,
             organisation_id: before.affiliation.organisation_id,
-            title: text(input, "title")?,
-            work_email: text(input, "work_email")?,
-            work_phone: text(input, "work_phone")?,
+            title: bilibi_agent_api::optional_text_field(input, "title"),
+            work_email: bilibi_agent_api::optional_text_field(input, "work_email"),
+            work_phone: bilibi_agent_api::optional_text_field(input, "work_phone"),
             dates: dates(input)?,
         },
     })
 }
 fn shape(error: Error) -> bilibi_agent_api::Error {
     match error {
-        Error::Invalid => invalid(
+        Error::Invalid => bilibi_agent_api::invalid(
             "affiliation",
             "title, work contacts or dates are not in the accepted shape",
         ),
@@ -178,8 +170,9 @@ impl ReadHandler for Read {
             let client = bound()?.db.get().await.map_err(Error::from)?;
             match self {
                 Self::List => {
-                    let query: Search = serde_json::from_value(input.clone())
-                        .map_err(|_| invalid("query", "has an unknown or malformed field"))?;
+                    let query: Search = serde_json::from_value(input.clone()).map_err(|_| {
+                        bilibi_agent_api::invalid("query", "has an unknown or malformed field")
+                    })?;
                     let page = identity::search(&**client, scope, &query)
                         .await
                         .map_err(shape)?;
@@ -235,9 +228,9 @@ impl WriteHandler for Write {
             references.require(&[("organisation_id", "company"), ("person_id", "person")])?;
             let client = client.transaction().ok_or(Error::Internal)?;
             let (title, email, phone) = crate::model::normalize_work(
-                &text(input, "title")?,
-                &text(input, "work_email")?,
-                &text(input, "work_phone")?,
+                &bilibi_agent_api::optional_text_field(input, "title"),
+                &bilibi_agent_api::optional_text_field(input, "work_email"),
+                &bilibi_agent_api::optional_text_field(input, "work_phone"),
             )
             .map_err(shape)?;
             let dates = dates(input)?;
@@ -267,7 +260,7 @@ impl WriteHandler for Write {
                         client,
                         scope,
                         &PersonInput {
-                            name: input["name"].as_str().unwrap_or_default().into(),
+                            name: bilibi_agent_api::text_field(input, "name"),
                             kind: PersonKind::Human,
                             email: None,
                             phone: None,
@@ -352,7 +345,7 @@ impl WriteHandler for Write {
                     .await
                     .map_err(not_found)?;
                     let to = date(input, "effective_to")?
-                        .ok_or_else(|| invalid("effective_to", "is required"))?;
+                        .ok_or_else(|| bilibi_agent_api::invalid("effective_to", "is required"))?;
                     json!({"summary":format!("End an affiliation on {}; identity, contacts and history are kept", to.as_str()),"before":record(before).encode(),"effective_to":to})
                 }
                 Self::Unlink => {
@@ -408,7 +401,7 @@ impl WriteHandler for Write {
                 }
                 Self::End => {
                     let to = date(input, "effective_to")?
-                        .ok_or_else(|| invalid("effective_to", "is required"))?;
+                        .ok_or_else(|| bilibi_agent_api::invalid("effective_to", "is required"))?;
                     identity::end(tx, scope, id(input)?, positive(input, "version")?, to).await
                 }
                 Self::Unlink => {

@@ -214,6 +214,14 @@ CI warns about a Rust file over 800 lines that is new or got longer in your pull
 - Files under `fixtures/`, `examples/`, `migrations/` and `generated/` are skipped.
 - CI runs it as `.github/workflows/file-length.yml`; editing the body re-runs it. The same script is copied unchanged into every Bilibi repository.
 
+### Shared helpers
+
+Base keeps one copy of the small helpers every module needs; [`apps/base/HELPERS.md`](apps/base/HELPERS.md) lists them.
+
+- Use a listed helper instead of writing your own reader, error, blank-text, money or badge function.
+- To add one, give a public Base function a one-line purpose and a `Shared helper:` example line in its doc comment, then run `python3 scripts/shared-helpers.py` to rebuild the list. CI fails when the list is out of date.
+- CI warns when a pull request adds a function with a listed helper's name. It never fails; to keep the copy, add `<path>: keep: <reason>` under `## Shared helpers` in the pull request body.
+
 ## Limits
 
 - Bilibi creates its own schema; it does not adopt an existing database.

@@ -75,7 +75,9 @@ pub use auth::{
     RESET_LINK_INVALID, RESET_REQUESTED, SESSION_EXPIRED, SIGN_IN_THROTTLED, WORKSPACE_UNAVAILABLE,
 };
 pub use chart::{Chart, ChartKind, Series, MAX_CATEGORIES, MAX_SERIES, MAX_SLICES};
-pub use components::{button_class, card_body_class, card_flat, stat_strip_columns};
+pub use components::{
+    active_badge, button_class, card_body_class, card_flat, stat_strip_columns, status_badge,
+};
 pub use components::{
     ActionLink, AppFrame, BackLink, Badge, BadgeKind, Button, ButtonVariant, Card, Chrome,
     CreateButton, DayKind, DayMonth, DayTile, Fact, Facts, Fold, Header, Icon, IconButton,

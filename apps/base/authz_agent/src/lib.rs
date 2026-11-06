@@ -16,8 +16,8 @@ mod web;
 
 use bilibi_agent_api::{
     json::{Data, Output},
-    Channels, Definitions, Error as AgentError, Guide, Handler, Operation, OperationClient,
-    OperationFuture, ReadHandler, WriteHandler, DEFINITIONS,
+    Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
+    ReadHandler, WriteHandler, DEFINITIONS,
 };
 use bilibi_authz::{
     effective_capabilities_of,
@@ -28,10 +28,7 @@ use bilibi_database::{Db, Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 const LIST: &str = "admin.authz.role.list";
 const UPDATE: &str = "admin.authz.role.update";
@@ -55,24 +52,23 @@ fn bound() -> bilibi_agent_api::Result<&'static Bound> {
     BOUND.get().ok_or(Error::Internal.into())
 }
 
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
 fn positive(input: &Value, field: &str) -> bilibi_agent_api::Result<i64> {
     input[field]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| field_error(field, "must be a positive id"))
+        .ok_or_else(|| bilibi_agent_api::invalid(field, "must be a positive id"))
 }
 fn assignment(input: &Value) -> bilibi_agent_api::Result<Assignment> {
     let bounds: Assignment = input
         .get("assignment")
         .map(|value| serde_json::from_value(value.clone()))
         .transpose()
-        .map_err(|_| field_error("assignment", "Enter a company, ISO dates and a purpose."))?
+        .map_err(|_| {
+            bilibi_agent_api::invalid("assignment", "Enter a company, ISO dates and a purpose.")
+        })?
         .unwrap_or_default();
     bounds.validate().map_err(|_| {
-        field_error(
+        bilibi_agent_api::invalid(
             "assignment",
             "Use valid dates in order and a purpose of at most 1000 characters.",
         )
@@ -84,7 +80,10 @@ fn capability<'a>(grants: &Grants, input: &'a Value) -> bilibi_agent_api::Result
     if grants.vocabulary().capabilities.contains_key(key) {
         Ok(key)
     } else {
-        Err(field_error("capability", "is not a registered capability"))
+        Err(bilibi_agent_api::invalid(
+            "capability",
+            "is not a registered capability",
+        ))
     }
 }
 fn role_json(role: &RoleSummary) -> Value {
@@ -101,7 +100,7 @@ async fn role(
     let companies = bound.grants.visible_companies(client, scope).await?;
     roles::get(client, scope, &companies, id)
         .await?
-        .ok_or_else(|| field_error("role_id", "is not a role of this tenant"))
+        .ok_or_else(|| bilibi_agent_api::invalid("role_id", "is not a role of this tenant"))
 }
 
 /// The escalation guard (`core/user` account page): the actor must hold
@@ -152,7 +151,7 @@ impl ReadHandler for Read {
                         scope,
                         &companies,
                         &roles::Query {
-                            search: input["search"].as_str().unwrap_or_default().to_owned(),
+                            search: bilibi_agent_api::text_field(input, "search"),
                             sort: roles::Sort::Name,
                             descending: false,
                             page: input["page"].as_u64().unwrap_or(1),
@@ -201,7 +200,10 @@ async fn review(
             bound.grants.verify_principal(client, scope, user).await?;
             let details = role(client, scope, positive(input, "role_id")?).await?;
             if matches!(write, Write::GrantAllRole) && !details.role.grant_all {
-                return Err(field_error("role_id", "is not a full-access role"));
+                return Err(bilibi_agent_api::invalid(
+                    "role_id",
+                    "is not a full-access role",
+                ));
             }
             let bounds = assignment(input)?;
             bound
@@ -228,7 +230,10 @@ async fn review(
             let key = capability(&bound.grants, input)?;
             let rule = input["rule"].as_str().unwrap_or_default();
             if !["allow", "deny", "clear"].contains(&rule) {
-                return Err(field_error("rule", "must be allow, deny or clear"));
+                return Err(bilibi_agent_api::invalid(
+                    "rule",
+                    "must be allow, deny or clear",
+                ));
             }
             bound.grants.verify_principal(client, scope, user).await?;
             if rule == "allow" {
@@ -253,7 +258,7 @@ async fn review(
             let granted = input["granted"].as_bool().unwrap_or(false);
             let details = role(client, scope, positive(input, "role_id")?).await?;
             if details.role.is_system {
-                return Err(field_error(
+                return Err(bilibi_agent_api::invalid(
                     "role_id",
                     "is a system role; reconciliation owns its capabilities",
                 ));

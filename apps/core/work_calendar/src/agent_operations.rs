@@ -30,13 +30,12 @@ pub(crate) fn bind(calendars: Arc<WorkCalendars>) -> bilibi_module_registry::Res
 fn calendars() -> bilibi_agent_api::Result<&'static Arc<WorkCalendars>> {
     CALENDARS.get().ok_or(Error::Internal.into())
 }
-fn field(name: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(name.into(), vec![message.into()])]))
-}
 fn refusal(error: WriteError) -> AgentError {
     match error {
         WriteError::Access(error) => error.into(),
-        WriteError::NotFound => field("code", "is not a calendar or holiday set of this tenant"),
+        WriteError::NotFound => {
+            bilibi_agent_api::invalid("code", "is not a calendar or holiday set of this tenant")
+        }
         WriteError::Stale => Error::Conflict.into(),
         WriteError::Invalid(errors) => {
             let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -49,8 +48,10 @@ fn refusal(error: WriteError) -> AgentError {
 }
 fn read_refusal(error: Error, name: &str) -> AgentError {
     match error {
-        Error::NotFound => field(name, "is not a calendar or holiday set of this tenant"),
-        Error::Invalid => field(
+        Error::NotFound => {
+            bilibi_agent_api::invalid(name, "is not a calendar or holiday set of this tenant")
+        }
+        Error::Invalid => bilibi_agent_api::invalid(
             name,
             "is not a valid window: from on or before to, at most 731 days",
         ),
@@ -61,14 +62,14 @@ fn date(input: &Value, name: &str) -> bilibi_agent_api::Result<Date> {
     input[name]
         .as_str()
         .and_then(|text| text.parse().ok())
-        .ok_or_else(|| field(name, "must be a date (YYYY-MM-DD)"))
+        .ok_or_else(|| bilibi_agent_api::invalid(name, "must be a date (YYYY-MM-DD)"))
 }
 fn instant(input: &Value, name: &str) -> bilibi_agent_api::Result<Timestamp> {
     input[name]
         .as_str()
         .and_then(|text| text.parse().ok())
         .ok_or_else(|| {
-            field(
+            bilibi_agent_api::invalid(
                 name,
                 "must be an instant with an offset, such as 2026-11-02T09:00:00+08:00",
             )
@@ -76,7 +77,7 @@ fn instant(input: &Value, name: &str) -> bilibi_agent_api::Result<Timestamp> {
 }
 fn shift(date: Date, days: i64) -> bilibi_agent_api::Result<Date> {
     date.checked_add(days.days())
-        .map_err(|_| field("date", "is out of range"))
+        .map_err(|_| bilibi_agent_api::invalid("date", "is out of range"))
 }
 /// An optional whole number from `min` to `max`, `default` when omitted.
 fn number(
@@ -91,7 +92,12 @@ fn number(
         Some(value) => value
             .as_i64()
             .filter(|n| (min..=max).contains(n))
-            .ok_or_else(|| field(name, &format!("must be a whole number from {min} to {max}"))),
+            .ok_or_else(|| {
+                bilibi_agent_api::invalid(
+                    name,
+                    format!("must be a whole number from {min} to {max}"),
+                )
+            }),
     }
 }
 fn page(input: &Value) -> bilibi_agent_api::Result<i64> {
@@ -103,7 +109,9 @@ fn listing(input: &Value) -> bilibi_agent_api::Result<Listing> {
         Some(value) => value
             .as_str()
             .filter(|text| text.chars().count() <= 200)
-            .ok_or_else(|| field("search", "must be text of at most 200 characters"))?
+            .ok_or_else(|| {
+                bilibi_agent_api::invalid("search", "must be text of at most 200 characters")
+            })?
             .to_owned(),
     };
     Ok(Listing {
@@ -219,7 +227,7 @@ async fn business_time(
             (day, shift(day, SEARCH_DAYS)?)
         }
         _ => {
-            return Err(field(
+            return Err(bilibi_agent_api::invalid(
                 "operation",
                 "must be is_open, next_open, add, elapsed or add_working_days",
             ))
@@ -229,7 +237,10 @@ async fn business_time(
         .until(to)
         .map_or(true, |span| i64::from(span.get_days()) >= MAX_WINDOW_DAYS)
     {
-        return Err(field("until", "must be within 729 days of at"));
+        return Err(bilibi_agent_api::invalid(
+            "until",
+            "must be within 729 days of at",
+        ));
     }
     let timetable: Timetable = calendars
         .timetable(scope, code, from, to)
@@ -247,7 +258,10 @@ async fn business_time(
                 .as_str()
                 .and_then(|text| text.parse().ok())
                 .ok_or_else(|| {
-                    field("duration", "must be an ISO 8601 duration, such as PT8H30M")
+                    bilibi_agent_api::invalid(
+                        "duration",
+                        "must be an ISO 8601 duration, such as PT8H30M",
+                    )
                 })?;
             timetable
                 .add(instant(input, "at")?, duration)
@@ -260,7 +274,9 @@ async fn business_time(
             let days = input["days"]
                 .as_u64()
                 .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| field("days", "must be a whole number from 0"))?;
+                .ok_or_else(|| {
+                    bilibi_agent_api::invalid("days", "must be a whole number from 0")
+                })?;
             timetable
                 .add_working_days(date(input, "date")?, days)
                 .map(|day| json!(day.to_string()))
@@ -273,8 +289,13 @@ async fn business_time(
         Err(TimeError::Beyond) => {
             Ok(json!({"code": code, "operation": operation, "result": null, "beyond": true}))
         }
-        Err(TimeError::Backwards) => Err(field("until", "must not be before at")),
-        Err(TimeError::Negative) => Err(field("duration", "must not be negative")),
+        Err(TimeError::Backwards) => {
+            Err(bilibi_agent_api::invalid("until", "must not be before at"))
+        }
+        Err(TimeError::Negative) => Err(bilibi_agent_api::invalid(
+            "duration",
+            "must not be negative",
+        )),
     }
 }
 

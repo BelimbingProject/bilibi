@@ -380,17 +380,13 @@ pub(crate) fn input_schema() -> Value {
     },"oneOf":[{"required":["key","entries"]},{"required":["operations"]}]})
 }
 
-type Fields = std::collections::BTreeMap<String, Vec<String>>;
-fn refuse(field: &str, message: impl Into<String>) -> Error {
-    Error::InvalidInput(Fields::from([(field.into(), vec![message.into()])]))
-}
 /// The shape of one step, with the fix named for the mistakes models make:
 /// `entries` or `operation` where `input` belongs, extra labels, a string
 /// where the object goes.
 fn step(index: usize, value: Value) -> Result<crate::plans::PlannedOperation> {
     let at = format!("operations[{}]", index + 1);
     let Value::Object(mut step) = value else {
-        return Err(refuse(
+        return Err(crate::invalid(
             &at,
             "Each step is an object {\"key\": \"<operation key>\", \"input\": {...}}.",
         ));
@@ -405,12 +401,12 @@ fn step(index: usize, value: Value) -> Result<crate::plans::PlannedOperation> {
             ),
             _ => format!("Remove `{unknown}`; a step has only `key` and `input`."),
         };
-        return Err(refuse(&at, hint));
+        return Err(crate::invalid(&at, hint));
     }
     let key = match step.remove("key") {
         Some(Value::String(key)) if !key.is_empty() && key.len() <= 255 => key,
         _ => {
-            return Err(refuse(
+            return Err(crate::invalid(
                 &format!("{at}.key"),
                 "Give the operation key returned by search, such as core.company.create.",
             ))
@@ -418,11 +414,11 @@ fn step(index: usize, value: Value) -> Result<crate::plans::PlannedOperation> {
     };
     match step.remove("input") {
         Some(input @ Value::Object(_)) => Ok(crate::plans::PlannedOperation { key, input }),
-        Some(Value::String(_)) => Err(refuse(
+        Some(Value::String(_)) => Err(crate::invalid(
             &format!("{at}.input"),
             "`input` must be a JSON object, not a string. Send the object itself.",
         )),
-        _ => Err(refuse(
+        _ => Err(crate::invalid(
             &format!("{at}.input"),
             "`input` must be the JSON object of fields for this operation; a link to an earlier new record is {\"$ref\":\"1.id\"}.",
         )),
@@ -434,20 +430,20 @@ fn step(index: usize, value: Value) -> Result<crate::plans::PlannedOperation> {
 fn draft(input: Value) -> Result<(Vec<crate::plans::PlannedOperation>, bool)> {
     const USAGE: &str = "Call review_entries with either `key` and `entries` (one write key, several records) or `operations` (ordered steps, each {\"key\", \"input\"}).";
     let Value::Object(mut object) = input else {
-        return Err(refuse("arguments", USAGE));
+        return Err(crate::invalid("arguments", USAGE));
     };
     if let Some(unknown) = object
         .keys()
         .find(|key| !matches!(key.as_str(), "key" | "entries" | "operations"))
     {
-        return Err(refuse(
+        return Err(crate::invalid(
             unknown,
             format!("`{unknown}` is not an argument of review_entries. {USAGE}"),
         ));
     }
     let linked = object.contains_key("operations");
     if linked && (object.contains_key("key") || object.contains_key("entries")) {
-        return Err(refuse(
+        return Err(crate::invalid(
             "operations",
             "Send `operations` alone: put each step's write key in its own `key` and drop the top-level `key` and `entries`.",
         ));
@@ -462,11 +458,11 @@ fn draft(input: Value) -> Result<(Vec<crate::plans::PlannedOperation>, bool)> {
                     .collect::<Result<_>>()?,
                 true,
             )),
-            Some(Value::String(_)) => Err(refuse(
+            Some(Value::String(_)) => Err(crate::invalid(
                 "operations",
                 "`operations` must be a JSON array of steps, not a string. Send the array itself.",
             )),
-            _ => Err(refuse(
+            _ => Err(crate::invalid(
                 "operations",
                 "`operations` must be a non-empty array of {\"key\", \"input\"} steps.",
             )),
@@ -474,14 +470,14 @@ fn draft(input: Value) -> Result<(Vec<crate::plans::PlannedOperation>, bool)> {
     }
     let key = match object.remove("key") {
         Some(Value::String(key)) if !key.is_empty() && key.len() <= 255 => key,
-        _ => return Err(refuse("key", USAGE)),
+        _ => return Err(crate::invalid("key", USAGE)),
     };
     match object.remove("entries") {
         Some(Value::Array(entries)) if !entries.is_empty() => {
             let mut operations = Vec::new();
             for (index, input) in entries.into_iter().enumerate() {
                 if !input.is_object() {
-                    return Err(refuse(
+                    return Err(crate::invalid(
                         &format!("entries[{}]", index + 1),
                         "Each entry is a JSON object of the write's input fields.",
                     ));
@@ -493,11 +489,11 @@ fn draft(input: Value) -> Result<(Vec<crate::plans::PlannedOperation>, bool)> {
             }
             Ok((operations, false))
         }
-        Some(Value::String(_)) => Err(refuse(
+        Some(Value::String(_)) => Err(crate::invalid(
             "entries",
             "`entries` must be a JSON array of objects, not a string. Send the array itself.",
         )),
-        _ => Err(refuse(
+        _ => Err(crate::invalid(
             "entries",
             "`entries` must be a non-empty array of input objects for `key`.",
         )),
@@ -512,7 +508,7 @@ pub(crate) async fn open(
     let review_settings = plans.review_settings().await?;
     let review_max_entries = MAX_REVIEW_ENTRIES;
     let too_many = |field: &str| {
-        refuse(
+        crate::invalid(
             field,
             format!(
                 "This installation can review up to {review_max_entries} entries at once. Split this into reviews of at most {review_max_entries} entries."
@@ -527,7 +523,7 @@ pub(crate) async fn open(
         return Err(too_many("entries"));
     }
     if input.to_string().len() > 1_048_576 {
-        return Err(refuse(
+        return Err(crate::invalid(
             "arguments",
             "The review is larger than 1 MiB. Split it into smaller reviews.",
         ));
@@ -537,7 +533,7 @@ pub(crate) async fn open(
         return Err(too_many("operations"));
     }
     if linked && operations.len() as u64 > review_settings.max_operations {
-        return Err(refuse("operations", format!("Linked steps must fit one plan, at most {} operations. Cross-plan references are refused.", review_settings.max_operations)));
+        return Err(crate::invalid("operations", format!("Linked steps must fit one plan, at most {} operations. Cross-plan references are refused.", review_settings.max_operations)));
     }
     let mut descriptions = Vec::new();
     {
@@ -549,7 +545,7 @@ pub(crate) async fn open(
         for op in &operations {
             let description = match registry.describe(&**client, session.scope, &op.key).await {
                 Err(Error::UnknownOperation) => {
-                    return Err(refuse(
+                    return Err(crate::invalid(
                         &format!("operations[{}].key", descriptions.len() + 1),
                         format!(
                             "`{}` is not an operation. Use the exact key search returned.",
@@ -560,7 +556,7 @@ pub(crate) async fn open(
                 other => other?,
             };
             if description["safe_write"] != true {
-                return Err(refuse(
+                return Err(crate::invalid(
                     &format!("operations[{}].key", descriptions.len() + 1),
                     format!(
                         "`{}` is not a reviewed write, so a review cannot change it. Use a write key whose describe shows safe_write true.",

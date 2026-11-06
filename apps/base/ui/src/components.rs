@@ -423,6 +423,25 @@ impl Badge<'_> {
     }
 }
 
+/// Render a dotted status badge of `kind` showing `text`.
+///
+/// Shared helper: `.slot("status", bilibi_ui::status_badge(BadgeKind::Success, "Posted"))`
+pub fn status_badge(kind: BadgeKind, text: &str) -> Html {
+    // Only escaped text is written to a String, so rendering cannot fail.
+    Html::render(&Badge::status(kind, text)).unwrap_or(Html::EMPTY)
+}
+
+/// Render the Active (success) or Inactive (neutral) status badge.
+///
+/// Shared helper: `.slot("status", bilibi_ui::active_badge(account.active))`
+pub fn active_badge(active: bool) -> Html {
+    if active {
+        status_badge(BadgeKind::Success, "Active")
+    } else {
+        status_badge(BadgeKind::Neutral, "Inactive")
+    }
+}
+
 /// What a date is, as a day tile shows it: Belimbing's day-type vocabulary
 /// (Normal, Rest, Off, Holiday). Base UI keeps the four kinds itself so it
 /// imports no calendar module; a calendar maps its own type onto one.

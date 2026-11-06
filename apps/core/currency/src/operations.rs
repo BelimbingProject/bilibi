@@ -59,36 +59,21 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn field_error(field: &str, message: &str) -> bilibi_agent_api::Error {
-    invalid(vec![FieldError {
-        field: match field {
-            "amount" => "amount",
-            "date" => "date",
-            "rate" => "rate",
-            "effective_on" => "effective_on",
-            _ => "input",
-        },
-        message: message.to_owned(),
-    }])
-}
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn decimal(input: &Value, field: &str) -> bilibi_agent_api::Result<Decimal> {
     Decimal::from_str(input[field].as_str().unwrap_or_default().trim())
-        .map_err(|_| field_error(field, "is not a number. Write it like \"4.7250\""))
+        .map_err(|_| bilibi_agent_api::invalid(field, "is not a number. Write it like \"4.7250\""))
 }
 fn date(input: &Value, field: &str) -> bilibi_agent_api::Result<Date> {
     input[field]
         .as_str()
         .unwrap_or_default()
         .parse()
-        .map_err(|_| field_error(field, "is not a date; use YYYY-MM-DD"))
+        .map_err(|_| bilibi_agent_api::invalid(field, "is not a date; use YYYY-MM-DD"))
 }
 fn rate_input(input: &Value) -> bilibi_agent_api::Result<RateInput> {
     Ok(RateInput {
-        from: text(input, "from"),
-        to: text(input, "to"),
+        from: bilibi_agent_api::text_field(input, "from"),
+        to: bilibi_agent_api::text_field(input, "to"),
         effective_on: date(input, "effective_on")?,
         rate: decimal(input, "rate")?,
         source_note: input["source_note"].as_str().map(str::to_owned),
@@ -166,8 +151,8 @@ impl ReadHandler for Read {
                 Self::Convert => {
                     let amount = decimal(input, "amount")?;
                     let on = date(input, "date")?;
-                    let from = text(input, "from");
-                    let to = text(input, "to");
+                    let from = bilibi_agent_api::text_field(input, "from");
+                    let to = bilibi_agent_api::text_field(input, "to");
                     let mut request = Request::new(amount, &from, &to, on);
                     if input["unrounded"].as_bool().unwrap_or(false) {
                         request = request.unrounded();
@@ -221,7 +206,12 @@ impl WriteHandler for Write {
                     let enable = input["enabled"].as_bool().ok_or(Error::Invalid)?;
                     let currency = checked(
                         currencies
-                            .preview_enabled(client, scope, &text(input, "code"), enable)
+                            .preview_enabled(
+                                client,
+                                scope,
+                                &bilibi_agent_api::text_field(input, "code"),
+                                enable,
+                            )
                             .await
                             .map_err(found)?,
                     )?;
@@ -285,7 +275,7 @@ impl WriteHandler for Write {
                         .set_enabled(
                             tx,
                             scope,
-                            &text(input, "code"),
+                            &bilibi_agent_api::text_field(input, "code"),
                             input["enabled"].as_bool().ok_or(Error::Invalid)?,
                         )
                         .await

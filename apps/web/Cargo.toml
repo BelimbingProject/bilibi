@@ -52,4 +52,6 @@ bilibi-workflow = { path = "../base/workflow" }
 bilibi-records = { path = "../base/records" }
 bilibi-grid = { path = "../base/grid" }
 bilibi-agent-api = { path = "../base/agent_api" }
+bilibi-locale = { path = "../base/locale" }
+rust_decimal.workspace = true
 jiff = "0.2.38"

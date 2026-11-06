@@ -1,0 +1,29 @@
+# Warns when a pull request adds a free function named like one of Base's
+# shared helpers (apps/base/HELPERS.md). It never fails: a deliberate copy says
+# why under "## Shared helpers" in the body (scripts/shared-helpers.py). Its own
+# workflow so editing the body re-runs it without compiling.
+name: Shared helpers
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-helpers-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  shared-helpers:
+    name: Shared helpers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: python3 scripts/shared-helpers.py warn --base "origin/${{ github.base_ref }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

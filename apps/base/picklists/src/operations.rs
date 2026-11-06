@@ -56,9 +56,6 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn texts(input: &Value, field: &str) -> Vec<String> {
     input[field]
         .as_array()
@@ -87,8 +84,8 @@ fn hint(input: &Value) -> Option<String> {
 }
 fn new_value(input: &Value) -> NewValue {
     NewValue {
-        code: text(input, "code"),
-        label: text(input, "label"),
+        code: bilibi_agent_api::text_field(input, "code"),
+        label: bilibi_agent_api::text_field(input, "label"),
         labels: labels(input),
         hint: hint(input),
         parents: texts(input, "parents"),
@@ -96,7 +93,7 @@ fn new_value(input: &Value) -> NewValue {
 }
 fn update(input: &Value) -> bilibi_agent_api::Result<ValueUpdate> {
     Ok(ValueUpdate {
-        label: text(input, "label"),
+        label: bilibi_agent_api::text_field(input, "label"),
         labels: labels(input),
         hint: hint(input),
         parents: texts(input, "parents"),

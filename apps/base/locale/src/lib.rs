@@ -10,9 +10,11 @@
 //! `Locales::adopt_inferred`. Nothing here changes process-global locale; the
 //! request edge carries the `Resolved` value explicitly.
 mod catalog;
+mod money;
 mod numbers;
 
 pub use catalog::{Entry, SUPPORTED};
+pub use money::money;
 pub use numbers::Numbers;
 
 use bilibi_database::{Error, MutationTransaction, Result};

@@ -54,31 +54,27 @@ impl From<ReportError> for AgentError {
     }
 }
 
-fn invalid(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
 fn id(input: &Value) -> Result<i64, AgentError> {
     input["id"]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| invalid("id", "is required"))
+        .ok_or_else(|| bilibi_agent_api::invalid("id", "is required"))
 }
 fn version(input: &Value) -> Result<i64, AgentError> {
     input["version"]
         .as_i64()
         .filter(|v| *v > 0)
-        .ok_or_else(|| invalid("version", "is required"))
+        .ok_or_else(|| bilibi_agent_api::invalid("version", "is required"))
 }
 fn draft(input: &Value) -> Result<Draft, AgentError> {
-    let text = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
     let kind = Kind::from_key(input["kind"].as_str().unwrap_or_default())
-        .ok_or_else(|| invalid("kind", "must be rows or summary"))?;
+        .ok_or_else(|| bilibi_agent_api::invalid("kind", "must be rows or summary"))?;
     let definition =
         Definition::from_input(&input["definition"]).map_err(AgentError::InvalidInput)?;
     Ok(Draft {
-        name: text("name"),
-        description: text("description"),
-        record_type: text("record_type"),
+        name: bilibi_agent_api::text_field(input, "name"),
+        description: bilibi_agent_api::text_field(input, "description"),
+        record_type: bilibi_agent_api::text_field(input, "record_type"),
         kind,
         definition,
     })
@@ -88,13 +84,18 @@ fn run_input(input: &Value) -> Result<RunInput, AgentError> {
     let mut answers = BTreeMap::new();
     let given = input["answers"].as_array().map_or(0, Vec::len);
     if given > bilibi_grid::MAX_FILTERS {
-        return Err(invalid("answers", "takes at most one answer per filter"));
+        return Err(bilibi_agent_api::invalid(
+            "answers",
+            "takes at most one answer per filter",
+        ));
     }
     for answer in input["answers"].as_array().into_iter().flatten() {
         let position = answer["filter"]
             .as_u64()
             .and_then(|p| usize::try_from(p).ok())
-            .ok_or_else(|| invalid("answers", "each answer names its filter position"))?;
+            .ok_or_else(|| {
+                bilibi_agent_api::invalid("answers", "each answer names its filter position")
+            })?;
         let value = if let Some(values) = answer.get("values") {
             values.clone()
         } else if answer.get("min").is_some() || answer.get("max").is_some() {
@@ -115,7 +116,12 @@ fn run_input(input: &Value) -> Result<RunInput, AgentError> {
                     Some("equals") => item["value"].clone(),
                     Some("empty") => Value::Null,
                     Some("range") => json!({"min": item["min"], "max": item["max"]}),
-                    _ => return Err(invalid("drill", "test must be equals, empty or range")),
+                    _ => {
+                        return Err(bilibi_agent_api::invalid(
+                            "drill",
+                            "test must be equals, empty or range",
+                        ))
+                    }
                 };
                 Ok(FilterDef {
                     column,
@@ -126,12 +132,18 @@ fn run_input(input: &Value) -> Result<RunInput, AgentError> {
             })
             .collect::<Result<Vec<_>, _>>()?,
         None if input.get("drill").is_some() => {
-            return Err(invalid("drill", "must be a list of filters"))
+            return Err(bilibi_agent_api::invalid(
+                "drill",
+                "must be a list of filters",
+            ))
         }
         None => Vec::new(),
     };
     if drill.len() > 2 {
-        return Err(invalid("drill", "takes at most two filters"));
+        return Err(bilibi_agent_api::invalid(
+            "drill",
+            "takes at most two filters",
+        ));
     }
     let page = input["page"]
         .as_u64()
@@ -504,7 +516,7 @@ fn subscription_id(input: &Value) -> Result<i64, AgentError> {
     input["subscription"]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| invalid("subscription", "is required"))
+        .ok_or_else(|| bilibi_agent_api::invalid("subscription", "is required"))
 }
 fn clock(minute: i16) -> String {
     format!("{:02}:{:02}", minute / 60, minute % 60)
@@ -514,14 +526,16 @@ fn clock(minute: i16) -> String {
 /// `skip_empty`, `roles` and `people`.
 pub(crate) fn plan(input: &Value) -> Result<Plan, AgentError> {
     let frequency = Frequency::from_key(input["frequency"].as_str().unwrap_or_default())
-        .ok_or_else(|| invalid("frequency", "must be daily, weekly or monthly"))?;
+        .ok_or_else(|| {
+            bilibi_agent_api::invalid("frequency", "must be daily, weekly or monthly")
+        })?;
     let at = input["at"].as_str().unwrap_or_default();
     let at_minute = at
         .split_once(':')
         .and_then(|(h, m)| Some((h.parse::<i16>().ok()?, m.parse::<i16>().ok()?)))
         .filter(|(h, m)| (0..24).contains(h) && (0..60).contains(m))
         .map(|(h, m)| h * 60 + m)
-        .ok_or_else(|| invalid("at", "must be a time like 08:30"))?;
+        .ok_or_else(|| bilibi_agent_api::invalid("at", "must be a time like 08:30"))?;
     let day = |key: &str| input[key].as_i64().and_then(|d| i16::try_from(d).ok());
     Ok(Plan {
         frequency,
@@ -574,7 +588,7 @@ fn subscriptions_output() -> Value {
 }
 fn export_format(input: &Value) -> Result<Format, AgentError> {
     Format::from_key(input["format"].as_str().unwrap_or("csv"))
-        .ok_or_else(|| invalid("format", "must be csv or pdf"))
+        .ok_or_else(|| bilibi_agent_api::invalid("format", "must be csv or pdf"))
 }
 fn prepare_schema() -> Value {
     let mut schema = run_schema();
