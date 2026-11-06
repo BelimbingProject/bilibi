@@ -523,15 +523,16 @@ async fn response_headers(request: axum::extract::Request, next: Next) -> Respon
 }
 
 /// The emailed credential links (a password reset, a portal invitation, a
-/// request's confirmation): the
+/// request's confirmation, a customer's survey response): the
 /// `{token}` segment is a bearer secret, so it is never logged, shown in a
 /// debug report or sent on as a referrer.
-const CREDENTIAL_PATHS: [&str; 5] = [
+const CREDENTIAL_PATHS: [&str; 6] = [
     "/reset-password/{token}",
     "/accept/{token}",
     "/portal/reset/{site}/{token}",
     "/portal/accept/{site}/{token}",
     "/portal/verify/{site}/{token}",
+    "/survey/{token}",
 ];
 /// `path` with a credential link's token replaced; any other path as it is.
 pub(crate) fn redacted(path: &str) -> std::borrow::Cow<'_, str> {
