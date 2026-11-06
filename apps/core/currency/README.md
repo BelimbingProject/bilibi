@@ -17,7 +17,8 @@ Never keep a free-text currency code, your own minor-units list or your own rate
 
 ## The list
 
-- **ISO 4217 ships.** `currencies` is global, with code, numeric code, name, decimal places (`minor_units`, 0 to 4) and a `withdrawn` flag. Production seed `currencies-iso4217-v1` inserts the list by code and never updates a row, so a rerun changes nothing. It leaves out the precious-metal and test codes (XAU, XTS, XXX…). A later seed version adds new codes and marks withdrawn ones.
+- **ISO 4217 ships.** `currencies` is global, with code, numeric code, name, decimal places (`minor_units`, 0 to 4) and a `withdrawn` flag. Production seed `currencies-iso4217-v1` inserts the list by code and never updates a row, so a rerun changes nothing. It leaves out the precious-metal and test codes (XAU, XTS, XXX…). Seed `currencies-iso4217-v2` sets common names. A later seed version adds new codes and marks withdrawn ones.
+- **Common names.** `common_names` holds the names people use that ISO does not (CNY: RMB, Renminbi, 人民币), most common first. Search on the list and in every currency control matches them, case-insensitively; labels read `CNY — Chinese yuan (RMB)` with the first one, and the others show muted after it. The ISO code is still what is stored and sent. Use `Currency::choice()`, never `Choice::new(currency.label(), ..)`, so a control keeps the names searchable. Printing a common name on a document is not done here.
 - **Tenants enable and disable; they never add a code or change decimal places.** A disabled or withdrawn currency stays readable (`get`) for records that hold it, but `check` refuses it for a new assignment. A withdrawn code cannot be enabled. A currency that is the tenant's base, or any company's own base, cannot be disabled; the refusal names who uses it. An archived or deleted company holds no usable base, so it never blocks a disable.
 
 ## Base currency

@@ -648,12 +648,7 @@ impl CurrencyPage {
                 "off" => !currency.enabled,
                 _ => true,
             })
-            .filter(|currency| {
-                search.is_empty()
-                    || currency.code.to_lowercase().contains(&search)
-                    || currency.name.to_lowercase().contains(&search)
-                    || currency.numeric_code == search
-            })
+            .filter(|currency| search.is_empty() || currency.matches(&search))
             .collect();
         let page = self.state.paginate(&shown);
         let (entries, counts) = (page.entries, page.counts);
@@ -681,7 +676,7 @@ impl CurrencyPage {
                     "search",
                     "Search currencies",
                     &form["search"],
-                    "Search by code or name...",
+                    "Search by code or name, e.g. RMB...",
                 ),
                 ToolbarControl::select(
                     "currency-status",
@@ -716,7 +711,7 @@ impl CurrencyPage {
                         text: &currency.code,
                     })?,
                 )
-                .slot("name", Html::text(&currency.name))
+                .slot("name", Html::text(&currency.display_name()))
                 .slot(
                     "numeric",
                     render(CodeCell {
@@ -801,12 +796,7 @@ struct MutedHtml {
 /// hook finds the control to commit.
 fn currency_editor(id: &str, name: &str, enabled: &[Currency], value: &str) -> Combobox {
     Combobox::new(id, name)
-        .options(
-            enabled
-                .iter()
-                .map(|currency| Choice::new(currency.label(), currency.code.clone()))
-                .collect(),
-        )
+        .options(enabled.iter().map(|currency| currency.choice()).collect())
         .value(value)
         .placeholder("Choose a currency")
         .aria_label("Currency")
@@ -1300,12 +1290,7 @@ impl Rates {
         let combo = |key: &str, label: &str| {
             Combobox::new(format!("convert_{key}"), format!("convert[{key}]"))
                 .label(label)
-                .options(
-                    enabled
-                        .iter()
-                        .map(|currency| Choice::new(currency.label(), currency.code.clone()))
-                        .collect(),
-                )
+                .options(enabled.iter().map(|currency| currency.choice()).collect())
                 .value(value(key))
                 .placeholder("Choose a currency")
         };
@@ -1376,10 +1361,7 @@ impl Rates {
     fn new_dialog(&self, enabled: &[Currency], draft: &Draft) -> Result<Html> {
         let value = |key: &str| draft.values.get(key).cloned().unwrap_or_default();
         let errors = |key: &str| draft.errors.get(key).cloned().unwrap_or_default();
-        let options: Vec<Choice> = enabled
-            .iter()
-            .map(|currency| Choice::new(currency.label(), currency.code.clone()))
-            .collect();
+        let options: Vec<Choice> = enabled.iter().map(|currency| currency.choice()).collect();
         let combo = |key: &str, label: &str, hint: &str| {
             Combobox::new(format!("rate_{key}"), format!("rate[{key}]"))
                 .label(label)
