@@ -51,6 +51,10 @@ The saved check is advisory. Each real row calls the owner again, interprets **t
 
 Existing `ContractError::Backend(bilibi_database::Error::Refused(message))` is an actionable failed row, preserving the owner's message (within the existing row-message bound). Commit refusals drop the owner transaction before reopening to record failure and advance `next_row`; genuine backend failures still retry, and Queue lease and row fences still apply.
 
+The same refusal mapping is shared by bulk updates: a `Refused` answer from the update contract is recorded as a **Not updated** row with the owner's message (within the same bound) instead of retrying the job, and a `Refused` answer when a ticked record is first read is reported on its row like a record that was not found.
+
+The action count in the finish notice, the run's action fact and its **Action** result filter appear only for record types whose owner contributes `ImportResults`, or for a run that already recorded actions; the Imports list's **Actions completed** column appears only when a mounted record type contributes it, with `—` on other types' rows. Ordinary imports keep their created/updated/skipped/not-imported wording.
+
 This seam supports [CX lead import 117](https://github.com/cx2027/bilibi-dom-cx/issues/117); consumer registration and its application adoption remain separate.
 
 ## A run

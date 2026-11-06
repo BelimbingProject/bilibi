@@ -265,6 +265,18 @@ impl BulkData {
             .get(key)
             .and_then(|registered| registered.definition.path)
     }
+    /// Whether a record type's owner reports business actions.
+    pub(crate) fn reports_actions(&self, key: &str) -> bool {
+        self.types
+            .get(key)
+            .is_some_and(|registered| registered.results.is_some())
+    }
+    /// Whether any mounted record type's owner reports business actions.
+    pub(crate) fn any_reports_actions(&self) -> bool {
+        self.types
+            .values()
+            .any(|registered| registered.results.is_some())
+    }
     /// What a record type's records are called; its key when unmounted.
     pub fn label<'a>(&'a self, key: &'a str) -> &'a str {
         self.types

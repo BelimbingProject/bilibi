@@ -970,44 +970,60 @@ impl Detail {
             would("Not imported", "With errors"),
         );
         let count = |n: i64| Html::text(&n.to_string());
+        let actions = self.pages.bulk.reports_actions(&run.record_type) || counts.action > 0;
+        let mut items = vec![
+            Fact {
+                title: &created,
+                id: "import-count-create",
+                value: count(counts.create),
+            },
+            Fact {
+                title: &updated,
+                id: "import-count-update",
+                value: count(counts.update),
+            },
+        ];
+        if actions {
+            items.push(Fact {
+                title: if preview {
+                    "Actions to complete"
+                } else {
+                    "Actions completed"
+                },
+                id: "import-count-action",
+                value: count(counts.action),
+            });
+        }
+        items.extend([
+            Fact {
+                title: &skipped,
+                id: "import-count-skip",
+                value: count(counts.skip),
+            },
+            Fact {
+                title: &failed,
+                id: "import-count-error",
+                value: count(counts.error),
+            },
+        ]);
         html.push(&render(Card {
             id: "import-counts",
             body: render(Facts {
                 id: "import-counts-list",
-                items: vec![
-                    Fact {
-                        title: &created,
-                        id: "import-count-create",
-                        value: count(counts.create),
-                    },
-                    Fact {
-                        title: &updated,
-                        id: "import-count-update",
-                        value: count(counts.update),
-                    },
-                    Fact {
-                        title: if preview {
-                            "Actions to complete"
-                        } else {
-                            "Actions completed"
-                        },
-                        id: "import-count-action",
-                        value: count(counts.action),
-                    },
-                    Fact {
-                        title: &skipped,
-                        id: "import-count-skip",
-                        value: count(counts.skip),
-                    },
-                    Fact {
-                        title: &failed,
-                        id: "import-count-error",
-                        value: count(counts.error),
-                    },
-                ],
+                items,
             })?,
             ..Card::default()
         })?);
+        let mut outcomes = vec![
+            ("All rows", "all"),
+            ("Errors", "error"),
+            ("Create", "create"),
+            ("Update", "update"),
+        ];
+        if actions {
+            outcomes.push(("Action", "action"));
+        }
+        outcomes.push(("Skip", "skip"));
         let form = self.state.filters_form();
         html.push(&render(FilterToolbar::new(
             "import-results-filters",
@@ -1028,14 +1044,7 @@ impl Detail {
                     "outcome",
                     "Filter by result",
                     &form["outcome"],
-                    choices(&[
-                        ("All rows", "all"),
-                        ("Errors", "error"),
-                        ("Create", "create"),
-                        ("Update", "update"),
-                        ("Action", "action"),
-                        ("Skip", "skip"),
-                    ]),
+                    choices(&outcomes),
                 ),
             ],
         ))?);

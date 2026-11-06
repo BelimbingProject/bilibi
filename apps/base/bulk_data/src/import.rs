@@ -631,11 +631,16 @@ impl BulkData {
             store::count(tx.sql(), tenant, &mut counted).await?;
             let run = &counted[0];
             let counts = run.run;
+            let actions = if self.reports_actions(&run.record_type) || counts.action > 0 {
+                format!(" {} actions completed,", counts.action)
+            } else {
+                String::new()
+            };
             let notice = Notice::new(format!("Import of {} finished", run.file_name))
                 .kind("bulk_data.import")
                 .body(format!(
-                    "{} created, {} updated, {} actions completed, {} skipped, {} not imported.",
-                    counts.create, counts.update, counts.action, counts.skip, counts.error
+                    "{} created, {} updated,{actions} {} skipped, {} not imported.",
+                    counts.create, counts.update, counts.skip, counts.error
                 ))
                 .url(format!("/imports/{id}"));
             self.notifications
