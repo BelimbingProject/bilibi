@@ -8,8 +8,11 @@ use std::{
 use tokio_postgres::Row;
 
 pub const COLUMNS: &str =
-    "id,code,name,kind,email,phone,system_key,retired_at,erased_at,version,created_at,updated_at";
+    "id,code,name,kind,email,phone,system_key,retired_at,erased_at,version,created_at,updated_at,custom_fields";
 pub const CONTACT_FIELDS: &[&str] = &["email", "phone"];
+/// Tenant-defined custom field values by key (`base/custom_fields`): text, a
+/// decimal string, `YYYY-MM-DD` or a pick-list code.
+pub type Custom = serde_json::Map<String, serde_json::Value>;
 
 /// What this reader may not see of persons: every restricted field, and of
 /// those, the ones it sees masked with their personal kinds (ADR 05).
@@ -44,6 +47,9 @@ pub struct Person {
     pub version: i64,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
+    /// Custom field values by key, archived fields' included; `custom::listed`
+    /// pairs them with the active fields.
+    pub custom: Custom,
     pub restricted: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub masked: Vec<String>,
@@ -67,6 +73,10 @@ impl Person {
             version: row.get("version"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+            custom: match row.get::<_, serde_json::Value>("custom_fields") {
+                serde_json::Value::Object(map) => map,
+                _ => return Err(Error::Internal),
+            },
             restricted: Vec::new(),
             masked: Vec::new(),
         })
@@ -116,6 +126,13 @@ pub struct FieldError {
 }
 pub(crate) fn error(field: &'static str, message: &'static str) -> FieldError {
     FieldError { field, message }
+}
+/// A refused custom field value: the field as `cf_<key>`, and why, in Base
+/// Custom Fields' words.
+#[derive(Clone, Debug, Serialize)]
+pub struct CustomFieldError {
+    pub field: String,
+    pub message: String,
 }
 pub fn optional(value: &Option<String>) -> Option<String> {
     value
@@ -171,6 +188,9 @@ pub fn validate(input: &PersonInput) -> std::result::Result<PersonInput, Vec<Fie
 pub struct Update {
     pub version: i64,
     pub identity: PersonInput,
+    /// Custom field values to set (a `null` clears); the others are kept.
+    #[serde(default, skip_serializing_if = "Custom::is_empty")]
+    pub custom: Custom,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -251,4 +271,7 @@ pub struct CreatePreview {
     #[serde(flatten)]
     pub identity: PersonInput,
     pub code: String,
+    /// The custom field values the person would hold.
+    #[serde(skip_serializing_if = "Custom::is_empty")]
+    pub custom: Custom,
 }

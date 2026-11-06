@@ -2,7 +2,7 @@
 
 `PersonService` (`core/person.persons`) and the transaction APIs the crate root exports from the private `src/identity.rs` (`read_person`, `search_persons`, `preview_person`, `preview_person_with_code`, `create_person`, `create_person_with_code`, `lock_for_account_binding`, `account_standing`) own `persons`. They use K0's `PersonInput`, `PersonKind` and `PersonId`; an identity is never an employee or login account. Core works with People absent. `/contacts` and `/contacts/{id}` provide the capability-gated directory and inline record/contact editor. Creating a contact opens a dialog on the list; `/contacts/new` redirects there with that dialog open. The earlier `/persons` addresses answer with a permanent redirect to the Contacts addresses (`Moved` contributions in `src/contributions.rs`).
 
-Every person has a fixed Core `code`, unique within their tenant, including retired identities. The default uses up to 12 characters from whole name words, omitting source-spelled connectors bin, binti, a/l, a/p, s/o and d/o. It truncates the first word only when needed to fit the limit. For example, `Kam Pui Yue` becomes `kam_pui_yue` and `Muhammad Hafiz bin Ismail` becomes `muhammad`. If the suggestion is taken, it adds `_2`, `_3` and so on within 12 characters. A name without ASCII slug characters starts with `person`. The form suggests a code while the name is entered, and the person can replace it with a code up to 255 characters, including an imported code. If they clear the field, Bilibi chooses the code. Updates cannot change a code. `preview_person_with_code` and `create_person_with_code` accept an optional explicit code, while `preview_person` and `create_person` use the default. Preview reserves nothing; creation checks availability under a tenant lock. Renames and retirement retain the code, and a database trigger refuses a code edit. Contacts and global search find a person by code. Downstream records should display this Core code rather than assign a customer or supplier code.
+Every person has a fixed Core `code`, unique within their tenant, including retired identities. The default uses up to 12 characters from whole name words, omitting source-spelled connectors bin, binti, a/l, a/p, s/o and d/o. It truncates the first word only when needed to fit the limit. For example, `Kam Pui Yue` becomes `kam_pui_yue` and `Muhammad Hafiz bin Ismail` becomes `muhammad`. If the suggestion is taken, it adds `_2`, `_3` and so on within 12 characters. A name without ASCII slug characters starts with `person`. The form suggests a code while the name is entered, and the person can replace it with a code up to 255 characters, including an imported code. If they clear the field, Bilibi chooses the code. Updates cannot change a code. `preview_person_with_code` and `create_person_with_code` accept an optional explicit code and the person's custom field values, while `preview_person` and `create_person` use the default code and set none. Preview reserves nothing; creation checks availability under a tenant lock. Renames and retirement retain the code, and a database trigger refuses a code edit. Contacts and global search find a person by code. Downstream records should display this Core code rather than assign a customer or supplier code.
 
 The module migration creates tenant-scoped bigint identities, fixed codes, personal
 email/phone, explicit human/agent kind, version and creation/change metadata.
@@ -101,11 +101,22 @@ tables directly; the providers contain the owning queries.
 
 `bilibi_person::read_person(client, scope, id)` accepts `&dyn bilibi_tenancy::ReadClient`. Composed reads, including billing-address owner checks, keep the caller's connection and the same `admin.person.view` check and contact masks. Retired Persons remain readable.
 
+## Tenant-defined custom fields
+
+**A tenant administrator adds text, number, date and pick-list fields to contacts without a release; Core Person keeps the values on the person and checks them in its own writes.** Contacts are the `base/custom_fields` record type `person` ([Custom Fields](../../base/custom_fields/README.md), ADR 21); values live in `persons.custom_fields` (migration `core-person-006-custom-fields`), keyed by each field's stable key.
+
+- **One check, every door.** `Update.custom` (key to value, `null` clears; keys left out are kept) and `create_person_with_code`'s values go through `CustomFields::validate` in a preview and `validate_locked` in the write, so a changed pick-list code is held until commit. A key that is not an active field, a value of the wrong shape or a choice the list does not offer is refused on `cf_<key>`; a retired choice the person already holds stays valid.
+- **Page.** The record page shows the active fields among the identity facts and edits each in place (`save_custom_field`, through `core.person.update` with the identity as it stands, so only that value changes). A date reads in the reader's format, a choice by its label (marked Retired when retired). The create dialog shows them after the contact details and posts `cf_<key>`; a refusal stays on its field and in the summary.
+- **Agents.** `core.person.create` and `core.person.update` take `custom` as a list of `{key, value}` (the input dialect has no free-form object). Reads (`get`, `list`, `duplicates`) and write results return `custom` as `{key, label, type, value}` for the active fields. Find the keys with `base.custom_fields.list`.
+- **Archived fields** leave the page and agent output, and a write naming one is refused; the value stays on the person and returns if the field is restored.
+- **Not in this part.** List columns, sorting and filters on custom fields (as Company has), and per-field restrictions, which ADR 21 leaves out: a reader who may open the person sees the values.
+- **Previews** of `core.person.update` and `.retire` read on the plan's own transaction, so concurrent plans never wait for a second pooled connection.
+
 ## Personal data
 
 **Erasure anonymises the person to a stub that keeps its ID, kind and links, and marks it erased (`erased_at`).** Store `core/person.people` under [`base/personal_data`](../../base/personal_data/README.md), [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md).
 
-- Declares kind `person` (name, code, email, phone; the record is a person) and erases `person`, `base/media/attachment` and `base/media/asset` evidence.
+- Declares kind `person` (name, code, email, phone and custom field values; the record is a person) and erases `person`, `base/media/attachment` and `base/media/asset` evidence. Erasure clears `custom_fields`, and audit erasure clears `custom` in the person's history.
 - The code, which may contain personal data, becomes `erased-<id>`, the only change the fixed-code trigger admits. The `erased-` prefix is reserved at creation and in the database, so an imported code cannot occupy another person's erasure stub.
 - Erasure invalidates all cached Contacts CSV exports in the tenant in the same transaction as anonymisation, including exports whose filters or linked columns may contain the person. Concurrent export reading/publication is fenced against that transaction; later exports read the anonymised facts. After commit, all saved copies (including files of interrupted attempts) are removed through Artifacts, with retention and legal holds reported. Invalidated downloads fail immediately, even if physical cleanup must retry.
 - Files are read and removed only through the grant-checked Media and Artifacts paths: a retired person's documents and those filed under another company are reached; no capability opens them otherwise. Each document deletion is recorded as it happens.
@@ -128,6 +139,12 @@ executes create/update/retire through the real safe-write plan service and print
 write refusal without printing credentials or 2FA codes. It creates a temporary
 operator marker only in the disposable DB and removes it. No People module,
 unit tests, test runner or mocks are involved.
+
+`person-custom-fields` proves custom fields through the same doors, each line `ok` or `FAIL`: definitions, refusals on `cf_<key>`, create and update through reviewed plans, audit, a stale version, the viewer and another tenant refused, a retired choice kept, an archived field, and 40 concurrent previews. It then serves the app for the browser (`APP_ORIGIN`, `BIND_ADDR`; `serve` serves only):
+
+```sh
+BILIBI_PERSON_DEMO=disposable cargo run -p bilibi-person --example person-custom-fields --locked
+```
 
 ## Person screens and record panels (K8)
 

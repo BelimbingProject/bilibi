@@ -240,7 +240,7 @@ impl Detail {
                     ("Agent", "agent"),
                 ])),
         )?;
-        let items = vec![
+        let mut items = vec![
             Fact {
                 title: super::fields::CODE.label,
                 value: Html::text(&person.code),
@@ -289,6 +289,29 @@ impl Detail {
                 ..Fact::default()
             },
         ];
+        // The tenant's own fields, edited in place through
+        // `core.person.update` (`save_custom_field`).
+        let definitions = super::custom::active(&self.pages, scope).await?;
+        for definition in &definitions {
+            let name = crate::custom::name(&definition.key);
+            let value = super::custom::text(person.custom.get(&definition.key));
+            let mut field = self.inline(
+                &person,
+                &name,
+                &definition.label,
+                &value,
+                editable,
+                "person-field",
+            );
+            field.id = format!("person-field-{}", name.replace('_', "-"));
+            field.save_event = "save_custom_field".into();
+            field = field.allow_empty();
+            items.push(Fact {
+                title: &definition.label,
+                value: super::custom::fact(&self.pages, scope, definition, &value, field).await?,
+                ..Fact::default()
+            });
+        }
         let mut identity = render(SectionHeading {
             title: "Identity and contact details",
             ..SectionHeading::default()
@@ -397,16 +420,7 @@ impl Detail {
                     .and_then(|v| v.parse::<i64>().ok())
                     .ok_or(Error::Invalid)?;
                 let person = self.pages.persons.read(scope, self.id).await?;
-                // Never carry a restricted contact into a replacement input: a
-                // masked one holds only its partial value. Left out, the owner
-                // keeps the stored value.
-                let masked = |key: &str| person.masked.iter().any(|m| m == key);
-                let mut identity = PersonInput {
-                    email: person.email.clone().filter(|_| !masked("email")),
-                    phone: person.phone.clone().filter(|_| !masked("phone")),
-                    name: person.name,
-                    kind: person.kind,
-                };
+                let mut identity = current_identity(person);
                 match field {
                     "name" => identity.name = submitted.into(),
                     "email" => identity.email = Some(submitted.into()),
@@ -478,6 +492,74 @@ impl Detail {
                     Err(ContractError::Backend(Error::Conflict)) => CommitStatus::refusal(
                         field,
                         if masked { "" } else { submitted },
+                        &["has changed since this edit began; reload before trying again"],
+                    ),
+                    Err(_) => CommitStatus::failure(),
+                };
+                self.statuses.put(field, status);
+            }
+            // One custom field (`cf_<key>`): the identity is sent as it is, so
+            // only that value changes; the owner checks it against the
+            // tenant's definitions.
+            "save_custom_field" => {
+                let field = value["field"].as_str().ok_or(Error::Invalid)?.to_owned();
+                let Some(key) = field.strip_prefix("cf_").map(str::to_owned) else {
+                    return Err(Error::Invalid);
+                };
+                if value["id"].as_str() != Some(&self.id.get().to_string()) {
+                    return Err(Error::Invalid);
+                }
+                let submitted = value["value"].as_str().ok_or(Error::Invalid)?;
+                let version = value["version"]
+                    .as_str()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let person = self.pages.persons.read(scope, self.id).await?;
+                let identity = current_identity(person);
+                // A refusal names the field as the page does.
+                let label = super::custom::active(&self.pages, scope)
+                    .await?
+                    .into_iter()
+                    .find(|definition| definition.key == key)
+                    .map_or_else(|| "This field".to_owned(), |definition| definition.label);
+                let result = self
+                    .pages
+                    .contracts
+                    .submit(
+                        &self.pages.call(scope, credential, "save_custom_field", "core.person.update"),
+                        json!({"person_id": self.id.get(), "version": version, "identity": identity_json(&identity), "custom": [{"key": key, "value": submitted}]}),
+                    )
+                    .await;
+                let status = match result {
+                    Ok(_) => CommitStatus::Saved,
+                    Err(ContractError::Backend(
+                        error @ (Error::Unauthorized | Error::StepUpRequired { .. }),
+                    )) => return Err(error),
+                    Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
+                        self.notice =
+                            "You do not have permission to edit this contact, or it is retired."
+                                .into();
+                        self.statuses.clear_saved();
+                        CommitStatus::Error(self.notice.clone())
+                    }
+                    Err(ContractError::InvalidInput(errors)) => {
+                        let messages: Vec<&str> = errors
+                            .values()
+                            .flat_map(|messages| messages.iter().map(String::as_str))
+                            .collect();
+                        CommitStatus::refusal(
+                            &label,
+                            submitted,
+                            if messages.is_empty() {
+                                &["is not valid"]
+                            } else {
+                                &messages
+                            },
+                        )
+                    }
+                    Err(ContractError::Backend(Error::Conflict)) => CommitStatus::refusal(
+                        &label,
+                        submitted,
                         &["has changed since this edit began; reload before trying again"],
                     ),
                     Err(_) => CommitStatus::failure(),
@@ -607,6 +689,19 @@ impl LiveState<Scope, Error> for Detail {
     }
     fn panels(&self) -> Vec<PanelSpec> {
         self.active_panels.clone()
+    }
+}
+
+/// The person's identity as a replacement input. A restricted contact is
+/// never carried: a masked one holds only its partial value, and left out the
+/// owner keeps the stored value.
+fn current_identity(person: Person) -> PersonInput {
+    let masked = |key: &str| person.masked.iter().any(|m| m == key);
+    PersonInput {
+        email: person.email.clone().filter(|_| !masked("email")),
+        phone: person.phone.clone().filter(|_| !masked("phone")),
+        name: person.name,
+        kind: person.kind,
     }
 }
 

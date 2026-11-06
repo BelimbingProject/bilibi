@@ -1,7 +1,7 @@
 //! Headless adapters call the owner; E2 owns review, replay and outer commit.
 use crate::{
-    contributions::*, identity, DuplicateQuery, Person, PersonId, PersonInput, Search, Update,
-    WriteError,
+    contributions::*, custom, identity, Custom, DuplicateQuery, Person, PersonId, PersonInput,
+    Search, Update, WriteError,
 };
 use bilibi_agent_api::{
     json::{Data, Output, Page},
@@ -30,15 +30,22 @@ fn db() -> bilibi_agent_api::Result<&'static Db> {
 fn parse<T: for<'a> Deserialize<'a>>(value: &Value) -> bilibi_agent_api::Result<T> {
     serde_json::from_value(value.clone()).map_err(|_| Error::Invalid.into())
 }
-fn create_input(input: &Value) -> bilibi_agent_api::Result<(PersonInput, Option<String>)> {
+fn create_input(input: &Value) -> bilibi_agent_api::Result<(PersonInput, Option<String>, Custom)> {
     let mut identity = input.clone();
-    let code = identity
-        .as_object_mut()
-        .ok_or(Error::Invalid)?
+    let object = identity.as_object_mut().ok_or(Error::Invalid)?;
+    let code = object
         .remove("code")
         .map(|value| value.as_str().map(str::to_owned).ok_or(Error::Invalid))
         .transpose()?;
-    Ok((parse(&identity)?, code))
+    let values = custom::patch(&object.remove("custom").unwrap_or(Value::Null))?;
+    Ok((parse(&identity)?, code, values))
+}
+fn update_input(input: &Value) -> bilibi_agent_api::Result<Update> {
+    Ok(Update {
+        version: version(input)?,
+        identity: parse(&input["identity"])?,
+        custom: custom::patch(&input["custom"])?,
+    })
 }
 fn id(input: &Value) -> bilibi_agent_api::Result<PersonId> {
     PersonId::new(input["person_id"].as_i64().ok_or(Error::Invalid)?)
@@ -64,14 +71,59 @@ fn invalid(error: WriteError) -> bilibi_agent_api::Error {
             }
             bilibi_agent_api::Error::InvalidInput(fields)
         }
+        WriteError::CustomFields(errors) => {
+            let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for error in errors {
+                fields.entry(error.field).or_default().push(error.message);
+            }
+            bilibi_agent_api::Error::InvalidInput(fields)
+        }
         WriteError::Retired | WriteError::SystemIdentity => Error::Forbidden.into(),
     }
 }
-fn record(person: Person) -> Data {
+/// A person for agents: hidden contacts marked restricted, and `custom` as
+/// the tenant's active fields with this person's values.
+async fn record(
+    client: &dyn bilibi_tenancy::ReadClient,
+    scope: &Scope,
+    person: Person,
+) -> bilibi_agent_api::Result<Data> {
     let masked: HashSet<_> = person.restricted.iter().cloned().collect();
     let mut value = person.json();
+    value["custom"] = custom::listed(client, scope, &person.custom).await?;
     value["path"] = json!(format!("/contacts/{}", person.id.get()));
-    Data::restricted(value, &masked)
+    Ok(Data::restricted(value, &masked))
+}
+async fn records(
+    client: &dyn bilibi_tenancy::ReadClient,
+    scope: &Scope,
+    people: Vec<Person>,
+) -> bilibi_agent_api::Result<Data> {
+    let mut out = Vec::with_capacity(people.len());
+    for person in people {
+        out.push(record(client, scope, person).await?);
+    }
+    Ok(Data::Array(out))
+}
+/// What an update would do, on one connection: the person before (with its
+/// custom fields), the identity it would store and the custom fields after.
+async fn update_preview(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    scope: &Scope,
+    id: PersonId,
+    update: &Update,
+) -> bilibi_agent_api::Result<Value> {
+    let (old, identity, after) = identity::preview_update(client, scope, id, update)
+        .await
+        .map_err(invalid)?;
+    let mut before = old.json();
+    before["custom"] = custom::listed(client, scope, &old.custom).await?;
+    let after = custom::listed(client, scope, &after).await?;
+    // Record JSON already lacks masked values. Null for a hidden contact
+    // means preserve; the guide explains this to clients.
+    Ok(
+        json!({"summary":"Update person", "person_id":old.id, "version":old.version, "before":before, "identity":identity, "custom":after}),
+    )
 }
 enum Read {
     List,
@@ -94,22 +146,22 @@ impl ReadHandler for Read {
                 Self::List => {
                     let page = identity::search(&**client, scope, &parse::<Search>(input)?).await?;
                     Ok(Output::Page(Page {
-                        entries: Data::Array(page.entries.into_iter().map(record).collect()),
+                        entries: records(&**client, scope, page.entries).await?,
                         page: page.page as u64,
                         page_size: page.page_size as u64,
                         total: page.total as u64,
                     }))
                 }
-                Self::Get => Ok(Output::Data(record(
-                    identity::read(&**client, scope, id(input)?).await?,
-                ))),
-                Self::Duplicates => Ok(Output::Data(Data::Array(
-                    identity::duplicates(&**client, scope, &parse::<DuplicateQuery>(input)?)
-                        .await?
-                        .into_iter()
-                        .map(record)
-                        .collect(),
-                ))),
+                Self::Get => {
+                    let person = identity::read(&**client, scope, id(input)?).await?;
+                    Ok(Output::Data(record(&**client, scope, person).await?))
+                }
+                Self::Duplicates => {
+                    let people =
+                        identity::duplicates(&**client, scope, &parse::<DuplicateQuery>(input)?)
+                            .await?;
+                    Ok(Output::Data(records(&**client, scope, people).await?))
+                }
             }
         })
     }
@@ -138,7 +190,7 @@ impl WriteHandler for Write {
         Box::pin(async move {
             let value = match self {
                 Self::Create => {
-                    let (identity, mut code) = create_input(input)?;
+                    let (identity, mut code, values) = create_input(input)?;
                     if let Some(tx) = client.transaction() {
                         identity::lock_code_allocation(tx, scope.tenant()).await?;
                     }
@@ -153,10 +205,15 @@ impl WriteHandler for Write {
                             .await?,
                         );
                     }
-                    let person =
-                        identity::preview_with_code(client, scope, &identity, code.as_deref())
-                            .await
-                            .map_err(invalid)?;
+                    let person = identity::preview_with_code(
+                        client,
+                        scope,
+                        &identity,
+                        code.as_deref(),
+                        &values,
+                    )
+                    .await
+                    .map_err(invalid)?;
                     if !generated && !client.reserve_preview_value("core.person.code", &person.code)
                     {
                         return Err(invalid(WriteError::Validation(vec![crate::model::error(
@@ -167,25 +224,30 @@ impl WriteHandler for Write {
                     json!({"summary":"Create person without an account or access grants", "identity":person})
                 }
                 Self::Update => {
-                    let client = db()?.get().await.map_err(Error::from)?;
-                    let update = Update {
-                        version: version(input)?,
-                        identity: parse(&input["identity"])?,
-                    };
-                    let (old, identity) =
-                        identity::preview_update(&**client, scope, id(input)?, &update)
-                            .await
-                            .map_err(invalid)?;
-                    // Record JSON already lacks masked values. Null for a hidden
-                    // contact means preserve; the guide explains this to clients.
-                    json!({"summary":"Update person", "person_id":old.id, "version":old.version, "before":old, "identity":identity})
+                    let update = update_input(input)?;
+                    // On the plan's own transaction: a second pooled
+                    // connection per preview would exhaust the pool under
+                    // concurrent plans. A caller without one reads from the pool.
+                    match client.transaction() {
+                        Some(tx) => update_preview(tx, scope, id(input)?, &update).await?,
+                        None => {
+                            let pooled = db()?.get().await.map_err(Error::from)?;
+                            update_preview(&**pooled, scope, id(input)?, &update).await?
+                        }
+                    }
                 }
                 Self::Retire => {
-                    let client = db()?.get().await.map_err(Error::from)?;
-                    let old =
-                        identity::preview_retire(&**client, scope, id(input)?, version(input)?)
-                            .await
-                            .map_err(invalid)?;
+                    let old = match client.transaction() {
+                        Some(tx) => {
+                            identity::preview_retire(tx, scope, id(input)?, version(input)?).await
+                        }
+                        None => {
+                            let pooled = db()?.get().await.map_err(Error::from)?;
+                            identity::preview_retire(&**pooled, scope, id(input)?, version(input)?)
+                                .await
+                        }
+                    }
+                    .map_err(invalid)?;
                     json!({"summary":"Retire person; retain identity and history", "person_id":old.id, "version":old.version})
                 }
             };
@@ -201,20 +263,11 @@ impl WriteHandler for Write {
         Box::pin(async move {
             let person = match self {
                 Self::Create => {
-                    let (identity, code) = create_input(input)?;
-                    identity::create_with_code(tx, scope, &identity, code.as_deref()).await
+                    let (identity, code, values) = create_input(input)?;
+                    identity::create_with_code(tx, scope, &identity, code.as_deref(), &values).await
                 }
                 Self::Update => {
-                    identity::update(
-                        tx,
-                        scope,
-                        id(input)?,
-                        &Update {
-                            version: version(input)?,
-                            identity: parse(&input["identity"])?,
-                        },
-                    )
-                    .await
+                    identity::update(tx, scope, id(input)?, &update_input(input)?).await
                 }
                 Self::Retire => {
                     crate::step_up::retire(scope, id(input)?).await?;
@@ -222,7 +275,7 @@ impl WriteHandler for Write {
                 }
             }
             .map_err(invalid)?;
-            Ok(Output::Data(record(person)))
+            Ok(Output::Data(record(tx.sql(), scope, person).await?))
         })
     }
 }
@@ -234,6 +287,7 @@ fn identity_schema() -> Value {
 }
 fn create_schema() -> Value {
     let mut schema = identity_schema();
+    schema["properties"]["custom"] = custom::schema();
     schema["properties"]["code"] = json!({"type":"string","maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit source-spelled connectors bin, binti, a/l, a/p, s/o and d/o; add _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."});
     schema
 }
@@ -257,13 +311,13 @@ fn duplicate_schema() -> Value {
     }})
 }
 fn update_schema() -> Value {
-    json!({"type":"object","required":["person_id","version","identity"],"properties":{"person_id":id_schema(),"version":id_schema(),"identity":identity_schema()}})
+    json!({"type":"object","required":["person_id","version","identity"],"properties":{"person_id":id_schema(),"version":id_schema(),"identity":identity_schema(),"custom":custom::schema()}})
 }
 fn retire_schema() -> Value {
     json!({"type":"object","required":["person_id","version"],"properties":{"person_id":id_schema(),"version":id_schema()}})
 }
 fn one_output() -> Value {
-    json!({"type":"object","description":"Person fixed Core code and identity/contact facts; hidden contacts read as {\"restricted\":true}. No credentials or grants."})
+    json!({"type":"object","description":"Person fixed Core code and identity/contact facts; hidden contacts read as {\"restricted\":true}; custom lists the tenant's active custom fields as {key, label, type, value}. No credentials or grants."})
 }
 fn many_output() -> Value {
     json!({"type":"array","description":"Bounded Person identities with contacts redacted under your current role restrictions."})
@@ -278,5 +332,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/person.agent", Provena
         Operation { key:"core.person.retire", title:"Retire a person", summary:"Retain the contact and history while refusing new identity bindings. Protected system identities cannot retire.", keywords:&["contact","archive"], capability:RETIRE, input:retire_schema, output:one_output, handler:Handler::SafeWrite(&Write::Retire),channels:Channels::Every,step_up:&[crate::step_up::RETIRE] },
     ],
     guides: &[Guide { key:"core.person", title:"Contacts and personal details", summary:"Identity, duplicate candidates, agents and optional account binding without People.", keywords:&["contact","human","agent","account"], capability:LIST,
-        body:"Postal addresses are saved and linked through core.address, not a scalar field here. Search address or read guide core.address. Use core.address.company.list or core.address.person.list to find existing addresses; create_and_attach or attach links an office, billing or other address to its company or contact. Use one ordered plan for new companies, contacts, affiliations and addresses, with {\"$ref\":\"1.id\"} for the record created by step 1; review_entries accepts operations for linked steps.\n\nEach Person has one fixed Core code. Propose a short code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit source-spelled connectors bin, binti, a/l, a/p, s/o and d/o; append _2, _3 and so on for collisions within 12 characters. The person may choose another, longer code. The create preview and every read return code; core.person.list searches and sorts by code. Renaming or retiring never changes or frees it. Do not send code in update inputs.\n\nA Person is a human or agent identity with optional personal email and phone, independent of any company, employment or login account. Search with core.person.list and core.person.duplicates before creating; duplicate email and name are allowed and never imply the same person. Duplicate lookup matches exact case-insensitive trimmed name/email or exact trimmed phone and includes retired records. It never probes a contact field you may not see.\n\nCreate through a dry run and explicit review before the write. Employee numbers, employment lifecycle, account IDs, grants and reserved system keys are refused. Agent kind grants no login or capability. The operator explicitly provisions the protected platform-orchestrator identity through its owner API, never by a magic numeric ID.\n\nUpdate sends person_id, current version and identity (name, kind, optional email/phone). Empty strings clear visible contacts; omitted visible contacts also clear. A hidden contact must be omitted and is preserved. Read results mark hidden contacts as restricted. Retirement retains identity/history and prevents new account bindings. Optional account links belong to User and require a live Person; Person creation never creates a link. Desks separately grant staff workplace access. Work contacts and dated company affiliations belong to Affiliation: record a namecard contact (a new person and their company position at once) with core.affiliation.contact.create, and affiliate an existing person with core.affiliation.create. Business roles toward a company (customer, prospect, vendor) are core.company.relationship.assign with target_kind person. Never invent an employee number, employment status or login from a namecard; HR belongs to People, which is not needed for contacts." }],
+        body:"Postal addresses are saved and linked through core.address, not a scalar field here. Search address or read guide core.address. Use core.address.company.list or core.address.person.list to find existing addresses; create_and_attach or attach links an office, billing or other address to its company or contact. Use one ordered plan for new companies, contacts, affiliations and addresses, with {\"$ref\":\"1.id\"} for the record created by step 1; review_entries accepts operations for linked steps.\n\nEach Person has one fixed Core code. Propose a short code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit source-spelled connectors bin, binti, a/l, a/p, s/o and d/o; append _2, _3 and so on for collisions within 12 characters. The person may choose another, longer code. The create preview and every read return code; core.person.list searches and sorts by code. Renaming or retiring never changes or frees it. Do not send code in update inputs.\n\nA Person is a human or agent identity with optional personal email and phone, independent of any company, employment or login account. Search with core.person.list and core.person.duplicates before creating; duplicate email and name are allowed and never imply the same person. Duplicate lookup matches exact case-insensitive trimmed name/email or exact trimmed phone and includes retired records. It never probes a contact field you may not see.\n\nCreate through a dry run and explicit review before the write. Employee numbers, employment lifecycle, account IDs, grants and reserved system keys are refused. Agent kind grants no login or capability. The operator explicitly provisions the protected platform-orchestrator identity through its owner API, never by a magic numeric ID.\n\nUpdate sends person_id, current version and identity (name, kind, optional email/phone). Empty strings clear visible contacts; omitted visible contacts also clear. A hidden contact must be omitted and is preserved. Read results mark hidden contacts as restricted. Retirement retains identity/history and prevents new account bindings.\n\nCustom fields are the tenant's own person fields (read them with base.custom_fields.list, record type person). Reads return custom as {key, label, type, value} for the active fields. core.person.create and core.person.update take custom as a list of {key, value}: text, a number as a decimal string, a date as YYYY-MM-DD, a choice as its pick-list code, or null to clear. Update changes only the keys you send; the others are kept. A key that is not an active field is refused on cf_<key>. Optional account links belong to User and require a live Person; Person creation never creates a link. Desks separately grant staff workplace access. Work contacts and dated company affiliations belong to Affiliation: record a namecard contact (a new person and their company position at once) with core.affiliation.contact.create, and affiliate an existing person with core.affiliation.create. Business roles toward a company (customer, prospect, vendor) are core.company.relationship.assign with target_kind person. Never invent an employee number, employment status or login from a namecard; HR belongs to People, which is not needed for contacts." }],
 }) }

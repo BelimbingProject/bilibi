@@ -1305,6 +1305,61 @@ async fn main() -> Result<()> {
         .await?
         .get(0);
     let lea_id = lea.to_string();
+    // A custom person field with a value of Lea's, written through Core
+    // Person so her audit history holds it too: erasure clears both.
+    {
+        let fields = app
+            .services
+            .get::<bilibi_base::custom_fields::CustomFields>(bilibi_base::custom_fields::SERVICE)?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("walkthrough.custom-field"),
+            )
+            .await?;
+        fields
+            .define(
+                &mut tx,
+                &admin,
+                &bilibi_base::custom_fields::NewField {
+                    record_type: "person".into(),
+                    key: "licence_note".into(),
+                    label: "Licence note".into(),
+                    kind: "text".into(),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .map_err(|errors| format!("{errors:?}"))?;
+        tx.commit().await?;
+        let people = app
+            .services
+            .get::<bilibi_core::person::PersonService>(bilibi_core::person::SERVICE)?;
+        let held = people.read(&admin, PersonId::new(lea)?).await?;
+        people
+            .update(
+                &admin,
+                held.id,
+                &bilibi_core::person::Update {
+                    version: held.version,
+                    identity: bilibi_core::person::PersonInput {
+                        name: held.name.clone(),
+                        kind: held.kind,
+                        email: held.email.clone(),
+                        phone: None,
+                    },
+                    custom: [(
+                        "licence_note".to_owned(),
+                        json!("Licence LX-4471 seen in person"),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        println!("Lea holds a custom licence note, written through Core Person");
+    }
     let lea_subject = AttachmentSubject {
         kind: person_files::ATTACHMENT_SUBJECT,
         id: &lea_id,
@@ -1402,7 +1457,13 @@ async fn main() -> Result<()> {
     rows(
         &client,
         "Lea",
-        &format!("SELECT row_to_json(p)::text FROM (SELECT name,code,email,erased_at IS NOT NULL AS erased FROM persons WHERE id={lea}) p"),
+        &format!("SELECT row_to_json(p)::text FROM (SELECT name,code,email,custom_fields,erased_at IS NOT NULL AS erased FROM persons WHERE id={lea}) p"),
+    )
+    .await?;
+    rows(
+        &client,
+        "Lea's custom values in her audit history (none may still read LX-4471)",
+        &format!("SELECT row_to_json(a)::text FROM (SELECT event,old_values->'custom' AS old_custom,new_values->'custom' AS new_custom FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id='{lea}' ORDER BY id) a"),
     )
     .await?;
 

@@ -32,6 +32,10 @@ pub(super) fn open_query() -> &'static str {
 /// The dialog's draft. Field errors stay here until the dialog closes.
 pub(super) struct Draft {
     input: PersonInput,
+    /// Custom field values as typed, by control name (`cf_<key>`).
+    custom: std::collections::BTreeMap<String, String>,
+    /// The custom fields' labels by control name, for the error summary.
+    custom_labels: std::collections::BTreeMap<String, String>,
     code: String,
     code_edited: bool,
     errors: Vec<(String, String)>,
@@ -49,6 +53,8 @@ impl Draft {
                 email: None,
                 phone: None,
             },
+            custom: std::collections::BTreeMap::new(),
+            custom_labels: std::collections::BTreeMap::new(),
             code: String::new(),
             code_edited: false,
             errors: Vec::new(),
@@ -64,6 +70,11 @@ impl Draft {
             bilibi_ui::params::form_values_checked(value, "person", bilibi_ui::params::FIELD_LIMIT)
                 .map_err(bilibi_database::Error::refused)?;
         self.code = fields.get("code").cloned().unwrap_or_default();
+        self.custom = fields
+            .iter()
+            .filter(|(name, _)| name.starts_with("cf_"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
         self.input = PersonInput {
             name: fields.get("name").cloned().unwrap_or_default(),
             kind: match fields.get("kind").map(String::as_str) {
@@ -134,6 +145,19 @@ impl Draft {
                 input[key] = json!(contact);
             }
         }
+        // Filled custom fields only; the owner checks each against the
+        // tenant's definitions and refuses on `cf_<key>`.
+        let custom: Vec<Value> = self
+            .custom
+            .iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .filter_map(|(name, value)| {
+                Some(json!({"key": name.strip_prefix("cf_")?, "value": value.trim()}))
+            })
+            .collect();
+        if !custom.is_empty() {
+            input["custom"] = json!(custom);
+        }
         match pages.contracts.submit(&call, input).await {
             Ok(result) => Ok(result["result"]["id"]
                 .as_i64()
@@ -162,11 +186,13 @@ impl Draft {
         for (path, messages) in fields {
             let key = ["name", "code", "kind", "email", "phone"]
                 .into_iter()
-                .find(|key| path == *key || path.ends_with(&format!(".{key}")));
+                .find(|key| path == *key || path.ends_with(&format!(".{key}")))
+                .map(str::to_owned)
+                .or_else(|| path.starts_with("cf_").then(|| path.clone()));
             match key {
                 Some(key) => {
                     for message in messages {
-                        self.errors.push((key.to_owned(), message));
+                        self.errors.push((key.clone(), message));
                     }
                     attached = true;
                 }
@@ -264,12 +290,39 @@ impl Draft {
             }
             fields.push(field);
         }
+        // The tenant's own fields, posted as `cf_<key>`.
+        self.custom_labels.clear();
+        for definition in super::custom::active(pages, scope).await? {
+            let name = crate::custom::name(&definition.key);
+            let label = definition.label.clone();
+            let errors = self
+                .errors
+                .iter()
+                .filter(|(field, _)| *field == name)
+                .map(|(_, message)| sentence(&label, message))
+                .collect();
+            let value = self.custom.get(&name).cloned().unwrap_or_default();
+            let mut field = super::custom::control(pages, scope, &definition, &value, errors)
+                .await?
+                .attr("data-debounce", "300");
+            if !can_create {
+                field = field.disabled();
+            }
+            fields.push(field);
+            self.custom_labels.insert(name, label);
+        }
         let duplicates = self.duplicates(pages, scope).await?;
         let summary = if self.submitted && !self.errors.is_empty() {
             let mut summary = ErrorSummary::new("person-create-errors");
             for (field, message) in &self.errors {
-                let label = label_for(field);
-                summary.push(format!("person-{field}"), sentence(label, message));
+                let label = self
+                    .custom_labels
+                    .get(field)
+                    .map_or_else(|| label_for(field), String::as_str);
+                summary.push(
+                    format!("person-{}", field.replace('_', "-")),
+                    sentence(label, message),
+                );
             }
             render(summary)?
         } else {

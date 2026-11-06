@@ -122,6 +122,7 @@ async fn main() -> Result<(), Failure> {
             &manager,
             second.id,
             &Update {
+                custom: Default::default(),
                 version: second.version,
                 identity: human("Amina Renamed"),
             },
@@ -243,6 +244,7 @@ async fn main() -> Result<(), Failure> {
                 &other,
                 alice.id,
                 &Update {
+                    custom: Default::default(),
                     version: 1,
                     identity: human("Cross Tenant"),
                 },
@@ -308,10 +310,12 @@ async fn main() -> Result<(), Failure> {
     );
     // Two real concurrent writes of the same version: row lock serializes them.
     let first_edit = Update {
+        custom: Default::default(),
         version: 1,
         identity: human("Amina First"),
     };
     let second_edit = Update {
+        custom: Default::default(),
         version: 1,
         identity: human("Amina Second"),
     };
@@ -379,6 +383,7 @@ async fn main() -> Result<(), Failure> {
                 &staff,
                 alice.id,
                 &Update {
+                    custom: Default::default(),
                     version: current.version,
                     identity: human("Forbidden Contact"),
                 },
@@ -390,6 +395,7 @@ async fn main() -> Result<(), Failure> {
             &staff,
             alice.id,
             &Update {
+                custom: Default::default(),
                 version: current.version,
                 identity: PersonInput {
                     name: "Amina Revised".into(),
@@ -446,6 +452,7 @@ async fn main() -> Result<(), Failure> {
                 &manager,
                 alice.id,
                 &Update {
+                    custom: Default::default(),
                     version: updated.version,
                     identity: human("Audit Failure"),
                 },
@@ -496,6 +503,7 @@ async fn main() -> Result<(), Failure> {
                 &manager,
                 system.id,
                 &Update {
+                    custom: Default::default(),
                     version: 1,
                     identity: human("Forged Human"),
                 },
