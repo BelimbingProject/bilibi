@@ -156,9 +156,30 @@ async fn main() -> Result<(), Error> {
                 .map(|c| c.map(|c| c.code)),
         );
         show(
-            "base GBP (not enabled)",
+            "company 2 base GBP (not enabled yet: the same write enables it)",
             currencies
                 .set_base(&mut tx, &admin, Some("GBP"), Some(OrganisationId::new(2)?))
+                .await?
+                .map(|c| c.map(|c| (c.code, c.enabled))),
+        );
+        show(
+            "GBP is now enabled",
+            currencies
+                .get(tx.sql(), &admin, "GBP")
+                .await?
+                .map(|c| c.enabled),
+        );
+        show(
+            "disable GBP (company 2's currency)",
+            currencies
+                .set_enabled(&mut tx, &admin, "GBP", false)
+                .await?
+                .map(|c| c.code),
+        );
+        show(
+            "base HRK (withdrawn)",
+            currencies
+                .set_base(&mut tx, &admin, Some("HRK"), None)
                 .await?
                 .map(|c| c.map(|c| c.code)),
         );

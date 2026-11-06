@@ -23,7 +23,7 @@ Never keep a free-text currency code, your own minor-units list or your own rate
 
 ## Base currency
 
-- Setting `currency.base` (tenant, and company to override). `null` until set: `base` answers `None` and `convert_to_base` refuses with `NoBase`. The pages and `core.currency.base.set` are its operator UI; they accept only an enabled currency.
+- Setting `currency.base` (tenant, and company to override). `null` until set: `base` answers `None` and `convert_to_base` refuses with `NoBase`. The pages and `core.currency.base.set` are its operator UI; they accept any currency that is not withdrawn and enable one that is not enabled yet in the same write.
 - When it is unset, the Currencies page suggests the primary company's country currency from Geonames. It never saves the suggestion unasked.
 - Conversion through the base uses the tenant's base. A company's own base is for reports and forms; `base(.., Some(company))` reads it.
 
@@ -55,8 +55,8 @@ All three are tenant capabilities contributed to `tenant_owner`. `enabled`, `get
 
 ## Pages and agents
 
-- `/currencies`: the base currency and per-company currencies (read first, chosen in place), then the list with an enable or disable action.
-- `/currencies/rates`: the rates, edited in place, a dialog to add one, a confirm to delete one, and a conversion check that calls the same `convert` modules use. The date fields start as today in the reader's display zone; in browser-local display mode they start empty, because only the browser knows the day.
+- `/currencies`: the base currency (chosen in place from every currency) and per-company currencies (from the enabled ones), then the list with an on/off switch per currency. Turning off one in use is refused with the reason.
+- `/currencies/rates`: the rates, edited in place, a dialog to add one, a confirm to delete one from the row's Actions… menu (`?delete=<id>`), and, once two currencies are enabled, a currency conversion calculator: two rows of an amount and its currency that answer each other through the same `convert` modules use, with the rate's date and source on one line and "Add this rate" when none is recent enough. The date fields start as today in the reader's display zone; in browser-local display mode they start empty, because only the browser knows the day.
 - Operations: `core.currency.list`, `.rates.list` and `.convert` (reads), and the reviewed writes `.enabled.set`, `.base.set`, `.rates.set` and `.rates.delete`. The pages call these same contracts (`PageWrites`).
 
 ## Runtime check
