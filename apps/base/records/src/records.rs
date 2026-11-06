@@ -3,7 +3,8 @@
 //! facade checks a new reference with the owner (`check`), names references
 //! through the owner's Grid source and its own access check (`resolve`),
 //! finds records for a picker (`search`), repoints merged records
-//! (`redirect`) and counts who points at a record (`referrers`). It reads no
+//! (`redirect`), supplies survivor membership for holder reads (`matching`)
+//! and counts who points at a record (`referrers`). It reads no
 //! owner table directly and the owner never learns its holders. No method
 //! holds a pooled connection while Grid takes one, so concurrent callers
 //! cannot fill the pool and wait on each other.
@@ -211,7 +212,7 @@ impl Records {
     /// stored reference, a redirect and a referrer count then name the row
     /// Grid returns, and a malformed id never reaches the owner's source as a
     /// cast error.
-    fn canonical(kind: &RecordKind, id: &str) -> Option<String> {
+    pub(crate) fn canonical(kind: &RecordKind, id: &str) -> Option<String> {
         if !bilibi_ui::workspace::record_id(id) {
             return None;
         }
@@ -227,7 +228,7 @@ impl Records {
     }
 
     /// The survivors of merged records, by stored id.
-    async fn redirected(
+    pub(crate) async fn redirected(
         client: &dyn ReadClient,
         tenant: i64,
         kind: &str,
@@ -529,7 +530,11 @@ impl Records {
     /// write: anything that pointed at `from` now points at `to`, and `to`
     /// itself is never redirected. Ids are taken in their one spelling.
     /// Merges of one kind in one tenant run one at a time, so overlapping
-    /// merges commit no chain. Holders repoint on read; no holder row is
+    /// merges commit no chain. The merge transaction must read at READ
+    /// COMMITTED (the `MutationBoundary` default); any other isolation is
+    /// refused with `Error::Invalid` before anything is locked or written,
+    /// since an older snapshot would miss a just-committed redirect and
+    /// commit a chain. Holders repoint on read; no holder row is
     /// rewritten. One audited `Change` on `record_redirect` per row.
     pub async fn redirect(
         &self,
@@ -547,6 +552,14 @@ impl Records {
             return Err(Error::Invalid);
         };
         if from == to {
+            return Err(Error::Invalid);
+        }
+        let isolation: String = tx
+            .sql()
+            .query_one("SHOW transaction_isolation", &[])
+            .await?
+            .get(0);
+        if isolation != "read committed" {
             return Err(Error::Invalid);
         }
         let tenant = scope.tenant();
@@ -629,17 +642,16 @@ impl Records {
             .await?
             .remove(&id)
             .unwrap_or(id);
-        let mut ids: Vec<String> = client
+        let ids: Vec<String> = client
             .query(
-                "SELECT from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3",
+                crate::matching::MEMBERSHIP_SQL,
                 &[&scope.tenant(), &kind, &id],
             )
             .await?
             .iter()
-            .map(|row| row.get(0))
+            .map(|row| row.get("record_id"))
             .collect();
         drop(client);
-        ids.push(id);
         let mut counts = Vec::new();
         'holders: for holder in &self.holders {
             let mut count = 0;

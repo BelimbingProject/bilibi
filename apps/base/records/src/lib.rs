@@ -6,11 +6,13 @@
 //! [`Records`]. Contract: `README.md`.
 mod declaration;
 mod drops;
+mod matching;
 mod operations;
 mod records;
 
 pub use declaration::{Access, Holder, RecordKind, RecordOwner, HOLDERS, KINDS};
 pub use drops::{AddTo, DropRefusal, DropTarget, DROP_EVENT, DROP_PARAM, DROP_TARGETS, MAX_DROP};
+pub use matching::ReferenceMatch;
 pub use records::{
     Hit, Records, Reference, Referrers, Refusal, Resolved, MAX_PER_KIND, MAX_SEARCH_KINDS,
     PICKER_HITS,
