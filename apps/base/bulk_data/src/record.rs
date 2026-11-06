@@ -156,6 +156,7 @@ pub(crate) struct Registered {
     pub key: &'static str,
     pub definition: &'static RecordType,
     pub fields: Vec<Field>,
+    pub results: Option<&'static crate::ImportResults>,
     /// The update contract's field properties.
     pub update_fields: Vec<String>,
     /// The fields a bulk update may set, and every field property of its
@@ -553,12 +554,27 @@ pub(crate) fn register(
                 key: entry.id,
                 definition: record,
                 fields,
+                results: None,
                 update_fields,
                 bulk_fields,
                 bulk_update_fields,
                 limited,
             },
         );
+    }
+    for entry in catalog.entries::<crate::ImportResults>(crate::IMPORT_RESULTS)? {
+        let registered = types
+            .get_mut(entry.id)
+            .ok_or_else(|| crate::result::invalid(entry))?;
+        if catalog
+            .entries::<RecordType>(RECORD_TYPES)?
+            .iter()
+            .find(|record| record.id == entry.id)
+            .is_none_or(|record| record.provenance.module != entry.provenance.module)
+        {
+            return Err(crate::result::invalid(entry));
+        }
+        registered.results = Some(entry.get::<crate::ImportResults>()?);
     }
     for registered in types.values() {
         for reference in registered.definition.import.references {

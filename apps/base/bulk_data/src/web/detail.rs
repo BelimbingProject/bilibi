@@ -44,7 +44,10 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ),
             (
                 "outcome".into(),
-                Filter::one_of(&["all", "error", "create", "update", "skip"], "all"),
+                Filter::one_of(
+                    &["all", "error", "create", "update", "action", "skip"],
+                    "all",
+                ),
             ),
         ]),
         omit_defaults: true,
@@ -983,6 +986,15 @@ impl Detail {
                         value: count(counts.update),
                     },
                     Fact {
+                        title: if preview {
+                            "Actions to complete"
+                        } else {
+                            "Actions completed"
+                        },
+                        id: "import-count-action",
+                        value: count(counts.action),
+                    },
+                    Fact {
                         title: &skipped,
                         id: "import-count-skip",
                         value: count(counts.skip),
@@ -1021,6 +1033,7 @@ impl Detail {
                         ("Errors", "error"),
                         ("Create", "create"),
                         ("Update", "update"),
+                        ("Action", "action"),
                         ("Skip", "skip"),
                     ]),
                 ),
@@ -1034,6 +1047,8 @@ impl Detail {
             let badge = match (result.outcome, preview) {
                 (Outcome::Create, true) => Badge::status(BadgeKind::Plain, "Would create"),
                 (Outcome::Update, true) => Badge::status(BadgeKind::Plain, "Would update"),
+                (Outcome::Action, true) => Badge::status(BadgeKind::Plain, "Would complete action"),
+                (Outcome::Action, false) => Badge::status(BadgeKind::Success, "Action completed"),
                 (Outcome::Skip, true) => Badge::status(BadgeKind::Neutral, "Would skip"),
                 (Outcome::Create, false) => Badge::status(BadgeKind::Success, "Created"),
                 (Outcome::Update, false) => Badge::status(BadgeKind::Success, "Updated"),
@@ -1041,7 +1056,7 @@ impl Detail {
                 (Outcome::Error, true) => Badge::status(BadgeKind::Danger, "Error"),
                 (Outcome::Error, false) => Badge::status(BadgeKind::Danger, "Not imported"),
             };
-            let record = match (&result.record_id, path) {
+            let mut record = match (&result.record_id, path) {
                 (Some(id), Some(path)) => render(ActionLink {
                     id: &format!("import-row-record-{key}"),
                     icon: "",
@@ -1053,6 +1068,21 @@ impl Detail {
                 (Some(id), None) => Html::text(id),
                 (None, _) => Html::text("—"),
             };
+            for (index, link) in result.links.iter().enumerate() {
+                if result.record_id.is_some() || index > 0 {
+                    record.push(&Html::text(" · "));
+                } else {
+                    record = Html::EMPTY;
+                }
+                record.push(&render(ActionLink {
+                    id: &format!("import-row-link-{key}-{index}"),
+                    icon: "",
+                    title: &link.label,
+                    href: &link.path,
+                    method: "",
+                    body: Html::text(&link.label),
+                })?);
+            }
             let message = result.message.clone().unwrap_or_default();
             let message = if compact && message.chars().count() > 80 {
                 format!("{}…", message.chars().take(79).collect::<String>())

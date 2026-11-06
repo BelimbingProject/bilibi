@@ -19,6 +19,7 @@ mod import;
 mod mapping;
 mod privacy;
 mod record;
+mod result;
 mod store;
 mod update;
 mod web;
@@ -30,6 +31,7 @@ pub use record::{
     BulkUpdate, Duplicates, Export, Field, Import, Kind, Lookup, RecordType, Reference,
     RECORD_TYPES,
 };
+pub use result::{ImportOutcome, ImportResult, ImportResults, ResultLink, IMPORT_RESULTS};
 pub use store::{Counts, Outcome, Pass, RowResult, Run, RunState, SavedMapping};
 pub use update::{Offers, UpdateRow, UpdateRun, UpdateState};
 
@@ -1132,6 +1134,7 @@ inventory::submit! { bilibi_module_registry::Module {
         ("base-bulk-data-002-exports", include_str!("../migrations/002-exports.sql")),
         ("base-bulk-data-003-updates", include_str!("../migrations/003-updates.sql")),
         ("base-bulk-data-004-export-erasure", include_str!("../migrations/004-export-erasure.sql")),
+        ("base-bulk-data-005-import-results", include_str!("../migrations/005-import-results.sql")),
     ],
     services: &[
         bilibi_module_registry::Service { id: SERVICE, factory: |services| {

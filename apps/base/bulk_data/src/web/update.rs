@@ -296,6 +296,7 @@ impl UpdatePage {
             let badge = match result.outcome {
                 Outcome::Update | Outcome::Create => Badge::status(BadgeKind::Success, "Updated"),
                 Outcome::Skip => Badge::status(BadgeKind::Neutral, "Already set"),
+                Outcome::Action => return Err(Error::Internal),
                 Outcome::Error => Badge::status(BadgeKind::Danger, "Not updated"),
             };
             let record = match path {

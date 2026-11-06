@@ -82,6 +82,13 @@ enum Planned {
     Refused(String),
 }
 
+type Answer = (
+    Outcome,
+    Option<String>,
+    Option<String>,
+    Vec<crate::ResultLink>,
+);
+
 /// One row's recorded result.
 struct Recorded {
     row: i32,
@@ -89,6 +96,7 @@ struct Recorded {
     record: Option<String>,
     key: Option<String>,
     message: Option<String>,
+    links: Vec<crate::ResultLink>,
 }
 
 /// One pass's working state.
@@ -131,6 +139,7 @@ pub(crate) fn refusal(error: &ContractError, offered: &[Field]) -> Option<String
         ContractError::Backend(Error::Conflict) => {
             "The record changed after it was matched, so it was not overwritten.".into()
         }
+        ContractError::Backend(Error::Refused(message)) => message.clone(),
         ContractError::Backend(Error::Invalid) => "The record was refused.".into(),
         ContractError::Backend(Error::StepUpRequired { .. }) => {
             "This change needs a confirmation code, which an import cannot give.".into()
@@ -419,7 +428,7 @@ async fn record(
         Box::pin(async move {
             let mut changes = Vec::with_capacity(results.len());
             for result in results {
-                let id: i64 = sql.query_one("INSERT INTO base_bulk_data_rows(tenant_id,run_id,pass,row_number,outcome,record_id,source_key,message) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id", &[&tenant, &run, &pass.as_str(), &result.row, &result.outcome.as_str(), &result.record, &result.key, &result.message]).await?.get(0);
+                let id: i64 = sql.query_one("INSERT INTO base_bulk_data_rows(tenant_id,run_id,pass,row_number,outcome,record_id,source_key,message,links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id", &[&tenant, &run, &pass.as_str(), &result.row, &result.outcome.as_str(), &result.record, &result.key, &result.message, &json!(result.links)]).await?.get(0);
                 changes.push(Change { kind: "base/bulk_data.row".into(), id, old: Value::Null, new: json!({"run": run, "pass": pass.as_str(), "row": result.row, "outcome": result.outcome.as_str(), "record_id": result.record}) });
             }
             sql.execute("UPDATE base_bulk_data_runs SET next_row=$3,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2", &[&tenant, &run, &next]).await?;
@@ -625,8 +634,8 @@ impl BulkData {
             let notice = Notice::new(format!("Import of {} finished", run.file_name))
                 .kind("bulk_data.import")
                 .body(format!(
-                    "{} created, {} updated, {} skipped, {} not imported.",
-                    counts.create, counts.update, counts.skip, counts.error
+                    "{} created, {} updated, {} actions completed, {} skipped, {} not imported.",
+                    counts.create, counts.update, counts.action, counts.skip, counts.error
                 ))
                 .url(format!("/imports/{id}"));
             self.notifications
@@ -640,6 +649,38 @@ impl BulkData {
 }
 
 impl Work<'_> {
+    /// Interpret the actual answer, never a previously saved preview.
+    fn answer(
+        &self,
+        contract: &str,
+        outcome: Outcome,
+        answer: &Value,
+        preview: bool,
+    ) -> Result<Answer> {
+        if contract == self.registered.definition.import.create {
+            if let Some(results) = self.registered.results {
+                let result = (results.interpret)(&answer["result"])?;
+                result.validate()?;
+                let outcome = match result.outcome {
+                    crate::ImportOutcome::Create => Outcome::Create,
+                    crate::ImportOutcome::Update => Outcome::Update,
+                    crate::ImportOutcome::Action => Outcome::Action,
+                };
+                return Ok((outcome, result.record_id, result.message, result.links));
+            }
+        }
+        Ok((
+            outcome,
+            if preview {
+                None
+            } else {
+                text_id(&answer["result"][self.registered.definition.import.id])
+            },
+            None,
+            Vec::new(),
+        ))
+    }
+
     /// A dry-run row: the owner's preview of the write, nothing written.
     async fn check(
         &self,
@@ -648,12 +689,13 @@ impl Work<'_> {
         row: i32,
         key: Option<String>,
     ) -> Result<Recorded> {
-        let (outcome, record, message) = match planned {
-            Planned::Refused(message) => (Outcome::Error, None, Some(message)),
+        let (outcome, record, message, links) = match planned {
+            Planned::Refused(message) => (Outcome::Error, None, Some(message), Vec::new()),
             Planned::Skip(id) => (
                 Outcome::Skip,
                 Some(id),
                 Some("Matches an existing record, which is left alone.".into()),
+                Vec::new(),
             ),
             Planned::Write {
                 contract,
@@ -666,9 +708,9 @@ impl Work<'_> {
                     .preview(client, self.execution, contract, &input)
                     .await
                 {
-                    Ok(_) => (outcome, None, None),
+                    Ok(answer) => self.answer(contract, outcome, &answer, true)?,
                     Err(error) => match refusal(&error, &self.offered) {
-                        Some(message) => (Outcome::Error, None, Some(message)),
+                        Some(message) => (Outcome::Error, None, Some(message), Vec::new()),
                         None => return Err(error_of(error)),
                     },
                 }
@@ -680,6 +722,7 @@ impl Work<'_> {
             record,
             key,
             message: message.map(bounded),
+            links,
         })
     }
 
@@ -720,6 +763,7 @@ impl Work<'_> {
                 row,
                 outcome: Outcome::Error,
                 record: None,
+                links: Vec::new(),
                 key,
                 message: Some(format!(
                     "You no longer have permission to import {}.",
@@ -732,6 +776,7 @@ impl Work<'_> {
                     row,
                     outcome: Outcome::Error,
                     record: None,
+                    links: Vec::new(),
                     key,
                     message: Some(bounded(message)),
                 },
@@ -739,6 +784,7 @@ impl Work<'_> {
                     row,
                     outcome: Outcome::Skip,
                     record: Some(id),
+                    links: Vec::new(),
                     key,
                     message: Some("Matched an existing record, which was left alone.".into()),
                 },
@@ -753,15 +799,18 @@ impl Work<'_> {
                         .commit(&mut tx, self.execution, contract, &input)
                         .await
                     {
-                        Ok(answer) => Recorded {
-                            row,
-                            outcome,
-                            record: text_id(
-                                &answer["result"][self.registered.definition.import.id],
-                            ),
-                            key,
-                            message: None,
-                        },
+                        Ok(answer) => {
+                            let (outcome, record, message, links) =
+                                self.answer(contract, outcome, &answer, false)?;
+                            Recorded {
+                                row,
+                                outcome,
+                                record,
+                                key,
+                                message,
+                                links,
+                            }
+                        }
                         Err(error) => {
                             let Some(message) = refusal(&error, &self.offered) else {
                                 return Err(error_of(error));
@@ -784,6 +833,7 @@ impl Work<'_> {
                                 row,
                                 outcome: Outcome::Error,
                                 record: None,
+                                links: Vec::new(),
                                 key,
                                 message: Some(bounded(message)),
                             }

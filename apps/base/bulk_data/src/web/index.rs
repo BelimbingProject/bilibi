@@ -48,6 +48,7 @@ fn builtins() -> Vec<BuiltinColumn> {
         number("rows", "Rows"),
         number("created", "Created"),
         number("updated", "Updated"),
+        number("actions", "Actions completed"),
         number("skipped", "Skipped"),
         number("errors", "Not imported"),
         started,
@@ -183,6 +184,7 @@ impl Index {
                 .slot("rows", Html::text(&run.row_count.to_string()))
                 .slot("created", count(counts.create))
                 .slot("updated", count(counts.update))
+                .slot("actions", count(counts.action))
                 .slot("skipped", count(counts.skip))
                 .slot("errors", count(counts.error))
                 .slot("started", when(&display, &started_id, run.created_at)?);

@@ -417,7 +417,7 @@ fn rows_schema() -> Value {
     json!({"type": "object", "required": ["run_id"], "properties": {
         "run_id": id_schema(),
         "pass": {"type": "string", "enum": ["preview", "run"]},
-        "outcome": {"type": "string", "enum": ["create", "update", "skip", "error"]},
+        "outcome": {"type": "string", "enum": ["create", "update", "action", "skip", "error"]},
         "page": {"type": "integer", "minimum": 1, "maximum": 100000},
         "page_size": {"type": "integer", "minimum": 1, "maximum": 100}
     }})
@@ -486,7 +486,7 @@ fn export_output() -> Value {
     json!({"type": "object", "description": "An export: record type, filter, how many ticked records it takes (selected), columns, state (running, completed or failed), the rows it holds, the reason it failed, the download path once completed, and its version. Never the file's data."})
 }
 fn run_output() -> Value {
-    json!({"type": "object", "description": "An import run: file name, record type, columns, rows, state (draft, previewing, previewed, running, completed, cancelled or stopped), progress, mapping, the dry run's and the real run's counts (create, update, skip, error), trace ID and version. Never the file's data."})
+    json!({"type": "object", "description": "An import run: file name, record type, columns, rows, state (draft, previewing, previewed, running, completed, cancelled or stopped), progress, mapping, the dry run's and the real run's counts (create, update, action, skip, error), trace ID and version. Never the file's data."})
 }
 fn list_output() -> Value {
     json!({"type": "array", "description": "Import runs or row results."})
@@ -504,7 +504,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/bulk_data.agent", prov
         Operation { key: "base.bulk_data.types", title: "List importable record types", summary: "Record types you may import from CSV, with the fields a column can fill, which fields refer to other records, and what rows are matched on.", keywords: &["import", "csv", "upload", "fields", "columns"], capability: VIEW, input: no_input, output: list_output, handler: Handler::Read(&Read::Types), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.list", title: "List your imports", summary: "Your CSV import runs, newest first, with state, progress and counts.", keywords: &["import", "csv", "runs"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.get", title: "Read an import", summary: "One of your import runs: its columns, mapping, state, counts, version, the saved mappings that fit its file and the imports it may name as parents.", keywords: &["import", "csv", "mapping"], capability: VIEW, input: get_schema, output: run_output, handler: Handler::Read(&Read::Get), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.bulk_data.import.rows", title: "Read an import's row results", summary: "What each row of a dry run (pass preview) or the real run did or would do: create, update, skip or error with the reason, the record it wrote and its source key.", keywords: &["import", "errors", "results"], capability: VIEW, input: rows_schema, output: list_output, handler: Handler::Read(&Read::Rows), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.bulk_data.import.rows", title: "Read an import's row results", summary: "What each row of a dry run (pass preview) or the real run did or would do: create, update, action, skip or error, with the owner message, record id, safe result links and source key.", keywords: &["import", "errors", "results"], capability: VIEW, input: rows_schema, output: list_output, handler: Handler::Read(&Read::Rows), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.mapping.list", title: "List saved import mappings", summary: "Mappings saved for a record type in your company: which column fills each field, fixed values and the duplicate rule.", keywords: &["import", "mapping", "template"], capability: VIEW, input: mappings_schema, output: list_output, handler: Handler::Read(&Read::Mappings), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.preview", title: "Check an import", summary: "Map a run's columns and check every row against the record type's own rules in the background, writing nothing. Replaces an earlier check's results.", keywords: &["import", "dry run", "validate"], capability: CREATE, input: pass_schema, output: run_output, handler: Handler::SafeWrite(&Write::Preview), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.start", title: "Run an import", summary: "Map a run's columns and import its rows in the background, each through the record type's own write contract as you.", keywords: &["import", "csv", "load"], capability: CREATE, input: pass_schema, output: run_output, handler: Handler::SafeWrite(&Write::Start), channels: Channels::Every, step_up: &[] },
