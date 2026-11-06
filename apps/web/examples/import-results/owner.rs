@@ -80,7 +80,7 @@ fn interpret(value: &Value) -> bilibi_database::Result<ImportResult> {
 inventory::submit! { Contribution::new(IMPORT_RESULTS, TYPE, provenance!(), &ImportResults { interpret }) }
 
 fn input() -> Value {
-    json!({"type":"object","properties":{"code":{"type":"string"},"mode":{"type":"string","enum":["normal","refuse","poison","retry","bad-result","bad-link"]}},"required":["code"],"additionalProperties":false})
+    json!({"type":"object","properties":{"code":{"type":"string"},"mode":{"type":"string","enum":["normal","refuse","poison","retry","bad-result","bad-link"]}},"required":["code"]})
 }
 fn output() -> Value {
     json!({"type":"object"})
