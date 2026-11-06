@@ -96,8 +96,19 @@ impl PersonService {
     }
     pub async fn duplicates(&self, scope: &Scope, query: &DuplicateQuery) -> Result<Vec<Person>> {
         let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        identity::duplicates(&**client, &scope, query).await
+        self.duplicates_on(&**client, scope, query).await
+    }
+    /// Find duplicate candidates on the caller's connection or transaction.
+    /// Re-proves the sealed scope on that client and retains the owner policy.
+    /// Sees earlier uncommitted writes; reserves nothing and commits nothing.
+    pub async fn duplicates_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        query: &DuplicateQuery,
+    ) -> Result<Vec<Person>> {
+        let scope = self.fresh(client, scope).await?;
+        identity::duplicates(client, &scope, query).await
     }
     pub async fn create(
         &self,
@@ -214,10 +225,11 @@ inventory::submit! {
             directory.bind("core/person", Arc::new(directory::Provider(bilibi_principal_directory::PrincipalKind::Agent)))?;
             CHANGES.set(broadcast::channel(128).0).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate person change sender".into()))?;
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
-            agent_operations::bind(db.clone())?;
             custom::bind(services.get(bilibi_custom_fields::SERVICE)?)?;
             step_up::bind(services.get(bilibi_step_up::SERVICE)?)?;
-            Ok(Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")? }))
+            let persons = Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")? });
+            agent_operations::bind(persons.clone())?;
+            Ok(persons)
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
