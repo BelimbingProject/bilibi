@@ -1480,10 +1480,7 @@ impl Rates {
     /// amount and its currency. Typing in either row answers in the other.
     fn check_card(&self, enabled: &[Currency], edits: bool) -> Result<Html> {
         let check = &self.check;
-        let options: Vec<Choice> = enabled
-            .iter()
-            .map(|currency| currency.choice())
-            .collect();
+        let options: Vec<Choice> = enabled.iter().map(|currency| currency.choice()).collect();
         let row = |amount: &str, code: &str, side: &str, label: &str| -> Result<Html> {
             render(FieldRow {
                 fields: vec![
