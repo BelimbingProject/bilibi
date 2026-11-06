@@ -90,6 +90,7 @@ async fn main() -> Result<(), Box<dyn Failure>> {
             "BILIBI_PERSON_PROOF=disposable and a fresh disposable DATABASE_URL required".into(),
         );
     }
+    println!("compiled composition: {:?}", bilibi_web::composition());
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_database::migrate(&db, &bilibi_module_registry::discover()?).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
