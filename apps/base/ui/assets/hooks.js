@@ -1,6 +1,6 @@
 // Browser behaviour for the shared form controls in templates/forms.html:
 // CodeInput, ColourInput, Combobox, SecretReveal, SecretClear, SecretStored and
-// DisclosureDismiss, MultiSelect, LocationAction (plus the dashboard's DashboardSort and the form Fold).
+// DisclosureDismiss, MultiSelect, LocationAction, FilterSheet (plus the dashboard's DashboardSort and the form Fold).
 // The LiveView JS commands are folded into the hooks.
 // Each registers with the shared `data-hook` runtime in ui.js
 // (BilibiUI.registerHook), which mounts a control when it enters the
@@ -1319,3 +1319,72 @@ const DateTime = {
 window.BilibiUI.registerHook('DateTime', DateTime)
 
 })();
+
+;(() => {
+  // FilterSheet (the filter toolbar of templates/lists.html): below `sm` the
+  // filters other than search sit in a <dialog> sheet. This hook only opens
+  // and closes it and resets a filter whose chip is removed; the filters
+  // themselves stay ordinary form controls, so a change posts with the form
+  // and the server's reply re-renders the count and the chips. The patcher
+  // keeps the dialog's `open`, so the sheet stays up while filters apply.
+  const WIDE = window.matchMedia("(min-width: 40rem)")
+
+  // A removed chip puts its filter back to the first choice (a select's
+  // "All"), unticks a multi-select and empties a date, then raises one
+  // change, which live.js turns into the toolbar's event.
+  const reset = (control) => {
+    let changed = null
+    for (const el of control.querySelectorAll("select, input")) {
+      if (el.disabled) continue
+      if (el.tagName === "SELECT") {
+        const first = el.options[0]?.value ?? ""
+        if (el.value !== first) { el.value = first; changed = el }
+      } else if (el.type === "checkbox" || el.type === "radio") {
+        if (el.checked) { el.checked = false; changed = el }
+      } else if (el.type !== "hidden" || el.name) {
+        if (el.value !== "") { el.value = ""; changed = el }
+      }
+    }
+    changed?.dispatchEvent(new Event("change", {bubbles: true}))
+  }
+
+  window.BilibiUI.registerHook("FilterSheet", {
+    mounted() {
+      const id = this.el.id
+      this.sheet = () => this.el.querySelector(`#${CSS.escape(id)}-filters`)
+      this.onClick = (event) => {
+        const sheet = this.sheet()
+        if (!sheet) return
+        const button = event.target instanceof Element ? event.target.closest("button") : null
+        if (event.target === sheet && sheet.open) {
+          // A click on the backdrop lands on the dialog itself.
+          const box = sheet.getBoundingClientRect()
+          const inside = event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom
+          if (!inside) sheet.close()
+          return
+        }
+        if (!button) return
+        if (button.id === `${id}-filters-open`) {
+          if (!sheet.open) sheet.showModal()
+        } else if (button.id === `${id}-filters-close` || button.id === `${id}-filters-done`) {
+          sheet.close()
+        } else if (button.id.startsWith(`${id}-chip-`) && button.id.endsWith("-remove")) {
+          const control = this.el.querySelector(`[data-filter-control="${CSS.escape(button.value)}"]`)
+          if (control) reset(control)
+        }
+      }
+      // Widening past `sm` draws the filters in the row again, so a sheet
+      // left open would hold the top layer with nothing to show.
+      this.onWide = () => {
+        const sheet = this.sheet()
+        if (WIDE.matches && sheet?.open) sheet.close()
+      }
+      this.el.addEventListener("click", this.onClick)
+      WIDE.addEventListener("change", this.onWide)
+    },
+    destroyed() {
+      this.el.removeEventListener("click", this.onClick)
+      WIDE.removeEventListener("change", this.onWide)
+    },
+  })
+})()

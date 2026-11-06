@@ -160,7 +160,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 *Every list is a `FlexTable`.* Never the plain `Table`.
 
 - **State:** `ListState` keeps page, search, filters, sort and page size in the URL. Reload and shared links reopen the same view.
-- **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. Leave 12 px between the page header and the toolbar. On narrow screens filters wrap below search in the same order. No second card.
+- **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
 - **Rows:** `py-0.5`, `px-2`. Headers `py-1`, sunken background, `text-xs font-semibold`.
 - **Numbers:** tabular numerals for IDs, counts, dates and amounts.
 - **Corners:** table frames are square. A card is flat only where it frames the table.
