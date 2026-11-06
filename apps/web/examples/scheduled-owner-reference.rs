@@ -266,6 +266,7 @@ async fn main() -> Result<()> {
                     )
                     .await
                     .map_err(|_| Error::Forbidden)?;
+                let consent = &consent["result"];
                 assert_eq!(consent["schedule"]["principal"], schedule::PRINCIPAL);
                 let shared = consent["schedule"]["items"]
                     .as_array()
@@ -287,7 +288,7 @@ async fn main() -> Result<()> {
                 } else {
                     schedule::TENANT_WORK
                 };
-                let owner = installed["entries"]
+                let owner = installed["result"]["entries"]
                     .as_array()
                     .ok_or(Error::Internal)?
                     .iter()
