@@ -702,6 +702,17 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
   margin-bottom: 0;
 }
 
+/* A list page's sections stand 12 px apart: a card (a summary above the
+ * list, or the table's own card) and whatever follows it, such as the
+ * toolbar or a second card. A table card keeps its larger notch margin, and
+ * a dialog keeps its own placement. In the components layer so a utility
+ * margin a component sets still wins. */
+@layer components {
+  [data-page="list"] > [data-card] + :not(dialog) {
+    margin-top: --spacing(3);
+  }
+}
+
 /* A compact row of `flex_table/1` is as short as eighteen pixels, so a badge
  * in one gives up its vertical padding: a twenty-pixel badge made every row
  * that held one twenty-one. The badge is `badge/1`, marked `data-badge`. */

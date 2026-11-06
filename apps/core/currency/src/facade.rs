@@ -773,35 +773,40 @@ impl Currencies {
             )]));
         }
         if !enable {
-            let users = self.base_users(client, scope, &currency.code).await?;
-            if !users.is_empty() {
-                return Ok(Err(vec![FieldError::new(
-                    "code",
-                    format!(
-                        "is the base currency of {}; choose another base currency first",
-                        users.join(", ")
-                    ),
-                )]));
+            let (tenant, companies) = self.base_users(client, scope, &currency.code).await?;
+            let uses = match (tenant, companies.is_empty()) {
+                (false, true) => None,
+                (true, true) => {
+                    Some("is the base currency; choose another base currency first".to_owned())
+                }
+                (false, false) => Some(format!(
+                    "is the currency of {}; choose another currency for it first",
+                    companies.join(", ")
+                )),
+                (true, false) => Some(format!(
+                    "is the base currency and the currency of {}; choose others first",
+                    companies.join(", ")
+                )),
+            };
+            if let Some(uses) = uses {
+                return Ok(Err(vec![FieldError::new("code", uses)]));
             }
         }
         Ok(Ok(currency))
     }
-    /// Who has `code` as a base currency: the tenant, and each company that
-    /// chose it for itself.
+    /// Who has `code` as a base currency: whether the tenant does, and the
+    /// name of each company that chose it for itself.
     async fn base_users(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
         code: &str,
-    ) -> Result<Vec<String>> {
-        let mut users = Vec::new();
-        if self
+    ) -> Result<(bool, Vec<String>)> {
+        let tenant = self
             .base(client, scope, None)
             .await?
-            .is_some_and(|base| base.code == code)
-        {
-            users.push("the tenant".to_owned());
-        }
+            .is_some_and(|base| base.code == code);
+        let mut users = Vec::new();
         for company in bilibi_company::list_tenant_company_ids(client, scope).await? {
             let own = match self.own_base(client, scope, company).await {
                 Ok(own) => own,
@@ -820,7 +825,7 @@ impl Currencies {
                 );
             }
         }
-        Ok(users)
+        Ok((tenant, users))
     }
     /// The currency as it would stand after the change, without making it.
     pub async fn preview_enabled(
@@ -857,6 +862,15 @@ impl Currencies {
         if currency.enabled == enable {
             return Ok(Ok(currency));
         }
+        Ok(Ok(Self::write_enabled(tx, scope, currency, enable).await?))
+    }
+    /// The enable or disable write itself, after its checks passed.
+    async fn write_enabled(
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        currency: Currency,
+        enable: bool,
+    ) -> Result<Currency> {
         let tenant = scope.tenant();
         let saved = Currency {
             enabled: enable,
@@ -905,7 +919,7 @@ impl Currencies {
             })
         })
         .await?;
-        Ok(Ok(saved))
+        Ok(saved)
     }
 
     async fn check_base(
@@ -923,15 +937,16 @@ impl Currencies {
             return Ok(Ok(None));
         };
         match self.get(client, scope, code).await? {
-            Some(currency) if currency.enabled && !currency.withdrawn => Ok(Ok(Some(currency))),
+            Some(currency) if !currency.withdrawn => Ok(Ok(Some(currency))),
             Some(_) => Ok(Err(vec![FieldError::new(
                 "code",
-                "must be an enabled currency; enable it first",
+                "has been withdrawn from ISO 4217, so it cannot be a base currency",
             )])),
             None => Ok(Err(vec![FieldError::new("code", "is not a currency code")])),
         }
     }
-    /// The base currency a write would leave in place.
+    /// The base currency a write would leave in place, as it stands now: a
+    /// currency not yet enabled is enabled by the write.
     pub async fn preview_base(
         &self,
         client: &(impl GenericClient + Sync),
@@ -941,8 +956,9 @@ impl Currencies {
         self.check_base(client, scope, code, false).await
     }
     /// Sets the tenant's base currency, or a company's own; `None` clears it
-    /// (a company then follows the tenant). The currency must be enabled.
-    /// Saved through Settings, which audits the change.
+    /// (a company then follows the tenant). A currency that is not enabled yet
+    /// is enabled in the same write; a withdrawn one is refused. Saved through
+    /// Settings, which audits the change.
     pub async fn set_base(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -951,6 +967,9 @@ impl Currencies {
         company: Option<OrganisationId>,
     ) -> Result<Checked<Option<Currency>>> {
         let currency = match self.check_base(tx.sql(), scope, code, true).await? {
+            Ok(Some(currency)) if !currency.enabled => {
+                Some(Self::write_enabled(tx, scope, currency, true).await?)
+            }
             Ok(currency) => currency,
             Err(errors) => return Ok(Err(errors)),
         };

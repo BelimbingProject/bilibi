@@ -1,7 +1,7 @@
 //! The operator pages (`core/currency.pages`): `/currencies` lists the ISO
 //! currencies with the tenant's switch, base currency and per-company base
 //! currencies; `/currencies/rates` lists the dated exchange rates, edited in
-//! place, with a conversion check. The lists and the
+//! place, with a currency conversion calculator. The lists and the
 //! in-row editors follow `base/picklists`.
 //!
 //! Every change goes through the `core.currency.*` contracts agents call
@@ -35,7 +35,8 @@ use bilibi_ui::{
     Combobox, CommitStates, CommitStatus, ConfirmDialog, CreateButton, Fact, Facts, Field,
     FilterToolbar, FlashMap, FlexRow, FlexTable, Fold, Form, Header, Html, IconButton, IconKind,
     InlineChoice, InlineEdit, InlineField, InputKind, ListColumns, ListSpec, ListState, Modal,
-    PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
+    PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty, Toggle, ToolbarControl,
+    NO_FLASH,
 };
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -222,7 +223,7 @@ struct MutedText<'a> {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% for badge in badges %}{{ badge }} {% endfor %}"#,
+    source = r#"<span class="inline-flex items-center gap-2">{% for badge in badges %}{{ badge }}{% endfor %}</span>"#,
     ext = "html"
 )]
 struct Badges {
@@ -312,16 +313,31 @@ impl CurrencyPage {
                         json!({"code": code, "enabled": enable}),
                     )
                     .await;
-                self.flash = Some(match outcome(result, DENIED)? {
-                    Ok(()) => (
-                        StatusKind::Success,
-                        if enable {
-                            format!("{code} is enabled. People can choose it in new records.")
-                        } else {
-                            format!("{code} is disabled. Records that hold it keep it.")
-                        },
-                    ),
-                    Err(message) => (StatusKind::Error, message),
+                self.flash = Some(match result {
+                    // The refusal names what holds the currency; it reads
+                    // after the code rather than after the field name.
+                    Err(ContractError::InvalidInput(fields)) => {
+                        let reasons: Vec<String> = fields.into_values().flatten().collect();
+                        (
+                            StatusKind::Error,
+                            format!(
+                                "{code} cannot be turned {}: it {}.",
+                                if enable { "on" } else { "off" },
+                                reasons.join("; ")
+                            ),
+                        )
+                    }
+                    result => match outcome(result, DENIED)? {
+                        Ok(()) => (
+                            StatusKind::Success,
+                            if enable {
+                                format!("{code} is enabled. People can choose it in new records.")
+                            } else {
+                                format!("{code} is disabled. Records that hold it keep it.")
+                            },
+                        ),
+                        Err(message) => (StatusKind::Error, message),
+                    },
                 });
             }
             "save_base" => {
@@ -431,17 +447,19 @@ impl CurrencyPage {
     }
 
     /// The base currency as a fact: read first, chosen in place.
+    /// Every currency that is not withdrawn is offered: choosing one that is
+    /// not enabled yet enables it in the same write.
     fn base_fact(
         &self,
         base: Option<&Currency>,
-        enabled: &[Currency],
+        choices: &[Currency],
         manage: bool,
     ) -> Result<Html> {
         let value = base.map_or("", |base| base.code.as_str());
         let display = match base {
             Some(base) => Html::text(&base.label()),
             None => render(MutedText {
-                text: "Not set. Conversions to the base currency are refused until you choose one.",
+                text: "Required for currency conversions.",
             })?,
         };
         let mut field = InlineField::new("currency-base", "base", "Edit base currency", value)
@@ -452,7 +470,7 @@ impl CurrencyPage {
         let editor = render(currency_editor(
             "currency-base-input",
             "base",
-            enabled,
+            choices,
             value,
         ))?;
         render(&InlineChoice {
@@ -473,6 +491,13 @@ impl CurrencyPage {
         let enabled: Vec<Currency> = catalog
             .iter()
             .filter(|currency| currency.enabled && !currency.withdrawn)
+            .cloned()
+            .collect();
+        let base_choices: Vec<Currency> = catalog
+            .iter()
+            .filter(|currency| {
+                !currency.withdrawn || base.as_ref().is_some_and(|base| base.code == currency.code)
+            })
             .cloned()
             .collect();
         let max_age = pages
@@ -523,7 +548,7 @@ impl CurrencyPage {
         let mut facts = vec![Fact {
             title: "Base currency",
             id: "currency-base-fact",
-            value: self.base_fact(base.as_ref(), &enabled, manage)?,
+            value: self.base_fact(base.as_ref(), &base_choices, manage)?,
         }];
         facts.push(Fact {
             title: "Oldest usable rate",
@@ -538,7 +563,6 @@ impl CurrencyPage {
         });
         let mut summary = render(SectionHeading {
             title: "Base currency",
-            description: "Reports roll amounts up in the base currency. A company can use its own.",
             ..SectionHeading::default()
         })?;
         summary.push(&render(Facts {
@@ -546,7 +570,8 @@ impl CurrencyPage {
             items: facts,
         })?);
         if let Some((country, code)) = &suggestion {
-            let usable = enabled.iter().any(|currency| &currency.code == code);
+            // Setting the base enables the currency in the same write.
+            let usable = base_choices.iter().any(|currency| &currency.code == code);
             let mut hint = Html::text(&format!(
                 "Your main company is in {country}, which uses {code}. "
             ));
@@ -561,10 +586,6 @@ impl CurrencyPage {
                     body: Html::text(&format!("Use {code} as the base currency")),
                     ..Button::default()
                 })?);
-            } else {
-                hint.push(&Html::text(&format!(
-                    "Enable {code} in the list below, then choose it as the base currency."
-                )));
             }
             summary.push(&render(MutedHtml { body: hint })?);
         }
@@ -658,12 +679,13 @@ impl CurrencyPage {
         }
         let header = render(Header {
             title: Html::text("Currencies"),
-            subtitle: "Switch on the currencies you trade in. Rates and forms offer only those.",
-            actions: render(bilibi_ui::ActionLink {
+            subtitle:
+                "Enable the currencies you use. Only enabled currencies appear in forms and rates.",
+            actions: render(Button {
                 id: "currency-rates-link",
                 href: RATES_PATH,
                 body: Html::text("Exchange rates"),
-                ..bilibi_ui::ActionLink::default()
+                ..Button::default()
             })?,
             ..Header::default()
         })?;
@@ -693,14 +715,26 @@ impl CurrencyPage {
         ))?;
         let mut rows = Vec::with_capacity(entries.len());
         for currency in entries {
-            let badge = if currency.withdrawn {
-                render(Badge::status(BadgeKind::Warning, "Withdrawn"))?
-            } else if currency.enabled {
-                render(Badge::status(BadgeKind::Success, "Enabled"))?
+            // One switch is the status and its control: a person without
+            // currency manage, and a withdrawn currency that is off, read it.
+            let (event, label) = if currency.enabled {
+                ("disable", format!("Disable {}", currency.code))
             } else {
-                render(Badge::status(BadgeKind::Neutral, "Not enabled"))?
+                ("enable", format!("Enable {}", currency.code))
             };
-            let mut badges = vec![badge];
+            let id = format!("currency-{}-enabled", currency.code.to_lowercase());
+            let mut badges = vec![render(Toggle {
+                on: currency.enabled,
+                label: &label,
+                id: &id,
+                event,
+                name: "key",
+                value: &currency.code,
+                disabled: !manage || (currency.withdrawn && !currency.enabled),
+            })?];
+            if currency.withdrawn {
+                badges.push(render(Badge::status(BadgeKind::Warning, "Withdrawn"))?);
+            }
             if base.as_ref().is_some_and(|base| base.code == currency.code) {
                 badges.push(render(Badge::status(BadgeKind::Plain, "Base"))?);
             }
@@ -720,22 +754,6 @@ impl CurrencyPage {
                 )
                 .slot("places", Html::text(&currency.minor_units.to_string()))
                 .slot("status", render(Badges { badges })?);
-            if manage && !(currency.withdrawn && !currency.enabled) {
-                let (icon, label, event) = if currency.enabled {
-                    ("close", "Disable", "disable")
-                } else {
-                    ("confirm", "Enable", "enable")
-                };
-                let id = format!("currency-{}-{event}", currency.code.to_lowercase());
-                row.actions = render(IconButton {
-                    id: &id,
-                    kind: IconKind::Neutral,
-                    event,
-                    name: "key",
-                    value: &currency.code,
-                    ..IconButton::new(icon, label)
-                })?;
-            }
             row.dom_id = Some(format!("currency-{}", currency.code.to_lowercase()));
             rows.push(row);
         }
@@ -745,7 +763,6 @@ impl CurrencyPage {
         table.add_query = &self.columns.add_query;
         table.caption = "Currencies";
         table.framed = false;
-        table.actions = manage;
         if counts.total_entries == 0 {
             table.empty = Some(TableEmpty::Content(Html::text(
                 if search.is_empty() && status == "all" {
@@ -782,6 +799,25 @@ impl CurrencyPage {
     }
 }
 
+/// Fields side by side, through the shared `field_row`.
+#[derive(Template)]
+#[template(
+    source = r#"{%- import "forms.html" as form -%}{% call form::field_row(fields=fields) %}{% endcall %}"#,
+    ext = "html"
+)]
+struct FieldRow {
+    fields: Vec<Html>,
+}
+/// The calculator's first line: the date to convert on, then what the
+/// conversion named, on one compact row.
+#[derive(Template)]
+#[template(
+    source = r#"{%- import "forms.html" as form -%}<div class="ui-compact-controls">{% call form::control_group(controls=controls) %}{% endcall %}</div>"#,
+    ext = "html"
+)]
+struct CheckLine {
+    controls: Vec<Html>,
+}
 #[derive(Template)]
 #[template(
     source = r#"<p class="mt-2 text-sm text-ink-muted">{{ body|safe }}</p>"#,
@@ -830,11 +866,27 @@ struct Draft {
     values: HashMap<String, String>,
     errors: BTreeMap<String, Vec<String>>,
 }
-/// The conversion check: what was asked and what came back.
+/// The currency conversion calculator: two amounts, each with its currency,
+/// the date to convert on, and the line that names the rate used or why
+/// there is none. Empty codes are filled with defaults on the first render.
 #[derive(Default)]
 struct Check {
-    values: HashMap<String, String>,
-    result: Option<std::result::Result<Vec<(String, String)>, String>>,
+    top_amount: String,
+    top: String,
+    bottom_amount: String,
+    bottom: String,
+    date: String,
+    /// The amount typed last; every render answers from it, so a rate
+    /// added or changed meanwhile shows at once.
+    side: Side,
+    line: Option<std::result::Result<String, String>>,
+}
+/// Which amount the person typed, so the other one is the answer.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Side {
+    #[default]
+    Top,
+    Bottom,
 }
 
 struct Rates {
@@ -1045,59 +1097,128 @@ impl Rates {
             "convert" => {
                 let posted = params::form_values_checked(value, "convert", params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
-                self.check = Check {
-                    result: Some(self.convert(scope, &posted).await?),
-                    values: posted,
+                let field =
+                    |key: &str| posted.get(key).map_or("", String::as_str).trim().to_owned();
+                // Only the bottom amount changed: the person typed there, so
+                // the top one is the answer. Anything else converts downward.
+                let side = if field("bottom_amount") != self.check.bottom_amount
+                    && field("top_amount") == self.check.top_amount
+                {
+                    Side::Bottom
+                } else {
+                    Side::Top
                 };
+                self.check.top_amount = field("top_amount");
+                self.check.top = field("top");
+                self.check.bottom_amount = field("bottom_amount");
+                self.check.bottom = field("bottom");
+                self.check.date = field("date");
+                self.check.side = side;
             }
             _ => return Err(Error::Invalid),
         }
         Ok(())
     }
 
-    /// Asks the shared conversion, as any module would; shows what it names.
-    async fn convert(
-        &self,
-        scope: &Scope,
-        posted: &HashMap<String, String>,
-    ) -> Result<std::result::Result<Vec<(String, String)>, String>> {
-        let field = |key: &str| posted.get(key).map_or("", String::as_str).trim().to_owned();
-        let Ok(amount) = Decimal::from_str(&field("amount")) else {
-            return Ok(Err("Enter the amount as a number, such as 1250.50.".into()));
+    /// Asks the shared conversion, as any module would, from the amount the
+    /// person typed into the other row's currency; the line names the rate's
+    /// date and where it came from, or why there is none.
+    async fn calculate(&mut self, scope: &Scope, side: Side) -> Result<()> {
+        let check = &mut self.check;
+        let (amount, from, to) = match side {
+            Side::Top => (&check.top_amount, &check.top, &check.bottom),
+            Side::Bottom => (&check.bottom_amount, &check.bottom, &check.top),
         };
-        let Ok(on) = field("date").parse::<Date>() else {
-            return Ok(Err("Choose the date to convert on.".into()));
+        let (amount, from, to) = (amount.clone(), from.clone(), to.clone());
+        let answer = match side {
+            Side::Top => &mut check.bottom_amount,
+            Side::Bottom => &mut check.top_amount,
+        };
+        if amount.is_empty() || from.is_empty() || to.is_empty() {
+            answer.clear();
+            check.line = None;
+            return Ok(());
+        }
+        let Ok(amount) = Decimal::from_str(&amount) else {
+            answer.clear();
+            check.line = Some(Err("Enter the amount as a number, such as 1250.50.".into()));
+            return Ok(());
+        };
+        let Ok(on) = check.date.parse::<Date>() else {
+            answer.clear();
+            check.line = Some(Err("Choose the date to convert on.".into()));
+            return Ok(());
         };
         let client = self.pages.db.get().await?;
-        let (from, to) = (field("from"), field("to"));
         let request = Request::new(amount, &from, &to, on);
-        Ok(
-            match self
-                .pages
-                .currencies
-                .convert(&**client, scope, &request)
-                .await?
-            {
-                Ok(conversion) => {
-                    let path = match conversion.quote.path {
-                        crate::Path::Same => "Same currency; no rate needed",
-                        crate::Path::Direct => "A rate entered for this pair",
-                        crate::Path::Inverse => "One over the rate for the opposite pair",
-                        crate::Path::ViaBase => "Two rates, through the base currency",
-                    };
-                    Ok(vec![
-                        (
-                            "Converted amount".into(),
-                            format!("{} {}", conversion.amount, conversion.to),
-                        ),
-                        ("Rate used".into(), conversion.quote.rate.to_string()),
-                        ("Rate date".into(), conversion.quote.rate_date.to_string()),
-                        ("How it was found".into(), path.into()),
-                    ])
-                }
-                Err(refusal) => Err(refusal.message()),
-            },
-        )
+        match self
+            .pages
+            .currencies
+            .convert(&**client, scope, &request)
+            .await?
+        {
+            Ok(conversion) => {
+                *answer = conversion.amount.to_string();
+                let quote = &conversion.quote;
+                let note = || {
+                    quote
+                        .rate_ids
+                        .first()
+                        .and_then(|id| self.rates.iter().find(|rate| rate.id == *id))
+                        .and_then(|rate| rate.source_note.clone())
+                        .unwrap_or_else(|| "entered manually".into())
+                };
+                let source = match quote.path {
+                    crate::Path::Same => "same currency, no rate needed".to_owned(),
+                    crate::Path::Direct | crate::Path::Inverse => note(),
+                    crate::Path::ViaBase => "two rates through the base currency".to_owned(),
+                };
+                self.check.line = Some(Ok(format!(
+                    "Rate of {} · {source}",
+                    quote.rate_date.strftime("%-d %b %Y")
+                )));
+            }
+            Err(refusal) => {
+                answer.clear();
+                self.check.line = Some(Err(refusal.message()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The calculator's starting point: 1 of the base currency (or the first
+    /// enabled one) on top, below it the other side of the latest rate that
+    /// involves it (or the next enabled currency), on today.
+    fn start_check(&mut self, enabled: &[Currency], base: Option<&Currency>, today: Option<Date>) {
+        let top = base
+            .filter(|base| enabled.iter().any(|currency| currency.code == base.code))
+            .or_else(|| enabled.first())
+            .map(|currency| currency.code.clone())
+            .unwrap_or_default();
+        let latest = self.rates.iter().find_map(|rate| {
+            if rate.from == top {
+                Some(rate.to.clone())
+            } else if rate.to == top {
+                Some(rate.from.clone())
+            } else {
+                None
+            }
+        });
+        let bottom = latest
+            .or_else(|| {
+                enabled
+                    .iter()
+                    .find(|currency| currency.code != top)
+                    .map(|currency| currency.code.clone())
+            })
+            .unwrap_or_default();
+        self.check = Check {
+            top_amount: "1".into(),
+            top,
+            bottom,
+            date: today.map(|today| today.to_string()).unwrap_or_default(),
+            ..Check::default()
+        };
     }
 
     fn inline(
@@ -1155,11 +1276,11 @@ impl Rates {
             self.columns.load(&self.rates, |rate| rate.id.to_string());
         }
         let counts = PageCounts::new(self.state.page, self.state.page_size, total as u64);
-        let mut actions = render(bilibi_ui::ActionLink {
+        let mut actions = render(Button {
             id: "currency-list-link",
             href: CURRENCIES_PATH,
             body: Html::text("Currencies"),
-            ..bilibi_ui::ActionLink::default()
+            ..Button::default()
         })?;
         if edits {
             actions.push(&render(CreateButton {
@@ -1234,10 +1355,13 @@ impl Rates {
         table.framed = false;
         table.actions = edits;
         if total == 0 {
-            table.empty = Some(TableEmpty::Content(Html::text(if search.is_empty() {
-                "No exchange rates yet. Enable the currencies you trade in, then add a rate."
-            } else {
+            table.empty = Some(TableEmpty::Content(Html::text(if !search.is_empty() {
                 "No rate matches this search."
+            } else if enabled.len() < 2 {
+                // A rate needs two enabled currencies.
+                "No exchange rates yet. Enable the currencies first."
+            } else {
+                "No exchange rates yet."
             })));
         }
         let mut body = render(table)?;
@@ -1252,7 +1376,15 @@ impl Rates {
             body,
             ..Card::default()
         })?;
-        let check = self.check_card(&enabled, today)?;
+        if self.check.top.is_empty() && self.check.bottom.is_empty() && enabled.len() >= 2 {
+            let base = {
+                let client = pages.db.get().await?;
+                pages.currencies.base(&**client, scope, None).await?
+            };
+            self.start_check(&enabled, base.as_ref(), today);
+        }
+        self.calculate(scope, self.check.side).await?;
+        let check = self.check_card(&enabled)?;
         let dialog = match (&self.confirm, &self.draft) {
             (Some(rate), _) => render(ConfirmDialog {
                 id: "currency-rate-delete-confirm",
@@ -1283,74 +1415,75 @@ impl Rates {
         .map_err(|_| Error::Internal)
     }
 
-    /// "Check a conversion": the same call every module makes, shown with the
-    /// rate, its date and how it was found.
-    fn check_card(&self, enabled: &[Currency], today: Option<Date>) -> Result<Html> {
-        let value = |key: &str| self.check.values.get(key).cloned().unwrap_or_default();
-        let combo = |key: &str, label: &str| {
-            Combobox::new(format!("convert_{key}"), format!("convert[{key}]"))
-                .label(label)
-                .options(enabled.iter().map(|currency| currency.choice()).collect())
-                .value(value(key))
-                .placeholder("Choose a currency")
+    /// The currency conversion calculator: the line that names the rate's
+    /// date and source with the date to convert on, then two rows of an
+    /// amount and its currency. Typing in either row answers in the other.
+    fn check_card(&self, enabled: &[Currency]) -> Result<Html> {
+        let check = &self.check;
+        let options: Vec<Choice> = enabled
+            .iter()
+            .map(|currency| currency.choice())
+            .collect();
+        let row = |amount: &str, code: &str, side: &str, label: &str| -> Result<Html> {
+            render(FieldRow {
+                fields: vec![
+                    render(
+                        Field::in_form("convert", &format!("{side}_amount"))
+                            .id(format!("currency-check-{side}-amount"))
+                            .label(format!("{label} amount"))
+                            .value(amount)
+                            .attr("inputmode", "decimal")
+                            .attr("autocomplete", "off")
+                            .attr("data-debounce", "400")
+                            .wrapper_class("mb-0"),
+                    )?,
+                    render(
+                        Combobox::new(format!("convert_{side}"), format!("convert[{side}]"))
+                            .label(format!("{label} currency"))
+                            .options(options.clone())
+                            .value(code)
+                            .placeholder("Choose a currency")
+                            .wrapper_class("mb-0"),
+                    )?,
+                ],
+            })
         };
-        let mut body = render(
-            Field::in_form("convert", "amount")
-                .id("currency-check-amount")
-                .label("Amount")
-                .value(value("amount"))
-                .attr("inputmode", "decimal")
-                .required(),
-        )?;
-        body.push(&render(combo("from", "From"))?);
-        body.push(&render(combo("to", "To"))?);
-        body.push(&render(
-            Field::in_form("convert", "date")
-                .id("currency-check-date")
-                .label("On")
-                .kind(InputKind::Date)
-                .value(match (value("date"), today) {
-                    (date, Some(today)) if date.is_empty() => today.to_string(),
-                    (date, _) => date,
-                })
-                .required(),
-        )?);
-        let actions = render(Button {
-            variant: ButtonVariant::Primary,
-            button_type: "submit",
-            working: "Converting…",
-            body: Html::text("Convert"),
-            ..Button::default()
+        let line = match &check.line {
+            Some(Ok(text)) => render(MutedText { text })?,
+            Some(Err(text)) => render(MutedText { text })?,
+            None => Html::EMPTY,
+        };
+        let mut body = render(CheckLine {
+            controls: vec![
+                render(
+                    Field::in_form("convert", "date")
+                        .id("currency-check-date")
+                        .label("On")
+                        .kind(InputKind::Date)
+                        .value(&check.date)
+                        .wrapper_class("mb-0"),
+                )?,
+                line,
+            ],
         })?;
+        body.push(&row(&check.top_amount, &check.top, "top", "First")?);
+        body.push(&row(
+            &check.bottom_amount,
+            &check.bottom,
+            "bottom",
+            "Second",
+        )?);
         let mut card = render(SectionHeading {
-            title: "Check a conversion",
-            description: "Try the conversion other modules use. It names the rate and its date.",
+            title: "Currency conversion calculator",
             ..SectionHeading::default()
         })?;
         card.push(&render(Form {
             id: "currency-check-form",
             event: "convert",
+            change: true,
             body,
-            actions,
             ..Form::default()
         })?);
-        match &self.check.result {
-            Some(Ok(lines)) => card.push(&render(Facts {
-                id: "currency-check-result",
-                items: lines
-                    .iter()
-                    .map(|(title, text)| Fact {
-                        title,
-                        id: "",
-                        value: Html::text(text),
-                    })
-                    .collect(),
-            })?),
-            Some(Err(message)) => card.push(&render(MutedHtml {
-                body: Html::text(message),
-            })?),
-            None => {}
-        }
         render(Card {
             id: "currency-check-card",
             body: card,
