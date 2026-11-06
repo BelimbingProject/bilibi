@@ -310,7 +310,7 @@ pub(super) async fn list(
             row.record = Some(("company".into(), id.clone()));
             row.actions.push(&render(&AddToMenu::new(
                 format!("company-{id}-add-to"),
-                format!("Add {} to…", company.name),
+                company.name.clone(),
                 add_to
                     .iter()
                     .map(|target| AddToItem {
