@@ -350,7 +350,8 @@ impl Timetable {
     /// Before-open times and breaks stay as given. Gaps use the first valid
     /// instant and folds the earlier one, just as opening periods do.
     /// The source date is read in its own rule's zone; if a zone change
-    /// repeats a date boundary, the later matching date wins.
+    /// repeats a date boundary, the later matching date wins; if it skips
+    /// one, `t` moves to the first valid instant, the next date's start.
     /// Zero follows the date operation (roll forward if non-working, cap at
     /// close). The clock adds `n * 24` elapsed hours and preserves zero.
     pub fn add_working_days_at(
@@ -371,6 +372,13 @@ impl Timetable {
             .find_map(|day| {
                 let local = t.to_zoned(zone(&day.timezone).ok()?);
                 (local.date() == day.date).then_some(local)
+            })
+            .or_else(|| {
+                window.days.iter().find_map(|day| {
+                    let tz = zone(&day.timezone).ok()?;
+                    let start = instant(&tz, day.date, 0).ok()?;
+                    (start > t).then(|| start.to_zoned(tz))
+                })
             })
             .ok_or(TimeError::Beyond)?;
         let date = self.add_working_days(local.date(), n)?;

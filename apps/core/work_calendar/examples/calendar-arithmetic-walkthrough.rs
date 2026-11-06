@@ -465,6 +465,30 @@ async fn main() -> Result<(), Failure> {
         1,
         "2026-11-10T10:00:00Z",
     )?;
+    for (label, from, to) in [
+        (
+            "last instant before skipped span",
+            "2026-11-09T23:59:59+08:00",
+            "2026-11-10T17:00:00Z",
+        ),
+        (
+            "skipped span start moves to next date",
+            "2026-11-09T16:00:00Z",
+            "2026-11-11T00:00:00Z",
+        ),
+        (
+            "skipped span moves to next date",
+            "2026-11-10T03:00:00+08:00",
+            "2026-11-11T00:00:00Z",
+        ),
+        (
+            "first instant after skipped span",
+            "2026-11-10T00:00:00Z",
+            "2026-11-11T00:00:00Z",
+        ),
+    ] {
+        days_at(&local, label, from, 1, to)?;
+    }
 
     let dst = calendars
         .timetable(

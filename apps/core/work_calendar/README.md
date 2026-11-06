@@ -58,7 +58,7 @@ All instants are `jiff::Timestamp` (UTC) and durations are `jiff::SignedDuration
 
 - Duration searches look at most 366 elapsed days (`SEARCH_DAYS`) in their direction and never past the loaded window; working-day searches count at most 366 civil dates forward. Failure is `TimeError::Beyond`, including calendars with no working days. Load the window you need, including earlier dates for negative budgets.
 - `shift(t, 0)`, like `add(t, 0)`, returns `t` even outside the window. Other instant operations require a start inside it; a computed exact boundary may equal the window's end.
-- Working-day instants use the source date in its own rule's zone (the later matching date if a zone change repeats a date boundary). Zero follows the date operation: a non-working date rolls forward, and a time after the final close is capped. An overnight period belongs to its starting date, but the instant's source date is its local civil date.
+- Working-day instants use the source date in its own rule's zone (the later matching date if a zone change repeats a date boundary; if it skips one, the first valid instant: the start of the next date). Zero follows the date operation: a non-working date rolls forward, and a time after the final close is capped. An overnight period belongs to its starting date, but the instant's source date is its local civil date.
 - `Timetable::clock()` shifts by signed elapsed time and adds working days as `n * 24` hours, without a calendar horizon. It preserves zero; timestamp overflow is `Beyond`. It is an explicit caller choice, never a substitute for an unknown calendar.
 
 ## Holiday sets
