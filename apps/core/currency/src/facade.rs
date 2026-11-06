@@ -31,6 +31,9 @@ pub struct Currency {
     pub code: String,
     pub numeric_code: String,
     pub name: String,
+    /// Other names people use (`RMB` for CNY), most common first. The first
+    /// one follows the name in labels; search matches all of them.
+    pub common_names: Vec<String>,
     /// Decimal places of the smallest unit (JPY 0, MYR 2, KWD 3).
     pub minor_units: u32,
     /// ISO has retired the code. Records holding it still read; it cannot be
@@ -45,20 +48,70 @@ impl Currency {
             code: row.get("code"),
             numeric_code: row.get("numeric_code"),
             name: row.get("name"),
+            common_names: row.get("common_names"),
             minor_units: row.get::<_, i16>("minor_units") as u32,
             withdrawn: row.get("withdrawn"),
             enabled: row.get("enabled"),
         }
     }
-    /// `MYR — Malaysian ringgit`, the label every currency control shows.
+    /// The common names that add something: those whose words already appear
+    /// together in the ISO name (`Yen` in `Japanese yen`, `Pound sterling` in
+    /// `Pound sterling`) are left out of labels.
+    fn extra_names(&self) -> impl Iterator<Item = &String> {
+        fn words(text: &str) -> Vec<String> {
+            text.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect()
+        }
+        let name = words(&self.name);
+        self.common_names.iter().filter(move |common| {
+            let common = words(common);
+            common.is_empty() || !name.windows(common.len()).any(|run| run == common)
+        })
+    }
+    /// `Chinese yuan (RMB)`: the name with its main common name, if any.
+    pub fn display_name(&self) -> String {
+        match self.extra_names().next() {
+            Some(common) => format!("{} ({common})", self.name),
+            None => self.name.clone(),
+        }
+    }
+    /// `CNY — Chinese yuan (RMB)`, the label every currency control shows.
+    /// The code stored and sent stays the ISO code.
     pub fn label(&self) -> String {
-        format!("{} — {}", self.code, self.name)
+        format!("{} — {}", self.code, self.display_name())
+    }
+    /// The option of a currency control. The other common names ride along
+    /// as the detail, which a combobox shows muted and searches like the
+    /// label, so `Renminbi` finds CNY as well.
+    pub fn choice(&self) -> Choice {
+        Choice::new(self.label(), self.code.clone()).detail(
+            self.extra_names()
+                .skip(1)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+    /// Whether `needle` (already lower case) is in the code, name, a common
+    /// name or is the numeric code.
+    pub fn matches(&self, needle: &str) -> bool {
+        self.code.to_lowercase().contains(needle)
+            || self.name.to_lowercase().contains(needle)
+            || self
+                .common_names
+                .iter()
+                .any(|common| common.to_lowercase().contains(needle))
+            || self.numeric_code == needle
     }
     pub fn to_json(&self) -> Value {
         json!({
             "code": self.code,
             "numeric_code": self.numeric_code,
             "name": self.name,
+            "common_names": self.common_names,
             "minor_units": self.minor_units,
             "withdrawn": self.withdrawn,
             "enabled": self.enabled,
@@ -66,7 +119,7 @@ impl Currency {
     }
 }
 const CURRENCY_COLUMNS: &str =
-    "c.code,c.numeric_code,c.name,c.minor_units,c.withdrawn,(e.code IS NOT NULL) AS enabled";
+    "c.code,c.numeric_code,c.name,c.common_names,c.minor_units,c.withdrawn,(e.code IS NOT NULL) AS enabled";
 const CURRENCY_FROM: &str =
     "FROM currencies c LEFT JOIN currency_tenant_enabled e ON e.tenant_id=$1 AND e.code=c.code";
 
@@ -365,7 +418,7 @@ impl Currencies {
             .map(Currency::from_row)
             .collect())
     }
-    /// The options of a currency control, `MYR — Malaysian ringgit`.
+    /// The options of a currency control, `MYR — Malaysian ringgit (RM)`.
     pub async fn choices(
         &self,
         client: &(impl GenericClient + Sync),
@@ -375,7 +428,7 @@ impl Currencies {
             .enabled(client, scope)
             .await?
             .into_iter()
-            .map(|currency| Choice::new(currency.label(), currency.code))
+            .map(|currency| currency.choice())
             .collect())
     }
     /// The one currency control every form reuses: a searchable `Combobox` of

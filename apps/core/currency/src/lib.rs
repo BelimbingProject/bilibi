@@ -56,6 +56,11 @@ pub const MIGRATION: (&str, &str) = (
     include_str!("../migrations/001-currency.sql"),
 );
 
+pub const MIGRATION_COMMON_NAMES: (&str, &str) = (
+    "core-currency-002-common-names",
+    include_str!("../migrations/002-common-names.sql"),
+);
+
 macro_rules! provenance {
     () => {
         Provenance {
@@ -70,7 +75,7 @@ inventory::submit! {
     Module {
         id: "core/currency", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "core/address", "core/company", "base/datetime", "base/locale"],
-        migrations: &[MIGRATION],
+        migrations: &[MIGRATION, MIGRATION_COMMON_NAMES],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let currencies = Arc::new(Currencies {
@@ -112,6 +117,14 @@ inventory::submit! { Contribution::new(SEEDS, "core/currency.iso4217-v1", proven
     version: "currencies-iso4217-v1",
     mode: SeedMode::Production,
     action: SeedAction::Sql(include_str!("../seeds/iso4217-v1.sql")),
+}) }
+
+// Common names (`RMB` for CNY). Its id sorts after `iso4217-v1`, so on a fresh
+// database the rows exist when it runs.
+inventory::submit! { Contribution::new(SEEDS, "core/currency.iso4217-v2-common-names", provenance!(), &Seed {
+    version: "currencies-iso4217-v2",
+    mode: SeedMode::Production,
+    action: SeedAction::Sql(include_str!("../seeds/iso4217-v2.sql")),
 }) }
 
 fn code_or_null(value: &Value) -> bool {
