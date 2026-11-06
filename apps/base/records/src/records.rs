@@ -3,7 +3,8 @@
 //! facade checks a new reference with the owner (`check`), names references
 //! through the owner's Grid source and its own access check (`resolve`),
 //! finds records for a picker (`search`), repoints merged records
-//! (`redirect`) and counts who points at a record (`referrers`). It reads no
+//! (`redirect`), supplies survivor membership for holder reads (`matching`)
+//! and counts who points at a record (`referrers`). It reads no
 //! owner table directly and the owner never learns its holders. No method
 //! holds a pooled connection while Grid takes one, so concurrent callers
 //! cannot fill the pool and wait on each other.
@@ -211,7 +212,7 @@ impl Records {
     /// stored reference, a redirect and a referrer count then name the row
     /// Grid returns, and a malformed id never reaches the owner's source as a
     /// cast error.
-    fn canonical(kind: &RecordKind, id: &str) -> Option<String> {
+    pub(crate) fn canonical(kind: &RecordKind, id: &str) -> Option<String> {
         if !bilibi_ui::workspace::record_id(id) {
             return None;
         }
@@ -227,7 +228,7 @@ impl Records {
     }
 
     /// The survivors of merged records, by stored id.
-    async fn redirected(
+    pub(crate) async fn redirected(
         client: &dyn ReadClient,
         tenant: i64,
         kind: &str,
@@ -629,17 +630,13 @@ impl Records {
             .await?
             .remove(&id)
             .unwrap_or(id);
-        let mut ids: Vec<String> = client
-            .query(
-                "SELECT from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3",
-                &[&scope.tenant(), &kind, &id],
-            )
+        let ids: Vec<String> = client
+            .query(crate::matching::IDS_SQL, &[&scope.tenant(), &kind, &id])
             .await?
             .iter()
             .map(|row| row.get(0))
             .collect();
         drop(client);
-        ids.push(id);
         let mut counts = Vec::new();
         'holders: for holder in &self.holders {
             let mut count = 0;

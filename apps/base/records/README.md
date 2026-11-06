@@ -52,11 +52,44 @@ An owner may override `RecordOwner::select` to refuse a new choice while keeping
 | Accept a new reference | `check(client, scope, kind, id)` on the connection you already hold: your write's `tx.sql()` in a commit, and in a preview the `OperationClient` the plan hands you. Store the `Reference` it returns. |
 | Show references | `resolve(scope, &references)` → `Resolved { label, path, … }`, in the order given; `resolved.pill(id, framed)` gives the `RelatedRecord`. |
 | Pick a record | `search(scope, &kinds, text)` → hits; `records.picker_hits(&hits)` feeds `RecordPicker`. |
+| Filter your own counts and pages by an existing reference | `matching(tx, scope, kind, id)` → an owner-built `ReferenceMatch` subquery, or `None` for an unavailable source; see below. |
 | Who points here | `referrers(scope, kind, id)` → a count per holder table the reader may read, through Grid's bounded `summarize`, for the record `id` names now (a merged id counts its survivor's referrers); a malformed id of a mounted kind is refused. |
 | Merge two records (owner) | `redirect(tx, scope, kind, from, to)` in the owner's merge transaction. |
 
 - A refusal from `check` (`UnknownKind`, `MalformedId`, `NotFound`, `Forbidden`) is your field error: `refusal.message()`.
 - Your holder row is your own write through `MutationBoundary`, with a `Change` on your own kind. The owner is not written to.
+
+## Filter by a surviving record
+
+Use `matching` when your own indexed count or list must include references stored before a merge. Canonicalizing the requested source with `check` and comparing its survivor with stored `record_id` by equality loses those earlier references.
+
+```rust
+let tx = client.build_transaction()
+    .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+    .start().await?;
+tx.batch_execute(bilibi_grid::BOUNDS).await?;
+let Some(matched) = records.matching(&tx, scope, kind, id).await? else {
+    // Your ordinary unavailable-source response, identical for every denial.
+    return Err(bilibi_database::Error::NotFound);
+};
+let (tenant, kind, survivor) = matched.parameters();
+let predicate = format!(
+    "tenant_id=$1 AND record_kind=$2 AND record_id IN ({})",
+    matched.sql(),
+);
+// Your authorized holder read uses this same predicate in both statements:
+let count = format!("SELECT count(*), count(*) FILTER (WHERE owner_id IS NOT NULL) FROM notes WHERE {predicate}");
+let page = format!("SELECT id FROM notes WHERE {predicate} ORDER BY id LIMIT $4 OFFSET $5");
+// Admit each complete statement with EXPLAIN against Grid's
+// MAX_ESTIMATED_COST, then bind tenant/kind/survivor to $1/$2/$3.
+// Bind the page's limit/offset to $4/$5; propagate a query failure.
+```
+
+- **Owner boundary:** `ReferenceMatch::sql()` is a complete owner-built membership subquery with one text column. Embed it whole; do not inspect its implementation or query Records storage yourself. `reference()` identifies the readable survivor. All values are parameters; holder table/column names come from your code, never request input.
+- **Exact membership:** the survivor and every predecessor from transitive merges participate in one SQL membership test. There is no alias cap, client-side enumeration, chunk arithmetic or holder-row multiplication. Keep the holder index on `(tenant_id, record_kind, record_id)` and apply membership before pagination and aggregation, including your own conditional counts.
+- **Uniform source denial:** unknown/unmounted kinds, malformed ids, missing/removed/other-tenant sources and unreadable survivors all return `None`. The survivor passes the owner's read check (`authorize`, as in `resolve`), so a retired record may still filter its existing references. This grants no holder access or write authority; the holder authorizes its own read, and new selections still use `check`.
+- **Connection and snapshot:** pass your existing PostgreSQL transaction. `matching` takes no pooled connection and starts, commits or rolls back nothing. It refuses `READ COMMITTED`/`READ UNCOMMITTED` with `Error::Invalid`; use `REPEATABLE READ` or `SERIALIZABLE`, then execute the subquery immediately on that same transaction and scope. Source access, redirects, count and pages see that transaction's snapshot, including its own writes. Concurrent merges become visible in a fresh transaction. Do not cache a match or reuse it after the transaction. The transaction must allow owner authorization decision-log writes; use `READ WRITE` even for these business reads.
+- **Cost:** the reverse redirect index serves the predecessor relation; no holder or tenant scan is required to discover aliases. The holder owns admission for its complete SQL: use Grid's `BOUNDS` (statement/lock timeouts), `MAX_ESTIMATED_COST`, `MAX_ROWS` and `MAX_OFFSET`, as in [`text_search_sql`](../grid/README.md). A timeout, cost refusal or database error must fail the read, never produce a partial count/page. `matching` does not change transaction settings or admit arbitrary holder SQL for you.
 
 ## Behaviour
 
@@ -146,3 +179,15 @@ Add `APP_ORIGIN` and `BIND_ADDR` to serve the app afterwards, with the notes pag
 | Long names | A 160-character company name: the pill, the picker hit and the chosen pill stay within a 390 px page, ending in "…" with the whole name as their title. |
 | Synchronized plans | 16 plans of the notes write at once through `/api/v1/plans` and through MCP's `plan` answer within 8 s on the pool of 16, three rounds, and 16 commits of previewed plans at once all finish. |
 | List but not view | For the manager allowed `admin.company.list` and denied `admin.company.view`, `check` refuses company 1, `resolve` shows it unavailable and `search` offers no company, directly and through `/api/v1` and MCP; in the browser their company pills are Restricted and the picker offers no company. |
+
+### Native equivalence proof
+
+`apps/web/examples/records-equivalence/` runs the complete Platform app with a disposable audited holder and the walkthrough fixture, without serving or changing UI. On a clean committed checkout, use the supported real-Git composition recipe and a fresh disposable database:
+
+```sh
+python3 scripts/discover-modules.py --check
+python3 scripts/discover-modules.py --pin
+DATABASE_URL=… cargo run --locked -p bilibi-web --example records-equivalence
+```
+
+The executable requires a current compiled-in pin and asserts unmerged and chained merges, canonical source spelling, the equality defect, total/taken/owned counts, every ordered page, more than 100 predecessors, agreement with `referrers`, uniform tenant/source denial, unchanged complete holder rows and mutation history, concurrent merge snapshots, caller-owned uncommitted redirects and rollback, refusal of `READ COMMITTED`, and successful reads with every pool connection already held. Complete consumer statements use Grid's cost admission and timeout bounds. Fixture-only source setup is explicit SQL; holder writes and redirects use `MutationBoundary`. Any failed assertion exits unsuccessfully.
