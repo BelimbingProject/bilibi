@@ -54,15 +54,21 @@ impl Currency {
             enabled: row.get("enabled"),
         }
     }
-    /// The common names that add something: those already a whole word of
-    /// the ISO name (`Yen` in `Japanese yen`) are left out of labels.
+    /// The common names that add something: those whose words already appear
+    /// together in the ISO name (`Yen` in `Japanese yen`, `Pound sterling` in
+    /// `Pound sterling`) are left out of labels.
     fn extra_names(&self) -> impl Iterator<Item = &String> {
-        let name = self.name.to_lowercase();
-        self.common_names.iter().filter(move |common| {
-            let common = common.to_lowercase();
-            !name
+        fn words(text: &str) -> Vec<String> {
+            text.to_lowercase()
                 .split(|c: char| !c.is_alphanumeric())
-                .any(|word| word == common)
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect()
+        }
+        let name = words(&self.name);
+        self.common_names.iter().filter(move |common| {
+            let common = words(common);
+            common.is_empty() || !name.windows(common.len()).any(|run| run == common)
         })
     }
     /// `Chinese yuan (RMB)`: the name with its main common name, if any.
