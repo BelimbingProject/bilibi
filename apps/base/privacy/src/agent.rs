@@ -21,10 +21,7 @@ use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_personal_data::Identifier;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static PRIVACY: OnceLock<Arc<Privacy>> = OnceLock::new();
 /// Bound once at boot by the `base/privacy.agent` service.
@@ -34,20 +31,17 @@ pub(crate) fn bind(privacy: Arc<Privacy>) -> bool {
 fn privacy() -> bilibi_agent_api::Result<&'static Arc<Privacy>> {
     PRIVACY.get().ok_or(Error::Internal.into())
 }
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
 fn id(input: &Value, field: &str) -> bilibi_agent_api::Result<i64> {
     input[field]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| field_error(field, "must be a positive integer"))
+        .ok_or_else(|| bilibi_agent_api::invalid(field, "must be a positive integer"))
 }
 fn text<'a>(input: &'a Value, field: &str) -> bilibi_agent_api::Result<&'a str> {
     input[field]
         .as_str()
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| field_error(field, "is required"))
+        .ok_or_else(|| bilibi_agent_api::invalid(field, "is required"))
 }
 
 /// A request as agents and pages read it: never the identifier values.
@@ -125,10 +119,11 @@ impl ReadHandler for Read {
                 }
                 Self::Retention => {
                     let company = match input.get("company_id") {
-                        Some(_) => Some(
-                            OrganisationId::new(id(input, "company_id")?)
-                                .map_err(|_| field_error("company_id", "is invalid"))?,
-                        ),
+                        Some(_) => {
+                            Some(OrganisationId::new(id(input, "company_id")?).map_err(|_| {
+                                bilibi_agent_api::invalid("company_id", "is invalid")
+                            })?)
+                        }
                         None => None,
                     };
                     let (company, classes) =
@@ -146,7 +141,7 @@ fn kind(input: &Value) -> bilibi_agent_api::Result<RequestKind> {
         Some("access") => Ok(RequestKind::Access),
         Some("portability") => Ok(RequestKind::Portability),
         Some("erasure") => Ok(RequestKind::Erasure),
-        _ => Err(field_error(
+        _ => Err(bilibi_agent_api::invalid(
             "kind",
             "must be access, portability or erasure",
         )),
@@ -154,9 +149,9 @@ fn kind(input: &Value) -> bilibi_agent_api::Result<RequestKind> {
 }
 fn new_request(input: &Value) -> bilibi_agent_api::Result<NewRequest> {
     let person = PersonId::new(id(input, "person_id")?)
-        .map_err(|_| field_error("person_id", "is invalid"))?;
+        .map_err(|_| bilibi_agent_api::invalid("person_id", "is invalid"))?;
     let company = OrganisationId::new(id(input, "company_id")?)
-        .map_err(|_| field_error("company_id", "is invalid"))?;
+        .map_err(|_| bilibi_agent_api::invalid("company_id", "is invalid"))?;
     let mut identifiers = Vec::new();
     for (field, make) in [
         ("emails", Identifier::Email as fn(String) -> Identifier),
@@ -165,12 +160,12 @@ fn new_request(input: &Value) -> bilibi_agent_api::Result<NewRequest> {
         if let Some(values) = input.get(field) {
             let values = values
                 .as_array()
-                .ok_or_else(|| field_error(field, "must be a list"))?;
+                .ok_or_else(|| bilibi_agent_api::invalid(field, "must be a list"))?;
             for value in values {
                 identifiers.push(make(
                     value
                         .as_str()
-                        .ok_or_else(|| field_error(field, "must be text"))?
+                        .ok_or_else(|| bilibi_agent_api::invalid(field, "must be text"))?
                         .to_owned(),
                 ));
             }
@@ -187,13 +182,13 @@ fn hold_target(input: &Value) -> bilibi_agent_api::Result<HoldTarget> {
     match (input.get("person_id"), input.get("record_kind")) {
         (Some(_), None) => Ok(HoldTarget::Person {
             person: PersonId::new(id(input, "person_id")?)
-                .map_err(|_| field_error("person_id", "is invalid"))?,
+                .map_err(|_| bilibi_agent_api::invalid("person_id", "is invalid"))?,
         }),
         (None, Some(_)) => Ok(HoldTarget::Record {
             kind: text(input, "record_kind")?.to_owned(),
             id: id(input, "record_id")?,
         }),
-        _ => Err(field_error(
+        _ => Err(bilibi_agent_api::invalid(
             "person_id",
             "give exactly one of person_id or record_kind with record_id",
         )),
@@ -201,7 +196,9 @@ fn hold_target(input: &Value) -> bilibi_agent_api::Result<HoldTarget> {
 }
 fn refusal(error: Error) -> AgentError {
     match error {
-        Error::Conflict => field_error("version", "the request or hold changed; read it again"),
+        Error::Conflict => {
+            bilibi_agent_api::invalid("version", "the request or hold changed; read it again")
+        }
         error => error.into(),
     }
 }
@@ -219,15 +216,19 @@ enum Write {
 fn reveal_record(input: &Value) -> bilibi_agent_api::Result<Value> {
     match &input["record"] {
         record @ (Value::Number(_) | Value::String(_)) => Ok(record.clone()),
-        _ => Err(field_error("record", "must be the record's key")),
+        _ => Err(bilibi_agent_api::invalid(
+            "record",
+            "must be the record's key",
+        )),
     }
 }
 /// The records the operator confirms, as `base.privacy.request.locate` listed them.
 fn confirm(input: &Value) -> bilibi_agent_api::Result<Vec<ConfirmedRecord>> {
     match input.get("confirm") {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(list) => serde_json::from_value(list.clone())
-            .map_err(|_| field_error("confirm", "must be a list of {store, kind, id}")),
+        Some(list) => serde_json::from_value(list.clone()).map_err(|_| {
+            bilibi_agent_api::invalid("confirm", "must be a list of {store, kind, id}")
+        }),
     }
 }
 impl WriteHandler for Write {
@@ -283,7 +284,7 @@ impl WriteHandler for Write {
             let version = || {
                 input["version"]
                     .as_i64()
-                    .ok_or_else(|| field_error("version", "is required"))
+                    .ok_or_else(|| bilibi_agent_api::invalid("version", "is required"))
             };
             let result = match self {
                 Self::Receive => request_json(
@@ -304,7 +305,7 @@ impl WriteHandler for Write {
                         )
                         .await
                         .map_err(|error| match error {
-                            Error::Invalid => field_error(
+                            Error::Invalid => bilibi_agent_api::invalid(
                                 "confirm",
                                 "names a record that is not a current candidate, or the note is invalid",
                             ),

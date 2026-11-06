@@ -582,8 +582,8 @@ impl TenantsPage {
                     additional_companies: field("additional_companies"),
                     company_errors: BTreeMap::new(),
                 };
-                let parent_id = params::blank_to_none(Some(draft.parent_id.trim()));
-                let parent = parent_id.map(|text| params::positive_id(Some(text)));
+                let parent_id = params::blank_to_none(Some(&draft.parent_id));
+                let parent = parent_id.map(|text| params::positive_id(Some(&text)));
                 if parent == Some(None) {
                     // A parent that is not an id cannot be cast, as the source's
                     // changeset reports.

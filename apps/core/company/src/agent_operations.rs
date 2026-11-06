@@ -116,8 +116,8 @@ impl ReadHandler for List {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let query = SearchQuery {
-                search: input["search"].as_str().unwrap_or_default().to_owned(),
-                status: input["status"].as_str().unwrap_or_default().to_owned(),
+                search: bilibi_agent_api::text_field(input, "search"),
+                status: bilibi_agent_api::text_field(input, "status"),
                 page: input["page"].as_i64().unwrap_or(1),
                 page_size: input["page_size"].as_i64().unwrap_or(25),
             };

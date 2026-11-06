@@ -129,8 +129,10 @@ impl Software {
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Saved> {
-        let repository = text_setting(self.settings.get_global(client, REPOSITORY).await?.as_str());
-        let bound = text_setting(
+        let repository = bilibi_ui::params::blank_to_none(
+            self.settings.get_global(client, REPOSITORY).await?.as_str(),
+        );
+        let bound = bilibi_ui::params::blank_to_none(
             self.settings
                 .get_global(client, REPOSITORY_BOUND)
                 .await?
@@ -312,13 +314,6 @@ impl Software {
             json!({"review": review.facts, "github": {"repository": review.facts["repository"], "repository_id": review.facts["repository_id"], "token_set": review.facts["token_set"]}}),
         )
     }
-}
-
-fn text_setting(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
 }
 
 async fn github_review(

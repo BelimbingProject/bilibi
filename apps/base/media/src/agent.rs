@@ -15,10 +15,7 @@ use bilibi_database::MutationTransaction;
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static MEDIA: OnceLock<Arc<Media>> = OnceLock::new();
 /// Bound once at boot by the `base/media.agent` service.
@@ -29,19 +26,18 @@ fn media() -> bilibi_agent_api::Result<&'static Arc<Media>> {
     MEDIA.get().ok_or(bilibi_database::Error::Internal.into())
 }
 
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
-}
 /// A refusal in the words of the field it is about; other failures keep
 /// their shared meaning (forbidden, unavailable).
 pub(crate) fn refusal(error: Error) -> AgentError {
     match error {
-        Error::NotFound => field_error("file_id", "is not a stored file of this tenant"),
+        Error::NotFound => {
+            bilibi_agent_api::invalid("file_id", "is not a stored file of this tenant")
+        }
         Error::NoScanner
         | Error::AlreadyClean
         | Error::Purged
         | Error::NotPurgeable
-        | Error::InvalidRules => field_error("file_id", &error.to_string()),
+        | Error::InvalidRules => bilibi_agent_api::invalid("file_id", error.to_string()),
         Error::Database(error) => error.into(),
         _ => bilibi_database::Error::Internal.into(),
     }
@@ -68,7 +64,7 @@ fn file_id(input: &Value) -> bilibi_agent_api::Result<i64> {
     input["file_id"]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| field_error("file_id", "must be a positive integer"))
+        .ok_or_else(|| bilibi_agent_api::invalid("file_id", "must be a positive integer"))
 }
 
 struct List;
@@ -84,7 +80,7 @@ impl ReadHandler for List {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let states = states(input["state"].as_str().unwrap_or_default()).ok_or_else(|| {
-                field_error(
+                bilibi_agent_api::invalid(
                     "state",
                     "must be attention, infected, failed, pending, unscanned or all",
                 )

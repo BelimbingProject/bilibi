@@ -31,9 +31,6 @@ fn owner() -> bilibi_agent_api::Result<&'static Consent> {
 }
 
 type Fields = BTreeMap<String, Vec<String>>;
-fn fields(path: &str, message: &str) -> bilibi_agent_api::Error {
-    bilibi_agent_api::Error::InvalidInput(Fields::from([(path.into(), vec![message.into()])]))
-}
 
 /// Reads the typed input. A value the schema accepts but the rules refuse
 /// (an unknown code, a bad time) is a field error on its path.
@@ -98,7 +95,7 @@ fn current_company(scope: &Scope) -> bilibi_agent_api::Result<i64> {
     scope
         .current_company()
         .map(|company| company.get())
-        .ok_or_else(|| fields("company", "requires a selected company"))
+        .ok_or_else(|| bilibi_agent_api::invalid("company", "requires a selected company"))
 }
 fn question(scope: &Scope, input: &Value) -> bilibi_agent_api::Result<Question> {
     let mut reader = Reader::new(input);
@@ -167,14 +164,14 @@ fn person_id(input: &Value) -> bilibi_agent_api::Result<PersonId> {
     input["person_id"]
         .as_i64()
         .and_then(|id| PersonId::new(id).ok())
-        .ok_or_else(|| fields("person_id", "must be positive"))
+        .ok_or_else(|| bilibi_agent_api::invalid("person_id", "must be positive"))
 }
 fn lift_input(input: &Value) -> bilibi_agent_api::Result<(i64, String)> {
     let id = input["suppression_id"]
         .as_i64()
         .filter(|id| *id > 0)
-        .ok_or_else(|| fields("suppression_id", "must be positive"))?;
-    Ok((id, input["reason"].as_str().unwrap_or_default().to_owned()))
+        .ok_or_else(|| bilibi_agent_api::invalid("suppression_id", "must be positive"))?;
+    Ok((id, bilibi_agent_api::text_field(input, "reason")))
 }
 
 /// An owner refusal, typed for every door.
@@ -182,7 +179,7 @@ pub(crate) fn refused(error: WriteError) -> bilibi_agent_api::Error {
     match error {
         WriteError::Access(error) => error.into(),
         WriteError::NotFound => bilibi_agent_api::Error::NotFound,
-        WriteError::Lifted => fields("lifted", &WriteError::Lifted.to_string()),
+        WriteError::Lifted => bilibi_agent_api::invalid("lifted", WriteError::Lifted.to_string()),
         WriteError::Invalid(errors) => {
             let mut fields = Fields::new();
             for e in errors {

@@ -1043,6 +1043,7 @@ dependencies = [
  "icu_decimal",
  "icu_locale",
  "inventory",
+ "rust_decimal",
  "serde_json",
  "tokio-postgres",
 ]
@@ -1823,6 +1824,7 @@ dependencies = [
  "bilibi-extensions",
  "bilibi-geonames",
  "bilibi-grid",
+ "bilibi-locale",
  "bilibi-mail",
  "bilibi-module-registry",
  "bilibi-notifications",
@@ -1843,6 +1845,7 @@ dependencies = [
  "inventory",
  "jiff",
  "libc",
+ "rust_decimal",
  "serde",
  "serde_json",
  "tokio",

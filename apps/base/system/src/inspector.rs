@@ -9,9 +9,8 @@ use bilibi_tenancy::Scope;
 use bilibi_ui::{
     forms::Choice,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
-    params, Badge, BadgeKind, BuiltinColumn, Card, Filter, FilterToolbar, FlexRow, FlexTable,
-    Header, Html, ListColumns, ListSpec, ListState, PageCounts, Pagination, TableEmpty,
-    ToolbarControl,
+    params, BadgeKind, BuiltinColumn, Card, Filter, FilterToolbar, FlexRow, FlexTable, Header,
+    Html, ListColumns, ListSpec, ListState, PageCounts, Pagination, TableEmpty, ToolbarControl,
 };
 use serde_json::Value;
 use std::{
@@ -122,14 +121,14 @@ impl Inspector {
                     )
                     .slot(
                         "kind",
-                        badge(
+                        bilibi_ui::status_badge(
+                            BadgeKind::Neutral,
                             if item.is_container() {
                                 "container"
                             } else {
                                 "leaf"
                             },
-                            BadgeKind::Neutral,
-                        )?,
+                        ),
                     )
                     .slot(
                         "capability",
@@ -148,9 +147,9 @@ impl Inspector {
                     .slot(
                         "served",
                         if item.route.is_none() {
-                            badge("—", BadgeKind::Neutral)?
+                            bilibi_ui::status_badge(BadgeKind::Neutral, "—")
                         } else {
-                            yes_no(served)?
+                            yes_no(served)
                         },
                     )
                     .slot(
@@ -160,7 +159,7 @@ impl Inspector {
                             "font-mono text-xs text-ink-muted",
                         )?,
                     )
-                    .slot("allowed", yes_no(permitted)?),
+                    .slot("allowed", yes_no(permitted)),
             );
         }
         let mut body = render(Header {
@@ -309,21 +308,10 @@ struct Cell<'a> {
 fn cell(text: &str, class: &str) -> Result<Html> {
     render(Cell { text, class })
 }
-fn badge(text: &str, kind: BadgeKind) -> Result<Html> {
-    render(Badge {
-        kind,
-        dot: true,
-        body: Html::text(text),
-        ..Badge::default()
-    })
-}
-fn yes_no(yes: bool) -> Result<Html> {
-    badge(
-        if yes { "yes" } else { "no" },
-        if yes {
-            BadgeKind::Success
-        } else {
-            BadgeKind::Danger
-        },
-    )
+fn yes_no(yes: bool) -> Html {
+    if yes {
+        bilibi_ui::status_badge(BadgeKind::Success, "yes")
+    } else {
+        bilibi_ui::status_badge(BadgeKind::Danger, "no")
+    }
 }

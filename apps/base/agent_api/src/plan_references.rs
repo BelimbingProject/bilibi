@@ -1,6 +1,6 @@
 //! Same-plan record links; extends the ordered plans.
 //! Only owners declare created records. No guessed IDs or preview writes.
-use crate::{Error, Handler, PlannedOperation, Registry, Result};
+use crate::{Handler, PlannedOperation, Registry, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -33,7 +33,10 @@ impl PlanReferences {
     pub fn require(&self, allowed: &[(&str, &str)]) -> Result<()> {
         for (field, link) in &self.0 {
             if !allowed.contains(&(field.as_str(), link.kind)) {
-                return Err(invalid(field, "this field cannot refer to that new record"));
+                return Err(crate::invalid(
+                    field,
+                    "this field cannot refer to that new record",
+                ));
             }
         }
         Ok(())
@@ -44,9 +47,6 @@ impl PlanReferences {
     pub(crate) fn paths(&self) -> impl Iterator<Item = &String> {
         self.0.keys()
     }
-}
-fn invalid(field: &str, message: &str) -> Error {
-    Error::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
 }
 fn step(value: &Value) -> Option<usize> {
     let text = value
@@ -74,7 +74,7 @@ pub(crate) fn collect(
         match input {
             Value::Object(object) if object.contains_key("$ref") => {
                 let step = step(input).filter(|step| *step <= index)
-                    .ok_or_else(|| invalid(path, "use {\"$ref\":\"N.id\"} with a one-based earlier step; forward links and cycles are refused"))?;
+                    .ok_or_else(|| crate::invalid(path, "use {\"$ref\":\"N.id\"} with a one-based earlier step; forward links and cycles are refused"))?;
                 let operation = &operations[step - 1];
                 let created = registry
                     .operations
@@ -84,7 +84,7 @@ pub(crate) fn collect(
                         _ => None,
                     })
                     .ok_or_else(|| {
-                        invalid(
+                        crate::invalid(
                             path,
                             "the referenced step does not declare a created record",
                         )
@@ -141,19 +141,21 @@ fn join(path: &str, key: &str) -> String {
 pub(crate) fn resolve(input: &Value, committed: &[Value]) -> Result<Value> {
     Ok(match input {
         Value::Object(object) if object.contains_key("$ref") => {
-            let step = step(input).ok_or_else(|| invalid("$ref", "invalid reference"))?;
+            let step = step(input).ok_or_else(|| crate::invalid("$ref", "invalid reference"))?;
             let record = committed
                 .get(step - 1)
-                .ok_or_else(|| invalid("$ref", "missing earlier result"))?;
+                .ok_or_else(|| crate::invalid("$ref", "missing earlier result"))?;
             let pointer = record["created"]["id_pointer"]
                 .as_str()
-                .ok_or_else(|| invalid("$ref", "step did not create a record"))?;
+                .ok_or_else(|| crate::invalid("$ref", "step did not create a record"))?;
             let id = record["result"]["result"]
                 .pointer(pointer)
                 .filter(|id| {
                     id.as_i64().is_some_and(|n| n > 0) || id.as_str().is_some_and(|s| !s.is_empty())
                 })
-                .ok_or_else(|| invalid("$ref", "owner did not return the declared created ID"))?;
+                .ok_or_else(|| {
+                    crate::invalid("$ref", "owner did not return the declared created ID")
+                })?;
             id.clone()
         }
         Value::Object(object) => Value::Object(

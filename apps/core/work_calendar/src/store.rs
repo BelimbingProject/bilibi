@@ -609,7 +609,7 @@ pub(crate) enum Prepared {
 }
 
 fn code(input: &Value, field: &str, errors: &mut Vec<FieldError>) -> String {
-    let code = input[field].as_str().unwrap_or_default().trim().to_owned();
+    let code = bilibi_agent_api::text_field(input, field);
     if !valid_code(&code) {
         errors.push(FieldError::new(
             field,

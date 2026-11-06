@@ -17,3 +17,10 @@ Only when CI lists a Rust file over 800 lines that is new or grew: one line per 
 `<path>: keep: <reason>` or `<path>: split: <what was split along which responsibility>`.
 Otherwise delete this section.
 -->
+
+## Shared helpers
+
+<!--
+Only when CI warns that a new function has a shared helper's name (apps/base/HELPERS.md):
+one line per function, `<path>: keep: <reason>`. Otherwise delete this section.
+-->

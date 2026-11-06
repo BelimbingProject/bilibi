@@ -3,8 +3,10 @@
 //! agents, pages call them through [`page`]. Callers authenticate a fresh
 //! sealed Scope at every request. Queued jobs call writes through [`job`]
 //! (ADR 10).
+mod input;
 pub mod job;
 pub mod json;
+pub use input::{invalid, optional_text_field, text_field};
 pub mod mcp;
 pub mod page;
 mod plan_references;
@@ -355,7 +357,7 @@ pub struct Registry {
     /// By tool name.
     pub apps: BTreeMap<&'static str, RegisteredApp>,
 }
-fn invalid(reason: impl Into<String>) -> RegistryError {
+fn contribution_error(reason: impl Into<String>) -> RegistryError {
     RegistryError::Contribution(reason.into())
 }
 fn text(value: &str, max: usize) -> bool {
@@ -389,7 +391,7 @@ fn validate_common(
         || !bilibi_authz::vocabulary::valid_key(cap)
         || reach::impersonation(cap)
     {
-        return Err(invalid(format!(
+        return Err(contribution_error(format!(
             "invalid agent definition {key} owned by {owner}"
         )));
     }
@@ -413,7 +415,7 @@ impl Registry {
                 let handler_owner = match op.handler {
                     Handler::Read(handler) => {
                         if !reach::read(op.capability) {
-                            return Err(invalid(format!(
+                            return Err(contribution_error(format!(
                                 "read operation {} uses a write capability",
                                 op.key
                             )));
@@ -424,30 +426,34 @@ impl Registry {
                     Handler::UnsupportedWrite => entry.provenance.module,
                 };
                 if handler_owner != entry.provenance.module {
-                    return Err(invalid(format!("foreign handler for {}", op.key)));
+                    return Err(contribution_error(format!(
+                        "foreign handler for {}",
+                        op.key
+                    )));
                 }
                 if let Channels::Only { channels, reason } = op.channels {
                     let distinct: std::collections::BTreeSet<_> =
                         channels.iter().map(|c| c.as_str()).collect();
                     if channels.is_empty() || distinct.len() != channels.len() || !text(reason, 200)
                     {
-                        return Err(invalid(format!(
+                        return Err(contribution_error(format!(
                             "{} must name its channels once each and why",
                             op.key
                         )));
                     }
                 }
                 if !op.step_up.is_empty() && matches!(op.handler, Handler::Read(_)) {
-                    return Err(invalid(format!(
+                    return Err(contribution_error(format!(
                         "read operation {} cannot need step-up",
                         op.key
                     )));
                 }
                 let input = (op.input)();
-                schema::check(&input).map_err(|reason| invalid(format!("{}: {reason}", op.key)))?;
+                schema::check(&input)
+                    .map_err(|reason| contribution_error(format!("{}: {reason}", op.key)))?;
                 let output = (op.output)();
                 if !output.is_object() {
-                    return Err(invalid(format!(
+                    return Err(contribution_error(format!(
                         "{} output must be a schema object",
                         op.key
                     )));
@@ -465,7 +471,10 @@ impl Registry {
                     )
                     .is_some()
                 {
-                    return Err(invalid(format!("duplicate agent key {}", op.key)));
+                    return Err(contribution_error(format!(
+                        "duplicate agent key {}",
+                        op.key
+                    )));
                 }
             }
             for guide in definitions.guides {
@@ -479,7 +488,10 @@ impl Registry {
                     true,
                 )?;
                 if guide.body.is_empty() || guide.body.len() > 8192 {
-                    return Err(invalid(format!("invalid guide body {}", guide.key)));
+                    return Err(contribution_error(format!(
+                        "invalid guide body {}",
+                        guide.key
+                    )));
                 }
                 if result
                     .guides
@@ -492,7 +504,10 @@ impl Registry {
                     )
                     .is_some()
                 {
-                    return Err(invalid(format!("duplicate guide key {}", guide.key)));
+                    return Err(contribution_error(format!(
+                        "duplicate guide key {}",
+                        guide.key
+                    )));
                 }
             }
         }
@@ -501,7 +516,9 @@ impl Registry {
             .keys()
             .find(|key| result.guides.contains_key(*key))
         {
-            return Err(invalid(format!("duplicate operation/guide key {key}")));
+            return Err(contribution_error(format!(
+                "duplicate operation/guide key {key}"
+            )));
         }
         Ok(result)
     }
@@ -542,13 +559,13 @@ impl Registry {
                 || !text(app.skill, 8192)
                 || !domains_valid
             {
-                return Err(invalid(format!(
+                return Err(contribution_error(format!(
                     "invalid MCP App {} owned by {}",
                     app.tool, entry.provenance.module
                 )));
             }
             if !tools.insert(app.tool) || !uris.insert(app.uri) {
-                return Err(invalid(format!(
+                return Err(contribution_error(format!(
                     "duplicate MCP App {} ({})",
                     app.tool, app.uri
                 )));
@@ -565,7 +582,7 @@ impl Registry {
             match app.source {
                 AppSource::Operation(key) => {
                     let operation = registry.operations.get(key).ok_or_else(|| {
-                        invalid(format!(
+                        contribution_error(format!(
                             "MCP App {} names unknown operation {key}",
                             app.tool
                         ))
@@ -573,7 +590,7 @@ impl Registry {
                     if operation.provenance.module != entry.provenance.module
                         || !matches!(operation.definition.handler, Handler::Read(_))
                     {
-                        return Err(invalid(format!(
+                        return Err(contribution_error(format!(
                             "MCP App {} must open a read operation of its own module",
                             app.tool
                         )));
@@ -581,7 +598,9 @@ impl Registry {
                 }
                 AppSource::ReviewEntries if entry.provenance.module == "base/agent_api" => {}
                 AppSource::ReviewEntries => {
-                    return Err(invalid("only base/agent_api owns the review editor"))
+                    return Err(contribution_error(
+                        "only base/agent_api owns the review editor",
+                    ))
                 }
             }
             registry.apps.insert(
@@ -600,7 +619,9 @@ impl Registry {
             .chain(registry.guides.values().map(|g| g.definition.capability))
         {
             if !vocabulary.capabilities.contains_key(key) {
-                return Err(invalid(format!("undeclared agent capability {key}")));
+                return Err(contribution_error(format!(
+                    "undeclared agent capability {key}"
+                )));
             }
         }
         let step_up = catalog.entries::<bilibi_step_up::Operation>(bilibi_step_up::OPERATIONS)?;
@@ -611,7 +632,7 @@ impl Registry {
                 .iter()
                 .find(|key| !step_up.iter().any(|entry| entry.id == **key))
             {
-                return Err(invalid(format!(
+                return Err(contribution_error(format!(
                     "{} names undeclared step-up operation {key}",
                     op.definition.key
                 )));

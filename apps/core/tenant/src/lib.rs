@@ -51,7 +51,7 @@ fn draft(input: &Value) -> Result<(NewTenant, Vec<String>)> {
     }
     Ok((
         NewTenant {
-            name: input["name"].as_str().unwrap_or_default().into(),
+            name: bilibi_agent_api::text_field(input, "name"),
             status: input["status"].as_str().unwrap_or("active").into(),
             parent_id: input.get("parent_id").and_then(Value::as_i64),
         },

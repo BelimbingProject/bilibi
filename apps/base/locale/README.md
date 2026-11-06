@@ -33,6 +33,7 @@ those rows directly, and do not keep a second locale list in a template or host.
   `ar-SA` digits). It is formatting only: Bilibi copy stays English and the
   catalogue is not a translation claim. `language()` is what a future copy
   adapter would use.
+- `money(amount, places)` shows an amount with exactly `places` decimals, rounded half away from zero, with comma thousands groups (`-1,234.57`). It is the one money display for pages, documents and exports for people; it is not locale-aware yet.
 - The definition leaves `editor` unset. The settings editor (P3) and the System
   localization page (O5) contribute editor metadata and its capability together.
 

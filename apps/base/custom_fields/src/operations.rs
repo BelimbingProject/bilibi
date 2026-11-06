@@ -55,9 +55,6 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn version(input: &Value) -> bilibi_agent_api::Result<i64> {
     input["version"]
         .as_i64()
@@ -66,17 +63,17 @@ fn version(input: &Value) -> bilibi_agent_api::Result<i64> {
 }
 fn new_field(input: &Value) -> NewField {
     NewField {
-        record_type: text(input, "record_type"),
-        key: text(input, "key"),
-        label: text(input, "label"),
+        record_type: bilibi_agent_api::text_field(input, "record_type"),
+        key: bilibi_agent_api::text_field(input, "key"),
+        label: bilibi_agent_api::text_field(input, "label"),
         help: input["help"].as_str().map(str::to_owned),
-        kind: text(input, "kind"),
+        kind: bilibi_agent_api::text_field(input, "kind"),
         picklist: input["picklist"].as_str().map(str::to_owned),
     }
 }
 fn update(input: &Value) -> bilibi_agent_api::Result<FieldUpdate> {
     Ok(FieldUpdate {
-        label: text(input, "label"),
+        label: bilibi_agent_api::text_field(input, "label"),
         help: input["help"].as_str().map(str::to_owned),
         version: version(input)?,
     })

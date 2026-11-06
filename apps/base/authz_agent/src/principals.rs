@@ -1,5 +1,5 @@
 //! Reviewed administration of the installed vocabulary's named principals.
-use crate::{field_error, Bound, SYSTEM_LIST};
+use crate::{Bound, SYSTEM_LIST};
 use bilibi_authz::{authorize_key, effective_capabilities_in_company, effective_system, Effective};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
@@ -64,9 +64,11 @@ pub(crate) async fn review(
         .vocabulary()
         .system_principals
         .get(principal)
-        .ok_or_else(|| field_error("principal", "is not an installed system principal"))?;
+        .ok_or_else(|| {
+            bilibi_agent_api::invalid("principal", "is not an installed system principal")
+        })?;
     if !declaration.capabilities.contains(&key) {
-        return Err(field_error(
+        return Err(bilibi_agent_api::invalid(
             "capability",
             "is outside this principal's declared bounds",
         ));
@@ -74,10 +76,13 @@ pub(crate) async fn review(
     let next = input["rule"].as_str().unwrap_or_default();
     let expected = input["expected_rule"].as_str().unwrap_or_default();
     if !["allow", "deny", "clear"].contains(&next) {
-        return Err(field_error("rule", "must be allow, deny or clear"));
+        return Err(bilibi_agent_api::invalid(
+            "rule",
+            "must be allow, deny or clear",
+        ));
     }
     if !["allow", "deny", "clear"].contains(&expected) {
-        return Err(field_error(
+        return Err(bilibi_agent_api::invalid(
             "expected_rule",
             "must be the stored rule from the latest read",
         ));

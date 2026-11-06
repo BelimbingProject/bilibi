@@ -887,7 +887,10 @@ impl Store<'_> {
             model::CHANGE_LOG_MAX,
         )
         .unwrap_or_else(|| model::FIRST_CHANGE_LOG.to_owned());
-        let file = match (draft.source, model::clean(draft.artifact_id.as_deref())) {
+        let file = match (
+            draft.source,
+            bilibi_ui::params::blank_to_none(draft.artifact_id.as_deref()),
+        ) {
             (Source::Internal, Some(artifact)) => {
                 match files::take(client, scope, &artifact, "artifact_id", on.locks()).await {
                     Ok(file) => Some(file),
@@ -1157,13 +1160,13 @@ impl Store<'_> {
         let mut file = None;
         match before.source {
             Source::Internal => {
-                if model::clean(input.external_url.as_deref()).is_some() {
+                if bilibi_ui::params::blank_to_none(input.external_url.as_deref()).is_some() {
                     errors.push(FieldError::new(
                         "external_url",
                         "this document keeps files, not links",
                     ));
                 }
-                match model::clean(input.artifact_id.as_deref()) {
+                match bilibi_ui::params::blank_to_none(input.artifact_id.as_deref()) {
                     None => errors.push(FieldError::new("artifact_id", "needs a file")),
                     Some(artifact) => {
                         match files::take(on.client(), scope, &artifact, "artifact_id", on.locks())
@@ -1177,7 +1180,7 @@ impl Store<'_> {
                 }
             }
             Source::External => {
-                if model::clean(input.artifact_id.as_deref()).is_some() {
+                if bilibi_ui::params::blank_to_none(input.artifact_id.as_deref()).is_some() {
                     errors.push(FieldError::new(
                         "artifact_id",
                         "this document keeps links, not files",

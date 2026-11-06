@@ -325,8 +325,8 @@ impl Draft {
     fn common(kind: Kind, common: &Common) -> Self {
         Self {
             title: common.title.trim().to_owned(),
-            description: clean(common.description.as_deref()),
-            internal_notes: clean(common.internal_notes.as_deref()),
+            description: bilibi_ui::params::blank_to_none(common.description.as_deref()),
+            internal_notes: bilibi_ui::params::blank_to_none(common.internal_notes.as_deref()),
             related: common.related.clone(),
             shared: common.shared,
             assignee: common.assignee,
@@ -350,7 +350,7 @@ impl Draft {
                 CallStatus::Held => Status::Held,
                 CallStatus::Planned => Status::Scheduled,
             }),
-            outcome: clean(input.outcome.as_deref()),
+            outcome: bilibi_ui::params::blank_to_none(input.outcome.as_deref()),
             direction: Some(input.direction),
             ..Self::common(Kind::Call, &input.common)
         }
@@ -359,23 +359,15 @@ impl Draft {
         Self {
             starts_at: Some(input.starts_at),
             ends_at: Some(input.ends_at),
-            location: clean(input.location.as_deref()),
-            join_url: clean(input.join_url.as_deref()),
-            meeting_type: clean(input.meeting_type.as_deref()),
+            location: bilibi_ui::params::blank_to_none(input.location.as_deref()),
+            join_url: bilibi_ui::params::blank_to_none(input.join_url.as_deref()),
+            meeting_type: bilibi_ui::params::blank_to_none(input.meeting_type.as_deref()),
             ..Self::common(Kind::Meeting, &input.common)
         }
     }
     pub fn note(input: &NoteInput) -> Self {
         Self::common(Kind::Note, &input.common)
     }
-}
-
-/// Trimmed text, or `None` when blank.
-pub(crate) fn clean(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
 }
 
 fn text(errors: &mut Vec<FieldError>, field: &'static str, value: &Option<String>, max: usize) {
@@ -597,22 +589,22 @@ pub(crate) fn patched(before: &Draft, patch: &Patch) -> Draft {
         after.start_at = start;
     }
     if let Some(outcome) = &patch.outcome {
-        after.outcome = clean(outcome.as_deref());
+        after.outcome = bilibi_ui::params::blank_to_none(outcome.as_deref());
     }
     if let Some(location) = &patch.location {
-        after.location = clean(location.as_deref());
+        after.location = bilibi_ui::params::blank_to_none(location.as_deref());
     }
     if let Some(url) = &patch.join_url {
-        after.join_url = clean(url.as_deref());
+        after.join_url = bilibi_ui::params::blank_to_none(url.as_deref());
     }
     if let Some(meeting_type) = &patch.meeting_type {
-        after.meeting_type = clean(meeting_type.as_deref());
+        after.meeting_type = bilibi_ui::params::blank_to_none(meeting_type.as_deref());
     }
     if let Some(description) = &patch.description {
-        after.description = clean(description.as_deref());
+        after.description = bilibi_ui::params::blank_to_none(description.as_deref());
     }
     if let Some(notes) = &patch.internal_notes {
-        after.internal_notes = clean(notes.as_deref());
+        after.internal_notes = bilibi_ui::params::blank_to_none(notes.as_deref());
     }
     if let Some(related) = &patch.related {
         after.related = related.clone();
