@@ -4,8 +4,8 @@ use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use tokio_postgres::Transaction;
 
-// Redirects collapse on write, so the survivor and its direct predecessors
-// are the complete equivalence class. The reverse index serves this lookup.
+// Redirects collapse on write (`redirect` runs only at READ COMMITTED), so the
+// survivor and its direct predecessors are the complete equivalence class. The reverse index serves this lookup.
 pub(crate) const IDS_SQL: &str = "SELECT $3::text AS id UNION ALL SELECT from_id FROM base_records_redirects WHERE tenant_id=$1 AND kind=$2 AND to_id=$3";
 
 /// An owner-built membership subquery for existing stored references.

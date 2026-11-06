@@ -179,30 +179,55 @@ async fn snapshots(
     .await?;
     println!("PASS concurrent merge: one caller snapshot across count/pages; fresh transaction sees commit");
 
+    let redirects = "SELECT count(*) FROM base_records_redirects WHERE tenant_id=$1 AND kind='company' AND from_id='2'";
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("records_equivalence.rollback"),
+            )
+            .await?;
+        tx.sql()
+            .batch_execute(&format!("SET TRANSACTION ISOLATION LEVEL {isolation}"))
+            .await?;
+        assert!(matches!(
+            records.redirect(&mut tx, admin, "company", "2", "1").await,
+            Err(Error::Invalid)
+        ));
+        let written: i64 = tx
+            .sql()
+            .query_one(redirects, &[&admin.tenant()])
+            .await?
+            .get(0);
+        assert_eq!(written, 0);
+        drop(tx);
+    }
+    expect(db, records, admin, "2", (1, 0, 0), &[&[7], &[]]).await?;
+    println!("PASS redirect outside READ COMMITTED refused before any write");
+
     let mut tx = boundary
         .begin(
             &mut client,
             admin.mutation_context("records_equivalence.rollback"),
         )
         .await?;
-    tx.sql()
-        .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .await?;
-    tx.sql().batch_execute(BOUNDS).await?;
     records
         .redirect(&mut tx, admin, "company", "2", "1")
         .await?;
-    let matched = records
-        .matching(tx.sql(), admin, "company", "2")
+    let written: i64 = tx
+        .sql()
+        .query_one(redirects, &[&admin.tenant()])
         .await?
-        .ok_or(Error::Forbidden)?;
-    assert_eq!(
-        read(tx.sql(), admin, &matched, 6).await?,
-        ((7, 3, 2), vec![7])
-    );
+        .get(0);
+    assert_eq!(written, 1);
+    let checked = records
+        .check(tx.sql(), admin, "company", "2")
+        .await?
+        .map_err(|_| Error::Forbidden)?;
+    assert_eq!(checked.id, "1");
     drop(tx); // owner neither commits nor rolls back the caller's transaction
     expect(db, records, admin, "2", (1, 0, 0), &[&[7], &[]]).await?;
-    println!("PASS caller transaction: own uncommitted redirect visible; dropping rolls it back");
+    println!("PASS READ COMMITTED caller transaction: own uncommitted redirect followed; dropping rolls it back");
     Ok(())
 }
 

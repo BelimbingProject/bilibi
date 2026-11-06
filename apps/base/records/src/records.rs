@@ -530,7 +530,11 @@ impl Records {
     /// write: anything that pointed at `from` now points at `to`, and `to`
     /// itself is never redirected. Ids are taken in their one spelling.
     /// Merges of one kind in one tenant run one at a time, so overlapping
-    /// merges commit no chain. Holders repoint on read; no holder row is
+    /// merges commit no chain. The merge transaction must read at READ
+    /// COMMITTED (the `MutationBoundary` default); any other isolation is
+    /// refused with `Error::Invalid` before anything is locked or written,
+    /// since an older snapshot would miss a just-committed redirect and
+    /// commit a chain. Holders repoint on read; no holder row is
     /// rewritten. One audited `Change` on `record_redirect` per row.
     pub async fn redirect(
         &self,
@@ -548,6 +552,14 @@ impl Records {
             return Err(Error::Invalid);
         };
         if from == to {
+            return Err(Error::Invalid);
+        }
+        let isolation: String = tx
+            .sql()
+            .query_one("SHOW transaction_isolation", &[])
+            .await?
+            .get(0);
+        if isolation != "read committed" {
             return Err(Error::Invalid);
         }
         let tenant = scope.tenant();
