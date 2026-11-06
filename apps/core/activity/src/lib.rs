@@ -576,6 +576,21 @@ impl Activities {
     ) -> WriteResult<Activity> {
         store::prepare_delete(client, scope, id, version).await
     }
+    /// Removes task `id` when it is still about `related`, whoever created
+    /// or owns it, in the caller's transaction. For the owner of `related`
+    /// (Core Document's expiry reminder): call it after the owner's own
+    /// authorization. A task already gone or about another record is left
+    /// alone; cleanup that fails is an error, never ignored.
+    pub async fn delete_related(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        related: &Reference,
+    ) -> WriteResult<()> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().delete_related(tx, &scope, id, related).await
+    }
     /// Removes the activity (soft delete), fenced on `version`.
     pub async fn delete(
         &self,

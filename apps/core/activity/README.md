@@ -70,6 +70,7 @@ Every write runs in the caller's `MutationTransaction` with its sealed scope and
 | `close` | Calls and meetings to `held`, tasks to `completed` |
 | `close_and_create_new` | Closes, and returns an unsaved copy with the same values and guests |
 | `delete` | Soft delete, fenced on `version` |
+| `delete_related(id, related)` | For the owner of `related` (Core Document's expiry reminder), after its own authorization: removes task `id` when it is still about `related`, whoever created it; a task already gone is left alone |
 | `add_guest`, `remove_guest` | Invites an active account, a person the actor may view or an email address (at most 50 guests); removes anyone but the assignee (`AssigneeNotRemovable`). No version; the activity is locked |
 | `respond` | Records `accepted`, `declined`, `tentative` or `none`. An account guest answers for themselves with `core.activity.view`; anyone else's answer needs the right to change the activity |
 | `send_invites` | For an open call or meeting still ahead: stamps every guest but the sender `invited_at`, tells account guests in the bell, and queues the invitation email to the others (Invitations) |

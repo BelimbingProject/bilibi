@@ -3,14 +3,17 @@
 //! goes through the caller's `MutationTransaction` and returns its
 //! `Change`s. Checks run before a write, so a refusal never poisons the
 //! caller's transaction.
+use crate::custom;
 use crate::files::{self, TakenFile};
-use crate::model::{self, Draft, FieldError, Patch, RevisionInput, ScanStatus, Source};
+use crate::model::{self, Custom, Draft, FieldError, Patch, RevisionInput, ScanStatus, Source};
 use crate::{
     contributions::ACTIVE, AccessGrant, Deleted, Document, Filter, Link, Page, Reference, Revision,
-    Sort, WriteError, WriteResult, LINK_RECORD, LIST_CATEGORY, LIST_STATUS, LIST_SUB_CATEGORY,
-    LIST_TYPE, MANAGE, RECORD, REVISION_RECORD, VIEW,
+    ShareInput, Sort, WriteError, WriteResult, LINK_RECORD, LIST_CATEGORY, LIST_STATUS,
+    LIST_SUB_CATEGORY, LIST_TYPE, MANAGE, RECORD, REVISION_RECORD, VIEW,
 };
+use bilibi_activity::Activities;
 use bilibi_authz::authorize_proof;
+use bilibi_custom_fields::CustomFields;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_notifications::NotificationBoundary;
@@ -19,13 +22,14 @@ use bilibi_principal_directory::{
     DirectoryClient, DirectoryFuture, PrincipalDirectory, PrincipalKind, PrincipalRef, Query,
 };
 use bilibi_records::Records;
+use bilibi_settings::Settings;
 use bilibi_tenancy::{ProofClient, ReadClient, Scope};
 use jiff::{civil::Date, Timestamp};
 use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row, Transaction};
 
-pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
+pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on::text AS expires_on,d.expiry_activity_id,d.expiry_user_id,d.custom_fields,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
 pub(crate) const REVISION_COLUMNS: &str = "r.id,r.document_id,r.revision,r.name,r.artifact_id,r.file_name,r.content_type,r.byte_size,r.sha256,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at";
 pub(crate) const LINK_COLUMNS: &str = "l.id,l.record_kind,l.record_id,l.linked_by,l.linked_at";
 
@@ -50,6 +54,14 @@ pub(crate) fn from_row(row: &Row) -> Result<Document> {
         sub_category: row.get("sub_category"),
         document_type: row.get("document_type"),
         status: row.get("status"),
+        expires_on: date(row.get("expires_on"))?,
+        expiry_activity_id: row.get("expiry_activity_id"),
+        expiry_user_id: row.get("expiry_user_id"),
+        custom: row
+            .get::<_, Value>("custom_fields")
+            .as_object()
+            .cloned()
+            .ok_or(Error::Internal)?,
         revision: row.get("revision"),
         last_revision_at: time(row.get("last_revision_at"))?,
         created_by: row.get("created_by"),
@@ -80,6 +92,17 @@ pub(crate) fn revision_from_row(row: &Row) -> Result<Revision> {
         created_at: time(row.get("created_at"))?,
     })
 }
+fn grant(row: &Row) -> Result<AccessGrant> {
+    Ok(AccessGrant {
+        id: row.get(0),
+        user_id: row.get(1),
+        can_view: row.get(2),
+        can_download: row.get(3),
+        can_manage: row.get(4),
+        can_share: row.get(5),
+        expires_at: row.get::<_, Option<SystemTime>>(6).map(time).transpose()?,
+    })
+}
 fn link_from_row(row: &Row) -> Result<Link> {
     Ok(Link {
         id: row.get("id"),
@@ -104,6 +127,10 @@ pub(crate) fn audit_values(d: &Document) -> Value {
         "sub_category": d.sub_category,
         "document_type": d.document_type,
         "status": d.status,
+        "expires_on": d.expires_on.map(|d| d.to_string()),
+        "expiry_activity_id": d.expiry_activity_id,
+        "expiry_user_id": d.expiry_user_id,
+        "custom_fields": d.custom,
         "revision": d.revision,
         "deleting": d.deleting_at.is_some(),
         "version": d.version,
@@ -155,7 +182,7 @@ impl Reader {
             _ => return Err(Error::Internal),
         };
         let sql = format!(
-            "SELECT EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=$1 AND a.document_id=$2 AND a.{column} AND a.user_id=$3)"
+            "SELECT EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=$1 AND a.document_id=$2 AND a.{column} AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$3)"
         );
         Ok(client
             .query_opt(&sql, &[&self.tenant, &document, &self.user])
@@ -178,7 +205,7 @@ pub(crate) async fn permission(
 }
 
 /// The document, whoever may see it; `lock` holds it for a write.
-async fn select(
+pub(crate) async fn select(
     client: &dyn ProofClient,
     scope: &Scope,
     id: i64,
@@ -280,7 +307,7 @@ impl<'c> On<'c> {
             Self::Commit(tx) => tx,
         }
     }
-    fn locks(self) -> bool {
+    pub(crate) fn locks(self) -> bool {
         matches!(self, Self::Commit(_))
     }
 }
@@ -311,6 +338,8 @@ impl CreatePlan {
             sub_category: self.values.sub_category.clone(),
             document_type: self.values.document_type.clone(),
             status: Some(self.values.status.clone()).filter(|s| !s.is_empty()),
+            expires_on: self.values.expires_on,
+            custom: self.values.custom.clone(),
             change_log: Some(self.change_log.clone()),
             related: self.related.clone(),
         }
@@ -334,6 +363,9 @@ struct Values {
     sub_category: Option<String>,
     document_type: Option<String>,
     status: String,
+    expires_on: Option<Date>,
+    /// The custom values the document will hold after the write.
+    custom: Custom,
 }
 
 /// What a write checks against the database: records, pick-lists, people
@@ -344,6 +376,11 @@ pub(crate) struct Store<'s> {
     pub display: &'s DisplayPolicy,
     pub directory: &'s PrincipalDirectory,
     pub notifications: &'s NotificationBoundary,
+    pub settings: &'s Settings,
+    pub custom: &'s CustomFields,
+    pub activities: &'s Activities,
+    pub artifacts: &'s bilibi_artifacts::Artifacts,
+    pub queue: &'s bilibi_queue::Queue,
 }
 impl Store<'_> {
     /// Links are filing aids only. They never grant document access.
@@ -389,84 +426,103 @@ impl Store<'_> {
             return Err(WriteError::Forbidden);
         }
         Ok(client.query(
-            "SELECT id,user_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 ORDER BY user_id",
+            "SELECT id,user_id,can_view,can_download,can_manage,can_share,expires_at FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 ORDER BY user_id",
             &[&scope.tenant(), &id],
-        ).await?.into_iter().map(|row| AccessGrant { id: row.get(0), user_id: row.get(1), can_view: row.get(2), can_download: row.get(3), can_manage: row.get(4), can_share: row.get(5) }).collect())
+        ).await?.into_iter().map(|row| grant(&row)).collect::<Result<Vec<_>>>()?)
     }
 
+    /// Checks a share and returns when the grant ends (the end of `until`,
+    /// UTC) and the document it is on.
     async fn check_share(
         &self,
         on: On<'_>,
         scope: &Scope,
         id: i64,
-        user_id: i64,
-    ) -> WriteResult<()> {
-        self.editable(on, scope, id, None, MANAGE).await?;
+        input: &ShareInput,
+    ) -> WriteResult<(Document, Option<Timestamp>)> {
+        let document = self.editable(on, scope, id, None, MANAGE).await?;
         let client = on.client();
         if !permission(client, scope, id, "share").await? {
             return Err(WriteError::Forbidden);
         }
-        if user_id > 0 && self.active_account(client, scope, user_id).await? {
-            Ok(())
-        } else {
-            Err(WriteError::field(
+        if !(input.user_id > 0 && self.active_account(client, scope, input.user_id).await?) {
+            return Err(WriteError::field(
                 "user_id",
                 "is not an active account you can share with",
-            ))
+            ));
         }
+        let expires_at = match input.until {
+            None => None,
+            Some(_) if input.user_id == scope.user() => {
+                return Err(WriteError::field(
+                    "until",
+                    "cannot end your own access to a document",
+                ))
+            }
+            Some(day) => {
+                let end = day
+                    .checked_add(jiff::Span::new().days(1))
+                    .and_then(|next| next.at(0, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC))
+                    .map(|zoned| zoned.timestamp())
+                    .map_err(|_| WriteError::field("until", "is not a usable date"))?;
+                if end <= Timestamp::now() {
+                    return Err(WriteError::field("until", "must be today or later"));
+                }
+                Some(end)
+            }
+        };
+        Ok((document, expires_at))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn preview_share(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
         id: i64,
-        user_id: i64,
-        can_download: bool,
-        can_manage: bool,
-        can_share: bool,
+        input: &ShareInput,
     ) -> WriteResult<AccessGrant> {
-        self.check_share(On::Preview(client), scope, id, user_id)
+        let (_, expires_at) = self
+            .check_share(On::Preview(client), scope, id, input)
             .await?;
         Ok(AccessGrant {
             id: 0,
-            user_id,
+            user_id: input.user_id,
             can_view: true,
-            can_download,
-            can_manage,
-            can_share,
+            can_download: input.can_download,
+            can_manage: input.can_manage,
+            can_share: input.can_share,
+            expires_at,
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Returns the grant and the document it is on.
     pub(crate) async fn share(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         id: i64,
-        user_id: i64,
-        can_download: bool,
-        can_manage: bool,
-        can_share: bool,
-    ) -> WriteResult<AccessGrant> {
-        self.check_share(On::Commit(tx.sql()), scope, id, user_id)
+        input: &ShareInput,
+    ) -> WriteResult<(AccessGrant, Document)> {
+        let (document, expires_at) = self
+            .check_share(On::Commit(tx.sql()), scope, id, input)
             .await?;
         let (tenant, actor) = (scope.tenant(), scope.user());
-        tx.mutate(move |sql| Box::pin(async move {
+        let input = *input;
+        let grant = tx.mutate(move |sql| Box::pin(async move {
             let before = sql.query_opt(
-                "SELECT id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 FOR UPDATE",
-                &[&tenant,&id,&user_id],
+                "SELECT id,can_view,can_download,can_manage,can_share,expires_at FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 FOR UPDATE",
+                &[&tenant,&id,&input.user_id],
             ).await?;
             let row = sql.query_one(
-                "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,granted_by) VALUES($1,$2,$3,true,$4,$5,$6,$7) ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_view=true,can_download=EXCLUDED.can_download,can_manage=EXCLUDED.can_manage,can_share=EXCLUDED.can_share,granted_by=EXCLUDED.granted_by,granted_at=now() RETURNING id,user_id,can_view,can_download,can_manage,can_share",
-                &[&tenant,&id,&user_id,&can_download,&can_manage,&can_share,&actor],
+                "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,can_download,can_manage,can_share,expires_at,granted_by) VALUES($1,$2,$3,true,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,document_id,user_id) DO UPDATE SET can_view=true,can_download=EXCLUDED.can_download,can_manage=EXCLUDED.can_manage,can_share=EXCLUDED.can_share,expires_at=EXCLUDED.expires_at,granted_by=EXCLUDED.granted_by,granted_at=now() RETURNING id,user_id,can_view,can_download,can_manage,can_share,expires_at",
+                &[&tenant,&id,&input.user_id,&input.can_download,&input.can_manage,&input.can_share,&expires_at.map(SystemTime::from),&actor],
             ).await?;
-            let grant = AccessGrant { id: row.get(0), user_id: row.get(1), can_view: row.get(2), can_download: row.get(3), can_manage: row.get(4), can_share: row.get(5) };
-            let old = before.map(|row| json!({"document_id":id,"user_id":user_id,"view":row.get::<_,bool>(1),"download":row.get::<_,bool>(2),"manage":row.get::<_,bool>(3),"share":row.get::<_,bool>(4)})).unwrap_or_else(|| json!({}));
-            let change = Change { kind: crate::ACCESS_RECORD.into(), id: grant.id, old, new: json!({"document_id":id,"user_id":grant.user_id,"view":grant.can_view,"download":grant.can_download,"manage":grant.can_manage,"share":grant.can_share}) };
+            let grant = grant(&row)?;
+            let old = before.map(|row| json!({"document_id":id,"user_id":input.user_id,"view":row.get::<_,bool>(1),"download":row.get::<_,bool>(2),"manage":row.get::<_,bool>(3),"share":row.get::<_,bool>(4),"expires_at":row.get::<_,Option<SystemTime>>(5).and_then(|t| time(t).ok()).map(|t| t.to_string())})).unwrap_or_else(|| json!({}));
+            let change = Change { kind: crate::ACCESS_RECORD.into(), id: grant.id, old, new: json!({"document_id":id,"user_id":grant.user_id,"view":grant.can_view,"download":grant.can_download,"manage":grant.can_manage,"share":grant.can_share,"expires_at":grant.expires_at.map(|t| t.to_string())}) };
             Ok((grant, vec![change]))
-        })).await.map_err(write_error)
+        })).await.map_err(write_error)?;
+        Ok((grant, document))
     }
 
     pub(crate) async fn unshare(
@@ -476,10 +532,25 @@ impl Store<'_> {
         id: i64,
         grant: i64,
     ) -> WriteResult<()> {
-        self.editable(On::Commit(tx.sql()), scope, id, None, MANAGE)
+        let document = self
+            .editable(On::Commit(tx.sql()), scope, id, None, MANAGE)
             .await?;
         if !permission(tx.sql(), scope, id, "share").await? {
             return Err(WriteError::Forbidden);
+        }
+        // The grantee's reminder task goes before their access does.
+        let grantee: i64 = tx
+            .sql()
+            .query_opt(
+                "SELECT user_id FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
+                &[&scope.tenant(), &id, &grant],
+            )
+            .await
+            .map_err(Error::from)?
+            .ok_or(WriteError::NotFound)?
+            .get(0);
+        if grantee != scope.user() {
+            self.drop_reminder_of(tx, scope, &document, grantee).await?;
         }
         let tenant = scope.tenant();
         let actor = scope.user();
@@ -510,17 +581,10 @@ impl Store<'_> {
             return Err(WriteError::Forbidden);
         }
         let row = client.query_opt(
-            "SELECT id,user_id,can_view,can_download,can_manage,can_share FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
+            "SELECT id,user_id,can_view,can_download,can_manage,can_share,expires_at FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
             &[&scope.tenant(),&id,&grant],
         ).await?.ok_or(WriteError::NotFound)?;
-        let result = AccessGrant {
-            id: row.get(0),
-            user_id: row.get(1),
-            can_view: row.get(2),
-            can_download: row.get(3),
-            can_manage: row.get(4),
-            can_share: row.get(5),
-        };
+        let result = self::grant(&row)?;
         if result.user_id == scope.user() {
             return Err(WriteError::Forbidden);
         }
@@ -532,6 +596,7 @@ impl Store<'_> {
         client: &dyn ReadClient,
         scope: &Scope,
         filter: &Filter,
+        today: Date,
     ) -> Result<Page> {
         let reader = reader(client, scope).await?;
         // A record filter narrows documents the reader already has access to.
@@ -561,15 +626,18 @@ impl Store<'_> {
             (Some(r.kind.as_str()), Some(r.id.as_str()))
         });
         let conditions = "d.tenant_id=$1 AND d.deleting_at IS NULL
-             AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND a.user_id=$2)
+             AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$2)
              AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$4))
              AND ($5 = '' OR d.name ILIKE $6)
              AND ($7::text IS NULL OR d.category = $7)
              AND ($8::text IS NULL OR d.document_type = $8)
              AND ($9::text IS NULL OR d.status = $9)
+             AND ($11::text IS NULL OR ($11 = 'expired' AND d.expires_on < $12::text::date) OR ($11 = 'soon' AND d.expires_on >= $12::text::date AND d.expires_on <= $12::text::date + 30))
              AND ($10::text IS NULL OR EXISTS (SELECT 1 FROM core_document_marks m WHERE m.tenant_id=d.tenant_id AND m.document_id=d.id AND m.user_id=$2 AND CASE WHEN $10 = 'favourites' THEN m.favourite ELSE m.following END))";
         let marked = filter.marked.map(|m| m.code());
-        let params: [&(dyn ToSql + Sync); 10] = [
+        let expiry = filter.expiry.map(|e| e.code());
+        let today = today.to_string();
+        let params: [&(dyn ToSql + Sync); 12] = [
             &reader.tenant,
             &reader.user,
             &related_kind,
@@ -580,6 +648,8 @@ impl Store<'_> {
             &filter.document_type,
             &filter.status,
             &marked,
+            &expiry,
+            &today,
         ];
         let total: i64 = client
             .query_opt(
@@ -933,6 +1003,9 @@ impl Store<'_> {
             (None, On::Commit(tx)) => Some(self.today(tx, scope).await?),
             (None, On::Preview(_)) => None,
         };
+        let stored = self
+            .check_custom(on, scope, &draft.custom, &Custom::new())
+            .await;
         let values = Values {
             name: name.unwrap_or_default(),
             publish_date: publish_date.unwrap_or_default(),
@@ -940,7 +1013,17 @@ impl Store<'_> {
             sub_category,
             document_type,
             status,
+            expires_on: draft.expires_on,
+            custom: match &stored {
+                Ok(stored) => custom::merge(&Custom::new(), stored),
+                Err(_) => Custom::new(),
+            },
         };
+        if let Err(WriteError::Invalid(mut refused)) = stored {
+            errors.append(&mut refused);
+        } else {
+            stored?;
+        }
         self.check_values(on, scope, errors, &values, None).await?;
         let mut related = Vec::with_capacity(draft.related.len());
         for record in &draft.related {
@@ -971,15 +1054,16 @@ impl Store<'_> {
             .prepare_create(On::Commit(tx.sql()), scope, draft)
             .await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        tx.mutate(move |sql| {
+        let document = tx.mutate(move |sql| {
             Box::pin(async move {
                 let CreatePlan { company, values, source, external_url, change_log, file, related, .. } = plan;
                 let row = sql
                     .query_one(
-                        &format!("INSERT INTO core_documents AS d (tenant_id,company_id,name,publish_date,source,external_url,category,sub_category,document_type,status,revision,last_revision_at,created_by)
-                                  VALUES ($1,$2,$3,$4::text::date,$5,$6,$7,$8,$9,$10,1,now(),$11) RETURNING {COLUMNS}"),
+                        &format!("INSERT INTO core_documents AS d (tenant_id,company_id,name,publish_date,source,external_url,category,sub_category,document_type,status,expires_on,custom_fields,revision,last_revision_at,created_by)
+                                  VALUES ($1,$2,$3,$4::text::date,$5,$6,$7,$8,$9,$10,$12::text::date,$13,1,now(),$11) RETURNING {COLUMNS}"),
                         &[&tenant, &company, &values.name, &values.publish_date.to_string(), &source.code(), &external_url,
-                          &values.category, &values.sub_category, &values.document_type, &values.status, &user],
+                          &values.category, &values.sub_category, &values.document_type, &values.status, &user,
+                          &values.expires_on.map(|d| d.to_string()), &Value::Object(values.custom.clone())],
                     )
                     .await?;
                 let document = from_row(&row)?;
@@ -1004,7 +1088,13 @@ impl Store<'_> {
             })
         })
         .await
-        .map_err(write_error)
+        .map_err(write_error)?;
+        let document = if document.expires_on.is_some() {
+            self.refresh_reminder(tx, scope, &document, None).await?
+        } else {
+            document
+        };
+        Ok(document)
     }
 
     /// Everything `update` checks, with no write: the stored document and
@@ -1072,6 +1162,9 @@ impl Store<'_> {
                     String::new()
                 }),
         };
+        let stored = self
+            .check_custom(on, scope, &patch.custom, &before.custom)
+            .await;
         let values = Values {
             name,
             publish_date: patch.publish_date.unwrap_or(before.publish_date),
@@ -1079,7 +1172,17 @@ impl Store<'_> {
             sub_category,
             document_type,
             status,
+            expires_on: patch.expires_on.unwrap_or(before.expires_on),
+            custom: match &stored {
+                Ok(stored) => custom::merge(&before.custom, stored),
+                Err(_) => before.custom.clone(),
+            },
         };
+        if let Err(WriteError::Invalid(mut refused)) = stored {
+            errors.append(&mut refused);
+        } else {
+            stored?;
+        }
         self.check_values(on, scope, errors, &values, Some(&before))
             .await?;
         let after = Document {
@@ -1089,6 +1192,8 @@ impl Store<'_> {
             sub_category: values.sub_category,
             document_type: values.document_type,
             status: values.status,
+            expires_on: values.expires_on,
+            custom: values.custom,
             ..before.clone()
         };
         Ok((before, after))
@@ -1109,14 +1214,20 @@ impl Store<'_> {
             return Ok(before);
         }
         let tenant = scope.tenant();
-        tx.mutate(move |sql| {
+        let (before_expiry, before_name, before_activity) = (
+            before.expires_on,
+            before.name.clone(),
+            before.expiry_activity_id,
+        );
+        let updated = tx.mutate(move |sql| {
             Box::pin(async move {
                 let row = sql
                     .query_opt(
-                        &format!("UPDATE core_documents d SET name=$4,publish_date=$5::text::date,category=$6,sub_category=$7,document_type=$8,status=$9,version=d.version+1,updated_at=now()
+                        &format!("UPDATE core_documents d SET name=$4,publish_date=$5::text::date,category=$6,sub_category=$7,document_type=$8,status=$9,expires_on=$10::text::date,custom_fields=$11,version=d.version+1,updated_at=now()
                                   WHERE d.tenant_id=$1 AND d.id=$2 AND d.version=$3 RETURNING {COLUMNS}"),
                         &[&tenant, &before.id, &before.version, &after.name, &after.publish_date.to_string(), &after.category,
-                          &after.sub_category, &after.document_type, &after.status],
+                          &after.sub_category, &after.document_type, &after.status,
+                          &after.expires_on.map(|d| d.to_string()), &Value::Object(after.custom.clone())],
                     )
                     .await?
                     .ok_or(Error::Conflict)?;
@@ -1126,7 +1237,15 @@ impl Store<'_> {
             })
         })
         .await
-        .map_err(write_error)
+        .map_err(write_error)?;
+        if updated.expires_on != before_expiry
+            || (updated.expires_on.is_some() && updated.name != before_name)
+        {
+            return self
+                .refresh_reminder(tx, scope, &updated, before_activity)
+                .await;
+        }
+        Ok(updated)
     }
 
     /// Everything `add_revision` checks, with no write.
@@ -1365,6 +1484,9 @@ impl Store<'_> {
         let before = self
             .prepare_delete(On::Commit(tx.sql()), scope, id, version)
             .await?;
+        if let (None, Some(task)) = (before.deleting_at, before.expiry_activity_id) {
+            self.remove_reminder(tx, scope, id, task).await?;
+        }
         let tenant = scope.tenant();
         tx.mutate(move |sql| {
             Box::pin(async move {

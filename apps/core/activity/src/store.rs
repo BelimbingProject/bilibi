@@ -1469,6 +1469,55 @@ pub(crate) async fn prepare_delete(
 }
 
 impl Store<'_> {
+    /// Removes task `id` when it is still about `related`, whoever owns it.
+    /// The owner of that record calls this after its own authorization, so
+    /// a record's system-kept task never outlives the record's own change
+    /// because a different person made it. A task already gone, or about
+    /// another record, is left alone.
+    pub(crate) async fn delete_related(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        related: &Reference,
+    ) -> WriteResult<()> {
+        let row = tx
+            .sql()
+            .query_opt(
+                &format!("SELECT {COLUMNS} FROM core_activities a WHERE a.tenant_id=$1 AND a.id=$2 AND a.related_kind=$3 AND a.related_id=$4 AND a.deleted_at IS NULL FOR UPDATE"),
+                &[&scope.tenant(), &id, &related.kind, &related.id],
+            )
+            .await
+            .map_err(Error::from)?;
+        let Some(row) = row else { return Ok(()) };
+        let before = from_row(&row)?;
+        let tenant = scope.tenant();
+        let earlier = before.clone();
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let row = sql
+                    .query_opt(
+                        &format!("UPDATE core_activities a SET deleted_at=now(),version=a.version+1,updated_at=now() WHERE a.tenant_id=$1 AND a.id=$2 AND a.version=$3 AND a.deleted_at IS NULL RETURNING {COLUMNS}"),
+                        &[&tenant, &before.id, &before.version],
+                    )
+                    .await?
+                    .ok_or(Error::Conflict)?;
+                let after = from_row(&row)?;
+                let change = Change {
+                    kind: RECORD.into(),
+                    id: after.id,
+                    old: audit_values(&before),
+                    new: json!({}),
+                };
+                Ok(((), vec![change]))
+            })
+        })
+        .await
+        .map_err(stale)?;
+        self.refresh_bells(tx, &earlier, None).await?;
+        Ok(())
+    }
+
     pub(crate) async fn delete(
         &self,
         tx: &mut MutationTransaction<'_>,

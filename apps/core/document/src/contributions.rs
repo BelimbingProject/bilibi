@@ -181,6 +181,20 @@ inventory::submit! { Contribution::new(DEFINITIONS, MAX_UPLOAD_BYTES, provenance
         reveal_duration_ms: 5_000,
     }),
 })) }
+// The tenant's lead time for the expiry reminder, in days.
+inventory::submit! { Contribution::new(DEFINITIONS, crate::reminders::REMINDER_DAYS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global, ScopeKind::Tenant], default: || json!(14),
+    nullable: false, encrypted: false, minimum: Some(0.0), maximum: Some(365.0), validator: None,
+    editor: Some(Editor {
+        group: "Documents",
+        label: "Days before a document expires to remind",
+        help: "How many days before its expiry date a document's reminder task is due. The task is created for the person who sets the date.",
+        capability: None,
+        reveal_duration_ms: 5_000,
+    }),
+})) }
+// Tenants add fields to documents without a release (ADR 21).
+inventory::submit! { Contribution::new(bilibi_custom_fields::RECORD_TYPES, crate::custom::RECORD_TYPE, provenance!(), &bilibi_custom_fields::RecordType { id: crate::custom::RECORD_TYPE, label: "Documents" }) }
 inventory::submit! { Contribution::new(DEFINITIONS, ALLOWED_TYPES, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Array, scopes: &[ScopeKind::Global, ScopeKind::Tenant], default: allowed_types,
     nullable: false, encrypted: false, minimum: None, maximum: None,
@@ -205,7 +219,7 @@ static GRID: GridContribution = GridContribution {
             "documents",
             "Documents",
             VIEW,
-            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view)"),
+            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
@@ -218,6 +232,7 @@ static GRID: GridContribution = GridContribution {
                 Field::new("sub_category", "Sub-category", FieldType::String).protected(),
                 Field::new("document_type", "Type", FieldType::String).protected(),
                 Field::new("status", "Status", FieldType::String).protected(),
+                Field::new("expires_on", "Expiry date", FieldType::Date).protected(),
                 Field::new("revision", "Revision", FieldType::Integer).protected(),
                 Field::new("last_revision_at", "Last revision", FieldType::DateTime).protected(),
                 Field::new("created_by", "Created by account ID", FieldType::Integer).protected(),
@@ -229,7 +244,7 @@ static GRID: GridContribution = GridContribution {
             "document_revisions",
             "Document revisions",
             VIEW,
-            Source::tenant("SELECT r.id,r.document_id,r.revision,r.name,r.file_name,r.content_type,r.byte_size,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=r.tenant_id AND a.document_id=r.document_id AND a.user_id=$2 AND a.can_view WHERE r.tenant_id=$1"),
+            Source::tenant("SELECT r.id,r.document_id,r.revision,r.name,r.file_name,r.content_type,r.byte_size,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=r.tenant_id AND a.document_id=r.document_id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) WHERE r.tenant_id=$1"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
@@ -250,7 +265,7 @@ static GRID: GridContribution = GridContribution {
             "document_links",
             "Document links",
             VIEW,
-            Source::tenant("SELECT l.id,l.document_id,l.record_kind,l.record_id,l.linked_by,l.linked_at FROM core_document_links l JOIN core_documents d ON d.tenant_id=l.tenant_id AND d.id=l.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=l.tenant_id AND a.document_id=l.document_id AND a.user_id=$2 AND a.can_view WHERE l.tenant_id=$1"),
+            Source::tenant("SELECT l.id,l.document_id,l.record_kind,l.record_id,l.linked_by,l.linked_at FROM core_document_links l JOIN core_documents d ON d.tenant_id=l.tenant_id AND d.id=l.document_id AND d.deleting_at IS NULL JOIN core_document_access a ON a.tenant_id=l.tenant_id AND a.document_id=l.document_id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) WHERE l.tenant_id=$1"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
@@ -348,6 +363,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
     contracts: &[
         ("create", "core.document.create"),
         ("save_field", "core.document.update"),
+        ("save_custom_field", "core.document.update"),
         ("add_revision", "core.document.add_revision"),
         ("link", "core.document.link"),
         ("unlink", "core.document.unlink"),

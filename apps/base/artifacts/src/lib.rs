@@ -661,6 +661,47 @@ impl<O: Owner> Owned<'_, O> {
             .await?;
         Ok(())
     }
+    /// Refuses with `Retained` or `LegalHold` when any of this owner's
+    /// documents `ids` is still protected, reading on the caller's own
+    /// connection so the check and the owner's write see one state. On the
+    /// owner's mutation transaction pass `lock`: the rows are held `FOR SHARE`,
+    /// so a hold placed meanwhile waits for the owner's commit. An owner calls
+    /// this after authorizing its own records, before it changes or moves
+    /// anything a protected document belongs to; it names no document and
+    /// reads no bytes. Unknown ids are `NotFound`.
+    pub async fn ensure_unprotected(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        ids: &[String],
+        lock: bool,
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ids = ids.to_vec();
+        let rows = client
+            .query(
+                &format!("SELECT {COLUMNS} FROM base_artifacts WHERE public_id = ANY($1) AND tenant_id=$2 AND company_id=$3 AND owner_id=$4 AND owner_adapter=$5 ORDER BY id{}", if lock { " FOR SHARE" } else { "" }),
+                &[&ids, &self.scope.tenant(), &self.company.get(), &self.owner.owner_id(), &type_name::<O>()],
+            )
+            .await
+            .map_err(Error::from)?;
+        let mut found = 0;
+        for row in rows {
+            let row = stored(row);
+            found += 1;
+            if !row.deleted {
+                if let Some(refusal) = row.refusal() {
+                    return Err(refusal);
+                }
+            }
+        }
+        if found == ids.len() {
+            Ok(())
+        } else {
+            Err(Error::NotFound)
+        }
+    }
     async fn fetch(&self, tx: &MutationTransaction<'_>, id: &str) -> Result<Stored> {
         self.find(tx.sql(), id, " FOR UPDATE").await
     }

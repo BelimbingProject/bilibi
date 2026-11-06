@@ -106,6 +106,25 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Custom values from the contract's list of `{key, value}` pairs (the input
+/// dialect has no free-form object, and each tenant's keys differ).
+fn custom_input(value: &Value) -> crate::Custom {
+    value
+        .as_array()
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|pair| {
+                    Some((
+                        pair["key"].as_str()?.to_owned(),
+                        Value::String(pair["value"].as_str().unwrap_or_default().to_owned()),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn draft(input: &Value) -> bilibi_agent_api::Result<Draft> {
     let mut reader = Reader::new(input, "");
     let source = match reader.text("source").as_deref() {
@@ -126,6 +145,8 @@ fn draft(input: &Value) -> bilibi_agent_api::Result<Draft> {
         sub_category: reader.text("sub_category"),
         document_type: reader.text("document_type"),
         status: reader.text("status"),
+        expires_on: reader.date("expires_on").flatten(),
+        custom: custom_input(&input["custom"]),
         change_log: reader.text("change_log"),
         related,
     };
@@ -141,6 +162,8 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
         sub_category: reader.clearable_text("sub_category"),
         document_type: reader.clearable_text("document_type"),
         status: reader.text("status"),
+        expires_on: reader.date("expires_on"),
+        custom: custom_input(&input["patch"]["custom"]),
     };
     if reader
         .text("publish_date")
@@ -232,6 +255,7 @@ pub(crate) fn record(d: &Document) -> Value {
         "sub_category": d.sub_category,
         "document_type": d.document_type,
         "status": d.status,
+        "expires_on": d.expires_on.map(|d| d.to_string()),
         "revision": d.revision,
         "last_revision_at": d.last_revision_at.to_string(),
         "company_id": d.company_id,
@@ -309,6 +333,7 @@ fn access_record(grant: &AccessGrant) -> Value {
         "download": grant.can_download,
         "manage": grant.can_manage,
         "share": grant.can_share,
+        "expires_at": grant.expires_at.map(|t| t.to_string()),
     })
 }
 
@@ -338,6 +363,10 @@ impl ReadHandler for List {
                 status: reader.text("status"),
                 related: input.get("related").map(|r| reader.reference(r)),
                 marked: reader.text("mark").as_deref().and_then(MarkFilter::parse),
+                expiry: reader
+                    .text("expiry")
+                    .as_deref()
+                    .and_then(crate::ExpiryFilter::parse),
                 sort,
                 descending: sort != Sort::Name,
                 page: input["page"].as_i64().unwrap_or(1).max(1),
@@ -378,10 +407,20 @@ impl ReadHandler for Get {
             let records: Vec<Reference> = links.iter().map(|l| l.record.clone()).collect();
             let named = owner.records().resolve(scope, &records).await?;
             let marks = owner.marks(scope, &[id]).await?;
+            let definitions = owner.custom_fields(scope).await?;
             let mut value = with_marks(
                 record(&document),
                 marks.get(&id).copied().unwrap_or_default(),
             );
+            value["custom"] = json!(definitions
+                .iter()
+                .map(|d| json!({
+                    "key": d.key,
+                    "label": d.label,
+                    "type": d.kind.as_str(),
+                    "value": document.custom.get(&d.key),
+                }))
+                .collect::<Vec<_>>());
             value["revisions"] = json!(revisions
                 .iter()
                 .map(|r| revision_record(id, r))
@@ -417,6 +456,19 @@ impl ReadHandler for Access {
     }
 }
 
+fn share_input(input: &Value) -> bilibi_agent_api::Result<crate::ShareInput> {
+    let mut reader = Reader::new(input, "");
+    let until = reader.date("until").flatten();
+    reader.done(crate::ShareInput {
+        user_id: input["user_id"].as_i64().unwrap_or_default(),
+        can_download: input["download"].as_bool().unwrap_or(false),
+        can_manage: input["manage"].as_bool().unwrap_or(false),
+        can_share: input["share"].as_bool().unwrap_or(false),
+        until,
+        email: input["email"].as_bool().unwrap_or(false),
+    })
+}
+
 struct Share;
 impl WriteHandler for Share {
     fn owner(&self) -> &'static str {
@@ -430,15 +482,7 @@ impl WriteHandler for Share {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let grant = owner()?
-                .preview_share(
-                    client,
-                    scope,
-                    id(input)?,
-                    input["user_id"].as_i64().unwrap_or_default(),
-                    input["download"].as_bool().unwrap_or(false),
-                    input["manage"].as_bool().unwrap_or(false),
-                    input["share"].as_bool().unwrap_or(false),
-                )
+                .preview_share(client, scope, id(input)?, &share_input(input)?)
                 .await
                 .map_err(|e| invalid(e, "", "user_id"))?;
             Ok(json!({"grants": access_record(&grant)}).into())
@@ -452,18 +496,17 @@ impl WriteHandler for Share {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let grant = owner()?
-                .share(
-                    tx,
-                    scope,
-                    id(input)?,
-                    input["user_id"].as_i64().unwrap_or_default(),
-                    input["download"].as_bool().unwrap_or(false),
-                    input["manage"].as_bool().unwrap_or(false),
-                    input["share"].as_bool().unwrap_or(false),
-                )
+                .share(tx, scope, id(input)?, &share_input(input)?)
                 .await
                 .map_err(|e| invalid(e, "", "user_id"))?;
-            Ok(access_record(&grant).into())
+            let mut value = access_record(&grant.grant);
+            if let Some(email) = grant.email {
+                value["email"] = json!(email.code());
+                if let crate::EmailOutcome::RateLimited(reason) = email {
+                    value["email_refused"] = json!(reason);
+                }
+            }
+            Ok(value.into())
         })
     }
 }
@@ -934,6 +977,8 @@ fn create_schema() -> Value {
         "sub_category":{"type":"string","maxLength":64,"description":"A code of core.document.sub_category under the category."},
         "document_type":{"type":"string","maxLength":64,"description":"A code of core.document.type."},
         "status":{"type":"string","maxLength":64,"description":"A code of core.document.status; the list's default when omitted."},
+        "expires_on":{"type":"string","format":"date","description":"When the document expires. A reminder task is created for you, due the tenant's lead time before."},
+        "custom":custom_schema(),
         "change_log":{"type":"string","maxLength":2000,"description":"Revision 1's change log; \"Document created\" when omitted."},
         "related":{"type":"array","description":"Records the document relates to, from base.records.search.","items":reference_schema("A record: its kind and id.")}
     }})
@@ -948,9 +993,17 @@ fn update_schema() -> Value {
             "category":{"type":"string","maxLength":64,"description":"A new category clears a sub-category you do not name."},
             "sub_category":{"type":"string","maxLength":64},
             "document_type":{"type":"string","maxLength":64},
-            "status":{"type":"string","maxLength":64}
+            "status":{"type":"string","maxLength":64},
+            "expires_on":{"type":"string","maxLength":10,"description":"A date such as 2026-12-31. An empty string clears the expiry date and removes the reminder."},
+            "custom":custom_schema()
         }}
     }})
+}
+fn custom_schema() -> Value {
+    json!({"type":"array","description":"The tenant's custom fields as {key, value} pairs; find the keys with base.custom_fields.list. An empty value clears a field.","items":{"type":"object","required":["key"],"properties":{
+        "key":{"type":"string","maxLength":40},
+        "value":{"type":"string","maxLength":2000}
+    }}})
 }
 fn revision_schema() -> Value {
     json!({"type":"object","required":["id","version","change_log"],"properties":{
@@ -974,7 +1027,9 @@ fn share_schema() -> Value {
         "user_id":{"type":"integer","minimum":1,"description":"The active account to share with."},
         "download":{"type":"boolean","description":"Allow file downloads as well as metadata viewing."},
         "manage":{"type":"boolean","description":"Allow document changes."},
-        "share":{"type":"boolean","description":"Allow changing this document's access."}
+        "share":{"type":"boolean","description":"Allow changing this document's access."},
+        "until":{"type":"string","format":"date","description":"The last day (UTC) the access works; it does not expire when omitted. Not for your own access."},
+        "email":{"type":"boolean","description":"Email the person a link to the document after the change commits. The link opens it only for their account, while the access lasts."}
     }})
 }
 fn unshare_schema() -> Value {
@@ -1023,6 +1078,7 @@ fn list_schema() -> Value {
         "status":{"type":"string","maxLength":64},
         "related":reference_schema("Only documents linked to this record."),
         "mark":{"type":"string","enum":["favourites","following"],"description":"Only your own favourites or the documents you follow."},
+        "expiry":{"type":"string","enum":["expired","soon"],"description":"Only documents past their expiry date, or expiring within 30 days."},
         "sort":{"type":"string","enum":["last_revision","name","publish_date","created"],"description":"Newest revision first by default."},
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}

@@ -168,6 +168,13 @@ impl Pages {
 /// How the reader sees dates and instants.
 pub(crate) struct Clock(DisplayContext);
 impl Clock {
+    /// Today in the reader's company zone.
+    pub fn today(&self) -> Date {
+        Timestamp::now().in_tz(&self.0.timezone).map_or_else(
+            |_| Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date(),
+            |z| z.date(),
+        )
+    }
     pub fn date(&self, date: Date) -> String {
         self.0.render_date(date)
     }
@@ -349,6 +356,9 @@ pub(crate) fn filter_of(query: &HashMap<String, String>) -> Filter {
         category: code("category"),
         document_type: code("type"),
         status: code("status"),
+        expiry: query
+            .get("expiry")
+            .and_then(|v| crate::ExpiryFilter::parse(v.trim())),
         related: related_of(query),
         marked: query
             .get("show")

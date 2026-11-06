@@ -3,6 +3,12 @@
 //! Pick-list codes, people, records and files are checked by `store`.
 use crate::Reference;
 use jiff::civil::Date;
+use serde_json::{Map, Value};
+
+/// The tenant's custom field values of one document: key to value. In a
+/// `Draft` or `Patch` it is a patch (an empty or null value clears a key);
+/// on a `Document` it is what is stored.
+pub type Custom = Map<String, Value>;
 
 /// Where a document's content lives. Fixed when the document is created.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,11 +64,18 @@ impl ScanStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldError {
-    pub field: &'static str,
+    /// A form field, or `cf_<key>` for a tenant's custom field.
+    pub field: String,
     pub message: String,
 }
 impl FieldError {
     pub(crate) fn new(field: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            field: field.to_owned(),
+            message: message.into(),
+        }
+    }
+    pub(crate) fn owned(field: String, message: impl Into<String>) -> Self {
         Self {
             field,
             message: message.into(),
@@ -86,6 +99,10 @@ pub struct Draft {
     pub sub_category: Option<String>,
     pub document_type: Option<String>,
     pub status: Option<String>,
+    /// When the document expires; a reminder task is kept for it.
+    pub expires_on: Option<Date>,
+    /// Values of the tenant's custom fields (`base/custom_fields`).
+    pub custom: Custom,
     /// The first revision's change log; "Document created" when omitted.
     pub change_log: Option<String>,
     /// Records the document relates to from the start.
@@ -103,6 +120,10 @@ pub struct Patch {
     pub sub_category: Option<Option<String>>,
     pub document_type: Option<Option<String>>,
     pub status: Option<String>,
+    /// `Some(None)` clears the expiry date.
+    pub expires_on: Option<Option<Date>>,
+    /// Custom values to set; an empty or null value clears a key.
+    pub custom: Custom,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
@@ -112,6 +133,8 @@ impl Patch {
             && self.sub_category.is_none()
             && self.document_type.is_none()
             && self.status.is_none()
+            && self.expires_on.is_none()
+            && self.custom.is_empty()
     }
 }
 
