@@ -56,7 +56,7 @@ All three are tenant capabilities contributed to `tenant_owner`. `enabled`, `get
 ## Pages and agents
 
 - `/currencies`: the base currency (chosen in place from every currency) and per-company currencies (from the enabled ones), then the list with an on/off switch per currency. Turning off one in use is refused with the reason.
-- `/currencies/rates`: the rates, edited in place, a dialog to add one, a confirm to delete one, and a currency conversion calculator that calls the same `convert` modules use and shows its result as the fields change. The date fields start as today in the reader's display zone; in browser-local display mode they start empty, because only the browser knows the day.
+- `/currencies/rates`: the rates, edited in place, a dialog to add one, a confirm to delete one from the row's Actions… menu (`?delete=<id>`), and, once two currencies are enabled, a currency conversion calculator: two rows of an amount and its currency that answer each other through the same `convert` modules use, with the rate's date and source on one line and "Add this rate" when none is recent enough. The date fields start as today in the reader's display zone; in browser-local display mode they start empty, because only the browser knows the day.
 - Operations: `core.currency.list`, `.rates.list` and `.convert` (reads), and the reviewed writes `.enabled.set`, `.base.set`, `.rates.set` and `.rates.delete`. The pages call these same contracts (`PageWrites`).
 
 ## Runtime check

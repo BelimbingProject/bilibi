@@ -31,9 +31,9 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, Choice, ColumnsOutcome,
-    Combobox, CommitStates, CommitStatus, ConfirmDialog, CreateButton, Fact, Facts, Field,
-    FilterToolbar, FlashMap, FlexRow, FlexTable, Fold, Form, Header, Html, IconButton, IconKind,
+    params, AddToItem, AddToMenu, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card,
+    Choice, ColumnsOutcome, Combobox, CommitStates, CommitStatus, ConfirmDialog, CreateButton,
+    Fact, Facts, Field, FilterToolbar, FlashMap, FlexRow, FlexTable, Fold, Form, Header, Html,
     InlineChoice, InlineEdit, InlineField, InputKind, ListColumns, ListSpec, ListState, Modal,
     PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty, Toggle, ToolbarControl,
     NO_FLASH,
@@ -766,7 +766,7 @@ impl CurrencyPage {
         if counts.total_entries == 0 {
             table.empty = Some(TableEmpty::Content(Html::text(
                 if search.is_empty() && status == "all" {
-                    "The currency list is empty. An administrator installs it with seed-production."
+                    "The currency list is not installed. Ask your administrator to install it."
                 } else {
                     "No currency matches this search."
                 },
@@ -880,6 +880,8 @@ struct Check {
     /// added or changed meanwhile shows at once.
     side: Side,
     line: Option<std::result::Result<String, String>>,
+    /// The pair and day no recent rate was found for, offered as a new rate.
+    missing: Option<String>,
 }
 /// Which amount the person typed, so the other one is the answer.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -901,6 +903,9 @@ struct Rates {
     notice: String,
     draft: Option<Draft>,
     confirm: Option<Rate>,
+    /// A rate the row's Actions… menu asked to delete (`?delete=<id>`); the
+    /// confirm opens once the rows are read.
+    pending_delete: Option<i64>,
     check: Check,
     flash: Option<(StatusKind, String)>,
 }
@@ -919,6 +924,7 @@ impl Rates {
             notice: String::new(),
             draft: None,
             confirm: None,
+            pending_delete: query.get("delete").and_then(|id| id.parse().ok()),
             check: Check::default(),
             flash: None,
         })
@@ -954,6 +960,16 @@ impl Rates {
                     draft
                         .values
                         .insert("effective_on".into(), today.to_string());
+                }
+                // The calculator's "Add this rate" names the missing pair
+                // and the day it was asked for.
+                if let Some(pair) = get("pair") {
+                    let mut parts = pair.splitn(3, '/');
+                    for key in ["from", "to", "effective_on"] {
+                        if let Some(part) = parts.next().filter(|part| !part.is_empty()) {
+                            draft.values.insert(key.into(), part.to_owned());
+                        }
+                    }
                 }
                 self.draft = Some(draft);
             }
@@ -1055,16 +1071,6 @@ impl Rates {
                 )?;
                 self.statuses.put(format!("{id}-{field}"), status);
             }
-            "request_delete" => {
-                let id: i64 = get("key")
-                    .unwrap_or_default()
-                    .parse()
-                    .map_err(|_| Error::Invalid)?;
-                if let Some(rate) = self.rate(id).cloned() {
-                    self.flash = None;
-                    self.confirm = Some(rate);
-                }
-            }
             "cancel_confirm" => self.confirm = None,
             "delete_rate" => {
                 let Some(rate) = self.confirm.take() else {
@@ -1134,6 +1140,7 @@ impl Rates {
             Side::Top => &mut check.bottom_amount,
             Side::Bottom => &mut check.top_amount,
         };
+        check.missing = None;
         if amount.is_empty() || from.is_empty() || to.is_empty() {
             answer.clear();
             check.line = None;
@@ -1177,6 +1184,14 @@ impl Rates {
                     "Rate of {} · {source}",
                     quote.rate_date.strftime("%-d %b %Y")
                 )));
+            }
+            Err(crate::Refusal::NoRate { from, to, on }) => {
+                answer.clear();
+                self.check.line = Some(Err(format!(
+                    "No recent rate from {from} to {to} on {}.",
+                    on.strftime("%-d %b %Y")
+                )));
+                self.check.missing = Some(format!("{from}/{to}/{on}"));
             }
             Err(refusal) => {
                 answer.clear();
@@ -1271,6 +1286,12 @@ impl Rates {
         let today = pages.today(&**client, scope).await?;
         drop(client);
         self.rates = rates;
+        if let Some(id) = self.pending_delete.take().filter(|_| edits) {
+            if let Some(rate) = self.rate(id).cloned() {
+                self.flash = None;
+                self.confirm = Some(rate);
+            }
+        }
         self.shown = self.rates.len();
         if self.rows_changed {
             self.columns.load(&self.rates, |rate| rate.id.to_string());
@@ -1293,7 +1314,7 @@ impl Rates {
         }
         let header = render(Header {
             title: Html::text("Exchange rates"),
-            subtitle: "One rate for a pair of currencies applies from its date until a later one. Nothing is fetched from the internet.",
+            subtitle: "Each rate applies from its date until a later one for the same pair.",
             actions,
             ..Header::default()
         })?;
@@ -1335,14 +1356,20 @@ impl Rates {
                     })?,
                 );
             if edits {
-                row.actions = render(IconButton {
-                    id: &format!("currency-rate-{}-delete", rate.id),
-                    kind: IconKind::Danger,
-                    event: "request_delete",
-                    name: "key",
-                    value: &rate.id.to_string(),
-                    ..IconButton::new("delete", "Delete")
-                })?;
+                let mut query = self.state.to_params();
+                query.insert("delete".into(), rate.id.to_string());
+                row.actions = render(AddToMenu::new(
+                    format!("currency-rate-{}-actions", rate.id),
+                    format!(
+                        "the {} to {} rate from {}",
+                        rate.from, rate.to, rate.effective_on
+                    ),
+                    vec![AddToItem {
+                        label: "Delete".into(),
+                        href: params::address(RATES_PATH, &query),
+                        disabled: None,
+                    }],
+                ))?;
             }
             row.dom_id = Some(format!("currency-rate-{}", rate.id));
             rows.push(row);
@@ -1355,14 +1382,40 @@ impl Rates {
         table.framed = false;
         table.actions = edits;
         if total == 0 {
-            table.empty = Some(TableEmpty::Content(Html::text(if !search.is_empty() {
-                "No rate matches this search."
+            // Each empty state offers its next step: a rate needs two
+            // enabled currencies.
+            let (text, next) = if !search.is_empty() {
+                ("No rate matches this search.", Html::EMPTY)
             } else if enabled.len() < 2 {
-                // A rate needs two enabled currencies.
-                "No exchange rates yet. Enable the currencies first."
+                (
+                    "No exchange rates yet. Enable the currencies first.",
+                    render(Button {
+                        id: "currency-rate-empty-enable",
+                        href: CURRENCIES_PATH,
+                        body: Html::text("Enable currencies"),
+                        ..Button::default()
+                    })?,
+                )
+            } else if edits {
+                (
+                    "No exchange rates yet.",
+                    render(Button {
+                        id: "currency-rate-empty-add",
+                        event: "new",
+                        button_type: "button",
+                        body: Html::text("Add a rate"),
+                        ..Button::default()
+                    })?,
+                )
             } else {
-                "No exchange rates yet."
-            })));
+                ("No exchange rates yet.", Html::EMPTY)
+            };
+            let mut empty = Html::text(text);
+            if !next.is_empty() {
+                empty.push(&Html::text(" "));
+                empty.push(&next);
+            }
+            table.empty = Some(TableEmpty::Content(empty));
         }
         let mut body = render(table)?;
         body.push(&render(Pagination::new(
@@ -1384,7 +1437,13 @@ impl Rates {
             self.start_check(&enabled, base.as_ref(), today);
         }
         self.calculate(scope, self.check.side).await?;
-        let check = self.check_card(&enabled)?;
+        // A conversion needs two enabled currencies; until then the empty
+        // state says so and the calculator stays out of the way.
+        let check = if enabled.len() >= 2 {
+            self.check_card(&enabled, edits)?
+        } else {
+            Html::EMPTY
+        };
         let dialog = match (&self.confirm, &self.draft) {
             (Some(rate), _) => render(ConfirmDialog {
                 id: "currency-rate-delete-confirm",
@@ -1418,7 +1477,7 @@ impl Rates {
     /// The currency conversion calculator: the line that names the rate's
     /// date and source with the date to convert on, then two rows of an
     /// amount and its currency. Typing in either row answers in the other.
-    fn check_card(&self, enabled: &[Currency]) -> Result<Html> {
+    fn check_card(&self, enabled: &[Currency], edits: bool) -> Result<Html> {
         let check = &self.check;
         let options: Vec<Choice> = enabled
             .iter()
@@ -1435,7 +1494,8 @@ impl Rates {
                             .attr("inputmode", "decimal")
                             .attr("autocomplete", "off")
                             .attr("data-debounce", "400")
-                            .wrapper_class("mb-0"),
+                            // Stacked on a phone, the amount keeps a gap above its currency.
+                            .wrapper_class("mb-3 sm:mb-0"),
                     )?,
                     render(
                         Combobox::new(format!("convert_{side}"), format!("convert[{side}]"))
@@ -1448,11 +1508,22 @@ impl Rates {
                 ],
             })
         };
-        let line = match &check.line {
+        let mut line = match &check.line {
             Some(Ok(text)) => render(MutedText { text })?,
             Some(Err(text)) => render(MutedText { text })?,
             None => Html::EMPTY,
         };
+        if let Some(pair) = check.missing.as_deref().filter(|_| edits) {
+            line.push(&render(Button {
+                id: "currency-check-add-rate",
+                event: "new",
+                name: "pair",
+                value: pair,
+                button_type: "button",
+                body: Html::text("Add this rate"),
+                ..Button::default()
+            })?);
+        }
         let mut body = render(CheckLine {
             controls: vec![
                 render(
@@ -1605,8 +1676,9 @@ impl LiveState<Scope, Error> for Rates {
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {
-                    self.state =
-                        ListState::parse(values, RATES_SPEC.clone()).map_err(|_| Error::Internal)?
+                    self.state = ListState::parse(values, RATES_SPEC.clone())
+                        .map_err(|_| Error::Internal)?;
+                    self.pending_delete = values.get("delete").and_then(|id| id.parse().ok());
                 }
                 LiveInput::Event(value) => {
                     self.event(request.scope, request.credential, value).await?
