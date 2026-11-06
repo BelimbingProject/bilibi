@@ -152,7 +152,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - A greyed field says why, in one line near the field that unlocks it.
 - **Coded choices are a searchable `Combobox`** showing code and name ("MYR · Malaysian ringgit"), never a plain select of codes. Typing also finds the common name people use (RMB for CNY, RM for MYR); the field stores the standard code.
 - **Show results live.** A calculator or preview updates as the person types or chooses; no Convert or Calculate button.
-- **Familiar patterns win.** A currency converter is two rows of amount + currency, as on Google, with the rate's date and source in one small muted line under them.
+- **Familiar patterns win.** A currency converter is two rows of amount + currency, as on Google, with the rate's date and source in one small muted line above them.
 - This departs from the label-above layout on purpose; the shared macros own it, so no page styles its own label.
 
 ## Lists
