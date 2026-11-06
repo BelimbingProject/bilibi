@@ -97,7 +97,7 @@ impl WriteHandler for Owner {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            bilibi_authz::authorize_key(client, scope, CAPABILITY).await?;
+            bilibi_authz::authorize_proof(client, scope, CAPABILITY).await?;
             if input["mode"] == "refuse" {
                 return Err(Error::refused("Supply a usable contact before importing.").into());
             }
@@ -152,21 +152,19 @@ impl WriteHandler for Owner {
         })
     }
 }
-fn operations() -> Vec<Operation> {
-    vec![Operation {
-        key: "reference.import-results.create",
-        title: "Capture reference enquiry",
-        summary: "Create a record or record another enquiry.",
-        keywords: &["import"],
-        capability: CAPABILITY,
-        input,
-        output,
-        handler: Handler::SafeWrite(&Owner),
-        channels: Channels::Every,
-        step_up: &[],
-    }]
-}
-inventory::submit! { Contribution::new(DEFINITIONS, MODULE, provenance!(), &Definitions(operations)) }
+const OPERATIONS: &[Operation] = &[Operation {
+    key: "reference.import-results.create",
+    title: "Capture reference enquiry",
+    summary: "Create a record or record another enquiry.",
+    keywords: &["import"],
+    capability: CAPABILITY,
+    input,
+    output,
+    handler: Handler::SafeWrite(&Owner),
+    channels: Channels::Every,
+    step_up: &[],
+}];
+inventory::submit! { Contribution::new(DEFINITIONS, MODULE, provenance!(), &Definitions { operations: OPERATIONS, guides: &[] }) }
 
 struct Pages(bilibi_database::Db);
 impl bilibi_ui::page::Page<Scope, Error> for Pages {
