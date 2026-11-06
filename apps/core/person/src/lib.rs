@@ -78,7 +78,7 @@ impl PersonService {
     /// HTTP adapters still validate their durable session on every request.
     async fn fresh(
         &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
+        client: &dyn bilibi_tenancy::ProofClient,
         scope: &Scope,
     ) -> Result<Scope> {
         // Keeps the impersonator and agent facet the edge sealed.
@@ -103,7 +103,7 @@ impl PersonService {
     /// Sees earlier uncommitted writes; reserves nothing and commits nothing.
     pub async fn duplicates_on(
         &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
+        client: &dyn bilibi_tenancy::ReadClient,
         scope: &Scope,
         query: &DuplicateQuery,
     ) -> Result<Vec<Person>> {

@@ -130,6 +130,16 @@ enum Read {
     Get,
     Duplicates,
 }
+async fn duplicate_records(
+    client: &dyn bilibi_tenancy::ReadClient,
+    scope: &Scope,
+    input: &Value,
+) -> bilibi_agent_api::Result<Output> {
+    let people = persons()?
+        .duplicates_on(client, scope, &parse::<DuplicateQuery>(input)?)
+        .await?;
+    Ok(Output::Data(records(client, scope, people).await?))
+}
 impl Read {
     async fn on(
         &self,
@@ -151,12 +161,7 @@ impl Read {
                 let person = identity::read(client, scope, id(input)?).await?;
                 Ok(Output::Data(record(client, scope, person).await?))
             }
-            Self::Duplicates => {
-                let people = persons()?
-                    .duplicates_on(client, scope, &parse::<DuplicateQuery>(input)?)
-                    .await?;
-                Ok(Output::Data(records(client, scope, people).await?))
-            }
+            Self::Duplicates => duplicate_records(client, scope, input).await,
         }
     }
 }
@@ -171,6 +176,9 @@ impl ReadHandler for Read {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
+            if matches!(self, Self::Duplicates) {
+                return duplicate_records(client, scope, input).await;
+            }
             match client.transaction() {
                 Some(tx) => self.on(tx, scope, input).await,
                 None => {

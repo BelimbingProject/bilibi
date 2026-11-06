@@ -16,6 +16,18 @@ async fn fields(client: &impl GenericClient, scope: &Scope) -> Result<Restrictio
         masks: bilibi_authz::fields::masks_for(client, scope, "persons").await?,
     })
 }
+async fn read_fields(
+    client: &dyn bilibi_tenancy::ReadClient,
+    scope: &Scope,
+) -> Result<Restrictions> {
+    Ok(Restrictions {
+        fields: bilibi_authz::fields::restricted_read(client, scope)
+            .await?
+            .remove("persons")
+            .unwrap_or_default(),
+        masks: bilibi_authz::fields::masks_for_read(client, scope, "persons").await?,
+    })
+}
 async fn raw(
     client: &impl GenericClient,
     scope: &Scope,
@@ -47,13 +59,7 @@ pub async fn read(
         .await?
         .ok_or(Error::NotFound)?;
     // Masked contacts keep their partial value, as on every other read.
-    let restrictions = Restrictions {
-        fields: bilibi_authz::fields::restricted_read(client, scope)
-            .await?
-            .remove("persons")
-            .unwrap_or_default(),
-        masks: bilibi_authz::fields::masks_for_read(client, scope, "persons").await?,
-    };
+    let restrictions = read_fields(client, scope).await?;
     Ok(Person::from_row(&row)?.redact(&restrictions))
 }
 
@@ -134,11 +140,11 @@ pub async fn search(client: &impl GenericClient, scope: &Scope, query: &Search) 
 /// A supplied restricted criterion is refused rather than silently searching it.
 /// Retired records are returned too so their identity/history is not recreated.
 pub async fn duplicates(
-    client: &impl GenericClient,
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     query: &DuplicateQuery,
 ) -> Result<Vec<Person>> {
-    authorize_key(client, scope, LIST).await?;
+    bilibi_authz::authorize_proof(client, scope, LIST).await?;
     if !(1..=100).contains(&query.limit) {
         return Err(Error::Invalid);
     }
@@ -158,7 +164,7 @@ pub async fn duplicates(
     {
         return Err(Error::Invalid);
     }
-    let masked = fields(client, scope).await?;
+    let masked = read_fields(client, scope).await?;
     if (email.is_some() && masked.contains("email"))
         || (phone.is_some() && masked.contains("phone"))
     {

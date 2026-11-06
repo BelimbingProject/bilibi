@@ -170,6 +170,20 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     )
     .await?;
     assert_eq!(value["result"][0]["id"], json!(created.id));
+    let registry = app
+        .services
+        .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+    let value = tokio::time::timeout(
+        Duration::from_secs(5),
+        registry.call(
+            tx.sql(),
+            &manager,
+            "core.person.duplicates",
+            &json!({"name":"Transaction Candidate"}),
+        ),
+    )
+    .await??;
+    assert_eq!(value["result"][0]["id"], json!(created.id));
     println!("ok: actual registered duplicate/get/list handlers and projections use supplied transaction without pool acquisition");
     assert!(people
         .duplicates_on(tx.sql(), &other, &q)
