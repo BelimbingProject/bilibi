@@ -241,7 +241,7 @@ async fn main() -> Result<(), Failure> {
         "preview writes no owner records",
     )?;
     admin
-        .write("reference.import-results.create", json!({"code":race_code}))
+        .write("reference.import_results.create", json!({"code":race_code}))
         .await?;
     let duplicate_check = admin
         .upload_case(&cases, "duplicate_preview", owner::TYPE)

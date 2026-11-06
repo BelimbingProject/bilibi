@@ -39,7 +39,7 @@ inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &Vocab
 }) }
 inventory::submit! { Contribution::new(RECORD_TYPES, TYPE, provenance!(), &RecordType {
     label: "Result reference records", table: "reference_import_records", path: Some("/reference/import-records/{id}"),
-    import: Import { capability: CAPABILITY, create: "reference.import-results.create", id: "id", duplicates: None, references: &[] },
+    import: Import { capability: CAPABILITY, create: "reference.import_results.create", id: "id", duplicates: None, references: &[] },
     export: None, bulk_update: None,
 }) }
 
@@ -153,7 +153,7 @@ impl WriteHandler for Owner {
     }
 }
 const OPERATIONS: &[Operation] = &[Operation {
-    key: "reference.import-results.create",
+    key: "reference.import_results.create",
     title: "Capture reference enquiry",
     summary: "Create a record or record another enquiry.",
     keywords: &["import"],
