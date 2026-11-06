@@ -20,9 +20,13 @@
 <span{% if !id.is_empty() %} id="{{ id }}"{% endif %} data-identity-image class="grid shrink-0 place-items-center overflow-hidden font-medium leading-none {{ size.box_class() }} {{ kind.box_class() }}" aria-hidden="true">{% if !src.is_empty() %}<img src="{{ src }}" alt="" class="size-full {{ kind.image_class() }}" width="{{ size.pixels() }}" height="{{ size.pixels() }}" decoding="async" loading="eager">{% elif kind.is_company() %}{% call icon(name="building-office-2", class=size.icon_class()) %}{% endcall %}{% else %}{{ initials }}{% endif %}</span>
 {% endmacro %}
 
-{#- Compact status badge with a state dot; dot=false for a type or role. -#}
+{#- Compact status badge with a state dot; dot=false for a type or role.
+    Its words read in sentence case: only the first letter is raised, so a
+    stored lower-case value ("draft") reads "Draft" and "Set up" stays "Set
+    up". Never `capitalize`, which raised every word ("Set Up", "Past Due");
+    ::first-letter needs the inline-block text box (a flex box has none). -#}
 {% macro badge(kind=bilibi_ui::BadgeKind::Neutral, dot=true, class="") %}
-<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-1.5 py-px text-xs font-medium capitalize {{ kind.class() }}{% if !class.is_empty() %} {{ class }}{% endif %}">{% if dot %}<span class="size-1.5 rounded-full bg-current opacity-70"></span>{% endif %}{{ caller() }}</span>
+<span data-badge class="inline-flex items-center gap-1.5 rounded-full px-1.5 py-px text-xs font-medium {{ kind.class() }}{% if !class.is_empty() %} {{ class }}{% endif %}">{% if dot %}<span class="size-1.5 rounded-full bg-current opacity-70"></span>{% endif %}<span class="inline-block first-letter:uppercase">{{ caller() }}</span></span>
 {% endmacro %}
 
 {#- One resolved day: its date, its type as a tint and as a word, then the

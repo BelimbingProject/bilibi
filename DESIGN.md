@@ -286,6 +286,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Scan before reading.** Headings, labels, badges, counts and table structure carry the workflow. Do not explain what a visible label already says.
 - **Put information where it acts.** A page title stays true across tabs. Tab guidance lives in the tab.
 - **Consistency.** Same thing, same look, same place.
+- **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator".
 - **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Enable the currencies first" is false once one is enabled.
