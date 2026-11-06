@@ -550,6 +550,23 @@ impl Currencies {
         Ok((rows, total))
     }
 
+    /// The source note of one rate, if it has one.
+    pub async fn rate_note(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        id: i64,
+    ) -> Result<Option<String>> {
+        authorize_key(client, scope, VIEW).await?;
+        Ok(client
+            .query_opt(
+                "SELECT source_note FROM currency_rates WHERE tenant_id=$1 AND id=$2",
+                &[&scope.tenant(), &id],
+            )
+            .await?
+            .and_then(|row| row.get("source_note")))
+    }
+
     // --------------------------------------------------------- converting
 
     async fn max_age(

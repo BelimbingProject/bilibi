@@ -1167,17 +1167,18 @@ impl Rates {
             Ok(conversion) => {
                 *answer = conversion.amount.to_string();
                 let quote = &conversion.quote;
-                let note = || {
-                    quote
-                        .rate_ids
-                        .first()
-                        .and_then(|id| self.rates.iter().find(|rate| rate.id == *id))
-                        .and_then(|rate| rate.source_note.clone())
-                        .unwrap_or_else(|| "entered manually".into())
+                let note = match (quote.path, quote.rate_ids.first()) {
+                    (crate::Path::Direct | crate::Path::Inverse, Some(id)) => self
+                        .pages
+                        .currencies
+                        .rate_note(&**client, scope, *id)
+                        .await?
+                        .unwrap_or_else(|| "entered manually".into()),
+                    _ => String::new(),
                 };
                 let source = match quote.path {
                     crate::Path::Same => "same currency, no rate needed".to_owned(),
-                    crate::Path::Direct | crate::Path::Inverse => note(),
+                    crate::Path::Direct | crate::Path::Inverse => note,
                     crate::Path::ViaBase => "two rates through the base currency".to_owned(),
                 };
                 self.check.line = Some(Ok(format!(
