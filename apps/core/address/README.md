@@ -110,7 +110,10 @@ the live operator tenant's primary company, its first address (primary, then
 priority, then id) and that country's Geonames name, languages and currency.
 Any missing step is `None`, never an error. Base Locale does not query Core:
 the service factory binds `bootstrap::Source` as Locale's `BootstrapSource`
-(K15), so every `Locales::resolve(.., None)` infers from these facts until a
+(K15), which reads on the caller's own connection (never a second pooled one,
+which would deadlock the pool under load) and the same for the Geonames
+country read (`bilibi_geonames::country_summary`), so every
+`Locales::resolve(.., None)` infers from these facts until a
 global locale is stored; `adopt_inferred` persists them once under operator
 proof; the shell does so on the first operator page that finds these facts
 (`adopt_installation_locale` in `apps/web/src/shell.rs`).

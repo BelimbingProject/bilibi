@@ -20,9 +20,11 @@ those rows directly, and do not keep a second locale list in a template or host.
   explicit platform-operator proof Settings enforces.
 - `Bootstrap` is supplied by Core, which owns companies and addresses (K11):
   explicitly as an argument, or through the `BootstrapSource` Core Address
-  binds once at boot (`Locales::bind_bootstrap`, K15), which `resolve` asks on
-  its own connection only when the caller supplied none and no global locale
-  is stored. Base never queries those tables; only `country_iso` and
+  binds once at boot (`Locales::bind_bootstrap`, K15), which `resolve` asks only
+  when the caller supplied none and no global locale is stored. The source
+  reads on the connection `resolve` was given and takes none of its own: a
+  second pooled connection while the caller holds the first deadlocks the pool
+  once more callers than connections wait. Base never queries those tables; only `country_iso` and
   `languages` drive inference.
 - Unsupported locales are refused (`Invalid`), not silently replaced; `normalize`
   accepts case, `_`/`-` and bare-language variants.
