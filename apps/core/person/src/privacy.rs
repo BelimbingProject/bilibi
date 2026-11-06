@@ -28,7 +28,7 @@ use tokio_postgres::{Client, GenericClient};
 
 /// The audit record kind person changes use.
 const PERSON_KIND: &str = "person";
-const FIELDS: [&str; 4] = ["name", "code", "email", "phone"];
+const FIELDS: [&str; 5] = ["name", "code", "email", "phone", "custom"];
 /// The kind a kept document is listed under.
 const DOCUMENT_KIND: &str = "core.person document";
 
@@ -326,7 +326,8 @@ impl Handler for People {
                     let live = old.name != ERASED
                         || old.code != format!("erased-{id}")
                         || old.email.is_some()
-                        || old.phone.is_some();
+                        || old.phone.is_some()
+                        || !old.custom.is_empty();
                     if live || bilibi_audit::holds_values(tx, PERSON_KIND, id).await? {
                         let tenant = scope.tenant();
                         let before = old.json();
@@ -334,7 +335,7 @@ impl Handler for People {
                         Box::pin(async move {
                             let row = sql
                                 .query_one(
-                                    &format!("UPDATE persons SET name=$3,code='erased-'||id,email=NULL,phone=NULL,erased_at=coalesce(erased_at,now()),version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
+                                    &format!("UPDATE persons SET name=$3,code='erased-'||id,email=NULL,phone=NULL,custom_fields='{{}}'::jsonb,erased_at=coalesce(erased_at,now()),version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"),
                                     &[&tenant, &id, &ERASED],
                                 )
                                 .await?;
@@ -342,7 +343,11 @@ impl Handler for People {
                             let mut after = Person::from_row(&row)?.json();
                             // The code's new value is its `erased-<id>` stub.
                             for field in FIELDS.into_iter().filter(|f| *f != "code") {
-                                if !before[field].is_null() {
+                                let held = match &before[field] {
+                                    serde_json::Value::Object(values) => !values.is_empty(),
+                                    value => !value.is_null(),
+                                };
+                                if held {
                                     after[field] = json!(ERASED);
                                 }
                             }

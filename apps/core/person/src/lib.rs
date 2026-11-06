@@ -2,6 +2,7 @@
 mod agent_operations;
 mod contact_lookup;
 mod contributions;
+mod custom;
 mod directory;
 mod files;
 mod identity;
@@ -26,8 +27,8 @@ pub use identity::{
     BindingIdentity,
 };
 pub use model::{
-    validate as validate_person, CreatePreview, DuplicateQuery, FieldError, Page, Person, PersonId,
-    PersonInput, PersonKind, Search, Update,
+    validate as validate_person, CreatePreview, Custom, CustomFieldError, DuplicateQuery,
+    FieldError, Page, Person, PersonId, PersonInput, PersonKind, Search, Update,
 };
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
@@ -39,6 +40,9 @@ pub enum WriteError {
     Backend(#[from] Error),
     #[error("Invalid contact fields")]
     Validation(Vec<FieldError>),
+    /// Custom field values the tenant's definitions refuse, on `cf_<key>`.
+    #[error("Invalid custom field values")]
+    CustomFields(Vec<CustomFieldError>),
     #[error("This identity is retired")]
     Retired,
     #[error("The platform system identity is protected")]
@@ -190,13 +194,14 @@ impl PersonService {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "core/person", layer: bilibi_module_registry::Layer::Core,
-        dependencies: &["base/audit", "base/database", "base/tenancy", "base/authz", "base/grid", "base/search", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale", "base/media", "base/artifacts", "base/step_up", "base/records", "base/bulk_data", "base/personal_data", "base/privacy", "base/settings", "base/system", "core/party"],
+        dependencies: &["base/audit", "base/database", "base/tenancy", "base/authz", "base/grid", "base/search", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale", "base/media", "base/artifacts", "base/step_up", "base/records", "base/bulk_data", "base/personal_data", "base/privacy", "base/settings", "base/system", "base/custom_fields", "base/picklists", "core/party"],
         migrations: &[
             ("001-core-person", include_str!("../migrations/001-person.sql")),
             ("core-person-002-search", include_str!("../migrations/002-search.sql")),
             ("core-person-003-code", include_str!("../migrations/003-code.sql")),
             ("core-person-004-erasure", include_str!("../migrations/004-erasure.sql")),
             ("core-person-005-contact-lookup", include_str!("../migrations/005-contact-lookup.sql")),
+            ("core-person-006-custom-fields", include_str!("../migrations/006-custom-fields.sql")),
         ],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let parties = services.get::<bilibi_tenancy::PartyProofs>("base/tenancy.parties")?;
@@ -210,6 +215,7 @@ inventory::submit! {
             CHANGES.set(broadcast::channel(128).0).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate person change sender".into()))?;
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             agent_operations::bind(db.clone())?;
+            custom::bind(services.get(bilibi_custom_fields::SERVICE)?)?;
             step_up::bind(services.get(bilibi_step_up::SERVICE)?)?;
             Ok(Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")? }))
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {
@@ -221,6 +227,7 @@ inventory::submit! {
                 bulk: services.get(bilibi_bulk_data::SERVICE)?,
                 settings: services.get("base/settings.store")?,
                 records: services.get(bilibi_records::SERVICE)?,
+                picklists: services.get(bilibi_picklists::SERVICE)?,
             }))))
         }}],
     }

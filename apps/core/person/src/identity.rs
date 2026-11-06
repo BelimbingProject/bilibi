@@ -176,15 +176,17 @@ pub async fn preview(
     scope: &Scope,
     input: &PersonInput,
 ) -> std::result::Result<CreatePreview, WriteError> {
-    preview_with_code(client, scope, input, None).await
+    preview_with_code(client, scope, input, None, &Custom::new()).await
 }
 
-/// Preview a person with an optional explicitly chosen fixed code.
+/// Preview a person with an optional explicitly chosen fixed code and custom
+/// field values (checked against the tenant's person fields, not locked).
 pub async fn preview_with_code(
     client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     input: &PersonInput,
     code: Option<&str>,
+    custom: &Custom,
 ) -> std::result::Result<CreatePreview, WriteError> {
     bilibi_authz::authorize_proof(client, scope, CREATE).await?;
     let input = validate(input).map_err(WriteError::Validation)?;
@@ -228,9 +230,13 @@ pub async fn preview_with_code(
         }
         None => available_code(client, scope.tenant(), &input.name).await?,
     };
+    let custom = crate::custom::check(client, None, scope, custom, &Custom::new())
+        .await?
+        .map_err(WriteError::CustomFields)?;
     Ok(CreatePreview {
         identity: input,
         code,
+        custom: crate::custom::merge(&Custom::new(), &custom),
     })
 }
 fn restricted_input(input: &PersonInput, masked: &Restrictions) -> Result<()> {
@@ -312,6 +318,7 @@ async fn insert(
     input: PersonInput,
     system: Option<&'static str>,
     explicit_code: Option<String>,
+    custom: Custom,
 ) -> Result<Person> {
     lock_code_allocation(tx.sql(), tenant).await?;
     let code = match explicit_code {
@@ -319,7 +326,8 @@ async fn insert(
         None => available_code(tx.sql(), tenant, &input.name).await?,
     };
     let person = tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_one(&format!("INSERT INTO persons(tenant_id,name,kind,email,phone,system_key,code) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING {COLUMNS}"), &[&tenant, &input.name, &kind_key(input.kind), &input.email, &input.phone, &system, &code]).await?;
+        let custom = Value::Object(custom);
+        let row = sql.query_one(&format!("INSERT INTO persons(tenant_id,name,kind,email,phone,system_key,code,custom_fields) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {COLUMNS}"), &[&tenant, &input.name, &kind_key(input.kind), &input.email, &input.phone, &system, &code, &custom]).await?;
         let person = Person::from_row(&row)?;
         let change = Change { kind: "person".into(), id: person.id.get(), old: Value::Null, new: person.json() };
         Ok((person, vec![change]))
@@ -338,32 +346,43 @@ pub async fn provision(
     }
     let input = validate(input).map_err(WriteError::Validation)?;
     let tenant = tx.context().tenant;
-    Ok(insert(tx, tenant, input, None, None).await?)
+    Ok(insert(tx, tenant, input, None, None, Custom::new()).await?)
 }
 pub async fn create(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     input: &PersonInput,
 ) -> std::result::Result<Person, WriteError> {
-    create_with_code(tx, scope, input, None).await
+    create_with_code(tx, scope, input, None, &Custom::new()).await
 }
 
-/// Create with an explicit code, or allocate a short default when omitted.
+/// Create with an explicit code, or allocate a short default when omitted,
+/// and custom field values checked on this transaction (a changed pick-list
+/// code held until commit).
 pub async fn create_with_code(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     input: &PersonInput,
     code: Option<&str>,
+    custom: &Custom,
 ) -> std::result::Result<Person, WriteError> {
     check_context(tx, scope)?;
     lock_code_allocation(tx.sql(), scope.tenant()).await?;
-    let input = preview_with_code(tx.sql(), scope, input, code).await?;
+    let input = preview_with_code(tx.sql(), scope, input, code, &Custom::new()).await?;
+    let custom = crate::custom::check(tx.sql(), Some(tx.sql()), scope, custom, &Custom::new())
+        .await?
+        .map_err(WriteError::CustomFields)?;
     let masked = fields(tx.sql(), scope).await?;
-    Ok(
-        insert(tx, scope.tenant(), input.identity, None, Some(input.code))
-            .await?
-            .redact(&masked),
+    Ok(insert(
+        tx,
+        scope.tenant(),
+        input.identity,
+        None,
+        Some(input.code),
+        crate::custom::merge(&Custom::new(), &custom),
     )
+    .await?
+    .redact(&masked))
 }
 pub async fn update(
     tx: &mut MutationTransaction<'_>,
@@ -373,9 +392,13 @@ pub async fn update(
 ) -> std::result::Result<Person, WriteError> {
     check_context(tx, scope)?;
     let (old, input, masked) = prepare_update(tx.sql(), scope, id, update, true).await?;
+    let custom = crate::custom::check(tx.sql(), Some(tx.sql()), scope, &update.custom, &old.custom)
+        .await?
+        .map_err(WriteError::CustomFields)?;
+    let custom = Value::Object(crate::custom::merge(&old.custom, &custom));
     let tenant = scope.tenant();
     let person = tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_one(&format!("UPDATE persons SET name=$3,kind=$4,email=$5,phone=$6,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &input.name, &kind_key(input.kind), &input.email, &input.phone]).await?;
+        let row = sql.query_one(&format!("UPDATE persons SET name=$3,kind=$4,email=$5,phone=$6,custom_fields=$7,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &input.name, &kind_key(input.kind), &input.email, &input.phone, &custom]).await?;
         let person = Person::from_row(&row)?;
         let change = Change { kind: "person".into(), id: id.get(), old: old.json(), new: person.json() };
         Ok((person, vec![change]))
@@ -384,7 +407,7 @@ pub async fn update(
     Ok(person.redact(&masked))
 }
 async fn prepare_update(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: PersonId,
     update: &Update,
@@ -412,20 +435,26 @@ async fn prepare_update(
     }
     Ok((old, input, masked))
 }
+/// What `update` would do: the person before, the identity it would store,
+/// and its custom values after the patch.
 pub async fn preview_update(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: PersonId,
     update: &Update,
-) -> std::result::Result<(Person, PersonInput), WriteError> {
+) -> std::result::Result<(Person, PersonInput, Custom), WriteError> {
     let (old, mut input, masked) = prepare_update(client, scope, id, update, false).await?;
+    let custom = crate::custom::check(client, None, scope, &update.custom, &old.custom)
+        .await?
+        .map_err(WriteError::CustomFields)?;
+    let custom = crate::custom::merge(&old.custom, &custom);
     if masked.contains("email") {
         input.email = None;
     }
     if masked.contains("phone") {
         input.phone = None;
     }
-    Ok((old.redact(&masked), input))
+    Ok((old.redact(&masked), input, custom))
 }
 pub async fn preview_retire(
     client: &impl GenericClient,
@@ -538,9 +567,16 @@ pub async fn ensure_platform_orchestrator(
         phone: None,
     };
     Ok((
-        insert(tx, scope.tenant(), input, Some(SYSTEM_KEY), None)
-            .await?
-            .redact(&masked),
+        insert(
+            tx,
+            scope.tenant(),
+            input,
+            Some(SYSTEM_KEY),
+            None,
+            Custom::new(),
+        )
+        .await?
+        .redact(&masked),
         true,
     ))
 }

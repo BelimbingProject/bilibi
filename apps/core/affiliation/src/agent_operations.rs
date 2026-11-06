@@ -109,6 +109,15 @@ fn person_error(error: WriteError) -> bilibi_agent_api::Error {
             }
             bilibi_agent_api::Error::InvalidInput(fields)
         }
+        // Affiliation's person writes send no custom values; a refusal of
+        // one is reported on its field all the same.
+        WriteError::CustomFields(errors) => {
+            let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for error in errors {
+                fields.entry(error.field).or_default().push(error.message);
+            }
+            bilibi_agent_api::Error::InvalidInput(fields)
+        }
         WriteError::Backend(error) => not_found(error),
         WriteError::Retired | WriteError::SystemIdentity => Error::Forbidden.into(),
     }

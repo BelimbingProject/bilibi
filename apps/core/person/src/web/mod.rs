@@ -1,5 +1,6 @@
 //! Person-owned screens. Contacts work independently of People or accounts.
 mod create;
+mod custom;
 mod detail;
 mod index;
 mod panels;
@@ -22,7 +23,7 @@ pub const SERVICE: &str = "core/person.pages";
 // Every write these pages make is a Person contract (ADR 01).
 inventory::submit! { bilibi_module_registry::Contribution::new(PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/person", source: file!(), line: line!() }, &PageWrites {
     service: SERVICE,
-    contracts: &[("create", "core.person.create"), ("save_field", "core.person.update"), ("retire", "core.person.retire"),
+    contracts: &[("create", "core.person.create"), ("save_field", "core.person.update"), ("save_custom_field", "core.person.update"), ("retire", "core.person.retire"),
         ("reveal", "base.privacy.field.reveal"), ("export", "base.bulk_data.export.start"), ("export_selected", "base.bulk_data.export.start"), ("bulk_update", "base.bulk_data.update.start")],
     pending: Pending::None,
 }) }
@@ -47,6 +48,8 @@ pub struct Pages {
     pub settings: Arc<bilibi_settings::Settings>,
     /// Where a contact may be dropped or added to (issue 265).
     pub records: Arc<bilibi_records::Records>,
+    /// Labels and choices of custom pick-list fields.
+    pub picklists: Arc<bilibi_picklists::PickLists>,
 }
 impl Pages {
     /// One of these pages' write events, as the contract it declared.
