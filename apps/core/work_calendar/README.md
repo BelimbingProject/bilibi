@@ -39,22 +39,27 @@ A `Day` gives the date, its type, `weekly` (the week's type underneath, such as 
 ## Periods and zones
 
 - Up to four periods a day, `HH:MM-HH:MM` in the version's zone, half-open (`09:00-18:00` closes at 18:00), sorted and not overlapping. An end at or before the start is the next day (`22:00-02:00`); a period belongs to the day it starts on. A day's late hours may not run into the next day's.
-- Wall-clock times become UTC instants by `Period::bounds`' rules: a time in a daylight-saving gap starts at the first valid instant, a time in a fold uses the earlier one. Business time is real elapsed time, so a period across a clock change is shorter or longer.
+- The owner converts wall-clock times to UTC instants: a time in a daylight-saving gap starts at the first valid instant, a time in a fold uses the earlier one. Business time is real elapsed time, so a period across a clock change is shorter or longer.
 - Dates are stored zone-free; nothing stores a computed instant.
 
 ## Arithmetic (`Timetable`)
 
-All instants are `jiff::Timestamp` (UTC) and durations non-negative `jiff::SignedDuration`.
+All instants are `jiff::Timestamp` (UTC) and durations are `jiff::SignedDuration`. `add` keeps its non-negative contract; use `shift` for signed remaining budgets.
 
 | Call | Result |
 | --- | --- |
 | `is_open(t)` | Whether `t` lies in an opening period |
 | `next_open(t)` | `t` if open, else the next period's start |
 | `add(t, d)` | `d` of business time counted from `t`, or from the next opening if closed. A result exactly at a closing time stays there ("due 18:00 today", not "09:00 tomorrow"); `add(t, 0)` is `t` |
+| `shift(t, d)` | Signed business time: positive and zero follow `add`; negative counts backwards from `t`, or from the previous close when closed. An exact opening boundary stays there |
 | `elapsed(a, b)` | Business time in `[a, b)`; `a` after `b` is `Backwards` |
-| `add_working_days(date, n)` | The `n`th working day after `date`; `n = 0` is `date` or the next working day. Take the time from `day` |
+| `add_working_days(date, n)` | The `n`th working day after `date`; `n = 0` is `date` or the next working day. Use `add_working_days_at` for an instant |
+| `add_working_days_at(t, n)` | Count working dates by `add_working_days`, preserving local time (including fractions of a second) in the destination rule's zone, capped at its final close (possibly after midnight). Before-open times and lunch breaks stay as given; gaps move to the first valid instant and folds use the earlier one |
 
-A search looks at most 366 days ahead (`SEARCH_DAYS`) and never past the loaded window, then returns `TimeError::Beyond` rather than looping, as it does for a calendar with no working days. An instant outside the window is `Beyond` too: load the window you need.
+- Duration searches look at most 366 elapsed days (`SEARCH_DAYS`) in their direction and never past the loaded window; working-day searches count at most 366 civil dates forward. Failure is `TimeError::Beyond`, including calendars with no working days. Load the window you need, including earlier dates for negative budgets.
+- `shift(t, 0)`, like `add(t, 0)`, returns `t` even outside the window. Other instant operations require a start inside it; a computed exact boundary may equal the window's end.
+- Working-day instants use the source date in its own rule's zone (the later matching date if a zone change repeats a date boundary). Zero follows the date operation: a non-working date rolls forward, and a time after the final close is capped. An overnight period belongs to its starting date, but the instant's source date is its local civil date.
+- `Timetable::clock()` shifts by signed elapsed time and adds working days as `n * 24` hours, without a calendar horizon. It preserves zero; timestamp overflow is `Beyond`. It is an explicit caller choice, never a substitute for an unknown calendar.
 
 ## Holiday sets
 
@@ -89,7 +94,7 @@ Agents and the [pages](#pages) use these contracts (ADR 01); writes are reviewed
 | `core.work_calendar.get` | read | One calendar: versions, sets, a page of exceptions, version |
 | `core.work_calendar.holiday_set.get` | read | One set with a page of its holidays (optionally from and to a date) and the calendars including it |
 | `core.work_calendar.days` | read | Resolved dates of a range |
-| `core.work_calendar.business_time` | read | `is_open`, `next_open`, `add`, `elapsed`, `add_working_days`; `beyond: true` is an answer |
+| `core.work_calendar.business_time` | read | `is_open`, `next_open`, `add`, `shift`, `elapsed`, `add_working_days`, `add_working_days_at`; `beyond: true` is an answer |
 | `core.work_calendar.create` | write | A calendar with its zone (default the tenant's `localization.timezone`), first week and substitute rule |
 | `core.work_calendar.update` | write | Rename, substitute rule, retire or reactivate |
 | `core.work_calendar.rule.set` | write | A week from a date |
@@ -147,3 +152,7 @@ Shifts, rosters and attendance; pay rates by day type and leave-day counting; SL
 ## Walkthrough
 
 On a disposable database, set `DATABASE_URL`, `BILIBI_WORK_CALENDAR_DEMO=disposable`, `BILIBI_SETTINGS_KEY` and `BILIBI_USER_SIGNING_KEY`, then run `cargo run -p bilibi-work-calendar --example work-calendar-walkthrough`. It migrates, installs the walkthrough fixture and, through the reviewed contracts, builds a Monday–Friday calendar with a lunch break, national and state holiday sets, a shutdown, a special working Saturday and a half day; prints the resolved days with their reasons, substitutes under a Friday–Saturday weekend and a new rule version; answers each `business_time` operation across breaks, weekends, holidays, a close boundary, a closed start, a daylight-saving gap and fold and a period past midnight; and shows the company default, retirement, `changed` events, tenant isolation, refused writes and the audit trail. It also shows a substitute chain resolving the same in any window, one plan editing two sets of a calendar, one plan writing one calendar twice and one set twice (refused when an operation names the version an earlier one makes, or when another session changed the calendar after the review), a holiday write and an inclusion committing at once, a business-time read held while a plan commits answering from one snapshot, replacing the first rule version, an exception's hours in its removal evidence, paged lists and holidays, removals of dates a set does not hold, a tenant owner managing calendars, and the migration ID. For installation-wide sets it shows the operator creating one and entering holidays, writes refused to a manager without the platform capability, to another tenant and for a clashing code, another tenant including the set and reading its holidays, the operator's preview naming the other tenants, the publish job (run by Queue's executor in process) recording `changed` in the other tenant, a copy that diverges, a tenant that denies the publisher told nothing, and the operator's tenant denying it telling no tenant.
+
+### Signed arithmetic walkthrough
+
+With the same disposable database guard and keys, run `cargo run --locked -p bilibi-work-calendar --example calendar-arithmetic-walkthrough` against a **fresh** disposable database. It creates calendars through reviewed contracts and checks independently worked instants through `Timetable::load` in a caller transaction, `WorkCalendars::timetable` and the agent business-time contract. A mismatch exits unsuccessfully. It retains the original negative-`add` refusal alongside successful signed shifts, and covers positive, negative and zero remaining budgets; overdue pause/resume; open and closed starts; exact boundaries; lunch, weekends and a holiday; working-day time preservation, a shorter destination and zero-day behavior; local versus UTC dates and a changed rule zone; overnight hours; daylight-saving gap and fold policy in both directions; bounds, overflow and a calendar without openings; retirement and tenant isolation. It uses no test harness and changes no existing database.
