@@ -5,6 +5,7 @@
 use crate::model::*;
 use crate::query::*;
 use bilibi_database::{Db, MutationBoundary, Result};
+use bilibi_tenancy::ProofClient;
 use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
@@ -32,6 +33,23 @@ pub async fn country_known(client: &impl GenericClient, iso: &str) -> Result<boo
         .query_opt("SELECT 1 FROM geonames_countries WHERE iso=$1", &[&iso])
         .await?
         .is_some())
+}
+/// One imported country by ISO code, on the caller's connection or
+/// transaction. Use it where the caller already holds a connection and
+/// `Geonames::get_country` would take a second one.
+pub async fn country_summary(
+    client: &(impl ProofClient + ?Sized),
+    iso: &str,
+) -> Result<Option<CountrySummary>> {
+    let Some(iso) = normalize_iso(iso) else {
+        return Ok(None);
+    };
+    let sql = format!(
+        "SELECT {} FROM geonames_countries WHERE iso=$1",
+        CountrySummary::COLUMNS
+    );
+    let row = client.query_opt(&sql, &[&iso]).await?;
+    Ok(row.as_ref().map(CountrySummary::from_row))
 }
 pub fn normalize_iso(value: &str) -> Option<String> {
     let value = value.trim();
@@ -98,15 +116,7 @@ impl Geonames {
     }
 
     pub async fn get_country(&self, iso: &str) -> Result<Option<CountrySummary>> {
-        let Some(iso) = normalize_iso(iso) else {
-            return Ok(None);
-        };
-        let sql = format!(
-            "SELECT {} FROM geonames_countries WHERE iso=$1",
-            CountrySummary::COLUMNS
-        );
-        let row = self.db.get().await?.query_opt(&sql, &[&iso]).await?;
-        Ok(row.as_ref().map(CountrySummary::from_row))
+        country_summary(&**self.db.get().await?, iso).await
     }
 
     /// A bounded, searchable, sortable page of the Countries index. Invalid

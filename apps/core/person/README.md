@@ -52,6 +52,25 @@ plans and their outer transaction, including replay protection. Agent input
 schemas use the currently supported schema dialect: omit optional contacts on
 create and use empty strings to clear visible contacts on update.
 
+## Exact contact lookup on a caller client
+
+`PersonService::match_contact_in(client, scope, &ContactAddress, limit)` compares personal contacts; [Affiliation's lookup](../affiliation/README.md#exact-current-work-contact-lookup) compares current work contacts. Call both owners when both sources matter. The crate root exports `ContactAddress` and `ContactMatches<T>`. Neither API infers, merges, binds or reserves an identity.
+
+- Scope's live account/tenant standing is reproved on the supplied client, preserving impersonator, agent and company facets. Caller HTTP/session and bearer adapters also revalidate their credential for each call, as in the ordinary owner facades. Live Person list and detail access are required. A hidden or masked criterion is `Forbidden`, even for a nonexistent value. Missing access is an error, never a complete empty answer.
+- Email uses the existing Person validator and PostgreSQL case-insensitive `lower` comparison after trimming input. There is no provider-specific dot/plus rewriting. Stored spelling is preserved.
+- Phone accepts only an explicit international spelling: remove ASCII spaces, hyphens, parentheses and dots, then require a leading `+` or `00` followed by 6–15 ASCII digits starting with a nonzero digit. Bare digits are refused, whether national (with or without a trunk zero, such as `(212) 555-1234`) or country-coded without a prefix (`60 12 345 6790`): no country is inferred from the digits, actor, tenant, company, postal address or locale. Extensions and other unsupported spellings are not canonical numbers either. Unsupported input is `Invalid`; any non-null unsupported stored phone sets `uncomparable`, so it cannot produce a complete negative or match another country's number. Email lookups never set `uncomparable`. Display values, write validation and Core Consent's own policy are unchanged.
+- Limits are 1–100, with stable ID order. `overflow` means additional exact matches exist; `uncomparable` means some source values could not be checked. Only `complete()` (both flags false) makes the result exhaustive under this comparison policy. Preserve both flags when composing owners or criteria. Known matches can coexist with incompleteness.
+- Retired identities remain candidates, consistently with duplicate lookup and detail reads. Erasure clears the contacts, including their derived index entries; an erased stub has no old address to match. A match is never a live Person proof.
+- SQL stays in the storage owner. Nonunique expression indexes derive from the original values, following every normal, provisioning and privacy write without another stored contact copy. Candidate and incompleteness reads use one statement snapshot on the caller's client; earlier uncommitted owner writes are visible, and rollback leaves no lookup state.
+
+### Concurrency boundary
+
+This is a read prerequisite, **not an intake uniqueness reservation**. The existing mutation boundary uses PostgreSQL's configured transaction isolation (normally Read Committed); the lookup neither changes it nor opens a nested transaction. Separate owner lookups can therefore observe different committed snapshots. A caller needing one read snapshot can begin its transaction at Repeatable Read before any query, while retaining visibility of its own writes; that snapshot still reserves no absent address.
+
+Person row/version locks protect existing records, and the tenant code lock protects code allocation. Neither coordinates contact intake with all independent Person/Affiliation/provisioning/privacy writers. A caller-only advisory lock does not fix this. Making only the intake transaction Serializable also cannot establish a reservation against writers that do not participate in that isolation contract. There is currently no supported bounded contact-reservation/retry contract across those writers. Intake that requires concurrent uniqueness must first establish a writer-wide coordination contract; this lookup does not claim that prerequisite is solved. Existing deadlock/lock-timeout retries roll back the entire outer operation, never just the lookup or its last write.
+
+The [contact matching walkthrough](../affiliation/README.md#contact-matching-walkthrough) exercises both real owners on a disposable database.
+
 ## System identity and optional account binding
 
 `ensure_platform_orchestrator` explicitly provisions Lara Example as an agent

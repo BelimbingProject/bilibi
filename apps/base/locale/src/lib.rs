@@ -4,8 +4,8 @@
 //! actor, so tenant, operator and company proofs are never bypassed here.
 //!
 //! Resolution is stateless (user override → stored global → inferred from the
-//! supplied `Bootstrap`, or from the bound `BootstrapSource` when the caller
-//! supplies none → declared default). A read never writes: inference is
+//! supplied `Bootstrap`, or from the bound `BootstrapSource`, read on the
+//! caller's own connection, when the caller supplies none → declared default). A read never writes: inference is
 //! reported as pending until an operator-proven transaction calls
 //! `Locales::adopt_inferred`. Nothing here changes process-global locale; the
 //! request edge carries the `Resolved` value explicitly.
@@ -20,7 +20,7 @@ use bilibi_module_registry::{Module, Service};
 use bilibi_settings::{
     Definition, ScopeKind, Setting, Settings, Target, Validator, ValueType, DEFINITIONS,
 };
-use bilibi_tenancy::{ProofFuture, Scope};
+use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use tokio_postgres::GenericClient;
@@ -68,11 +68,15 @@ impl Bootstrap {
 
 /// The owner of companies and addresses (Core Address, K11/K15) binds this
 /// once so every page's `resolve(.., None)` sees the installation facts
-/// without naming Core. It is asked only when no global locale is stored,
-/// reads on its own
-/// connection, and answers `None` when no live operator address exists.
+/// without naming Core. It is asked only when no global locale is stored, and
+/// answers `None` when no live operator address exists.
+///
+/// It reads on the connection the caller of `resolve` already holds and takes
+/// none of its own: a source that asked the pool for a second connection while
+/// the caller keeps the first would deadlock the pool once every connection
+/// belongs to a waiting caller.
 pub trait BootstrapSource: Send + Sync {
-    fn bootstrap(&self) -> ProofFuture<'_, Option<Bootstrap>>;
+    fn bootstrap<'a>(&'a self, client: &'a dyn ProofClient) -> ProofFuture<'a, Option<Bootstrap>>;
 }
 
 /// Where the effective locale came from.
@@ -284,7 +288,7 @@ impl Locales {
             Some(bootstrap) => Some(bootstrap),
             None => match self.source.get() {
                 Some(source) => {
-                    supplied = source.bootstrap().await?;
+                    supplied = source.bootstrap(client).await?;
                     supplied.as_ref()
                 }
                 None => None,

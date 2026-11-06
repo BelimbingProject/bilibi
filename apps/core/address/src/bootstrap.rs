@@ -3,21 +3,19 @@
 //! Locale never queries Core: Address binds `Source` as Locale's
 //! `BootstrapSource` at boot (K15), so every `Locales::resolve(.., None)`
 //! infers from these facts until a global locale is stored.
-use crate::AddressService;
 use bilibi_database::{Error, Result};
-use bilibi_geonames::Geonames;
 use bilibi_locale::{Bootstrap, BootstrapSource};
-use bilibi_tenancy::ProofFuture;
-use std::sync::Arc;
-use tokio_postgres::GenericClient;
+use bilibi_tenancy::{ProofClient, ProofFuture};
 
-/// The bound source: reads on the Address service's own pool, since Locale
-/// asks outside any transaction and must never fail a page on a broken
-/// primary-company assignment.
-pub struct Source(pub Arc<AddressService>);
+/// The bound source: reads on the connection `Locales::resolve` was called
+/// with and takes none of its own. The caller already holds one, so a second
+/// pooled connection would deadlock the pool at more than its size in
+/// concurrent callers. A broken primary-company assignment is an ordinary
+/// `None`, so a page never fails on it.
+pub struct Source;
 impl BootstrapSource for Source {
-    fn bootstrap(&self) -> ProofFuture<'_, Option<Bootstrap>> {
-        Box::pin(self.0.platform_operator_bootstrap())
+    fn bootstrap<'a>(&'a self, client: &'a dyn ProofClient) -> ProofFuture<'a, Option<Bootstrap>> {
+        Box::pin(platform_operator(client))
     }
 }
 
@@ -26,10 +24,7 @@ impl BootstrapSource for Source {
 /// A missing operator, primary company or country is an ordinary `None`; a
 /// broken primary-company assignment is also `None`, so a
 /// locale read never fails on it.
-pub async fn platform_operator(
-    client: &impl GenericClient,
-    geonames: &Geonames,
-) -> Result<Option<Bootstrap>> {
+pub async fn platform_operator(client: &(impl ProofClient + ?Sized)) -> Result<Option<Bootstrap>> {
     let Some(tenant) = client
         .query_opt(
             "SELECT o.tenant_id FROM platform_operator o JOIN tenants t ON t.id=o.tenant_id WHERE o.singleton AND t.status='active' AND t.deleted_at IS NULL",
@@ -57,7 +52,7 @@ pub async fn platform_operator(
     let Some(Ok(mut facts)) = country.as_deref().map(Bootstrap::new) else {
         return Ok(None);
     };
-    if let Some(country) = geonames.get_country(facts.country_iso()).await? {
+    if let Some(country) = bilibi_geonames::country_summary(client, facts.country_iso()).await? {
         facts.country_name = Some(country.country);
         facts.languages = country.languages;
         facts.currency_code = country.currency_code;

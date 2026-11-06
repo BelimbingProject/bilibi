@@ -162,7 +162,7 @@ impl AddressService {
     /// Installation-locale facts for `Locales::resolve` (see `bootstrap`).
     pub async fn platform_operator_bootstrap(&self) -> Result<Option<Bootstrap>> {
         let client = self.db.get().await?;
-        bootstrap::platform_operator(&**client, &self.geonames).await
+        bootstrap::platform_operator(&**client).await
     }
 
     pub async fn create(&self, scope: &Scope, input: &AddressInput) -> WriteResult<Address> {
@@ -292,7 +292,7 @@ inventory::submit! {
             // Address owns the operator's address facts, so it supplies Locale's
             // installation bootstrap (K15) without Base naming Core.
             services.get::<bilibi_locale::Locales>("base/locale.locales")?
-                .bind_bootstrap(Arc::new(bootstrap::Source(addresses.clone())))?;
+                .bind_bootstrap(Arc::new(bootstrap::Source))?;
             Ok(addresses)
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, Error>(Arc::new(web::Pages {
