@@ -1,9 +1,9 @@
 //! Dragging a record onto a page that can act on it (issue 265). The source
 //! carries a reference only (`kind:id`, `FlexRow::record`); a target page
 //! wraps itself in a [`DropZone`] (`DropZone::wrap`) and receives a
-//! `drop_records` event; the same shortcut is always also an [`AddToMenu`]
-//! item, a plain link, so a phone, the keyboard, a screen reader and an AI
-//! agent reach it without a drag. Which pages accept which kinds is
+//! `drop_records` event; the same shortcut is always also an item of the
+//! row's Actions… menu ([`AddToMenu`]), a plain link, so a phone, the
+//! keyboard, a screen reader and an AI agent reach it without a drag. Which pages accept which kinds is
 //! `base/records`' business (`bilibi_records::DropTarget`); this module only
 //! draws it. Browser half: `assets/drops.js`. Contract: `DESIGN.md`.
 use crate::Html;
@@ -51,7 +51,7 @@ impl DropZone {
     }
 }
 
-/// One shortcut in the "Add to…" menu: a link to the target page that opens
+/// One shortcut in the Actions… menu: a link to the target page that opens
 /// its review on the records. A target that takes fewer records than are
 /// ticked stays in the menu, disabled, with the reason as its title.
 #[derive(Clone, Debug)]
@@ -61,12 +61,15 @@ pub struct AddToItem {
     pub disabled: Option<String>,
 }
 
-/// The "Add to…" menu of a row or of a selection bar.
+/// The Actions… menu of a row or of a selection bar: an icon-only button
+/// (Carbon `perform-action`, tooltip "Actions…") that opens the list of
+/// pages the record can be taken to. `DisclosureDismiss` closes it on Escape
+/// and on a click outside.
 #[derive(Template, Clone, Debug)]
 #[template(
     source = r##"{%- import "components.html" as ui -%}
 {%- if !items.is_empty() -%}
-<span id="{{ id }}-wrap" data-hook="DisclosureDismiss" class="floating-scope relative inline-block"><button id="{{ id }}" type="button" aria-expanded="false" aria-controls="{{ id }}-items" title="{{ title }}" class="peer floating-anchor inline-flex h-6 items-center gap-1 whitespace-nowrap rounded-md border border-line bg-surface px-2 text-xs text-ink hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand-strong/40">{% call ui::icon(name="create", class="size-3.5") %}{% endcall %}Add to…</button><div id="{{ id }}-items" class="floating-list z-40 mt-0.5 hidden min-w-40 rounded-md border border-line bg-surface p-1 text-left shadow-lg peer-aria-expanded:block">{% for item in items %}{% if let Some(reason) = item.disabled %}<span id="{{ id }}-{{ loop.index0 }}" aria-disabled="true" title="{{ reason }}" class="block cursor-not-allowed rounded-sm px-2 py-1 text-xs text-ink-faint">{{ item.label }}</span>{% else %}<a id="{{ id }}-{{ loop.index0 }}" href="{{ item.href }}" class="block rounded-sm px-2 py-1 text-xs text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none">{{ item.label }}</a>{% endif %}{% endfor %}</div></span>
+<span id="{{ id }}-wrap" data-hook="DisclosureDismiss" class="floating-scope relative inline-block"><button id="{{ id }}" type="button" aria-expanded="false" aria-controls="{{ id }}-items" aria-label="Actions for {{ subject }}…" title="Actions…" class="peer floating-anchor {% call ui::icon_button_class(context=bilibi_ui::IconContext::Table, kind=bilibi_ui::IconKind::Neutral, chrome=bilibi_ui::Chrome::Utilities, busy=false, class="") %}{% endcall %} aria-expanded:bg-surface-sunken aria-expanded:text-ink">{% call ui::icon(name="carbon-perform-action", class="size-4") %}{% endcall %}</button><div id="{{ id }}-items" class="floating-list z-40 mt-0.5 hidden min-w-40 rounded-md border border-line bg-surface p-1 text-left shadow-lg peer-aria-expanded:block">{% for item in items %}{% if let Some(reason) = item.disabled %}<span id="{{ id }}-{{ loop.index0 }}" aria-disabled="true" title="{{ reason }}" class="block cursor-not-allowed rounded-sm px-2 py-1 text-xs text-ink-faint">{{ item.label }}</span>{% else %}<a id="{{ id }}-{{ loop.index0 }}" href="{{ item.href }}" class="block rounded-sm px-2 py-1 text-xs text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none">{{ item.label }}</a>{% endif %}{% endfor %}</div></span>
 {%- endif -%}"##,
     ext = "html"
 )]
@@ -74,15 +77,16 @@ pub struct AddToMenu {
     /// A stable id for this menu on the page.
     pub id: String,
     pub items: Vec<AddToItem>,
-    /// The menu button's title: what it adds ("Add this contact to…").
-    pub title: String,
+    /// What the actions act on, for the button's accessible name ("Actions
+    /// for Acme Sdn Bhd…"): the record's name, or "the selected contacts".
+    pub subject: String,
 }
 impl AddToMenu {
-    pub fn new(id: impl Into<String>, title: impl Into<String>, items: Vec<AddToItem>) -> Self {
+    pub fn new(id: impl Into<String>, subject: impl Into<String>, items: Vec<AddToItem>) -> Self {
         Self {
             id: id.into(),
             items,
-            title: title.into(),
+            subject: subject.into(),
         }
     }
 }

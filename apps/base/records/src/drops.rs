@@ -2,7 +2,7 @@
 //! the target page already offers (issue 265). A page declares what it
 //! accepts and which operation contract the drop's review commits, with one
 //! typed contribution; `Records` answers the rest for every caller: which
-//! targets a person may use for a kind of record (the "Add to…" menu and the
+//! targets a person may use for a kind of record (the "Actions…" menu and the
 //! highlighted tiles), and the records a drop or a link carried, re-read and
 //! re-checked under the reader's own scope. A drop carries references only
 //! (`kind:id`), never field values, and grants no authority: the target opens
@@ -23,7 +23,7 @@ pub const DROP_TARGETS: &str = "base/records.drop_targets";
 /// The live event a target page receives for a drop: `{type: "drop_records",
 /// records: "kind:id,kind:id"}`.
 pub const DROP_EVENT: &str = "drop_records";
-/// The query parameter the "Add to…" link carries to the target page, in the
+/// The query parameter the "Actions…" link carries to the target page, in the
 /// same spelling as the event's `records`.
 pub const DROP_PARAM: &str = "drop";
 /// The most records one drop may name, whatever a target declares.
@@ -44,7 +44,7 @@ pub struct DropTarget {
     pub capability: &'static str,
     /// The target page, a contributed GET page route without parameters.
     pub path: &'static str,
-    /// What the shortcut does, as the "Add to…" menu and the highlighted
+    /// What the shortcut does, as the "Actions…" menu and the highlighted
     /// tile say it: "Invite as customer".
     pub label: &'static str,
     /// The kinds of record the target accepts.
@@ -80,7 +80,7 @@ macro_rules! drop_target {
 }
 
 /// A target offered to one person for one kind of record: what the
-/// "Add to…" menu lists. `path` is the page; `drop_href` adds the records.
+/// "Actions…" menu lists. `path` is the page; `drop_href` adds the records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddTo {
     pub id: &'static str,
@@ -199,7 +199,7 @@ impl Records {
         Ok(offered)
     }
 
-    /// The records a drop or an "Add to…" link carried (`text` is `kind:id`
+    /// The records a drop or an "Actions…" link carried (`text` is `kind:id`
     /// joined by commas), for the target page to open its review on. The
     /// package is only a request: the count, the kinds and every record are
     /// checked again here, each record read under `scope` the way a reference

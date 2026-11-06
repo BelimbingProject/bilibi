@@ -75,7 +75,7 @@ An owner may override `RecordOwner::select` to refuse a new choice while keeping
 
 ## Drop targets
 
-A page can take records dropped from another tile as a shortcut for an action it already has (issue 265): contacts onto Customer portal opens the invitation review on that contact. A drop grants nothing: it opens the target's own review, and the operation that review commits decides again. The same shortcut is always an "Add to…" menu item (a link), so phones, the keyboard, screen readers and agents need no drag.
+A page can take records dropped from another tile as a shortcut for an action it already has (issue 265): contacts onto Customer portal opens the invitation review on that contact. A drop grants nothing: it opens the target's own review, and the operation that review commits decides again. The same shortcut is always an "Actions…" menu item (a link), so phones, the keyboard, screen readers and agents need no drag.
 
 **Declare a target (the page's owner),** beside the page's `PageWrites`:
 
