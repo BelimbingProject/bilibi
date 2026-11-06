@@ -1,17 +1,17 @@
 //! Reference owner for the import-results walkthrough; linked only by this example.
 use bilibi_agent_api::{
-    Channels, DEFINITIONS, Definitions, Handler, Operation, OperationClient, OperationFuture,
-    WriteHandler, json::Output,
+    json::Output, Channels, Definitions, Handler, Operation, OperationClient, OperationFuture,
+    WriteHandler, DEFINITIONS,
 };
-use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VOCABULARY, VocabularyContribution};
+use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_base::bulk_data::{
-    IMPORT_RESULTS, Import, ImportOutcome, ImportResult, ImportResults, RECORD_TYPES, RecordType,
-    ResultLink,
+    Import, ImportOutcome, ImportResult, ImportResults, RecordType, ResultLink, IMPORT_RESULTS,
+    RECORD_TYPES,
 };
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance};
 use bilibi_tenancy::Scope;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MODULE: &str = "reference/import_results";
@@ -222,6 +222,6 @@ impl bilibi_ui::page::Page<Scope, Error> for Pages {
         })
     }
 }
-use bilibi_module_registry::contributions::{Access, CompanyScope, Method, ROUTES, Route};
+use bilibi_module_registry::contributions::{Access, CompanyScope, Method, Route, ROUTES};
 inventory::submit! { Contribution::new(ROUTES,"reference.record",provenance!(),&Route { method:Method::Get,path:"/reference/import-records/{id}",service:"reference/import_results.pages",operation:"record",access:Access::Capability(CAPABILITY),framed:true,company_scope:CompanyScope::Company }) }
 inventory::submit! { Contribution::new(ROUTES,"reference.task",provenance!(),&Route { method:Method::Get,path:"/reference/import-tasks/{id}",service:"reference/import_results.pages",operation:"task",access:Access::Capability(CAPABILITY),framed:true,company_scope:CompanyScope::Company }) }
