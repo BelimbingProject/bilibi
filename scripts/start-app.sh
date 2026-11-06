@@ -11,6 +11,7 @@ fi
 cd "$root"
 # shellcheck source=scripts/lib/prerequisites.sh
 source "$root/scripts/lib/prerequisites.sh"
+clear_stale_jobserver
 # Settings come from the shell, then the gitignored .env beside the ./bilibi
 # you ran, then defaults; .env.example lists the lines .env accepts. This also
 # resolves BILIBI_DEV_HOST, the instance's own <name>.localhost (scripts/dev-env.py).
@@ -143,8 +144,13 @@ host=$BILIBI_DEV_HOST
 # and whether Caddy is "unavailable". An address clash stops startup.
 # Two first launches at the same moment must not pick the same backend port:
 # the lock covers choosing a port and reserving it until the app listens.
-exec 9>"/tmp/bilibi-ports-$(id -u).lock"
-flock 9
+# Let bash pick the descriptor (10 or higher), never a fixed low one: a parent
+# Cargo or make passes its jobserver pipe on low descriptors (for example 3 and
+# 9), and overwriting one leaves Cargo and rustc printing "failed to connect to
+# jobserver ... is not a pipe". It is closed again below so cargo-watch and every
+# build do not inherit the lock file.
+exec {ports_lock}>"/tmp/bilibi-ports-$(id -u).lock"
+flock "$ports_lock"
 plan=$(python3 "$root/scripts/local-https-api.py" --plan "$host" "${BILIBI_DEV_PORT:-4300}")
 readarray -t origin_plan <<< "$plan"
 scheme=${origin_plan[0]}
@@ -176,7 +182,8 @@ fi
 # exec below keeps this process ID, so the reservation lasts as long as the launcher.
 mkdir -p "/tmp/bilibi-ports-$(id -u)"
 printf '%s\n' "$$" > "/tmp/bilibi-ports-$(id -u)/${instance[1]}"
-flock -u 9
+flock -u "$ports_lock"
+exec {ports_lock}>&-
 # Colour the address on a terminal without NO_COLOR, as the app's own "listening" line does.
 if [[ -t 1 && -z ${NO_COLOR-} ]]; then
     highlight() { printf '\e[1;32m%s\e[4m%s\e[0m' "$1" "$2"; }

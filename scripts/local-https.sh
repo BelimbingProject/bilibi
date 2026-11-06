@@ -14,8 +14,10 @@ if [[ ! "$port" =~ ^[0-9]{4,5}$ ]] || (( 10#$port < 1024 || 10#$port > 65535 ));
     exit 1
 fi
 mkdir -p "$root/.local/https"
-exec 8>"/tmp/bilibi-local-https-$(id -u).lock"
-flock 8
+# Bash picks a free descriptor (10 or higher) so an inherited low one, such as a
+# parent Cargo's jobserver pipe, is never overwritten.
+exec {https_lock}>"/tmp/bilibi-local-https-$(id -u).lock"
+flock "$https_lock"
 certificate="$root/.local/https/$host.pem"
 key="$root/.local/https/$host-key.pem"
 # Ownership is checked before the API helper creates or renews these files.
