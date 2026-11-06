@@ -17,6 +17,8 @@ Folder guides hold the mistakes that recur in that folder. Open the one you are 
 - `apps/base/dashboard/AGENTS.md`: dashboard panels
 - `apps/domains/AGENTS.md`, `apps/extensions/AGENTS.md`: mounting Domains and Extensions
 
+Before writing a small helper, read `apps/base/HELPERS.md`.
+
 Authoritative contracts (point to them, do not copy them): `apps/base/module_registry/README.md` (descriptors, contributions, boot validation), `apps/web/README.md` (routes, downloads, access, agent edge), `apps/base/database/README.md` and `apps/base/audit/README.md` (writes and audit), `docs/live-pages.md` and `docs/inline-editing.md`, and the README of the module you edit.
 
 ## Principles

@@ -63,6 +63,8 @@ returns dotted field paths, including array indexes. Null is never implicit.
 String formats are date, date-time with offset, and email. Nesting is bounded
 at discovery. Output schemas describe data without runtime enforcement.
 
+Read text input with `text_field` and `optional_text_field` (trimmed; blank is empty or `None`) and refuse a field with `invalid(field, message)`, all in [src/input.rs](src/input.rs); the schema has already checked the types.
+
 Use [json::Data](src/json.rs) for results and its `Restricted` variant for a
 withheld field. The marker stores no original value and serializes only as
 `{"restricted":true}`. `Data::restricted` replaces restricted field values

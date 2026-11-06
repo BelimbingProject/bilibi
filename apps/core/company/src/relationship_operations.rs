@@ -129,14 +129,11 @@ fn dates(input: &Value) -> bilibi_agent_api::Result<EffectiveDates> {
         },
     )
 }
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn role_input(input: &Value) -> RelationshipRoleInput {
     RelationshipRoleInput {
-        code: text(input, "code"),
-        name: text(input, "name"),
-        inverse_name: text(input, "inverse_name"),
+        code: bilibi_agent_api::text_field(input, "code"),
+        name: bilibi_agent_api::text_field(input, "name"),
+        inverse_name: bilibi_agent_api::text_field(input, "inverse_name"),
     }
 }
 fn assignment(input: &Value) -> bilibi_agent_api::Result<RelationshipInput> {
@@ -339,8 +336,8 @@ impl WriteHandler for Write {
                 }
                 Self::UpdateRole => {
                     let update = RoleUpdate {
-                        name: text(input, "name"),
-                        inverse_name: text(input, "inverse_name"),
+                        name: bilibi_agent_api::text_field(input, "name"),
+                        inverse_name: bilibi_agent_api::text_field(input, "inverse_name"),
                         version: positive(input, "version")?,
                     };
                     let (before, update) = outcome(
@@ -427,8 +424,8 @@ impl WriteHandler for Write {
                 }
                 Self::UpdateRole => {
                     let update = RoleUpdate {
-                        name: text(input, "name"),
-                        inverse_name: text(input, "inverse_name"),
+                        name: bilibi_agent_api::text_field(input, "name"),
+                        inverse_name: bilibi_agent_api::text_field(input, "inverse_name"),
                         version: positive(input, "version")?,
                     };
                     outcome(

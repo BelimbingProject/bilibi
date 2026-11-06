@@ -1,6 +1,6 @@
 //! One reviewed door over Authz's existing system-principal grants for the
 //! two engines that ask every tenant before acting there.
-use crate::{field_error, Bound};
+use crate::Bound;
 use bilibi_authz::{authorize_key, effective_capabilities, effective_system, in_operator_tenant};
 use bilibi_database::{Error, Result};
 use bilibi_events::{Subscriber, DELIVER, PRINCIPAL as EVENTS_PRINCIPAL, SUBSCRIBERS};
@@ -71,7 +71,10 @@ impl Kind {
         match input["kind"].as_str() {
             Some("schedule") => Ok(Self::Schedule),
             Some("events") => Ok(Self::Events),
-            _ => Err(field_error("kind", "must be schedule or events")),
+            _ => Err(bilibi_agent_api::invalid(
+                "kind",
+                "must be schedule or events",
+            )),
         }
     }
 
@@ -153,7 +156,7 @@ pub(crate) async fn review(
     let kind = Kind::from_input(input)?;
     let granted = input["granted"]
         .as_bool()
-        .ok_or_else(|| field_error("granted", "must be true or false"))?;
+        .ok_or_else(|| bilibi_agent_api::invalid("granted", "must be true or false"))?;
     let gate = if granted { GRANT } else { REVOKE };
     authorize_key(client, scope, gate).await?;
     let (principal, capability) = target(client, scope, kind).await?;

@@ -19,10 +19,10 @@ use bilibi_tenancy::Scope;
 use bilibi_ui::{
     list_state::FILTERS_FORM,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
-    params, Badge, BadgeKind, BuiltinColumn, Button, Card, ColumnsOutcome, CommitStates,
-    CommitStatus, ConfirmDialog, Fact, Facts, FilterToolbar, FlashGroup, FlashMap, FlexRow,
-    FlexTable, Header, Html, InlineEdit, InlineField, ListColumns, ListSpec, ListState, Pagination,
-    SectionHeading, SortDir, StatusKind, Tab, TableEmpty, Tabs, ToolbarControl,
+    params, BadgeKind, BuiltinColumn, Button, Card, ColumnsOutcome, CommitStates, CommitStatus,
+    ConfirmDialog, Fact, Facts, FilterToolbar, FlashGroup, FlashMap, FlexRow, FlexTable, Header,
+    Html, InlineEdit, InlineField, ListColumns, ListSpec, ListState, Pagination, SectionHeading,
+    SortDir, StatusKind, Tab, TableEmpty, Tabs, ToolbarControl,
 };
 use std::{
     collections::HashMap,
@@ -219,11 +219,8 @@ struct OperationCell<'a> {
     key: &'a str,
 }
 
-fn badge(kind: BadgeKind, text: &str) -> Result<Html> {
-    render(Badge::status(kind, text))
-}
-fn mode_badge(mode: Mode) -> Result<Html> {
-    badge(
+fn mode_badge(mode: Mode) -> Html {
+    bilibi_ui::status_badge(
         match mode {
             Mode::Off => BadgeKind::Neutral,
             Mode::On => BadgeKind::Success,
@@ -461,7 +458,7 @@ impl StepUpPolicy {
         } else {
             Mode::Off
         };
-        let mut tenant = mode_badge(rule.effective)?;
+        let mut tenant = mode_badge(rule.effective);
         if rule.choice.is_none() {
             tenant.push(&render(TextCell {
                 class: "ml-1 text-xs text-ink-muted",
@@ -483,14 +480,14 @@ impl StepUpPolicy {
                     key: operation.key,
                 })?,
             )
-            .slot("default", mode_badge(default)?)
+            .slot("default", mode_badge(default))
             .slot("tenant", tenant)
             .slot(
                 "floor",
                 if rule.declared.operation.always {
-                    badge(BadgeKind::Warning, "Always")?
+                    bilibi_ui::status_badge(BadgeKind::Warning, "Always")
                 } else if rule.floor {
-                    badge(BadgeKind::Warning, "Locked on")?
+                    bilibi_ui::status_badge(BadgeKind::Warning, "Locked on")
                 } else {
                     render(TextCell {
                         class: "text-sm text-ink-muted",

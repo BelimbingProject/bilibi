@@ -63,13 +63,10 @@ fn found(error: Error) -> bilibi_agent_api::Error {
         other => other.into(),
     }
 }
-fn text(input: &Value, field: &str) -> String {
-    input[field].as_str().unwrap_or_default().to_owned()
-}
 fn site_input(input: &Value) -> SiteInput {
     SiteInput {
-        address: text(input, "address"),
-        title: text(input, "title"),
+        address: bilibi_agent_api::text_field(input, "address"),
+        title: bilibi_agent_api::text_field(input, "title"),
         enabled: input["enabled"].as_bool(),
         registration: input["registration"].as_bool(),
         logo: match (
@@ -95,8 +92,8 @@ fn invitation_input(input: &Value) -> bilibi_agent_api::Result<InvitationInput> 
     Ok(InvitationInput {
         person,
         affiliation,
-        name: text(input, "name"),
-        email: text(input, "email"),
+        name: bilibi_agent_api::text_field(input, "name"),
+        email: bilibi_agent_api::text_field(input, "email"),
     })
 }
 /// The Person (and affiliation) an approval invites.

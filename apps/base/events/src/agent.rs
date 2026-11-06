@@ -17,10 +17,7 @@ use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use jiff::Timestamp;
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 static EVENTS: OnceLock<Arc<Events>> = OnceLock::new();
 /// Bound once at boot by the `base/events.agent` service.
@@ -29,10 +26,6 @@ pub(crate) fn bind(events: Arc<Events>) -> bool {
 }
 fn events() -> bilibi_agent_api::Result<&'static Arc<Events>> {
     EVENTS.get().ok_or(Error::Internal.into())
-}
-
-fn field_error(field: &str, message: &str) -> AgentError {
-    AgentError::InvalidInput(BTreeMap::from([(field.into(), vec![message.into()])]))
 }
 
 fn time(at: Timestamp) -> String {
@@ -108,14 +101,13 @@ fn replay_input(input: &Value) -> bilibi_agent_api::Result<(&str, ReplayFrom, i6
     let subscriber = input["subscriber"].as_str().unwrap_or_default();
     let from = match (input.get("from_event"), input.get("from_time")) {
         (Some(id), None) => ReplayFrom::Event(id.as_i64().unwrap_or_default()),
-        (None, Some(at)) => ReplayFrom::Time(
-            at.as_str()
-                .unwrap_or_default()
-                .parse()
-                .map_err(|_| field_error("from_time", "must be a date-time with an offset"))?,
-        ),
+        (None, Some(at)) => {
+            ReplayFrom::Time(at.as_str().unwrap_or_default().parse().map_err(|_| {
+                bilibi_agent_api::invalid("from_time", "must be a date-time with an offset")
+            })?)
+        }
         _ => {
-            return Err(field_error(
+            return Err(bilibi_agent_api::invalid(
                 "from_event",
                 "give exactly one of from_event or from_time",
             ))
@@ -125,7 +117,7 @@ fn replay_input(input: &Value) -> bilibi_agent_api::Result<(&str, ReplayFrom, i6
 }
 fn refusal(error: Error) -> AgentError {
     match error {
-        Error::NotFound => field_error("subscriber", "is not a mounted subscriber"),
+        Error::NotFound => bilibi_agent_api::invalid("subscriber", "is not a mounted subscriber"),
         error => error.into(),
     }
 }

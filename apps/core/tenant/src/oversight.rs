@@ -34,20 +34,23 @@ pub(super) async fn catalog(
     }
     Ok(json!(tables))
 }
-fn invalid(field: &str, message: &str) -> bilibi_agent_api::Error {
-    bilibi_agent_api::Error::InvalidInput([(field.into(), vec![message.into()])].into())
-}
 fn rules(input: &Value) -> bilibi_agent_api::Result<Value> {
     let entries = input["tables"].as_array().ok_or(Error::Invalid)?;
     if entries.len() > 64 {
-        return Err(invalid("tables", "Choose at most 64 record types."));
+        return Err(bilibi_agent_api::invalid(
+            "tables",
+            "Choose at most 64 record types.",
+        ));
     }
     let mut tables = serde_json::Map::new();
     for entry in entries {
         let id = entry["table"].as_str().ok_or(Error::Invalid)?;
         let rule = json!({"level":entry["level"],"withheld":entry["withheld"],"personal":entry["personal"]});
         if tables.insert(id.into(), rule).is_some() {
-            return Err(invalid("tables", "Choose each record type only once."));
+            return Err(bilibi_agent_api::invalid(
+                "tables",
+                "Choose each record type only once.",
+            ));
         }
     }
     Ok(Value::Object(tables))
@@ -65,7 +68,10 @@ async fn validate(
     let rules = rules(input)?;
     let tables = rules.as_object().ok_or(Error::Invalid)?;
     if tables.is_empty() || tables.len() > 64 {
-        return Err(invalid("tables", "Choose between 1 and 64 record types."));
+        return Err(bilibi_agent_api::invalid(
+            "tables",
+            "Choose between 1 and 64 record types.",
+        ));
     }
     for (id, rule) in tables {
         let table = offered
@@ -73,9 +79,14 @@ async fn validate(
             .into_iter()
             .flatten()
             .find(|t| t["id"].as_str() == Some(id))
-            .ok_or_else(|| invalid("tables", "A record type is no longer readable."))?;
+            .ok_or_else(|| {
+                bilibi_agent_api::invalid("tables", "A record type is no longer readable.")
+            })?;
         if !matches!(rule["level"].as_str(), Some("rows" | "aggregates")) {
-            return Err(invalid("tables", "Choose figures or rows."));
+            return Err(bilibi_agent_api::invalid(
+                "tables",
+                "Choose figures or rows.",
+            ));
         }
         for key in ["withheld", "personal"] {
             let fields = rule[key].as_array().ok_or(Error::Invalid)?;
@@ -88,22 +99,30 @@ async fn validate(
                     .into_iter()
                     .flatten()
                     .find(|f| f["id"] == *field)
-                    .ok_or_else(|| invalid("tables", "A selected field is no longer available."))?;
+                    .ok_or_else(|| {
+                        bilibi_agent_api::invalid(
+                            "tables",
+                            "A selected field is no longer available.",
+                        )
+                    })?;
                 if (key == "personal" && known["personal"] != true)
                     || (key == "withheld" && known["key"] == true)
                 {
-                    return Err(invalid("tables","Only personal fields can be explicitly shared; record keys cannot be withheld."));
+                    return Err(bilibi_agent_api::invalid("tables","Only personal fields can be explicitly shared; record keys cannot be withheld."));
                 }
             }
         }
     }
     if let Some(expires) = input.get("expires_at").filter(|v| !v.is_null()) {
         let value = expires.as_str().ok_or(Error::Invalid)?;
-        let instant = value
-            .parse::<jiff::Timestamp>()
-            .map_err(|_| invalid("expires_at", "Use a date and time with its UTC offset."))?;
+        let instant = value.parse::<jiff::Timestamp>().map_err(|_| {
+            bilibi_agent_api::invalid("expires_at", "Use a date and time with its UTC offset.")
+        })?;
         if instant <= jiff::Timestamp::now() {
-            return Err(invalid("expires_at", "Choose a future expiry."));
+            return Err(bilibi_agent_api::invalid(
+                "expires_at",
+                "Choose a future expiry.",
+            ));
         }
     }
     Ok(())
@@ -125,7 +144,10 @@ impl WriteHandler for Update {
             let client = f.db.get().await.map_err(Error::from)?;
             let current = f.oversight.given(&**client, scope).await?;
             if current["parent_id"].is_null() {
-                return Err(invalid("tables", "This tenant has no recorded parent."));
+                return Err(bilibi_agent_api::invalid(
+                    "tables",
+                    "This tenant has no recorded parent.",
+                ));
             }
             if current["version"] != input["version"] {
                 return Err(Error::Conflict.into());

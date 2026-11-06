@@ -158,7 +158,7 @@ fn revision_input(input: &Value) -> RevisionInput {
         revision: input["revision"]
             .as_i64()
             .and_then(|r| i32::try_from(r).ok()),
-        change_log: input["change_log"].as_str().unwrap_or_default().to_owned(),
+        change_log: bilibi_agent_api::text_field(input, "change_log"),
     }
 }
 
@@ -185,20 +185,19 @@ fn record_input(input: &Value) -> Reference {
 /// path (`patch.` for an update); a refused record is a field error on
 /// `field`.
 pub(crate) fn invalid(error: WriteError, prefix: &str, field: &str) -> bilibi_agent_api::Error {
-    let one = |key: &str, message: String| {
-        bilibi_agent_api::Error::InvalidInput(BTreeMap::from([(key.into(), vec![message])]))
-    };
     match error {
         WriteError::Access(error) => error.into(),
         WriteError::NotFound => bilibi_agent_api::Error::NotFound,
         WriteError::Forbidden => bilibi_agent_api::Error::Forbidden,
         WriteError::Stale => Error::Conflict.into(),
-        WriteError::RelatedRefused(message) => one(field, message.into()),
-        error @ WriteError::MergeRefused(_) => one("merge", error.to_string()),
+        WriteError::RelatedRefused(message) => bilibi_agent_api::invalid(field, message),
+        error @ WriteError::MergeRefused(_) => {
+            bilibi_agent_api::invalid("merge", error.to_string())
+        }
         error @ (WriteError::TooLarge { .. }
         | WriteError::Quarantined
         | WriteError::Retained
-        | WriteError::LegalHold) => one("file", error.to_string()),
+        | WriteError::LegalHold) => bilibi_agent_api::invalid("file", error.to_string()),
         WriteError::Invalid(errors) => {
             let mut fields = Fields::new();
             for e in errors {

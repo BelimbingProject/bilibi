@@ -103,12 +103,6 @@ fn render(fragment: impl askama::Template) -> Result<Html> {
     Html::render(&fragment).map_err(|_| Error::Internal)
 }
 
-fn money(cents: i64) -> String {
-    let sign = if cents < 0 { "-" } else { "" };
-    let cents = cents.unsigned_abs();
-    format!("{sign}{}.{:02}", cents / 100, cents % 100)
-}
-
 fn badge(status: &str) -> BadgeKind {
     match status {
         "active" => BadgeKind::Success,
@@ -273,7 +267,7 @@ impl ReferenceState {
                 "balance".into(),
                 Html::raw(format!(
                     "<span class=\"tabular-nums\">{}</span>",
-                    money(vendor.balance)
+                    bilibi_locale::money(rust_decimal::Decimal::new(vendor.balance, 2), 2)
                 )),
             );
             flex_rows.push(flex);

@@ -356,17 +356,16 @@ fn version(input: &Value) -> bilibi_agent_api::Result<i64> {
 /// An owner refusal, typed for every door. Field errors keep their input
 /// path (`patch.` for an update).
 pub(crate) fn invalid(error: WriteError, prefix: &str) -> bilibi_agent_api::Error {
-    let field = |key: &str, message: String| {
-        bilibi_agent_api::Error::InvalidInput(BTreeMap::from([(key.into(), vec![message])]))
-    };
     match error {
         WriteError::Access(error) => error.into(),
         WriteError::NotFound => bilibi_agent_api::Error::NotFound,
         WriteError::Forbidden => bilibi_agent_api::Error::Forbidden,
         WriteError::Stale => Error::Conflict.into(),
-        WriteError::AlreadyClosed => field("already_closed", WriteError::AlreadyClosed.to_string()),
+        WriteError::AlreadyClosed => {
+            bilibi_agent_api::invalid("already_closed", WriteError::AlreadyClosed.to_string())
+        }
         WriteError::AssigneeNotRemovable => {
-            field("guest_id", WriteError::AssigneeNotRemovable.to_string())
+            bilibi_agent_api::invalid("guest_id", WriteError::AssigneeNotRemovable.to_string())
         }
         WriteError::Invalid(errors) => {
             let mut fields = Fields::new();
