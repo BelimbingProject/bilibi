@@ -152,24 +152,6 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     )
     .await?;
     assert_eq!(value["result"][0]["id"], json!(created.id));
-    let value = registered(
-        &app,
-        tx.sql(),
-        &manager,
-        "core.person.get",
-        &json!({"person_id":created.id}),
-    )
-    .await?;
-    assert_eq!(value["result"]["id"], json!(created.id));
-    let value = registered(
-        &app,
-        tx.sql(),
-        &manager,
-        "core.person.list",
-        &json!({"search":"Transaction Candidate"}),
-    )
-    .await?;
-    assert_eq!(value["result"][0]["id"], json!(created.id));
     let registry = app
         .services
         .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
@@ -184,7 +166,7 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     )
     .await??;
     assert_eq!(value["result"][0]["id"], json!(created.id));
-    println!("ok: actual registered duplicate/get/list handlers and projections use supplied transaction without pool acquisition");
+    println!("ok: actual registered duplicate handler and projection use supplied transaction without pool acquisition");
     assert!(people
         .duplicates_on(tx.sql(), &other, &q)
         .await?
@@ -349,6 +331,28 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         retired.id
     );
     println!("ok: rollback removes Person and audit effects, publishes nothing, restores policy; pooled convenience retained");
+    db.resize(2);
+    let client = db.get().await?;
+    let value = registry
+        .call(
+            &**client,
+            &manager,
+            "core.person.get",
+            &json!({"person_id":retired.id}),
+        )
+        .await?;
+    assert_eq!(value["result"]["id"], json!(retired.id));
+    let value = registry
+        .call(
+            &**client,
+            &manager,
+            "core.person.list",
+            &json!({"search":"Retired Candidate"}),
+        )
+        .await?;
+    assert!(value["result"].is_array());
+    drop(client);
+    println!("ok: registered get/list keep their pooled path once the pool is available");
     println!("PASS: native supplied-client duplicate owner and registered transaction proof");
     Ok(())
 }

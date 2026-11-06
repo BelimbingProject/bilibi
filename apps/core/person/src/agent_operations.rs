@@ -130,41 +130,6 @@ enum Read {
     Get,
     Duplicates,
 }
-async fn duplicate_records(
-    client: &dyn bilibi_tenancy::ReadClient,
-    scope: &Scope,
-    input: &Value,
-) -> bilibi_agent_api::Result<Output> {
-    let people = persons()?
-        .duplicates_on(client, scope, &parse::<DuplicateQuery>(input)?)
-        .await?;
-    Ok(Output::Data(records(client, scope, people).await?))
-}
-impl Read {
-    async fn on(
-        &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
-        scope: &Scope,
-        input: &Value,
-    ) -> bilibi_agent_api::Result<Output> {
-        match self {
-            Self::List => {
-                let page = identity::search(client, scope, &parse::<Search>(input)?).await?;
-                Ok(Output::Page(Page {
-                    entries: records(client, scope, page.entries).await?,
-                    page: page.page as u64,
-                    page_size: page.page_size as u64,
-                    total: page.total as u64,
-                }))
-            }
-            Self::Get => {
-                let person = identity::read(client, scope, id(input)?).await?;
-                Ok(Output::Data(record(client, scope, person).await?))
-            }
-            Self::Duplicates => duplicate_records(client, scope, input).await,
-        }
-    }
-}
 impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
         "core/person"
@@ -176,14 +141,27 @@ impl ReadHandler for Read {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            if matches!(self, Self::Duplicates) {
-                return duplicate_records(client, scope, input).await;
-            }
-            match client.transaction() {
-                Some(tx) => self.on(tx, scope, input).await,
-                None => {
-                    let pooled = persons()?.db.get().await.map_err(Error::from)?;
-                    self.on(&**pooled, scope, input).await
+            match self {
+                Self::List => {
+                    let client = persons()?.db.get().await.map_err(Error::from)?;
+                    let page = identity::search(&**client, scope, &parse::<Search>(input)?).await?;
+                    Ok(Output::Page(Page {
+                        entries: records(&**client, scope, page.entries).await?,
+                        page: page.page as u64,
+                        page_size: page.page_size as u64,
+                        total: page.total as u64,
+                    }))
+                }
+                Self::Get => {
+                    let client = persons()?.db.get().await.map_err(Error::from)?;
+                    let person = identity::read(&**client, scope, id(input)?).await?;
+                    Ok(Output::Data(record(&**client, scope, person).await?))
+                }
+                Self::Duplicates => {
+                    let people = persons()?
+                        .duplicates_on(client, scope, &parse::<DuplicateQuery>(input)?)
+                        .await?;
+                    Ok(Output::Data(records(client, scope, people).await?))
                 }
             }
         })
