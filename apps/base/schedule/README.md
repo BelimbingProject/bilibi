@@ -89,10 +89,6 @@ The handler still contributes `TENANT_POLICY`, enters `Schedule::run`, and takes
 
 Every attempt also checks that its captured principal is still the definition's selected identity. An owner-principal job whose reviewed definition or timing version changed is cancelled with `schedule_changed`, including a retry that had already started; a fresh reviewed occurrence must start the new version. Disabling an otherwise unchanged definition retains the established started-run retry rule. A person's manual run continues to use their own ordinary authority.
 
-### Upgrade notes for agents
-
-Existing `Definition` and Queue contributions need no source changes. Owners that need business authority add the optional `EXECUTION_PRINCIPALS` contribution and a dedicated Authz principal declaration, then obtain operator review, named schedule consent and named business grants. Import `ExecutionPrincipal` and `EXECUTION_PRINCIPALS` from `bilibi_schedule`. `Registered::fingerprint()` is the full review fingerprint, including a selected principal's declared bound; `definition::fingerprint` covers only the base definition. No declaration or installation reconciles principal grants.
-
 ### Disposable owner proof
 
 `apps/web/examples/scheduled-owner-reference.rs` links two each-tenant definitions and one owner principal only into its private executable. On a fresh migrated walkthrough database seeded with `BILIBI_ENV=development`, set `BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes`, `DATABASE_URL`, `BIND_ADDR` and an exactly matching `APP_ORIGIN`. Run the executable with `grant-fan-out 1` to give only the scheduler its infrastructure grants, then `serve` and visit `/system/schedule`. Review its execution identity and bound in Enable, then enable it. Before owner grants it records `not_granted` without an owner job.
@@ -107,7 +103,7 @@ The example also contributes **Scheduled locked owner reference**, targeting com
 
 Run the same executable with `grant 1` and `grant 2` to give the fixture administrators' explicit grants through `Grants`; the operator also grants the scheduler its two fan-out keys. The worker fences the real Queue execution and calls Company's ordinary facade to set the tenant primary company's legal name to its job reference. Inspect `/companies/1` and `/companies/100` in their respective fixture tenants, together with the Schedule history and audit attribution `System · scheduled-owner-reference`.
 
-`revoke-business 2` removes only the owner update grant. The next scheduled job still passes consent but the ordinary owner permission check refuses it (`owner_refused`), leaving the company unchanged. `deny-business 2` proves an explicit deny; `revoke-consent 2` prevents subsequent owner jobs; `invalid-grant 1` asserts that granting a key outside the declared bound is refused. To exercise waiting-job and retry reproof, change grants or suspend a fixture tenant before its next Queue attempt; Queue cancels refused identities with `actor_refused`. These commands and browser actions belong only to the disposable fixture runtime; production carries no reference definition or automatic grants.
+`revoke-business 2` removes only the owner update grant. The next scheduled job still passes consent but the ordinary owner permission check refuses it (`owner_refused`), leaving the company unchanged. `deny-business 2` proves an explicit deny; `revoke-consent 2` prevents subsequent owner jobs; `consent-list 2` reads Authz Agent's Automation access operations and asserts the shared `scheduler` list omits both owner definitions while the owner principal's consent key, and its current grant, appear under installed system principals; `invalid-grant 1` asserts that granting a key outside the declared bound is refused. To exercise waiting-job and retry reproof, change grants or suspend a fixture tenant before its next Queue attempt; Queue cancels refused identities with `actor_refused`. These commands and browser actions belong only to the disposable fixture runtime; production carries no reference definition or automatic grants.
 
 For a deterministic retry reproof, retain a discarded real owner job in the operator tenant. After `revoke-consent 1` removes that principal's `EXECUTE`, `retry 1 JOB_ID` uses Queue's audited `retry_for` command; it authorizes the fixture administrator and accepts only an owner job visible in this definition's own tenant history. Queue retains the captured system identity and cancels it with `actor_refused` on its next attempt. The administrator's own authority never replaces that captured identity.
 
@@ -158,7 +154,7 @@ redacted with `admin.system.schedule.view`.
 
 Every definition is `Unreviewed` until an operator reviews its **fingerprint**
 (`Registered::fingerprint`): SHA-256 over key, name, expression, zone, owner,
-task name, worker, canonicalised arguments, overlap and misfire. Changing any of
+task name, worker, canonicalised arguments, overlap and misfire, plus any selected execution principal and its declared bound. Changing any of
 those in code makes a stored review stale, so a redeploy can never silently run
 changed work; the owner route is display-only and not part of it. Review state
 is `Unreviewed`, `Enabled` or `Disabled` for the current fingerprint.

@@ -50,7 +50,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "scheduled-owner-reference.vo
     // permissions through the real Grants facade, with no cross-tenant actor.
     roles: &[RoleDefinition {
         code: "manager", name: "manager", description: "Disposable schedule administrator", grant_all: false,
-        capabilities: &["admin.authz.system-principal.grant", "admin.authz.system-principal.revoke", schedule::TENANT_WORK, schedule::TENANT_VIEW],
+        capabilities: &["admin.authz.system-principal.list", "admin.authz.system-principal.grant", "admin.authz.system-principal.revoke", schedule::TENANT_WORK, schedule::TENANT_VIEW],
     }],
 }) }
 
@@ -252,6 +252,54 @@ async fn main() -> Result<()> {
                             .await?;
                     }
                 }
+            }
+            "consent-list" => {
+                let registry = app
+                    .services
+                    .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+                let consent = registry
+                    .read(
+                        &db,
+                        &admin,
+                        "base.authz_agent.automation_consent.list",
+                        &json!({}),
+                    )
+                    .await
+                    .map_err(|_| Error::Forbidden)?;
+                assert_eq!(consent["schedule"]["principal"], schedule::PRINCIPAL);
+                let shared = consent["schedule"]["items"]
+                    .as_array()
+                    .ok_or(Error::Internal)?;
+                assert!(!shared
+                    .iter()
+                    .any(|item| item["key"] == KEY || item["key"] == LOCKED_KEY));
+                let installed = registry
+                    .read(
+                        &db,
+                        &admin,
+                        "base.authz_agent.system_principal.list",
+                        &json!({}),
+                    )
+                    .await
+                    .map_err(|_| Error::Forbidden)?;
+                let consent_key = if tenant == 1 {
+                    schedule::EXECUTE
+                } else {
+                    schedule::TENANT_WORK
+                };
+                let owner = installed["entries"]
+                    .as_array()
+                    .ok_or(Error::Internal)?
+                    .iter()
+                    .find(|entry| {
+                        entry["principal"] == PRINCIPAL && entry["capability"] == consent_key
+                    })
+                    .ok_or(Error::NotFound)?;
+                println!(
+                    "shared schedules={} owner consent {consent_key} granted={}",
+                    shared.len(),
+                    owner["granted"]
+                );
             }
             "revoke-business" => {
                 grants
