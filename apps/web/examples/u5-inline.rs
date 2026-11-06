@@ -165,13 +165,27 @@ impl LiveState<Scope, Error> for State {
                                 value,
                                 &["must be a valid date"],
                             ))
-                        } else if field == "kind" && !["customer", "vendor"].contains(&value) {
+                        } else if field == "kind"
+                            && !match record.values.get("kind").map(String::as_str) {
+                                Some("vendor") => ["vendor", "partner"],
+                                Some("partner") => ["partner", "customer"],
+                                _ => ["customer", "vendor"],
+                            }
+                            .contains(&value)
+                        {
                             Some(CommitStatus::refusal(
                                 "Relationship",
                                 value,
                                 &["is unavailable"],
                             ))
-                        } else if field == "region" && !["my", "sg", "au"].contains(&value) {
+                        } else if field == "region"
+                            && !match record.values.get("region").map(String::as_str) {
+                                Some("sg") => ["sg", "au"],
+                                Some("au") => ["au", "my"],
+                                _ => ["my", "sg"],
+                            }
+                            .contains(&value)
+                        {
                             Some(CommitStatus::refusal("Region", value, &["is unavailable"]))
                         } else {
                             record.values.insert(field.into(), value.into());
