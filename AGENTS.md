@@ -54,7 +54,7 @@ Authoritative contracts (point to them, do not copy them): `apps/base/module_reg
 
 ## UI
 
-`DESIGN.md` is the design source; `apps/base/ui/AGENTS.md` holds the recurring mistakes.
+`DESIGN.md` is the design source; run its Page review checklist on every page you change. `apps/base/ui/AGENTS.md` holds the recurring mistakes.
 
 - Use the shared Askama macros and typed models of `base/ui` for every page element. No hand-written markup or copied classes.
 - Every list uses `FlexTable` on `ListState`, never the plain `Table`.
