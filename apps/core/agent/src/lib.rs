@@ -378,51 +378,6 @@ pub fn valid_label(label: &str) -> bool {
         && !label.trim().is_empty()
         && !label.chars().any(char::is_control)
 }
-fn approved_client_label(user_agent: &str) -> String {
-    let browser = if user_agent.contains("Edg/")
-        || user_agent.contains("EdgiOS/")
-        || user_agent.contains("EdgA/")
-    {
-        Some("Edge")
-    } else if user_agent.contains("Chrome/")
-        || user_agent.contains("CriOS/")
-        || user_agent.contains("HeadlessChrome/")
-    {
-        Some("Chrome")
-    } else if user_agent.contains("Firefox/") || user_agent.contains("FxiOS/") {
-        Some("Firefox")
-    } else if user_agent.contains("OPR/") || user_agent.contains("Opera/") {
-        Some("Opera")
-    } else if user_agent.contains("Safari/") && user_agent.contains("Version/") {
-        Some("Safari")
-    } else {
-        None
-    };
-    let system = if user_agent.contains("Windows") {
-        Some("Windows")
-    } else if user_agent.contains("iPhone")
-        || user_agent.contains("iPad")
-        || user_agent.contains("iPod")
-    {
-        Some("iOS")
-    } else if user_agent.contains("Android") {
-        Some("Android")
-    } else if user_agent.contains("CrOS") {
-        Some("ChromeOS")
-    } else if user_agent.contains("Macintosh") || user_agent.contains("Mac OS X") {
-        Some("macOS")
-    } else if user_agent.contains("Linux") {
-        Some("Linux")
-    } else {
-        None
-    };
-    match (browser, system) {
-        (Some(browser), Some(system)) => format!("{browser} on {system}"),
-        (Some(browser), None) => browser.to_owned(),
-        (None, Some(system)) => format!("Browser on {system}"),
-        (None, None) => "Browser".to_owned(),
-    }
-}
 /// Impersonated sessions and agent facets are refused from managing
 /// connections: a bearer request carries the agent facet, an impersonated
 /// browser session its operator. Refused here once, not at each caller.
@@ -1202,7 +1157,7 @@ impl AgentAccess {
                 self_reported_agents: serde_json::from_value(row.get(5)).unwrap_or_default(),
                 observed_clients: serde_json::from_value(row.get(6)).unwrap_or_default(),
                 created_at: row.get(7),
-                approved_client: approved_client_label(&row.get::<_, String>(8)),
+                approved_client: bilibi_session::client_name(Some(&row.get::<_, String>(8))),
                 enabled,
             });
         }

@@ -600,6 +600,63 @@ pub struct IconButton<'a> {
     pub method: &'a str,
 }
 
+/// One command in a list row's shared Actions… disclosure.
+#[derive(Clone, Debug)]
+pub struct RowAction {
+    pub label: String,
+    pub event: String,
+    pub name: String,
+    pub value: String,
+    pub danger: bool,
+    pub disabled: bool,
+}
+impl RowAction {
+    pub fn new(
+        label: impl Into<String>,
+        event: impl Into<String>,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            event: event.into(),
+            name: name.into(),
+            value: value.into(),
+            danger: false,
+            disabled: false,
+        }
+    }
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+    pub fn disabled(mut self) -> Self {
+        self.disabled = true;
+        self
+    }
+}
+
+/// The one Actions… disclosure a list row uses for its commands.
+#[derive(Template, Clone, Debug)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::row_actions(id=id, subject=subject, items=items) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct RowActions {
+    pub id: String,
+    pub subject: String,
+    pub items: Vec<RowAction>,
+}
+impl RowActions {
+    pub fn new(id: impl Into<String>, subject: impl Into<String>, items: Vec<RowAction>) -> Self {
+        Self {
+            id: id.into(),
+            subject: subject.into(),
+            items,
+        }
+    }
+}
+
 impl<'a> IconButton<'a> {
     pub fn new(icon: &'a str, label: &'a str) -> Self {
         Self {

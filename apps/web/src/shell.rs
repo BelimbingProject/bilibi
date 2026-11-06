@@ -20,13 +20,67 @@ use bilibi_module_registry::contributions::{
 use bilibi_security::Scope;
 use bilibi_ui::page::{PageRequest, PageService};
 use bilibi_ui::{
-    page::PageChrome, AppShell, CompanyChoice, DisplayPreferences, Framed, Html, NavNode,
-    SearchPage, ShellContext, StandaloneReview, TenantChoice,
+    page::PageChrome, AppShell, CompanyChoice, DisplayPreferences, Framed, Html, Instant,
+    InstantView, NavNode, SearchPage, ShellContext, StandaloneReview, TenantChoice,
 };
 use bilibi_user::{ChoiceRefusal, PreferenceError, Presentation};
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
+
+#[derive(Template)]
+#[template(
+    source = r#"<div id="app-user-session-security" class="mb-3 border-b border-line pb-3">{% if first %}<p id="app-user-previous-sign-in">First sign-in</p>{% else %}<p id="app-user-previous-sign-in" class="break-words"><span class="text-muted">Previous sign-in:</span> {{ at|safe }} · {{ device }}{% if !ip.is_empty() %} · <span class="tabular-nums text-muted">{{ ip }}</span>{% endif %}</p>{% endif %}<a id="app-user-sessions" href="/settings/sessions" class="mt-1 inline-flex items-center gap-1 text-link hover:underline">Your sessions</a></div>"#,
+    ext = "html"
+)]
+struct AccountSessionSecurity {
+    first: bool,
+    at: Html,
+    device: String,
+    ip: String,
+}
+
+fn account_session_security(
+    previous: Option<bilibi_base::session::PreviousSignIn>,
+    display: &bilibi_base::datetime::DisplayContext,
+) -> Result<Html> {
+    let (first, at, device, ip) = match previous {
+        Some(previous) => {
+            let at =
+                jiff::Timestamp::try_from(previous.signed_in_at).map_err(|_| Error::Internal)?;
+            let rendered = display.render(
+                at,
+                bilibi_base::datetime::Format::DateTime,
+                bilibi_base::datetime::Precision::Minute,
+            );
+            let instant = Instant::new(
+                &rendered.iso,
+                &rendered.text,
+                &rendered.company,
+                &rendered.utc,
+                rendered.mode.as_str(),
+            );
+            (
+                false,
+                Html::render(&InstantView {
+                    id: "app-user-previous-sign-in-at",
+                    instant: &instant,
+                })
+                .map_err(|_| Error::Internal)?,
+                bilibi_base::session::client_name(previous.user_agent.as_deref()),
+                previous.ip_address.unwrap_or_default(),
+            )
+        }
+        None => (true, Html::EMPTY, String::new(), String::new()),
+    };
+    Html::render(&AccountSessionSecurity {
+        first,
+        at,
+        device,
+        ip,
+    })
+    .map_err(|_| Error::Internal)
+}
 
 /// A rendered page body and the explicit theme to stamp on `<html>`.
 pub struct Rendered {
@@ -84,7 +138,13 @@ pub async fn render(
         }
         .render()
     } else if let Some(scope) = scope {
-        let context = context(app, scope, path, preferences, topbar_actions).await?;
+        let presentation = presentation.as_ref().ok_or(Error::Internal)?;
+        let display = bilibi_base::datetime::DisplayContext {
+            mode: presentation.mode,
+            timezone: presentation.timezone.clone(),
+            locale: presentation.locale,
+        };
+        let context = context(app, scope, path, preferences, display, topbar_actions).await?;
         AppShell {
             context: &context,
             live,
@@ -118,6 +178,7 @@ async fn context<'a>(
     scope: &'a Scope,
     path: &str,
     preferences: DisplayPreferences,
+    display: bilibi_base::datetime::DisplayContext,
     topbar_actions: Html,
 ) -> Result<ShellContext<'a>> {
     let client = app.db.get().await?;
@@ -217,6 +278,14 @@ async fn context<'a>(
         );
     let pins = bilibi_user::list_pins(&**client, scope).await?;
     let profile_image_url = app.user.profile_image_url(&**client, scope).await;
+    let session_security = if scope.impersonator().is_none() {
+        let sessions = app
+            .services
+            .get::<bilibi_base::session::Sessions>("base/session.sessions")?;
+        account_session_security(sessions.previous_sign_in(&**client, scope).await?, &display)?
+    } else {
+        Html::EMPTY
+    };
     // Everything below takes connections of its own. Holding this one across
     // them would let as many simultaneous renders as the pool holds take every
     // connection and wait on each other for good (every live reply renders
@@ -312,6 +381,7 @@ async fn context<'a>(
             &initials,
         ))
         .map_err(|_| Error::Internal)?,
+        session_security,
         tenant_bar,
         platform_operator,
         operator_company_missing,

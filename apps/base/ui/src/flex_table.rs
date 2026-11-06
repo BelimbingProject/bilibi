@@ -448,6 +448,17 @@ impl Instant {
     }
 }
 
+/// One timestamp through the same markup a flexible-table datetime cell uses.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "flex_table.html" as flex %}{% call flex::instant(id=id, i=instant) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct InstantView<'a> {
+    pub id: &'a str,
+    pub instant: &'a Instant,
+}
+
 /// What a cell's value is, beyond its text. A calendar date is zone-free.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Typed {

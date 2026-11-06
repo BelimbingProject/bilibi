@@ -1,9 +1,6 @@
 # Base Session
 
-`base/session.sessions` (`Sessions` in `src/lib.rs`) owns the durable session
-store: authentication of the opaque cookie token, the operator list and its
-termination commands, the termination broadcast, and the scheduled sweep.
-The admin screen is at `/system/sessions`, with a dashboard stats panel.
+`base/session.sessions` (`Sessions` in `src/lib.rs`) owns the durable session store: authentication of the opaque cookie token, the account and operator lists, termination commands, the termination broadcast, and the scheduled sweep. The account page is at `/settings/sessions`; the operator page is at `/system/sessions`, with a dashboard stats panel.
 
 ## Guard boundary
 
@@ -71,16 +68,21 @@ their name, one outside it shows `User <id>`, so no name crosses a tenant
 boundary. The user column sorts by `user_id`. Search matches the IP address or
 user agent recorded once at sign-in by `describe` (the host passes the proxy's
 `X-Forwarded-For`/`X-Real-IP` and `User-Agent`; a direct connection records no
-address). Rows and termination requests are keyed by a digest of the session id
-(`Summary::key`), never by the bearer token.
+address). `sessions.signed_in_at` records admission time and has the same retention as the session row. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
 
 The dashboard entry `base-dashboard-session-stats` (embed `session.dashboard-stats`,
 slot `dashboard.sessions`) shows the open count, reading only while
 `admin.system.session.list` is effective and otherwise an em dash.
 
+## Your sessions
+
+`/settings/sessions` lists only the signed-in person's active staff sessions. Each row shows the device label derived from the user agent, IP address, sign-in time, last activity and whether it is this device. There is no platform geo-IP lookup, so the page and account popup show the IP address and do not guess a city. The account popup shows the latest other successful sign-in whose session row is still retained, or **First sign-in** when there is none.
+
+An impersonating operator, agent bearer or system principal cannot open the page or read the previous-sign-in summary. A row command sends only `OwnSummary::key`; the mounted page keeps the bearer, and the mutation locks and deletes only a row with the sealed scope's tenant and user. The current session has no sign-out command. **Sign out everywhere else** excludes it.
+
 ## Ending a session
 
-`terminate(tx, id, current)` is the operator command: the caller's own session is refused before any row is read (`Termination::CurrentSession`), the delete is an audited mutation recording whose session ended and from where (the payload is marked redacted; the token is never written), and the termination is announced after the commit. `delete(client, scope, id)` is logout: the holder's own session, no audit row. `revoke(tx, user, except)` runs inside an owner's mutation transaction (Core User's password change and reset), invokes every registered factor revocation hook and delegated-credential revoker, and returns the ended ids for `announce` after that commit, so a rolled-back credential change signs nobody out or disconnects an app. Each delegated revoker receives a `RevocationAccount` carrying a `CredentialRevocationReason` (password changed or reset, signed out, administrator action, or the neutral account changed) taken from the transaction's action; unknown actions map to account changed.
+`terminate(tx, id, current)` is the operator command: the caller's own session is refused before any row is read (`Termination::CurrentSession`), the delete is an audited mutation recording whose session ended and from where (the payload is marked redacted; the token is never written), and the termination is announced after the commit. `terminate_own` and `terminate_others` are the account commands: both re-bind every target to the sealed tenant and user, audit each ended session and keep the current session. `delete(client, scope, id)` is logout: the holder's own session, no audit row. `revoke(tx, user, except)` runs inside an owner's mutation transaction (Core User's password change and reset), invokes every registered factor revocation hook and delegated-credential revoker, and returns the ended ids for `announce` after that commit, so a rolled-back credential change signs nobody out or disconnects an app. Each delegated revoker receives a `RevocationAccount` carrying a `CredentialRevocationReason` (password changed or reset, signed out, administrator action, or the neutral account changed) taken from the transaction's action; unknown actions map to account changed.
 
 `subscribe_terminations()` is the broadcast the host consumes: every live
 socket subscribes once (`apps/web/src/live.rs`) and, when its own session is

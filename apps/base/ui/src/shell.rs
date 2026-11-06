@@ -233,6 +233,9 @@ pub struct ShellContext<'a> {
     pub company_bar: Html,
     /// The signed-in account's uploaded picture or initials fallback.
     pub user_image: Html,
+    /// The previous sign-in summary and link to the account's active sessions.
+    /// Empty while an operator is viewing as another account.
+    pub session_security: Html,
     /// The installation-level tenant switcher, before the tenant's desk.
     pub tenant_bar: Html,
     pub platform_operator: bool,

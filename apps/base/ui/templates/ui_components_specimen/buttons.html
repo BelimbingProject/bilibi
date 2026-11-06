@@ -18,3 +18,6 @@
 <div class="flex items-center gap-2 text-sm text-ink-muted">Link {% call ui::icon_button(id="specimen-icon-button-link", icon="view", label="View company", href="/companies/1") %}{% endcall %}</div>
 </div>
 {% endcall %}
+{% call ui::card(id="specimen-row-actions", title="List row actions", inner_class="p-4") %}
+{{ row_actions|safe }}
+{% endcall %}

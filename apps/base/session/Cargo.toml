@@ -10,6 +10,8 @@ askama.workspace = true
 bilibi-authz = { path = "../authz" }
 bilibi-dashboard = { path = "../dashboard" }
 bilibi-database.workspace = true
+bilibi-datetime.workspace = true
+bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-principal-directory.workspace = true
@@ -20,6 +22,7 @@ bilibi-step-up.workspace = true
 bilibi-tenancy = { path = "../tenancy" }
 bilibi-ui.workspace = true
 inventory.workspace = true
+jiff.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.1"
 tokio.workspace = true

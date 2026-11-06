@@ -1,0 +1,11 @@
+{#- The signed-in person's active sessions in the shared settings layout. -#}
+{% import "settings.html" as settings %}
+{% import "components.html" as ui %}
+{{ flash }}
+{% call ui::page(variant=bilibi_ui::PageVariant::List) %}
+{% call settings::layout(header=header, current=current, heading="Your sessions", subheading="Review where you are signed in and end sessions you do not recognize.") %}
+{{ toolbar }}
+{{ card }}
+{% endcall %}
+{% endcall %}
+{{ dialog }}

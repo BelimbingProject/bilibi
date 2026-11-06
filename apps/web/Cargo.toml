@@ -29,6 +29,7 @@ url.workspace = true
 askama.workspace = true
 tokio-postgres.workspace = true
 libc.workspace = true
+jiff.workspace = true
 
 bilibi-base.workspace = true
 bilibi-core.workspace = true
@@ -54,4 +55,3 @@ bilibi-grid = { path = "../base/grid" }
 bilibi-agent-api = { path = "../base/agent_api" }
 bilibi-locale = { path = "../base/locale" }
 rust_decimal.workspace = true
-jiff = "0.2.38"
