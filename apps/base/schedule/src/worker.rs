@@ -275,7 +275,22 @@ impl Schedule {
             return Ok(Err("invalid_schedule_occurrence"));
         };
         let (id, occurrence_id, started): (i64, i64, bool) = (row.get(0), row.get(1), row.get(2));
-        let refusal = if started {
+        let item = self.definitions.get(metadata.key.as_str());
+        let principal = execution.scope().and_then(|scope| scope.principal());
+        // A started run may continue after a later disable, but it cannot
+        // acquire a different owner identity or unreviewed authority on retry.
+        // The ordinary default scheduler keeps its established retry policy.
+        let authority_changed = match (principal, item) {
+            (Some(principal), Some(item)) => {
+                principal != item.execution_principal()
+                    || (item.execution_principal.is_some()
+                        && self.timing(&tx, &metadata.key).await?.version != metadata.fingerprint)
+            }
+            _ => false,
+        };
+        let refusal = if authority_changed {
+            Some("schedule_changed")
+        } else if started {
             None
         } else {
             self.start_refusal(&tx, metadata).await?

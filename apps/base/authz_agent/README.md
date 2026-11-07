@@ -18,7 +18,7 @@ This module gives pages and agents the same reviewed doors for authorization cha
 
 ## Automation access
 
-Administration → Authorization → **Automation access** (`/authz/automation`) lists every shared schedule and event subscription that wants to act for the current organisation. Scheduled work shares one consent record. Event subscriptions share another.
+Administration → Authorization → **Automation access** (`/authz/automation`) lists every shared schedule on the default `scheduler` identity and every event subscription that wants to act for the current organisation. Those schedules share one consent record; a schedule with its own execution principal is not listed there and is consented through [Installed system principals](#installed-system-principals) ([Schedule owner business authority](../schedule/README.md#owner-business-authority)). Event subscriptions share another.
 
 Grant and Withdraw call `base.authz_agent.automation_consent.set`, the same reviewed operation an agent calls. Authz checks the live administrator, verifies they hold the access they are granting, asks for 2FA under the existing policy, and records the change in Audit. Withdrawing scheduled work refuses its next authorization check. Withdrawing Events leaves deliveries waiting until access is granted again.
 

@@ -229,13 +229,18 @@ impl NotificationBoundary {
         }
         self.sink()?.eligible(tx, &wanted).await
     }
-    /// Tells the acting account about its own write.
+    /// Tells the acting account about its own write. A named principal has no
+    /// account to notify; owners can still notify explicit people with notify.
     pub async fn record(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         title: &str,
     ) -> Result<()> {
+        if scope.principal().is_some() {
+            Notice::new(title).validate()?;
+            return Ok(());
+        }
         self.notify(tx, scope, &[scope.user()], &Notice::new(title))
             .await
     }

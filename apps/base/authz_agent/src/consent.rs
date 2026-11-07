@@ -33,7 +33,10 @@ pub(crate) struct SubscriberItem {
 pub(crate) fn schedules(schedule: std::sync::Arc<Schedule>) -> Vec<ScheduleItem> {
     schedule
         .definitions()
-        .filter(|item| item.definition().reach == Reach::EachTenant)
+        .filter(|item| {
+            item.definition().reach == Reach::EachTenant
+                && item.execution_principal() == SCHEDULE_PRINCIPAL
+        })
         .map(|item| ScheduleItem {
             key: item.key(),
             name: item.definition().name,
