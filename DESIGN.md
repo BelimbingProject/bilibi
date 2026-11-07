@@ -65,7 +65,7 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 
 | Need | Use | Source |
 | --- | --- | --- |
-| Page, card, section, stack, cluster, narrowing, removable, button, badge, icon, row Actions… menu | `templates/components.html` and `src/components.rs` | `apps/base/ui` |
+| Page, card, section, stack, cluster, narrowing, removable, button, badge, icon | `templates/components.html` and `src/components.rs` | `apps/base/ui` |
 | Company mark or account picture with a fixed-size fallback | `IdentityImage` and `identity_image` | `apps/base/ui` |
 | Form control | `templates/forms.html` and `src/forms.rs` | `apps/base/ui` |
 | Form layout (`form`, `section`, `fields`, `field_row`, `control_group`) | `templates/forms.html` | `apps/base/ui` |

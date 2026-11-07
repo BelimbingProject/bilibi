@@ -34,8 +34,7 @@ use bilibi_ui::{
     params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
     ColumnsOutcome, ConfirmDialog, FilterToolbar, FlashGroup, FlashMap, FlexRow, FlexTable, Header,
     Html, IconButton, IconKind, Instant, ListColumns, ListSpec, ListState, PageCounts, Pagination,
-    RowAction, RowActions, SettingsTab, SortDir, StatItem, StatStrip, StatusKind, TableEmpty,
-    ToolbarControl, NO_FLASH,
+    SettingsTab, SortDir, StatItem, StatStrip, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
 };
 use jiff::Timestamp;
 use serde_json::Value;
@@ -859,11 +858,17 @@ impl Own {
                 )?),
             );
             if !is_current {
-                row.actions = render(RowActions::new(
-                    format!("own-session-actions-{key}"),
-                    &device,
-                    vec![RowAction::new("Sign out", "request_sign_out", "key", &key).danger()],
-                ))?;
+                // Signing a session out acts on the row itself, so it is the
+                // row's own icon (DESIGN.md, Lists, Row actions).
+                row.actions = render(IconButton {
+                    id: &format!("own-session-{key}-sign-out"),
+                    kind: IconKind::Danger,
+                    title: "Sign out",
+                    event: "request_sign_out",
+                    name: "key",
+                    value: &key,
+                    ..IconButton::new("arrow-right-on-rectangle", &format!("Sign out {device}"))
+                })?;
             }
             row.dom_id = Some(format!("own-session-{key}"));
             rows.push(row);
