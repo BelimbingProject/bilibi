@@ -14,7 +14,7 @@ Consent owns decisions, withdrawals, evidence, purpose and channel scope, compan
 
 Every decision, suppression and check names the company sending the message. A grant for one company never authorises another company in the same tenant.
 
-Staff pages use the selected company. Facade callers pass `company_id`, and the facade proves the caller can work in that company before reading or writing.
+Staff pages use the selected company. Facade callers pass `company_id`, and the facade proves the caller can work in that company before reading or writing. An archived company's decisions and suppressions still read; recording, suppressing, lifting and checks (which log an answer) are refused with `WriteError::CompanyArchived`.
 
 ## Example
 

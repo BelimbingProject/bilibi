@@ -88,11 +88,17 @@ impl UserService {
             .begin(&mut client, scope.mutation_context("user.company.switch"))
             .await?;
         if let Some(id) = company {
-            match bilibi_company::require_writable(tx.sql(), &scope, id, true).await {
-                Ok(_) => {}
-                Err(bilibi_company::WriteError::Access(error)) => return Err(error.into()),
-                Err(_) => return Err(ChoiceRefusal::Unavailable),
-            }
+            // An archived desk may be chosen: its records stay readable and
+            // their owners refuse every write. The lock orders the choice
+            // against a concurrent desk removal.
+            tx.sql()
+                .query_opt(
+                    "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
+                    &[&scope.tenant(), &id],
+                )
+                .await
+                .map_err(Error::from)?
+                .ok_or(ChoiceRefusal::Unavailable)?;
             let company = OrganisationId::new(id).map_err(|_| Error::Invalid)?;
             if !bilibi_tenancy::reaches_work_company(tx.sql(), &scope, company).await? {
                 return Err(ChoiceRefusal::Unavailable);

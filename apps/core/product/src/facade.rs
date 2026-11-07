@@ -15,6 +15,24 @@ pub type Checked<T> = std::result::Result<T, FieldErrors>;
 pub(crate) fn invalid(field: &str, message: &str) -> FieldErrors {
     [(field.into(), vec![message.into()])].into()
 }
+/// An archived selling company keeps its price history readable and takes
+/// no new price (`bilibi_company::require_writable`).
+async fn archived(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    company: i64,
+    lock: bool,
+) -> Result<Option<FieldErrors>> {
+    match bilibi_company::require_writable(client, scope, company, lock).await {
+        Ok(_) => Ok(None),
+        Err(bilibi_company::WriteError::Archived) => Ok(Some(invalid(
+            "selling_company",
+            "This company is archived, so its prices cannot change.",
+        ))),
+        Err(bilibi_company::WriteError::Access(error)) => Err(error),
+        Err(_) => Err(Error::NotFound),
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductInput {
@@ -352,6 +370,9 @@ impl Products {
     ) -> Result<Checked<PriceInput>> {
         bilibi_company::authorize_work_target(client, scope, input.selling_company, PRICES_MANAGE)
             .await?;
+        if let Some(refusal) = archived(client, scope, input.selling_company, false).await? {
+            return Ok(Err(refusal));
+        }
         let product = self.load(client, scope, input.product, false).await?;
         if product.status != "active" {
             return Ok(Err(invalid("product", "This product is retired.")));
@@ -392,6 +413,10 @@ impl Products {
     ) -> Result<Checked<Price>> {
         // Serialize against retirement and other price inserts for this product.
         self.load(tx.sql(), scope, input.product, true).await?;
+        // Hold the selling company against a concurrent archive.
+        if let Some(refusal) = archived(tx.sql(), scope, input.selling_company, true).await? {
+            return Ok(Err(refusal));
+        }
         let input = match self.preview_price(tx.sql(), scope, input).await? {
             Ok(v) => v,
             Err(e) => return Ok(Err(e)),

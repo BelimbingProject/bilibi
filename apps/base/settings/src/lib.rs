@@ -104,11 +104,16 @@ impl Settings {
         self.changes.subscribe()
     }
 
+    /// The inheritance chain for `target`. A company in it must be a live
+    /// company of the actor's tenant; a `write` also needs it unarchived (the
+    /// organisation proof), while a read resolves an archived company's
+    /// values, because its records and reports stay readable.
     async fn chain(
         &self,
         client: &dyn ReadClient,
         actor: &Scope,
         target: Target,
+        write: bool,
     ) -> Result<Vec<StorageScope>> {
         let global = StorageScope {
             kind: ScopeKind::Global,
@@ -124,7 +129,7 @@ impl Settings {
             Target::Global => Ok(vec![global]),
             Target::Tenant => Ok(vec![tenant, global]),
             Target::Company(id) => {
-                self.parties.organisation(client, actor, id).await?;
+                self.company(client, actor, id, write).await?;
                 Ok(vec![
                     StorageScope {
                         kind: ScopeKind::Company,
@@ -146,7 +151,7 @@ impl Settings {
                     id: actor.user(),
                 }];
                 if let Some(id) = company {
-                    self.parties.organisation(client, actor, id).await?;
+                    self.company(client, actor, id, write).await?;
                     chain.push(StorageScope {
                         kind: ScopeKind::Company,
                         tenant: actor.tenant(),
@@ -157,6 +162,23 @@ impl Settings {
                 Ok(chain)
             }
         }
+    }
+    async fn company(
+        &self,
+        client: &dyn ReadClient,
+        actor: &Scope,
+        id: OrganisationId,
+        write: bool,
+    ) -> Result<()> {
+        if write {
+            self.parties.organisation(client, actor, id).await?;
+        } else {
+            self.parties
+                .organisation_name(client, actor, id)
+                .await?
+                .ok_or(Error::NotFound)?;
+        }
+        Ok(())
     }
     fn plan(&self, key: &str) -> Result<(Option<&Definition>, bool)> {
         match self.definitions.lookup(key)?.setting {
@@ -250,7 +272,7 @@ impl Settings {
         for key in keys {
             self.plan(key)?;
         }
-        let chain = self.chain(client, actor, target).await?;
+        let chain = self.chain(client, actor, target, false).await?;
         let identities = Value::Array(chain.iter().map(|scope| json!({"tenant_id":scope.tenant,"scope_type":scope.kind.as_str(),"scope_id":scope.id})).collect());
         let rows = client.query("SELECT s.key,s.tenant_id,s.scope_type,s.scope_id,s.value,s.is_encrypted FROM base_settings s JOIN jsonb_to_recordset($2::jsonb) AS requested(tenant_id bigint,scope_type text,scope_id bigint) USING(tenant_id,scope_type,scope_id) WHERE s.key=ANY($1)", &[&keys,&identities]).await?;
         let mut result = std::collections::BTreeMap::new();
@@ -431,7 +453,7 @@ impl Settings {
         if matches!(target, Target::Global) {
             bilibi_tenancy::prove_operator(tx.sql(), actor).await?;
         }
-        let scope = self.chain(tx.sql(), actor, target).await?[0];
+        let scope = self.chain(tx.sql(), actor, target, true).await?[0];
         let (definition, _) = self.plan(key)?;
         if definition.is_some_and(|d| !d.scopes.contains(&scope.kind)) {
             return Err(Error::Invalid);

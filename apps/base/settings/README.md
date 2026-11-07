@@ -51,7 +51,7 @@ through Tenancy's `Authorization::authorize_scope` on the same connection; a
 definition without an editor capability, or a missing grant, refuses the read.
 `Settings::new` leaves that decision unbound, so a principal is refused until `with_authorization` binds Tenancy's decision (the module factory does). Each company read,
 write, and delete calls `base/tenancy.parties` on the same DB connection. A missing
-provider refuses. Core owns this binding; Settings never queries Company tables.
+provider refuses. A read resolves an archived company's values (its reports stay readable); a write or delete needs the organisation proof, which refuses an archived company. Core owns this binding; Settings never queries Company tables.
 Global writes/delete additionally reprove the explicit platform operator.
 The calling owner/HTTP adapter must freshly guard its session and authorize
 route/field capabilities on **every** save, delete and reveal. The storage API

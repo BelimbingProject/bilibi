@@ -170,7 +170,8 @@ impl ActorVerifier for AccountVerifier {
         })
     }
     /// The chosen workplace is proved through Core Company's work-access seam:
-    /// live, unarchived and assigned as an explicit desk on this connection.
+    /// live and assigned as an explicit desk on this connection. An archived
+    /// desk qualifies (read-only); the default desk prefers an unarchived one.
     fn reaches_company<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -200,7 +201,7 @@ impl ActorVerifier for AccountVerifier {
         scope: &'a Scope,
     ) -> ProofFuture<'a, Option<OrganisationId>> {
         Box::pin(async move {
-            let row=client.query_opt("SELECT d.company_id FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id AND u.id=$2 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL AND c.deleted_at IS NULL AND c.status <> 'archived' ORDER BY (d.company_id=u.last_desk_id) DESC NULLS LAST,d.id LIMIT 1", &[&scope.tenant(),&scope.user()]).await?;
+            let row=client.query_opt("SELECT d.company_id FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id AND u.id=$2 JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY c.status='archived',(d.company_id=u.last_desk_id) DESC NULLS LAST,d.id LIMIT 1", &[&scope.tenant(),&scope.user()]).await?;
             row.map(|row| OrganisationId::new(row.get(0)).map_err(|_| Error::Internal))
                 .transpose()
         })

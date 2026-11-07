@@ -58,15 +58,29 @@ company reach. The generic field editor never accepts `status`.
 
 | Piece | Owner | Contract |
 | --- | --- | --- |
-| `bilibi_company::reachable(client, scope, id)` | Company | `true` for a live, unarchived company of the tenant the account reaches: one assigned through an explicit desk. Never an error for a missing, archived or other-tenant id |
-| `Directory::reachable` (`OrganisationDirectory`) | Company | The same desk access, listed: what the top bar's switcher offers. No capability is asked, because the list is the reach alone |
+| `bilibi_company::reachable(client, scope, id)` | Company | `true` for a live company of the tenant the account reaches: one assigned through an explicit desk. An archived company qualifies (read-only). Never an error for a missing or other-tenant id |
+| `Directory::reachable` (`OrganisationDirectory`) | Company | The same desk access, listed: what the top bar's switcher offers, an archived company flagged `archived`. No capability is asked, because the list is the reach alone |
 | `sessions.company_id` and `Sessions::choose_company` | Base Session | The stored choice; `NULL` lets Tenancy select the remembered or first valid desk. See [Base Session](../../base/session/README.md#current-company) |
 | `ActorVerifier::reaches_company` | Core User, through `reachable` | Proves the stored choice on every authentication; a choice the account no longer reaches is dropped from the scope and the session edge forgets it |
 | `UserService::choose_company` | Core User | The switch: proves the reach, writes the row and records `user.company.switched` in one transaction (a refused one records `user.company.switch_refused`) ([Core User README](../user/README.md#current-company)) |
 | `POST /session/company` | Web | The top bar's form ([Web README](../../web/README.md)) |
 | `core.company.reachable` | Company | The same list for an agent, under `admin.company.view`; reviewed writes capture one proved workplace for the whole plan |
 
-The dashboard's Companies strip and Current company card follow `current_company()`. The switcher lists every live desk by name, with a type-to-find box past eight. Viewing as another account starts from that account's remembered or first valid desk, and leaving restores the operator's choice. Archived companies are never offered, and switching desks never crosses a tenant.
+The dashboard's Companies strip and Current company card follow `current_company()`. The switcher lists every live desk by name, with a type-to-find box past eight. Viewing as another account starts from that account's remembered or first valid desk, and leaving restores the operator's choice. Switching desks never crosses a tenant.
+
+### Archived companies
+
+**An archived company is read-only, not locked out.** Its records, reports and books stay available for audit and statutory retention ([ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md#archived-workplaces-stay-readable)).
+
+| Who | Reads | Writes |
+| --- | --- | --- |
+| A person with a desk there and the owner's capability | Allowed: `authorize_work_target` passes | Refused by `require_writable`: `WriteError::Archived`, a Domain's `CompanyArchived` |
+| Anyone without a desk there | Refused, as before archiving | Refused |
+
+- Archiving keeps desks, provider-sourced roles and sessions; it changes the status only.
+- No new desk is given in an archived company, on any path. A desk there can still be removed.
+- The switcher shows an archived desk with an Archived badge; the default desk prefers an unarchived one.
+- Every write into a company holds `require_writable` in its own transaction. `authorize_work_target` alone never refuses an archived company.
 
 ## Public company summaries
 
@@ -312,7 +326,7 @@ administrator. No account is shown a guessed company. The widget and section nee
 capability to read; the links show only to a reader holding
 `admin.company.list` / `admin.company.view`.
 
-Workplace liveness (`reachable`) locks the live company `FOR KEY SHARE` before proving the desk assignment on the handed connection. This preserves the company-before-desk order used by company archival.
+Workplace liveness (`reachable`) locks the live company `FOR KEY SHARE` before proving the desk assignment on the handed connection. This preserves the company-before-desk order that desk writes use.
 
 ## Runtime inspection
 
@@ -464,7 +478,7 @@ Each command requires `admin.company.update` and, for a company other than
 An explicit operator identity or admin grant does not bypass tenant scope,
 standing checks, field restrictions, or the final archive state. Archive
 and suspend refuse the tenant's primary company and the current company.
-Archive also removes that company's desks and provider-sourced roles and ends sessions working there in the same transaction; other desks and sessions remain active.
+Archive changes only the status: desks, provider-sourced roles and sessions working there stay, and the company becomes read-only ([Archived companies](#archived-companies)).
 The primary assignment and lifecycle commands both lock the tenant before
 the company, so the standing check is atomic with primary transfer. Tenant
 locks use `FOR NO KEY UPDATE`, compatible with the `KEY SHARE` needed by a

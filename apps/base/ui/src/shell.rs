@@ -98,12 +98,14 @@ struct NavBranch<'a> {
 }
 
 /// One company the top bar's switcher offers: an explicit live desk the host
-/// proved for the person. `current` marks the workplace of this request.
+/// proved for the person. `current` marks the workplace of this request;
+/// `archived` marks a desk whose company is read-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompanyChoice {
     pub id: i64,
     pub name: String,
     pub current: bool,
+    pub archived: bool,
     pub image_url: Option<String>,
 }
 
@@ -151,10 +153,14 @@ const COMPANY_FILTER_FROM: usize = 8;
 /// The top bar's company switcher (`templates/company_bar.html`): the
 /// company the session works in (`current`, `None` for no desk) and the
 /// person's desks. With one desk, none, or a
-/// tenant-wide page (`tenant_wide`), it is a plain label. The host supplies
-/// `csrf` for the form and `path` as the address to return to after a switch.
+/// tenant-wide page (`tenant_wide`), it is a plain label. An archived company
+/// (`current_archived`, `CompanyChoice::archived`) carries an "Archived"
+/// badge: its records read, and nothing in it can be changed. The host
+/// supplies `csrf` for the form and `path` as the address to return to after
+/// a switch.
 pub fn company_bar(
     current: Option<&str>,
+    current_archived: bool,
     current_image_url: Option<&str>,
     companies: &[CompanyChoice],
     csrf: &str,
@@ -182,12 +188,14 @@ pub fn company_bar(
                 id: company.id,
                 name: &company.name,
                 current: company.current,
+                archived: company.archived,
                 image: Html::render(&crate::IdentityImage::company(company.image_url.as_deref()))?,
             })
         })
         .collect::<askama::Result<Vec<_>>>()?;
     Html::render(&CompanyBar {
         current,
+        current_archived,
         current_image,
         companies: &companies,
         csrf,
@@ -200,6 +208,7 @@ pub fn company_bar(
 #[template(path = "company_bar.html")]
 struct CompanyBar<'a> {
     current: Option<&'a str>,
+    current_archived: bool,
     current_image: Html,
     companies: &'a [RenderedCompanyChoice<'a>],
     csrf: &'a str,
@@ -211,6 +220,7 @@ struct RenderedCompanyChoice<'a> {
     id: i64,
     name: &'a str,
     current: bool,
+    archived: bool,
     image: Html,
 }
 

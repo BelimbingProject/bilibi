@@ -103,6 +103,7 @@ impl Pages {
             company: None,
             can_manage: false,
             can_price: false,
+            company_archived: false,
             currency_choices: Vec::new(),
             panels: Vec::new(),
             draft: None,
@@ -196,6 +197,7 @@ struct State {
     company: Option<i64>,
     can_manage: bool,
     can_price: bool,
+    company_archived: bool,
     currency_choices: Vec<Choice>,
     panels: Vec<PanelSpec>,
     draft: Option<Draft>,
@@ -297,10 +299,21 @@ impl State {
                     }
                     Err(e) => return Err(e),
                 }
-                self.can_price = permitted(
-                    bilibi_company::authorize_work_target(client, scope, company, PRICES_MANAGE)
+                // An archived company's prices read and never change.
+                self.company_archived = matches!(
+                    bilibi_company::require_writable(client, scope, company, false).await,
+                    Err(bilibi_company::WriteError::Archived)
+                );
+                self.can_price = !self.company_archived
+                    && permitted(
+                        bilibi_company::authorize_work_target(
+                            client,
+                            scope,
+                            company,
+                            PRICES_MANAGE,
+                        )
                         .await,
-                )?;
+                    )?;
             }
             self.currency_choices = self
                 .pages
@@ -846,6 +859,11 @@ impl State {
                     sections.push(render(EmptyState::missing(
                         "Retired product",
                         "Retired products keep earlier prices and cannot receive new ones.",
+                    ))?);
+                } else if self.company_archived {
+                    sections.push(render(EmptyState::missing(
+                        "Archived company",
+                        "This company is archived, so its prices cannot change. Earlier prices stay readable.",
                     ))?);
                 } else if !self.can_price {
                     sections.push(render(EmptyState::forbidden("add selling prices"))?);

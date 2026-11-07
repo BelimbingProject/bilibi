@@ -247,14 +247,16 @@ async fn named_in_scope(
     companies.sort_by_cached_key(|company| (company.name.to_lowercase(), company.id.get()));
     Ok(companies)
 }
-/// Whether `scope` may work in company `id` right now: a live, unarchived
-/// company of its own tenant with an explicit desk. This is the fact
-/// Tenancy asks for a session's chosen company (`Scope::current_company`) and the
-/// test the switch applies before storing a choice. It grants nothing: an
-/// operational owner still uses `authorize_work_target` with its own
-/// capability, while company-record administration uses `authorize_target`.
-/// A missing, cross-tenant or archived company is `false`,
-/// never an error, so a stale choice selects another valid desk.
+/// Whether `scope` may work in company `id` right now: a live company of its
+/// own tenant with an explicit desk. An archived company stays reachable for
+/// the people whose desks it kept, so its records stay readable for audit and
+/// retention; every write into it is refused by [`require_writable`]. This is
+/// the fact Tenancy asks for a session's chosen company
+/// (`Scope::current_company`) and the test the switch applies before storing
+/// a choice. It grants nothing: an operational owner still uses
+/// `authorize_work_target` with its own capability, while company-record
+/// administration uses `authorize_target`. A missing or cross-tenant company
+/// is `false`, never an error, so a stale choice selects another valid desk.
 pub async fn reachable(
     client: &dyn ProofClient,
     scope: &Scope,
@@ -262,11 +264,11 @@ pub async fn reachable(
 ) -> Result<bool> {
     let live = client
         .query_opt(
-            "SELECT status FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE",
+            "SELECT id FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE",
             &[&scope.tenant(), &id.get()],
         )
         .await?
-        .is_some_and(|row| row.get::<_, String>(0) != ARCHIVED);
+        .is_some();
     if !live {
         return Ok(false);
     }
@@ -391,11 +393,8 @@ impl OrganisationDirectory for Directory {
                 .into_iter()
                 .map(OrganisationId::get)
                 .collect();
-            Ok(named_in_scope(client, scope, Some(ids))
-                .await?
-                .into_iter()
-                .filter(|company| !company.archived)
-                .collect())
+            // Archived desks stay listed, flagged, so their records can be read.
+            named_in_scope(client, scope, Some(ids)).await
         })
     }
 }

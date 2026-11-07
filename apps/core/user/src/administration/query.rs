@@ -37,7 +37,7 @@ const STATEMENT: &str = "WITH filtered_users AS (
   SELECT u.id,u.name,COALESCE(i.email,v.email) AS email,u.created_at,
     CASE WHEN u.status='invited' THEN 'invited' WHEN i.home_tenant_id=u.tenant_id THEN 'home' ELSE 'outside' END AS membership,
     v.id AS invitation_id,
-    (SELECT string_agg(c.name,', ' ORDER BY c.name) FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND c.deleted_at IS NULL AND c.status <> 'archived') AS desks
+    (SELECT string_agg(c.name || CASE WHEN c.status='archived' THEN ' (archived)' ELSE '' END,', ' ORDER BY c.name) FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=u.tenant_id AND d.person_id=u.person_id AND c.deleted_at IS NULL) AS desks
   FROM users u
   LEFT JOIN user_identities i ON i.id = u.identity_id AND i.status = 'active' AND i.deleted_at IS NULL
   LEFT JOIN user_invitations v ON v.tenant_id=u.tenant_id AND v.user_id=u.id AND v.accepted_at IS NULL AND v.revoked_at IS NULL

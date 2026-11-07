@@ -212,10 +212,12 @@ async fn context<'a>(
     let parties = app
         .services
         .get::<tenancy::PartyProofs>("base/tenancy.parties")?;
-    let current_company = match scope.current_company() {
-        Some(id) => company_name(&parties, &**client, scope, id).await,
-
-        None => None,
+    let (current_company, current_archived) = match scope.current_company() {
+        Some(id) => match company_name(&parties, &**client, scope, id).await {
+            Some(organisation) => (Some(organisation.name), organisation.archived),
+            None => (None, false),
+        },
+        None => (None, false),
     };
     let organisations = parties
         .reachable_organisations(&**client, scope)
@@ -234,6 +236,7 @@ async fn context<'a>(
         .map(|organisation| CompanyChoice {
             id: organisation.id.get(),
             current: Some(organisation.id) == scope.current_company(),
+            archived: organisation.archived,
             name: organisation.name,
             image_url: image_urls.get(&organisation.id.get()).cloned(),
         })
@@ -246,6 +249,7 @@ async fn context<'a>(
     );
     let company_bar = bilibi_ui::company_bar(
         current_company.as_deref(),
+        current_archived,
         scope
             .current_company()
             .and_then(|company| image_urls.get(&company.get()))
@@ -422,13 +426,12 @@ async fn company_name(
     client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
     id: bilibi_base::party_ids::OrganisationId,
-) -> Option<String> {
+) -> Option<tenancy::NamedOrganisation> {
     parties
         .organisation_name(client, scope, id)
         .await
         .ok()
         .flatten()
-        .map(|organisation| organisation.name)
 }
 
 /// The address of Company's operator setup page, which the status bar links to

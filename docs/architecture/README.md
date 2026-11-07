@@ -174,7 +174,7 @@ A **tenant** is the outer wall: one customer's data, kept apart from every other
 - **`Scope` is the sealed proof of one unit of work:** tenant, actor and optional impersonator. It has no public constructor and no `Deserialize`, so it can't be faked.
 - Modules take a `Scope`, never a raw tenant or actor ID.
 - **The party model:** a staff account links to a Person within its tenant; explicit desks grant access to the tenant’s workplaces. Every session check re-proves that identity and desk. Customer portal affiliations remain separate business identity.
-- Archiving a company removes it from staff work access; staff can still use their other desks. Customer portal company identity retains its archival checks. There is no restore.
+- Archiving a company makes it read-only: the people with desks there can still read its records, reports and books, and every write into it is refused as archived. It takes no new desk. Customer portal company identity retains its archival checks. There is no restore.
 
 ## How a write is saved and audited
 

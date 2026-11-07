@@ -43,7 +43,7 @@ impl WriteHandler for Set {
             let users = USERS.get().ok_or(Error::Internal)?;
             let client = users.db.get().await.map_err(Error::from)?;
             let (company, person, assigned) = args(input)?;
-            desks::check(&**client, scope, company, person, false).await?;
+            desks::check(&**client, scope, company, person, false, assigned).await?;
             Ok(json!({"summary":if assigned {"Give this person a desk in the company"} else {"Remove this person's desk in the company"},"person_id":person,"company_id":company,"assigned":assigned}).into())
         })
     }

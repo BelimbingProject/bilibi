@@ -131,10 +131,13 @@ pub(crate) fn refusal(
             "This changed since the page loaded. Reload before trying again.".into(),
         ),
         E::NotFound => Refusal::Message(WriteError::NotFound.to_string()),
-        E::InvalidInput(fields) => match fields.get("lifted") {
-            Some(_) => Refusal::Message(WriteError::Lifted.to_string()),
-            None => Refusal::Fields(fields),
-        },
+        E::InvalidInput(fields) if fields.contains_key("lifted") => {
+            Refusal::Message(WriteError::Lifted.to_string())
+        }
+        E::InvalidInput(fields) if fields.contains_key("company_id") => {
+            Refusal::Message(WriteError::CompanyArchived.to_string())
+        }
+        E::InvalidInput(fields) => Refusal::Fields(fields),
         _ => Refusal::Message(failed.into()),
     })
 }

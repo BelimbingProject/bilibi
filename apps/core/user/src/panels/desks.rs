@@ -121,10 +121,17 @@ impl Desks {
         } else {
             !manageable_company_ids.is_empty()
         };
+        // An archived company keeps its desks (its people still read its
+        // records) and takes no new one; a desk there can still be removed.
+        let can_add = can_manage
+            && (!self.company
+                || bilibi_company::require_writable(&**client, scope, self.id, false)
+                    .await
+                    .is_ok());
         let sql = if self.company {
-            "SELECT p.id,p.name,count(*) OVER () AS total FROM user_desks d JOIN persons p ON p.tenant_id=d.tenant_id AND p.id=d.person_id WHERE d.tenant_id=$1 AND d.company_id=$2 AND p.retired_at IS NULL AND EXISTS(SELECT 1 FROM users u WHERE u.tenant_id=p.tenant_id AND u.person_id=p.id AND u.kind='staff' AND u.deleted_at IS NULL) ORDER BY lower(p.name),p.id LIMIT $3 OFFSET $4"
+            "SELECT p.id,p.name,count(*) OVER () AS total,false AS archived FROM user_desks d JOIN persons p ON p.tenant_id=d.tenant_id AND p.id=d.person_id WHERE d.tenant_id=$1 AND d.company_id=$2 AND p.retired_at IS NULL AND EXISTS(SELECT 1 FROM users u WHERE u.tenant_id=p.tenant_id AND u.person_id=p.id AND u.kind='staff' AND u.deleted_at IS NULL) ORDER BY lower(p.name),p.id LIMIT $3 OFFSET $4"
         } else {
-            "SELECT c.id,c.name,count(*) OVER () AS total FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=$1 AND d.person_id=$2 AND c.deleted_at IS NULL AND c.status <> 'archived' ORDER BY lower(c.name),c.id LIMIT $3 OFFSET $4"
+            "SELECT c.id,c.name,count(*) OVER () AS total,c.status='archived' AS archived FROM user_desks d JOIN companies c ON c.tenant_id=d.tenant_id AND c.id=d.company_id WHERE d.tenant_id=$1 AND d.person_id=$2 AND c.deleted_at IS NULL ORDER BY lower(c.name),c.id LIMIT $3 OFFSET $4"
         };
         let limit = self.list.page_size as i64;
         let offset = self.list.offset() as i64;
@@ -149,11 +156,31 @@ impl Desks {
         for row in &entries {
             let id: i64 = row.get(0);
             let name: String = row.get(1);
-
+            let archived: bool = row.get("archived");
             let mut item = FlexRow::new(id.to_string())
                 .slot("name", Html::text(&name))
-                .slot("kind", Html::text("Assigned desk"));
-            if can_manage && (self.company || manageable_company_ids.contains(&id)) {
+                .slot(
+                    "kind",
+                    Html::text(if archived {
+                        "Read-only: the company is archived"
+                    } else {
+                        "Assigned desk"
+                    }),
+                );
+            // An archived company is never selectable, so its desk is
+            // removable wherever the person may administer that company.
+            let removable = self.company
+                || manageable_company_ids.contains(&id)
+                || (archived
+                    && bilibi_company::authorize_target(
+                        &**client,
+                        scope,
+                        id,
+                        bilibi_company::UPDATE,
+                    )
+                    .await
+                    .is_ok());
+            if can_manage && removable {
                 item.actions = render(&IconButton {
                     event: "desk_remove",
                     name: "id",
@@ -183,7 +210,7 @@ impl Desks {
         pagination.page_event = "desk_page";
         pagination.filters_event = "desk_filters";
         pagination.target = &self.anchor;
-        let (search, form) = if can_manage {
+        let (search, form) = if can_add {
             let pattern = format!(
                 "%{}%",
                 self.search
