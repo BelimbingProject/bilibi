@@ -68,7 +68,7 @@ their name, one outside it shows `User <id>`, so no name crosses a tenant
 boundary. The user column sorts by `user_id`. Search matches the IP address or
 user agent recorded once at sign-in by `describe` (the host passes the proxy's
 `X-Forwarded-For`/`X-Real-IP` and `User-Agent`; a direct connection records no
-address). `sessions.signed_in_at` records admission time and has the same retention as the session row. `describe` also appends the sign-in (time, address, user agent) to `session_sign_ins`, keyed by tenant and user, which `previous_sign_in` reads for the latest sign-in before the current session; it survives sign-out, expiry and "sign out everywhere else", and the expiry sweep deletes rows older than 90 days. The UI says "No earlier sign-in on record" when none is found; the place of a sign-in is not resolved. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
+address). `sessions.signed_in_at` records admission time and has the same retention as the session row. `describe` also appends the sign-in (time, address, user agent and its device label) to `session_sign_ins`, keyed by tenant and user, which `previous_sign_in` reads for the latest sign-in before the current session; it survives sign-out, expiry and "sign out everywhere else", and the expiry sweep deletes rows older than 90 days. The UI says "No earlier sign-in on record" when none is found; the place of a sign-in is not resolved. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
 
 The dashboard entry `base-dashboard-session-stats` (embed `session.dashboard-stats`,
 slot `dashboard.sessions`) shows the open count, reading only while
@@ -79,6 +79,24 @@ slot `dashboard.sessions`) shows the open count, reading only while
 `/settings/sessions` lists only the signed-in person's active staff sessions. Each row shows the device label derived from the user agent, IP address, sign-in time, last activity and whether it is this device. There is no platform geo-IP lookup, so the page and account popup show the IP address and do not guess a city. The account popup shows the previous sign-in from `session_sign_ins` (time, device, IP address), or "No earlier sign-in on record".
 
 An impersonating operator, agent bearer or system principal cannot open the page or read the previous-sign-in summary. A row command sends only `OwnSummary::key`; the mounted page keeps the bearer, and the mutation locks and deletes only a row with the sealed scope's tenant and user. The current session has no sign-out command. **Sign out everywhere else** excludes it.
+
+## New-device sign-in email
+
+**A staff sign-in from a device the account has not used in the last 90 days emails the account holder.** The history, judgement and daily claim are here (`src/sign_ins.rs`); Core User sends the email (`apps/core/user/src/sign_in_alert.rs`).
+
+| Rule | Detail |
+| --- | --- |
+| Device | `client_name(user_agent)`: browser family and operating system, for example "Chrome on Windows". Not the version, not a fingerprint |
+| New | `describe` returns `Some(NewDevice)` when the account's retained history already holds an earlier sign-in and none of them has the same device label |
+| Not new | The first sign-in on record (nothing to compare), an impersonated session, and a portal customer's sign-in (the portal has no Your sessions page) |
+| Limit | `claim_new_device_alert(tx, scope, device)` claims one email per account, device and UTC day in `session_sign_in_alerts` and audits it (`session_sign_in_alert`, action `user.new_device_sign_in_email`). A repeat sign-in is not new anyway, so the claim only matters for sign-ins that race |
+| Timing | The web host calls `UserService::alert_new_device` after `describe`; it runs in the background, so a failure is logged and never delays or fails the sign-in |
+| Content | Time, device and IP address, a link to `/settings/sessions` and "If this wasn't you, change your password". No secret, and no link that signs anything out by itself |
+
+- Someone using the same browser and system as the account holder is not detected; the label is coarse on purpose, so a browser update does not raise an email.
+- A device unused for 90 days counts as new again, because the history is pruned. After every row is pruned, the next sign-in counts as the first and sends nothing.
+- There is no per-person setting to turn the email off yet.
+- The expiry sweep deletes claims older than yesterday.
 
 ## Ending a session
 
