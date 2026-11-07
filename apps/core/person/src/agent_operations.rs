@@ -8,24 +8,24 @@ use bilibi_agent_api::{
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
     ReadHandler, WriteHandler, DEFINITIONS,
 };
-use bilibi_database::{Db, Error, MutationTransaction};
+use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
-static DB: OnceLock<Db> = OnceLock::new();
-pub fn bind(db: Db) -> bilibi_module_registry::Result<()> {
-    DB.set(db).map_err(|_| {
+static PERSONS: OnceLock<Arc<crate::PersonService>> = OnceLock::new();
+pub fn bind(persons: Arc<crate::PersonService>) -> bilibi_module_registry::Result<()> {
+    PERSONS.set(persons).map_err(|_| {
         bilibi_module_registry::RegistryError::Service("duplicate person agent binding".into())
     })
 }
-fn db() -> bilibi_agent_api::Result<&'static Db> {
-    DB.get().ok_or(Error::Internal.into())
+fn persons() -> bilibi_agent_api::Result<&'static crate::PersonService> {
+    PERSONS.get().map(Arc::as_ref).ok_or(Error::Internal.into())
 }
 fn parse<T: for<'a> Deserialize<'a>>(value: &Value) -> bilibi_agent_api::Result<T> {
     serde_json::from_value(value.clone()).map_err(|_| Error::Invalid.into())
@@ -136,14 +136,14 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let client = db()?.get().await.map_err(Error::from)?;
             match self {
                 Self::List => {
+                    let client = persons()?.db.get().await.map_err(Error::from)?;
                     let page = identity::search(&**client, scope, &parse::<Search>(input)?).await?;
                     Ok(Output::Page(Page {
                         entries: records(&**client, scope, page.entries).await?,
@@ -153,14 +153,15 @@ impl ReadHandler for Read {
                     }))
                 }
                 Self::Get => {
+                    let client = persons()?.db.get().await.map_err(Error::from)?;
                     let person = identity::read(&**client, scope, id(input)?).await?;
                     Ok(Output::Data(record(&**client, scope, person).await?))
                 }
                 Self::Duplicates => {
-                    let people =
-                        identity::duplicates(&**client, scope, &parse::<DuplicateQuery>(input)?)
-                            .await?;
-                    Ok(Output::Data(records(&**client, scope, people).await?))
+                    let people = persons()?
+                        .duplicates_on(client, scope, &parse::<DuplicateQuery>(input)?)
+                        .await?;
+                    Ok(Output::Data(records(client, scope, people).await?))
                 }
             }
         })
@@ -231,7 +232,7 @@ impl WriteHandler for Write {
                     match client.transaction() {
                         Some(tx) => update_preview(tx, scope, id(input)?, &update).await?,
                         None => {
-                            let pooled = db()?.get().await.map_err(Error::from)?;
+                            let pooled = persons()?.db.get().await.map_err(Error::from)?;
                             update_preview(&**pooled, scope, id(input)?, &update).await?
                         }
                     }
@@ -242,7 +243,7 @@ impl WriteHandler for Write {
                             identity::preview_retire(tx, scope, id(input)?, version(input)?).await
                         }
                         None => {
-                            let pooled = db()?.get().await.map_err(Error::from)?;
+                            let pooled = persons()?.db.get().await.map_err(Error::from)?;
                             identity::preview_retire(&**pooled, scope, id(input)?, version(input)?)
                                 .await
                         }

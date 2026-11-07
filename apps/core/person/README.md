@@ -52,6 +52,8 @@ plans and their outer transaction, including replay protection. Agent input
 schemas use the currently supported schema dialect: omit optional contacts on
 create and use empty strings to clear visible contacts on update.
 
+`PersonService::duplicates_on(client, scope, query)` runs the same bounded duplicate lookup as `duplicates` on a supplied PostgreSQL client or transaction. It re-proves the sealed Scope on that client, retaining actor, agent and impersonation evidence, then applies the existing authorization, restricted-criterion refusal and result masking. Earlier uncommitted Person writes in that transaction are visible. It opens no pooled connection or inner transaction, reserves no identity and leaves commit or rollback to the caller. The existing `duplicates` convenience method still acquires its own connection. The registered duplicate read uses its supplied `OperationClient` directly for reproof, lookup and custom-field projection, including the `Registry::call` transaction adapter.
+
 ## Exact contact lookup on a caller client
 
 `PersonService::match_contact_in(client, scope, &ContactAddress, limit)` compares personal contacts; [Affiliation's lookup](../affiliation/README.md#exact-current-work-contact-lookup) compares current work contacts. Call both owners when both sources matter. The crate root exports `ContactAddress` and `ContactMatches<T>`. Neither API infers, merges, binds or reserves an identity.
@@ -145,6 +147,8 @@ unit tests, test runner or mocks are involved.
 ```sh
 BILIBI_PERSON_DEMO=disposable cargo run -p bilibi-person --example person-custom-fields --locked
 ```
+
+On a fresh disposable database, `BILIBI_PERSON_PROOF=disposable cargo run -p bilibi-person --example person-duplicates --locked` proves caller-transaction visibility and rollback, tenant separation, live denial/reproof, restrictions/masking and the original bounds. It exhausts a single-connection pool and calls the actual registered duplicate read handler with an `OperationClient` exposing that transaction, including its custom-field projection. It also calls the registered duplicate read through `Registry::call` on the bare transaction; that generic adapter need not expose `transaction()` for the duplicate read to retain its connection.
 
 ## Person screens and record panels (K8)
 

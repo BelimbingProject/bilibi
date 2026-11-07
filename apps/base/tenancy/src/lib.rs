@@ -775,7 +775,7 @@ impl Authentication {
     }
     async fn authenticate_session_inner(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &dyn ProofClient,
         tenant: i64,
         user: i64,
         impersonator: Option<i64>,
@@ -871,7 +871,7 @@ impl Authentication {
     /// every decision re-reads.
     pub async fn for_principal(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &dyn ProofClient,
         tenant: i64,
         principal: &str,
     ) -> Result<Scope> {
@@ -911,11 +911,7 @@ impl Authentication {
     /// Re-proves a scope an edge already sealed, keeping its impersonator,
     /// agent facet and presented step-up code: owners refresh eligibility with this rather than
     /// `authenticate`, which would drop the operator from the audit pair.
-    pub async fn reprove(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-    ) -> Result<Scope> {
+    pub async fn reprove(&self, client: &dyn ProofClient, scope: &Scope) -> Result<Scope> {
         // A principal scope is re-sealed against the live tenant; it carries
         // no agent facet or step-up code to keep.
         if let Some(principal) = scope.principal() {
