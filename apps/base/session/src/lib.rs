@@ -27,7 +27,9 @@ pub use contributions::{
     TOUCH_KEY,
 };
 use sign_ins::SIGN_IN_HISTORY_DAYS;
-pub use sign_ins::{client_name, NewDevice, PreviousSignIn};
+pub use sign_ins::{
+    client_name, NewDevice, PreviousSignIn, SignInAlertRecord, SignInExport, SignInRecord,
+};
 
 /// The operator list's page sizes.
 pub const PAGE_SIZES: [u64; 4] = [25, 50, 100, 300];
@@ -1035,7 +1037,7 @@ fn like_escape(text: &str) -> String {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/session", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/settings", "base/authz", "base/step_up", "base/queue", "base/schedule", "base/datetime", "base/locale", "base/ui", "base/menu", "base/dashboard", "base/principal_directory"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/settings", "base/authz", "base/step_up", "base/queue", "base/schedule", "base/datetime", "base/locale", "base/ui", "base/menu", "base/dashboard", "base/principal_directory", "base/personal_data"],
         migrations: &[
             ("base-session-001-client", include_str!("../migrations/001-client.sql")),
             ("base-session-002-impersonation", include_str!("../migrations/002-impersonation.sql")),

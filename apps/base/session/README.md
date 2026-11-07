@@ -120,6 +120,20 @@ minutes) deletes rows past the absolute expiry or idle beyond the lifetime
 setting. Review and enable it at `/system/schedule` before expecting scheduled
 cleanup; the enablement and delivery rules belong to Base Schedule.
 
+The same sweep deletes `session_sign_ins` rows more than 90 days after the sign-in and `session_sign_in_alerts` claims after one to two days, for every tenant in one statement each. Until an operator enables the task, neither table is pruned, so enable it in production.
+
+## Sign-in history and privacy
+
+**A person's erasure does not delete their sign-in history; the 90-day sweep does.** Each record holds the sign-in time, device label, IP address and user agent. The new-device email claims (`session_sign_in_alerts`: account, device label, day) also stay through erasure, but the sweep deletes them after one to two days, far sooner than the history.
+
+| Event | What happens to `session_sign_ins` | Why |
+| --- | --- | --- |
+| Personal-data export | `Sessions::sign_in_history` lists the person's records (time, device, address, user agent, and when the sweep deletes each) and any held new-device email claims in `core/user.accounts`, under each account | A person may see what we hold about them |
+| Personal-data erasure | Records stay. `Sessions::sign_in_retained_until` lets Core User report them on the certificate as kept (`session.sign_in_history`) until the newest one's 90-day end | They are security evidence: they show where and when an account was used, which an investigation of account takeover needs after the owner is gone |
+| 90 days after a sign-in | The expiry sweep deletes the record | The retention is short and fixed, so nothing is kept longer than the evidence is useful |
+
+Records older than 90 days are never exported or reported as kept, even in the minutes before the sweep reaches them. Audit rows for sessions keep the IP address and user agent: that is unchanged and follows Audit's own retention and legal minimum (`apps/base/audit/README.md`).
+
 ## Try it
 
 On a migrated disposable database, install the walkthrough fixture

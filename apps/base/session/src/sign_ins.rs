@@ -28,6 +28,37 @@ pub struct PreviousSignIn {
     pub user_agent: Option<String>,
 }
 
+/// One retained sign-in of an account, as the personal-data export lists it.
+/// No bearer or row id leaves this value.
+#[derive(Clone, Debug)]
+pub struct SignInRecord {
+    pub user_id: i64,
+    /// RFC 3339, UTC.
+    pub signed_in_at: String,
+    pub device: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    /// RFC 3339, UTC: when the retention sweep deletes the record.
+    pub retained_until: String,
+}
+
+/// A new-device email claim still held (the sweep removes claims after a
+/// day or two), as the personal-data export lists it.
+#[derive(Clone, Debug)]
+pub struct SignInAlertRecord {
+    pub user_id: i64,
+    pub device: String,
+    /// The UTC day, `YYYY-MM-DD`.
+    pub alerted_on: String,
+}
+
+/// An account's retained sign-in records for an export.
+#[derive(Clone, Debug, Default)]
+pub struct SignInExport {
+    pub sign_ins: Vec<SignInRecord>,
+    pub alerts: Vec<SignInAlertRecord>,
+}
+
 /// A sign-in from a device the account's retained history has not seen, as
 /// `describe` judged it. It names no account: the alert re-derives the
 /// account from the session it just admitted.
@@ -229,5 +260,75 @@ impl Sessions {
             })
         })
         .await
+    }
+
+    /// The retained sign-in history (time, device, address, user agent) and
+    /// held new-device email claims of `users`, for an approved personal-data
+    /// export. Only records inside the retention period are listed, newest
+    /// first per account, so a record the sweep has not yet reached is never
+    /// disclosed or reported as kept. `grant` must be for `scope`'s tenant; the
+    /// caller chooses `users` from the person.
+    pub async fn sign_in_history(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        grant: &bilibi_personal_data::Disclosure,
+        users: &[i64],
+    ) -> Result<SignInExport> {
+        grant.check(scope)?;
+        let sign_ins = client
+            .query(
+                "SELECT user_id,to_char(signed_in_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),device,ip_address,user_agent,\
+                 to_char((signed_in_at+make_interval(days => $3::int)) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+                 FROM session_sign_ins WHERE tenant_id=$1 AND user_id=ANY($2) AND signed_in_at>=now()-make_interval(days => $3::int) \
+                 ORDER BY user_id,signed_in_at DESC,id DESC",
+                &[&scope.tenant(), &users, &SIGN_IN_HISTORY_DAYS],
+            )
+            .await?
+            .iter()
+            .map(|row| SignInRecord {
+                user_id: row.get(0),
+                signed_in_at: row.get(1),
+                device: row.get(2),
+                ip_address: row.get(3),
+                user_agent: row.get(4),
+                retained_until: row.get(5),
+            })
+            .collect();
+        let alerts = client
+            .query(
+                "SELECT user_id,device,alerted_on::text FROM session_sign_in_alerts WHERE tenant_id=$1 AND user_id=ANY($2) ORDER BY user_id,alerted_on DESC,id DESC",
+                &[&scope.tenant(), &users],
+            )
+            .await?
+            .iter()
+            .map(|row| SignInAlertRecord {
+                user_id: row.get(0),
+                device: row.get(1),
+                alerted_on: row.get(2),
+            })
+            .collect();
+        Ok(SignInExport { sign_ins, alerts })
+    }
+
+    /// When the sweep deletes the newest retained sign-in of `user` (RFC 3339,
+    /// UTC), or `None` when none is retained. Erasure leaves the sign-in
+    /// history in place as security evidence and reports it as kept until then.
+    pub async fn sign_in_retained_until(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        grant: &bilibi_personal_data::Erasure,
+        user: i64,
+    ) -> Result<Option<String>> {
+        grant.check(scope)?;
+        Ok(client
+            .query_one(
+                "SELECT to_char((max(signed_in_at)+make_interval(days => $3::int)) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+                 FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at>=now()-make_interval(days => $3::int)",
+                &[&scope.tenant(), &user, &SIGN_IN_HISTORY_DAYS],
+            )
+            .await?
+            .get(0))
     }
 }

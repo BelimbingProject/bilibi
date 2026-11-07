@@ -14,6 +14,7 @@ bilibi-datetime.workspace = true
 bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
+bilibi-personal-data.workspace = true
 bilibi-principal-directory.workspace = true
 bilibi-queue = { path = "../queue" }
 bilibi-schedule = { path = "../schedule" }
