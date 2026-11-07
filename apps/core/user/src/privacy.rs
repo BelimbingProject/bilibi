@@ -151,17 +151,25 @@ impl Handler for Accounts {
                 .map(|row| {
                     let user = row.get::<_, i64>(0);
                     let history: Vec<Value> = sign_ins
+                        .sign_ins
                         .iter()
                         .filter(|sign_in| sign_in.user_id == user)
                         .map(|sign_in| {
                             json!({
-                                "signed_in_at": sign_in.signed_in_at, "ip_address": sign_in.ip_address,
-                                "user_agent": sign_in.user_agent, "retained_until": sign_in.retained_until,
+                                "signed_in_at": sign_in.signed_in_at, "device": sign_in.device,
+                                "ip_address": sign_in.ip_address, "user_agent": sign_in.user_agent,
+                                "retained_until": sign_in.retained_until,
                             })
                         })
                         .collect();
+                    let alerts: Vec<Value> = sign_ins
+                        .alerts
+                        .iter()
+                        .filter(|alert| alert.user_id == user)
+                        .map(|alert| json!({"device": alert.device, "alerted_on": alert.alerted_on}))
+                        .collect();
                     json!({
-                        "sign_ins": history,
+                        "sign_ins": history, "new_device_email_claims": alerts,
                         "id": row.get::<_, i64>(0), "name": row.get::<_, String>(1), "email": row.get::<_, String>(2),
                         "status": row.get::<_, String>(3), "email_verified_at": row.get::<_, Option<String>>(4),
                         "deleted_at": row.get::<_, Option<String>>(5), "notifications": row.get::<_, Value>(6),

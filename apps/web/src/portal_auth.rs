@@ -634,7 +634,10 @@ async fn admitted(
                 .await?;
         }
     }
-    app.security
+    // The portal has no Your sessions page, so a customer gets no
+    // new-device email; the sign-in is still recorded.
+    let _new_device = app
+        .security
         .sessions
         .describe(
             &**client,

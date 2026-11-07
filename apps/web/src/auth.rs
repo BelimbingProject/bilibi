@@ -613,7 +613,8 @@ async fn admitted(
         // Release the connection before `landing_route` takes its own, or
         // concurrent logins can hold the whole pool while waiting for a second.
         let client = app.db.get().await.map_err(Error::from)?;
-        app.security
+        let new_device = app
+            .security
             .sessions
             .describe(
                 &**client,
@@ -626,6 +627,11 @@ async fn admitted(
                     .and_then(|value| value.to_str().ok()),
             )
             .await?;
+        // Sent in the background once the sign-in is recorded; it never fails
+        // or delays the sign-in.
+        if let Some(device) = new_device {
+            app.user.alert_new_device(&session.token, device);
+        }
     }
     if let Ok(old) = token(headers) {
         app.user
