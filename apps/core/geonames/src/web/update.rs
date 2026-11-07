@@ -369,6 +369,12 @@ pub(crate) fn fallback_cause(cause: &FallbackCause) -> String {
 pub(crate) fn as_of(cached_at: Option<SystemTime>) -> String {
     cached_at
         .and_then(|at| jiff::Timestamp::try_from(at).ok())
-        .map(|at| format!(", so this data is from {}", at.strftime("%d %b %Y")))
+        .map(|at| {
+            let date = at.to_zoned(jiff::tz::TimeZone::UTC).date();
+            format!(
+                ", so this data is from {}",
+                DisplayContext::anonymous().render_date(date)
+            )
+        })
         .unwrap_or_default()
 }
