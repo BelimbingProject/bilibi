@@ -81,6 +81,7 @@ pub enum Outcome {
     Create,
     Update,
     Skip,
+    Action,
     Error,
 }
 impl Outcome {
@@ -89,6 +90,7 @@ impl Outcome {
             Self::Create => "create",
             Self::Update => "update",
             Self::Skip => "skip",
+            Self::Action => "action",
             Self::Error => "error",
         }
     }
@@ -97,6 +99,7 @@ impl Outcome {
             "create" => Some(Self::Create),
             "update" => Some(Self::Update),
             "skip" => Some(Self::Skip),
+            "action" => Some(Self::Action),
             "error" => Some(Self::Error),
             _ => None,
         }
@@ -108,11 +111,12 @@ pub struct Counts {
     pub create: i64,
     pub update: i64,
     pub skip: i64,
+    pub action: i64,
     pub error: i64,
 }
 impl Counts {
     pub fn done(&self) -> i64 {
-        self.create + self.update + self.skip + self.error
+        self.create + self.update + self.skip + self.action + self.error
     }
 }
 
@@ -219,6 +223,7 @@ pub struct RowResult {
     pub record_id: Option<String>,
     pub source_key: Option<String>,
     pub message: Option<String>,
+    pub links: Vec<crate::ResultLink>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -282,6 +287,7 @@ pub(crate) async fn count(
             Some(Outcome::Create) => counts.create = n,
             Some(Outcome::Update) => counts.update = n,
             Some(Outcome::Skip) => counts.skip = n,
+            Some(Outcome::Action) => counts.action = n,
             _ => counts.error = n,
         }
     }
@@ -368,7 +374,7 @@ pub(crate) async fn rows(
         .get(0);
     let rows = client
         .query(
-            "SELECT row_number,outcome,record_id,source_key,message FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND pass=$3 AND ($4::text IS NULL OR outcome=$4) ORDER BY row_number OFFSET $5 LIMIT $6",
+            "SELECT row_number,outcome,record_id,source_key,message,links FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND pass=$3 AND ($4::text IS NULL OR outcome=$4) ORDER BY row_number OFFSET $5 LIMIT $6",
             &[&tenant, &run, &pass.as_str(), &outcome, &offset, &limit],
         )
         .await?
@@ -380,6 +386,7 @@ pub(crate) async fn rows(
                 record_id: row.get(2),
                 source_key: row.get(3),
                 message: row.get(4),
+                links: serde_json::from_value(row.get(5)).map_err(|_| Error::Internal)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;

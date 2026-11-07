@@ -44,7 +44,10 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
             ),
             (
                 "outcome".into(),
-                Filter::one_of(&["all", "error", "create", "update", "skip"], "all"),
+                Filter::one_of(
+                    &["all", "error", "create", "update", "action", "skip"],
+                    "all",
+                ),
             ),
         ]),
         omit_defaults: true,
@@ -967,35 +970,60 @@ impl Detail {
             would("Not imported", "With errors"),
         );
         let count = |n: i64| Html::text(&n.to_string());
+        let actions = self.pages.bulk.reports_actions(&run.record_type) || counts.action > 0;
+        let mut items = vec![
+            Fact {
+                title: &created,
+                id: "import-count-create",
+                value: count(counts.create),
+            },
+            Fact {
+                title: &updated,
+                id: "import-count-update",
+                value: count(counts.update),
+            },
+        ];
+        if actions {
+            items.push(Fact {
+                title: if preview {
+                    "Actions to complete"
+                } else {
+                    "Actions completed"
+                },
+                id: "import-count-action",
+                value: count(counts.action),
+            });
+        }
+        items.extend([
+            Fact {
+                title: &skipped,
+                id: "import-count-skip",
+                value: count(counts.skip),
+            },
+            Fact {
+                title: &failed,
+                id: "import-count-error",
+                value: count(counts.error),
+            },
+        ]);
         html.push(&render(Card {
             id: "import-counts",
             body: render(Facts {
                 id: "import-counts-list",
-                items: vec![
-                    Fact {
-                        title: &created,
-                        id: "import-count-create",
-                        value: count(counts.create),
-                    },
-                    Fact {
-                        title: &updated,
-                        id: "import-count-update",
-                        value: count(counts.update),
-                    },
-                    Fact {
-                        title: &skipped,
-                        id: "import-count-skip",
-                        value: count(counts.skip),
-                    },
-                    Fact {
-                        title: &failed,
-                        id: "import-count-error",
-                        value: count(counts.error),
-                    },
-                ],
+                items,
             })?,
             ..Card::default()
         })?);
+        let mut outcomes = vec![
+            ("All rows", "all"),
+            ("Errors", "error"),
+            ("Create", "create"),
+            ("Update", "update"),
+        ];
+        if actions {
+            outcomes.push(("Action", "action"));
+        }
+        outcomes.push(("Skip", "skip"));
         let form = self.state.filters_form();
         html.push(&render(FilterToolbar::new(
             "import-results-filters",
@@ -1016,13 +1044,7 @@ impl Detail {
                     "outcome",
                     "Filter by result",
                     &form["outcome"],
-                    choices(&[
-                        ("All rows", "all"),
-                        ("Errors", "error"),
-                        ("Create", "create"),
-                        ("Update", "update"),
-                        ("Skip", "skip"),
-                    ]),
+                    choices(&outcomes),
                 ),
             ],
         ))?);
@@ -1034,6 +1056,8 @@ impl Detail {
             let badge = match (result.outcome, preview) {
                 (Outcome::Create, true) => Badge::status(BadgeKind::Plain, "Would create"),
                 (Outcome::Update, true) => Badge::status(BadgeKind::Plain, "Would update"),
+                (Outcome::Action, true) => Badge::status(BadgeKind::Plain, "Would complete action"),
+                (Outcome::Action, false) => Badge::status(BadgeKind::Success, "Action completed"),
                 (Outcome::Skip, true) => Badge::status(BadgeKind::Neutral, "Would skip"),
                 (Outcome::Create, false) => Badge::status(BadgeKind::Success, "Created"),
                 (Outcome::Update, false) => Badge::status(BadgeKind::Success, "Updated"),
@@ -1041,7 +1065,7 @@ impl Detail {
                 (Outcome::Error, true) => Badge::status(BadgeKind::Danger, "Error"),
                 (Outcome::Error, false) => Badge::status(BadgeKind::Danger, "Not imported"),
             };
-            let record = match (&result.record_id, path) {
+            let mut record = match (&result.record_id, path) {
                 (Some(id), Some(path)) => render(ActionLink {
                     id: &format!("import-row-record-{key}"),
                     icon: "",
@@ -1053,6 +1077,21 @@ impl Detail {
                 (Some(id), None) => Html::text(id),
                 (None, _) => Html::text("—"),
             };
+            for (index, link) in result.links.iter().enumerate() {
+                if result.record_id.is_some() || index > 0 {
+                    record.push(&Html::text(" · "));
+                } else {
+                    record = Html::EMPTY;
+                }
+                record.push(&render(ActionLink {
+                    id: &format!("import-row-link-{key}-{index}"),
+                    icon: "",
+                    title: &link.label,
+                    href: &link.path,
+                    method: "",
+                    body: Html::text(&link.label),
+                })?);
+            }
             let message = result.message.clone().unwrap_or_default();
             let message = if compact && message.chars().count() > 80 {
                 format!("{}…", message.chars().take(79).collect::<String>())
