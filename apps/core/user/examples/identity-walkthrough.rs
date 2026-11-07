@@ -320,23 +320,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     archive??;
     match concurrent_write? {
         // If archive owns the company row first, desk assignment observes an
-        // archived target and refuses it as invalid. If assignment owns the
-        // row first, it either commits before archive removes that desk or is
-        // refused by the re-proved company boundary.
+        // archived target and is refused. If assignment owns the row first,
+        // the desk already exists, so the write changes nothing and
+        // MutationBoundary refuses it as invalid.
         Ok(_) | Err(bilibi_database::Error::Forbidden) | Err(bilibi_database::Error::Invalid) => {}
         Err(error) => return Err(error.into()),
     }
     let other_desk = app.security.guard(&other_desk_login.token).await?;
-    let archived_desk_ended = app
-        .security
-        .guard(&archived_desk_login.token)
-        .await
-        .is_err();
-    let impersonated_default_ended = app
-        .security
-        .guard(&impersonation_login.token)
-        .await
-        .is_err();
+    let archived_session = app.security.guard(&archived_desk_login.token).await?;
+    let impersonated_session = app.security.guard(&impersonation_login.token).await?;
     let retained_desk: bool = sql
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM user_desks WHERE tenant_id=$1 AND person_id=$2 AND company_id=$3)",
@@ -369,21 +361,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bilibi_authz::has_effective_role(&**sql, &manager, 2, contractor.user()).await?;
     let manual_role =
         bilibi_authz::has_effective_role(&**sql, &manager, 3, contractor.user()).await?;
+    let reaches_archived =
+        bilibi_company::reachable(&**sql, &archived_session, OrganisationId::new(2)?).await?;
     if other_desk.current_company().map(|id| id.get()) != Some(1)
-        || !archived_desk_ended
-        || !impersonated_default_ended
+        || archived_session.current_company().map(|id| id.get()) != Some(2)
+        || impersonated_session.current_company().map(|id| id.get()) != Some(2)
+        || !reaches_archived
         || !retained_desk
-        || archived_desk
-        || remembered_desk.is_some()
-        || provider_role
+        || !archived_desk
+        || remembered_desk != Some(2)
+        || !provider_role
         || !manual_role
         || !impersonation_audited
     {
-        return Err("Company archive did not revoke only its workplace access".into());
+        return Err("Company archive changed workplace access".into());
     }
     println!(
-        "Archive and opposite-company write completed; cleanup removed its desks, remembered choices and provider roles, ended chosen and effective-default impersonation sessions, retained other workplace access and manual grants, and kept the impersonation entry audit: true"
+        "Archive and opposite-company write completed; the archived company kept its desks, remembered choice, provider and manual roles and the sessions working there (read-only), other workplace access stayed, and the impersonation entry audit was kept: true"
     );
+    // Access to an archived company only narrows: a desk there can be
+    // removed, and no new desk is given.
+    users.set_desk(&manager, 2, person, false).await?;
+    let reassigned = users.set_desk(&manager, 2, person, true).await;
+    if !matches!(reassigned, Err(bilibi_database::Error::Forbidden)) {
+        return Err(
+            format!("A desk in an archived company was not refused: {reassigned:?}").into(),
+        );
+    }
+    println!("Archived company desk removed; a new desk there was refused: true");
     println!(
         "Archived workplace does not freeze tenant account: {}",
         users

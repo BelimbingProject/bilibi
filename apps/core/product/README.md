@@ -38,7 +38,7 @@ Domains contribute a Module Registry `Embed` with `EmbedContext::Record { kind: 
 
 ## Pages and operations
 
-`/products` searches by code or name and filters by category or status. Creation opens one dialog. `/products/{id}` reads first and edits in place. Selling prices follow the selected work company; switching desk reloads the page. The submitted price explicitly carries the displayed selling company and is authorized again.
+`/products` searches by code or name and filters by category or status. Creation opens one dialog. `/products/{id}` reads first and edits in place. Selling prices follow the selected work company; switching desk reloads the page. An archived company's prices read and take no new price. The submitted price explicitly carries the displayed selling company and is authorized again.
 
 | Agent operation | Capability |
 | --- | --- |

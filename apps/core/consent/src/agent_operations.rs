@@ -180,6 +180,9 @@ pub(crate) fn refused(error: WriteError) -> bilibi_agent_api::Error {
         WriteError::Access(error) => error.into(),
         WriteError::NotFound => bilibi_agent_api::Error::NotFound,
         WriteError::Lifted => bilibi_agent_api::invalid("lifted", WriteError::Lifted.to_string()),
+        WriteError::CompanyArchived => {
+            bilibi_agent_api::invalid("company_id", WriteError::CompanyArchived.to_string())
+        }
         WriteError::Invalid(errors) => {
             let mut fields = Fields::new();
             for e in errors {

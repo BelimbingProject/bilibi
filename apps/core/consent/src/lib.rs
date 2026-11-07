@@ -10,10 +10,10 @@ mod web;
 
 use bilibi_database::{Db, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Layer, Module, Service};
-use bilibi_party_ids::PersonId;
+use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_picklists::PickLists;
 use bilibi_settings::{Settings, Target};
-use bilibi_tenancy::{Authentication, ReadClient, Scope};
+use bilibi_tenancy::{Authentication, OrganisationDirectory, ReadClient, Scope};
 use std::sync::Arc;
 
 pub use contributions::{CHECK, DEFAULT_NEW_ADDRESS, MANAGE, PURPOSES, RECORD, VIEW};
@@ -136,10 +136,38 @@ pub enum WriteError {
     NotFound,
     #[error("This suppression was already lifted.")]
     Lifted,
+    /// The company is archived: its consent history reads, and nothing is
+    /// recorded, suppressed, lifted or logged in it.
+    #[error("This company is archived, so nothing in it can change.")]
+    CompanyArchived,
     #[error("Invalid input")]
     Invalid(Vec<FieldError>),
     #[error(transparent)]
     Access(#[from] Error),
+}
+/// The archived check a preview makes (`bilibi_company::require_writable`'s
+/// rule, without a lock).
+async fn writable(client: &dyn ReadClient, scope: &Scope, company: i64) -> WriteResult<()> {
+    let id = OrganisationId::new(company).map_err(|_| WriteError::NotFound)?;
+    match bilibi_company::Directory.lookup(client, scope, id).await? {
+        Some(company) if company.archived => Err(WriteError::CompanyArchived),
+        Some(_) => Ok(()),
+        None => Err(Error::NotFound.into()),
+    }
+}
+/// The same check on a write's transaction, holding the company against a
+/// concurrent archive until the write commits.
+async fn lock_writable(
+    tx: &MutationTransaction<'_>,
+    scope: &Scope,
+    company: i64,
+) -> WriteResult<()> {
+    match bilibi_company::require_writable(tx.sql(), scope, company, true).await {
+        Ok(_) => Ok(()),
+        Err(bilibi_company::WriteError::Archived) => Err(WriteError::CompanyArchived),
+        Err(bilibi_company::WriteError::Access(error)) => Err(error.into()),
+        Err(_) => Err(Error::NotFound.into()),
+    }
 }
 fn invalid(errors: Vec<FieldError>) -> WriteResult<()> {
     if errors.is_empty() {
@@ -236,6 +264,7 @@ impl Consent {
         let question = Self::question(question, &mut errors);
         invalid(errors)?;
         bilibi_company::authorize_work_target(tx.sql(), &scope, question.company_id, CHECK).await?;
+        lock_writable(tx, &scope, question.company_id).await?;
         self.lock_purpose(tx, &scope, &question.purpose).await?;
         let default = self.default(tx.sql(), &scope).await?;
         Ok(store::log(tx, &scope, &question, key, caller, default).await?)
@@ -346,6 +375,7 @@ impl Consent {
         self.purpose(client, scope, &input.purpose, &mut errors)
             .await?;
         bilibi_company::authorize_work_target(client, scope, input.company_id, RECORD).await?;
+        writable(client, scope, input.company_id).await?;
         let evidence = model::evidence(input.evidence.as_deref()).unwrap_or_else(|e| {
             errors.push(e);
             None
@@ -375,6 +405,7 @@ impl Consent {
         input: &DecisionInput,
     ) -> WriteResult<Decision> {
         let scope = self.fresh(tx.sql(), scope).await?;
+        lock_writable(tx, &scope, input.company_id).await?;
         let input = self.preview_record(tx.sql(), &scope, input).await?;
         self.lock_purpose(tx, &scope, &input.purpose).await?;
         Ok(store::record(tx, &scope, &input).await?)
@@ -394,6 +425,7 @@ impl Consent {
         }
         let contact = model::contact(&input.contact, input.channel, false, &mut errors);
         bilibi_company::authorize_work_target(client, scope, input.company_id, CHECK).await?;
+        writable(client, scope, input.company_id).await?;
         let evidence = model::evidence(input.evidence.as_deref()).unwrap_or_else(|e| {
             errors.push(e);
             None
@@ -417,6 +449,7 @@ impl Consent {
         input: &SuppressionInput,
     ) -> WriteResult<Suppression> {
         let scope = self.fresh(tx.sql(), scope).await?;
+        lock_writable(tx, &scope, input.company_id).await?;
         let input = self.preview_suppress(tx.sql(), &scope, input).await?;
         Ok(store::suppress(tx, &scope, &input).await?.0)
     }
@@ -454,6 +487,7 @@ impl Consent {
         };
         bilibi_company::authorize_work_target(client, scope, suppression.company_id, MANAGE)
             .await?;
+        writable(client, scope, suppression.company_id).await?;
         if suppression.lifted_at.is_some() {
             return Err(WriteError::Lifted);
         }
@@ -470,6 +504,7 @@ impl Consent {
     ) -> WriteResult<Suppression> {
         let scope = self.fresh(tx.sql(), scope).await?;
         let before = self.liftable(tx.sql(), &scope, id, reason, true).await?;
+        lock_writable(tx, &scope, before.company_id).await?;
         Ok(store::lift(tx, &scope, before, reason.trim()).await?)
     }
     /// One suppression. Needs `core.consent.view`.

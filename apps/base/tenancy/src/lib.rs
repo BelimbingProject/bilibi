@@ -84,8 +84,9 @@ pub trait ActorVerifier: Send + Sync {
         tenant: i64,
         user: i64,
     ) -> ProofFuture<'a, AccountIdentity>;
-    /// The account's remembered desk, else its first live desk. Accounts belong
-    /// to tenants; no affiliation grants a staff workplace.
+    /// The account's remembered desk, else its first live desk, an unarchived
+    /// desk before an archived one. Accounts belong to tenants; no affiliation
+    /// grants a staff workplace.
     fn default_company<'a>(
         &'a self,
         _client: &'a dyn ProofClient,
@@ -106,8 +107,9 @@ pub trait ActorVerifier: Send + Sync {
         Box::pin(async { Ok(false) })
     }
     /// Whether the staff account just sealed into `scope` may work in
-    /// `company` right now: a live, unarchived company of its tenant assigned
-    /// through an explicit desk. Asked on every authentication for the company
+    /// `company` right now: a live company of its tenant assigned through an
+    /// explicit desk. An archived company qualifies: it stays readable, and
+    /// its owners refuse every write into it. Asked on every authentication for the company
     /// the session chose (`Scope::current_company`), so a choice outlives
     /// neither its desk nor the company. A verifier that cannot tell keeps this
     /// default, which never confirms, and the scope uses its default desk.
@@ -1223,9 +1225,11 @@ pub trait OrganisationDirectory: Send + Sync {
     ) -> ProofFuture<'a, Option<OrganisationId>> {
         Box::pin(async { Ok(None) })
     }
-    /// The unarchived companies this staff actor may work in: its explicit
-    /// desks. No capability is asked, because the list is work access alone;
-    /// each operation still proves its target with its own capability.
+    /// The companies this staff actor may work in: its explicit desks, an
+    /// archived one flagged (`NamedOrganisation::archived`) because it stays
+    /// readable while every write into it is refused. No capability is asked,
+    /// because the list is work access alone; each operation still proves its
+    /// target with its own capability.
     fn reachable<'a>(
         &'a self,
         client: &'a dyn ProofClient,
