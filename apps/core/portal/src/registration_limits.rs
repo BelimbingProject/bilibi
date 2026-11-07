@@ -37,7 +37,6 @@ pub(crate) struct NewRegistration {
 pub(crate) struct Admission {
     pub created: bool,
     pub changed: bool,
-    pub alert: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -68,121 +67,96 @@ impl PortalService {
         let sender_hash = subject_hash(registration.tenant, "sender", &registration.sender);
         let recipient_hash = subject_hash(registration.tenant, "recipient", &registration.email);
         let portal_hash = subject_hash(registration.tenant, "portal", "portal");
-        let admission = tx
-            .mutate(move |sql| {
+        let sql = tx.sql();
+        sql.query_one(
+            "SELECT pg_advisory_xact_lock(hashtextextended('core.portal.registration:'||$1::bigint::text,0))",
+            &[&registration.tenant],
+        )
+        .await?;
+        let none = Admission {
+            created: false,
+            changed: false,
+        };
+        if sql
+            .query_opt(
+                "SELECT 1 FROM customer_registrations WHERE tenant_id=$1 AND email=$2 AND decision IS NULL",
+                &[&registration.tenant, &registration.email],
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(none);
+        }
+        let sender = counter(sql, registration.tenant, "sender", &sender_hash).await?;
+        let recipient = counter(sql, registration.tenant, "recipient", &recipient_hash).await?;
+        let portal = counter(sql, registration.tenant, "portal", &portal_hash).await?;
+        let pending: i64 = sql
+            .query_one(
+                "SELECT count(*) FROM customer_registrations WHERE tenant_id=$1 AND decision IS NULL",
+                &[&registration.tenant],
+            )
+            .await?
+            .get(0);
+        let portal_full = portal.minute >= limits.portal_minute || portal.day >= limits.portal_day;
+        let pending_full = pending >= limits.pending;
+        let full = portal_full
+            || pending_full
+            || sender.minute >= limits.sender_minute
+            || sender.day >= limits.sender_day
+            || recipient.minute >= limits.recipient_minute
+            || recipient.day >= limits.recipient_day;
+        if full {
+            // A refusal writes nothing unless the daily staff alert is due;
+            // `mutate` rejects an empty change list, so decide that first.
+            if !(portal_full || pending_full) || !alert_due(sql, tenant, &portal_hash).await? {
+                return Ok(none);
+            }
+            tx.mutate(move |sql| {
                 Box::pin(async move {
-                    sql.query_one(
-                        "SELECT pg_advisory_xact_lock(hashtextextended('core.portal.registration:'||$1::bigint::text,0))",
-                        &[&registration.tenant],
-                    )
-                    .await?;
-                    if sql
-                        .query_opt(
-                            "SELECT 1 FROM customer_registrations WHERE tenant_id=$1 AND email=$2 AND decision IS NULL",
-                            &[&registration.tenant, &registration.email],
-                        )
-                        .await?
-                        .is_some()
-                    {
-                        return Ok((
-                            Admission {
-                                created: false,
-                                changed: false,
-                                alert: false,
-                            },
-                            Vec::new(),
-                        ));
-                    }
-                    let sender = counter(sql, registration.tenant, "sender", &sender_hash).await?;
-                    let recipient =
-                        counter(sql, registration.tenant, "recipient", &recipient_hash).await?;
-                    let portal = counter(sql, registration.tenant, "portal", &portal_hash).await?;
-                    let pending: i64 = sql
-                        .query_one(
-                            "SELECT count(*) FROM customer_registrations WHERE tenant_id=$1 AND decision IS NULL",
-                            &[&registration.tenant],
-                        )
-                        .await?
-                        .get(0);
-                    let sender_full =
-                        sender.minute >= limits.sender_minute || sender.day >= limits.sender_day;
-                    let recipient_full = recipient.minute >= limits.recipient_minute
-                        || recipient.day >= limits.recipient_day;
-                    let portal_full =
-                        portal.minute >= limits.portal_minute || portal.day >= limits.portal_day;
-                    let pending_full = pending >= limits.pending;
-                    if sender_full || recipient_full || portal_full || pending_full {
-                        let mut changes = Vec::new();
-                        let alert = if portal_full || pending_full {
-                            mark_alert(sql, registration.tenant, &portal_hash, &mut changes).await?
-                        } else {
-                            false
-                        };
-                        return Ok((
-                            Admission {
-                                created: false,
-                                changed: !changes.is_empty(),
-                                alert,
-                            },
-                            changes,
-                        ));
-                    }
-                    let inserted = sql
-                        .query_one(
-                            "INSERT INTO customer_registrations(tenant_id,name,email,company_name,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,now()+make_interval(days => $6::int)) RETURNING id",
-                            &[&registration.tenant, &registration.name, &registration.email, &registration.company, &registration.token_hash, &registration.days],
-                        )
-                        .await?;
-                    let registration_id: i64 = inserted.get(0);
-                    let mut changes = vec![Change {
-                        kind: "portal.registration".into(),
-                        id: registration_id,
-                        old: json!(null),
-                        new: json!({"status": "unverified"}),
-                    }];
-                    purge_stale(sql, registration.tenant, &mut changes).await?;
-                    increment(
-                        sql,
-                        registration.tenant,
-                        "sender",
-                        &sender_hash,
-                        sender,
-                        &mut changes,
-                    )
-                    .await?;
-                    increment(
-                        sql,
-                        registration.tenant,
-                        "recipient",
-                        &recipient_hash,
-                        recipient,
-                        &mut changes,
-                    )
-                    .await?;
-                    increment(
-                        sql,
-                        registration.tenant,
-                        "portal",
-                        &portal_hash,
-                        portal,
-                        &mut changes,
-                    )
-                    .await?;
-                    Ok((
-                        Admission {
-                            created: true,
-                            changed: true,
-                            alert: false,
-                        },
-                        changes,
-                    ))
+                    let mut changes = Vec::new();
+                    mark_alert(sql, tenant, &portal_hash, &mut changes).await?;
+                    Ok(((), changes))
                 })
             })
             .await?;
-        if admission.alert {
             self.notify_registration_limit(tx, tenant).await?;
+            return Ok(Admission {
+                created: false,
+                changed: true,
+            });
         }
-        Ok(admission)
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let inserted = sql
+                    .query_one(
+                        "INSERT INTO customer_registrations(tenant_id,name,email,company_name,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,now()+make_interval(days => $6::int)) RETURNING id",
+                        &[&registration.tenant, &registration.name, &registration.email, &registration.company, &registration.token_hash, &registration.days],
+                    )
+                    .await?;
+                let registration_id: i64 = inserted.get(0);
+                let mut changes = vec![Change {
+                    kind: "portal.registration".into(),
+                    id: registration_id,
+                    old: json!(null),
+                    new: json!({"status": "unverified"}),
+                }];
+                purge_stale(sql, registration.tenant, &mut changes).await?;
+                for (dimension, hash, previous) in [
+                    ("sender", &sender_hash, sender),
+                    ("recipient", &recipient_hash, recipient),
+                    ("portal", &portal_hash, portal),
+                ] {
+                    increment(sql, registration.tenant, dimension, hash, previous, &mut changes)
+                        .await?;
+                }
+                Ok(((), changes))
+            })
+        })
+        .await?;
+        Ok(Admission {
+            created: true,
+            changed: true,
+        })
     }
 
     async fn registration_limits(&self, client: &dyn ReadClient) -> Result<Limits> {
@@ -309,6 +283,16 @@ async fn increment(
         new: json!({"dimension": dimension, "minute": previous.minute + 1, "day": previous.day + 1}),
     });
     Ok(())
+}
+
+async fn alert_due(sql: &Transaction<'_>, tenant: i64, portal_hash: &[u8]) -> Result<bool> {
+    Ok(sql
+        .query_opt(
+            "SELECT 1 FROM customer_registration_limits WHERE tenant_id=$1 AND dimension='portal' AND subject_hash=$2 AND alerted_at>now()-interval '1 day'",
+            &[&tenant, &portal_hash],
+        )
+        .await?
+        .is_none())
 }
 
 async fn mark_alert(
