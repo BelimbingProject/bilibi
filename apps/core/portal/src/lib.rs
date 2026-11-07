@@ -9,6 +9,7 @@ mod facade;
 mod operations;
 mod panel;
 mod portal;
+mod privacy;
 mod registration;
 mod web;
 
@@ -76,6 +77,10 @@ const DELIVERY_MIGRATION: (&str, &str) = (
     "core-customer_access-005-delivery",
     include_str!("../migrations/005-delivery.sql"),
 );
+const PERSONAL_DATA_MIGRATION: (&str, &str) = (
+    "core-portal-006-personal-data",
+    include_str!("../migrations/006-personal-data.sql"),
+);
 const REGISTRATION_MIGRATION: (&str, &str) = (
     "core-customer_access-003-registration",
     include_str!("../migrations/003-registration.sql"),
@@ -94,8 +99,8 @@ macro_rules! provenance {
 inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "core/company", "core/person", "core/affiliation", "core/user"],
-        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
+        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let desk = delivery::Desk {
