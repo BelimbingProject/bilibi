@@ -68,7 +68,7 @@ their name, one outside it shows `User <id>`, so no name crosses a tenant
 boundary. The user column sorts by `user_id`. Search matches the IP address or
 user agent recorded once at sign-in by `describe` (the host passes the proxy's
 `X-Forwarded-For`/`X-Real-IP` and `User-Agent`; a direct connection records no
-address). `sessions.signed_in_at` records admission time and has the same retention as the session row. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
+address). `sessions.signed_in_at` records admission time and has the same retention as the session row. `describe` also appends the sign-in (time, address, user agent) to `session_sign_ins`, keyed by tenant and user, which `previous_sign_in` reads for the latest sign-in before the current session; it survives sign-out, expiry and "sign out everywhere else", and the expiry sweep deletes rows older than 90 days. The UI says "No earlier sign-in on record" when none is found; the place of a sign-in is not resolved. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
 
 The dashboard entry `base-dashboard-session-stats` (embed `session.dashboard-stats`,
 slot `dashboard.sessions`) shows the open count, reading only while

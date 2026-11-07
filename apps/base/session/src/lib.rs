@@ -96,8 +96,8 @@ pub struct SessionClient {
     pub name: String,
 }
 
-/// The successful sign-in before the current session, when its session row is
-/// still retained. No bearer or row id leaves this value.
+/// The successful sign-in before the current session, from the retained
+/// sign-in history. No bearer or row id leaves this value.
 #[derive(Clone, Debug)]
 pub struct PreviousSignIn {
     pub signed_in_at: SystemTime,
@@ -196,6 +196,8 @@ impl Summary {
         session_key(&self.id)
     }
 }
+const SIGN_IN_HISTORY_DAYS: i32 = 90;
+
 fn session_key(id: &str) -> String {
     let digest = Sha256::digest(id.as_bytes());
     digest.iter().take(12).map(|b| format!("{b:02x}")).collect()
@@ -497,6 +499,12 @@ impl Sessions {
                 &[&token, &ip, &agent],
             )
             .await?;
+        client
+            .execute(
+                "INSERT INTO session_sign_ins(tenant_id,user_id,signed_in_at,ip_address,user_agent) SELECT tenant_id,user_id,signed_in_at,$2,$3 FROM sessions WHERE id=$1 AND impersonator_id IS NULL",
+                &[&token, &ip, &agent],
+            )
+            .await?;
         Ok(())
     }
     /// Whether this exact session is still live. Agent calls use this read-only
@@ -541,7 +549,8 @@ impl Sessions {
             name: row.get(1),
         })
     }
-    /// The latest other successful sign-in retained for this account. An
+    /// The latest successful sign-in of this account before the current
+    /// session, kept for `SIGN_IN_HISTORY_DAYS`. An
     /// impersonating operator is not the account holder and cannot read it.
     pub async fn previous_sign_in(
         &self,
@@ -557,7 +566,7 @@ impl Sessions {
         }
         Ok(client
             .query_opt(
-                "SELECT signed_in_at,ip_address,user_agent FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf<>$3 AND impersonator_id IS NULL ORDER BY signed_in_at DESC,id LIMIT 1",
+                "SELECT signed_in_at,ip_address,user_agent FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at<(SELECT signed_in_at FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf=$3 AND impersonator_id IS NULL) ORDER BY signed_in_at DESC,id DESC LIMIT 1",
                 &[&scope.tenant(), &scope.user(), &scope.csrf],
             )
             .await?
@@ -1064,6 +1073,12 @@ impl Sessions {
             .iter()
             .map(|row| row.get(0))
             .collect();
+        client
+            .execute(
+                "DELETE FROM session_sign_ins WHERE signed_in_at<now()-make_interval(days => $1::int)",
+                &[&SIGN_IN_HISTORY_DAYS],
+            )
+            .await?;
         let pruned = ids.len() as u64;
         self.announce(ids);
         Ok(pruned)
@@ -1141,6 +1156,7 @@ inventory::submit! {
             ("base-session-003-step-up", include_str!("../migrations/003-step-up.sql")),
             ("base-session-004-company", include_str!("../migrations/004-company.sql")),
             ("base-session-005-signed-in-at", include_str!("../migrations/005-signed-in-at.sql")),
+            ("base-session-006-sign-in-history", include_str!("../migrations/006-sign-in-history.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },

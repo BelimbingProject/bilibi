@@ -114,7 +114,7 @@ fn builtins() -> Vec<BuiltinColumn> {
     };
     vec![
         sortable("user_id", "User", ColumnType::String),
-        sortable("ip_address", "IP Address", ColumnType::String),
+        sortable("ip_address", "IP address", ColumnType::String),
         sortable("user_agent", "User Agent", ColumnType::String),
         sortable("last_activity", "Last Activity", ColumnType::Datetime),
         BuiltinColumn::new("status", "Status"),
@@ -130,7 +130,7 @@ fn own_builtins() -> Vec<BuiltinColumn> {
     };
     vec![
         sortable("device", "Device", ColumnType::String),
-        sortable("ip_address", "IP Address", ColumnType::String),
+        sortable("ip_address", "IP address", ColumnType::String),
         sortable("signed_in", "Signed In", ColumnType::Datetime),
         sortable("last_activity", "Last Active", ColumnType::Datetime),
         BuiltinColumn::new("status", "Status"),

@@ -30,7 +30,7 @@ use std::{collections::HashMap, sync::Arc};
 
 #[derive(Template)]
 #[template(
-    source = r#"<div id="app-user-session-security" class="mb-3 border-b border-line pb-3">{% if first %}<p id="app-user-previous-sign-in">First sign-in</p>{% else %}<p id="app-user-previous-sign-in" class="break-words"><span class="text-muted">Previous sign-in:</span> {{ at|safe }} · {{ device }}{% if !ip.is_empty() %} · <span class="tabular-nums text-muted">{{ ip }}</span>{% endif %}</p>{% endif %}<a id="app-user-sessions" href="/settings/sessions" class="mt-1 inline-flex items-center gap-1 text-link hover:underline">Your sessions</a></div>"#,
+    source = r#"<div id="app-user-session-security" class="mb-3 border-b border-line pb-3">{% if first %}<p id="app-user-previous-sign-in">No earlier sign-in on record</p>{% else %}<p id="app-user-previous-sign-in" class="break-words"><span class="text-muted">Previous sign-in:</span> {{ at|safe }} · {{ device }}{% if !ip.is_empty() %} · <span class="text-muted">IP address</span> <span class="tabular-nums">{{ ip }}</span>{% endif %}</p>{% endif %}<a id="app-user-sessions" href="/settings/sessions" class="mt-1 inline-flex items-center gap-1 text-link hover:underline">Your sessions</a></div>"#,
     ext = "html"
 )]
 struct AccountSessionSecurity {
