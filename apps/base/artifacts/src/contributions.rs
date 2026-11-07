@@ -21,6 +21,7 @@ inventory::submit! { Contribution::new(VOCABULARY,"base/artifacts",provenance!()
     capabilities:&[CapabilityDefinition::platform(MANAGE),CapabilityDefinition::tenant(PURGE)], domains:&["artifacts"],verbs:&["purge"],roles:&[],
     system_principals:&[SystemPrincipalDefinition { name: SWEEPER, capabilities: &[PURGE] }],
 }) }
+inventory::submit! { Contribution::new(bilibi_module_registry::contributions::CREDENTIAL_PATHS, "base/artifacts.pdf-render", provenance!(), &bilibi_module_registry::contributions::CredentialPath { path: crate::RENDER_ROUTE }) }
 // Purging expired documents is Platform housekeeping no tenant should have to
 // switch on (`Artifacts::sweep_expired`); a tenant may still deny it, and its
 // expired bytes then wait for the next purge a person in it triggers.

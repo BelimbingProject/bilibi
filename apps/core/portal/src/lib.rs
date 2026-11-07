@@ -25,8 +25,8 @@ use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution,
 use bilibi_menu::{MenuItem, Requirement, PORTAL_ROOT};
 use bilibi_module_registry::{
     contributions::{
-        Access, Embed, EmbedContext, Method, PageWrites, Pending, Route, EMBEDS, PAGE_WRITES,
-        ROUTES,
+        Access, CredentialPath, Embed, EmbedContext, Method, PageWrites, Pending, Route,
+        CREDENTIAL_PATHS, EMBEDS, PAGE_WRITES, ROUTES,
     },
     Contribution, Layer, Module, Provenance, Service,
 };
@@ -107,6 +107,8 @@ macro_rules! provenance {
         }
     };
 }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.accept-invitation", provenance!(), &CredentialPath { path: "/portal/accept/{site}/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.verify-registration", provenance!(), &CredentialPath { path: "/portal/verify/{site}/{token}" }) }
 
 inventory::submit! {
     Module {

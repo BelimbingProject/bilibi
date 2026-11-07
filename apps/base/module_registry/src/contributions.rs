@@ -167,6 +167,7 @@ impl Catalog {
             validators[consumer](items)?;
         }
         let catalog = Self { entries, types };
+        catalog.validate_credential_routes()?;
         catalog.validate_references(modules)?;
         Ok(catalog)
     }
@@ -232,6 +233,47 @@ impl Catalog {
         }
         Ok(())
     }
+    /// A bearer path belongs to the module that registers it. Keeping this
+    /// cross-catalog check here makes a new route fail boot before Web can log
+    /// or expose its `{token}` segment without the matching privacy policy.
+    fn validate_credential_routes(&self) -> Result<()> {
+        let credentials: BTreeMap<_, _> = self.entries[CREDENTIAL_PATHS]
+            .iter()
+            .map(|entry| Ok((entry.get::<CredentialPath>()?.path, entry)))
+            .collect::<Result<_>>()?;
+        let check = |entry: &Entry, path: &str| -> Result<()> {
+            if !parameters(path).any(|name| name == "token") {
+                return Ok(());
+            }
+            let Some(credential) = credentials.get(path) else {
+                return Err(invalid(format!(
+                    "{} at {}:{} registers credential route {path} without a {CREDENTIAL_PATHS} contribution",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                )));
+            };
+            if credential.provenance.module != entry.provenance.module {
+                return Err(invalid(format!(
+                    "{} at {}:{} registers credential route {path}, but {} declared it for {}",
+                    entry.id,
+                    entry.provenance.source,
+                    entry.provenance.line,
+                    credential.id,
+                    credential.provenance.module
+                )));
+            }
+            Ok(())
+        };
+        for entry in &self.entries[ROUTES] {
+            check(entry, entry.get::<Route>()?.path)?;
+        }
+        for entry in &self.entries[DOWNLOADS] {
+            check(entry, entry.get::<Download>()?.path)?;
+        }
+        for entry in &self.entries[MOVED] {
+            check(entry, entry.get::<Moved>()?.from)?;
+        }
+        Ok(())
+    }
 }
 fn invalid(message: String) -> RegistryError {
     RegistryError::Contribution(message)
@@ -243,6 +285,7 @@ pub const DOWNLOADS: &str = "base/module_registry.downloads";
 pub const SEEDS: &str = "base/module_registry.seeds";
 pub const MOVED: &str = "base/module_registry.moved";
 pub const PAGE_WRITES: &str = "base/module_registry.page_writes";
+pub const CREDENTIAL_PATHS: &str = "base/module_registry.credential_paths";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Method {
     Get,
@@ -372,6 +415,14 @@ pub struct Route {
     pub operation: &'static str,
     pub access: Access,
     pub framed: bool,
+}
+/// A route pattern whose `{token}` segment is a bearer secret. Web redacts the
+/// token from logs and debug reports and sends a referrer policy that never
+/// forwards the full path. The module that registers a token route declares
+/// the same pattern under [`CREDENTIAL_PATHS`]; boot refuses an omission.
+#[derive(Clone, Copy, Debug)]
+pub struct CredentialPath {
+    pub path: &'static str,
 }
 /// A GET that answers with a file instead of a page: a download or
 /// export (`/finance/attachments/{id}/download`, a return's CSV).
@@ -557,6 +608,24 @@ fn validate_embeds(entries: &[Entry]) -> Result<()> {
 inventory::submit! { Consumer::new::<Route>(ROUTES, "base/module_registry", validate_routes) }
 inventory::submit! { Consumer::new::<Embed>(EMBEDS, "base/module_registry", validate_embeds) }
 inventory::submit! { Consumer::new::<Download>(DOWNLOADS, "base/module_registry", validate_downloads) }
+fn validate_credential_paths(entries: &[Entry]) -> Result<()> {
+    let mut paths = BTreeSet::new();
+    for entry in entries {
+        let path = entry.get::<CredentialPath>()?.path;
+        if !path.starts_with('/')
+            || path.contains(['?', '#'])
+            || !parameters(path).any(|name| name == "token")
+            || !paths.insert(path)
+        {
+            return Err(invalid(format!(
+                "invalid credential path {} at {}:{}",
+                entry.id, entry.provenance.source, entry.provenance.line
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<CredentialPath>(CREDENTIAL_PATHS, "base/module_registry", validate_credential_paths) }
 fn validate_moved(entries: &[Entry]) -> Result<()> {
     let mut paths = BTreeSet::new();
     for entry in entries {

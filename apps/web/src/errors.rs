@@ -146,13 +146,13 @@ fn bare(response: &Response) -> bool {
 }
 
 /// A referrer that is a credential link loses its token and its query.
-fn redacted_referer(value: &str) -> String {
+fn redacted_referer(app: &App, value: &str) -> String {
     match value.parse::<Uri>() {
-        Ok(uri) if crate::credential_path(uri.path()) => format!(
+        Ok(uri) if crate::credential_path(&app.credential_paths, uri.path()) => format!(
             "{}://{}{}",
             uri.scheme_str().unwrap_or("http"),
             uri.authority().map_or("", |authority| authority.as_str()),
-            crate::redacted(uri.path())
+            crate::redacted(&app.credential_paths, uri.path())
         ),
         _ => value.to_owned(),
     }
@@ -161,7 +161,7 @@ fn redacted_referer(value: &str) -> String {
 fn describe(app: &App, seen: &Seen) -> DebugReport {
     // A credential link's token, and the address its query carries, stay
     // out of the report (`crate::redacted`).
-    let credential = crate::credential_path(seen.uri.path());
+    let credential = crate::credential_path(&app.credential_paths, seen.uri.path());
     let query = axum::extract::Query::<Vec<(String, String)>>::try_from_uri(&seen.uri)
         .map(|query| query.0)
         .unwrap_or_default()
@@ -219,7 +219,7 @@ fn describe(app: &App, seen: &Seen) -> DebugReport {
         .filter_map(|name| {
             let value = seen.headers.get(*name)?.to_str().ok()?;
             let value = if *name == "referer" {
-                redacted_referer(value)
+                redacted_referer(app, value)
             } else {
                 value.to_owned()
             };
@@ -228,7 +228,7 @@ fn describe(app: &App, seen: &Seen) -> DebugReport {
         .collect();
     DebugReport {
         method: seen.method.to_string(),
-        path: crate::redacted(seen.uri.path()).into_owned(),
+        path: crate::redacted(&app.credential_paths, seen.uri.path()).into_owned(),
         query,
         params,
         headers,

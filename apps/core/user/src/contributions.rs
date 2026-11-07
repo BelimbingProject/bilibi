@@ -4,7 +4,10 @@
 //! `core/user.pages`; Web establishes the session before dispatching.
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
-    contributions::{Access, Embed, EmbedContext, Method, Route, EMBEDS, ROUTES},
+    contributions::{
+        Access, CredentialPath, Embed, EmbedContext, Method, Route, CREDENTIAL_PATHS, EMBEDS,
+        ROUTES,
+    },
     Contribution, Provenance,
 };
 use bilibi_settings::{Definition, ScopeKind, Setting, Validator, DEFINITIONS};
@@ -52,6 +55,9 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { mod
     ],
     system_principals: &[],
 }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/reset-password/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.accept-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.portal-reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/portal/reset/{site}/{token}" }) }
 
 // The `admin.user` menu entry for the tenant-wide `/users` index.
 bilibi_menu::contribute!(
