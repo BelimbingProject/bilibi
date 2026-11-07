@@ -42,6 +42,7 @@ pub struct App {
     routes: Arc<routes::Pages>,
     downloads: Arc<routes::Downloads>,
     moved: Arc<Vec<&'static bilibi_module_registry::contributions::Moved>>,
+    credential_paths: Arc<CredentialPaths>,
     pub db: Db,
     pub origin: Arc<str>,
     settings: Arc<bilibi_base::settings::Settings>,
@@ -129,12 +130,14 @@ impl App {
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
         let moved = Arc::new(routes::bind_moved(&services, &routes, &downloads)?);
+        let credential_paths = Arc::new(CredentialPaths::from_catalog(services.catalog()?)?);
         let api = Arc::new(api::Edge::new(&services)?);
         let webhooks = Arc::new(webhooks::Boundary::bind(&services)?);
         Ok(Self {
             routes,
             downloads,
             moved,
+            credential_paths,
             db,
             origin: origin.into(),
             settings,
@@ -400,7 +403,10 @@ pub fn router(app: App) -> Router {
         .route("/favicon.ico", get(embedded_asset))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), errors::pages))
-        .layer(middleware::from_fn(response_headers))
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            response_headers,
+        ))
         .layer(
             tower_http::compression::CompressionLayer::new()
                 .quality(tower_http::CompressionLevel::Precise(4))
@@ -497,14 +503,22 @@ async fn embedded_asset(
 /// do with a sandboxing CSP, keeps it.
 /// A server-side failure is also logged here with its request line: the
 /// page shows only the error's public text.
-async fn response_headers(request: axum::extract::Request, next: Next) -> Response {
+async fn response_headers(
+    State(app): State<App>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
     let path = request.uri().path();
-    let line = format!("{} {}", request.method(), redacted(path));
+    let line = format!(
+        "{} {}",
+        request.method(),
+        redacted(&app.credential_paths, path)
+    );
     // A credential link's page never sends its path on: `strict-origin`
     // names only this origin. Not `no-referrer`, which would make the
     // browser post the page's own form with `Origin: null`, which the
     // origin check refuses.
-    let referrer = if credential_path(path) {
+    let referrer = if credential_path(&app.credential_paths, path) {
         "strict-origin"
     } else {
         "same-origin"
@@ -522,22 +536,25 @@ async fn response_headers(request: axum::extract::Request, next: Next) -> Respon
     response
 }
 
-/// The emailed credential links (a password reset, a portal invitation, a
-/// request's confirmation, a customer's survey response): the
-/// `{token}` segment is a bearer secret, so it is never logged, shown in a
-/// debug report or sent on as a referrer.
-const CREDENTIAL_PATHS: [&str; 6] = [
-    "/reset-password/{token}",
-    "/accept/{token}",
-    "/portal/reset/{site}/{token}",
-    "/portal/accept/{site}/{token}",
-    "/portal/verify/{site}/{token}",
-    "/survey/{token}",
-];
+struct CredentialPaths(Vec<&'static str>);
+impl CredentialPaths {
+    fn from_catalog(
+        catalog: &bilibi_module_registry::Catalog,
+    ) -> bilibi_module_registry::Result<Self> {
+        use bilibi_module_registry::contributions::{CredentialPath, CREDENTIAL_PATHS};
+        Ok(Self(
+            catalog
+                .entries::<CredentialPath>(CREDENTIAL_PATHS)?
+                .iter()
+                .map(|entry| entry.get::<CredentialPath>().map(|path| path.path))
+                .collect::<bilibi_module_registry::Result<_>>()?,
+        ))
+    }
+}
 /// `path` with a credential link's token replaced; any other path as it is.
-pub(crate) fn redacted(path: &str) -> std::borrow::Cow<'_, str> {
+fn redacted<'a>(paths: &CredentialPaths, path: &'a str) -> std::borrow::Cow<'a, str> {
     let given: Vec<&str> = path.split('/').collect();
-    for pattern in CREDENTIAL_PATHS {
+    for pattern in &paths.0 {
         let shape: Vec<&str> = pattern.split('/').collect();
         let matches = shape.len() == given.len()
             && shape
@@ -562,9 +579,9 @@ pub(crate) fn redacted(path: &str) -> std::borrow::Cow<'_, str> {
     }
     path.into()
 }
-/// Whether `path` is an emailed credential link.
-pub(crate) fn credential_path(path: &str) -> bool {
-    matches!(redacted(path), std::borrow::Cow::Owned(_))
+/// Whether `path` is a contributed bearer credential path.
+fn credential_path(paths: &CredentialPaths, path: &str) -> bool {
+    matches!(redacted(paths, path), std::borrow::Cow::Owned(_))
 }
 
 /// A failed request. API clients read the status and text; `errors::pages`
