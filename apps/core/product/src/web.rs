@@ -850,10 +850,7 @@ impl State {
                 } else if !self.can_price {
                     sections.push(render(EmptyState::forbidden("add selling prices"))?);
                 } else if self.currency_choices.is_empty() {
-                    sections.push(render(EmptyState::missing(
-                        "Selling currency",
-                        "The currency list is not installed. Ask your administrator to install it.",
-                    ))?);
+                    sections.push(render(EmptyState::missing("Selling currency", "The currency list is not installed. Ask your administrator to install it before adding a price."))?);
                 } else {
                     sections.push(self.price_form()?);
                 }
