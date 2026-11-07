@@ -10,8 +10,8 @@ use crate::{
     choices, error_sentence, ActionLink, AddMore, BadgeKind, Button, ButtonVariant, Card, Choice,
     Chrome, ClientEntry, CodeInput, Combobox, DayKind, DayMonth, DayTile, ErrorSummary, Field,
     FileInput, Html, IconButton, IconContext, IconKind, InputKind, LocationAction, MultiSelect,
-    PageVariant, RadioGroup, Restricted, RestrictedField, SecretInput, StatItem, UploadSpec,
-    Uploads,
+    PageVariant, RadioGroup, Restricted, RestrictedField, RowAction, RowActions, SecretInput,
+    StatItem, UploadSpec, Uploads,
 };
 use askama::Template;
 
@@ -38,6 +38,7 @@ pub struct ComponentsSpecimen {
     header_title_actions: Html,
     section_title_actions: Html,
     section_actions: Html,
+    row_actions: Html,
     card_titled: Html,
     card_untitled: Html,
     card_flat: Html,
@@ -468,6 +469,11 @@ impl ComponentsSpecimen {
             body: Html::text("Manage"),
             method: "",
         })?;
+        let row_actions = Html::render(&RowActions::new(
+            "specimen-row-actions-menu",
+            "Example session",
+            vec![RowAction::new("Sign out", "sign_out", "key", "example").danger()],
+        ))?;
         let card_titled = Html::render(&Card {
             title: "Company profile",
             inner_class: "p-3",
@@ -601,6 +607,7 @@ impl ComponentsSpecimen {
             header_title_actions,
             section_title_actions,
             section_actions,
+            row_actions,
             stats_linked: vec![
                 StatItem::number("People", 24),
                 StatItem::number("Active", 18),

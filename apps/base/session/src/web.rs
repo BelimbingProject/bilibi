@@ -1,5 +1,5 @@
-//! `/system/sessions` and the dashboard
-//! stats panel.
+//! `/system/sessions`, the signed-in account's `/settings/sessions`, and the
+//! dashboard stats panel.
 //!
 //! The list is platform-global and payload-free. Each row names the signed-in
 //! user through the PrincipalDirectory seam: a user in the actor's tenant shows
@@ -15,12 +15,14 @@
 //! re-asks Authz (`authorize_operator`, logged) before it acts; a refusal is a
 //! flash, never a page-clearing error.
 use crate::{
-    contributions::PATH, ListQuery, Sessions, SortBy, Summary, Termination, LIST, MANAGE,
-    PAGE_SIZES,
+    client_name, contributions::PATH, ListQuery, OwnSummary, Sessions, SortBy, Summary,
+    Termination, LIST, MANAGE, PAGE_SIZES,
 };
 use askama::Template;
 use bilibi_authz::{authorize_operator, effective_capabilities};
 use bilibi_database::{Db, Error, MutationBoundary, Result};
+use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
+use bilibi_locale::Locales;
 use bilibi_principal_directory::{PrincipalDirectory, PrincipalKind, PrincipalRef, Query};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
@@ -29,15 +31,19 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    params, Badge, BadgeKind, BuiltinColumn, Card, ColumnType, ColumnsOutcome, ConfirmDialog,
-    FilterToolbar, FlashMap, FlexRow, FlexTable, Header, Html, IconButton, IconKind, ListColumns,
-    ListSpec, ListState, PageCounts, Pagination, SortDir, StatItem, StatStrip, StatusKind,
-    TableEmpty, ToolbarControl, NO_FLASH,
+    params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
+    ColumnsOutcome, ConfirmDialog, FilterToolbar, FlashGroup, FlashMap, FlexRow, FlexTable, Header,
+    Html, IconButton, IconKind, Instant, ListColumns, ListSpec, ListState, PageCounts, Pagination,
+    RowAction, RowActions, SettingsTab, SortDir, StatItem, StatStrip, StatusKind, TableEmpty,
+    ToolbarControl, NO_FLASH,
 };
+use jiff::Timestamp;
 use serde_json::Value;
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     sync::{Arc, LazyLock},
+    time::SystemTime,
 };
 
 const DENIED: &str = "You do not have permission to terminate sessions.";
@@ -72,6 +78,31 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     .expect("session list spec")
 });
 
+static OWN_SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
+    ListSpec {
+        sortable: BTreeMap::from([
+            ("device".into(), SortDir::Asc),
+            ("ip_address".into(), SortDir::Asc),
+            ("signed_in".into(), SortDir::Desc),
+            ("last_activity".into(), SortDir::Desc),
+        ]),
+        default_sort: Some("last_activity".into()),
+        page_sizes: PAGE_SIZES.to_vec(),
+        page_size_param: "per_page".into(),
+        invalid_page_size: InvalidPageSize::Default,
+        param_names: ParamNames {
+            search: "search".into(),
+            page: "page".into(),
+            sort_by: "sort".into(),
+            sort_dir: "dir".into(),
+        },
+        omit_defaults: true,
+        ..ListSpec::default()
+    }
+    .shared()
+    .expect("own session list spec")
+});
+
 /// The list's own columns: the sortable ones keep the
 /// source's sort keys and button ids.
 fn builtins() -> Vec<BuiltinColumn> {
@@ -83,9 +114,25 @@ fn builtins() -> Vec<BuiltinColumn> {
     };
     vec![
         sortable("user_id", "User", ColumnType::String),
-        sortable("ip_address", "IP Address", ColumnType::String),
+        sortable("ip_address", "IP address", ColumnType::String),
         sortable("user_agent", "User Agent", ColumnType::String),
         sortable("last_activity", "Last Activity", ColumnType::Datetime),
+        BuiltinColumn::new("status", "Status"),
+    ]
+}
+
+fn own_builtins() -> Vec<BuiltinColumn> {
+    let sortable = |id: &str, label: &str, kind| {
+        let mut column = BuiltinColumn::new(id, label).sortable(id);
+        column.kind = kind;
+        column.sort_id = Some(format!("own-sessions-sort-{id}"));
+        column
+    };
+    vec![
+        sortable("device", "Device", ColumnType::String),
+        sortable("ip_address", "IP address", ColumnType::String),
+        sortable("signed_in", "Signed In", ColumnType::Datetime),
+        sortable("last_activity", "Last Active", ColumnType::Datetime),
         BuiltinColumn::new("status", "Status"),
     ]
 }
@@ -95,6 +142,8 @@ struct Core {
     sessions: Arc<Sessions>,
     mutations: Arc<MutationBoundary>,
     directory: Arc<PrincipalDirectory>,
+    display: Arc<DisplayPolicy>,
+    locales: Arc<Locales>,
 }
 pub(crate) struct Pages(Arc<Core>);
 impl Pages {
@@ -103,12 +152,16 @@ impl Pages {
         sessions: Arc<Sessions>,
         mutations: Arc<MutationBoundary>,
         directory: Arc<PrincipalDirectory>,
+        display: Arc<DisplayPolicy>,
+        locales: Arc<Locales>,
     ) -> Self {
         Self(Arc::new(Core {
             db,
             sessions,
             mutations,
             directory,
+            display,
+            locales,
         }))
     }
 }
@@ -535,6 +588,421 @@ impl LiveState<Scope, Error> for Index {
     }
 }
 
+#[derive(Template)]
+#[template(path = "own_sessions.html")]
+struct OwnView {
+    flash: Html,
+    header: Html,
+    current: SettingsTab,
+    toolbar: Html,
+    card: Html,
+    dialog: Html,
+}
+
+#[derive(Clone)]
+enum OwnPending {
+    One(OwnSummary),
+    Others(usize),
+}
+
+struct Own {
+    core: Arc<Core>,
+    state: ListState,
+    columns: ListColumns,
+    rows_changed: bool,
+    rows: Vec<OwnSummary>,
+    pending: Option<OwnPending>,
+    flash: Option<(StatusKind, String)>,
+}
+
+impl Own {
+    fn new(core: Arc<Core>, query: &HashMap<String, String>) -> Result<Self> {
+        Ok(Self {
+            core,
+            state: ListState::parse(query, OWN_SPEC.clone()).map_err(|_| Error::Internal)?,
+            columns: ListColumns::mount("own-sessions", own_builtins())
+                .map_err(|_| Error::Internal)?,
+            rows_changed: true,
+            rows: Vec::new(),
+            pending: None,
+            flash: None,
+        })
+    }
+
+    fn flash(&mut self, kind: StatusKind, message: impl Into<String>) {
+        self.flash = Some((kind, message.into()));
+    }
+
+    async fn event(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+        let get = |key: &str| value.get(key).and_then(Value::as_str);
+        match get("type").ok_or(Error::Invalid)? {
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
+            "sort" => {
+                if !self.state.next_sort(get("sort").unwrap_or_default()) {
+                    return Err(Error::Invalid);
+                }
+            }
+            "page" => self.state.put_page(get("page")),
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
+                ColumnsOutcome::Sort(column) => {
+                    if !self.state.next_sort(&column) {
+                        return Err(Error::Invalid);
+                    }
+                }
+                ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
+            },
+            "clear-flash" => {
+                if self
+                    .flash
+                    .as_ref()
+                    .is_some_and(|(kind, _)| Some(kind.name()) == get("key"))
+                {
+                    self.flash = None;
+                }
+            }
+            "request_sign_out" => {
+                let key = get("key").unwrap_or_default();
+                let client = self.core.db.get().await?;
+                let current = self.core.sessions.identify(&**client, scope).await?;
+                self.pending = self
+                    .rows
+                    .iter()
+                    .find(|row| row.key() == key && row.id != current)
+                    .cloned()
+                    .map(OwnPending::One);
+            }
+            "request_sign_out_others" => {
+                let client = self.core.db.get().await?;
+                let current = self.core.sessions.identify(&**client, scope).await?;
+                let count = self.rows.iter().filter(|row| row.id != current).count();
+                self.pending = (count > 0).then_some(OwnPending::Others(count));
+            }
+            "cancel_sign_out" => self.pending = None,
+            "sign_out" => {
+                let Some(pending) = self.pending.take() else {
+                    return Ok(());
+                };
+                let mut client = self.core.db.get().await?;
+                let action = match pending {
+                    OwnPending::One(_) => "session.sign_out",
+                    OwnPending::Others(_) => "session.sign_out_others",
+                };
+                let mut tx = self
+                    .core
+                    .mutations
+                    .begin(&mut client, scope.mutation_context(action))
+                    .await?;
+                let current = self.core.sessions.identify(tx.sql(), scope).await?;
+                match pending {
+                    OwnPending::One(session) => {
+                        match self
+                            .core
+                            .sessions
+                            .terminate_own(&mut tx, scope, &session.id, &current)
+                            .await?
+                        {
+                            Termination::Terminated => {
+                                tx.commit().await?;
+                                self.flash(StatusKind::Success, "Session signed out.");
+                            }
+                            Termination::NotFound => {
+                                tx.commit().await?;
+                                self.flash(StatusKind::Info, "That session had already ended.");
+                            }
+                            Termination::CurrentSession => {
+                                tx.rollback().await?;
+                                self.flash(
+                                    StatusKind::Error,
+                                    "This device stays signed in from this page.",
+                                );
+                            }
+                        }
+                    }
+                    OwnPending::Others(_) => {
+                        let ended = self
+                            .core
+                            .sessions
+                            .terminate_others(&mut tx, scope, &current)
+                            .await?;
+                        tx.commit().await?;
+                        self.flash(
+                            StatusKind::Success,
+                            if ended.len() == 1 {
+                                "1 other session signed out.".to_owned()
+                            } else {
+                                format!("{} other sessions signed out.", ended.len())
+                            },
+                        );
+                    }
+                }
+            }
+            _ => return Err(Error::Invalid),
+        }
+        Ok(())
+    }
+
+    async fn display(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<DisplayContext> {
+        let locale = self.core.locales.resolve(client, scope, None).await?.locale;
+        self.core.display.display(client, scope, None, locale).await
+    }
+
+    fn instant(display: &DisplayContext, at: SystemTime) -> Result<Instant> {
+        let at = Timestamp::try_from(at).map_err(|_| Error::Internal)?;
+        let rendered = display.render(at, Format::DateTime, Precision::Minute);
+        Ok(Instant::new(
+            &rendered.iso,
+            &rendered.text,
+            &rendered.company,
+            &rendered.utc,
+            rendered.mode.as_str(),
+        ))
+    }
+
+    fn compare(a: &OwnSummary, b: &OwnSummary, field: &str) -> Ordering {
+        match field {
+            "device" => {
+                client_name(a.user_agent.as_deref()).cmp(&client_name(b.user_agent.as_deref()))
+            }
+            "ip_address" => a.ip_address.cmp(&b.ip_address),
+            "signed_in" => a.signed_in_at.cmp(&b.signed_in_at),
+            _ => a.last_activity.cmp(&b.last_activity),
+        }
+        .then_with(|| a.id.cmp(&b.id))
+    }
+
+    async fn render(&mut self, scope: &Scope) -> Result<String> {
+        let client = self.core.db.get().await?;
+        let current = self.core.sessions.identify(&**client, scope).await?;
+        let display = self.display(&**client, scope).await?;
+        self.rows = self.core.sessions.own_sessions(&**client, scope).await?;
+        let query = self.state.search.trim().to_lowercase();
+        let mut visible: Vec<OwnSummary> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                query.is_empty()
+                    || client_name(row.user_agent.as_deref())
+                        .to_lowercase()
+                        .contains(&query)
+                    || row
+                        .ip_address
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .cloned()
+            .collect();
+        let field = self.state.sort_by.as_deref().unwrap_or("last_activity");
+        visible.sort_by(|a, b| Self::compare(a, b, field));
+        if self.state.sort_dir == Some(SortDir::Desc) {
+            visible.reverse();
+        }
+        let mut counts =
+            PageCounts::new(self.state.page, self.state.page_size, visible.len() as u64);
+        if self.state.clamp_to_last_page(counts.total_pages, true) {
+            counts = PageCounts::new(self.state.page, self.state.page_size, visible.len() as u64);
+        }
+        let start = self.state.offset() as usize;
+        let shown: Vec<OwnSummary> = visible
+            .into_iter()
+            .skip(start)
+            .take(self.state.page_size as usize)
+            .collect();
+        if self.rows_changed {
+            self.columns.load(&shown, OwnSummary::key);
+        }
+        let mut rows = Vec::with_capacity(shown.len());
+        for session in &shown {
+            let key = session.key();
+            let is_current = session.id == current;
+            let device = client_name(session.user_agent.as_deref());
+            let mut row = FlexRow::new(&key)
+                .slot("device", Html::text(&device))
+                .slot(
+                    "ip_address",
+                    Html::raw(format!(
+                        "<span class=\"tabular-nums text-ink-muted\">{}</span>",
+                        Html::text(session.ip_address.as_deref().unwrap_or("—"))
+                    )),
+                )
+                .slot(
+                    "status",
+                    if is_current {
+                        render(Badge::status(BadgeKind::Success, "This device"))?
+                    } else {
+                        Html::EMPTY
+                    },
+                );
+            row.cells.insert(
+                "signed_in".into(),
+                bilibi_ui::flex_table::Cell::instant(Self::instant(
+                    &display,
+                    session.signed_in_at,
+                )?),
+            );
+            row.cells.insert(
+                "last_activity".into(),
+                bilibi_ui::flex_table::Cell::instant(Self::instant(
+                    &display,
+                    session.last_activity,
+                )?),
+            );
+            if !is_current {
+                row.actions = render(RowActions::new(
+                    format!("own-session-actions-{key}"),
+                    &device,
+                    vec![RowAction::new("Sign out", "request_sign_out", "key", &key).danger()],
+                ))?;
+            }
+            row.dom_id = Some(format!("own-session-{key}"));
+            rows.push(row);
+        }
+        let mut table = FlexTable::new("own-sessions", self.columns.flex_columns(), rows)
+            .sorted(self.state.sort_by.as_deref(), self.state.sort_dir);
+        table.zoom = self.columns.zoom;
+        table.suggestions = self.columns.flex_suggestions();
+        table.add_query = &self.columns.add_query;
+        table.caption = "Your sessions";
+        table.framed = false;
+        table.actions = self.rows.iter().any(|row| row.id != current);
+        if shown.is_empty() {
+            table.empty = Some(TableEmpty::Content(Html::text(
+                "No sessions match your search. Try another device or IP address.",
+            )));
+        }
+        let mut body = render(table)?;
+        body.push(&render(Pagination::new(
+            "own-sessions-pagination",
+            counts,
+            &PAGE_SIZES,
+        ))?);
+        let card = render(Card {
+            id: "own-sessions-card",
+            inner_class: "p-0",
+            body,
+            ..Card::default()
+        })?;
+        let form = self.state.filters_form();
+        let toolbar = render(FilterToolbar::new(
+            "own-sessions-filters",
+            vec![ToolbarControl::search(
+                "own-sessions-search",
+                "search",
+                "Search sessions",
+                &form["search"],
+                "Search by device or IP address…",
+            )],
+        ))?;
+        let other_count = self.rows.iter().filter(|row| row.id != current).count();
+        let actions = render(Button {
+            id: "sign-out-other-sessions",
+            event: "request_sign_out_others",
+            working: "Opening…",
+            variant: ButtonVariant::Danger,
+            disabled: other_count == 0,
+            body: Html::text("Sign out everywhere else"),
+            ..Button::default()
+        })?;
+        let header = render(Header {
+            title: Html::text("My settings"),
+            actions,
+            ..Header::default()
+        })?;
+        let dialog = match &self.pending {
+            Some(OwnPending::One(session)) => {
+                let device = client_name(session.user_agent.as_deref());
+                let address = session
+                    .ip_address
+                    .as_deref()
+                    .unwrap_or("an unknown address");
+                let consequence = format!("{device} at {address} will be signed out.");
+                render(ConfirmDialog {
+                    id: "sign-out-session-confirm",
+                    consequence: &consequence,
+                    detail: "That device will need to sign in again. This cannot be undone.",
+                    confirm: "Sign out",
+                    working: "Signing out…",
+                    confirm_event: "sign_out",
+                    cancel_event: "cancel_sign_out",
+                })?
+            }
+            Some(OwnPending::Others(count)) => {
+                let consequence = if *count == 1 {
+                    "1 other session will be signed out.".to_owned()
+                } else {
+                    format!("{count} other sessions will be signed out.")
+                };
+                render(ConfirmDialog {
+                    id: "sign-out-other-sessions-confirm",
+                    consequence: &consequence,
+                    detail: "This device stays signed in. Every other device will need to sign in again.",
+                    confirm: "Sign out everywhere else",
+                    working: "Signing out…",
+                    confirm_event: "sign_out",
+                    cancel_event: "cancel_sign_out",
+                })?
+            }
+            None => Html::EMPTY,
+        };
+        let mut flash = FlashMap::default();
+        if let Some((kind, message)) = &self.flash {
+            match kind {
+                StatusKind::Success => flash.success = message,
+                StatusKind::Error => flash.error = message,
+                StatusKind::Warning => flash.warning = message,
+                StatusKind::Info => flash.info = message,
+            }
+        }
+        OwnView {
+            flash: render(FlashGroup {
+                id: "own-sessions-flash",
+                flash,
+            })?,
+            header,
+            current: SettingsTab::Sessions,
+            toolbar,
+            card,
+            dialog,
+        }
+        .render()
+        .map_err(|_| Error::Internal)
+    }
+}
+
+impl LiveState<Scope, Error> for Own {
+    fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
+        Box::pin(async move {
+            self.rows_changed = true;
+            match request.input {
+                LiveInput::Refresh => {}
+                LiveInput::Params(values) => {
+                    self.state =
+                        ListState::parse(values, OWN_SPEC.clone()).map_err(|_| Error::Internal)?
+                }
+                LiveInput::Event(value) => self.event(request.scope, value).await?,
+            }
+            let html = self.render(request.scope).await?;
+            Ok(LiveBody {
+                html,
+                query: self.state.to_params(),
+                rows: self.rows.len(),
+                ..LiveBody::default()
+            })
+        })
+    }
+}
+
 /// The dashboard widget: how many durable sessions exist right now. The count
 /// is platform-wide, read again when the dashboard counts a refresh and only
 /// while `admin.system.session.list` is effective; otherwise an em dash and no
@@ -592,16 +1060,28 @@ impl LiveState<Scope, Error> for Panel {
 
 impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
-        (operation == "index").then_some("Sessions")
+        match operation {
+            "index" => Some("Sessions"),
+            "own" => Some("Your sessions"),
+            _ => None,
+        }
     }
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
-            if request.operation != "index" {
-                return Err(Error::NotFound);
-            }
             let scope = request.scope.ok_or(Error::Unauthorized)?;
-            let mut index = Index::new(self.0.clone(), request.query)?;
-            let html = index.render(scope).await?;
+            let html = match request.operation {
+                "index" => {
+                    Index::new(self.0.clone(), request.query)?
+                        .render(scope)
+                        .await?
+                }
+                "own" => {
+                    Own::new(self.0.clone(), request.query)?
+                        .render(scope)
+                        .await?
+                }
+                _ => return Err(Error::NotFound),
+            };
             Ok(PageBody {
                 html,
                 live: true,
@@ -613,6 +1093,7 @@ impl Page<Scope, Error> for Pages {
         Box::pin(async move {
             let state: Box<dyn LiveState<Scope, Error>> = match request.operation {
                 "index" => Box::new(Index::new(self.0.clone(), request.query)?),
+                "own" => Box::new(Own::new(self.0.clone(), request.query)?),
                 "dashboard-stats" => Box::new(Panel {
                     core: self.0.clone(),
                     args: bilibi_dashboard::PanelArgs::from_request(&request)?,

@@ -151,6 +151,12 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 <div{% if !id.is_empty() %} id="{{ id }}"{% endif %} data-page="{{ variant.name() }}" data-shared-ui class="mx-auto text-sm {{ variant.width() }}{% if !class.is_empty() %} {{ class }}{% endif %}">{{ caller() }}</div>
 {% endmacro %}
 
+{#- One Actions… disclosure for commands on a list row. The page keeps the
+    target server-side and sends only the row key the latest render supplied. -#}
+{% macro row_actions(id, subject, items) %}
+{% if !items.is_empty() %}<span id="{{ id }}-wrap" data-hook="DisclosureDismiss" class="floating-scope relative inline-block"><button id="{{ id }}" type="button" aria-expanded="false" aria-controls="{{ id }}-items" aria-label="Actions for {{ subject }}…" title="Actions…" class="peer floating-anchor {% call icon_button_class(context=bilibi_ui::IconContext::Table, kind=bilibi_ui::IconKind::Neutral, chrome=bilibi_ui::Chrome::Utilities, busy=false, class="") %}{% endcall %} aria-expanded:bg-brand-surface aria-expanded:text-brand-strong">{% call icon(name="carbon-perform-action", class="size-4") %}{% endcall %}</button><div id="{{ id }}-items" class="floating-list z-40 mt-0.5 hidden min-w-40 rounded-md border border-line bg-surface p-1 text-left shadow-lg peer-aria-expanded:block">{% for item in items %}<button type="button"{% if item.disabled %} disabled{% endif %} data-event="{{ item.event }}" data-{{ item.name }}="{{ item.value }}" class="block w-full rounded-sm px-2 py-1 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong disabled:cursor-not-allowed disabled:text-ink-faint{% if item.danger %} text-danger hover:bg-danger-surface hover:text-danger-ink{% else %} text-ink hover:bg-surface-muted{% endif %}">{{ item.label }}</button>{% endfor %}</div></span>{% endif %}
+{% endmacro %}
+
 {#- Page header: the body is the title; subtitle_html, title_actions and actions are Html fragments.
     The actions slot owns the layout of its buttons: one centred row, 8 px apart (DESIGN.md
     Compact scale), wrapping at phone width; callers pass bare buttons, no wrapper or margin. -#}

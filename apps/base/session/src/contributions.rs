@@ -26,6 +26,7 @@ pub const LIVE_MESSAGES_PER_MINUTE_KEY: &str = "session.live.messages_per_minute
 pub const LIVE_SOCKETS_PER_CUSTOMER_KEY: &str = "session.live.sockets_per_customer";
 pub const LIVE_CHUNKS_PER_MINUTE_KEY: &str = "session.live.chunks_per_minute";
 pub const PATH: &str = "/system/sessions";
+pub const OWN_PATH: &str = "/settings/sessions";
 /// The dashboard entry id is stored in each account's arrangement: never rename.
 pub const WIDGET_ID: &str = "base-dashboard-session-stats";
 pub const EMBED: &str = "session.dashboard-stats";
@@ -75,6 +76,10 @@ inventory::submit! { Contribution::new(DEFINITIONS, LIFETIME_KEY, provenance!(),
 inventory::submit! { Contribution::new(ROUTES, "session.index", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: PATH, service: "base/session.pages", operation: "index",
     access: Access::OperatorCapability(LIST), framed: true,
+}) }
+inventory::submit! { Contribution::new(ROUTES, "session.own", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+    method: Method::Get, path: OWN_PATH, service: "base/session.pages", operation: "own",
+    access: Access::SignedIn, framed: true,
 }) }
 bilibi_menu::contribute!(
     "base/session",

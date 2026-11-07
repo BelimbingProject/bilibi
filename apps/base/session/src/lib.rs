@@ -12,6 +12,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, RwLock},
+    time::SystemTime,
 };
 use tokio::sync::broadcast;
 use tokio_postgres::GenericClient;
@@ -95,6 +96,88 @@ pub struct SessionClient {
     pub name: String,
 }
 
+/// The successful sign-in before the current session, from the retained
+/// sign-in history. No bearer or row id leaves this value.
+#[derive(Clone, Debug)]
+pub struct PreviousSignIn {
+    pub signed_in_at: SystemTime,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+/// One active session owned by the signed-in account. Its bearer stays in the
+/// mounted page state; [`OwnSummary::key`] is the only row identity rendered.
+#[derive(Clone, Debug)]
+struct OwnSummary {
+    id: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    signed_in_at: SystemTime,
+    last_activity: SystemTime,
+}
+impl OwnSummary {
+    fn key(&self) -> String {
+        session_key(&self.id)
+    }
+}
+
+struct OwnTermination {
+    id: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    signed_in_at: String,
+    last_activity: String,
+}
+
+/// A modest device label from a browser's self-reported user agent. It is
+/// presentation only and never grants authority.
+pub fn client_name(user_agent: Option<&str>) -> String {
+    let user_agent = user_agent.unwrap_or_default();
+    let browser = if user_agent.contains("Edg/")
+        || user_agent.contains("EdgiOS/")
+        || user_agent.contains("EdgA/")
+    {
+        Some("Edge")
+    } else if user_agent.contains("Chrome/")
+        || user_agent.contains("CriOS/")
+        || user_agent.contains("HeadlessChrome/")
+    {
+        Some("Chrome")
+    } else if user_agent.contains("Firefox/") || user_agent.contains("FxiOS/") {
+        Some("Firefox")
+    } else if user_agent.contains("OPR/") || user_agent.contains("Opera/") {
+        Some("Opera")
+    } else if user_agent.contains("Safari/") && user_agent.contains("Version/") {
+        Some("Safari")
+    } else {
+        None
+    };
+    let system = if user_agent.contains("Windows") {
+        Some("Windows")
+    } else if user_agent.contains("iPhone")
+        || user_agent.contains("iPad")
+        || user_agent.contains("iPod")
+    {
+        Some("iOS")
+    } else if user_agent.contains("Android") {
+        Some("Android")
+    } else if user_agent.contains("CrOS") {
+        Some("ChromeOS")
+    } else if user_agent.contains("Macintosh") || user_agent.contains("Mac OS X") {
+        Some("macOS")
+    } else if user_agent.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    };
+    match (browser, system) {
+        (Some(browser), Some(system)) => format!("{browser} on {system}"),
+        (Some(browser), None) => browser.to_owned(),
+        (None, Some(system)) => format!("Browser on {system}"),
+        (None, None) => "Browser".to_owned(),
+    }
+}
+
 /// Payload-free metadata of one stored session for the operator list.
 #[derive(Clone, Debug)]
 pub struct Summary {
@@ -113,6 +196,8 @@ impl Summary {
         session_key(&self.id)
     }
 }
+const SIGN_IN_HISTORY_DAYS: i32 = 90;
+
 fn session_key(id: &str) -> String {
     let digest = Sha256::digest(id.as_bytes());
     digest.iter().take(12).map(|b| format!("{b:02x}")).collect()
@@ -414,6 +499,12 @@ impl Sessions {
                 &[&token, &ip, &agent],
             )
             .await?;
+        client
+            .execute(
+                "INSERT INTO session_sign_ins(tenant_id,user_id,signed_in_at,ip_address,user_agent) SELECT tenant_id,user_id,signed_in_at,$2,$3 FROM sessions WHERE id=$1 AND impersonator_id IS NULL",
+                &[&token, &ip, &agent],
+            )
+            .await?;
         Ok(())
     }
     /// Whether this exact session is still live. Agent calls use this read-only
@@ -457,6 +548,63 @@ impl Sessions {
             id: row.get(0),
             name: row.get(1),
         })
+    }
+    /// The latest successful sign-in of this account before the current
+    /// session, kept for `SIGN_IN_HISTORY_DAYS`. An
+    /// impersonating operator is not the account holder and cannot read it.
+    pub async fn previous_sign_in(
+        &self,
+        client: &impl GenericClient,
+        scope: &Scope,
+    ) -> Result<Option<PreviousSignIn>> {
+        if scope.impersonator().is_some()
+            || scope.agent().is_some()
+            || scope.principal().is_some()
+            || scope.actor().kind() != AccountKind::Staff
+        {
+            return Err(Error::Forbidden);
+        }
+        Ok(client
+            .query_opt(
+                "SELECT signed_in_at,ip_address,user_agent FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at<(SELECT signed_in_at FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf=$3 AND impersonator_id IS NULL) ORDER BY signed_in_at DESC,id DESC LIMIT 1",
+                &[&scope.tenant(), &scope.user(), &scope.csrf],
+            )
+            .await?
+            .map(|row| PreviousSignIn {
+                signed_in_at: row.get(0),
+                ip_address: row.get(1),
+                user_agent: row.get(2),
+            }))
+    }
+
+    async fn own_sessions(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Vec<OwnSummary>> {
+        if scope.impersonator().is_some()
+            || scope.agent().is_some()
+            || scope.principal().is_some()
+            || scope.actor().kind() != AccountKind::Staff
+        {
+            return Err(Error::Forbidden);
+        }
+        let policy = self.policy(client).await?;
+        Ok(client
+            .query(
+                "SELECT id,ip_address,user_agent,signed_in_at,last_activity FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $3::double precision) ORDER BY last_activity DESC,id",
+                &[&scope.tenant(), &scope.user(), &(policy.idle_seconds as f64)],
+            )
+            .await?
+            .iter()
+            .map(|row| OwnSummary {
+                id: row.get(0),
+                ip_address: row.get(1),
+                user_agent: row.get(2),
+                signed_in_at: row.get(3),
+                last_activity: row.get(4),
+            })
+            .collect())
     }
     /// How many durable sessions exist right now, platform-wide: the store is
     /// not tenant-owned, and the dashboard asks the operational question.
@@ -568,6 +716,137 @@ impl Sessions {
             }
             None => Ok(Termination::NotFound),
         }
+    }
+    /// The account holder ends one of their own other sessions. Ownership is
+    /// part of the locked read and delete, not trusted from mounted page state.
+    async fn terminate_own(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: &str,
+        current: &str,
+    ) -> Result<Termination> {
+        if id.is_empty() || current.is_empty() {
+            return Err(Error::Invalid);
+        }
+        if id == current {
+            return Ok(Termination::CurrentSession);
+        }
+        if scope.impersonator().is_some()
+            || scope.agent().is_some()
+            || scope.principal().is_some()
+            || scope.actor().kind() != AccountKind::Staff
+        {
+            return Err(Error::Forbidden);
+        }
+        let tenant = scope.tenant();
+        let user = scope.user();
+        let id = id.to_owned();
+        let Some(row) = tx.sql().query_opt(
+            "SELECT ip_address,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND impersonator_id IS NULL FOR UPDATE",
+            &[&tenant, &user, &id],
+        ).await? else {
+            return Ok(Termination::NotFound);
+        };
+        let ip: Option<String> = row.get(0);
+        let agent: Option<String> = row.get(1);
+        let signed_in: String = row.get(2);
+        let activity: String = row.get(3);
+        let ended = id.clone();
+        tx.mutate(move |sql| Box::pin(async move {
+            sql.execute(
+                "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND impersonator_id IS NULL",
+                &[&tenant, &user, &ended],
+            ).await?;
+            Ok(((), vec![Change {
+                kind: "session".into(), id: user,
+                old: json!({"tenant_id":tenant,"user_id":user,"ip_address":ip,"user_agent":agent,"signed_in_at":signed_in,"last_activity":activity,"payload":"[redacted]"}),
+                new: json!({"ended_by_account":true}),
+            }]))
+        })).await?;
+        let sessions = self.terminations.clone();
+        tx.after_commit(move || {
+            let _ = sessions.send(Terminated { id, redirect: None });
+        });
+        Ok(Termination::Terminated)
+    }
+
+    /// The account holder ends every own session except the one making the
+    /// request. Each ended session is a separate audited change.
+    async fn terminate_others(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        current: &str,
+    ) -> Result<Vec<String>> {
+        if current.is_empty() {
+            return Err(Error::Invalid);
+        }
+        if scope.impersonator().is_some()
+            || scope.agent().is_some()
+            || scope.principal().is_some()
+            || scope.actor().kind() != AccountKind::Staff
+        {
+            return Err(Error::Forbidden);
+        }
+        let tenant = scope.tenant();
+        let user = scope.user();
+        let current = current.to_owned();
+        let policy = self.policy(tx.sql()).await?;
+        let rows = tx.sql().query(
+            "SELECT id,ip_address,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id<>$3 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $4::double precision) FOR UPDATE",
+            &[&tenant, &user, &current, &(policy.idle_seconds as f64)],
+        ).await?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let metadata: Vec<OwnTermination> = rows
+            .iter()
+            .map(|row| OwnTermination {
+                id: row.get(0),
+                ip_address: row.get(1),
+                user_agent: row.get(2),
+                signed_in_at: row.get(3),
+                last_activity: row.get(4),
+            })
+            .collect();
+        let ids: Vec<String> = metadata.iter().map(|row| row.id.clone()).collect();
+        let deleting = ids.clone();
+        tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=ANY($3) AND impersonator_id IS NULL",
+                        &[&tenant, &user, &deleting],
+                    ).await?;
+                    let changes = metadata
+                        .iter()
+                        .map(|row| Change {
+                            kind: "session".into(),
+                            id: user,
+                            old: json!({
+                                "tenant_id": tenant,
+                                "user_id": user,
+                                "ip_address": row.ip_address.clone(),
+                                "user_agent": row.user_agent.clone(),
+                                "signed_in_at": row.signed_in_at.clone(),
+                                "last_activity": row.last_activity.clone(),
+                                "payload": "[redacted]",
+                            }),
+                            new: json!({"ended_by_account": true}),
+                        })
+                        .collect();
+                    Ok(((), changes))
+                })
+            })
+            .await?;
+        let announced = ids.clone();
+        let sessions = self.terminations.clone();
+        tx.after_commit(move || {
+            for id in announced {
+                let _ = sessions.send(Terminated { id, redirect: None });
+            }
+        });
+        Ok(ids)
     }
     /// Ends a user's sessions inside the caller's own write, except the one
     /// named: a credential change keeps the session that made it. A session
@@ -794,6 +1073,12 @@ impl Sessions {
             .iter()
             .map(|row| row.get(0))
             .collect();
+        client
+            .execute(
+                "DELETE FROM session_sign_ins WHERE signed_in_at<now()-make_interval(days => $1::int)",
+                &[&SIGN_IN_HISTORY_DAYS],
+            )
+            .await?;
         let pruned = ids.len() as u64;
         self.announce(ids);
         Ok(pruned)
@@ -864,12 +1149,14 @@ fn like_escape(text: &str) -> String {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/session", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/settings", "base/authz", "base/step_up", "base/queue", "base/schedule", "base/ui", "base/menu", "base/dashboard", "base/principal_directory"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/settings", "base/authz", "base/step_up", "base/queue", "base/schedule", "base/datetime", "base/locale", "base/ui", "base/menu", "base/dashboard", "base/principal_directory"],
         migrations: &[
             ("base-session-001-client", include_str!("../migrations/001-client.sql")),
             ("base-session-002-impersonation", include_str!("../migrations/002-impersonation.sql")),
             ("base-session-003-step-up", include_str!("../migrations/003-step-up.sql")),
             ("base-session-004-company", include_str!("../migrations/004-company.sql")),
+            ("base-session-005-signed-in-at", include_str!("../migrations/005-signed-in-at.sql")),
+            ("base-session-006-sign-in-history", include_str!("../migrations/006-sign-in-history.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },
@@ -883,6 +1170,8 @@ inventory::submit! {
                 services.get("base/session.sessions")?,
                 services.get("base/database.mutations")?,
                 services.get("base/principal_directory.directory")?,
+                services.get("base/datetime.display")?,
+                services.get("base/locale.locales")?,
             ))))) },
         ],
     }
