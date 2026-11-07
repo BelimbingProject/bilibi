@@ -231,7 +231,10 @@ impl PortalService {
                         kind: "portal.registration".into(),
                         id,
                         old: json!(null),
-                        new: json!({"name": insert_name, "email": insert_email, "company_name": insert_company, "status": "unverified"}),
+                        // The address has not been confirmed, so the audit
+                        // trail names only the record and its state. The row
+                        // remains the one short-lived source of these values.
+                        new: json!({"status": "unverified"}),
                     });
                     Ok(((), changes))
                 })

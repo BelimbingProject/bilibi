@@ -10,7 +10,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 | Staff page | `/customer-access` (`admin.customer-access.view`; writes need `admin.customer-access.manage`) |
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
 | Portal role | `portal_customer`, given to every customer an invitation admits |
-| Settings | `customer_portal.invitation_days` (tenant, default 7), `customer_portal.registration_days` (installation, default 3) |
+| Settings | `customer_portal.invitation_days` (tenant, default 7), `customer_portal.registration_days` (installation, default 3), and the company retention class `core/portal.registration_requests` |
 | Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`; customer accounts stay in Core User's `users` |
 
 ## Portal site
@@ -39,6 +39,12 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 - The emailed link (`/portal/verify/{address}/{token}`, hashed, single use) shows a button; pressing it confirms the address, so a mail scanner that opens links confirms nothing. An unconfirmed request expires after `customer_portal.registration_days`; a confirmed one waits.
 - Nothing is written to Person or Company. Staff **approve** a confirmed request by choosing the Person (matching or creating it first) and, for a business customer, its affiliation: this sends the ordinary invitation with the request's name and confirmed address, through the same checks. **Reject** closes it; the person is not told and may ask again.
 - Each step is audited: the request and its confirmation as `system · portal`, the decision as the staff member.
+
+### Personal data and retention
+
+- A new unconfirmed request writes only its record ID and status to audit; its unverified name, email and company stay in the registration row rather than append-only evidence.
+- `portal.registration` declares `name`, `email` and `company_name` as personal. A confirmed request that matches an email supplied for a data-subject request is a candidate the operator must confirm. Approval links the request to the chosen Person through its invitation, so it is found without an identifier match. Access and portability export confirmed requests; erasure deletes confirmed or linked requests unless a legal hold names the request or Person, and clears their declared fields from audit evidence.
+- The shared Privacy retention class **Customer account requests** purges expired unconfirmed requests and approved or rejected requests after the primary company's configured period. Confirmed requests still waiting for staff are not expired. As with every privacy class, an operator must set its period, turn it on and enable the daily privacy sweep before cleanup runs.
 
 ## Portal access panel
 
