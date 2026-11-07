@@ -10,8 +10,8 @@ use crate::{
     choices, error_sentence, ActionLink, AddMore, BadgeKind, Button, ButtonVariant, Card, Choice,
     Chrome, ClientEntry, CodeInput, Combobox, DayKind, DayMonth, DayTile, ErrorSummary, Field,
     FileInput, Html, IconButton, IconContext, IconKind, InputKind, LocationAction, MultiSelect,
-    PageVariant, RadioGroup, Restricted, RestrictedField, RowAction, RowActions, SecretInput,
-    StatItem, UploadSpec, Uploads,
+    PageVariant, RadioGroup, Restricted, RestrictedField, SecretInput, StatItem, UploadSpec,
+    Uploads,
 };
 use askama::Template;
 
@@ -469,11 +469,26 @@ impl ComponentsSpecimen {
             body: Html::text("Manage"),
             method: "",
         })?;
-        let row_actions = Html::render(&RowActions::new(
+        // A row's actions: its own (local) action as a plain icon, and the
+        // actions that take it to another module in the Non-local actions menu.
+        let mut row_actions = Html::render(&IconButton {
+            id: "specimen-row-actions-delete",
+            kind: IconKind::Danger,
+            title: "Delete rate",
+            event: "delete",
+            name: "id",
+            value: "example",
+            ..IconButton::new("delete", "Delete the example rate")
+        })?;
+        row_actions.push(&Html::render(&crate::AddToMenu::new(
             "specimen-row-actions-menu",
-            "Example session",
-            vec![RowAction::new("Sign out", "sign_out", "key", "example").danger()],
-        ))?;
+            "Example contact",
+            vec![crate::AddToItem {
+                label: "Invite as customer".into(),
+                href: "/customer-access?drop=person:example".into(),
+                disabled: None,
+            }],
+        ))?);
         let card_titled = Html::render(&Card {
             title: "Company profile",
             inner_class: "p-3",
