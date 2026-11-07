@@ -1542,6 +1542,7 @@ dependencies = [
  "bilibi-locale",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-personal-data",
  "bilibi-principal-directory",
  "bilibi-queue",
  "bilibi-schedule",

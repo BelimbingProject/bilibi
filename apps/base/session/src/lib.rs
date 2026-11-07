@@ -105,6 +105,19 @@ pub struct PreviousSignIn {
     pub user_agent: Option<String>,
 }
 
+/// One retained sign-in of an account, as the personal-data export lists it.
+/// No bearer or row id leaves this value.
+#[derive(Clone, Debug)]
+pub struct SignInRecord {
+    pub user_id: i64,
+    /// RFC 3339, UTC.
+    pub signed_in_at: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    /// RFC 3339, UTC: when the retention sweep deletes the record.
+    pub retained_until: String,
+}
+
 /// One active session owned by the signed-in account. Its bearer stays in the
 /// mounted page state; [`OwnSummary::key`] is the only row identity rendered.
 #[derive(Clone, Debug)]
@@ -575,6 +588,60 @@ impl Sessions {
                 ip_address: row.get(1),
                 user_agent: row.get(2),
             }))
+    }
+
+    /// The retained sign-in history (time, address, user agent) of `users`, for
+    /// an approved personal-data export. Only records inside the retention
+    /// period are listed, newest first per account, so a record the sweep has
+    /// not yet reached is never disclosed or reported as kept. `grant` must be
+    /// for `scope`'s tenant; the caller chooses `users` from the person.
+    pub async fn sign_in_history(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        grant: &bilibi_personal_data::Disclosure,
+        users: &[i64],
+    ) -> Result<Vec<SignInRecord>> {
+        grant.check(scope)?;
+        Ok(client
+            .query(
+                "SELECT user_id,to_char(signed_in_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),ip_address,user_agent,\
+                 to_char((signed_in_at+make_interval(days => $3::int)) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+                 FROM session_sign_ins WHERE tenant_id=$1 AND user_id=ANY($2) AND signed_in_at>=now()-make_interval(days => $3::int) \
+                 ORDER BY user_id,signed_in_at DESC,id DESC",
+                &[&scope.tenant(), &users, &SIGN_IN_HISTORY_DAYS],
+            )
+            .await?
+            .iter()
+            .map(|row| SignInRecord {
+                user_id: row.get(0),
+                signed_in_at: row.get(1),
+                ip_address: row.get(2),
+                user_agent: row.get(3),
+                retained_until: row.get(4),
+            })
+            .collect())
+    }
+
+    /// When the sweep deletes the newest retained sign-in of `user` (RFC 3339,
+    /// UTC), or `None` when none is retained. Erasure leaves the sign-in
+    /// history in place as security evidence and reports it as kept until then.
+    pub async fn sign_in_retained_until(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        grant: &bilibi_personal_data::Erasure,
+        user: i64,
+    ) -> Result<Option<String>> {
+        grant.check(scope)?;
+        Ok(client
+            .query_one(
+                "SELECT to_char((max(signed_in_at)+make_interval(days => $3::int)) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+                 FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at>=now()-make_interval(days => $3::int)",
+                &[&scope.tenant(), &user, &SIGN_IN_HISTORY_DAYS],
+            )
+            .await?
+            .get(0))
     }
 
     async fn own_sessions(
@@ -1149,7 +1216,7 @@ fn like_escape(text: &str) -> String {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/session", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/settings", "base/authz", "base/step_up", "base/queue", "base/schedule", "base/datetime", "base/locale", "base/ui", "base/menu", "base/dashboard", "base/principal_directory"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/settings", "base/authz", "base/step_up", "base/queue", "base/schedule", "base/datetime", "base/locale", "base/ui", "base/menu", "base/dashboard", "base/principal_directory", "base/personal_data"],
         migrations: &[
             ("base-session-001-client", include_str!("../migrations/001-client.sql")),
             ("base-session-002-impersonation", include_str!("../migrations/002-impersonation.sql")),

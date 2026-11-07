@@ -9,12 +9,15 @@
 //! its placeholder email. Accounts that only share an email are counted, never
 //! touched. A membership invitation is found by its address: erasure closes it
 //! and anonymises the address and the sign-in-less account prepared for it.
+//! Session's sign-in history (time, address, device) is security evidence:
+//! the export lists it, erasure leaves it and reports it kept, and Session's
+//! expiry sweep deletes each record 90 days after the sign-in.
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_personal_data::{
     Action, Disclosure, Erased, ErasedRecord, Erasure, Exported, Handler, HandlerFuture, Holds,
-    Identifier, Kept, KindCount, Located, PersonalData, RecordKind, Subject, ERASED, PERSONAL_DATA,
-    RECORD_KINDS,
+    Identifier, Kept, KeptReason, KindCount, Located, PersonalData, RecordKind, Subject, ERASED,
+    PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_security::Sessions;
 use bilibi_tenancy::Scope;
@@ -25,6 +28,9 @@ use tokio_postgres::Client;
 const USER_KIND: &str = "user";
 pub(crate) const IDENTITY_KIND: &str = "user_identity";
 const NOTIFICATION_KIND: &str = "notification";
+/// The certificate's name for an account's retained sign-in history; not an
+/// audit record kind, so no store erases it.
+const SIGN_IN_HISTORY_KIND: &str = "session.sign_in_history";
 /// A membership invitation: the invitee's address, and the name on the
 /// account prepared for it, which has no sign-in yet.
 pub(crate) const INVITATION_KIND: &str = "user.invitation";
@@ -134,10 +140,28 @@ impl Handler for Accounts {
                     &[&scope.tenant(), &subject.person.get()],
                 )
                 .await?;
+            let bound = BOUND.get().ok_or(Error::Internal)?;
+            let user_ids: Vec<i64> = accounts.iter().map(|row| row.get(0)).collect();
+            let sign_ins = bound
+                .sessions
+                .sign_in_history(client, scope, grant, &user_ids)
+                .await?;
             let records: Vec<Value> = accounts
                 .iter()
                 .map(|row| {
+                    let user = row.get::<_, i64>(0);
+                    let history: Vec<Value> = sign_ins
+                        .iter()
+                        .filter(|sign_in| sign_in.user_id == user)
+                        .map(|sign_in| {
+                            json!({
+                                "signed_in_at": sign_in.signed_in_at, "ip_address": sign_in.ip_address,
+                                "user_agent": sign_in.user_agent, "retained_until": sign_in.retained_until,
+                            })
+                        })
+                        .collect();
                     json!({
+                        "sign_ins": history,
                         "id": row.get::<_, i64>(0), "name": row.get::<_, String>(1), "email": row.get::<_, String>(2),
                         "status": row.get::<_, String>(3), "email_verified_at": row.get::<_, Option<String>>(4),
                         "deleted_at": row.get::<_, Option<String>>(5), "notifications": row.get::<_, Value>(6),
@@ -222,6 +246,22 @@ impl Handler for Accounts {
                 if user == scope.user() {
                     // The approver's own account cannot be the one erased.
                     return Err(Error::Forbidden);
+                }
+                // The sign-in history (time, address, device) is security
+                // evidence: erasure leaves it, and Session's expiry sweep
+                // deletes each record 90 days after the sign-in.
+                if let Some(until) = bound
+                    .sessions
+                    .sign_in_retained_until(tx.sql(), scope, grant, user)
+                    .await?
+                {
+                    erased.kept.push(Kept {
+                        kind: SIGN_IN_HISTORY_KIND.into(),
+                        id: user.to_string(),
+                        reason: KeptReason::RetainedUntil,
+                        until: Some(until),
+                        hold: None,
+                    });
                 }
                 // Each notification on its own: a held one stays.
                 let notices: Vec<i64> = tx
