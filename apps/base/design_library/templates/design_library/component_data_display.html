@@ -38,7 +38,7 @@
                 <div id="component-badge" class="flex flex-wrap gap-2">
                   {% call ui::badge() %}Archived{% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Success) %}Active{% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Warning) %}
                     Pending
-                  {% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Danger) %}Suspended{% endcall %}{% call ui::badge(dot=false) %}
+                  {% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Danger) %}Suspended{% endcall %}{% call ui::badge(kind=bilibi_ui::BadgeKind::Warning) %}Past due{% endcall %}{% call ui::badge(dot=false) %}
                     Manager
                   {% endcall %}
                 </div>
