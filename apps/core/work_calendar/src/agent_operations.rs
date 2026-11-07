@@ -214,9 +214,21 @@ async fn business_time(
 ) -> bilibi_agent_api::Result<Value> {
     let operation = input["operation"].as_str().unwrap_or_default();
     let (from, to) = match operation {
-        "is_open" | "next_open" | "add" => {
+        "is_open" | "next_open" | "add" | "add_working_days_at" => {
             let at = utc_date(instant(input, "at")?);
             (shift(at, -1)?, shift(at, SEARCH_DAYS + 1)?)
+        }
+        "shift" => {
+            let at = utc_date(instant(input, "at")?);
+            let backwards = input["duration"]
+                .as_str()
+                .and_then(|text| text.parse::<SignedDuration>().ok())
+                .is_some_and(|duration| duration.is_negative());
+            if backwards {
+                (shift(at, -(SEARCH_DAYS + 1))?, shift(at, 1)?)
+            } else {
+                (shift(at, -1)?, shift(at, SEARCH_DAYS + 1)?)
+            }
         }
         "elapsed" => (
             shift(utc_date(instant(input, "at")?), -1)?,
@@ -229,7 +241,7 @@ async fn business_time(
         _ => {
             return Err(bilibi_agent_api::invalid(
                 "operation",
-                "must be is_open, next_open, add, elapsed or add_working_days",
+                "must be is_open, next_open, add, shift, elapsed, add_working_days or add_working_days_at",
             ))
         }
     };
@@ -253,7 +265,7 @@ async fn business_time(
         "next_open" => timetable
             .next_open(instant(input, "at")?)
             .map(|at| json!(at.to_string())),
-        "add" => {
+        "add" | "shift" => {
             let duration: SignedDuration = input["duration"]
                 .as_str()
                 .and_then(|text| text.parse().ok())
@@ -263,9 +275,13 @@ async fn business_time(
                         "must be an ISO 8601 duration, such as PT8H30M",
                     )
                 })?;
-            timetable
-                .add(instant(input, "at")?, duration)
-                .map(|at| json!(at.to_string()))
+            let at = instant(input, "at")?;
+            let answer = if operation == "shift" {
+                timetable.shift(at, duration)
+            } else {
+                timetable.add(at, duration)
+            };
+            answer.map(|at| json!(at.to_string()))
         }
         "elapsed" => timetable
             .elapsed(instant(input, "at")?, instant(input, "until")?)
@@ -277,9 +293,15 @@ async fn business_time(
                 .ok_or_else(|| {
                     bilibi_agent_api::invalid("days", "must be a whole number from 0")
                 })?;
-            timetable
-                .add_working_days(date(input, "date")?, days)
-                .map(|day| json!(day.to_string()))
+            if operation == "add_working_days_at" {
+                timetable
+                    .add_working_days_at(instant(input, "at")?, days)
+                    .map(|at| json!(at.to_string()))
+            } else {
+                timetable
+                    .add_working_days(date(input, "date")?, days)
+                    .map(|day| json!(day.to_string()))
+            }
         }
     };
     match answer {
@@ -384,12 +406,12 @@ fn read_schema(operation: Read) -> Value {
         }}),
         Read::BusinessTime => json!({"type":"object","required":["code","operation"],"properties":{
             "code":code_schema("A calendar code"),
-            "operation":{"type":"string","enum":["is_open","next_open","add","elapsed","add_working_days"]},
-            "at":{"type":"string","format":"date-time","description":"is_open, next_open, add, elapsed: the instant, with an offset"},
+            "operation":{"type":"string","enum":["is_open","next_open","add","shift","elapsed","add_working_days","add_working_days_at"]},
+            "at":{"type":"string","format":"date-time","description":"is_open, next_open, add, shift, elapsed, add_working_days_at: the instant, with an offset"},
             "until":{"type":"string","format":"date-time","description":"elapsed: the end, not before at"},
-            "duration":{"type":"string","maxLength":40,"description":"add: business time to add, ISO 8601 (PT8H30M)"},
+            "duration":{"type":"string","maxLength":40,"description":"add: non-negative business time; shift: signed business time, ISO 8601 (PT8H30M or -PT2H)"},
             "date":{"type":"string","format":"date","description":"add_working_days: the start date"},
-            "days":{"type":"integer","minimum":0,"maximum":366,"description":"add_working_days: 0 is the date itself or the next working day"}
+            "days":{"type":"integer","minimum":0,"maximum":366,"description":"add_working_days, add_working_days_at: 0 is the date itself or the next working day; the instant operation preserves local time capped at final close"}
         }}),
     }
 }
@@ -577,7 +599,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/work_calendar", crate:
         read!("core.work_calendar.holiday_set.list", "List holiday sets", "This tenant's holiday sets and the installation-wide ones (code, name, country, division, installation), a page at a time, with the total.", LIST, SETS_OP, sets_schema),
         read!("core.work_calendar.get", "Get a work calendar", "One calendar: its weekly rule versions, included holiday sets and dated exceptions, with the version to write against.", VIEW, GET_OP, get_schema),
         read!("core.work_calendar.days", "Resolve calendar days", "Each date in a range (at most 731 days) as working, rest, off or holiday, with its opening periods and why.", VIEW, DAYS_OP, days_schema),
-        read!("core.work_calendar.business_time", "Business-time arithmetic", "Ask a calendar: is it open at an instant, when does it next open, what instant is a duration of business time later, how much business time lies between two instants, which is the nth working day after a date.", VIEW, BUSINESS_OP, business_schema),
+        read!("core.work_calendar.business_time", "Business-time arithmetic", "Ask a calendar: is it open at an instant, when does it next open, what instant is a duration of business time later, shift by signed business time, how much business time lies between two instants, which is the nth working day after a date or instant (preserving local time capped at final close).", VIEW, BUSINESS_OP, business_schema),
         read!("core.work_calendar.holiday_set.get", "Get a holiday set", "One holiday set with its holidays (optionally from and to a date) and the calendars that include it.", VIEW, SET_OP, set_schema),
         write!("core.work_calendar.create", "Create a work calendar", "A new calendar with its zone, its first weekly rule and its holiday substitution rule.", CREATE, create_schema),
         write!("core.work_calendar.update", "Update a work calendar", "Rename a calendar, change where holidays on rest days move, or retire or reactivate it.", UPDATE, update_schema),
@@ -591,5 +613,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/work_calendar", crate:
         write!("core.work_calendar.include", "Include a holiday set in a calendar", "Include a holiday set in a calendar, or leave it out.", INCLUDE, include_schema),
     ],
     guides: &[Guide { key: "core.work_calendar", title: "Work calendars", summary: "Build a calendar, enter holidays and ask business-time questions.", keywords: &["calendar", "working hours", "holiday", "business time", "sla"], capability: VIEW,
-        body: "A work calendar says when a tenant does business. Every date resolves to working (with opening periods), rest (the weekly rest day), off (another non-working day) or holiday: a dated exception wins, then a holiday (or a substitute for one) from an included holiday set, then the weekly rule in force. Build one with core.work_calendar.create (code, name, week; the zone defaults to the tenant's). Change the week from a date with core.work_calendar.rule.set; earlier dates keep their rules. Create a holiday set per country or state with core.work_calendar.holiday_set.create, enter a year of holidays in one core.work_calendar.holiday_set.holidays call, and include it with core.work_calendar.include. Installation-wide sets (installation true in core.work_calendar.holiday_set.list) are kept by the platform operator for every tenant: include one like your own; it is read-only, so to change it copy it with core.work_calendar.holiday_set.copy and include the copy instead. A shutdown, a special working day or a half day is core.work_calendar.exception.add. Writes need the version from core.work_calendar.get or .holiday_set.get; plan, show the review, then commit. One plan may write a calendar or set several times: each of those writes names the version you read. Check the result with core.work_calendar.days, and answer due times with core.work_calendar.business_time: add PT8H from an instant gives the due time (a result at a closing time stays there), elapsed measures business time between two instants, add_working_days counts working days. beyond true means the answer lies more than 366 days ahead or the calendar has no working time." }],
+        body: "A work calendar says when a tenant does business. Every date resolves to working (with opening periods), rest (the weekly rest day), off (another non-working day) or holiday: a dated exception wins, then a holiday (or a substitute for one) from an included holiday set, then the weekly rule in force. Build one with core.work_calendar.create (code, name, week; the zone defaults to the tenant's). Change the week from a date with core.work_calendar.rule.set; earlier dates keep their rules. Create a holiday set per country or state with core.work_calendar.holiday_set.create, enter a year of holidays in one core.work_calendar.holiday_set.holidays call, and include it with core.work_calendar.include. Installation-wide sets (installation true in core.work_calendar.holiday_set.list) are kept by the platform operator for every tenant: include one like your own; it is read-only, so to change it copy it with core.work_calendar.holiday_set.copy and include the copy instead. A shutdown, a special working day or a half day is core.work_calendar.exception.add. Writes need the version from core.work_calendar.get or .holiday_set.get; plan, show the review, then commit. One plan may write a calendar or set several times: each of those writes names the version you read. Check the result with core.work_calendar.days, and answer due times with core.work_calendar.business_time: add PT8H from an instant gives the due time (a result at a closing time stays there), elapsed measures business time between two instants, shift accepts signed durations (negative counts backwards from the previous close when closed), add_working_days counts working dates, and add_working_days_at preserves local time capped at the destination final close (gaps use the first valid instant, folds the earlier one; zero rolls a non-working date forward). beyond true means the answer lies past the loaded window or 366-day search limit or the calendar has no working time." }],
 }) }
