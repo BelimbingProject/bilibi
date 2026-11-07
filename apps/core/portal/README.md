@@ -10,8 +10,8 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 | Staff page | `/customer-access` (`admin.customer-access.view`; writes need `admin.customer-access.manage`) |
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
 | Portal role | `portal_customer`, given to every customer an invitation admits |
-| Settings | `customer_portal.invitation_days` (tenant, default 7), `customer_portal.registration_days` (installation, default 3), and the company retention class `core/portal.registration_requests` |
-| Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`; customer accounts stay in Core User's `users` |
+| Settings | `customer_portal.invitation_days` (tenant, default 7), the installation-wide `customer_portal.registration_*` lifetime and abuse limits, and the company retention class `core/portal.registration_requests` |
+| Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`, `customer_registration_limits`; customer accounts stay in Core User's `users` |
 
 ## Portal site
 
@@ -35,7 +35,8 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 ## Requests for an account
 
 - **Off until staff turn it on** (`registration` on the site, issue 137 behaviour 7). While off, or while the portal is off, `/portal/register/{address}` and `/portal/verify/...` answer 404 and the sign-in card has no link to them.
-- Someone gives a name, an email and an optional company name. The answer is the same for known and unknown addresses. A live unverified request or one waiting for staff stays unchanged and sends no new mail, even for concurrent requests from different senders; only an expired unverified request is replaced. The existing token remains valid until `customer_portal.registration_days` expires. The tenant/normalized-recipient unique index arbitrates creation in the owner transaction. Requests are also bounded per sender with password recovery (`user.recovery.per_sender_per_minute`).
+- Someone gives a name, an email and an optional company name. The answer is the same for known and unknown addresses, including when a limit suppresses the request. A live unverified request or one waiting for staff stays unchanged and sends no new mail, even for concurrent requests from different senders; only an expired unverified request is replaced. The existing token remains valid until `customer_portal.registration_days` expires. The tenant/normalized-recipient unique index arbitrates creation in the owner transaction.
+- Registration has its own installation-wide settings for sender, normalized-recipient and tenant-portal limits over rolling one-minute and one-day windows, plus a cap on pending requests. The counters and admission lock are in PostgreSQL, so every application node shares them; registration consumes none of password recovery's budget. The table keeps only tenant-bound one-way subject fingerprints; each admitted request purges up to 100 inactive counter rows older than two days. Reaching the portal-wide rate or pending cap notifies staff who can manage customer access at most once per day. The public response remains the ordinary success response and no mail or registration row is created.
 - The emailed link (`/portal/verify/{address}/{token}`, hashed, single use) shows a button; pressing it confirms the address, so a mail scanner that opens links confirms nothing. An unconfirmed request expires after `customer_portal.registration_days`; a confirmed one waits.
 - Nothing is written to Person or Company. Staff **approve** a confirmed request by choosing the Person (matching or creating it first) and, for a business customer, its affiliation: this sends the ordinary invitation with the request's name and confirmed address, through the same checks. **Reject** closes it; the person is not told and may ask again.
 - Each step is audited: the request and its confirmation as `system · portal`, the decision as the staff member.

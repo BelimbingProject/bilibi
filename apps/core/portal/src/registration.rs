@@ -147,6 +147,7 @@ impl PortalService {
         name: &str,
         email: &str,
         company: &str,
+        sender: &str,
     ) -> std::result::Result<(), RegisterError> {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let Some(site) = open_site(&**client, address).await? else {
@@ -194,45 +195,27 @@ impl PortalService {
                 Context::system(tenant, PRINCIPAL, "core.portal.registration.request"),
             )
             .await?;
-        let (insert_name, insert_email, insert_company) =
-            (name.clone(), email.clone(), company.clone());
-        let created = tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    // The open-recipient unique index arbitrates concurrent
-                    // callers, even when no row existed for either to lock.
-                    let inserted = sql
-                        .query_opt(
-                            "INSERT INTO customer_registrations(tenant_id,name,email,company_name,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,now()+make_interval(days => $6::int)) ON CONFLICT (tenant_id,email) WHERE decision IS NULL DO NOTHING RETURNING id",
-                            &[&tenant, &insert_name, &insert_email, &insert_company, &hash, &days],
-                        )
-                        .await?;
-                    let Some(inserted) = inserted else {
-                        // Suppression made no write. Refuse this mutation and
-                        // roll it back below, rather than invent an audit Change.
-                        return Err(Error::Conflict);
-                    };
-                    let id: i64 = inserted.get(0);
-                    let changes = vec![Change {
-                        kind: "portal.registration".into(),
-                        id,
-                        old: json!(null),
-                        // The address has not been confirmed, so the audit
-                        // trail names only the record and its state. The row
-                        // remains the one short-lived source of these values.
-                        new: json!({"status": "unverified"}),
-                    }];
-                    Ok(((), changes))
-                })
-            })
-            .await;
-        match created {
-            Ok(()) => {}
-            Err(Error::Conflict) => {
+        let admission = self
+            .admit_registration(
+                &mut tx,
+                crate::registration_limits::NewRegistration {
+                    tenant,
+                    name: name.clone(),
+                    email: email.clone(),
+                    company: company.clone(),
+                    token_hash: hash.clone(),
+                    days,
+                    sender: sender.to_owned(),
+                },
+            )
+            .await?;
+        if !admission.created {
+            if admission.changed {
+                tx.commit().await?;
+            } else {
                 tx.rollback().await?;
-                return Ok(());
             }
-            Err(error) => return Err(error.into()),
+            return Ok(());
         }
         let message = Message::text(
                 Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,

@@ -1200,7 +1200,8 @@ pub struct RegisterSubmission {
 }
 /// `POST /portal/register/{site}`: takes the request and emails its
 /// confirmation link; the answer is the same for known and unknown
-/// addresses. Bounded per sender with password recovery, since it sends mail.
+/// addresses. Core Portal applies its own shared registration limits before
+/// it writes a request or sends mail.
 pub async fn register(
     State(app): State<App>,
     headers: HeaderMap,
@@ -1230,11 +1231,15 @@ pub async fn register(
     if !(form.name_errors.is_empty() && form.email_errors.is_empty()) {
         return register_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
     }
-    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
-        form.email_errors = vec![RECOVERY_THROTTLED.into()];
-        return register_card(&site, form, StatusCode::TOO_MANY_REQUESTS);
-    }
-    match access.register(&address, &name, &email, &company).await {
+    let sender = api::client_address(
+        peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
+        &headers,
+    )
+    .map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    match access
+        .register(&address, &name, &email, &company, &sender)
+        .await
+    {
         Ok(()) => {
             form.success = REQUESTED;
             register_card(&site, form, StatusCode::OK)
