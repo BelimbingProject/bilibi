@@ -2,7 +2,7 @@
 //! carries a reference only (`kind:id`, `FlexRow::record`); a target page
 //! wraps itself in a [`DropZone`] (`DropZone::wrap`) and receives a
 //! `drop_records` event; the same shortcut is always also an item of the
-//! row's Actions… menu ([`AddToMenu`]), a plain link, so a phone, the
+//! row's "Non-local actions" menu ([`AddToMenu`]), a plain link, so a phone, the
 //! keyboard, a screen reader and an AI agent reach it without a drag. Which pages accept which kinds is
 //! `base/records`' business (`bilibi_records::DropTarget`); this module only
 //! draws it. Browser half: `assets/drops.js`. Contract: `DESIGN.md`.
@@ -51,7 +51,7 @@ impl DropZone {
     }
 }
 
-/// One shortcut in the Actions… menu: a link to the target page that opens
+/// One shortcut in the "Non-local actions" menu: a link to the target page that opens
 /// its review on the records. A target that takes fewer records than are
 /// ticked stays in the menu, disabled, with the reason as its title.
 #[derive(Clone, Debug)]
@@ -61,15 +61,20 @@ pub struct AddToItem {
     pub disabled: Option<String>,
 }
 
-/// The Actions… menu of a row or of a selection bar: an icon-only button
-/// (Carbon `perform-action`, tooltip "Actions…") that opens the list of
-/// pages the record can be taken to. `DisclosureDismiss` closes it on Escape
-/// and on a click outside.
+/// The "Non-local actions" menu of a row or of a selection bar: an icon-only button
+/// (Font Awesome `arrow-up-right-from-square`, tooltip "Non-local actions") that
+/// opens the list of pages the record can be taken to. `DisclosureDismiss`
+/// closes it on Escape and on a click outside.
+///
+/// Only actions that take the record to another module or kind of record
+/// belong here (`bilibi_records::Records::add_to`). An action on the record
+/// itself (edit, delete, archive, an on/off) is an `IconButton` on the row,
+/// never an item of this menu (`DESIGN.md`, Lists, Row actions).
 #[derive(Template, Clone, Debug)]
 #[template(
     source = r##"{%- import "components.html" as ui -%}
 {%- if !items.is_empty() -%}
-<span id="{{ id }}-wrap" data-hook="DisclosureDismiss" class="floating-scope relative inline-block"><button id="{{ id }}" type="button" aria-expanded="false" aria-controls="{{ id }}-items" aria-label="Actions for {{ subject }}…" title="Actions…" class="peer floating-anchor {% call ui::icon_button_class(context=bilibi_ui::IconContext::Table, kind=bilibi_ui::IconKind::Neutral, chrome=bilibi_ui::Chrome::Utilities, busy=false, class="") %}{% endcall %} aria-expanded:bg-surface-sunken aria-expanded:text-ink">{% call ui::icon(name="carbon-perform-action", class="size-4") %}{% endcall %}</button><div id="{{ id }}-items" class="floating-list z-40 mt-0.5 hidden min-w-40 rounded-md border border-line bg-surface p-1 text-left shadow-lg peer-aria-expanded:block">{% for item in items %}{% if let Some(reason) = item.disabled %}<span id="{{ id }}-{{ loop.index0 }}" aria-disabled="true" title="{{ reason }}" class="block cursor-not-allowed rounded-sm px-2 py-1 text-xs text-ink-faint">{{ item.label }}</span>{% else %}<a id="{{ id }}-{{ loop.index0 }}" href="{{ item.href }}" class="block rounded-sm px-2 py-1 text-xs text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none">{{ item.label }}</a>{% endif %}{% endfor %}</div></span>
+<span id="{{ id }}-wrap" data-hook="DisclosureDismiss" class="floating-scope relative inline-block"><button id="{{ id }}" type="button" aria-expanded="false" aria-controls="{{ id }}-items" aria-label="Non-local actions for {{ subject }}" title="Non-local actions" class="peer floating-anchor {% call ui::icon_button_class(context=bilibi_ui::IconContext::Table, kind=bilibi_ui::IconKind::Neutral, chrome=bilibi_ui::Chrome::Utilities, busy=false, class="") %}{% endcall %} aria-expanded:bg-surface-sunken aria-expanded:text-ink">{% call ui::icon(name="fas-arrow-up-right-from-square", class="size-4") %}{% endcall %}</button><div id="{{ id }}-items" class="floating-list z-40 mt-0.5 hidden min-w-40 rounded-md border border-line bg-surface p-1 text-left shadow-lg peer-aria-expanded:block">{% for item in items %}{% if let Some(reason) = item.disabled %}<span id="{{ id }}-{{ loop.index0 }}" aria-disabled="true" title="{{ reason }}" class="block cursor-not-allowed rounded-sm px-2 py-1 text-xs text-ink-faint">{{ item.label }}</span>{% else %}<a id="{{ id }}-{{ loop.index0 }}" href="{{ item.href }}" class="block rounded-sm px-2 py-1 text-xs text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none">{{ item.label }}</a>{% endif %}{% endfor %}</div></span>
 {%- endif -%}"##,
     ext = "html"
 )]

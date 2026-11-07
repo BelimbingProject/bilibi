@@ -244,7 +244,7 @@ impl Index {
             ],
         ))?);
         // Where a contact may go from here (issue 265): rows become draggable
-        // and offer "Actions…" only when a page the person may use accepts one.
+        // and offer "Non-local actions" only when a page the person may use accepts one.
         let add_to = self.pages.records.add_to(scope, PERSON_KIND).await?;
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {

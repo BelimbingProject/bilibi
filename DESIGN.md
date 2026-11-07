@@ -168,7 +168,9 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Settings:** the operator and company settings table opens each Value cell as a form with Save and Cancel (`InlineForm`). Enter saves; Escape cancels. Protected values ask for 2FA in the row.
 - **Empty:** `EmptyState` says why and offers the fix itself: a button straight to the form that clears it. Its words stay true: "Enable the currencies first" shows only while none is enabled.
 - **Every row has a next step.** A row whose obvious action is not visible gets one ("Open book" on a company without a book).
-- **Row actions:** one "Actions…" icon button (Carbon `perform-action`, `AddToMenu` in `apps/base/ui/src/drops.rs`) per row and on the selection bar, listing every action other modules register for that kind of record. No row of separate action links.
+- **Row actions:** a *local* action works on the row's own record where it stands (edit, delete, archive, an on/off). It is a plain icon button on the row, with a tooltip that names it (`IconButton`). A *non-local* action takes the record to another module or kind of record ("Invite as customer" from a contact, "Add as customer" when Finance is mounted); other modules register them for that kind of record. Non-local actions sit in one "Non-local actions" icon button (Font Awesome `arrow-up-right-from-square`, `AddToMenu` in `apps/base/ui/src/drops.rs`) on the row and on the selection bar, and nowhere else. A row with no non-local action shows no "Non-local actions" button. No row of separate text action links.
+  - Before: an exchange rate row had a menu button whose only item was Delete, so deleting took two clicks and hid what the row can do.
+  - After: the rate row shows its delete icon (tooltip "Delete rate") and no "Non-local actions" button, because no other module takes a rate. A contact row keeps "Non-local actions" for "Invite as customer".
 - **Bulk actions:** a list whose records may be exported or changed together sets `FlexTable.selection`: a tick at the start of each row and one for the page, and, while anything is ticked, a bar above the table saying how many, offering every row the filters match, a Clear, and the bulk actions. The page keeps the ticks on the server and clears them when the filters or sort change. People who may take no bulk action see no ticks.
 
 ### Flexible columns
@@ -276,7 +278,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 ### Drag and drop between tiles *built* (`apps/base/records/README.md`, Drop targets)
 
-- **A shortcut, never the only way.** A row of a list, or every ticked row, can be dragged onto a tile that accepts that kind of record. Every drop target is also an item of the "Actions…" menu (the perform-action icon button) on the row and on the selection bar, a plain link that opens the same review, so a phone, the keyboard, a screen reader and an AI assistant reach it without dragging.
+- **A shortcut, never the only way.** A row of a list, or every ticked row, can be dragged onto a tile that accepts that kind of record. Every drop target is also an item of the "Non-local actions" menu (the arrow-out-of-a-box icon button) on the row and on the selection bar, a plain link that opens the same review, so a phone, the keyboard, a screen reader and an AI assistant reach it without dragging.
 - **Only tiles that accept the records light up** while a drag lasts (a dashed selection-line outline and the action's name); the one under the pointer fills. A tile that does not accept them shows no change and refuses the drop.
 - **A drop opens the target's own review**, the dialog its button opens, with the record chosen. Nothing is written until the person confirms, and the confirm runs the target's existing operation: its permission check, rules and history. A drop carries references only (`kind:id`) and the target re-reads every record under the person's own scope.
 - **Rows are draggable only when a page the person may use accepts their kind;** the menu shows the same targets. A target that takes fewer records than are ticked stays in the menu, greyed, saying how many it takes.
@@ -328,7 +330,7 @@ Run this on every page you changed, in the browser at `APP_ORIGIN`, once with a 
 11. Is header navigation the standard button, and Back the standard `BackLink`?
 12. Is every coded choice a searchable combobox with code and name, finding common names too?
 13. Do results update live, with no Convert or Calculate button?
-14. Are row actions one "Actions…" button?
+14. Does "Non-local actions" hold only actions that take the record to another module, with local ones (edit, delete, archive, on/off) as plain icon buttons on the row?
 15. Do sections, cards, toolbars and tables keep the standard gaps, with nothing touching, and do icon and close buttons stay inside their box on a touch screen?
 
 How to build each part with the shared components: `apps/base/ui/AGENTS.md`.

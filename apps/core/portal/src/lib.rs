@@ -218,7 +218,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PORTAL_PAGES, provenance!(),
     pending: Pending::Every { reason: "The authenticator page enrols and moves the customer's own authenticator through the User facade, as the staff page does; no contract yet." },
 }) }
 
-// A contact dropped on the page, or carried by "Actions…", opens the same
+// A contact dropped on the page, or carried by "Non-local actions", opens the same
 // invitation review as "+ Customer"; the review commits the invitation
 // contract (one Person at a time, as the invite dialog takes).
 bilibi_records::drop_target!(
