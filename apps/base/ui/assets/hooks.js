@@ -1,6 +1,6 @@
 // Browser behaviour for the shared form controls in templates/forms.html:
 // CodeInput, ColourInput, Combobox, SecretReveal, SecretClear, SecretStored and
-// DisclosureDismiss, MultiSelect, LocationAction, FilterSheet (plus the dashboard's DashboardSort and the form Fold).
+// DisclosureDismiss, MultiSelect, LocationAction, FilterSheet, DateInput (plus the dashboard's DashboardSort and the form Fold).
 // The LiveView JS commands are folded into the hooks.
 // Each registers with the shared `data-hook` runtime in ui.js
 // (BilibiUI.registerHook), which mounts a control when it enters the
@@ -1186,138 +1186,141 @@
 })();
 
 ;(() => {
-// Keeps every rendered instant on the saved display mode.
-//
-// A mode change has to reach timestamps that are already on screen, including
-// rows a LiveView stream handed to the DOM and never re-renders. So the shell
-// publishes the live mode on #app-shell and this hook re-applies it in place.
-//
-// The server decides `company` and `utc` and writes both strings onto the
-// element, so those two modes are a copy, never a re-format: the browser
-// cannot disagree with the server about a string it did not produce. `local`
-// is the one mode the server cannot decide — it does not know the browser's
-// zone — so it is formatted here, in the reader's own locale and hour cycle.
-const SHELL = "#app-shell"
+  // DateInput (the date, date-and-time and time kinds of forms::input, and
+  // forms::date_box): one text box that reads and shows the shared formats,
+  // "6 Nov 2026", "6 Nov 2026, 14:30" and "14:30", on every browser. A native
+  // date or time input draws the browser's own order and clock (mm/dd/yyyy,
+  // 02:30 PM on an American system), so it is never the visible box here.
+  // The box has no name; its hidden sibling posts what the server always
+  // read (yyyy-mm-dd, yyyy-mm-ddTHH:MM or HH:MM), kept in step on every
+  // keystroke, so a change, Enter or a submit button carries what the box
+  // shows. A date may be typed "6 Nov 2026", "6/11/2026" (day first),
+  // "2026-11-06" or "Nov 6 2026"; a time "14:30", "2:30 pm" or "1430". Text
+  // it cannot read is posted as typed, so the server's own validation
+  // answers it. The icon button opens the browser's picker on a hidden
+  // native input (showPicker), which carries min and max.
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  const monthOf = (word) => {
+    const key = word.toLowerCase()
+    if (key.length < 3) return 0
+    return MONTHS.findIndex((month) => key.startsWith(month.toLowerCase())) + 1
+  }
+  const pad = (n) => String(n).padStart(2, "0")
+  const isoDate = (y, m, d) => {
+    if (y < 100) y += 2000
+    const date = new Date(Date.UTC(y, m - 1, d))
+    if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null
+    return `${y}-${pad(m)}-${pad(d)}`
+  }
+  const parseDate = (text) => {
+    const value = text.trim()
+    let match
+    if ((match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(value))) return isoDate(+match[1], +match[2], +match[3])
+    if ((match = /^(\d{1,2})[/.\-\s](\d{1,2})[/.\-\s](\d{2}|\d{4})$/.exec(value))) return isoDate(+match[3], +match[2], +match[1])
+    const words = value.replace(/,/g, " ").split(/[\s/.\-]+/).filter(Boolean)
+    if (words.length !== 3 || !/^\d{2}(\d{2})?$/.test(words[2])) return null
+    const year = +words[2]
+    if (/^\d{1,2}$/.test(words[0]) && monthOf(words[1])) return isoDate(year, monthOf(words[1]), +words[0])
+    if (monthOf(words[0]) && /^\d{1,2}$/.test(words[1])) return isoDate(year, monthOf(words[0]), +words[1])
+    return null
+  }
+  const parseTime = (text) => {
+    const match = /^(\d{1,2})(?:[:.h]?(\d{2}))?(?::\d{2})?\s*(?:([ap])\.?m?\.?)?$/i.exec(text.trim())
+    if (!match) return null
+    let hour = +match[1]
+    const minute = match[2] === undefined ? 0 : +match[2]
+    const meridiem = match[3]?.toLowerCase()
+    if (meridiem) {
+      if (hour < 1 || hour > 12) return null
+      hour = (hour % 12) + (meridiem === "p" ? 12 : 0)
+    }
+    if (hour > 23 || minute > 59) return null
+    return `${pad(hour)}:${pad(minute)}`
+  }
+  // The value the server reads for the box's text, or null.
+  const parse = (kind, text) => {
+    if (kind === "time") return parseTime(text)
+    if (kind !== "datetime-local") return parseDate(text)
+    const value = text.trim()
+    const split = /^(\d{4}-\d{1,2}-\d{1,2})[T\s]+(.+)$/.exec(value) || /^(.*\d{4})[,\s]+(.+)$/.exec(value)
+    if (!split) return null
+    const date = parseDate(split[1]), time = parseTime(split[2])
+    return date && time ? `${date}T${time}` : null
+  }
+  // The box's text for a posted value, in the shared format.
+  const show = (kind, value) => {
+    if (!value) return ""
+    if (kind === "time") return /^\d{2}:\d{2}/.test(value) ? value.slice(0, 5) : value
+    const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}:\d{2}))?/.exec(value)
+    if (!match) return value
+    const date = `${+match[3]} ${MONTHS[+match[2] - 1]} ${match[1]}`
+    return kind === "datetime-local" && match[4] ? `${date}, ${match[4]}` : date
+  }
 
-// Every mounted instant, so one shell change repaints all of them without
-// each element observing the shell separately.
-const instances = new Set()
+  const syncPicker = (picker, parsed) => {
+    if (!picker) return
+    const inside = parsed && (!picker.min || parsed >= picker.min) && (!picker.max || parsed <= picker.max)
+    picker.value = inside ? parsed : ""
+  }
 
-// One observer for the whole page, armed on the first mount. It re-arms if the
-// shell element is ever replaced rather than patched, so a stale observer
-// cannot leave every timestamp silently frozen on the previous mode.
-let observer = null
-let observed = null
-
-const shell = () => document.querySelector(SHELL)
-
-const liveMode = () => shell()?.dataset.displayMode || null
-
-const observeShell = () => {
-  const el = shell()
-  if (!el || observed === el) return
-  observer?.disconnect()
-  observer = new MutationObserver(() => {
-    for (const hook of instances) hook.renderDateTime()
+  window.BilibiUI.registerHook("DateInput", {
+    mounted() {
+      this.kind = () => this.el.dataset.dateKind || "date"
+      this.box = () => this.el.querySelector('input[type="text"]')
+      this.value = () => this.el.querySelector("input[data-date-value]")
+      this.picker = () => this.el.querySelector("input[data-date-picker]")
+      // Runs on the wrapper, before live.js reads the form at the document,
+      // so the posted value always matches the box.
+      this.onInput = (event) => {
+        const box = this.box(), value = this.value(), picker = this.picker(), kind = this.kind()
+        if (!box || !value) return
+        if (event.target === picker) {
+          if (!picker.value) return
+          value.value = picker.value
+          box.value = show(kind, picker.value)
+          return
+        }
+        if (event.target !== box) return
+        const parsed = parse(kind, box.value)
+        value.value = parsed ?? box.value.trim()
+        syncPicker(picker, parsed)
+        // On leaving the box (change), show what was understood.
+        if (event.type === "change" && parsed) box.value = show(kind, parsed)
+      }
+      this.onClick = (event) => {
+        const button = event.target instanceof Element ? event.target.closest("button") : null
+        const picker = this.picker()
+        if (!button || button.disabled || !picker) return
+        event.preventDefault()
+        try {
+          picker.showPicker()
+        } catch {
+          // A browser without showPicker still has the typed box.
+          this.box()?.focus()
+        }
+      }
+      // An inline editor opening on a value (or on the first key typed)
+      // hands it here, so the box shows it in the shared format.
+      this.onValue = (event) => {
+        const box = this.box(), value = this.value(), picker = this.picker(), given = event.detail?.value ?? ""
+        if (!box || !value) return
+        const parsed = parse(this.kind(), given) ?? (/^\d{4}-\d{2}-\d{2}/.test(given) ? given : null)
+        value.value = parsed ?? given
+        syncPicker(picker, parsed)
+        box.value = show(this.kind(), parsed ?? given)
+      }
+      this.el.addEventListener("input", this.onInput)
+      this.el.addEventListener("change", this.onInput)
+      this.el.addEventListener("click", this.onClick)
+      this.el.addEventListener("bilibi:date-value", this.onValue)
+    },
+    destroyed() {
+      this.el.removeEventListener("input", this.onInput)
+      this.el.removeEventListener("change", this.onInput)
+      this.el.removeEventListener("click", this.onClick)
+      this.el.removeEventListener("bilibi:date-value", this.onValue)
+    },
   })
-  observer.observe(el, {attributes: true, attributeFilter: ["data-display-mode"]})
-  observed = el
-}
-
-// `local` renders the instant the way the reader's own device would: their
-// locale orders the fields and chooses the hour cycle. The zone is named on
-// `datetime` only, where the label qualifies a full date and time.
-const formatLocal = (value, timeZone, format, precision) => {
-  const options = {timeZone}
-
-  if (format !== "time") {
-    Object.assign(options, {day: "2-digit", month: "2-digit", year: "numeric"})
-  }
-
-  if (format !== "date") {
-    Object.assign(options, {hour: "2-digit", minute: "2-digit"})
-    if (precision === "second") options.second = "2-digit"
-  }
-
-  if (format === "datetime") options.timeZoneName = "short"
-
-  return new Intl.DateTimeFormat(undefined, options).format(value)
-}
-
-const DateTime = {
-  mounted() {
-    instances.add(this)
-    observeShell()
-    this.renderDateTime()
-  },
-
-  updated() {
-    this.renderDateTime()
-  },
-
-  destroyed() {
-    instances.delete(this)
-
-    // With nothing left to repaint, stop observing. Otherwise the observer
-    // keeps a strong reference to a detached #app-shell — the root of the
-    // whole previous page — after navigating to a screen that carries no
-    // instants and so mounts no hook to re-arm it.
-    //
-    // Conditioned on the set being empty rather than on destroyed() alone:
-    // during LiveView navigation the incoming view's hooks mount BEFORE the
-    // outgoing view's are destroyed, so live instances are still registered
-    // here and an observer they depend on is never torn down underneath them.
-    if (instances.size === 0) {
-      observer?.disconnect()
-      observer = null
-      observed = null
-    }
-  },
-
-  renderDateTime() {
-    const value = new Date(this.el.dateTime)
-
-    if (Number.isNaN(value.getTime())) return
-
-    // An instant given an explicit display context follows that context, not
-    // the shell: the caller has already decided what it is showing.
-    const shellMode = this.el.dataset.followShell === "true" ? liveMode() : null
-    const mode = shellMode || this.el.dataset.mode || "local"
-
-    if (mode === "company" || mode === "utc") {
-      // The server already rendered both. Copy, never re-format.
-      const text = mode === "company" ? this.el.dataset.textCompany : this.el.dataset.textUtc
-      this.showServerText(text)
-      return
-    }
-
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-    let text
-
-    try {
-      text = formatLocal(value, timeZone, this.el.dataset.format, this.el.dataset.precision)
-    } catch {
-      // A browser that cannot format this zone falls back to the server's
-      // stored-UTC text. Keeping whatever is there would leave the previous
-      // mode's string under a control that now reports a different mode.
-      this.showServerText(this.el.dataset.textUtc)
-      return
-    }
-
-    if (this.el.textContent !== text) this.el.textContent = text
-    this.el.dataset.timezone = timeZone
-    this.el.title = `Rendered in ${timeZone}`
-  },
-
-  showServerText(text) {
-    if (text && this.el.textContent !== text) this.el.textContent = text
-    delete this.el.dataset.timezone
-    this.el.removeAttribute("title")
-  },
-}
-
-window.BilibiUI.registerHook('DateTime', DateTime)
-
 })();
 
 ;(() => {

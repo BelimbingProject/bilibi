@@ -22,8 +22,11 @@ definitions and the request-scoped display context presentation renders with.
   The shared timestamp template must emit both (`data-text-company`,
   `data-text-utc`) so the browser follows a mode change by copying a server
   string; `Local` is the only mode the browser formats. Dates are zone-free
-  (`render_date`). Format is `dd/mm/yyyy, HH:MM` with a zone abbreviation.
-  Do not format an instant by hand in a template.
+  (`render_date`). Format is `6 Nov 2026` for a date and `6 Nov 2026, 09:13`
+  plus a zone abbreviation for a date and time; the `local` mode in the browser
+  writes the same shape, and the shared date input (`forms::input` with
+  `InputKind::Date`) reads and shows it. Do not format a date or an instant by
+  hand in a template.
 - `Period` parses `period/from/to`, with inclusive days and the Last 30 days
   default. `bounds(zone)` converts to a half-open UTC range under the zone's
   real rules (23/25-hour days; a midnight gap starts at the first valid

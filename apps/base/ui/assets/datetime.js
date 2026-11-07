@@ -51,18 +51,24 @@
     }
   }
 
-  // `local` renders the instant the way the reader's own device would: their
-  // locale orders the fields and chooses the hour cycle. The zone is named on
+  // `local` renders the instant in the browser's own zone but in the one
+  // Bilibi format the server writes ("6 Nov 2026, 09:13 GMT+8"): day, short
+  // English month, year, then a 24-hour clock. The reader's locale is not
+  // used, because it would order the fields its own way (11/06/2026) and
+  // differ from every server-written date beside it. The zone is named on
   // `datetime` only, where the label qualifies a full date and time.
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
   const formatLocal = (value, timeZone, format, precision) => {
-    const options = {timeZone}
-    if (format !== "time") Object.assign(options, {day: "2-digit", month: "2-digit", year: "numeric"})
-    if (format !== "date") {
-      Object.assign(options, {hour: "2-digit", minute: "2-digit"})
-      if (precision === "second") options.second = "2-digit"
-    }
+    const options = {timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"}
+    if (precision === "second") options.second = "2-digit"
     if (format === "datetime") options.timeZoneName = "short"
-    return new Intl.DateTimeFormat(undefined, options).format(value)
+    const part = {}
+    for (const {type, value: text} of new Intl.DateTimeFormat("en-GB", options).formatToParts(value)) part[type] = text
+    const date = `${Number(part.day)} ${MONTHS[Number(part.month) - 1]} ${part.year}`
+    const clock = `${part.hour}:${part.minute}${precision === "second" ? `:${part.second}` : ""}`
+    if (format === "date") return date
+    if (format === "time") return clock
+    return `${date}, ${clock}${part.timeZoneName ? ` ${part.timeZoneName}` : ""}`
   }
 
   // Every write compares first: ui.js reports a text write inside a hooked

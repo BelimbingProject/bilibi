@@ -465,7 +465,7 @@ pub enum Typed {
     #[default]
     Text,
     Instant(Instant),
-    /// `iso` is `YYYY-MM-DD`; `text` its `dd/mm/yyyy` reading.
+    /// `iso` is `YYYY-MM-DD`; `text` its `6 Nov 2026` reading.
     Date {
         iso: String,
         text: String,
@@ -861,6 +861,11 @@ impl<'a> FlexTable<'a> {
     /// Whether a change-since lens is worn, which shows its date control.
     pub fn delta(&self) -> bool {
         self.columns.iter().any(|column| column.lens == Lens::Delta)
+    }
+
+    /// The change-since date as its date box shows it ("6 Nov 2026").
+    pub fn since_text(&self) -> String {
+        crate::forms::date_text("date", self.since.unwrap_or_default())
     }
 
     pub fn cost_text(&self, cost: &Cost) -> String {

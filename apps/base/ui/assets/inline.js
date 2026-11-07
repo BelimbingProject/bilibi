@@ -11,7 +11,7 @@
       this.long = this.el.dataset.hook === 'InlineLongText';
       this.choice = this.el.dataset.hook === 'InlineChoice';
       this.editorSource = this.editor()?.dataset.editor;
-      this.date = this.el.dataset.inputType === 'date';
+      this.date = ['date', 'datetime-local', 'time'].includes(this.el.dataset.inputType);
       this.abort = new AbortController();
       const listen = (node, type, callback) => node.addEventListener(type, callback, {signal: this.abort.signal});
       listen(this.el, 'click', (event) => {
@@ -23,7 +23,7 @@
           if (['Enter', ' ', 'F2'].includes(event.key)) {
             event.preventDefault();
             this.start(undefined, event.key === 'F2');
-          } else if (!this.choice && !this.date && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          } else if (!this.choice && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
             event.preventDefault();
             this.start(event.key);
           }
@@ -48,7 +48,9 @@
         });
       });
       listen(this.el, 'change', (event) => {
-        if ((this.choice || this.date) && this.active && event.target.name === this.el.dataset.field) this.commit(true);
+        // A date's picker has no name: the DateInput hook has already copied
+        // the chosen day into the named hidden value.
+        if ((this.choice || this.date) && this.active && (event.target.name === this.el.dataset.field || (this.date && event.target.matches('[data-date-picker]')))) this.commit(true);
       });
       this.updated();
       if (this.el.dataset.initialEdit === 'true') this.start(undefined, false, this.el.dataset.autofocus !== 'false');
@@ -124,11 +126,14 @@
       input.value = value === undefined ? draft.value : value;
       const combo = this.editor().querySelector('[data-hook="Combobox"]');
       combo?.dispatchEvent(new CustomEvent('bilibi:choice-value', {detail: {value: input.value}}));
+      // A date's named input is the hidden value; its typed box shows it.
+      const dateBox = this.editor().querySelector('[data-hook="DateInput"]');
+      dateBox?.dispatchEvent(new CustomEvent('bilibi:date-value', {detail: {value: input.value}}));
       this.updated();
       if (!autofocus) return;
-      const focus = this.editor().querySelector('[role="combobox"]') || input;
+      const focus = this.editor().querySelector('[role="combobox"]') || dateBox?.querySelector('[data-role="input"]') || input;
       focus.focus();
-      if (focus.select && !this.date) {
+      if (focus.select) {
         if (value !== undefined || atEnd) focus.setSelectionRange(focus.value.length, focus.value.length);
         else focus.select();
       }
