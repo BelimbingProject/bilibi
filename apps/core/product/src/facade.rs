@@ -359,10 +359,13 @@ impl Products {
         let mut input = input.clone();
         input.currency = bilibi_currency::normalize(&input.currency).unwrap_or_default();
         let Some(currency) = self.currencies.get(client, scope, &input.currency).await? else {
-            return Ok(Err(invalid("currency", "Choose an enabled currency.")));
+            return Ok(Err(invalid("currency", "Choose a currency from the list.")));
         };
-        if !currency.enabled || currency.withdrawn {
-            return Ok(Err(invalid("currency", "Choose an enabled currency.")));
+        if currency.withdrawn {
+            return Ok(Err(invalid(
+                "currency",
+                "This currency has been withdrawn; choose another.",
+            )));
         }
         if input.amount < Decimal::ZERO
             || input.amount >= Decimal::from(1_000_000_000_000_000i64)

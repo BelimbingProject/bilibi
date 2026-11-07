@@ -24,7 +24,7 @@ Professional, compact, warm, trustworthy. Dense enough for operations, calm enou
 
 **One thing one door, one door many keys.**
 
-**One thing one door.** Each kind of record has exactly one list and one record page, reached from one menu item. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
+**One thing one door.** Each kind of record has exactly one list and one record page, reached from one menu item. Its stages (draft, waiting for approval, posted, rejected, archived) and its sources (typed in, imported, created by another module) are columns and filters on that list, never separate pages or menu items. One action creates it ("+ Journal"), wherever it is started. Views of one subject are tabs on its one page, not sub-items in the menu: Currencies is one menu item with Base currency and Exchange rates tabs. Approvals may also surface in a shared queue such as "Waiting for my approval", but that queue links back to the record's one home.
 
 *Example:* journals. Posted entries and manual journals waiting for approval are one Journals list with a status filter, not "Journal entries" and "Manual journals".
 
@@ -128,7 +128,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
   - No loop between two pages (Book → Chart of accounts → Book). Each link leads forward or Back.
   - A "Go to X" button lands where the person acts (the company's open-book form), not on a list of all of them.
   - After a step is finished, land on the next step.
-  - Set a prerequisite in place rather than sending people elsewhere first: a combobox of every currency that enables the chosen one, not "Enable it on the Currencies page first".
+  - Set a prerequisite in place rather than sending people elsewhere first: a combobox of every currency, the ones already used first, not "Enable it on the Currencies page first".
 - Layouts are responsive. There is no separate mobile product.
 
 ## Forms
@@ -146,6 +146,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Sections:** draw a bordered part of a form with `forms::section` (one shared 12 px box and heading), not page-owned box classes. Create Address uses it.
 - **Classic label above** stays for a field with no visible label (toolbars, `sr-only`), a field with its own `class` or `label_class`, checkboxes and radio groups. Multi-selects keep their canonical inset label.
 - Placeholder text shows only once the person is in the field, as an example, never as the label.
+- **No enable step.** A choice from a standard list (currencies) offers every current entry, the ones this tenant has already used first; using one is what marks it. Never a table of on/off switches to curate before a first use.
 - Help and error lines sit under the box. An error is a sentence that names its field (`error_sentence`): "Parse confidence must be a number from 0 to 1…".
 - After a refused save, `ErrorSummary` lists the problems above the form, each linking to its field. Inline errors stay.
 - Keep rarely used parts out of the way: `Fold` folds a part under a one-line summary of what it holds and opens itself on an error; `AddMore` ("+ Add address line 2") reveals one more optional field.
@@ -160,14 +161,14 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 *Every list is a `FlexTable`.* Never the plain `Table`.
 
 - **State:** `ListState` keeps page, search, filters, sort and page size in the URL. Reload and shared links reopen the same view.
-- **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
+- **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. A list a person reads whole (exchange rates) has no search box. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
 - **Rows:** `py-0.5`, `px-2`. Headers `py-1`, sunken background, `text-xs font-semibold`.
 - **Numbers:** tabular numerals for IDs, counts, dates and amounts.
 - **Dates:** one date format, "6 Nov 2026", and one date and time format, "6 Nov 2026, 09:13" plus the zone, on every page, in every field and in every display mode the top bar offers. Never ISO `2026-11-06`, `06/11/2026` or the browser's own order. A calendar heading or a day tile may name the weekday or spell the month out ("Wed 3 November 2026"); it keeps the day, month, year order. A time alone is "14:30" (24-hour). Show a date through `bilibi_datetime` (`render_date`, `render`, the `instant` markup) and take one with the shared date, date-and-time or time input, which reads "6 Nov 2026", "6/11/2026" (day first), "2026-11-06" or "2:30 pm" and shows what it understood.
 - **Corners:** table frames are square. A card is flat only where it frames the table.
 - **Pagination:** the results count shows whenever there are rows. The rows-per-page selector and pager show only when another page exists; an empty list shows none. They live in the component.
 - **Settings:** the operator and company settings table opens each Value cell as a form with Save and Cancel (`InlineForm`). Enter saves; Escape cancels. Protected values ask for 2FA in the row.
-- **Empty:** `EmptyState` says why and offers the fix itself: a button straight to the form that clears it. Its words stay true: "Enable the currencies first" shows only while none is enabled.
+- **Empty:** `EmptyState` says why and offers the fix itself: a button straight to the form that clears it. Its words stay true: "Add the first rate" shows only while there is none.
 - **Every row has a next step.** A row whose obvious action is not visible gets one ("Open book" on a company without a book).
 - **Row actions:** a *local* action works on the row's own record where it stands (edit, delete, archive, an on/off). It is a plain icon button on the row, with a tooltip that names it (`IconButton`). A *non-local* action takes the record to another module or kind of record ("Invite as customer" from a contact, "Add as customer" when Finance is mounted); other modules register them for that kind of record. Non-local actions sit in one "Non-local actions" icon button (Font Awesome `arrow-up-right-from-square`, `AddToMenu` in `apps/base/ui/src/drops.rs`) on the row and on the selection bar, and nowhere else. A row with no non-local action shows no "Non-local actions" button. No row of separate text action links.
   - Before: an exchange rate row had a menu button whose only item was Delete, so deleting took two clicks and hid what the row can do.
@@ -292,7 +293,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
 - **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator".
-- **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Enable the currencies first" is false once one is enabled.
+- **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Add the first rate" is false once a rate exists.
 - **No product notes.** Notes for builders ("Draft, awaiting accountant review" on a template) never show to users.
 - **No internals in hints.** Do not explain how the system works behind the page (how filters relate to the top bar, how reports roll up, which rows are hidden). Say what the person can do.
 - **Help text** (subtitles, section descriptions, field hints, empty states) is one short sentence a business user would say, telling them what they can do here. Leave it out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
@@ -309,9 +310,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 | Leave empty to set it when you issue. | Leave empty to use the actual date of issue. |
 | The numbering the document takes when it is issued | Issued ref no, settings *(with a link icon to the setting)* |
 | A draft has no number and posts nothing until you issue it. | Draft: no ref no and no posting until issued. |
-| Switch on the currencies you trade in. Rates and forms offer only those. | Enable the currencies you use. Only enabled currencies appear in forms and rates. |
 | Not set. Conversions to the base currency are refused until you choose one. | Required for currency conversions. |
-| No exchange rates yet. Enable the currencies you trade in, then add a rate. | No exchange rates yet. Enable the currencies first. *(only while none is enabled)* |
+| No exchange rates yet. Enable the currencies you trade in, then add a rate. | No exchange rates yet. *(with an "Add a rate" button; no step before it)* |
 | Check a conversion / Try the conversion other modules use… | Currency conversion calculator *(no hint)* |
 
 ## Page review checklist

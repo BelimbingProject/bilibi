@@ -1,8 +1,10 @@
-//! The operator pages (`core/currency.pages`): `/currencies` lists the ISO
-//! currencies with the tenant's switch, base currency and per-company base
-//! currencies; `/currencies/rates` lists the dated exchange rates, edited in
-//! place, with a currency conversion calculator. The lists and the
-//! in-row editors follow `base/picklists`.
+//! The operator page (`core/currency.pages`): `/currencies`, one page with
+//! two tabs. Base currency (the default) holds the tenant's base currency and
+//! each company's own; Exchange rates (`?tab=rates`, `rates.rs`) holds the
+//! dated rates, edited in place, and the currency conversion calculator.
+//! Nothing is switched on: a currency becomes used the first time it is a
+//! base, in a rate or on a record, and every currency control lists the used
+//! ones first.
 //!
 //! Every change goes through the `core.currency.*` contracts agents call
 //! (`PageContracts::submit`), which recheck the capability in their own
@@ -12,7 +14,7 @@ mod rates;
 
 use crate::{
     facade::{normalize, Currencies, Currency},
-    MANAGE, PAGES, RATES_PATH,
+    CURRENCIES_PATH, MANAGE, PAGES,
 };
 use askama::Template;
 use bilibi_address::AddressService;
@@ -25,47 +27,24 @@ use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayPolicy, Mode};
 use bilibi_locale::Locales;
 use bilibi_party_ids::{OrganisationId, PartyId};
-use bilibi_settings::{Settings, Target};
+use bilibi_settings::Settings;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    list_state::FILTERS_FORM,
     page::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    params, Badge, BadgeKind, BuiltinColumn, Button, Card, Choice, ColumnsOutcome, Combobox,
-    CommitStates, CommitStatus, Fact, Facts, FilterToolbar, FlashMap, FlexRow, FlexTable, Fold,
-    Header, Html, InlineChoice, InlineField, ListColumns, ListSpec, ListState, Pagination,
-    SectionHeading, StatusKind, TableEmpty, Toggle, ToolbarControl, NO_FLASH,
+    params, Button, Card, CommitStates, CommitStatus, Fact, Facts, FlashMap, Fold, Header, Html,
+    InlineChoice, InlineField, StatusKind, Tab, Tabs, NO_FLASH,
 };
 use jiff::civil::Date;
 use serde_json::{json, Value};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{Arc, LazyLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
 const PAGE_SIZES: [u64; 3] = [25, 50, 100];
 const DENIED: &str = "You do not have permission to change currencies.";
 /// How many companies the per-company base currencies list.
 const COMPANIES_SHOWN: i64 = 100;
-
-static CURRENCY_SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
-    ListSpec {
-        page_sizes: PAGE_SIZES.to_vec(),
-        default_page_size: 25,
-        page_size_param: "per_page".into(),
-        filters: BTreeMap::from([(
-            "status".into(),
-            bilibi_ui::Filter::one_of(&["all", "enabled", "off"], "all"),
-        )]),
-        omit_blank: vec!["search".into()],
-        omit_defaults: true,
-        ..ListSpec::default()
-    }
-    .shared()
-    .expect("currency list spec")
-});
 
 /// The module's page adapter; every field is shared by mounted states.
 #[derive(Clone)]
@@ -183,21 +162,11 @@ struct View<'a> {
     id: &'a str,
     flash: FlashMap<'a>,
     header: Html,
-    summary: Html,
-    toolbar: Html,
-    card: Html,
-    footer: Html,
+    tabs: Html,
+    body: Html,
     dialog: Html,
 }
 
-#[derive(Template)]
-#[template(
-    source = r#"<span class="font-mono text-xs text-ink">{{ text }}</span>"#,
-    ext = "html"
-)]
-struct CodeCell<'a> {
-    text: &'a str,
-}
 #[derive(Template)]
 #[template(
     source = r#"<span class="text-sm text-ink-muted">{{ text }}</span>"#,
@@ -206,13 +175,13 @@ struct CodeCell<'a> {
 struct MutedText<'a> {
     text: &'a str,
 }
-#[derive(Template)]
-#[template(
-    source = r#"<span class="inline-flex items-center gap-2">{% for badge in badges %}{{ badge }}{% endfor %}</span>"#,
-    ext = "html"
-)]
-struct Badges {
-    badges: Vec<Html>,
+
+/// What a tab puts on the page: its body and its dialog. The header stays
+/// the same across tabs; a tab's guidance and actions live in the tab. The
+/// flash is the tab's own.
+struct TabBody {
+    body: Html,
+    dialog: Html,
 }
 
 impl Pages {
@@ -233,98 +202,29 @@ impl Pages {
     }
 }
 
-// ------------------------------------------------------------ the currencies
+// ----------------------------------------------------------- the base tab
 
-fn currency_columns() -> Vec<BuiltinColumn> {
-    vec![
-        BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Currency"),
-        BuiltinColumn::new("numeric", "Number"),
-        BuiltinColumn::new("places", "Decimal places"),
-        BuiltinColumn::new("status", "Status"),
-    ]
-}
-
-struct CurrencyPage {
+struct BaseTab {
     pages: Pages,
-    state: ListState,
-    columns: ListColumns,
-    rows_changed: bool,
-    shown: usize,
     statuses: CommitStates,
     notice: String,
     flash: Option<(StatusKind, String)>,
 }
-impl CurrencyPage {
-    fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
-        Ok(Self {
+impl BaseTab {
+    fn new(pages: Pages) -> Self {
+        Self {
             pages,
-            state: ListState::parse(query, CURRENCY_SPEC.clone()).map_err(|_| Error::Internal)?,
-            columns: ListColumns::mount("currencies", currency_columns())
-                .map_err(|_| Error::Internal)?,
-            rows_changed: true,
-            shown: 0,
             statuses: CommitStates::default(),
             notice: String::new(),
             flash: None,
-        })
+        }
     }
 
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         self.notice.clear();
         match get("type").ok_or(Error::Invalid)? {
-            "filters" => self.state.apply_filters(
-                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
-                    .map_err(Error::refused)?,
-            ),
-            "page" => self.state.put_page(get("page")),
-            "grid" => match self.columns.handle(
-                &params::string_values_checked(value, params::FIELD_LIMIT)
-                    .map_err(Error::refused)?,
-            ) {
-                ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
-                ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
-            },
             "clear-flash" => clear_flash(&mut self.flash, get("key")),
-            event @ ("enable" | "disable") => {
-                let code = get("key").unwrap_or_default().to_owned();
-                let enable = event == "enable";
-                let result = self
-                    .pages
-                    .contracts
-                    .submit(
-                        &call(scope, credential, event, "core.currency.enabled.set"),
-                        json!({"code": code, "enabled": enable}),
-                    )
-                    .await;
-                self.flash = Some(match result {
-                    // The refusal names what holds the currency; it reads
-                    // after the code rather than after the field name.
-                    Err(ContractError::InvalidInput(fields)) => {
-                        let reasons: Vec<String> = fields.into_values().flatten().collect();
-                        (
-                            StatusKind::Error,
-                            format!(
-                                "{code} cannot be turned {}: it {}.",
-                                if enable { "on" } else { "off" },
-                                reasons.join("; ")
-                            ),
-                        )
-                    }
-                    result => match outcome(result, DENIED)? {
-                        Ok(()) => (
-                            StatusKind::Success,
-                            if enable {
-                                format!("{code} is enabled. People can choose it in new records.")
-                            } else {
-                                format!("{code} is disabled. Records that hold it keep it.")
-                            },
-                        ),
-                        Err(message) => (StatusKind::Error, message),
-                    },
-                });
-            }
             "save_base" => {
                 let submitted = get("value").unwrap_or_default().to_owned();
                 let result = self
@@ -431,9 +331,8 @@ impl CurrencyPage {
             .map(|code| (country.country, code)))
     }
 
-    /// The base currency as a fact: read first, chosen in place.
-    /// Every currency that is not withdrawn is offered: choosing one that is
-    /// not enabled yet enables it in the same write.
+    /// The base currency as a fact: read first, chosen in place from every
+    /// current currency, the used ones first.
     fn base_fact(
         &self,
         base: Option<&Currency>,
@@ -465,33 +364,20 @@ impl CurrencyPage {
         })
     }
 
-    async fn render(&mut self, scope: &Scope) -> Result<String> {
+    async fn render(&mut self, scope: &Scope) -> Result<TabBody> {
         let pages = self.pages.clone();
         let mut client = pages.db.get().await?;
         let manage = effective_capabilities(&**client, scope)
             .await?
             .contains(MANAGE);
-        let catalog = pages.currencies.catalog(&**client, scope).await?;
         let base = pages.currencies.base(&**client, scope, None).await?;
-        let enabled: Vec<Currency> = catalog
-            .iter()
-            .filter(|currency| currency.enabled && !currency.withdrawn)
-            .cloned()
-            .collect();
-        let base_choices: Vec<Currency> = catalog
-            .iter()
-            .filter(|currency| {
-                !currency.withdrawn || base.as_ref().is_some_and(|base| base.code == currency.code)
-            })
-            .cloned()
-            .collect();
-        let max_age = pages
-            .settings
-            .get(&**client, scope, Target::Tenant, crate::MAX_AGE_KEY)
-            .await?
-            .value
-            .as_i64()
-            .unwrap_or(7);
+        let current = pages.currencies.current(&**client, scope).await?;
+        // The base keeps showing even after ISO withdrew it, so it can be
+        // read and replaced.
+        let mut base_choices = current.clone();
+        if let Some(base) = base.as_ref().filter(|base| base.withdrawn) {
+            base_choices.insert(0, base.clone());
+        }
         // Companies are read through their own owner; a person who may not
         // list them simply gets no per-company section.
         let companies = match bilibi_company::list(
@@ -529,38 +415,19 @@ impl CurrencyPage {
             None
         };
 
-        // The summary card: the base currency, then each company's own.
-        let mut facts = vec![Fact {
-            title: "Base currency",
-            id: "currency-base-fact",
-            value: self.base_fact(base.as_ref(), &base_choices, manage)?,
-        }];
-        facts.push(Fact {
-            title: "Oldest usable rate",
-            id: "currency-max-age-fact",
-            value: Html::text(&if max_age == 0 {
-                "No limit".to_owned()
-            } else if max_age == 1 {
-                "1 day".to_owned()
-            } else {
-                format!("{max_age} days")
-            }),
-        });
-        let mut summary = render(SectionHeading {
-            title: "Base currency",
-            ..SectionHeading::default()
-        })?;
-        summary.push(&render(Facts {
+        let mut body = render(Facts {
             id: "currency-summary",
-            items: facts,
-        })?);
+            items: vec![Fact {
+                title: "Base currency",
+                id: "currency-base-fact",
+                value: self.base_fact(base.as_ref(), &base_choices, manage)?,
+            }],
+        })?;
         if let Some((country, code)) = &suggestion {
-            // Setting the base enables the currency in the same write.
-            let usable = base_choices.iter().any(|currency| &currency.code == code);
             let mut hint = Html::text(&format!(
                 "Your main company is in {country}, which uses {code}. "
             ));
-            if usable {
+            if current.iter().any(|currency| &currency.code == code) {
                 hint.push(&render(Button {
                     id: "currency-use-suggestion",
                     event: "use_suggestion",
@@ -572,7 +439,7 @@ impl CurrencyPage {
                     ..Button::default()
                 })?);
             }
-            summary.push(&render(MutedHtml { body: hint })?);
+            body.push(&render(MutedHtml { body: hint })?);
         }
         if !companies.is_empty() {
             let mut items = Vec::new();
@@ -601,7 +468,7 @@ impl CurrencyPage {
                 let editor = render(currency_editor(
                     &format!("currency-company-{}-input", company.id),
                     "currency",
-                    &enabled,
+                    &current,
                     own,
                 ))?;
                 items.push((
@@ -625,7 +492,7 @@ impl CurrencyPage {
                     })
                     .collect(),
             })?;
-            summary.push(&render(Fold {
+            body.push(&render(Fold {
                 id: "currency-companies-fold",
                 title: "Currency by company",
                 summary: "Leave a company empty to follow the base currency.",
@@ -633,154 +500,14 @@ impl CurrencyPage {
                 body: facts,
             })?);
         }
-        let summary = render(Card {
-            id: "currency-summary-card",
-            body: summary,
-            ..Card::default()
-        })?;
-
-        // The list.
-        let search = self.state.search.to_lowercase();
-        let status = self
-            .state
-            .filters
-            .get("status")
-            .map_or("all", String::as_str)
-            .to_owned();
-        let shown: Vec<Currency> = catalog
-            .into_iter()
-            .filter(|currency| match status.as_str() {
-                "enabled" => currency.enabled,
-                "off" => !currency.enabled,
-                _ => true,
-            })
-            .filter(|currency| search.is_empty() || currency.matches(&search))
-            .collect();
-        let page = self.state.paginate(&shown);
-        let (entries, counts) = (page.entries, page.counts);
-        self.shown = entries.len();
-        if self.rows_changed {
-            self.columns.load(entries, |currency| currency.code.clone());
-        }
-        let header = render(Header {
-            title: Html::text("Currencies"),
-            subtitle:
-                "Enable the currencies you use. Only enabled currencies appear in forms and rates.",
-            actions: render(Button {
-                id: "currency-rates-link",
-                href: RATES_PATH,
-                body: Html::text("Exchange rates"),
-                ..Button::default()
+        Ok(TabBody {
+            body: render(Card {
+                id: "currency-summary-card",
+                body,
+                ..Card::default()
             })?,
-            ..Header::default()
-        })?;
-        let form = self.state.filters_form();
-        let toolbar = render(FilterToolbar::new(
-            "currency-filters",
-            vec![
-                ToolbarControl::search(
-                    "currency-search",
-                    "search",
-                    "Search currencies",
-                    &form["search"],
-                    "Search by code or name, e.g. RMB...",
-                ),
-                ToolbarControl::select(
-                    "currency-status",
-                    "status",
-                    "Show",
-                    &form["status"],
-                    vec![
-                        Choice::new("All currencies", "all"),
-                        Choice::new("Enabled", "enabled"),
-                        Choice::new("Not enabled", "off"),
-                    ],
-                ),
-            ],
-        ))?;
-        let mut rows = Vec::with_capacity(entries.len());
-        for currency in entries {
-            // One switch is the status and its control: a person without
-            // currency manage, and a withdrawn currency that is off, read it.
-            let (event, label) = if currency.enabled {
-                ("disable", format!("Disable {}", currency.code))
-            } else {
-                ("enable", format!("Enable {}", currency.code))
-            };
-            let id = format!("currency-{}-enabled", currency.code.to_lowercase());
-            let mut badges = vec![render(Toggle {
-                on: currency.enabled,
-                label: &label,
-                id: &id,
-                event,
-                name: "key",
-                value: &currency.code,
-                disabled: !manage || (currency.withdrawn && !currency.enabled),
-            })?];
-            if currency.withdrawn {
-                badges.push(render(Badge::status(BadgeKind::Warning, "Withdrawn"))?);
-            }
-            if base.as_ref().is_some_and(|base| base.code == currency.code) {
-                badges.push(render(Badge::status(BadgeKind::Plain, "Base"))?);
-            }
-            let mut row = FlexRow::new(currency.code.clone())
-                .slot(
-                    "code",
-                    render(CodeCell {
-                        text: &currency.code,
-                    })?,
-                )
-                .slot("name", Html::text(&currency.display_name()))
-                .slot(
-                    "numeric",
-                    render(CodeCell {
-                        text: &currency.numeric_code,
-                    })?,
-                )
-                .slot("places", Html::text(&currency.minor_units.to_string()))
-                .slot("status", render(Badges { badges })?);
-            row.dom_id = Some(format!("currency-{}", currency.code.to_lowercase()));
-            rows.push(row);
-        }
-        let mut table = FlexTable::new("currencies", self.columns.flex_columns(), rows);
-        table.zoom = self.columns.zoom;
-        table.suggestions = self.columns.flex_suggestions();
-        table.add_query = &self.columns.add_query;
-        table.caption = "Currencies";
-        table.framed = false;
-        if counts.total_entries == 0 {
-            table.empty = Some(TableEmpty::Content(Html::text(
-                if search.is_empty() && status == "all" {
-                    "The currency list is not installed. Ask your administrator to install it."
-                } else {
-                    "No currency matches this search."
-                },
-            )));
-        }
-        let mut body = render(table)?;
-        body.push(&render(Pagination::new(
-            "currency-pagination",
-            counts,
-            &PAGE_SIZES,
-        ))?);
-        let card = render(Card {
-            id: "currency-card",
-            inner_class: "p-0",
-            body,
-            ..Card::default()
-        })?;
-        View {
-            id: "currency-page",
-            flash: flash_map(&self.flash),
-            header,
-            summary,
-            toolbar,
-            card,
-            footer: Html::EMPTY,
             dialog: Html::EMPTY,
-        }
-        .render()
-        .map_err(|_| Error::Internal)
+        })
     }
 }
 
@@ -793,12 +520,12 @@ struct MutedHtml {
     body: Html,
 }
 
-/// The editor of an inline currency choice: one searchable box over the
-/// enabled currencies. Its `name` is the inline field's, which is how the
-/// hook finds the control to commit.
-fn currency_editor(id: &str, name: &str, enabled: &[Currency], value: &str) -> Combobox {
-    Combobox::new(id, name)
-        .options(enabled.iter().map(|currency| currency.choice()).collect())
+/// The editor of an inline currency choice: one searchable box over every
+/// current currency, the used ones first. Its `name` is the inline field's,
+/// which is how the hook finds the control to commit.
+fn currency_editor(id: &str, name: &str, choices: &[Currency], value: &str) -> bilibi_ui::Combobox {
+    bilibi_ui::Combobox::new(id, name)
+        .options(choices.iter().map(|currency| currency.choice()).collect())
         .value(value)
         .placeholder("Choose a currency")
         .aria_label("Currency")
@@ -815,28 +542,133 @@ fn base_input(code: &str, company: Option<i64>) -> Value {
     input
 }
 
+// ------------------------------------------------------------- the page
+
+/// Which tab shows, from the address (`?tab=rates`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Showing {
+    Base,
+    Rates,
+}
+impl Showing {
+    fn parse(query: &HashMap<String, String>) -> Self {
+        match query.get("tab").map(String::as_str) {
+            Some("rates") => Self::Rates,
+            _ => Self::Base,
+        }
+    }
+}
+
+struct CurrencyPage {
+    showing: Showing,
+    base: BaseTab,
+    rates: rates::Rates,
+}
+impl CurrencyPage {
+    fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
+        Ok(Self {
+            showing: Showing::parse(query),
+            base: BaseTab::new(pages.clone()),
+            rates: rates::Rates::new(pages, query)?,
+        })
+    }
+
+    /// The address of the tab that shows: the rates tab keeps its list's
+    /// page and page size.
+    fn query(&self) -> HashMap<String, String> {
+        match self.showing {
+            Showing::Base => HashMap::new(),
+            Showing::Rates => {
+                let mut query = self.rates.query();
+                query.insert("tab".into(), "rates".into());
+                query
+            }
+        }
+    }
+
+    async fn render(&mut self, scope: &Scope) -> Result<String> {
+        let (tab, flash) = match self.showing {
+            Showing::Base => (self.base.render(scope).await?, &self.base.flash),
+            Showing::Rates => (self.rates.render(scope).await?, self.rates.flash()),
+        };
+        let header = render(Header {
+            title: Html::text("Currencies"),
+            ..Header::default()
+        })?;
+        let rates_href = params::address(
+            CURRENCIES_PATH,
+            &HashMap::from([("tab".to_owned(), "rates".to_owned())]),
+        );
+        let tabs = render(Tabs {
+            id: "currency-tabs",
+            label: "Currency views",
+            class: "mb-3",
+            tabs: vec![
+                Tab {
+                    id: "currency-tab-base",
+                    ..Tab::patch(
+                        CURRENCIES_PATH,
+                        "Base currency",
+                        self.showing == Showing::Base,
+                    )
+                },
+                Tab {
+                    id: "currency-tab-rates",
+                    ..Tab::patch(
+                        &rates_href,
+                        "Exchange rates",
+                        self.showing == Showing::Rates,
+                    )
+                },
+            ],
+        })?;
+        View {
+            id: "currency-page",
+            flash: flash_map(flash),
+            header,
+            tabs,
+            body: tab.body,
+            dialog: tab.dialog,
+        }
+        .render()
+        .map_err(|_| Error::Internal)
+    }
+}
+
 // ------------------------------------------------------------- live adapters
 
 impl LiveState<Scope, Error> for CurrencyPage {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            self.rows_changed = true;
             match request.input {
-                LiveInput::Refresh => {}
+                LiveInput::Refresh => self.rates.refresh(),
                 LiveInput::Params(values) => {
-                    self.state = ListState::parse(values, CURRENCY_SPEC.clone())
-                        .map_err(|_| Error::Internal)?
+                    self.showing = Showing::parse(values);
+                    self.rates.params(values)?;
                 }
-                LiveInput::Event(value) => {
-                    self.event(request.scope, request.credential, value).await?
-                }
+                LiveInput::Event(value) => match self.showing {
+                    Showing::Base => {
+                        self.base
+                            .event(request.scope, request.credential, value)
+                            .await?
+                    }
+                    Showing::Rates => {
+                        self.rates
+                            .event(request.scope, request.credential, value)
+                            .await?
+                    }
+                },
             }
             let html = self.render(request.scope).await?;
+            let (rows, notice) = match self.showing {
+                Showing::Base => (0, self.base.notice.clone()),
+                Showing::Rates => (self.rates.shown(), self.rates.notice()),
+            };
             Ok(LiveBody {
                 html,
-                query: self.state.to_params(),
-                rows: self.shown,
-                notice: self.notice.clone(),
+                query: self.query(),
+                rows,
+                notice,
                 ..LiveBody::default()
             })
         })
@@ -847,7 +679,6 @@ impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         match operation {
             "currencies" => Some("Currencies"),
-            "rates" => Some("Exchange rates"),
             _ => None,
         }
     }
@@ -857,11 +688,6 @@ impl Page<Scope, Error> for Pages {
             let html = match request.operation {
                 "currencies" => {
                     CurrencyPage::new(self.clone(), request.query)?
-                        .render(scope)
-                        .await?
-                }
-                "rates" => {
-                    rates::Rates::new(self.clone(), request.query)?
                         .render(scope)
                         .await?
                 }
@@ -878,7 +704,6 @@ impl Page<Scope, Error> for Pages {
         Box::pin(async move {
             let state: Box<dyn LiveState<Scope, Error>> = match request.operation {
                 "currencies" => Box::new(CurrencyPage::new(self.clone(), request.query)?),
-                "rates" => Box::new(rates::Rates::new(self.clone(), request.query)?),
                 _ => return Ok(None),
             };
             Ok(Some(state))

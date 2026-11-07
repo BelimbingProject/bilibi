@@ -4,7 +4,7 @@
 **Status:** Accepted; implemented
 **Agents:** claude-code/sonnet-5.5-default (author)
 **Scope:** Where the currency list, a tenant's base currency and exchange rates live (`core/currency`)
-**Last Updated:** 2026-10-28
+**Last Updated:** 2026-11-07
 
 > Source: [issue 140](https://github.com/BelimbingProject/bilibi/issues/140).
 
@@ -14,7 +14,7 @@
 
 ## Decision
 
-1. **Currencies are Core master data**, in `core/currency`: the ISO 4217 list ships with the Platform (unlike holidays, the standard is stable and authoritative), each tenant enables the codes it trades in, and Domains read them through one facade.
+1. **Currencies are Core master data**, in `core/currency`: the ISO 4217 list ships with the Platform (unlike holidays, the standard is stable and authoritative) and Domains read it through one facade. A tenant switches nothing on: a currency is marked used the first time it is used (a base currency, a rate, a new record), and currency controls list the used ones first. Changed 2026-11-07: tenants first enabled each code by hand, which sent people to the Currencies page before they could choose one.
 2. **A conversion always names the rate it used**: the rate, its date and how it was found (direct, inverse, or through the base currency). The caller stores that with its result, so a later rate change rewrites nothing.
 3. **No rate is a refusal.** Never an assumed rate of 1 and never a silent old rate; a rate older than the tenant's limit is not used.
 4. **Operators keep the rates by hand.** There is no bundled feed and no fetcher. An Extension may write rates through the same reviewed operation.
@@ -23,7 +23,8 @@
 
 - **A currency list inside each Domain:** no sharing across Domains.
 - **Taking the list from Geonames:** it holds one currency per country, no decimal places, and is empty until imported.
-- **Tenants adding codes or changing decimal places:** it would break the standard; they enable and disable.
+- **Tenants adding codes or changing decimal places:** it would break the standard.
+- **Tenants enabling and disabling codes by hand** (the first design): one more step before every first use, and the list it kept is the used set the system already knows.
 - **Bundled rate feeds:** an outbound dependency and a source of silent staleness.
 
 ## Consequences

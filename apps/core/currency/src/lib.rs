@@ -1,5 +1,5 @@
 //! Currencies and exchange rates as Core master data: the ISO 4217 list, the
-//! currencies each tenant enables, a base currency, dated rates and the one
+//! currencies each tenant has used, a base currency, dated rates and the one
 //! conversion every module shares. A Domain may depend on Core but never on
 //! another Domain, so a list kept in one Domain could not be shared.
 //! Contract: `README.md`; decision: ADR 08.
@@ -32,12 +32,12 @@ use std::sync::Arc;
 
 /// The registry service of the facade.
 pub const SERVICE: &str = "core/currency.currencies";
-/// The two operator pages.
+/// The Currencies page (two tabs: base currency, exchange rates).
 pub(crate) const PAGES: &str = "core/currency.pages";
 
 /// See the currency list, the rates and the conversion.
 pub const VIEW: &str = "admin.currency.view";
-/// Enable and disable currencies and choose the base currency.
+/// Choose the base currency.
 pub const MANAGE: &str = "admin.currency.manage";
 /// Add, change and delete exchange rates.
 pub const RATES_MANAGE: &str = "admin.currency.rates.manage";
@@ -49,7 +49,6 @@ pub const BASE_KEY: &str = "currency.base";
 pub const MAX_AGE_KEY: &str = "currency.rates.max_age_days";
 
 pub const CURRENCIES_PATH: &str = "/currencies";
-pub const RATES_PATH: &str = "/currencies/rates";
 
 pub const MIGRATION: (&str, &str) = (
     "core-currency-001-currency",
@@ -59,6 +58,11 @@ pub const MIGRATION: (&str, &str) = (
 pub const MIGRATION_COMMON_NAMES: (&str, &str) = (
     "core-currency-002-common-names",
     include_str!("../migrations/002-common-names.sql"),
+);
+
+pub const MIGRATION_USED: (&str, &str) = (
+    "core-currency-003-used-currencies",
+    include_str!("../migrations/003-used-currencies.sql"),
 );
 
 macro_rules! provenance {
@@ -75,7 +79,7 @@ inventory::submit! {
     Module {
         id: "core/currency", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "core/address", "core/company", "base/datetime", "base/locale"],
-        migrations: &[MIGRATION, MIGRATION_COMMON_NAMES],
+        migrations: &[MIGRATION, MIGRATION_COMMON_NAMES, MIGRATION_USED],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let currencies = Arc::new(Currencies {
@@ -134,7 +138,8 @@ fn code_or_null(value: &Value) -> bool {
             .is_some_and(|code| code.len() == 3 && code.bytes().all(|b| b.is_ascii_uppercase()))
 }
 // The page and `core.currency.base.set` are the operator UI for the base
-// currency: they only accept an enabled currency, which a settings form would not know.
+// currency: they refuse a withdrawn currency and mark the chosen one used,
+// which a settings form would not know.
 inventory::submit! { Contribution::new(DEFINITIONS, BASE_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::String, scopes: &[ScopeKind::Tenant, ScopeKind::Company], default: || Value::Null, nullable: true, encrypted: false,
     minimum: None, maximum: None,
@@ -151,17 +156,11 @@ inventory::submit! { Contribution::new(ROUTES, "core/currency.currencies", prove
     method: Method::Get, path: CURRENCIES_PATH, service: PAGES, operation: "currencies",
     access: Access::Capability(VIEW), framed: true,
 }) }
-inventory::submit! { Contribution::new(ROUTES, "core/currency.rates", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
-    method: Method::Get, path: RATES_PATH, service: PAGES, operation: "rates",
-    access: Access::Capability(VIEW), framed: true,
-}) }
 
 // Every write goes through the contracts agents call.
 inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageWrites {
     service: PAGES,
     contracts: &[
-        ("enable", "core.currency.enabled.set"),
-        ("disable", "core.currency.enabled.set"),
         ("save_base", "core.currency.base.set"),
         ("use_suggestion", "core.currency.base.set"),
         ("save_company_base", "core.currency.base.set"),
@@ -172,25 +171,12 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
     pending: Pending::None,
 }) }
 
+// One item: the page's tabs hold the base currency and the exchange rates.
 bilibi_menu::contribute!(
     "core/currency",
-    bilibi_menu::MenuItem::container("admin.currency", "Currencies")
+    bilibi_menu::MenuItem::page("admin.currency", "Currencies", CURRENCIES_PATH)
         .under("admin")
         .icon("currency-dollar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))
         .order(55)
-);
-bilibi_menu::contribute!(
-    "core/currency",
-    bilibi_menu::MenuItem::page("admin.currency.list", "Currency list", CURRENCIES_PATH)
-        .under("admin.currency")
-        .icon("banknotes")
-        .order(10)
-);
-bilibi_menu::contribute!(
-    "core/currency",
-    bilibi_menu::MenuItem::page("admin.currency.rates", "Exchange rates", RATES_PATH)
-        .under("admin.currency")
-        .icon("arrows-right-left")
-        .order(20)
 );

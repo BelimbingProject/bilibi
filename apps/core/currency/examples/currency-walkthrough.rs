@@ -1,8 +1,8 @@
 //! Manual walkthrough against an explicitly disposable database that already
 //! ran `migrate` and `seed-production` (the ISO list). Real app services and
 //! walkthrough-fixture sessions, no assertions: it prints each outcome for
-//! inspection. It installs the fixture and rewrites tenant 1's currency
-//! switches, rates and base currency, so never point it at a shared database.
+//! inspection. It installs the fixture and rewrites tenant 1's used
+//! currencies, rates and base currency, so never point it at a shared database.
 //!
 //! ```sh
 //! BILIBI_CURRENCY_DEMO=disposable cargo run -p bilibi-currency --example currency-walkthrough --locked
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Error> {
     let mut client = db.get().await?;
     // Re-runs start from the seeded list.
     client
-        .batch_execute("DELETE FROM currency_rates; DELETE FROM currency_tenant_enabled; DELETE FROM base_settings WHERE key='currency.base'")
+        .batch_execute("DELETE FROM currency_rates; DELETE FROM currency_tenant_used; DELETE FROM base_settings WHERE key='currency.base'")
         .await?;
     let listed: i64 = client
         .query_one("SELECT count(*) FROM currencies", &[])
@@ -94,12 +94,12 @@ async fn main() -> Result<(), Error> {
     println!("== a person without the capability");
     {
         let mut tx = boundary
-            .begin(&mut client, viewer.mutation_context("currency.enable"))
+            .begin(&mut client, viewer.mutation_context("currency.base"))
             .await?;
         show(
-            "viewer enables MYR",
+            "viewer sets the base MYR",
             currencies
-                .set_enabled(&mut tx, &viewer, "MYR", true)
+                .set_base(&mut tx, &viewer, Some("MYR"), None)
                 .await
                 .map(|_| ()),
         );
@@ -127,27 +127,13 @@ async fn main() -> Result<(), Error> {
         tx.rollback().await?;
     }
 
-    println!("== the administrator enables currencies, sets the base and enters rates");
+    println!(
+        "== the administrator sets the base and enters rates; each first use marks a currency used"
+    );
     {
         let mut tx = boundary
             .begin(&mut client, admin.mutation_context("currency.setup"))
             .await?;
-        for code in ["MYR", "USD", "SGD", "JPY", "KWD"] {
-            show(
-                &format!("enable {code}"),
-                currencies
-                    .set_enabled(&mut tx, &admin, code, true)
-                    .await?
-                    .map(|c| (c.code, c.minor_units)),
-            );
-        }
-        show(
-            "enable HRK (withdrawn)",
-            currencies
-                .set_enabled(&mut tx, &admin, "HRK", true)
-                .await?
-                .map(|c| c.code),
-        );
         show(
             "base MYR (tenant)",
             currencies
@@ -156,25 +142,18 @@ async fn main() -> Result<(), Error> {
                 .map(|c| c.map(|c| c.code)),
         );
         show(
-            "company 2 base GBP (not enabled yet: the same write enables it)",
+            "company 2 base GBP (not used yet: the same write marks it used)",
             currencies
                 .set_base(&mut tx, &admin, Some("GBP"), Some(OrganisationId::new(2)?))
                 .await?
-                .map(|c| c.map(|c| (c.code, c.enabled))),
+                .map(|c| c.map(|c| (c.code, c.used))),
         );
         show(
-            "GBP is now enabled",
+            "GBP is now used",
             currencies
                 .get(tx.sql(), &admin, "GBP")
                 .await?
-                .map(|c| c.enabled),
-        );
-        show(
-            "disable GBP (company 2's currency)",
-            currencies
-                .set_enabled(&mut tx, &admin, "GBP", false)
-                .await?
-                .map(|c| c.code),
+                .map(|c| c.used),
         );
         show(
             "base HRK (withdrawn)",
@@ -260,11 +239,12 @@ async fn main() -> Result<(), Error> {
             .map(|c| c.code),
     );
     show(
-        "enabled",
+        "used (listed first in every currency control)",
         currencies
-            .enabled(sql, &admin)
+            .current(sql, &admin)
             .await?
             .iter()
+            .filter(|c| c.used)
             .map(|c| c.code.clone())
             .collect::<Vec<_>>(),
     );
@@ -368,8 +348,13 @@ async fn main() -> Result<(), Error> {
 
     println!("== a second tenant keeps its own");
     show(
-        "other tenant: enabled",
-        currencies.enabled(sql, &other).await?.len(),
+        "other tenant: used",
+        currencies
+            .current(sql, &other)
+            .await?
+            .iter()
+            .filter(|c| c.used)
+            .count(),
     );
     convert(
         &currencies,
@@ -387,53 +372,51 @@ async fn main() -> Result<(), Error> {
             .map(|c| c.amount.to_string()),
     );
 
-    println!("== a disabled currency");
+    println!("== a new record checks its currency");
     {
         let mut tx = boundary
-            .begin(&mut client, admin.mutation_context("currency.setup"))
+            .begin(&mut client, admin.mutation_context("currency.check"))
             .await?;
         show(
-            "disable MYR (the base)",
+            "check USD (used) for a new record",
             currencies
-                .set_enabled(&mut tx, &admin, "MYR", false)
+                .check(&mut tx, &admin, "USD")
+                .await?
+                .map(|c| (c.code, c.used)),
+        );
+        show(
+            "check CHF (not used yet) for a new record",
+            currencies
+                .check(&mut tx, &admin, "CHF")
+                .await?
+                .map(|c| (c.code, c.used)),
+        );
+        show(
+            "check HRK (withdrawn) for a new record",
+            currencies
+                .check(&mut tx, &admin, "HRK")
                 .await?
                 .map(|c| c.code),
         );
         show(
-            "disable USD",
-            currencies
-                .set_enabled(&mut tx, &admin, "USD", false)
-                .await?
-                .map(|c| (c.code, c.enabled)),
-        );
-        show(
-            "check USD for a new record",
-            currencies.check(&tx, &admin, "USD").await?.map(|c| c.code),
-        );
-        show(
-            "check MYR for a new record",
-            currencies.check(&tx, &admin, "MYR").await?.map(|c| c.code),
-        );
-        show(
-            "check HRK for a new record",
-            currencies.check(&tx, &admin, "HRK").await?.map(|c| c.code),
-        );
-        show(
             "check XYZ for a new record",
-            currencies.check(&tx, &admin, "XYZ").await?.map(|c| c.code),
+            currencies
+                .check(&mut tx, &admin, "XYZ")
+                .await?
+                .map(|c| c.code),
         );
         tx.commit().await?;
     }
     let sql: &tokio_postgres::Client = &client;
     show(
-        "a record still shows USD",
-        currencies.get(sql, &admin, "USD").await?,
+        "CHF is used after the check committed",
+        currencies.get(sql, &admin, "CHF").await?.map(|c| c.used),
     );
     convert(
         &currencies,
         sql,
         &admin,
-        "converting a stored USD amount still works",
+        "100 USD -> MYR after the checks",
         Request::new(money("100"), "USD", "MYR", day("2026-10-28")),
     )
     .await?;
