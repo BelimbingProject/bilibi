@@ -11,6 +11,7 @@ mod panel;
 mod portal;
 mod privacy;
 mod registration;
+mod registration_limits;
 mod web;
 
 pub use bilibi_user::CustomerAccount;
@@ -33,6 +34,13 @@ use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINIT
 use bilibi_tenancy::{PortalScope, Scope};
 use serde_json::json;
 use std::sync::Arc;
+
+use registration_limits::{
+    PENDING_DEFAULT, PENDING_KEY, PORTAL_DAY_DEFAULT, PORTAL_DAY_KEY, PORTAL_MINUTE_DEFAULT,
+    PORTAL_MINUTE_KEY, RECIPIENT_DAY_DEFAULT, RECIPIENT_DAY_KEY, RECIPIENT_MINUTE_DEFAULT,
+    RECIPIENT_MINUTE_KEY, SENDER_DAY_DEFAULT, SENDER_DAY_KEY, SENDER_MINUTE_DEFAULT,
+    SENDER_MINUTE_KEY,
+};
 
 /// The registry service of the facade.
 pub const SERVICE: &str = "core/portal.access";
@@ -81,6 +89,10 @@ const PERSONAL_DATA_MIGRATION: (&str, &str) = (
     "core-portal-006-personal-data",
     include_str!("../migrations/006-personal-data.sql"),
 );
+const REGISTRATION_LIMITS_MIGRATION: (&str, &str) = (
+    "core-portal-007-registration-limits",
+    include_str!("../migrations/007-registration-limits.sql"),
+);
 const REGISTRATION_MIGRATION: (&str, &str) = (
     "core-customer_access-003-registration",
     include_str!("../migrations/003-registration.sql"),
@@ -100,7 +112,7 @@ inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
-        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION],
+        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let desk = delivery::Desk {
@@ -175,6 +187,24 @@ inventory::submit! { Contribution::new(DEFINITIONS, REGISTRATION_DAYS_KEY, prove
     minimum: Some(1.0), maximum: Some(30.0), validator: None,
     editor: Some(Editor { group: "Customer portal", label: "Account request confirmation (days)", help: "How long the link that confirms a request for a customer account works. An unconfirmed request is dropped after that.", capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
+
+macro_rules! registration_limit {
+    ($key:expr, $default:expr, $label:expr, $help:expr) => {
+        inventory::submit! { Contribution::new(DEFINITIONS, $key, provenance!(), &Setting::Definition(Definition {
+            value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!($default), nullable: false, encrypted: false,
+            minimum: Some(1.0), maximum: Some(100_000.0), validator: None,
+            editor: Some(Editor { group: "Customer portal", label: $label, help: $help, capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+        })) }
+    };
+}
+
+registration_limit!(SENDER_MINUTE_KEY, SENDER_MINUTE_DEFAULT, "Account requests per sender per minute", "The most new customer account requests one network address may start in a rolling minute, across every server.");
+registration_limit!(SENDER_DAY_KEY, SENDER_DAY_DEFAULT, "Account requests per sender per day", "The most new customer account requests one network address may start in a rolling day, across every server.");
+registration_limit!(RECIPIENT_MINUTE_KEY, RECIPIENT_MINUTE_DEFAULT, "Account requests per email per minute", "The most new customer account requests one email address may receive in a rolling minute, across every server.");
+registration_limit!(RECIPIENT_DAY_KEY, RECIPIENT_DAY_DEFAULT, "Account requests per email per day", "The most new customer account requests one email address may receive in a rolling day, across every server.");
+registration_limit!(PORTAL_MINUTE_KEY, PORTAL_MINUTE_DEFAULT, "Account requests per portal per minute", "The most new customer account requests one customer portal may accept in a rolling minute, across every sender and server.");
+registration_limit!(PORTAL_DAY_KEY, PORTAL_DAY_DEFAULT, "Account requests per portal per day", "The most new customer account requests one customer portal may accept in a rolling day, across every sender and server.");
+registration_limit!(PENDING_KEY, PENDING_DEFAULT, "Pending account requests per portal", "The most unapproved customer account requests one portal may hold. Staff are notified when this or a portal request-rate limit is reached.");
 
 inventory::submit! { Contribution::new(ROUTES, "core/portal.staff", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: STAFF_PATH, service: PAGES, operation: "portal",
