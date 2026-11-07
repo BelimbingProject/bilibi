@@ -19,19 +19,20 @@ use tokio_postgres::GenericClient;
 
 mod contributions;
 mod expiry;
+mod sign_ins;
 mod web;
 pub use contributions::{
     LIFETIME_KEY, LIST, LIVE_CHUNKS_PER_MINUTE_KEY, LIVE_MESSAGES_PER_MINUTE_KEY,
     LIVE_SOCKETS_PER_CUSTOMER_KEY, LIVE_SOCKETS_PER_SESSION_KEY, LIVE_SOCKETS_TOTAL_KEY, MANAGE,
     TOUCH_KEY,
 };
+use sign_ins::SIGN_IN_HISTORY_DAYS;
+pub use sign_ins::{client_name, NewDevice, PreviousSignIn};
 
 /// The operator list's page sizes.
 pub const PAGE_SIZES: [u64; 4] = [25, 50, 100, 300];
 pub const DEFAULT_PAGE_SIZE: u64 = 25;
 const MAX_SEARCH: usize = 255;
-const MAX_IP: usize = 45;
-const MAX_USER_AGENT: usize = 512;
 
 /// Idle lifetime and the activity-renewal throttle, both from the operator
 /// settings `session.lifetime_minutes` and `session.last_activity_touch_minutes`.
@@ -96,15 +97,6 @@ pub struct SessionClient {
     pub name: String,
 }
 
-/// The successful sign-in before the current session, from the retained
-/// sign-in history. No bearer or row id leaves this value.
-#[derive(Clone, Debug)]
-pub struct PreviousSignIn {
-    pub signed_in_at: SystemTime,
-    pub ip_address: Option<String>,
-    pub user_agent: Option<String>,
-}
-
 /// One active session owned by the signed-in account. Its bearer stays in the
 /// mounted page state; [`OwnSummary::key`] is the only row identity rendered.
 #[derive(Clone, Debug)]
@@ -129,55 +121,6 @@ struct OwnTermination {
     last_activity: String,
 }
 
-/// A modest device label from a browser's self-reported user agent. It is
-/// presentation only and never grants authority.
-pub fn client_name(user_agent: Option<&str>) -> String {
-    let user_agent = user_agent.unwrap_or_default();
-    let browser = if user_agent.contains("Edg/")
-        || user_agent.contains("EdgiOS/")
-        || user_agent.contains("EdgA/")
-    {
-        Some("Edge")
-    } else if user_agent.contains("Chrome/")
-        || user_agent.contains("CriOS/")
-        || user_agent.contains("HeadlessChrome/")
-    {
-        Some("Chrome")
-    } else if user_agent.contains("Firefox/") || user_agent.contains("FxiOS/") {
-        Some("Firefox")
-    } else if user_agent.contains("OPR/") || user_agent.contains("Opera/") {
-        Some("Opera")
-    } else if user_agent.contains("Safari/") && user_agent.contains("Version/") {
-        Some("Safari")
-    } else {
-        None
-    };
-    let system = if user_agent.contains("Windows") {
-        Some("Windows")
-    } else if user_agent.contains("iPhone")
-        || user_agent.contains("iPad")
-        || user_agent.contains("iPod")
-    {
-        Some("iOS")
-    } else if user_agent.contains("Android") {
-        Some("Android")
-    } else if user_agent.contains("CrOS") {
-        Some("ChromeOS")
-    } else if user_agent.contains("Macintosh") || user_agent.contains("Mac OS X") {
-        Some("macOS")
-    } else if user_agent.contains("Linux") {
-        Some("Linux")
-    } else {
-        None
-    };
-    match (browser, system) {
-        (Some(browser), Some(system)) => format!("{browser} on {system}"),
-        (Some(browser), None) => browser.to_owned(),
-        (None, Some(system)) => format!("Browser on {system}"),
-        (None, None) => "Browser".to_owned(),
-    }
-}
-
 /// Payload-free metadata of one stored session for the operator list.
 #[derive(Clone, Debug)]
 pub struct Summary {
@@ -196,7 +139,6 @@ impl Summary {
         session_key(&self.id)
     }
 }
-const SIGN_IN_HISTORY_DAYS: i32 = 90;
 
 fn session_key(id: &str) -> String {
     let digest = Sha256::digest(id.as_bytes());
@@ -471,42 +413,6 @@ impl Sessions {
         self.resolve(client, token, true, AccountKind::Customer)
             .await
     }
-    /// Records the signing-in client once, bounded; neither value is ever
-    /// interpreted, only listed.
-    pub async fn describe(
-        &self,
-        client: &impl GenericClient,
-        token: &str,
-        ip_address: Option<&str>,
-        user_agent: Option<&str>,
-    ) -> Result<()> {
-        let ip = ip_address
-            .map(str::trim)
-            .filter(|ip| !ip.is_empty() && ip.len() <= MAX_IP)
-            .map(str::to_owned);
-        let agent = user_agent
-            .map(|agent| {
-                agent
-                    .trim()
-                    .chars()
-                    .take(MAX_USER_AGENT)
-                    .collect::<String>()
-            })
-            .filter(|agent| !agent.is_empty());
-        client
-            .execute(
-                "UPDATE sessions SET ip_address=$2,user_agent=$3 WHERE id=$1",
-                &[&token, &ip, &agent],
-            )
-            .await?;
-        client
-            .execute(
-                "INSERT INTO session_sign_ins(tenant_id,user_id,signed_in_at,ip_address,user_agent) SELECT tenant_id,user_id,signed_in_at,$2,$3 FROM sessions WHERE id=$1 AND impersonator_id IS NULL",
-                &[&token, &ip, &agent],
-            )
-            .await?;
-        Ok(())
-    }
     /// Whether this exact session is still live. Agent calls use this read-only
     /// check and therefore never renew browser activity.
     pub async fn is_live(
@@ -548,33 +454,6 @@ impl Sessions {
             id: row.get(0),
             name: row.get(1),
         })
-    }
-    /// The latest successful sign-in of this account before the current
-    /// session, kept for `SIGN_IN_HISTORY_DAYS`. An
-    /// impersonating operator is not the account holder and cannot read it.
-    pub async fn previous_sign_in(
-        &self,
-        client: &impl GenericClient,
-        scope: &Scope,
-    ) -> Result<Option<PreviousSignIn>> {
-        if scope.impersonator().is_some()
-            || scope.agent().is_some()
-            || scope.principal().is_some()
-            || scope.actor().kind() != AccountKind::Staff
-        {
-            return Err(Error::Forbidden);
-        }
-        Ok(client
-            .query_opt(
-                "SELECT signed_in_at,ip_address,user_agent FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at<(SELECT signed_in_at FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf=$3 AND impersonator_id IS NULL) ORDER BY signed_in_at DESC,id DESC LIMIT 1",
-                &[&scope.tenant(), &scope.user(), &scope.csrf],
-            )
-            .await?
-            .map(|row| PreviousSignIn {
-                signed_in_at: row.get(0),
-                ip_address: row.get(1),
-                user_agent: row.get(2),
-            }))
     }
 
     async fn own_sessions(
@@ -1079,6 +958,13 @@ impl Sessions {
                 &[&SIGN_IN_HISTORY_DAYS],
             )
             .await?;
+        // A claim only limits today's new-device email; the audit keeps it.
+        client
+            .execute(
+                "DELETE FROM session_sign_in_alerts WHERE alerted_on<(now() AT TIME ZONE 'UTC')::date-1",
+                &[],
+            )
+            .await?;
         let pruned = ids.len() as u64;
         self.announce(ids);
         Ok(pruned)
@@ -1157,6 +1043,7 @@ inventory::submit! {
             ("base-session-004-company", include_str!("../migrations/004-company.sql")),
             ("base-session-005-signed-in-at", include_str!("../migrations/005-signed-in-at.sql")),
             ("base-session-006-sign-in-history", include_str!("../migrations/006-sign-in-history.sql")),
+            ("base-session-007-sign-in-devices", include_str!("../migrations/007-sign-in-devices.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },

@@ -34,6 +34,7 @@ mod reset;
 mod retention;
 mod scim;
 mod sign_in;
+mod sign_in_alert;
 mod sign_in_identity;
 mod sso;
 mod tenant_context;
