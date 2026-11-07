@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     facade::{Currency, Rate, RateQuery, Request, NOTE_MAX},
-    CURRENCIES_PATH, RATES_MANAGE, RATES_PATH,
+    CURRENCIES_PATH, RATES_MANAGE,
 };
 use askama::Template;
 use bilibi_agent_api::Error as ContractError;
@@ -16,10 +16,10 @@ use bilibi_tenancy::Scope;
 use bilibi_ui::{
     list_state::FILTERS_FORM,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
-    params, AddToItem, AddToMenu, BuiltinColumn, Button, ButtonVariant, Card, Choice,
-    ColumnsOutcome, Combobox, CommitStates, ConfirmDialog, CreateButton, Field, FilterToolbar,
-    FlexRow, FlexTable, Form, Header, Html, InlineEdit, InlineField, InputKind, ListColumns,
-    ListSpec, ListState, Modal, PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty,
+    params, BuiltinColumn, Button, ButtonVariant, Card, Choice, ColumnsOutcome, Combobox,
+    CommitStates, ConfirmDialog, CreateButton, Field, FilterToolbar, FlexRow, FlexTable, Form,
+    Header, Html, IconButton, IconKind, InlineEdit, InlineField, InputKind, ListColumns, ListSpec,
+    ListState, Modal, PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty,
     ToolbarControl,
 };
 use jiff::civil::Date;
@@ -117,9 +117,6 @@ pub(super) struct Rates {
     notice: String,
     draft: Option<Draft>,
     confirm: Option<Rate>,
-    /// A rate the row's Actions… menu asked to delete (`?delete=<id>`); the
-    /// confirm opens once the rows are read.
-    pending_delete: Option<i64>,
     check: Check,
     flash: Option<(StatusKind, String)>,
 }
@@ -138,7 +135,6 @@ impl Rates {
             notice: String::new(),
             draft: None,
             confirm: None,
-            pending_delete: query.get("delete").and_then(|id| id.parse().ok()),
             check: Check::default(),
             flash: None,
         })
@@ -284,6 +280,20 @@ impl Rates {
                     &mut self.statuses,
                 )?;
                 self.statuses.put(format!("{id}-{field}"), status);
+            }
+            // The row's delete icon: the confirm names the rate it removes.
+            "confirm_delete" => {
+                let id: i64 = get("id")
+                    .unwrap_or_default()
+                    .parse()
+                    .map_err(|_| Error::Invalid)?;
+                match self.rate(id).cloned() {
+                    Some(rate) => {
+                        self.flash = None;
+                        self.confirm = Some(rate);
+                    }
+                    None => self.notice = "This rate no longer exists; reload the page.".into(),
+                }
             }
             "cancel_confirm" => self.confirm = None,
             "delete_rate" => {
@@ -501,12 +511,6 @@ impl Rates {
         let today = pages.today(&**client, scope).await?;
         drop(client);
         self.rates = rates;
-        if let Some(id) = self.pending_delete.take().filter(|_| edits) {
-            if let Some(rate) = self.rate(id).cloned() {
-                self.flash = None;
-                self.confirm = Some(rate);
-            }
-        }
         self.shown = self.rates.len();
         if self.rows_changed {
             self.columns.load(&self.rates, |rate| rate.id.to_string());
@@ -570,21 +574,24 @@ impl Rates {
                         ),
                     })?,
                 );
+            // Delete acts on the rate itself, so it is the row's own icon,
+            // not an item of a "Non-local actions" menu (DESIGN.md, Row actions).
             if edits {
-                let mut query = self.state.to_params();
-                query.insert("delete".into(), rate.id.to_string());
-                row.actions = render(AddToMenu::new(
-                    format!("currency-rate-{}-actions", rate.id),
-                    format!(
-                        "the {} to {} rate from {}",
-                        rate.from, rate.to, rate.effective_on
-                    ),
-                    vec![AddToItem {
-                        label: "Delete".into(),
-                        href: params::address(RATES_PATH, &query),
-                        disabled: None,
-                    }],
-                ))?;
+                row.actions = render(IconButton {
+                    id: &format!("currency-rate-{}-delete", rate.id),
+                    kind: IconKind::Danger,
+                    title: "Delete rate",
+                    event: "confirm_delete",
+                    name: "id",
+                    value: &rate.id.to_string(),
+                    ..IconButton::new(
+                        "delete",
+                        &format!(
+                            "Delete the {} to {} rate from {}",
+                            rate.from, rate.to, rate.effective_on
+                        ),
+                    )
+                })?;
             }
             row.dom_id = Some(format!("currency-rate-{}", rate.id));
             rows.push(row);
@@ -863,7 +870,6 @@ impl LiveState<Scope, Error> for Rates {
                 LiveInput::Params(values) => {
                     self.state = ListState::parse(values, RATES_SPEC.clone())
                         .map_err(|_| Error::Internal)?;
-                    self.pending_delete = values.get("delete").and_then(|id| id.parse().ok());
                 }
                 LiveInput::Event(value) => {
                     self.event(request.scope, request.credential, value).await?

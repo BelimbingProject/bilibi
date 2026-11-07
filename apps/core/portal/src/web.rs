@@ -1026,7 +1026,7 @@ impl PortalPage {
         }
     }
 
-    /// The "Actions…" link's records (`?drop=person:42`), opened as a drop.
+    /// The "Non-local actions" link's records (`?drop=person:42`), opened as a drop.
     async fn open_dropped(&mut self, scope: &Scope, query: &HashMap<String, String>) -> Result<()> {
         match query.get(records::DROP_PARAM) {
             Some(text) => self.receive_drop(scope, text).await,
@@ -1406,7 +1406,7 @@ impl PortalPage {
                     .ok_or(Error::Invalid)?;
                 self.invite = Some(self.choose_person(scope, draft, kind, id).await?);
             }
-            // A contact dropped on the page (or carried here by "Actions…"):
+            // A contact dropped on the page (or carried here by "Non-local actions"):
             // the invitation review opens on that Person, as if "+ Customer"
             // had been pressed and the Person picked.
             records::DROP_EVENT => {
