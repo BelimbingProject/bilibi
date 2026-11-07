@@ -73,21 +73,45 @@ impl InlineSpecimen {
             .id("inline-kind-input")
             .kind(InputKind::Select)
             .value(&kind_field.value)
-            .options(choices(&[
-                ("Customer", "customer"),
-                ("Vendor", "vendor"),
-                ("Unavailable", "unavailable"),
-            ]))
+            .options(choices(match kind_field.value.as_str() {
+                "vendor" => &[
+                    ("Vendor", "vendor"),
+                    ("Partner", "partner"),
+                    ("Unavailable", "unavailable"),
+                ],
+                "partner" => &[
+                    ("Partner", "partner"),
+                    ("Customer", "customer"),
+                    ("Unavailable", "unavailable"),
+                ],
+                _ => &[
+                    ("Customer", "customer"),
+                    ("Vendor", "vendor"),
+                    ("Unavailable", "unavailable"),
+                ],
+            }))
             .aria_label("Relationship")
             .wrapper_class("mb-0");
         let region_field = field("region", "Edit region");
         let region_editor = Combobox::new("inline-region-input", "region")
             .value(&region_field.value)
-            .options(choices(&[
-                ("Malaysia", "my"),
-                ("Singapore", "sg"),
-                ("Australia", "au"),
-            ]))
+            .options(choices(match region_field.value.as_str() {
+                "sg" => &[
+                    ("Singapore", "sg"),
+                    ("Australia", "au"),
+                    ("Unavailable", "unavailable"),
+                ],
+                "au" => &[
+                    ("Australia", "au"),
+                    ("Malaysia", "my"),
+                    ("Unavailable", "unavailable"),
+                ],
+                _ => &[
+                    ("Malaysia", "my"),
+                    ("Singapore", "sg"),
+                    ("Unavailable", "unavailable"),
+                ],
+            }))
             .wrapper_class("mb-0");
         let region_label = match region_field.value.as_str() {
             "my" => "Malaysia",
@@ -97,6 +121,7 @@ impl InlineSpecimen {
         };
         let kind_label = match kind_field.value.as_str() {
             "vendor" => "Vendor",
+            "partner" => "Partner",
             _ => "Customer",
         };
         Ok(Self {

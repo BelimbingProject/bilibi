@@ -10,6 +10,7 @@
       this.sequence = 0;
       this.long = this.el.dataset.hook === 'InlineLongText';
       this.choice = this.el.dataset.hook === 'InlineChoice';
+      this.editorSource = this.editor()?.dataset.editor;
       this.date = this.el.dataset.inputType === 'date';
       this.abort = new AbortController();
       const listen = (node, type, callback) => node.addEventListener(type, callback, {signal: this.abort.signal});
@@ -63,6 +64,18 @@
       if (this.el.dataset.editable !== 'true') {
         this.active = false;
         this.draft = null;
+      }
+      // The patcher updates data-* on the retained editor. Follow the owner's
+      // latest render when idle; an active/refused/pending editor stays intact.
+      // Only its matching successful reply or cancellation releases a draft.
+      const editor = this.editor();
+      const source = editor?.dataset.editor;
+      if (this.choice && editor && !this.active && !this.draft && !this.pending.size
+        && source !== undefined && source !== this.editorSource) {
+        const template = document.createElement('template');
+        template.innerHTML = source;
+        this.editorSource = source;
+        editor.replaceChildren(template.content);
       }
       // The owner's hint, then the outcome, as the template renders them.
       const describedBy = [

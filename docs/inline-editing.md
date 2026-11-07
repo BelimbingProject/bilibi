@@ -60,7 +60,9 @@ never treated as stored.
    `Combobox` (no `data-event` of its own) and pass its committed label as
    `display`. The choice vocabulary and its validation stay with the owner.
    Give the editor no width of its own: inside a fact it fills the fact's
-   floating-field box (`[data-fact]` in `assets/css/app.css`).
+   floating-field box (`[data-fact]` in `assets/css/app.css`). The owner may change the available choices on every render; no client-side vocabulary or separate refresh event is needed.
+
+The choice shell retains its editor while active, while a reply is outstanding, or while a refused/unconfirmed draft is kept. An idle shell adopts the latest owner-rendered editor, including background changes; a kept draft is released only by its confirmed save or cancellation. This refreshes both native select options and Combobox choices without replacing the trigger or moving focus. A background patch never acknowledges a pending write or replaces a draft's original version.
 
 ## Draft recovery
 
@@ -90,3 +92,5 @@ fact (failed write with draft kept), "Make readonly" after a refused save (the k
 draft is discarded; a save still in flight is refused with a notice and the
 page stays), "Refresh facts" while a draft is open (draft survives), and the
 same fact saved from two tabs (stale-version refusal).
+
+The relationship select cycles Customer → Vendor → Partner → Customer; the region Combobox cycles Malaysia → Singapore → Australia → Malaysia. Each render offers the current and next choice plus Unavailable (always refused). Commit two successive changes without reloading: the second choice must come from the updated owner vocabulary. While another tab changes the record, keep an active query or a refused draft open, then verify that its focus, value and original version survive; Escape discards it and exposes the latest choices. Reopen during Saving, queue a second choice, and verify that an earlier reply does not settle or replace the later draft.
