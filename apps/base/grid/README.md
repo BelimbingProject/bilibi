@@ -247,7 +247,7 @@ A host reads lenses in three steps:
    the FlexTable's heavy-query warning above 20,000.
 3. `lens::cell(value, column, range, lens, Extras { series, before }, &display)`
    per cell. Pass the request's `DisplayContext`: a date becomes a zone-free
-   `Typed::Date` (`dd/mm/yyyy`) and a timestamp a `Typed::Instant` with both
+   `Typed::Date` (`6 Nov 2026`) and a timestamp a `Typed::Instant` with both
    server clock texts, so a clock change re-renders it through every lens. Do
    not format a date into text yourself. Numbers position on the range (dates
    as days, timestamps as seconds; equal ends are 0.5), sequential bands are

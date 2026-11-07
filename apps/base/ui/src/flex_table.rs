@@ -454,7 +454,7 @@ pub enum Typed {
     #[default]
     Text,
     Instant(Instant),
-    /// `iso` is `YYYY-MM-DD`; `text` its `dd/mm/yyyy` reading.
+    /// `iso` is `YYYY-MM-DD`; `text` its `6 Nov 2026` reading.
     Date {
         iso: String,
         text: String,
