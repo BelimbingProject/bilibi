@@ -44,7 +44,8 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 - A new unconfirmed request writes only its record ID and status to audit; its unverified name, email and company stay in the registration row rather than append-only evidence.
 - `portal.registration` declares `name`, `email` and `company_name` as personal. A confirmed request that matches an email supplied for a data-subject request is a candidate the operator must confirm. Approval links the request to the chosen Person through its invitation, so it is found without an identifier match. Access and portability export confirmed requests; erasure deletes confirmed or linked requests unless a legal hold names the request or Person, and clears their declared fields from audit evidence.
-- The shared Privacy retention class **Customer account requests** purges expired unconfirmed requests and approved or rejected requests after the primary company's configured period. Confirmed requests still waiting for staff are not expired. As with every privacy class, an operator must set its period, turn it on and enable the daily privacy sweep before cleanup runs.
+- Expired unconfirmed requests are deleted by default, with no operator setting: each new registration on the portal's tenant first deletes up to 100 of them (the same address first), except any a legal hold names. Confirmed requests still waiting for staff are not expired.
+- The shared Privacy retention class **Customer account requests** also purges expired unconfirmed requests and approved or rejected requests after the primary company's configured period. As with every privacy class, an operator must set its period, turn it on and enable the daily privacy sweep before that cleanup runs.
 
 ## Portal access panel
 

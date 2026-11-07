@@ -186,6 +186,7 @@ impl PortalService {
         let token = new_token()?;
         let hash = digest(&token);
         let tenant = site.tenant;
+        self.purge_expired(&mut client, tenant, &email).await?;
         let mut tx = self
             .mutations
             .begin(
@@ -198,21 +199,6 @@ impl PortalService {
         let created = tx
             .mutate(move |sql| {
                 Box::pin(async move {
-                    let mut changes = Vec::new();
-                    for row in sql
-                        .query(
-                            "DELETE FROM customer_registrations WHERE tenant_id=$1 AND email=$2 AND decision IS NULL AND verified_at IS NULL AND expires_at<=now() RETURNING id",
-                            &[&tenant, &insert_email],
-                        )
-                        .await?
-                    {
-                        changes.push(Change {
-                            kind: "portal.registration".into(),
-                            id: row.get(0),
-                            old: json!({"status": "unverified"}),
-                            new: json!(null),
-                        });
-                    }
                     // The open-recipient unique index arbitrates concurrent
                     // callers, even when no row existed for either to lock.
                     let inserted = sql
@@ -227,7 +213,7 @@ impl PortalService {
                         return Err(Error::Conflict);
                     };
                     let id: i64 = inserted.get(0);
-                    changes.push(Change {
+                    let changes = vec![Change {
                         kind: "portal.registration".into(),
                         id,
                         old: json!(null),
@@ -235,7 +221,7 @@ impl PortalService {
                         // trail names only the record and its state. The row
                         // remains the one short-lived source of these values.
                         new: json!({"status": "unverified"}),
-                    });
+                    }];
                     Ok(((), changes))
                 })
             })
@@ -266,6 +252,78 @@ impl PortalService {
         });
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Deletes expired unconfirmed requests unless a legal hold names them,
+    /// the one for `email` first, so abandoned names and addresses do not
+    /// wait for an operator to turn on the privacy sweep.
+    async fn purge_expired(
+        &self,
+        client: &mut tokio_postgres::Client,
+        tenant: i64,
+        email: &str,
+    ) -> Result<()> {
+        let ids: Vec<i64> = client
+            .query(
+                "SELECT id FROM customer_registrations WHERE tenant_id=$1 AND decision IS NULL AND verified_at IS NULL AND expires_at<=now() ORDER BY email=$2 DESC,id LIMIT 100",
+                &[&tenant, &email],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
+        let held = holds.records(crate::privacy::KIND, &ids).await?;
+        let ids: Vec<i64> = ids
+            .into_iter()
+            .filter(|id| !held.contains_key(id))
+            .collect();
+        let purged = if ids.is_empty() {
+            Ok(())
+        } else {
+            self.purge_in(client, tenant, ids).await
+        };
+        holds.release().await?;
+        purged
+    }
+
+    async fn purge_in(
+        &self,
+        client: &mut tokio_postgres::Client,
+        tenant: i64,
+        ids: Vec<i64>,
+    ) -> Result<()> {
+        let mut tx = self
+            .mutations
+            .begin(
+                client,
+                Context::system(tenant, PRINCIPAL, "core.portal.registration.expire"),
+            )
+            .await?;
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let changes = sql
+                    .query(
+                        "DELETE FROM customer_registrations WHERE tenant_id=$1 AND id=ANY($2) AND decision IS NULL AND verified_at IS NULL AND expires_at<=now() RETURNING id",
+                        &[&tenant, &ids],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| Change {
+                        kind: "portal.registration".into(),
+                        id: row.get(0),
+                        old: json!({"status": "unverified"}),
+                        new: json!(null),
+                    })
+                    .collect();
+                Ok(((), changes))
+            })
+        })
+        .await?;
+        tx.commit().await
     }
 
     /// Whether a verification link on the portal at `address` is open, for
