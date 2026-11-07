@@ -53,7 +53,7 @@ without a valid session redirect to login. Authenticated refusals return 403.
 | `/portal/reset/{site}/{token}` | `portal_reset_password`, then back to sign-in |
 | `/portal/accept/{site}/{token}` | Core Portal redeems the invitation, then the customer is signed in through `portal_login` (or sent to sign-in when a second step is required) |
 | `/portal/sign-in/{site}/challenge` | The second sign-in step for a tenant that turned on `core.user.portal_sign_in`: the pending sign-in's cookie (`bilibi_portal_sign_in`, `Path=/portal/sign-in`), start or resend a challenge, verify the code, cancel |
-| `/portal/register/{site}` | Core Portal takes a request for an account (404 unless the site takes them); one answer for known and unknown addresses; bounded per sender with recovery |
+| `/portal/register/{site}` | Core Portal takes a request for an account (404 unless the site takes them); one answer for known and unknown addresses; bounded by Core Portal's own shared registration limits, not the recovery budget |
 | `/portal/verify/{site}/{token}` | A button that confirms the request's address (the GET alone confirms nothing) |
 
 - Sign-in (the form, or accepting an invitation) alone sets `bilibi_portal`: `HttpOnly`, `SameSite=Lax`, `Path=/portal`, `Max-Age` one day, `Secure` on an `https` origin, holding the fresh token each sign-in issues.
