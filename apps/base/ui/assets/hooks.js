@@ -1257,6 +1257,12 @@
     return kind === "datetime-local" && match[4] ? `${date}, ${match[4]}` : date
   }
 
+  const syncPicker = (picker, parsed) => {
+    if (!picker) return
+    const inside = parsed && (!picker.min || parsed >= picker.min) && (!picker.max || parsed <= picker.max)
+    picker.value = inside ? parsed : ""
+  }
+
   window.BilibiUI.registerHook("DateInput", {
     mounted() {
       this.kind = () => this.el.dataset.dateKind || "date"
@@ -1277,7 +1283,7 @@
         if (event.target !== box) return
         const parsed = parse(kind, box.value)
         value.value = parsed ?? box.value.trim()
-        if (picker) picker.value = parsed ?? ""
+        syncPicker(picker, parsed)
         // On leaving the box (change), show what was understood.
         if (event.type === "change" && parsed) box.value = show(kind, parsed)
       }
@@ -1300,7 +1306,7 @@
         if (!box || !value) return
         const parsed = parse(this.kind(), given) ?? (/^\d{4}-\d{2}-\d{2}/.test(given) ? given : null)
         value.value = parsed ?? given
-        if (picker) picker.value = parsed ?? ""
+        syncPicker(picker, parsed)
         box.value = show(this.kind(), parsed ?? given)
       }
       this.el.addEventListener("input", this.onInput)
