@@ -1,26 +1,25 @@
-//! The Exchange rates page: the dated rates, edited in place, and the
-//! currency conversion calculator.
+//! The Exchange rates tab of the Currencies page: the dated rates, edited in
+//! place, and the currency conversion calculator. Every currency control
+//! offers every current currency, the used ones first.
 use super::{
-    call, clear_flash, commit_status, flash_map, outcome, render, MutedText, Pages, View,
+    call, clear_flash, commit_status, flash_map, outcome, render, MutedText, Pages, TabBody,
     PAGE_SIZES,
 };
 use crate::{
     facade::{Currency, Rate, RateQuery, Request, NOTE_MAX},
-    CURRENCIES_PATH, RATES_MANAGE,
+    MAX_AGE_KEY, RATES_MANAGE,
 };
 use askama::Template;
 use bilibi_agent_api::Error as ContractError;
 use bilibi_authz::effective_capabilities;
 use bilibi_database::{Error, Result};
+use bilibi_settings::Target;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    list_state::FILTERS_FORM,
-    page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
     params, BuiltinColumn, Button, ButtonVariant, Card, Choice, ColumnsOutcome, Combobox,
-    CommitStates, ConfirmDialog, CreateButton, Field, FilterToolbar, FlexRow, FlexTable, Form,
-    Header, Html, IconButton, IconKind, InlineEdit, InlineField, InputKind, ListColumns, ListSpec,
-    ListState, Modal, PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty,
-    ToolbarControl,
+    CommitStates, ConfirmDialog, CreateButton, Field, FlexRow, FlexTable, Form, Html, IconButton,
+    IconKind, InlineEdit, InlineField, InputKind, ListColumns, ListSpec, ListState, Modal,
+    PageCounts, Pagination, SectionHeading, StatusKind, TableEmpty,
 };
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -37,7 +36,6 @@ static RATES_SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         page_sizes: PAGE_SIZES.to_vec(),
         default_page_size: 25,
         page_size_param: "per_page".into(),
-        omit_blank: vec!["search".into()],
         omit_defaults: true,
         ..ListSpec::default()
     }
@@ -122,6 +120,30 @@ pub(super) struct Rates {
 }
 
 impl Rates {
+    /// The list's page and page size, for the address.
+    pub(super) fn query(&self) -> HashMap<String, String> {
+        let mut query = self.state.to_params();
+        query.remove("search");
+        query
+    }
+    pub(super) fn flash(&self) -> &Option<(StatusKind, String)> {
+        &self.flash
+    }
+    pub(super) fn notice(&self) -> String {
+        self.notice.clone()
+    }
+    pub(super) fn shown(&self) -> usize {
+        self.shown
+    }
+    pub(super) fn refresh(&mut self) {
+        self.rows_changed = true;
+    }
+    pub(super) fn params(&mut self, values: &HashMap<String, String>) -> Result<()> {
+        self.rows_changed = true;
+        self.state = ListState::parse(values, RATES_SPEC.clone()).map_err(|_| Error::Internal)?;
+        Ok(())
+    }
+
     pub(super) fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
         Ok(Self {
             pages,
@@ -143,14 +165,16 @@ impl Rates {
         self.rates.iter().find(|rate| rate.id == id)
     }
 
-    async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
+    pub(super) async fn event(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        value: &Value,
+    ) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         self.notice.clear();
+        self.rows_changed = true;
         match get("type").ok_or(Error::Invalid)? {
-            "filters" => self.state.apply_filters(
-                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
-                    .map_err(Error::refused)?,
-            ),
             "page" => self.state.put_page(get("page")),
             "grid" => match self.columns.handle(
                 &params::string_values_checked(value, params::FIELD_LIMIT)
@@ -427,12 +451,14 @@ impl Rates {
     }
 
     /// The calculator's starting point: 1 of the base currency (or the first
-    /// enabled one) on top, below it the other side of the latest rate that
-    /// involves it (or the next enabled currency), on today.
-    fn start_check(&mut self, enabled: &[Currency], base: Option<&Currency>, today: Option<Date>) {
+    /// used one) on top, below it the other side of the latest rate that
+    /// involves it (or the next used currency), on today. A tenant that has
+    /// used none starts empty and picks both.
+    fn start_check(&mut self, current: &[Currency], base: Option<&Currency>, today: Option<Date>) {
+        let used: Vec<&Currency> = current.iter().filter(|currency| currency.used).collect();
         let top = base
-            .filter(|base| enabled.iter().any(|currency| currency.code == base.code))
-            .or_else(|| enabled.first())
+            .filter(|base| current.iter().any(|currency| currency.code == base.code))
+            .or_else(|| used.first().copied())
             .map(|currency| currency.code.clone())
             .unwrap_or_default();
         let latest = self.rates.iter().find_map(|rate| {
@@ -446,8 +472,7 @@ impl Rates {
         });
         let bottom = latest
             .or_else(|| {
-                enabled
-                    .iter()
+                used.iter()
                     .find(|currency| currency.code != top)
                     .map(|currency| currency.code.clone())
             })
@@ -488,12 +513,11 @@ impl Rates {
         inline
     }
 
-    pub(super) async fn render(&mut self, scope: &Scope) -> Result<String> {
+    pub(super) async fn render(&mut self, scope: &Scope) -> Result<TabBody> {
         let pages = self.pages.clone();
         let client = pages.db.get().await?;
         let capabilities = effective_capabilities(&**client, scope).await?;
         let edits = capabilities.contains(RATES_MANAGE);
-        let search = self.state.search.clone();
         let (limit, offset) = (self.state.page_size as i64, self.state.offset() as i64);
         let (rates, total) = pages
             .currencies
@@ -501,14 +525,21 @@ impl Rates {
                 &**client,
                 scope,
                 &RateQuery {
-                    code: (!search.trim().is_empty()).then(|| search.clone()),
+                    code: None,
                     limit,
                     offset,
                 },
             )
             .await?;
-        let enabled = pages.currencies.enabled(&**client, scope).await?;
+        let current = pages.currencies.current(&**client, scope).await?;
         let today = pages.today(&**client, scope).await?;
+        let max_age = pages
+            .settings
+            .get(&**client, scope, Target::Tenant, MAX_AGE_KEY)
+            .await?
+            .value
+            .as_i64()
+            .unwrap_or(7);
         drop(client);
         self.rates = rates;
         self.shown = self.rates.len();
@@ -516,38 +547,23 @@ impl Rates {
             self.columns.load(&self.rates, |rate| rate.id.to_string());
         }
         let counts = PageCounts::new(self.state.page, self.state.page_size, total as u64);
-        let mut actions = render(Button {
-            id: "currency-list-link",
-            href: CURRENCIES_PATH,
-            body: Html::text("Currencies"),
-            ..Button::default()
-        })?;
-        if edits {
-            actions.push(&render(CreateButton {
+        let actions = if edits {
+            render(CreateButton {
                 noun: "Rate",
                 id: "currency-rate-new",
                 event: "new",
                 button_type: "button",
                 ..CreateButton::default()
-            })?);
-        }
-        let header = render(Header {
-            title: Html::text("Exchange rates"),
-            subtitle: "Each rate applies from its date until a later one for the same pair.",
-            actions,
-            ..Header::default()
-        })?;
-        let form = self.state.filters_form();
-        let toolbar = render(FilterToolbar::new(
-            "currency-rate-filters",
-            vec![ToolbarControl::search(
-                "currency-rate-search",
-                "search",
-                "Search rates",
-                &form["search"],
-                "Search by currency code...",
-            )],
-        ))?;
+            })?
+        } else {
+            Html::EMPTY
+        };
+        // The tab's guidance: the two rules a person entering rates needs.
+        let guidance = match max_age {
+            0 => "Each rate applies from its date until a later rate for the same pair.".to_owned(),
+            1 => "Each rate applies from its date until a later rate for the same pair. Conversions skip a rate older than 1 day.".to_owned(),
+            days => format!("Each rate applies from its date until a later rate for the same pair. Conversions skip a rate older than {days} days."),
+        };
         let mut rows = Vec::with_capacity(self.rates.len());
         for rate in &self.rates {
             let mut row = FlexRow::new(rate.id.to_string())
@@ -610,38 +626,16 @@ impl Rates {
         table.framed = false;
         table.actions = edits;
         if total == 0 {
-            // Each empty state offers its next step: a rate needs two
-            // enabled currencies.
-            let (text, next) = if !search.is_empty() {
-                ("No rate matches this search.", Html::EMPTY)
-            } else if enabled.len() < 2 {
-                (
-                    "No exchange rates yet. Enable the currencies first.",
-                    render(Button {
-                        id: "currency-rate-empty-enable",
-                        href: CURRENCIES_PATH,
-                        body: Html::text("Enable currencies"),
-                        ..Button::default()
-                    })?,
-                )
-            } else if edits {
-                (
-                    "No exchange rates yet.",
-                    render(Button {
-                        id: "currency-rate-empty-add",
-                        event: "new",
-                        button_type: "button",
-                        body: Html::text("Add a rate"),
-                        ..Button::default()
-                    })?,
-                )
-            } else {
-                ("No exchange rates yet.", Html::EMPTY)
-            };
-            let mut empty = Html::text(text);
-            if !next.is_empty() {
+            let mut empty = Html::text("No exchange rates yet.");
+            if edits {
                 empty.push(&Html::text(" "));
-                empty.push(&next);
+                empty.push(&render(Button {
+                    id: "currency-rate-empty-add",
+                    event: "new",
+                    button_type: "button",
+                    body: Html::text("Add a rate"),
+                    ..Button::default()
+                })?);
             }
             table.empty = Some(TableEmpty::Content(empty));
         }
@@ -657,21 +651,24 @@ impl Rates {
             body,
             ..Card::default()
         })?;
-        if self.check.top.is_empty() && self.check.bottom.is_empty() && enabled.len() >= 2 {
+        let mut body = render(SectionHeading {
+            title: "Rates",
+            id: "currency-rates-heading",
+            count: Some(total as usize),
+            description: &guidance,
+            actions,
+            ..SectionHeading::default()
+        })?;
+        body.push(&card);
+        if self.check.top.is_empty() && self.check.bottom.is_empty() {
             let base = {
                 let client = pages.db.get().await?;
                 pages.currencies.base(&**client, scope, None).await?
             };
-            self.start_check(&enabled, base.as_ref(), today);
+            self.start_check(&current, base.as_ref(), today);
         }
         self.calculate(scope, self.check.side).await?;
-        // A conversion needs two enabled currencies; until then the empty
-        // state says so and the calculator stays out of the way.
-        let check = if enabled.len() >= 2 {
-            self.check_card(&enabled, edits)?
-        } else {
-            Html::EMPTY
-        };
+        body.push(&self.check_card(&current, edits)?);
         let dialog = match (&self.confirm, &self.draft) {
             (Some(rate), _) => render(ConfirmDialog {
                 id: "currency-rate-delete-confirm",
@@ -685,29 +682,18 @@ impl Rates {
                 confirm_event: "delete_rate",
                 cancel_event: "cancel_confirm",
             })?,
-            (None, Some(draft)) => self.new_dialog(&enabled, draft)?,
+            (None, Some(draft)) => self.new_dialog(&current, draft)?,
             (None, None) => Html::EMPTY,
         };
-        View {
-            id: "currency-rates-page",
-            flash: flash_map(&self.flash),
-            header,
-            summary: Html::EMPTY,
-            toolbar,
-            card,
-            footer: check,
-            dialog,
-        }
-        .render()
-        .map_err(|_| Error::Internal)
+        Ok(TabBody { body, dialog })
     }
 
     /// The currency conversion calculator: the line that names the rate's
     /// date and source with the date to convert on, then two rows of an
     /// amount and its currency. Typing in either row answers in the other.
-    fn check_card(&self, enabled: &[Currency], edits: bool) -> Result<Html> {
+    fn check_card(&self, current: &[Currency], edits: bool) -> Result<Html> {
         let check = &self.check;
-        let options: Vec<Choice> = enabled.iter().map(|currency| currency.choice()).collect();
+        let options: Vec<Choice> = current.iter().map(|currency| currency.choice()).collect();
         let row = |amount: &str, code: &str, side: &str, label: &str| -> Result<Html> {
             render(FieldRow {
                 fields: vec![
@@ -787,10 +773,10 @@ impl Rates {
         })
     }
 
-    fn new_dialog(&self, enabled: &[Currency], draft: &Draft) -> Result<Html> {
+    fn new_dialog(&self, current: &[Currency], draft: &Draft) -> Result<Html> {
         let value = |key: &str| draft.values.get(key).cloned().unwrap_or_default();
         let errors = |key: &str| draft.errors.get(key).cloned().unwrap_or_default();
-        let options: Vec<Choice> = enabled.iter().map(|currency| currency.choice()).collect();
+        let options: Vec<Choice> = current.iter().map(|currency| currency.choice()).collect();
         let combo = |key: &str, label: &str, hint: &str| {
             Combobox::new(format!("rate_{key}"), format!("rate[{key}]"))
                 .label(label)
@@ -863,32 +849,6 @@ impl Rates {
             flash: Some(flash_map(&self.flash)),
             body: form,
             ..Modal::default()
-        })
-    }
-}
-
-impl LiveState<Scope, Error> for Rates {
-    fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
-        Box::pin(async move {
-            self.rows_changed = true;
-            match request.input {
-                LiveInput::Refresh => {}
-                LiveInput::Params(values) => {
-                    self.state = ListState::parse(values, RATES_SPEC.clone())
-                        .map_err(|_| Error::Internal)?;
-                }
-                LiveInput::Event(value) => {
-                    self.event(request.scope, request.credential, value).await?
-                }
-            }
-            let html = self.render(request.scope).await?;
-            Ok(LiveBody {
-                html,
-                query: self.state.to_params(),
-                rows: self.shown,
-                notice: self.notice.clone(),
-                ..LiveBody::default()
-            })
         })
     }
 }

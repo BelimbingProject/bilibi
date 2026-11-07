@@ -1,6 +1,7 @@
-//! The `Currencies` facade: what forms read (`enabled`, `base`), what an
-//! owner's write checks (`check`), the one conversion (`rate`, `convert`) and
-//! the operator's curation (enable, base currency, dated rates). Reads need
+//! The `Currencies` facade: what forms read (`current`, `base`), what an
+//! owner's write checks (`check`, which also marks the currency used), the
+//! one conversion (`rate`, `convert`) and the operator's curation (base
+//! currency, dated rates). Reads need
 //! only the sealed scope, since the caller authorises its own operation;
 //! every write rechecks its capability inside the write's transaction. A
 //! conversion always names the rate it used, its date and how it was found.
@@ -37,10 +38,11 @@ pub struct Currency {
     /// Decimal places of the smallest unit (JPY 0, MYR 2, KWD 3).
     pub minor_units: u32,
     /// ISO has retired the code. Records holding it still read; it cannot be
-    /// enabled or chosen for something new.
+    /// chosen for something new.
     pub withdrawn: bool,
-    /// The tenant has switched it on.
-    pub enabled: bool,
+    /// The tenant has used it: as a base currency, in a rate or on a record
+    /// `check` accepted. Currency controls list these first.
+    pub used: bool,
 }
 impl Currency {
     fn from_row(row: &Row) -> Self {
@@ -51,7 +53,7 @@ impl Currency {
             common_names: row.get("common_names"),
             minor_units: row.get::<_, i16>("minor_units") as u32,
             withdrawn: row.get("withdrawn"),
-            enabled: row.get("enabled"),
+            used: row.get("used"),
         }
     }
     /// The common names that add something: those whose words already appear
@@ -95,17 +97,6 @@ impl Currency {
                 .join(", "),
         )
     }
-    /// Whether `needle` (already lower case) is in the code, name, a common
-    /// name or is the numeric code.
-    pub fn matches(&self, needle: &str) -> bool {
-        self.code.to_lowercase().contains(needle)
-            || self.name.to_lowercase().contains(needle)
-            || self
-                .common_names
-                .iter()
-                .any(|common| common.to_lowercase().contains(needle))
-            || self.numeric_code == needle
-    }
     pub fn to_json(&self) -> Value {
         json!({
             "code": self.code,
@@ -114,14 +105,14 @@ impl Currency {
             "common_names": self.common_names,
             "minor_units": self.minor_units,
             "withdrawn": self.withdrawn,
-            "enabled": self.enabled,
+            "used": self.used,
         })
     }
 }
 const CURRENCY_COLUMNS: &str =
-    "c.code,c.numeric_code,c.name,c.common_names,c.minor_units,c.withdrawn,(e.code IS NOT NULL) AS enabled";
+    "c.code,c.numeric_code,c.name,c.common_names,c.minor_units,c.withdrawn,(u.code IS NOT NULL) AS used";
 const CURRENCY_FROM: &str =
-    "FROM currencies c LEFT JOIN currency_tenant_enabled e ON e.tenant_id=$1 AND e.code=c.code";
+    "FROM currencies c LEFT JOIN currency_tenant_used u ON u.tenant_id=$1 AND u.code=c.code";
 
 /// One dated rate: 1 `from` = `rate` `to` from `effective_on` until a later row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,14 +303,12 @@ impl Refusal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unusable {
     Unknown,
-    NotEnabled,
     Withdrawn,
 }
 impl Unusable {
     pub fn message(self) -> &'static str {
         match self {
             Self::Unknown => "is not a currency code",
-            Self::NotEnabled => "is not enabled; enable it on the Currencies page",
             Self::Withdrawn => "has been withdrawn from ISO 4217",
         }
     }
@@ -382,7 +371,7 @@ fn civil(date: Date) -> String {
 impl Currencies {
     // ------------------------------------------------------------ reading
 
-    /// A currency of the catalog, enabled or not, withdrawn or not: a record
+    /// A currency of the catalog, used or not, withdrawn or not: a record
     /// that holds a code can always show it. `None` for a code ISO never had.
     pub async fn get(
         &self,
@@ -402,15 +391,16 @@ impl Currencies {
             .as_ref()
             .map(Currency::from_row))
     }
-    /// What a form offers: the currencies the tenant enabled, by code.
-    pub async fn enabled(
+    /// What a form offers: every currency that is not withdrawn, the ones the
+    /// tenant has used first, each group by code.
+    pub async fn current(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Vec<Currency>> {
         Ok(client
             .query(
-                &format!("SELECT {CURRENCY_COLUMNS} {CURRENCY_FROM} WHERE e.code IS NOT NULL AND NOT c.withdrawn ORDER BY c.code"),
+                &format!("SELECT {CURRENCY_COLUMNS} {CURRENCY_FROM} WHERE NOT c.withdrawn ORDER BY (u.code IS NULL), c.code"),
                 &[&scope.tenant()],
             )
             .await?
@@ -418,21 +408,23 @@ impl Currencies {
             .map(Currency::from_row)
             .collect())
     }
-    /// The options of a currency control, `MYR — Malaysian ringgit (RM)`.
+    /// The options of a currency control, `MYR — Malaysian ringgit (RM)`,
+    /// used ones first.
     pub async fn choices(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Vec<Choice>> {
         Ok(self
-            .enabled(client, scope)
+            .current(client, scope)
             .await?
             .into_iter()
             .map(|currency| currency.choice())
             .collect())
     }
     /// The one currency control every form reuses: a searchable `Combobox` of
-    /// the enabled currencies. Put it in a form with `forms::combobox`.
+    /// every current currency, the used ones first. Put it in a form with
+    /// `forms::combobox`.
     pub async fn combobox(
         &self,
         client: &(impl GenericClient + Sync),
@@ -477,34 +469,27 @@ impl Currencies {
             None => Ok(None),
         }
     }
-    /// Whether a new assignment may use `code`, on the owner's transaction.
-    /// The enabled row is locked `FOR SHARE`, so a concurrent disable waits
-    /// for the owner's commit.
+    /// Whether a new assignment may use `code`, on the owner's transaction:
+    /// any current currency may. One the tenant has not used yet becomes used
+    /// in the same transaction, so currency controls list it first from then
+    /// on. Call it in the commit, not in a read-only preview.
     pub async fn check(
         &self,
-        tx: &MutationTransaction<'_>,
+        tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         code: &str,
     ) -> Result<std::result::Result<Currency, Unusable>> {
         let Some(code) = normalize(code) else {
             return Ok(Err(Unusable::Unknown));
         };
-        let client = tx.sql();
-        client
-            .execute(
-                "SELECT 1 FROM currency_tenant_enabled WHERE tenant_id=$1 AND code=$2 FOR SHARE",
-                &[&scope.tenant(), &code],
-            )
-            .await?;
-        Ok(match self.get(client, scope, &code).await? {
+        Ok(match self.get(tx.sql(), scope, &code).await? {
             None => Err(Unusable::Unknown),
             Some(currency) if currency.withdrawn => Err(Unusable::Withdrawn),
-            Some(currency) if !currency.enabled => Err(Unusable::NotEnabled),
-            Some(currency) => Ok(currency),
+            Some(currency) => Ok(Self::mark_used(tx, scope, currency).await?),
         })
     }
 
-    /// Every catalog entry with the tenant's switch, under `view`.
+    /// Every catalog entry with whether the tenant used it, under `view`.
     pub async fn catalog(
         &self,
         client: &(impl GenericClient + Sync),
@@ -513,7 +498,7 @@ impl Currencies {
         authorize_key(client, scope, VIEW).await?;
         Ok(client
             .query(
-                &format!("SELECT {CURRENCY_COLUMNS} {CURRENCY_FROM} ORDER BY (e.code IS NULL), c.withdrawn, c.code"),
+                &format!("SELECT {CURRENCY_COLUMNS} {CURRENCY_FROM} ORDER BY (u.code IS NULL), c.withdrawn, c.code"),
                 &[&scope.tenant()],
             )
             .await?
@@ -756,8 +741,8 @@ impl Currencies {
 
     // ------------------------------------------------------------ curating
 
-    /// Serializes the base, enable and disable writes of one tenant, so a
-    /// disable cannot slip past a base currency being chosen.
+    /// Serializes one tenant's base and rate writes, so two adds of the same
+    /// rate meet the version check rather than the unique key.
     async fn lock(client: &(impl GenericClient + Sync), tenant: i64) -> Result<()> {
         client
             .execute(
@@ -768,168 +753,41 @@ impl Currencies {
         Ok(())
     }
 
-    async fn check_enabled_change(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        code: &str,
-        enable: bool,
-        lock: bool,
-    ) -> Result<Checked<Currency>> {
-        authorize_key(client, scope, MANAGE).await?;
-        if lock {
-            Self::lock(client, scope.tenant()).await?;
-        }
-        let Some(currency) = self.get(client, scope, code).await? else {
-            return Ok(Err(vec![FieldError::new("code", "is not a currency code")]));
-        };
-        if enable && currency.withdrawn && !currency.enabled {
-            return Ok(Err(vec![FieldError::new(
-                "code",
-                "has been withdrawn from ISO 4217, so it cannot be enabled",
-            )]));
-        }
-        if !enable {
-            let (tenant, companies) = self.base_users(client, scope, &currency.code).await?;
-            let uses = match (tenant, companies.is_empty()) {
-                (false, true) => None,
-                (true, true) => {
-                    Some("is the base currency; choose another base currency first".to_owned())
-                }
-                (false, false) => Some(format!(
-                    "is the currency of {}; choose another currency for it first",
-                    companies.join(", ")
-                )),
-                (true, false) => Some(format!(
-                    "is the base currency and the currency of {}; choose others first",
-                    companies.join(", ")
-                )),
-            };
-            if let Some(uses) = uses {
-                return Ok(Err(vec![FieldError::new("code", uses)]));
-            }
-        }
-        Ok(Ok(currency))
-    }
-    /// Who has `code` as a base currency: whether the tenant does, and the
-    /// name of each company that chose it for itself.
-    async fn base_users(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        code: &str,
-    ) -> Result<(bool, Vec<String>)> {
-        let tenant = self
-            .base(client, scope, None)
-            .await?
-            .is_some_and(|base| base.code == code);
-        let mut users = Vec::new();
-        for company in bilibi_company::list_tenant_company_ids(client, scope).await? {
-            let own = match self.own_base(client, scope, company).await {
-                Ok(own) => own,
-                Err(Error::NotFound | Error::Forbidden) => continue,
-                Err(error) => return Err(error),
-            };
-            if own.is_some_and(|base| base.code == code) {
-                users.push(
-                    match bilibi_company::detail(client, scope, company.get()).await {
-                        Ok((company, _)) => company.display_name(),
-                        Err(Error::NotFound | Error::Forbidden) => {
-                            format!("company {}", company.get())
-                        }
-                        Err(error) => return Err(error),
-                    },
-                );
-            }
-        }
-        Ok((tenant, users))
-    }
-    /// The currency as it would stand after the change, without making it.
-    pub async fn preview_enabled(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        code: &str,
-        enable: bool,
-    ) -> Result<Checked<Currency>> {
-        Ok(self
-            .check_enabled_change(client, scope, code, enable, false)
-            .await?
-            .map(|currency| Currency {
-                enabled: enable,
-                ..currency
-            }))
-    }
-    /// Turns a currency on or off for the tenant, under `admin.currency.manage`.
-    /// A disabled currency stays readable on the records that hold it.
-    pub async fn set_enabled(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        scope: &Scope,
-        code: &str,
-        enable: bool,
-    ) -> Result<Checked<Currency>> {
-        let currency = match self
-            .check_enabled_change(tx.sql(), scope, code, enable, true)
-            .await?
-        {
-            Ok(currency) => currency,
-            Err(errors) => return Ok(Err(errors)),
-        };
-        if currency.enabled == enable {
-            return Ok(Ok(currency));
-        }
-        Ok(Ok(Self::write_enabled(tx, scope, currency, enable).await?))
-    }
-    /// The enable or disable write itself, after its checks passed.
-    async fn write_enabled(
+    /// Marks a currency used by the tenant, audited, the first time it is
+    /// used; a currency already used is returned as it is.
+    async fn mark_used(
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         currency: Currency,
-        enable: bool,
     ) -> Result<Currency> {
+        if currency.used {
+            return Ok(currency);
+        }
         let tenant = scope.tenant();
         let saved = Currency {
-            enabled: enable,
+            used: true,
             ..currency
         };
-        let (before, after) = if enable {
-            (json!({}), saved.to_json())
-        } else {
-            (
-                Currency {
-                    enabled: true,
-                    ..saved.clone()
-                }
-                .to_json(),
-                json!({}),
-            )
-        };
+        let after = saved.to_json();
         let code = saved.code.clone();
         tx.mutate(move |sql| {
             Box::pin(async move {
-                let id: i64 = if enable {
-                    sql.query_one(
-                        "INSERT INTO currency_tenant_enabled(tenant_id,code) VALUES($1,$2) \
+                // A concurrent first use of the same code meets the key; both
+                // writes then name the one row.
+                let id: i64 = sql
+                    .query_one(
+                        "INSERT INTO currency_tenant_used(tenant_id,code) VALUES($1,$2) \
                          ON CONFLICT (tenant_id,code) DO UPDATE SET code=EXCLUDED.code RETURNING id",
                         &[&tenant, &code],
                     )
                     .await?
-                    .get(0)
-                } else {
-                    sql.query_one(
-                        "DELETE FROM currency_tenant_enabled WHERE tenant_id=$1 AND code=$2 RETURNING id",
-                        &[&tenant, &code],
-                    )
-                    .await?
-                    .get(0)
-                };
+                    .get(0);
                 Ok((
                     (),
                     vec![Change {
-                        kind: "currency_enabled".into(),
+                        kind: "currency_used".into(),
                         id,
-                        old: before,
+                        old: json!({}),
                         new: after,
                     }],
                 ))
@@ -963,7 +821,7 @@ impl Currencies {
         }
     }
     /// The base currency a write would leave in place, as it stands now: a
-    /// currency not yet enabled is enabled by the write.
+    /// currency not used yet becomes used by the write.
     pub async fn preview_base(
         &self,
         client: &(impl GenericClient + Sync),
@@ -973,9 +831,10 @@ impl Currencies {
         self.check_base(client, scope, code, false).await
     }
     /// Sets the tenant's base currency, or a company's own; `None` clears it
-    /// (a company then follows the tenant). A currency that is not enabled yet
-    /// is enabled in the same write; a withdrawn one is refused. Saved through
-    /// Settings, which audits the change.
+    /// (a company then follows the tenant). Any current currency may be
+    /// chosen, and one not used yet becomes used in the same write; a
+    /// withdrawn one is refused. Saved through Settings, which audits the
+    /// change.
     pub async fn set_base(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -984,10 +843,8 @@ impl Currencies {
         company: Option<OrganisationId>,
     ) -> Result<Checked<Option<Currency>>> {
         let currency = match self.check_base(tx.sql(), scope, code, true).await? {
-            Ok(Some(currency)) if !currency.enabled => {
-                Some(Self::write_enabled(tx, scope, currency, true).await?)
-            }
-            Ok(currency) => currency,
+            Ok(Some(currency)) => Some(Self::mark_used(tx, scope, currency).await?),
+            Ok(None) => None,
             Err(errors) => return Ok(Err(errors)),
         };
         let target = company.map_or(Target::Tenant, Target::Company);
@@ -1082,17 +939,13 @@ impl Currencies {
             _ => {}
         }
         if existing.is_none() {
-            // A new rate names currencies the tenant trades in.
+            // A new rate names current currencies; adding it marks them used.
             for (field, code) in [("from", &from), ("to", &to)] {
                 match self.get(client, scope, code).await? {
                     None => errors.push(FieldError::new(field, "is not a currency code")),
                     Some(currency) if currency.withdrawn => {
                         errors.push(FieldError::new(field, "has been withdrawn from ISO 4217"))
                     }
-                    Some(currency) if !currency.enabled => errors.push(FieldError::new(
-                        field,
-                        "is not enabled; enable it on the Currencies page",
-                    )),
                     Some(_) => {}
                 }
             }
@@ -1122,7 +975,8 @@ impl Currencies {
         self.check_rate(client, scope, input, false).await
     }
     /// Adds a rate, or changes the one for this pair and date with its
-    /// version. Audited with the old and new values.
+    /// version. Audited with the old and new values. A new rate marks both
+    /// currencies used.
     pub async fn set_rate(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -1133,6 +987,13 @@ impl Currencies {
             Ok(checked) => checked,
             Err(errors) => return Ok(Err(errors)),
         };
+        if before.is_none() {
+            for code in [&input.from, &input.to] {
+                if let Some(currency) = self.get(tx.sql(), scope, code).await? {
+                    Self::mark_used(tx, scope, currency).await?;
+                }
+            }
+        }
         let tenant = scope.tenant();
         let saved = tx
             .mutate(move |sql| {
