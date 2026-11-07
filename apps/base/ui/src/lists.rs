@@ -179,9 +179,76 @@ impl ToolbarControl {
     }
 }
 
+/// A set filter as its chip shows it on a narrow screen ("Status: Posted").
+#[derive(Clone, Debug)]
+pub struct FilterChip {
+    /// The control's id; the chip's × resets the control of that id.
+    pub id: String,
+    pub label: String,
+    pub value: String,
+}
+
+impl ToolbarControl {
+    /// What this filter is set to, or `None` while it shows everything: a
+    /// select away from its first choice (the "All" a list offers first), a
+    /// date with a day, a multi-select with a tick. A search is never a chip.
+    pub fn chip(&self) -> Option<FilterChip> {
+        let value = match &self.kind {
+            ControlKind::Search => return None,
+            ControlKind::Select => {
+                let field = &self.field;
+                let first = if field.prompt.is_empty() {
+                    field.options.first().map(|choice| choice.value.as_str())
+                } else {
+                    Some("")
+                };
+                if field.value.is_empty() || first == Some(field.value.as_str()) {
+                    return None;
+                }
+                field
+                    .options
+                    .iter()
+                    .find(|choice| choice.value == field.value)
+                    .map(|choice| choice.label.clone())
+                    .unwrap_or_else(|| field.value.clone())
+            }
+            ControlKind::Date => {
+                if self.field.value.is_empty() {
+                    return None;
+                }
+                // The chip reads the day as the pages do ("6 Nov 2026").
+                self.field
+                    .value
+                    .parse::<jiff::civil::Date>()
+                    .map(|date| date.strftime("%-d %b %Y").to_string())
+                    .unwrap_or_else(|_| self.field.value.clone())
+            }
+            ControlKind::MultiSelect(control) => {
+                let labels: Vec<&str> = control
+                    .options
+                    .iter()
+                    .filter(|choice| control.values.contains(&choice.value))
+                    .map(|choice| choice.label.as_str())
+                    .collect();
+                if labels.is_empty() {
+                    return None;
+                }
+                labels.join(", ")
+            }
+        };
+        Some(FilterChip {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            value,
+        })
+    }
+}
+
 /// The filter toolbar framed above a list. The form raises `event` on change
 /// and on submit (Enter filters in place), carrying `filters[...]` values.
-/// Search comes first, with filters to its right and wrapping below on narrow screens.
+/// Search comes first, with filters to its right. Below `sm` the filters
+/// fold behind a Filters button into a sheet, and each set one shows as a
+/// chip under the search (DESIGN.md, Lists).
 #[derive(Template, Clone, Debug)]
 #[template(
     source = r#"{% import "lists.html" as lists %}{% call lists::filter_toolbar(toolbar=self) %}{% endcall %}"#,
@@ -208,6 +275,20 @@ impl<'a> FilterToolbar<'a> {
             target: "",
             controls,
         }
+    }
+
+    /// Whether any control other than search exists: only then is there a
+    /// Filters button and a sheet.
+    pub fn has_filters(&self) -> bool {
+        self.controls.iter().any(|control| !control.is_search())
+    }
+
+    /// The filters that are set, in toolbar order, as chips.
+    pub fn active_filters(&self) -> Vec<FilterChip> {
+        self.controls
+            .iter()
+            .filter_map(ToolbarControl::chip)
+            .collect()
     }
 }
 
