@@ -83,13 +83,15 @@ cd bilibi
 ./bilibi start
 ```
 
-`start` checks the tools, runs the existing setup when needed, activates newly installed Rust tools in the same shell, and launches local sources. Setup installs Rust, PostgreSQL 18, Caddy, mkcert and Node.js. You do not need a GitHub account. An AI agent follows these same steps.
+`start` checks the tools, runs the existing setup when needed, activates newly installed Rust tools in the same shell, and launches local sources. Setup installs the Rust version pinned in `rust-toolchain.toml`, PostgreSQL 18, Caddy, mkcert and Node.js 24. You do not need a GitHub account. An AI agent follows these same steps.
 
 Bilibi opens in your browser at the sign-in page when it is ready. Sign in as `ai@agent.my` / `bilibi-dev` (development seed only). Later starts do not open another tab; open the address the launcher prints, or the tab you already have. If no browser opens, open that address too. To stop it opening a browser, set `BILIBI_OPEN_BROWSER=0`. To open one again, delete `.local/dev/browser-opened`. Every checkout defaults to <https://bilibi.localhost> and gets its own private database. To choose another address, put `BILIBI_DEV_HOST=<name>.localhost` in `.env` (see [Local launcher](#local-launcher)). If another checkout owns the address, startup stops and names that checkout. Follow the printed `BILIBI_DEV_HOST` line in your `.env`, then start again. Restart the launcher after changing the address; it releases its old name when it registers the new one. Setting `BILIBI_DEV_PORT` selects a backend port, without taking over another checkout's HTTPS address.
 
 ### Supported environment
 
 Use apt-based Ubuntu or Debian, or Arch Linux and its derivatives (including Omarchy), with Git, Bash and network access. These distributions also work in WSL2. On Arch, setup performs a full system upgrade when it installs missing packages, as required by pacman. Installing missing packages needs root or sudo privileges. Setup may ask for your sudo password in the terminal; one command does not mean unattended installation.
+
+On Arch/Omarchy, setup uses `pacman` and the Node.js 24 LTS package (`nodejs-lts-krypton`). If another Node.js major is active, select version 24 before rerunning setup. Setup refuses a different PostgreSQL major. Rustup selects the pinned Rust version for this checkout without changing your global default.
 
 Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. If local HTTPS trust needs manual setup (including Windows trust in WSL2), use the printed loopback HTTP address. The launcher falls back to HTTP when local HTTPS is unavailable.
 
