@@ -1,5 +1,9 @@
 # Principal directory contract
 
+**Use it for:** naming the people and system principals your rows reference.
+
+**Not for:** joining `users` or other Core tables from Base.
+
 Base screens use `base/principal_directory.directory` (`PrincipalDirectory`) to
 name the principals their rows reference. Do not join `users` (or any Core table)
 from Base and do not import Core.

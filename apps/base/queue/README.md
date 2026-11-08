@@ -1,5 +1,9 @@
 # Durable Queue
 
+**Use it for:** background work: a durable job enqueued in your write's transaction, retried, and run as a named system principal.
+
+**Not for:** `tokio::spawn`, a jobs table or a worker loop of your own.
+
 Queue stores every job in PostgreSQL. Owners contribute a `Worker` through the
 `base/queue.workers` typed catalog, using `Contribution::new` and source provenance.
 Boot rejects invalid/duplicate worker IDs and attempts outside 1–100. The worker's

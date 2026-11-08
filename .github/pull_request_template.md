@@ -18,6 +18,14 @@ Only when CI lists a Rust file over 800 lines that is new or grew: one line per 
 Otherwise delete this section.
 -->
 
+## Platform reuse
+
+<!--
+Only when CI flags code that looks like what a Base module already does (apps/base/CAPABILITIES.md):
+one line per flagged rule, `<id>: uses <base module> (how)` or `<id>: no fit: <why the module does not fit>`.
+Otherwise delete this section.
+-->
+
 ## Shared helpers
 
 <!--

@@ -1,5 +1,9 @@
 # Registry contracts
 
+**Use it for:** declaring your module and contributing its routes, menu items, settings, capabilities, operations and ports.
+
+**Not for:** a host-owned list of modules, routes or migrations.
+
 Renaming a module needs no declaration: the migration ledger accepts a changed owner when the SQL is unchanged (`apps/base/database/README.md`, "Renaming a module").
 
 Module IDs are `base/<module>` and `core/<module>` for the Platform layers, and

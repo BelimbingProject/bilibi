@@ -1,5 +1,9 @@
 # Locale contract
 
+**Use it for:** the supported locales, the `ui.locale` setting, and showing money and numbers.
+
+**Not for:** a second locale list or a number formatter of your own.
+
 `base/locale` owns the supported regional catalogue (`SUPPORTED`, 28 codes such
 as `en-MY`, `de-CH`) and the `ui.locale` Settings contract. It has no table; the
 values and their provenance live in `base_settings` through `base/settings`, so

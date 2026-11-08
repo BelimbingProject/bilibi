@@ -1,5 +1,9 @@
 # Operation contracts
 
+**Use it for:** exposing an operation to agents (`/api/v1`, MCP) and to pages as one operation contract, and the review card for agent writes.
+
+**Not for:** an API endpoint, MCP tool or page-only write path of your own.
+
 Every action that reads or changes business data is one operation contract here, and it does not know who calls it (ADR 01, `docs/architecture/decisions/01-agent-first-operations.md`). `/api/v1` and `/mcp` call contracts for agents; pages call them through [Pages as callers](#pages-as-callers). The module keeps its historical name.
 
 Use the `base/agent_api.registry` service for search, describe, guide and read

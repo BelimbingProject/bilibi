@@ -1,5 +1,9 @@
 # Notifications and to-dos
 
+**Use it for:** telling people something happened (the bell) and putting work on their To do list.
+
+**Not for:** a notifications table, inbox or bell of your own.
+
 Other modules send notifications through `NotificationBoundary`; Core User stores and delivers them after commit.
 
 Call `notify` inside the owner's mutation transaction with a validated `Notice` and explicit recipients. The boundary records each recipient once and wakes them only after commit. Core binds the persistence adapter through `bind` at boot.

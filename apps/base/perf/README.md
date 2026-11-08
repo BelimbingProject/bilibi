@@ -1,5 +1,9 @@
 # Perf history
 
+**Use it for:** the timing history of requests, live events, jobs and processes, and the Performance page.
+
+**Not for:** timing logs or a metrics table of your own.
+
 `base/perf` records redacted request, live-event, job and process samples into
 `base_perf_samples` without ever delaying the work it measures. Reading the
 history, its Performance page and its dashboard health widget are owned here,

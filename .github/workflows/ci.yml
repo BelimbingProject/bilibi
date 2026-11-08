@@ -42,6 +42,8 @@ jobs:
       - run: ./scripts/build-assets.sh --check
       - name: The shared helper catalog matches the doc comments
         run: python3 scripts/shared-helpers.py --check
+      - name: The Base capability map matches the module READMEs
+        run: python3 scripts/base-capabilities.py --check
       - run: rustup show active-toolchain || rustup toolchain install
         if: steps.decide.outputs.affected == 'true'
       - uses: Swatinem/rust-cache@v2.9.2

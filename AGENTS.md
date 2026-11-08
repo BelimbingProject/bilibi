@@ -45,7 +45,7 @@ Authoritative contracts (point to them, do not copy them): `apps/base/module_reg
 - **Writes go through `MutationBoundary`**, returning every affected record as a `Change`. Never insert audit rows, open an inner transaction or publish notifications by hand.
 - **Authorization.** Capabilities are declared in the module's vocabulary contribution; an unknown key fails closed; direct denies win. The owner rechecks inside its mutation transaction.
 - **Migrations** are embedded in the owning module, ID `<layer>-<module>-NNN-<slug>` (mounted: `<name>-<module>-NNN-<slug>`, where `<name>` is the Domain or Extension). Never edit an applied migration. Nothing migrates or seeds on boot.
-- **Use the platform, do not hand-roll:** files `base/media`, documents `base/artifacts`, jobs `base/queue`, mail `base/mail`, outbound HTTP `base/integration`, time `bilibi_datetime` (store UTC).
+- **Use the platform, do not hand-roll:** before designing any feature, read `apps/base/CAPABILITIES.md` (approvals, history, notifications, files, jobs, schedules, settings, time and the rest of Base) and build on the module it names; store time in UTC.
 - **Agents.** Expose an operation with an `agent_api` contribution that calls your facade with the scope it receives. No endpoint per module.
 - Askama escapes by default: keep `|safe` inside the shared macros, never `Html::raw` on request data. Never build identifiers or SQL fragments from request input.
 - Never commit or log secrets, session IDs or tokens, including in fixtures and evidence.

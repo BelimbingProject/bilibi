@@ -1,5 +1,9 @@
 # Audit screens
 
+**Use it for:** showing a record's change history (the `record.history` embed) and the operator audit screens.
+
+**Not for:** recording evidence (use `base/audit`) or a history panel of your own.
+
 `/audit/actions`, `/audit/mutations`, the `record.history` embed and the
 dashboard's Recent Activity panel. The evidence, its capture and its
 reads live in `base/audit`; this module only presents them.

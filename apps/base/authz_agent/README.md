@@ -1,5 +1,9 @@
 # Base Authz Agent
 
+**Use it for:** the operation contracts that change grants and roles, shared by pages and agents.
+
+**Not for:** changing grants or roles from your own module.
+
 This module gives pages and agents the same reviewed doors for authorization changes.
 
 - Authz sits below Agent API, so these adapters live in a module above both, as Audit Views sits above Audit.

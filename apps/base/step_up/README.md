@@ -1,5 +1,9 @@
 # Base Step-up
 
+**Use it for:** asking the account holder for a fresh second-factor code before a sensitive operation.
+
+**Not for:** deciding in code whether it applies, or importing the authenticator.
+
 Ask the human account holder to prove it is them again before an operation goes ahead, on any channel. GitHub calls this "sudo mode".
 - **This module names no consumer** (no page, table, sign-in or role) and no second-factor method.
 - Each owner declares its own operations and calls the facade from its own module.

@@ -1,5 +1,9 @@
 # System pages
 
+**Use it for:** the instance identity (Dev, Staging, Production) and the System Info, Localization and Menu Inspector pages.
+
+**Not for:** reading `BILIBI_ENV` or the origin to decide which instance this is.
+
 `base/system` owns `/system/info`, `/system/localization` and
 `/system/menu-inspector`. Each requires its contributed platform capability
 **and** the persisted operator identity. It also owns the owner-only

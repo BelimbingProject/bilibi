@@ -1,5 +1,9 @@
 # Mail
 
+**Use it for:** building and sending email (SMTP or the development mailbox) and reading received email safely.
+
+**Not for:** an SMTP crate or mail sender of your own.
+
 `base/mail` builds complete outgoing email, renders its wire bytes once, and sends those bytes through SMTP or a private development mailbox. It also reads received email and makes its HTML safe to store and show.
 
 ## Sending a message

@@ -1,5 +1,9 @@
 # bilibi-ports
 
+**Use it for:** asking another Domain or Extension a question and getting the answer now, or `Unavailable` when it is not mounted.
+
+**Not for:** a crate dependency between Domains or reading another module's tables.
+
 Ports (`base/ports`) let a module ask another Domain or Extension a question and get the answer straight away, without either module depending on the other.
 
 ## What is a port?

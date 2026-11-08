@@ -1,5 +1,9 @@
 # bilibi-dashboard
 
+**Use it for:** contributing widgets and sections to the `/dashboard` landing page.
+
+**Not for:** a landing or summary page of your own.
+
 The workspace landing page at `/dashboard`. Installed modules contribute its
 widgets and sections; this module owns the catalogue, the page and each
 account's arrangement, and reads no contributor's tables.

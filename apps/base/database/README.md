@@ -1,5 +1,9 @@
 # Database write and seed contracts
 
+**Use it for:** every business write (`MutationBoundary`, `Change`), its transaction, migrations and seeds.
+
+**Not for:** an inner transaction, hand-written audit rows or notifications sent outside the write.
+
 Business owners obtain `MutationBoundary` from the `base/database.mutations`
 registry service. Start one transaction with trusted `Context`, and pass its
 mutable `MutationTransaction` to every nested owner. Use `mutate` for writes and

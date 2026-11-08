@@ -1,5 +1,9 @@
 # bilibi-tiling
 
+**Use it for:** the tiled `/workspace` that shows several pages side by side.
+
+**Not for:** a multi-pane page of your own.
+
 The tiled workspace at `/workspace`: several pages
 side by side in one browser tab, arranged by a Hyprland-style dwindle
 tree, with keyboard control, drag resizing, drag-to-swap, monocle and

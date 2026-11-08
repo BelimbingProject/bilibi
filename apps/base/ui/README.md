@@ -1,5 +1,9 @@
 # Shared UI
 
+**Use it for:** every page element: components, forms, `FlexTable` lists, dialogs, the shell and live pages.
+
+**Not for:** hand-written markup, copied classes, or CSS and JavaScript in a module.
+
 `base/ui` supplies the shared components, form controls and browser behaviour used by every Bilibi page.
 
 Use the typed models exported by the crate or their Askama macros; [`DESIGN.md`](../../../DESIGN.md) sets the design rules and [`AGENTS.md`](AGENTS.md) records the recurring mistakes. The DOM uses Bilibi's floating labels.

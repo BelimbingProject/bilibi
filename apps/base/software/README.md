@@ -1,5 +1,9 @@
 # Base Software
 
+**Use it for:** what the server runs, finding more modules, and installing tested updates with a backup and undo.
+
+**Not for:** reading a pin file, tag or the catalogue to learn what is installed (use `Composition`).
+
 `base/software` shows what this server runs, helps you find more modules, and installs tested updates with a database backup and undo. Build releases in your application workspace, with or without a coding agent; servers never build them.
 ## Add a Domain
 

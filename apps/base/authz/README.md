@@ -1,5 +1,9 @@
 # Authorization owner contract
 
+**Use it for:** declaring capabilities, checking them, roles and grants, and masking fields some readers must not see.
+
+**Not for:** role tables, permission flags in code or `is admin` checks of your own.
+
 The field restriction catalog combines owner contributions for the same table. Sources must agree on the table label and audit record types, and field IDs must be unique across the composition. This lets a record owner expose restrictions for an Extension-owned field without Authz depending on that Extension.
 
 Authz owns capability vocabulary, decisions, grants and field withholding.

@@ -1,5 +1,9 @@
 # Workflow status kernel
 
+**Use it for:** record statuses and their allowed moves, status history, approvals (approvers, rules, cover, reasons, history) and long-running process runs.
+
+**Not for:** an approvals table, status-history table or state machine of your own.
+
 Workflow owns status configuration, edges, subject bindings, append-only
 history, and immutable versioned process runs with their lifecycle and
 worker leases. Its facade accepts a sealed

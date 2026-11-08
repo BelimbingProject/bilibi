@@ -1,5 +1,9 @@
 # Integration exchange log and outgoing transport
 
+**Use it for:** every outgoing HTTP call, and the log of incoming and outgoing exchanges.
+
+**Not for:** an HTTP client crate (`reqwest`, `hyper`, `ureq`) of your own.
+
 `base/integration` records incoming and outgoing HTTP exchanges in one log,
 `base_integration_exchanges`, and is the only outgoing HTTP client. Domain
 modules own request meaning, response parsing, retries and user-facing

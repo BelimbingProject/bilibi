@@ -1,5 +1,9 @@
 # Base Session
 
+**Use it for:** the session store, session checks and signing sessions out.
+
+**Not for:** cookies, tokens or a sessions table of your own.
+
 `base/session.sessions` (`Sessions` in `src/lib.rs`) owns the durable session store: authentication of the opaque cookie token, the account and operator lists, termination commands, the termination broadcast, and the scheduled sweep. The account page is at `/settings/sessions`; the operator page is at `/system/sessions`, with a dashboard stats panel.
 
 ## Guard boundary
