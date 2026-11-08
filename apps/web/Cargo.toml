@@ -55,3 +55,4 @@ bilibi-grid = { path = "../base/grid" }
 bilibi-agent-api = { path = "../base/agent_api" }
 bilibi-locale = { path = "../base/locale" }
 rust_decimal.workspace = true
+sha2.workspace = true

@@ -18,7 +18,10 @@ mod retention;
 mod transport;
 mod web;
 pub mod webhooks;
-pub use contributions::{WebhookLimits, DELETE, LIST, PAYLOAD, RETENTION_DAYS, WEBHOOK_SETTINGS};
+pub use contributions::{
+    WebhookLimits, DELETE, LIST, PAYLOAD, PUBLIC_ENDPOINT_SENDER_LIMIT, RETENTION_DAYS,
+    WEBHOOK_SETTINGS,
+};
 pub use redirect::RedirectPolicy;
 pub use transport::{Failure, Outgoing, Reply, Streamed};
 

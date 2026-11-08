@@ -59,7 +59,7 @@ pub struct Downloads {
     pub portal: Vec<BoundPortalDownload>,
 }
 impl Pages {
-    fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
+    pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
         self.staff
             .iter()
             .map(|bound| (bound.route.method, bound.route.path))
@@ -71,7 +71,7 @@ impl Pages {
     }
 }
 impl Downloads {
-    fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
+    pub(crate) fn patterns(&self) -> impl Iterator<Item = (Method, &'static str)> + '_ {
         self.staff
             .iter()
             .map(|bound| bound.download.path)
@@ -191,7 +191,7 @@ pub fn bind_downloads(services: &Services, pages: &Pages) -> Result<Downloads> {
     Ok(bound)
 }
 
-fn validate_host_free(entry: &bilibi_module_registry::Entry, path: &str) -> Result<()> {
+pub(crate) fn validate_host_free(entry: &bilibi_module_registry::Entry, path: &str) -> Result<()> {
     validate_pattern(path)?;
     if crate::api::reserved(path) {
         return Err(invalid(format!(
@@ -278,7 +278,7 @@ fn intersects(a: &str, b: &str) -> bool {
             .zip(b)
             .all(|(a, b)| a == &b || parameter(a) || parameter(b))
 }
-fn validate_pair(other: (Method, &str), route: (Method, &str)) -> Result<()> {
+pub(crate) fn validate_pair(other: (Method, &str), route: (Method, &str)) -> Result<()> {
     let (other_method, other_path) = other;
     let (method, path) = route;
     // Axum shares parameter nodes even for disjoint methods and suffixes.
@@ -376,7 +376,7 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
     }
     router
 }
-fn method_filter(method: Method) -> MethodFilter {
+pub(crate) fn method_filter(method: Method) -> MethodFilter {
     match method {
         Method::Get => MethodFilter::GET,
         Method::Post => MethodFilter::POST,
@@ -386,14 +386,15 @@ fn method_filter(method: Method) -> MethodFilter {
     }
 }
 
-/// Retired page paths, bound after the pages and downloads: each claims no
-/// host path, collides with no page or download, and lands on a GET page whose
+/// Retired page paths, bound after the pages, downloads and public endpoints:
+/// each claims no host path, collides with none of them, and lands on a GET page whose
 /// pattern is exactly its `to`, so a rename that drops the new page fails boot
 /// instead of redirecting into a 404.
 pub fn bind_moved(
     services: &Services,
     pages: &Pages,
     downloads: &Downloads,
+    endpoints: &crate::endpoints::Endpoints,
 ) -> Result<Vec<&'static Moved>> {
     let mut bound: Vec<&'static Moved> = Vec::new();
     for entry in services.catalog()?.entries::<Moved>(MOVED)? {
@@ -403,6 +404,7 @@ pub fn bind_moved(
         let taken = pages
             .patterns()
             .chain(downloads.patterns())
+            .chain(endpoints.patterns())
             .chain(bound.iter().map(|other| (Method::Get, other.from)));
         for other in taken {
             validate_pair(other, (Method::Get, moved.from))?;

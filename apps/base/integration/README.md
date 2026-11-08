@@ -141,7 +141,7 @@ verification can be retried unchanged. Its secret is
 `BILIBI_REFERENCE_WEBHOOK_SECRET` at boot, because a webhook has no actor and
 Settings releases encrypted values only to an authorized scope; unset, it
 refuses everything. Production owners resolve credentials from their own
-definitions. The host reads the `webhooks.*` limits contributed here.
+definitions. The host reads the `webhooks.*` limits contributed here, and `public_endpoints.sender_per_minute` for its public token links (`apps/web/README.md`, "Public endpoints").
 
 ## API Exchanges pages
 

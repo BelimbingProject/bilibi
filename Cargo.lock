@@ -1743,6 +1743,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -1860,6 +1861,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tokio-postgres",
  "tower-http",

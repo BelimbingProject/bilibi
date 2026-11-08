@@ -5,6 +5,7 @@ mod api;
 mod auth;
 mod composition;
 mod create_owner;
+mod endpoints;
 mod errors;
 mod impersonation;
 mod landing;
@@ -41,6 +42,7 @@ pub use two_factor_reset::two_factor_reset;
 pub struct App {
     routes: Arc<routes::Pages>,
     downloads: Arc<routes::Downloads>,
+    endpoints: Arc<endpoints::Endpoints>,
     moved: Arc<Vec<&'static bilibi_module_registry::contributions::Moved>>,
     credential_paths: Arc<CredentialPaths>,
     pub db: Db,
@@ -129,13 +131,17 @@ impl App {
         }
         let routes = Arc::new(routes::bind(&services)?);
         let downloads = Arc::new(routes::bind_downloads(&services, &routes)?);
-        let moved = Arc::new(routes::bind_moved(&services, &routes, &downloads)?);
+        let endpoints = Arc::new(endpoints::bind(&services, &routes, &downloads)?);
+        let moved = Arc::new(routes::bind_moved(
+            &services, &routes, &downloads, &endpoints,
+        )?);
         let credential_paths = Arc::new(CredentialPaths::from_catalog(services.catalog()?)?);
         let api = Arc::new(api::Edge::new(&services)?);
         let webhooks = Arc::new(webhooks::Boundary::bind(&services)?);
         Ok(Self {
             routes,
             downloads,
+            endpoints,
             moved,
             credential_paths,
             db,
@@ -322,6 +328,7 @@ pub async fn media_cleanup(db: &Db, tenant: i64, hours: u64) -> Result<()> {
 pub fn router(app: App) -> Router {
     let perf = app.perf.clone();
     let pages = routes::install(Router::new(), &app.routes, &app.downloads);
+    let pages = endpoints::install(pages, &app.endpoints);
     routes::install_moved(pages, &app.moved)
         .merge(api::router(app.clone()))
         .merge(webhooks::router())

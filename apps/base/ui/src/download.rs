@@ -86,7 +86,7 @@ impl FileBody {
 
 /// The owner's media type, lowercased, or `application/octet-stream` when it
 /// is not a plain `type/subtype[; parameters]` token line.
-fn content_type(declared: &str) -> String {
+pub(crate) fn content_type(declared: &str) -> String {
     let declared = declared.trim().to_ascii_lowercase();
     let (essence, _) = declared.split_once(';').unwrap_or((&declared, ""));
     let token = |part: &str| {

@@ -114,3 +114,16 @@ webhook_setting!(
     "Webhook read timeout",
     "Longest wait, in milliseconds, to receive a webhook's content."
 );
+
+/// Requests one sender may make to each public endpoint (a tracking pixel, a
+/// click link, a one-click unsubscribe) per minute, on each server. Mail
+/// providers and image proxies fetch for many readers from few addresses, so
+/// the default is generous.
+pub const PUBLIC_ENDPOINT_SENDER_LIMIT: &str = "public_endpoints.sender_per_minute";
+inventory::submit! { Contribution::new(DEFINITIONS, PUBLIC_ENDPOINT_SENDER_LIMIT, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(600), nullable: false, encrypted: false,
+    minimum: Some(1.0), maximum: Some(1_000_000.0), validator: None,
+    editor: Some(Editor { group: "Public links", label: "Public link requests per sender",
+        help: "Most times one sender may open each kind of mail tracking or unsubscribe link per minute, on each server. Mail services fetch for many readers from one address, so keep it high.",
+        capability: None, reveal_duration_ms: 5_000 }),
+})) }

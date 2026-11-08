@@ -123,6 +123,30 @@ no missing-record redirect or shell applies.
 targeted panels, URL changes and guarded subscriptions. HTTP-only adapters should
 return `live: false`. F6 owns queued events and retained fragment/iframe lifecycle.
 
+# Public endpoints (`src/endpoints.rs`)
+
+**A token link that a mail client, image proxy or mail provider calls with no session is a `PUBLIC_ENDPOINTS` contribution, not a `Public` page.** Use one for an open-tracking pixel, a click-tracking redirect or an RFC 8058 one-click unsubscribe.
+
+```rust
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "email.click", provenance!(), &CredentialPath { path: "/email/c/{token}" }) }
+inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenance!(), &PublicEndpoint {
+    method: Method::Get, path: "/email/c/{token}", service: "cx/email.links", operation: "click",
+}) }
+```
+
+- **The token is the only credential.** The path must carry `{token}`, and the module declares the same pattern under `CREDENTIAL_PATHS`, so the token is `[redacted]` in logs and debug reports and never sent on in a referrer. Boot refuses an endpoint without `{token}` or without its declaration.
+- **Shape.** GET or POST only, never under `/portal`; it shares the page routes' path rules and pattern space, so a page, download, moved path or host path of the same method at an intersecting path fails boot. A GET page and a POST endpoint may share one path (an unsubscribe page and its one-click POST).
+- **Owner.** The service resolves to `bilibi_ui::endpoint::EndpointService<Error>` wrapping the owner's `Endpoint`. `answer` gets the operation, the path parameters, the request's content type and the bounded body (empty for a GET), and no scope: the owner finds the tenant and record from the token and writes as unattended work.
+- **Reply.** `Reply::Bytes { bytes, content_type, cache }` (`Reply::pixel()` is a transparent 1×1 GIF), `Reply::Redirect(Target)` (302) or `Reply::NoContent` (204). `Reply::headers` decides every header: `no-store` unless the owner asks for `Cache::Private`, `nosniff`, `X-Frame-Options: DENY` and `default-src 'none'; frame-ancestors 'none'; sandbox`; a redirect also sends `Referrer-Policy: no-referrer`.
+- **No open redirect.** A `Target` exists only through `Target::parse`, which accepts an absolute `http`/`https` address with a host, no user name or password, no backslash, whitespace or control character, at most 2048 characters. Parse the address your record stored. The owner never sees the query string, so `?to=` on a link cannot choose the destination.
+- **No session, no Origin, no CSRF.** Web reads no cookie, `Origin` or CSRF secret here and renders no shell, which is why a mail provider's POST (no `Origin`) is admitted. Nothing here acts as a signed-in person.
+- **One refusal.** Any refusal from the owner (`NotFound`, `Invalid`, `Forbidden`, ...) and a framed request (`Sec-Fetch-Dest: iframe`) get the same bare `404 Not found` (the error card for a browser), so an unknown token and a known one with an unusable target look alike. A server fault is a 500, logged with the token redacted.
+- **Same answer for unknown tokens.** Where a different answer would reveal which tokens exist, answer as for a known one: the pixel for any token, 204 for any one-click POST whose body says `List-Unsubscribe=One-Click`.
+- **Token lookup.** Store a digest of the token (SHA-256) and look the row up by digest, as Session does; never compare the raw token in SQL or with `==`.
+- **Rate limit.** Each sender (the peer, or the client behind a loopback proxy, as for sign-in) gets `public_endpoints.sender_per_minute` requests per endpoint per minute on each server (Base Integration setting, default 600); more get `429`. The counter is the endpoints' own, apart from sign-in's.
+
+`apps/web/examples/public-endpoint-reference.rs` is the running specimen; `--refusals` prints each boot refusal without a database.
+
 # Agent edge (`src/api.rs`)
 
 The host owns the machine endpoints; discovered pages cannot claim them
