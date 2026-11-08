@@ -42,10 +42,8 @@ jobs:
       - run: ./scripts/build-assets.sh --check
       - name: The shared helper catalog matches the doc comments
         run: python3 scripts/shared-helpers.py --check
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup show active-toolchain || rustup toolchain install
         if: steps.decide.outputs.affected == 'true'
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2.9.2
         if: steps.decide.outputs.affected == 'true'
         with:

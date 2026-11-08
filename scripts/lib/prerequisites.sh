@@ -44,7 +44,7 @@ development_prerequisites() {
         $tool >/dev/null 2>&1 || { echo "Prerequisite failed: $tool" >&2; return 1; }
     done
     pkg-config --exists openssl || { echo 'OpenSSL development libraries are required.' >&2; return 1; }
-    node -e "process.exit(Number(process.versions.node.split('.')[0]) === $NODE_MAJOR ? 0 : 1)" || { echo "Node.js $NODE_MAJOR is required. Select that version, then run ./bilibi setup." >&2; return 1; }
+    node -e "process.exit(Number(process.versions.node.split('.')[0]) < $NODE_MIN_MAJOR ? 1 : 0)" || { echo "Node.js $NODE_MIN_MAJOR+ is required." >&2; return 1; }
     if [[ -z ${DATABASE_URL:-} ]]; then
         pg_bin=$(postgres_bin)
         [[ $("$pg_bin/initdb" --version 2>/dev/null | awk '{print $NF}' | cut -d. -f1) == "$POSTGRESQL_MAJOR" ]] &&

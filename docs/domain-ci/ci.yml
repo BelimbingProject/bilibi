@@ -91,9 +91,7 @@ jobs:
         working-directory: .
         run: mv container "bilibi/apps/$CONTAINER_ROLE/$CONTAINER_ID"
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - run: rustup show active-toolchain || rustup toolchain install
       - name: Keep pull-request debug builds small
         if: env.DOMAIN_CI_BUILD == 'check'
         run: echo CARGO_PROFILE_DEV_DEBUG=0 >> "$GITHUB_ENV"
