@@ -4,6 +4,7 @@
 //! the vendored asset allowlist. Only shared fragments may use `safe`.
 use askama::Template;
 pub mod download;
+pub mod endpoint;
 pub mod page;
 
 // Lets the shared macro file name this crate's items as `bilibi_ui::...` from

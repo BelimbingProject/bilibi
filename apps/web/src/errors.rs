@@ -210,6 +210,19 @@ fn describe(app: &App, seen: &Seen) -> DebugReport {
                 route.push(("Download operation".into(), bound.download.operation.into()));
                 route.push(("Download service".into(), bound.download.service.into()));
                 route.push(("Access".into(), format!("{:?}", bound.download.access)));
+            } else if let Some(bound) = app.endpoints.bound.iter().find(|bound| {
+                bound.endpoint.path == pattern
+                    && format!("{:?}", bound.endpoint.method)
+                        .eq_ignore_ascii_case(seen.method.as_str())
+            }) {
+                route.push((
+                    "Public endpoint operation".into(),
+                    bound.endpoint.operation.into(),
+                ));
+                route.push((
+                    "Public endpoint service".into(),
+                    bound.endpoint.service.into(),
+                ));
             }
         }
         None => route.push(("Matched route".into(), "none (router fallback)".into())),

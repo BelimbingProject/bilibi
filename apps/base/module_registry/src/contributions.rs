@@ -209,6 +209,9 @@ impl Catalog {
         for entry in self.entries.get(DOWNLOADS).into_iter().flatten() {
             check(entry, entry.get::<Download>()?.service)?;
         }
+        for entry in self.entries.get(PUBLIC_ENDPOINTS).into_iter().flatten() {
+            check(entry, entry.get::<PublicEndpoint>()?.service)?;
+        }
         let mut versions = BTreeSet::new();
         for entry in self.entries.get(SEEDS).into_iter().flatten() {
             let seed = entry.get::<Seed>()?;
@@ -272,6 +275,9 @@ impl Catalog {
         for entry in &self.entries[MOVED] {
             check(entry, entry.get::<Moved>()?.from)?;
         }
+        for entry in &self.entries[PUBLIC_ENDPOINTS] {
+            check(entry, entry.get::<PublicEndpoint>()?.path)?;
+        }
         Ok(())
     }
 }
@@ -286,6 +292,7 @@ pub const SEEDS: &str = "base/module_registry.seeds";
 pub const MOVED: &str = "base/module_registry.moved";
 pub const PAGE_WRITES: &str = "base/module_registry.page_writes";
 pub const CREDENTIAL_PATHS: &str = "base/module_registry.credential_paths";
+pub const PUBLIC_ENDPOINTS: &str = "base/module_registry.public_endpoints";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Method {
     Get,
@@ -438,6 +445,27 @@ pub struct Download {
     pub service: &'static str,
     pub operation: &'static str,
     pub access: Access,
+}
+/// A public machine-facing address that answers outside the shell with a
+/// small typed reply: bytes (an open-tracking pixel), a redirect to an
+/// address the owner stored and validated (a click-tracking link), or an
+/// empty 204 (an RFC 8058 one-click unsubscribe POST from a mail provider).
+///
+/// The `{token}` segment of `path` is the only credential: Web reads no
+/// cookie, session, `Origin` or CSRF secret for it, so a POST from a mail
+/// provider, which carries no `Origin`, is admitted. Boot therefore refuses
+/// a path without `{token}`, and the owning module declares the same
+/// pattern under [`CREDENTIAL_PATHS`] so the token never reaches a log,
+/// debug report or referrer. GET or POST only; never under `/portal`.
+/// Web rate-limits each sender, never frames the reply and never renders
+/// the shell. The service resolves to
+/// `bilibi_ui::endpoint::EndpointService`; contract in `apps/web/README.md`.
+#[derive(Clone, Copy, Debug)]
+pub struct PublicEndpoint {
+    pub method: Method,
+    pub path: &'static str,
+    pub service: &'static str,
+    pub operation: &'static str,
 }
 /// A retired page path that answers a GET with a permanent redirect to the
 /// page that replaced it, so bookmarks, pins and saved workspace tiles keep
@@ -626,6 +654,41 @@ fn validate_credential_paths(entries: &[Entry]) -> Result<()> {
     Ok(())
 }
 inventory::submit! { Consumer::new::<CredentialPath>(CREDENTIAL_PATHS, "base/module_registry", validate_credential_paths) }
+/// A public endpoint is a GET or a POST whose `{token}` is its credential,
+/// outside the portal; Web refuses one that intersects a page, download,
+/// moved or host path.
+fn validate_public_endpoints(entries: &[Entry]) -> Result<()> {
+    let mut paths = BTreeSet::new();
+    for entry in entries {
+        let endpoint = entry.get::<PublicEndpoint>()?;
+        let at = format!(
+            "public endpoint {} at {}:{}",
+            entry.id, entry.provenance.source, entry.provenance.line
+        );
+        if !path_valid(endpoint.path, endpoint.operation, Access::Public)
+            || !matches!(endpoint.method, Method::Get | Method::Post)
+            || !parameters(endpoint.path).any(|name| name == "token")
+        {
+            return Err(invalid(format!(
+                "{at} must be a GET or POST whose path carries {{token}}"
+            )));
+        }
+        if in_portal(endpoint.path) {
+            return Err(invalid(format!(
+                "{at} claims the portal path {}",
+                endpoint.path
+            )));
+        }
+        if !paths.insert((endpoint.method, normalized(endpoint.path))) {
+            return Err(invalid(format!(
+                "duplicate public endpoint {}",
+                endpoint.path
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<PublicEndpoint>(PUBLIC_ENDPOINTS, "base/module_registry", validate_public_endpoints) }
 fn validate_moved(entries: &[Entry]) -> Result<()> {
     let mut paths = BTreeSet::new();
     for entry in entries {
