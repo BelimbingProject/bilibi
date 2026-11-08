@@ -2,7 +2,7 @@
 
 **Use it for:** naming the people and system principals your rows reference.
 
-**Not for:** joining `users` or other Core tables from Base.
+**Not for:** joining `users` or other Core tables from Base, or choosing a person from the whole tenant (an assignment picker uses Core User's `search_staff`, `apps/core/user/README.md#staff-choice`).
 
 Base screens use `base/principal_directory.directory` (`PrincipalDirectory`) to
 name the principals their rows reference. Do not join `users` (or any Core table)

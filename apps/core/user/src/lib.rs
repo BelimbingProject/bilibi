@@ -37,6 +37,7 @@ mod sign_in;
 mod sign_in_alert;
 mod sign_in_identity;
 mod sso;
+mod staff_choices;
 mod tenant_context;
 pub use scim::{ScimError, ScimRequest, ScimResponse, ScimResult};
 pub use sso::{
@@ -258,6 +259,7 @@ pub struct UserService {
     sso_grants: std::sync::Arc<bilibi_authz::grants::Grants>,
     sso_parties: std::sync::Arc<bilibi_tenancy::PartyProofs>,
     pub(crate) step_up: std::sync::Arc<bilibi_step_up::StepUp>,
+    staff_assignments: staff_choices::Assignments,
 }
 inventory::submit! {
     bilibi_module_registry::Module {
@@ -276,7 +278,9 @@ inventory::submit! {
             services.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?.bind(std::sync::Arc::new(notifications.clone()))?;
             services.get::<bilibi_principal_directory::PrincipalDirectory>("base/principal_directory.directory")?.bind("core/user", std::sync::Arc::new(directory::UserDirectory))?;
             privacy::bind(services.get("base/session.sessions")?, services.get(bilibi_step_up::SERVICE)?)?;
-            let users = std::sync::Arc::new(UserService {identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
+            let modules = bilibi_module_registry::discover()?;
+            let staff_assignments = staff_choices::Assignments::from_catalog(&bilibi_module_registry::Catalog::discover(&modules)?, &modules)?;
+            let users = std::sync::Arc::new(UserService {staff_assignments,identities:sso::Registry::default(),sso_grants:services.get("base/authz.grants")?,sso_parties:services.get("base/tenancy.parties")?,sessions:services.get("base/session.sessions")?,mutations:services.get("base/database.mutations")?,authentication:services.get("base/tenancy.authentication")?,persons:services.get(bilibi_person::SERVICE)?,affiliations:services.get(bilibi_affiliation::SERVICE)?,db:services.get::<Db>("base/database.pool")?.as_ref().clone(),notification_boundary:services.get("base/notifications.sink")?,notifications,mailer:services.get("base/mail.mailer")?,media:services.get(bilibi_media::SERVICE)?,settings:services.get("base/settings.store")?,display:services.get("base/datetime.display")?,locales:services.get("base/locale.locales")?,signer:Signer::from_hex(std::env::var("BILIBI_USER_SIGNING_KEY").ok().as_deref()),origin:std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),step_up:services.get(bilibi_step_up::SERVICE)?});
             users.register_identity_provider("oidc", std::sync::Arc::new(sso::oidc::Oidc(services.get("base/integration.exchanges")?)))?;
             users.step_up.register(sso::factor::METHOD, std::sync::Arc::new(sso::factor::Factor(users.clone())))?;
             let authenticator = std::sync::Arc::new(two_factor::Authenticator(users.clone()));
@@ -398,3 +402,11 @@ pub use accounts::{validate_input, LANDING_KEY, NAME_MAX};
 pub use bootstrap::{BOOTSTRAP_ACTION, BOOTSTRAP_COMPLETED, CREATE_OWNER_PRINCIPAL};
 pub use company_accounts::CompanyAccount;
 pub use contributions::{CREATE, DELETE, INVITE, LIST, UPDATE, VIEW};
+pub use staff_choices::{
+    StaffAssignment, StaffChoice, ASSIGNMENTS, STAFF_CHOICE_MAX, STAFF_SEARCH_MAX,
+};
+#[doc(hidden)]
+pub use {
+    bilibi_module_registry::{Contribution, Provenance},
+    inventory,
+};
