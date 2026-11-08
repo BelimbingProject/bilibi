@@ -5,8 +5,12 @@
 #   id       the key a "## Platform reuse" line in the pull request body uses
 #   use      the Base module that already does it
 #   why      one sentence on what that module gives, shown with each flag
-#   names    a regex over the snake_case name of a table, enum type (SQL) or
-#            struct, enum, type or trait (Rust) the change defines
+#   names    a regex over the snake_case name of a SQL table or enum type the
+#            change defines (migration files, or SQL inside Rust). Broad words
+#            such as config, job or file belong here only
+#   types    a stricter regex over the snake_case name of a Rust struct, enum,
+#            type or trait the change defines; a rule without it never flags a
+#            Rust type. Use only names that are the reinvention itself
 #   columns  a regex over the name of a SQL column the change adds
 #   code     [[rule.code]] entries: `files` globs over the path and a `pattern`
 #            regex over the added line (comment lines are skipped)
@@ -21,6 +25,7 @@ use = "base/workflow"
 why = "Workflow's shared approvals hold approvers, company rules, cover, reasons and history; declare an ApprovalCase (apps/base/workflow/README.md, Shared approvals)."
 names = 'approv'
 columns = 'approv'
+types = '(^|_)approv(al|er)'
 skip = ["apps/base/workflow/*"]
 
 [[rule]]
@@ -28,6 +33,7 @@ id = "status_history"
 use = "base/workflow"
 why = "Workflow owns a record's statuses, its allowed moves and the append-only status history; bind your record as a Subject."
 names = '(status|state)_?(history|histories|log|logs|transitions?|changes?)|transition_?(log|history)'
+types = '(^|_)status_?histor'
 skip = ["apps/base/workflow/*"]
 
 [[rule]]
@@ -35,6 +41,7 @@ id = "audit_log"
 use = "base/audit"
 why = "Every MutationBoundary write is captured as audit evidence; return each affected record as a Change and show it with the record.history embed (base/audit_views)."
 names = '(^|_)audits?(_|$)|change_?logs?|activity_?logs?|edit_?logs?|revision_?logs?'
+types = '(^|_)audit_?logs?'
 skip = ["apps/base/audit/*", "apps/base/audit_views/*", "apps/base/database/*"]
   [[rule.code]]
   files = ["*.rs", "*.sql"]
@@ -45,6 +52,7 @@ id = "notification"
 use = "base/notifications"
 why = "NotificationBoundary tells people inside your write and puts work on their To do list; Core User stores and delivers it."
 names = 'notifications?|(^|_)inbox(es)?(_|$)|(^|_)to_?dos?(_|$)'
+types = '(^|_)notifications?'
 skip = ["apps/base/notifications/*", "apps/core/user/*"]
 
 [[rule]]
@@ -72,6 +80,7 @@ id = "picklist"
 use = "base/picklists"
 why = "A value list each tenant curates is a declared pick-list stored by stable code; values your logic branches on stay in code."
 names = 'pick_?lists?|(^|_)lookups?(_|$)|lookup_values?|dropdowns?|value_lists?'
+types = '(^|_)pick_?lists?'
 skip = ["apps/base/picklists/*"]
 
 [[rule]]

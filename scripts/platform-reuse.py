@@ -2,10 +2,12 @@
 """Flag added code that rebuilds what a Base module already does.
 
 Reads the rules in scripts/platform-reuse.toml (one data file, easy to extend)
-and checks each line this change adds: tables, SQL enum types, columns and Rust
-types whose names look like a Base concern (approvals, audit logs,
-notifications, settings, attachments...), and code that brings its own HTTP or
-SMTP client, local time or timer loop. Each hit is a CI warning naming the
+and checks each line this change adds: SQL tables, SQL enum types and columns
+whose names look like a Base concern (approvals, audit logs, notifications,
+settings, attachments...), Rust types (struct, enum, type, trait) only when
+they match a rule's stricter `types` pattern (Approval*, Notification*...), so
+a generic word such as Config or JobStatus never flags a Rust type, and code
+that brings its own HTTP or SMTP client, local time or timer loop. Each hit is a CI warning naming the
 Base module to use (apps/base/CAPABILITIES.md).
 
 The check fails only when a flagged rule has no line in the pull request body,
@@ -68,7 +70,7 @@ def snake(name):
 def load_rules():
     rules = tomllib.loads(RULES.read_text())["rule"]
     for rule in rules:
-        for key in ("names", "columns"):
+        for key in ("names", "types", "columns"):
             rule[key] = re.compile(rule[key], re.I) if key in rule else None
         rule["code"] = [{"files": c["files"], "pattern": re.compile(c["pattern"], re.I)} for c in rule.get("code", [])]
     return rules
@@ -88,7 +90,7 @@ def added_lines(base):
 
 
 def defined_names(path, text):
-    """(kind, snake_case name) of what this line defines: a table, type or column."""
+    """(kind, snake_case name) of what this line defines: a SQL table, type or column, or a Rust type."""
     if path.endswith(".sql") or (path.endswith(".rs") and re.search(r"\b(create|alter)\s+(table|type)\b", text, re.I)):
         for kind, pattern in SQL_NAMES:
             yield from ((kind, m.lower()) for m in pattern.findall(text))
@@ -101,14 +103,14 @@ def defined_names(path, text):
     if path.endswith(".rs"):
         match = RUST_TYPE.match(text)
         if match:
-            yield "type", snake(match.group(1))
+            yield "rust type", snake(match.group(1))
 
 
 def hits(rule, path, text):
     if any(fnmatch.fnmatch(path, glob) for glob in rule.get("skip", [])):
         return
     for kind, name in defined_names(path, text):
-        pattern = rule["columns"] if kind == "column" else rule["names"]
+        pattern = rule[{"column": "columns", "rust type": "types"}.get(kind, "names")]
         if pattern and pattern.search(name):
             yield f"{kind} `{name}`"
     for code in rule["code"]:
