@@ -151,5 +151,3 @@ load_cargo_env() {
     [[ -f $HOME/.cargo/env ]] && source "$HOME/.cargo/env"
     return 0
 }
-
-version_ge() { [[ $(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1) == "$2" ]]; }

@@ -163,9 +163,7 @@ jobs:
           mv container "bilibi/apps/$CONTAINER_ROLE/$CONTAINER_ID"
           printf 'Mounted %s (%s) at %s\n' "$CONTAINER_REPOSITORY" "$CONTAINER_REF" "$(git -C "bilibi/apps/$CONTAINER_ROLE/$CONTAINER_ID" rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - run: rustup show active-toolchain || rustup toolchain install
       # Set before the cache so the key matches the profile the build uses.
       - name: Keep pull-request debug builds small
         if: env.DOMAIN_CI_BUILD == 'check'
