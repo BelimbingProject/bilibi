@@ -1,4 +1,4 @@
-//! Staff choice proof: a holder of another owner's capability (no
+//! Staff choice proof: a holder of a registered staff-assignment capability (no
 //! `admin.user.*` grant) finds active staff of its own tenant by name, at most
 //! `STAFF_CHOICE_MAX` at a time, and never a deactivated, deleted, SCIM-off,
 //! retired-Person or other-tenant account.
@@ -6,6 +6,15 @@ use bilibi_database::pool;
 use bilibi_user::{UserService, STAFF_CHOICE_MAX};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+// The proof's own assignment capability, declared by this module and held by the manager only.
+const ASSIGN: &str = "admin.staff-proof.update";
+bilibi_user::inventory::submit! { bilibi_user::Contribution::new(bilibi_authz::VOCABULARY, "staff-choices.proof", bilibi_user::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_authz::VocabularyContribution {
+    domains: &[], verbs: &[],
+    capabilities: &[bilibi_authz::CapabilityDefinition::tenant(ASSIGN)],
+    roles: &[bilibi_authz::RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &[ASSIGN] }],
+    system_principals: &[],
+}) }
+bilibi_user::declare_staff_assignment!("core/user", bilibi_user::StaffAssignment::new(ASSIGN));
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_STAFF_CHOICES_DEMO").as_deref() != Ok("disposable") {
@@ -43,18 +52,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let viewer = sign_in("viewer@example.test").await?;
     let manager = sign_in("manager@example.test").await?;
     println!(
-        "Viewer, `companies.view`, text 'a': {:?}",
-        names(users.search_staff(&viewer, "companies.view", "a").await?)
-    );
-    println!(
-        "Viewer, `companies.update` (not held): {:?}",
+        "Viewer holds `companies.view`, not a registered assignment capability: {:?}",
         users
-            .search_staff(&viewer, "companies.update", "a")
+            .search_staff(&viewer, "companies.view", "a")
             .await
             .err()
     );
     println!(
-        "Viewer, unknown capability: {:?}",
+        "Manager holds `companies.update`, not registered either: {:?}",
+        users
+            .search_staff(&manager, "companies.update", "a")
+            .await
+            .err()
+    );
+    println!(
+        "Viewer, registered {ASSIGN} (not held): {:?}",
+        users.search_staff(&viewer, ASSIGN, "a").await.err()
+    );
+    println!(
+        "Manager, registered {ASSIGN} (held), text 'a': {:?}",
+        names(users.search_staff(&manager, ASSIGN, "a").await?)
+    );
+    println!(
+        "Viewer, unknown capability (unregistered): {:?}",
         users
             .search_staff(&viewer, "no.such.capability", "")
             .await
@@ -62,29 +82,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "Word start 'con' finds a second word; 'ontractor' finds nothing: {:?} / {:?}",
-        names(
-            users
-                .search_staff(&manager, "companies.update", "con")
-                .await?
-        ),
-        names(
-            users
-                .search_staff(&manager, "companies.update", "ontractor")
-                .await?
-        )
+        names(users.search_staff(&manager, ASSIGN, "con").await?),
+        names(users.search_staff(&manager, ASSIGN, "ontractor").await?)
     );
     println!(
         "Typed wildcard '%' stays literal: {:?}",
-        names(
-            users
-                .search_staff(&manager, "companies.update", "%")
-                .await?
-        )
+        names(users.search_staff(&manager, ASSIGN, "%").await?)
     );
     println!(
         "Over-long text: {:?}",
         users
-            .search_staff(&manager, "companies.update", &"x".repeat(256))
+            .search_staff(&manager, ASSIGN, &"x".repeat(256))
             .await
             .err()
     );
@@ -94,23 +102,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "Tenant 1 empty text sees tenant 2's account: {}",
         users
-            .search_staff(&manager, "companies.update", "")
+            .search_staff(&manager, ASSIGN, "")
             .await?
             .iter()
             .any(|c| c.id == 5)
     );
     println!(
         "Tenant 2 empty text: {:?}",
-        names(
-            users
-                .search_staff(&other, "companies.update", "")
-                .await
-                .or_else(|e| {
-                    // The other tenant's manager holds no walkthrough role here.
-                    println!("  tenant 2 caller refused: {e:?}");
-                    Ok::<_, bilibi_database::Error>(Vec::new())
-                })?
-        )
+        names(users.search_staff(&other, ASSIGN, "").await.or_else(|e| {
+            // The other tenant's manager holds no walkthrough role here.
+            println!("  tenant 2 caller refused: {e:?}");
+            Ok::<_, bilibi_database::Error>(Vec::new())
+        })?)
     );
     // Inactive exclusion, one reason at a time, on the disposable database.
     let client = db.get().await?;
@@ -118,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let users = users.clone();
         let manager = manager.clone();
         async move {
-            let found = users.search_staff(&manager, "companies.update", "").await?;
+            let found = users.search_staff(&manager, ASSIGN, "").await?;
             println!(
                 "{label}: user {id} offered = {}",
                 found.iter().any(|c| c.id == id)
@@ -180,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              INSERT INTO users(id,tenant_id,identity_id,name) SELECT 100+n,1,100+n,'Bulk '||lpad(n::text,2,'0') FROM generate_series(1,25) n ON CONFLICT DO NOTHING",
         )
         .await?;
-    let found = users.search_staff(&manager, "companies.update", "").await?;
+    let found = users.search_staff(&manager, ASSIGN, "").await?;
     println!(
         "25 more staff, empty text: {} results (bound {STAFF_CHOICE_MAX}), first {:?}",
         found.len(),
@@ -188,12 +191,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "Text 'bulk': {} results, last {:?}",
+        users.search_staff(&manager, ASSIGN, "bulk").await?.len(),
         users
-            .search_staff(&manager, "companies.update", "bulk")
-            .await?
-            .len(),
-        users
-            .search_staff(&manager, "companies.update", "BULK")
+            .search_staff(&manager, ASSIGN, "BULK")
             .await?
             .last()
             .map(|c| &c.name)
