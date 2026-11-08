@@ -18,13 +18,13 @@ use bilibi_tenancy::{Authentication, Scope};
 pub use contact_lookup::{ContactAddress, ContactMatches};
 pub use contributions::{CAPS, CREATE, LIST, RETIRE, SYSTEM_MANAGE, UPDATE, VIEW};
 pub use files::{PersonFiles, ARTIFACT_OWNER, ATTACHMENT_SUBJECT, FILES};
-// Other owners' transactions: a person read, searched, previewed or created
-// on the caller's connection, and the account binder's locks and standing.
+// Other owners' transactions: a person read, searched, previewed, created or
+// updated on the caller's connection, and the account binder's locks and standing.
 pub use identity::{
     account_standing, create as create_person, create_with_code as create_person_with_code,
-    lock_for_account_binding, preview as preview_person,
+    lock_for_account_binding, preview as preview_person, preview_update as preview_update_person,
     preview_with_code as preview_person_with_code, read as read_person, search as search_persons,
-    BindingIdentity,
+    update as update_person, BindingIdentity,
 };
 pub use model::{
     validate as validate_person, CreatePreview, Custom, CustomFieldError, DuplicateQuery,

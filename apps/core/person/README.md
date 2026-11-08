@@ -1,6 +1,6 @@
 # Person identity and personal contacts
 
-`PersonService` (`core/person.persons`) and the transaction APIs the crate root exports from the private `src/identity.rs` (`read_person`, `search_persons`, `preview_person`, `preview_person_with_code`, `create_person`, `create_person_with_code`, `lock_for_account_binding`, `account_standing`) own `persons`. They use K0's `PersonInput`, `PersonKind` and `PersonId`; an identity is never an employee or login account. Core works with People absent. `/contacts` and `/contacts/{id}` provide the capability-gated directory and inline record/contact editor. Creating a contact opens a dialog on the list; `/contacts/new` redirects there with that dialog open. The earlier `/persons` addresses answer with a permanent redirect to the Contacts addresses (`Moved` contributions in `src/contributions.rs`).
+`PersonService` (`core/person.persons`) and the transaction APIs the crate root exports from the private `src/identity.rs` (`read_person`, `search_persons`, `preview_person`, `preview_person_with_code`, `create_person`, `create_person_with_code`, `preview_update_person`, `update_person`, `lock_for_account_binding`, `account_standing`) own `persons`. They use K0's `PersonInput`, `PersonKind` and `PersonId`; an identity is never an employee or login account. Core works with People absent. `/contacts` and `/contacts/{id}` provide the capability-gated directory and inline record/contact editor. Creating a contact opens a dialog on the list; `/contacts/new` redirects there with that dialog open. The earlier `/persons` addresses answer with a permanent redirect to the Contacts addresses (`Moved` contributions in `src/contributions.rs`).
 
 Every person has a fixed Core `code`, unique within their tenant, including retired identities. The default uses up to 12 characters from whole name words, omitting source-spelled connectors bin, binti, a/l, a/p, s/o and d/o. It truncates the first word only when needed to fit the limit. For example, `Kam Pui Yue` becomes `kam_pui_yue` and `Muhammad Hafiz bin Ismail` becomes `muhammad`. If the suggestion is taken, it adds `_2`, `_3` and so on within 12 characters. A name without ASCII slug characters starts with `person`. The form suggests a code while the name is entered, and the person can replace it with a code up to 255 characters, including an imported code. If they clear the field, Bilibi chooses the code. Updates cannot change a code. `preview_person_with_code` and `create_person_with_code` accept an optional explicit code and the person's custom field values, while `preview_person` and `create_person` use the default code and set none. Preview reserves nothing; creation checks availability under a tenant lock. Renames and retirement retain the code, and a database trigger refuses a code edit. Contacts and global search find a person by code. Downstream records should display this Core code rather than assign a customer or supplier code.
 
@@ -53,6 +53,16 @@ schemas use the currently supported schema dialect: omit optional contacts on
 create and use empty strings to clear visible contacts on update.
 
 `PersonService::duplicates_on(client, scope, query)` runs the same bounded duplicate lookup as `duplicates` on a supplied PostgreSQL client or transaction. It re-proves the sealed Scope on that client, retaining actor, agent and impersonation evidence, then applies the existing authorization, restricted-criterion refusal and result masking. Earlier uncommitted Person writes in that transaction are visible. It opens no pooled connection or inner transaction, reserves no identity and leaves commit or rollback to the caller. The existing `duplicates` convenience method still acquires its own connection. The registered duplicate read uses its supplied `OperationClient` directly for reproof, lookup and custom-field projection, including the `Registry::call` transaction adapter.
+
+## Update on a caller's transaction
+
+**`update_person(tx, scope, id, &Update)` changes a person inside another module's own `MutationTransaction`, so that module's check and the person change commit, or roll back, together.**
+
+- **One implementation.** `PersonService::update`, the `core.person.update` agent write and `update_person` run the same owner code: the `core/person.update` capability, version check, validation, field restrictions and masking, custom fields, the protected system identity and retired refusals, and one audited `person` change in the caller's transaction.
+- **Who may call it.** A module whose operation is a user's request. Begin the transaction with that user's sealed `scope.mutation_context(...)`; a transaction for another tenant, actor or a system context is refused. The user still needs `core/person.update`: the caller's own capability and checks (such as a case's identity assurance gate) come first and never replace it.
+- **Refuse before the write.** Run your own check first and return its error; the caller then rolls back and nothing is written or audited. A later failure in the caller's operation rolls the person change back too, and no change notification is published.
+- **Review first.** `preview_update_person(client, scope, id, &Update)` runs the same checks on a read connection or transaction (a contract's preview) and returns the person before, the identity it would store and the custom values after. It locks and writes nothing.
+- **Not for system principals.** A system-context owner uses `PersonService::update_provisioned_contact_in` (below).
 
 ## Exact contact lookup on a caller client
 
@@ -136,7 +146,12 @@ BILIBI_PERSON_DEMO=disposable cargo run -p bilibi-person --example person-walkth
 The example calls real app services and prints records/refusals for normalization,
 duplicate candidates, concurrent stale saves, cross-tenant IDs, masked contacts,
 live capability revocation, retirement, system-agent protection, optional binding
-locks, transactional rollback and a deliberately refused audit action. It also
+locks, transactional rollback and a deliberately refused audit action. A
+Domain-style operation calls `update_person` on its own transaction: its check
+refuses before the write (nothing written or audited), a user without
+`core/person.update` and another user's scope are refused, a rollback leaves the
+person unchanged, and a permitted change commits audited under the caller's
+action. It also
 executes create/update/retire through the real safe-write plan service and prints
 write refusal without printing credentials or 2FA codes. It creates a temporary
 operator marker only in the disposable DB and removes it. No People module,
