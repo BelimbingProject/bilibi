@@ -28,8 +28,8 @@ async fn read_fields(
         masks: bilibi_authz::fields::masks_for_read(client, scope, "persons").await?,
     })
 }
-async fn raw(
-    client: &impl GenericClient,
+async fn raw<C: bilibi_tenancy::ReadClient + ?Sized>(
+    client: &C,
     scope: &Scope,
     id: PersonId,
     lock: bool,
@@ -390,6 +390,9 @@ pub async fn create_with_code(
     .await?
     .redact(&masked))
 }
+/// Change a person in the caller's audited transaction (`update_person`):
+/// the owner's `UPDATE` check, version, validation, field restrictions,
+/// custom fields and audit, written as one `Change` of that transaction.
 pub async fn update(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
@@ -413,15 +416,15 @@ pub async fn update(
     Ok(person.redact(&masked))
 }
 async fn prepare_update(
-    client: &(impl GenericClient + Sync),
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     id: PersonId,
     update: &Update,
     lock: bool,
 ) -> std::result::Result<(Person, PersonInput, Restrictions), WriteError> {
-    authorize_key(client, scope, UPDATE).await?;
+    bilibi_authz::authorize_proof(client, scope, UPDATE).await?;
     let mut input = validate(&update.identity).map_err(WriteError::Validation)?;
-    let masked = fields(client, scope).await?;
+    let masked = read_fields(client, scope).await?;
     restricted_input(&input, &masked)?;
     let old = raw(client, scope, id, lock).await?;
     if old.version != update.version {
@@ -441,10 +444,11 @@ async fn prepare_update(
     }
     Ok((old, input, masked))
 }
-/// What `update` would do: the person before, the identity it would store,
-/// and its custom values after the patch.
+/// What `update` would do (`preview_update_person`), on the caller's read
+/// connection or transaction: the person before, the identity it would store,
+/// and its custom values after the patch. Locks and writes nothing.
 pub async fn preview_update(
-    client: &(impl GenericClient + Sync),
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     id: PersonId,
     update: &Update,
@@ -463,7 +467,7 @@ pub async fn preview_update(
     Ok((old.redact(&masked), input, custom))
 }
 pub async fn preview_retire(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: PersonId,
     version: i64,

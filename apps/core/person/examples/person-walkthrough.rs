@@ -4,12 +4,12 @@ use bilibi_agent_api::{
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
     Registry,
 };
-use bilibi_database::{pool, Error, MutationBoundary};
+use bilibi_database::{pool, Error, MutationBoundary, MutationTransaction};
 use bilibi_person::{
-    create_person, lock_for_account_binding, DuplicateQuery, PersonInput, PersonKind,
-    PersonService, Search, Update, SERVICE,
+    create_person, lock_for_account_binding, update_person, DuplicateQuery, Person, PersonId,
+    PersonInput, PersonKind, PersonService, Search, Update, SERVICE,
 };
-use bilibi_tenancy::{PartyProofs, ProofFuture};
+use bilibi_tenancy::{PartyProofs, ProofFuture, Scope};
 use serde_json::json;
 use tokio_postgres::Transaction;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
@@ -46,6 +46,27 @@ fn human(name: &str) -> PersonInput {
         email: Some("contact@example.test".into()),
         phone: Some("+60 12 3456789".into()),
     }
+}
+fn contact(version: i64, name: &str) -> Update {
+    Update {
+        custom: Default::default(),
+        version,
+        identity: human(name),
+    }
+}
+/// A Domain-style operation: its own check first, then the Core person change,
+/// in one caller transaction. `assured` stands in for the caller's gate.
+async fn case_contact_update(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    assured: bool,
+    id: PersonId,
+    update: &Update,
+) -> Result<Person, Failure> {
+    if !assured {
+        return Err("case identity assurance is below its minimum".into());
+    }
+    Ok(update_person(tx, scope, id, update).await?)
 }
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
@@ -444,6 +465,163 @@ async fn main() -> Result<(), Failure> {
         people.read(&manager, rolled_back.id).await,
     );
     show("rollback publishes no change", changes.try_recv());
+
+    // A Domain operation changes a Core person on its own transaction.
+    let gated = people.create(&manager, &human("Gate Contact")).await?;
+    let gated_id = gated.id.get().to_string();
+    let audit_rows =
+        "SELECT count(*) FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id=$1";
+    let audited = |label: &'static str| {
+        let gated_id = gated_id.clone();
+        async move {
+            let rows: i64 = client.query_one(audit_rows, &[&gated_id]).await?.get(0);
+            show(label, rows);
+            Ok::<_, Failure>(())
+        }
+    };
+    while changes.try_recv().is_ok() {}
+    audited("caller transaction: person audit rows at start").await?;
+    show(
+        "caller previews the change",
+        bilibi_person::preview_update_person(
+            client,
+            &manager,
+            gated.id,
+            &contact(gated.version, "Gate Previewed"),
+        )
+        .await?,
+    );
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.refused-specimen"),
+        )
+        .await?;
+    show(
+        "caller's check refuses before the write",
+        case_contact_update(
+            &mut tx,
+            &manager,
+            false,
+            gated.id,
+            &contact(gated.version, "Gate Refused"),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+    );
+    tx.rollback().await?;
+    let read = people.read(&manager, gated.id).await?;
+    show(
+        "refused: name/version unchanged",
+        (&read.name, read.version),
+    );
+    audited("refused: person audit rows").await?;
+    show("refused: no change published", changes.try_recv());
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            viewer.mutation_context("case.contact.viewer-specimen"),
+        )
+        .await?;
+    show(
+        "caller passes but its user lacks core/person.update",
+        case_contact_update(
+            &mut tx,
+            &viewer,
+            true,
+            gated.id,
+            &contact(gated.version, "Gate Viewer"),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+    );
+    tx.rollback().await?;
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.foreign-scope-specimen"),
+        )
+        .await?;
+    show(
+        "another user's scope on this transaction refused",
+        case_contact_update(
+            &mut tx,
+            &staff,
+            true,
+            gated.id,
+            &contact(gated.version, "Gate Foreign"),
+        )
+        .await
+        .map_err(|e| e.to_string()),
+    );
+    tx.rollback().await?;
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.rollback-specimen"),
+        )
+        .await?;
+    let inside = case_contact_update(
+        &mut tx,
+        &manager,
+        true,
+        gated.id,
+        &contact(gated.version, "Gate Rolled Back"),
+    )
+    .await?;
+    show(
+        "inside the caller transaction",
+        (&inside.name, inside.version),
+    );
+    tx.rollback().await?;
+    let read = people.read(&manager, gated.id).await?;
+    show(
+        "caller rollback: name/version unchanged",
+        (&read.name, read.version),
+    );
+    audited("caller rollback: person audit rows").await?;
+    show("caller rollback: no change published", changes.try_recv());
+    let mut tx = boundary
+        .begin(
+            &mut connection,
+            manager.mutation_context("case.contact.update-specimen"),
+        )
+        .await?;
+    let changed = case_contact_update(
+        &mut tx,
+        &manager,
+        true,
+        gated.id,
+        &contact(gated.version, "Gate Changed"),
+    )
+    .await?;
+    tx.commit().await?;
+    show(
+        "permitted: committed with the caller's operation",
+        (&changed.name, changed.version),
+    );
+    show(
+        "permitted: change published after commit",
+        changes.try_recv(),
+    );
+    for row in client
+        .query(
+            "SELECT a.event,m.event,m.old_values->>'name',m.new_values->>'name' FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id WHERE m.auditable_type='person' AND m.auditable_id=$1 ORDER BY m.id",
+            &[&gated_id],
+        )
+        .await?
+    {
+        show(
+            "person audit row (action, event, old name, new name)",
+            (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, Option<String>>(2),
+                row.get::<_, Option<String>>(3),
+            ),
+        );
+    }
+    while changes.try_recv().is_ok() {}
     client.batch_execute("CREATE FUNCTION k7_refuse_action() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event='person.update' THEN RAISE EXCEPTION 'K7 deliberate audit refusal'; END IF; RETURN NEW; END $$; CREATE TRIGGER k7_refuse_action BEFORE INSERT ON base_audit_actions FOR EACH ROW EXECUTE FUNCTION k7_refuse_action()").await?;
     show(
         "audit failure rejects person update",

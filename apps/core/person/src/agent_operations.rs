@@ -105,10 +105,10 @@ async fn records(
     }
     Ok(Data::Array(out))
 }
-/// What an update would do, on one connection: the person before (with its
-/// custom fields), the identity it would store and the custom fields after.
+/// What an update would do, on the plan's connection: the person before (with
+/// its custom fields), the identity it would store and the custom fields after.
 async fn update_preview(
-    client: &(impl tokio_postgres::GenericClient + Sync),
+    client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
     id: PersonId,
     update: &Update,
@@ -225,17 +225,10 @@ impl WriteHandler for Write {
                     json!({"summary":"Create person without an account or access grants", "identity":person})
                 }
                 Self::Update => {
-                    let update = update_input(input)?;
-                    // On the plan's own transaction: a second pooled
+                    // On the plan's own connection: a second pooled
                     // connection per preview would exhaust the pool under
-                    // concurrent plans. A caller without one reads from the pool.
-                    match client.transaction() {
-                        Some(tx) => update_preview(tx, scope, id(input)?, &update).await?,
-                        None => {
-                            let pooled = persons()?.db.get().await.map_err(Error::from)?;
-                            update_preview(&**pooled, scope, id(input)?, &update).await?
-                        }
-                    }
+                    // concurrent plans.
+                    update_preview(client, scope, id(input)?, &update_input(input)?).await?
                 }
                 Self::Retire => {
                     let old = match client.transaction() {
