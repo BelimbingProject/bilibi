@@ -31,8 +31,8 @@ pub const SEARCH_DAYS: i64 = 366;
 /// Why an answer could not be given.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TimeError {
-    /// The answer lies past the loaded window or 366-day search limit (or
-    /// the calendar has no working time at all). Load the needed window.
+    /// The answer lies past the loaded window or the 366-day limit on the first
+    /// opening (or the calendar has no working time at all). Load the needed window.
     #[error("The answer lies beyond the loaded window or the search limit")]
     Beyond,
     #[error("The start is after the end")]
@@ -237,7 +237,8 @@ impl Timetable {
     /// Either direction needs its first opening within 366 elapsed days of
     /// `t` and counts the budget to the edge of the loaded window (at most 731
     /// days), so a retained budget beyond a year succeeds when the window holds
-    /// the working time; a calendar without enough is `Beyond`. The clock shifts by elapsed time, without a calendar search limit.
+    /// the working time; a calendar without enough is `Beyond`. The clock
+    /// shifts by elapsed time, without a calendar search limit.
     pub fn shift(
         &self,
         t: Timestamp,
