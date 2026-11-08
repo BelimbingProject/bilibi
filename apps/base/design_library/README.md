@@ -1,5 +1,9 @@
 # Design Library
 
+**Use it for:** seeing the shared UI components rendered (Administration › System › Design Library).
+
+**Not for:** building pages (use `base/ui`).
+
 The five source routes are discovered from this module. Access requires
 `admin.system.design-library.view`; the contributed System Viewer role receives
 that capability. The menu lives under Administration → System → Design Library.

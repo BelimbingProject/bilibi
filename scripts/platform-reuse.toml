@@ -1,0 +1,158 @@
+# Common ways a change rebuilds what Base already does (apps/base/CAPABILITIES.md).
+# scripts/platform-reuse.py flags each added line of a pull request that matches
+# a rule. Add a rule here; the script needs no change.
+#
+#   id       the key a "## Platform reuse" line in the pull request body uses
+#   use      the Base module that already does it
+#   why      one sentence on what that module gives, shown with each flag
+#   names    a regex over the snake_case name of a table, enum type (SQL) or
+#            struct, enum, type or trait (Rust) the change defines
+#   columns  a regex over the name of a SQL column the change adds
+#   code     [[rule.code]] entries: `files` globs over the path and a `pattern`
+#            regex over the added line (comment lines are skipped)
+#   skip     path globs that are exempt: the owning module itself
+#
+# Regexes are Python syntax, matched case-insensitively. Globs are fnmatch
+# patterns, where `*` also crosses `/`.
+
+[[rule]]
+id = "approval"
+use = "base/workflow"
+why = "Workflow's shared approvals hold approvers, company rules, cover, reasons and history; declare an ApprovalCase (apps/base/workflow/README.md, Shared approvals)."
+names = 'approv'
+columns = 'approv'
+skip = ["apps/base/workflow/*"]
+
+[[rule]]
+id = "status_history"
+use = "base/workflow"
+why = "Workflow owns a record's statuses, its allowed moves and the append-only status history; bind your record as a Subject."
+names = '(status|state)_?(history|histories|log|logs|transitions?|changes?)|transition_?(log|history)'
+skip = ["apps/base/workflow/*"]
+
+[[rule]]
+id = "audit_log"
+use = "base/audit"
+why = "Every MutationBoundary write is captured as audit evidence; return each affected record as a Change and show it with the record.history embed (base/audit_views)."
+names = '(^|_)audits?(_|$)|change_?logs?|activity_?logs?|edit_?logs?|revision_?logs?'
+skip = ["apps/base/audit/*", "apps/base/audit_views/*", "apps/base/database/*"]
+  [[rule.code]]
+  files = ["*.rs", "*.sql"]
+  pattern = 'insert\s+into\s+"?base_audit_'
+
+[[rule]]
+id = "notification"
+use = "base/notifications"
+why = "NotificationBoundary tells people inside your write and puts work on their To do list; Core User stores and delivers it."
+names = 'notifications?|(^|_)inbox(es)?(_|$)|(^|_)to_?dos?(_|$)'
+skip = ["apps/base/notifications/*", "apps/core/user/*"]
+
+[[rule]]
+id = "setting"
+use = "base/settings"
+why = "A value an operator could set is a Setting contribution with an editor (base/settings_editor), scoped and encrypted when secret."
+names = '(^|_)settings?(_|$)|(^|_)configs?(_|$)|(^|_)configurations?(_|$)|(^|_)preferences?(_|$)'
+skip = ["apps/base/settings/*", "apps/base/settings_editor/*"]
+
+[[rule]]
+id = "attachment"
+use = "base/media"
+why = "Media stores, scans and streams files and binds private attachments to your record; base/artifacts keeps generated or sensitive documents."
+names = 'attachments?|(^|_)uploads?(_|$)|(^|_)files?(_|$)|(^|_)blobs?(_|$)'
+skip = ["apps/base/media/*", "apps/base/artifacts/*", "apps/base/software/*", "apps/installer/*"]
+  [[rule.code]]
+  files = ["*.rs"]
+  pattern = '\b(std::)?fs::(write|File::create|create_dir_all)\b|\btokio::fs::(write|File::create)\b|\bFile::create\('
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?(aws-sdk-s3|rust-s3|object_store|opendal)"?\s*[=.]'
+
+[[rule]]
+id = "picklist"
+use = "base/picklists"
+why = "A value list each tenant curates is a declared pick-list stored by stable code; values your logic branches on stay in code."
+names = 'pick_?lists?|(^|_)lookups?(_|$)|lookup_values?|dropdowns?|value_lists?'
+skip = ["apps/base/picklists/*"]
+
+[[rule]]
+id = "custom_field"
+use = "base/custom_fields"
+why = "A field a tenant adds without a release is a custom_fields RecordType plus your own custom_fields jsonb column."
+names = 'custom_?fields?|extra_?fields?|user_?defined_?fields?|(^|_)udfs?(_|$)|field_?definitions?'
+skip = ["apps/base/custom_fields/*"]
+
+[[rule]]
+id = "mail_client"
+use = "base/mail"
+why = "Mail builds and sends every outgoing email through the operator's SMTP settings or the development mailbox."
+skip = ["apps/base/mail/*"]
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?(lettre|mail-send|mail-builder|async-smtp|samotop)"?\s*[=.]'
+  [[rule.code]]
+  files = ["*.rs"]
+  pattern = '\b(lettre|mail_send|mail_builder|async_smtp)::'
+
+[[rule]]
+id = "http_client"
+use = "base/integration"
+why = "Integration is the only outgoing HTTP client and logs every exchange; call it instead of a client crate."
+skip = ["apps/base/integration/*", "apps/web/*"]
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?(reqwest|ureq|isahc|surf|attohttpc|curl|awc|minreq|hyper|hyper-util)"?\s*[=.]'
+  [[rule.code]]
+  files = ["*.rs"]
+  pattern = '\b(reqwest|ureq|isahc|surf|attohttpc|minreq)::|\bhyper(_util)?::client'
+
+[[rule]]
+id = "local_time"
+use = "base/datetime"
+why = "Store instants in UTC (timestamptz) and show them through bilibi_datetime, which applies the reader's timezone and clock."
+skip = ["apps/base/datetime/*"]
+  [[rule.code]]
+  files = ["*.rs"]
+  pattern = '\bchrono::(Local|Naive)|\bLocal::now\b|\bNaiveDateTime\b|\bnow_local\b|\bZoned::now\(\)'
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?chrono"?\s*[=.]'
+  [[rule.code]]
+  files = ["*.sql"]
+  pattern = '\btimestamp\b(?!\s+with\s+time\s+zone)|\blocaltimestamp\b|\blocaltime\b'
+
+[[rule]]
+id = "cron_loop"
+use = "base/schedule"
+why = "Schedule runs recurring work at set times, once per installation or in every tenant, and hands each occurrence to Queue."
+skip = ["apps/base/schedule/*", "apps/base/queue/*", "apps/web/*"]
+  [[rule.code]]
+  files = ["*.rs"]
+  pattern = '\btokio::time::interval(_at)?\b|\btime::interval(_at)?\(|\bthread::sleep\('
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?(cron|croner|saffron|tokio-cron-scheduler|job_scheduler|job-scheduler|clokwerk|delay_timer)"?\s*[=.]'
+
+[[rule]]
+id = "job_queue"
+use = "base/queue"
+why = "Queue stores background jobs in your write's transaction, retries them and runs them as a named system principal."
+names = '(^|_)jobs?(_|$)|(^|_)queues?(_|$)|outbox(es)?|background_?tasks?'
+skip = ["apps/base/queue/*", "apps/base/schedule/*", "apps/base/events/*", "apps/base/workflow/*", "apps/base/software/*", "apps/base/bulk_data/*"]
+
+[[rule]]
+id = "two_factor"
+use = "base/step_up"
+why = "Step-up asks the account holder for a fresh second-factor code before an operation; declare it with bilibi_step_up::declare!."
+skip = ["apps/base/step_up/*", "apps/core/user/*"]
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?(totp-rs|totp-lite|google-authenticator|otpauth|libreauth)"?\s*[=.]'
+
+[[rule]]
+id = "pdf"
+use = "base/artifacts"
+why = "Artifacts renders text and table PDFs and stores private documents with retention."
+skip = ["apps/base/artifacts/*"]
+  [[rule.code]]
+  files = ["Cargo.toml"]
+  pattern = '^\s*"?(printpdf|genpdf|lopdf|pdf-writer|wkhtmltopdf|headless_chrome|chromiumoxide)"?\s*[=.]'

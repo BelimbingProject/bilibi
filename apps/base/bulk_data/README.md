@@ -1,5 +1,9 @@
 # Bulk data: CSV import, export and bulk updates
 
+**Use it for:** CSV import, CSV export and setting one field on many records of your type, through your own contracts.
+
+**Not for:** an import page, CSV parser or bulk-update handler of your own.
+
 `base/bulk_data` lets people bring a module's records in from a CSV file through that module's own write contracts, take a list's records out to CSV through its own list contract, and set one field on many records through its own update contract, for any module that opts in ([ADR 10](../../../docs/architecture/decisions/10-queued-jobs-call-contracts.md), issue 133). Lists tick rows with `FlexTable`'s `Selection` (`apps/base/ui`).
 ## Opting a record type in
 

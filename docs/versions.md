@@ -60,7 +60,7 @@ Only a repository owner acting as the release maintainer creates the tag. Contri
 
 After the tag exists, open a pull request that bumps `Cargo.toml` to the next number, so `main` never claims a number that was released.
 
-**A Domain or Extension.** Copy [`docs/domain-ci/ci.yml`](domain-ci/ci.yml) to `.github/workflows/ci.yml`. No secret is needed. An owner creates the protected `vX.Y.Z` tag only on a reviewed default-branch commit whose CI is green:
+**A Domain or Extension.** Copy [`docs/domain-ci/ci.yml`](domain-ci/ci.yml) to `.github/workflows/ci.yml` and [`docs/domain-ci/platform-reuse.yml`](domain-ci/platform-reuse.yml) to `.github/workflows/platform-reuse.yml`. No secret is needed. An owner creates the protected `vX.Y.Z` tag only on a reviewed default-branch commit whose CI is green:
 
 ```sh
 git tag v0.1.1 <commit>

@@ -1,5 +1,9 @@
 # Private artifacts (A1, A2)
 
+**Use it for:** private documents a record keeps: generated PDFs, sensitive uploaded evidence, their retention and encryption.
+
+**Not for:** ordinary record attachments and uploads (use `base/media`).
+
 Use `base/artifacts.store` and `Artifacts::for_owner(scope, company, &ConcreteOwner)`
 for sensitive uploaded/generated documents. Implement `Owner` in the business
 module and declare a dependency on `base/artifacts`. Select the concrete adapter

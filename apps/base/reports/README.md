@@ -1,5 +1,9 @@
 # Reports (`base/reports`)
 
+**Use it for:** saved reports an operator builds over Grid tables, run as each reader, with exports and scheduled delivery.
+
+**Not for:** a report builder or export page of your own.
+
 Operator-built reports: a saved question over one Grid table, run as each reader.
 ## Parent oversight
 

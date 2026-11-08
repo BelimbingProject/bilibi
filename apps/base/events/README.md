@@ -1,5 +1,9 @@
 # bilibi-events
 
+**Use it for:** reacting, later and in your own transaction, to something another Domain or Extension did.
+
+**Not for:** asking another module a question now (use `base/ports`), or calling or reading another Domain directly.
+
 Events (`base/events`) let a module react to something that happened in another Domain or Extension, without either module knowing the other exists.
 
 ## What is an event?

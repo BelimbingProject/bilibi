@@ -1,5 +1,9 @@
 # DateTime display and period contract
 
+**Use it for:** showing an instant in the reader's timezone and clock, the timezone settings, and the period filter on lists; time is stored in UTC.
+
+**Not for:** `chrono::Local`, naive local time or formatting a date yourself.
+
 `base/datetime` is a policy boundary, not date arithmetic: storage stays UTC and
 business modules keep their own deadline semantics. It owns two Settings
 definitions and the request-scoped display context presentation renders with.

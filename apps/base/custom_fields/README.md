@@ -1,5 +1,9 @@
 # Base Custom Fields
 
+**Use it for:** fields a tenant administrator adds to your records without a release.
+
+**Not for:** a field-definitions table, page or operation of your own, or values your logic branches on (keep those in code).
+
 Typed fields (text, number, date, pick-list) a tenant administrator adds to the records of a module that opts in, without a release. The decision and the rejected alternatives are in [ADR 21](../../../docs/architecture/decisions/21-tenant-defined-custom-fields.md).
 
 - **This module owns the definitions, not the values.** A record's owner keeps values in its own row and checks them in its own write.

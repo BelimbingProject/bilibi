@@ -1,5 +1,9 @@
 # Audit evidence contract
 
+**Use it for:** the evidence of who changed what; every `MutationBoundary` write is captured automatically, plus recorded action facts.
+
+**Not for:** an audit table, change log or history rows of your own; never insert audit rows by hand.
+
 `base/audit` records durable mutation and action facts in `base_audit_mutations`,
 `base_audit_actions`, the mutable bookmark table `base_audit_action_metadata`
 and the diagnostics table `base_audit_capture_failures` (migration

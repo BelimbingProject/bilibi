@@ -1,5 +1,9 @@
 # Schedule definitions, review and occurrence claims
 
+**Use it for:** recurring work at set times, once per installation or once in every tenant, run through Queue.
+
+**Not for:** `tokio::time::interval`, sleep loops, cron crates or looping over tenants.
+
 Schedule holds installation-global recurrence definitions, the operator's
 decision about them, and the durable claim that hands exactly one Queue job to
 each intended occurrence. Definitions, fingerprint review, suppression and the

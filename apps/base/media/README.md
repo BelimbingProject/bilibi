@@ -1,5 +1,9 @@
 # Media storage contract
 
+**Use it for:** uploading, storing, scanning and streaming files, and private attachments on your records.
+
+**Not for:** `std::fs` writes, a files or attachments table, or a download route of your own.
+
 `base/media` owns private asset storage: operator-mapped disks, asset metadata
 (`base_media_assets`), content-checked uploads, malware scanning with
 quarantine, the staging of resumable uploads, signed single-asset streams, the

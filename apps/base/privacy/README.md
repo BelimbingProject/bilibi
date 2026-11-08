@@ -1,5 +1,9 @@
 # Personal data (privacy)
 
+**Use it for:** data-subject requests, legal holds, retention sweeps and masked-field reveals.
+
+**Not for:** a deletion or retention job of your own (declare your stores in `base/personal_data`).
+
 **Data-subject requests, legal holds, retention sweeps and masked-field reveals, above the `base/personal_data` contract.** The decision is [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md); the work is tracked in [issue 132](https://github.com/BelimbingProject/bilibi/issues/132).
 Stores, record kinds, grants and the hold guard are contracts in [`base/personal_data`](../personal_data/README.md). This module runs them.
 

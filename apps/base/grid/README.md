@@ -1,5 +1,9 @@
 # Grid catalog, page projections, lenses and page columns (G1–G4)
 
+**Use it for:** declaring your tables so lists get pickable columns, lenses and saved arrangements; reports and search read the same catalog.
+
+**Not for:** a column picker or per-list join code of your own.
+
 ## Parent oversight
 
 `OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.offsets` allows callers to compose globally bounded pages, without widening the proven directory. `latest` and `list` values stay per child, with null combined cells.

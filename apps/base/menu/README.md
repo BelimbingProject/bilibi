@@ -1,5 +1,9 @@
 # Menu contract
 
+**Use it for:** adding your pages to the navigation.
+
+**Not for:** hard-coded links in a template or a host-side link list.
+
 `base/menu` owns the navigation tree; it has no tables and does no IO. An owning
 module contributes items with `bilibi_menu::contribute!("core/x", MenuItem::page(...))`
 (see `apps/core/company/src/contributions.rs`) and adds `base/menu` to its

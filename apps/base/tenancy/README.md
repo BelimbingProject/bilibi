@@ -1,5 +1,9 @@
 # Tenancy identity boundary
 
+**Use it for:** who is acting: the sealed `Scope`, its actor, tenant and current company.
+
+**Not for:** a raw tenant, actor or party ID from a request or argument.
+
 Use `Authentication` and `Scope` from `src/lib.rs` for authenticated identity. Raw route IDs and K0 party IDs carry no authority. Scope and Actor have private identity fields, no deserialize implementation and no public constructor; the display fields are never policy input. A proof applies to one freshly guarded unit of work, not a permanent credential.
 
 `base/tenancy.authentication` owns a once-bound `ActorVerifier`. Core User installs the account adapter during registry boot; missing and duplicate bindings fail startup. The `ProofClient` read adapter keeps owner checks on the caller's connection or transaction. `ReadClient` extends it with `query` for owners that also read lists (Settings reads take `&dyn ReadClient`). Base has no SQL against Core account/company/person tables. `Authentication::authenticate` is an authentication-edge API: supply only identities extracted from validated durable credentials, never request IDs. It establishes identity and grants no capabilities. `Scope::mutation_context` supplies F2 attribution from that identity.

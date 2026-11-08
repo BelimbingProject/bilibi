@@ -1,0 +1,45 @@
+# Reference Platform reuse check for a Bilibi Domain or Extension repository.
+# Copy it unchanged to .github/workflows/platform-reuse.yml. It flags added
+# code that looks like what a Base module already does (an approvals table, an
+# HTTP client crate, local time, a timer loop) and fails only when the pull
+# request body does not say, under "## Platform reuse", which Base module it
+# used or why none fits. The script and its rules come from Bilibi's main
+# branch, not the pinned revision, so a rule added there applies to every
+# repository at once and nothing is copied here (docs/domain-ci/README.md).
+# Its own workflow so editing the body re-runs it without compiling.
+name: Platform reuse
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-reuse-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  platform-reuse:
+    name: Platform reuse
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: container
+          fetch-depth: 0
+      - uses: actions/checkout@v7
+        with:
+          repository: BelimbingProject/bilibi
+          ref: main
+          path: bilibi
+          sparse-checkout: |
+            scripts/platform-reuse.py
+            scripts/platform-reuse.toml
+          sparse-checkout-cone-mode: false
+      - run: python3 ../bilibi/scripts/platform-reuse.py --base "origin/${{ github.base_ref }}"
+        working-directory: container
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

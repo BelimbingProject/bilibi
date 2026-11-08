@@ -1,5 +1,9 @@
 # Settings editor (P3)
 
+**Use it for:** showing your settings on the System Settings page (give the setting `editor` metadata).
+
+**Not for:** a settings page of your own.
+
 `/system/settings`, titled **System Settings**, is the operator page for contributed settings. It is its own module because it needs Authz, and Authz depends on `base/settings`: storage stays below Authz, the screen sits above it.
 
 ## Table

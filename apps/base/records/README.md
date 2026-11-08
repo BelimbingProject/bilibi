@@ -1,5 +1,9 @@
 # Base Records
 
+**Use it for:** pointing at a record another module owns, even in another Domain, and showing it as a pill or picker.
+
+**Not for:** a foreign key across modules or a copy of another record's name.
+
 One way for any module to point at a record that another module owns, including a record in another Domain, without depending on that module.
 - **A holder stores `(record_kind, record_id)`, both text.** No foreign key crosses a module boundary, and the owner never learns who points at its records.
 - **An owner registers each kind of record once:** its key, Grid table, page path and an access check.

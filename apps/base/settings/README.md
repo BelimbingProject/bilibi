@@ -1,5 +1,9 @@
 # Settings storage contract (P2)
 
+**Use it for:** any value an operator could reasonably set, per installation, tenant or company, with secrets encrypted.
+
+**Not for:** constants, environment-only values or a settings table of your own.
+
 Contribute `Setting` payloads to `base/settings.definitions` using the registry's
 `Contribution` and the declaring module's provenance. The contribution ID is the
 setting key or wildcard pattern. Exact keys win, then the longest matching
