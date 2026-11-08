@@ -151,6 +151,16 @@ Customer accounts retain their separate portal identity ([ADR 16](../../../docs/
 
 **Use `UserService::list_company_accounts(scope, company)` and `company_account(scope, company, user)` for staff pickers.** A caller already holding a database transaction uses the static `UserService::list_company_accounts_on(client, scope, company)` and `company_account_on(client, scope, company, user)` variants to preserve that connection. These read live staff accounts whose live Person has an explicit desk at that live, unarchived company. The caller authorizes its own company target; every answer remains within the sealed scope's tenant.
 
+## Staff choice
+
+**Use `UserService::search_staff(scope, capability, text)` (or `search_staff_on(client, scope, capability, text)` on your transaction) to pick any active staff account of the tenant for an assignment control.** `PrincipalDirectory` only names accounts you already hold, `list_users` needs `admin.user.list` and `list_company_accounts` is limited to one company's desks.
+
+- **`capability` is your own declared capability** for the operation the choice feeds (Lead's assign). Core User decides it for the actor, logged, before it reads: not held or unknown is `Forbidden`, so no `admin.user.*` grant is needed. You still authorize your own target and re-prove the chosen id when you save; a choice is never proof.
+- **Result:** `StaffChoice { id, name }`, at most `STAFF_CHOICE_MAX` (20), in name order. `text` is empty (the first 20) or up to `STAFF_SEARCH_MAX` (255 bytes); it matches a word start in the name, ignoring case, with `%` and `_` literal. Email is not searched or returned.
+- **Who is offered:** staff of the scope's tenant only, with an active sign-in identity, an active account that is not deleted or SCIM-deactivated, and a linked Person that is not retired (the `standing` rule). Customer accounts, other tenants and anyone `standing` would freeze are never offered. A desk is not required, unlike `list_company_accounts`.
+- **Picker:** a Domain shows it with the shared search field and hit buttons, as `RecordPicker` does for records; no new component.
+- Proof: `examples/staff-choices-walkthrough.rs` (`BILIBI_STAFF_CHOICES_DEMO=disposable`, migrated disposable `DATABASE_URL`).
+
 `CompanyAccount` carries id, name, email, verification, Person, the requested organisation and timestamps. It contains no credential or employment affiliation. Staff without a desk are not listed. Business affiliations neither add nor remove workplace access.
 
 ## Pages (`core/user.pages`)

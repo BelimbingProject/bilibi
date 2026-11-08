@@ -37,6 +37,7 @@ mod sign_in;
 mod sign_in_alert;
 mod sign_in_identity;
 mod sso;
+mod staff_choices;
 mod tenant_context;
 pub use scim::{ScimError, ScimRequest, ScimResponse, ScimResult};
 pub use sso::{
@@ -398,3 +399,4 @@ pub use accounts::{validate_input, LANDING_KEY, NAME_MAX};
 pub use bootstrap::{BOOTSTRAP_ACTION, BOOTSTRAP_COMPLETED, CREATE_OWNER_PRINCIPAL};
 pub use company_accounts::CompanyAccount;
 pub use contributions::{CREATE, DELETE, INVITE, LIST, UPDATE, VIEW};
+pub use staff_choices::{StaffChoice, STAFF_CHOICE_MAX, STAFF_SEARCH_MAX};
