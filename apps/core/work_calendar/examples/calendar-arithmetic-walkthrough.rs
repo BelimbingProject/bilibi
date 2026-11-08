@@ -160,6 +160,8 @@ async fn main() -> Result<(), Failure> {
             false,
         ),
         ("arithmetic-all", "UTC", vec!["00:00-24:00"], true),
+        ("arithmetic-week", "UTC", vec!["09:00-17:00"], false),
+        ("arithmetic-shut", "UTC", vec!["09:00-17:00"], false),
     ] {
         write(&plans, &browser, &scope, "core.work_calendar.create",
             json!({"code":code,"name":code,"timezone":timezone,"effective_from":"2025-01-01","week":week(&periods,weekends)})).await?;
@@ -184,6 +186,13 @@ async fn main() -> Result<(), Failure> {
     .await?;
     write(&plans, &browser, &scope, "core.work_calendar.exception.add",
         json!({"code":"arithmetic-office","version":2,"starts_on":"2026-11-12","name":"Short day","type":"working","periods":["09:00-12:00"]})).await?;
+    for (version, starts_on, ends_on) in [
+        (1, "2025-02-01", "2025-12-31"),
+        (2, "2026-01-01", "2026-02-05"),
+    ] {
+        write(&plans, &browser, &scope, "core.work_calendar.exception.add",
+            json!({"code":"arithmetic-shut","version":version,"starts_on":starts_on,"ends_on":ends_on,"name":"Shut","type":"off"})).await?;
+    }
     write(&plans, &browser, &scope, "core.work_calendar.create",
         json!({"code":"arithmetic-closed","name":"Closed calendar","timezone":"UTC","week":{
             "monday":{"type":"off"},"tuesday":{"type":"off"},"wednesday":{"type":"off"},
@@ -565,6 +574,108 @@ async fn main() -> Result<(), Failure> {
         closed.add_working_days_at(pause, 0),
         Err(TimeError::Beyond),
     )?;
+    for n in [-2117, 2117] {
+        check(
+            "closed calendar refuses a budget beyond one horizon",
+            closed.shift(pause, hours(n)),
+            Err(TimeError::Beyond),
+        )?;
+    }
+    // Mon-Fri 09:00-17:00 in UTC, no closures: a three-hour timer started
+    // 2024-01-01T09:00Z is due 12:00 and stays unresolved until paused
+    // 2025-01-06T09:00Z, 53 weekday weeks (265 days of 8 hours less its own
+    // 3 hours of budget) later; resumed 2026-01-05T09:00Z, 371 elapsed days
+    // after the answer, beyond one 366-day horizon but inside the window.
+    let started = at("2024-01-01T09:00:00Z");
+    let paused = at("2025-01-06T09:00:00Z");
+    let resumed = at("2026-01-05T09:00:00Z");
+    let week_start = calendars
+        .timetable(
+            &scope,
+            "arithmetic-week",
+            date("2024-01-01"),
+            date("2025-12-31"),
+        )
+        .await?;
+    check(
+        "three-hour timer due",
+        week_start.add(started, hours(3)),
+        Ok(at("2024-01-01T12:00:00Z")),
+    )?;
+    check(
+        "53 weekday weeks of business time",
+        week_start.elapsed(started, paused),
+        Ok(hours(2120)),
+    )?;
+    check(
+        "retained budget beyond one horizon",
+        hours(3) - week_start.elapsed(started, paused)?,
+        hours(-2117),
+    )?;
+    check(
+        "positive budget beyond one horizon",
+        week_start.add(started, hours(2120)),
+        Ok(at("2025-01-03T17:00:00Z")),
+    )?;
+    let week = calendars
+        .timetable(
+            &scope,
+            "arithmetic-week",
+            date("2024-12-01"),
+            date("2026-01-31"),
+        )
+        .await?;
+    check(
+        "overdue resume beyond one horizon",
+        week.shift(resumed, hours(-2117)),
+        Ok(at("2024-12-30T12:00:00Z")),
+    )?;
+    check(
+        "positive resume beyond one horizon",
+        week.shift(at("2024-12-02T09:00:00Z"), hours(2120)),
+        Ok(at("2025-12-05T17:00:00Z")),
+    )?;
+    let short = calendars
+        .timetable(
+            &scope,
+            "arithmetic-week",
+            date("2025-06-01"),
+            date("2026-01-31"),
+        )
+        .await?;
+    check(
+        "budget past the loaded window",
+        short.shift(resumed, hours(-2117)),
+        Err(TimeError::Beyond),
+    )?;
+    let shut = calendars
+        .timetable(
+            &scope,
+            "arithmetic-shut",
+            date("2025-01-01"),
+            date("2026-03-01"),
+        )
+        .await?;
+    check(
+        "first opening over 366 days away forward",
+        shut.add(at("2025-01-31T18:00:00Z"), hours(1)),
+        Err(TimeError::Beyond),
+    )?;
+    check(
+        "first opening within 366 days forward",
+        shut.add(at("2025-02-10T10:00:00Z"), hours(1)),
+        Ok(at("2026-02-06T10:00:00Z")),
+    )?;
+    check(
+        "previous close over 366 days away",
+        shut.shift(at("2026-02-06T09:00:00Z"), hours(-1)),
+        Err(TimeError::Beyond),
+    )?;
+    check(
+        "previous close within 366 days",
+        shut.shift(at("2026-02-01T10:00:00Z"), hours(-1)),
+        Ok(at("2025-01-31T16:00:00Z")),
+    )?;
     let all = calendars
         .timetable(
             &scope,
@@ -575,13 +686,13 @@ async fn main() -> Result<(), Failure> {
         .await?;
     shifted(
         &all,
-        "negative at exact 366-day limit",
+        "negative at exact 366-day distance",
         "2026-11-06T00:00:00Z",
         -366 * 24,
         "2025-11-05T00:00:00Z",
     )?;
     check(
-        "one second past negative limit",
+        "one second before the window start",
         all.shift(
             at("2026-11-06T00:00:00Z"),
             SignedDuration::from_secs(-366 * 86400 - 1),

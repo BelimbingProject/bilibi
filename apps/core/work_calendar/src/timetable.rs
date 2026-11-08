@@ -24,7 +24,8 @@ use tokio_postgres::GenericClient;
 
 /// The widest window one load reads.
 pub const MAX_WINDOW_DAYS: i64 = 731;
-/// The furthest a search looks in either direction.
+/// The furthest the first opening may lie from the start of a search, in
+/// either direction. Counting a budget is bounded by the loaded window.
 pub const SEARCH_DAYS: i64 = 366;
 
 /// Why an answer could not be given.
@@ -161,7 +162,7 @@ impl Timetable {
             Ok(())
         }
     }
-    /// The furthest instant a search from `t` may reach.
+    /// The furthest instant the first opening of a search from `t` may be at.
     fn limit(window: &Window, t: Timestamp) -> Timestamp {
         t.checked_add(SignedDuration::from_hours(SEARCH_DAYS * 24))
             .map_or(window.end, |far| far.min(window.end))
@@ -193,7 +194,10 @@ impl Timetable {
 
     /// `d` of business time after `t`, counted from `t` or, if closed, from
     /// the next opening. A result exactly at a closing time stays there ("due
-    /// 18:00 today", not "09:00 tomorrow"); `add(t, 0)` is `t`.
+    /// 18:00 today", not "09:00 tomorrow"); `add(t, 0)` is `t`. The first
+    /// opening must lie within 366 days of `t`; counting then runs to the end
+    /// of the loaded window, so a budget beyond a year succeeds when the window
+    /// holds enough working time.
     /// Negative durations are `Negative`; use `shift` for signed budgets.
     pub fn add(
         &self,
@@ -209,7 +213,6 @@ impl Timetable {
         let Some(window) = &self.window else {
             return t.checked_add(d).map_err(|_| TimeError::Beyond);
         };
-        let limit = Self::limit(window, t);
         let mut cursor = self.next_open(t)?;
         let mut index = window.open.partition_point(|(start, _)| *start <= cursor) - 1;
         let mut remaining = d;
@@ -217,20 +220,13 @@ impl Timetable {
             let (_, close) = window.open[index];
             let available = cursor.duration_until(close);
             if remaining <= available {
-                let due = cursor
-                    .checked_add(remaining)
-                    .map_err(|_| TimeError::Beyond)?;
-                return if due <= limit {
-                    Ok(due)
-                } else {
-                    Err(TimeError::Beyond)
-                };
+                return cursor.checked_add(remaining).map_err(|_| TimeError::Beyond);
             }
             remaining -= available;
             index += 1;
             match window.open.get(index) {
-                Some((start, _)) if *start < limit => cursor = *start,
-                _ => return Err(TimeError::Beyond),
+                Some((start, _)) => cursor = *start,
+                None => return Err(TimeError::Beyond),
             }
         }
     }
@@ -238,8 +234,10 @@ impl Timetable {
     /// Shift by signed business time. Positive and zero durations follow
     /// `add`; negative durations count backwards from `t`, or from the
     /// previous close when closed. An exact opening boundary stays there.
-    /// Either direction searches at most 366 elapsed days within the window.
-    /// The clock shifts by elapsed time, without a calendar search limit.
+    /// Either direction needs its first opening within 366 elapsed days of
+    /// `t` and counts the budget to the edge of the loaded window (at most 731
+    /// days), so a retained budget beyond a year succeeds when the window holds
+    /// the working time; a calendar without enough is `Beyond`. The clock shifts by elapsed time, without a calendar search limit.
     pub fn shift(
         &self,
         t: Timestamp,
@@ -252,31 +250,27 @@ impl Timetable {
             return t.checked_add(d).map_err(|_| TimeError::Beyond);
         };
         Self::inside(window, t)?;
-        let limit = t
+        let reach = t
             .checked_sub(SignedDuration::from_hours(SEARCH_DAYS * 24))
             .map_or(window.start, |far| far.max(window.start));
         let mut cursor = t;
         let mut remaining = d;
+        let mut counting = false;
         for &(start, close) in window.open.iter().rev() {
             if start >= cursor {
                 continue;
             }
             cursor = cursor.min(close);
-            if cursor <= limit {
+            // Only the previous close is held to 366 days; counting runs on.
+            if !counting && cursor <= reach {
                 break;
             }
+            counting = true;
             // Keep the remaining budget negative, including its minimum
             // representable value: negating it could overflow.
             let available = cursor.duration_until(start);
             if remaining >= available {
-                let due = cursor
-                    .checked_add(remaining)
-                    .map_err(|_| TimeError::Beyond)?;
-                return if due >= limit {
-                    Ok(due)
-                } else {
-                    Err(TimeError::Beyond)
-                };
+                return cursor.checked_add(remaining).map_err(|_| TimeError::Beyond);
             }
             remaining -= available;
             cursor = start;
