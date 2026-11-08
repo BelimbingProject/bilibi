@@ -91,7 +91,7 @@ Bilibi opens in your browser at the sign-in page when it is ready. Sign in as `a
 
 Use apt-based Ubuntu or Debian, or Arch Linux and its derivatives (including Omarchy), with Git, Bash and network access. These distributions also work in WSL2. On Arch, setup performs a full system upgrade when it installs missing packages, as required by pacman. Installing missing packages needs root or sudo privileges. Setup may ask for your sudo password in the terminal; one command does not mean unattended installation.
 
-On Arch/Omarchy, setup uses `pacman` and the Node.js 24 LTS package (`nodejs-lts-krypton`).  Setup keeps an installed Node.js 22 or newer. Setup refuses a different PostgreSQL major. Rustup selects the pinned Rust version for this checkout without changing your global default.
+On Arch/Omarchy, setup uses `pacman` and the Node.js 24 LTS package (`nodejs-lts-krypton`). Setup keeps an installed Node.js 22 or newer. Setup refuses a different PostgreSQL major. Rustup selects the pinned Rust version for this checkout without changing your global default.
 
 Python 3.11 or newer is required. Ubuntu 20.04 and 22.04, and Debian 11, ship older Python versions. Upgrade to Ubuntu 24.04 or newer, or Debian 12 or newer, before starting; setup does not replace the distribution's Python. If local HTTPS trust needs manual setup (including Windows trust in WSL2), use the printed loopback HTTP address. The launcher falls back to HTTP when local HTTPS is unavailable.
 
