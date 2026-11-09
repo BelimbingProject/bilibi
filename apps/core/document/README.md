@@ -9,7 +9,7 @@
 - Links to registered records. A link helps people find an already-authorized document; it never grants access.
 - Explicit user grants for view, download, manage and share permissions.
 - Personal favourite and follow marks: a person's own flags, never shared. A follower is notified of a new revision while they can still see the document.
-- Library actions: find duplicates, copy and merge.
+- Library actions: quick add, find duplicates, copy, merge and delete one or many.
 - The file ledger and the `core.document` Artifact owner.
 - One Documents list, one document record page, metadata CSV export, file downloads and agent operations.
 - The Documents panel on Core company and Core person pages, and on any Domain record page that renders the `record.documents` slot.
@@ -57,6 +57,14 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 - **Copy:** `copy_file` stores a private duplicate of the latest file (bytes cannot go through a contract, like `store_file`), then `copy` creates a new document named "Copy of …" with the same publish date, category, sub-category and type, the list's default status, and one revision whose change log is "Document created". A link is copied without a file. Links, grants and marks are not copied: only the person who copies can see the copy until they share it.
 - **Merge:** `merge` folds one or more duplicates into a survivor. Each source's revisions are renumbered after the survivor's latest with the change log saying where they came from, so no file is lost; links, marks and the explicit grants of active accounts are combined (permissions OR together); each source is removed along with its expiry reminder task (the survivor keeps its own date and reminder) and `base/records` redirects references to it. It needs `core.document.merge`, `core.document.manage` and the explicit manage and share grants on every document, because merging unites who may read them. The documents must all keep files or all keep links, and be filed under one company. A source revision that is retained or under legal hold keeps its document, number, change log and file (ADR 23), so the merge is refused, in the preview and again under the commit's locks (`Artifacts::ensure_unprotected`).
 
+## Quick add
+
+- **Quick add** (`quick_create`, with `core.document.manage`) files a document in one step, from the list header and from a record's Documents panel. One form takes a file or an https link, an optional name, a category and a type, and one **Add document** receives the file, keeps it and creates the document through `core.document.create`.
+- The name is the file's name when left blank (a link needs one). The category and type start at the pick-lists' defaults (`other` out of the box; an operator changes or clears them on the pick-lists page) and can be changed in the form. Status, publish date and the rest take the same defaults as any create.
+- From the panel, or from the list filtered to one record (`related=<kind>:<id>`), the new document is related to that record in the same write. The New document dialog on a filtered list does the same.
+- A refusal (size, type, scan, a missing name) stays in the form with the file kept, so Add document can be pressed again. A file another document you may see already holds is filed anyway; the message says how many hold it.
+- Nothing else changes: the New document dialog stays the place for a publish date, status, sub-category and an arbitrary related record.
+
 ## Files and scanning
 
 `store_file` validates the configured size and file types, stages the upload through `base/media`, and waits for a clean malware result before copying it into private `base/artifacts`. Pending, infected, failed or unscanned content is refused and never becomes a readable revision.
@@ -65,9 +73,15 @@ Internal revisions store one Artifact ID in `core_document_revisions`; external 
 
 ## Retention-safe deletion
 
-Deleting a document first marks it as deleting while preserving the document, every revision, every file-ledger row, every link, every mark and every access grant. After that transaction commits, `Artifacts::delete_batch` locks and checks the complete revision set before it tombstones any file.
+Deleting a document first checks every revision's file. If any revision is retained or under legal hold, `preview_delete` and `delete` refuse with `Retained` or `LegalHold` before anything changes (the check reads the Artifacts rows `FOR SHARE` inside the commit, so a hold placed meanwhile waits). The document stays readable with its complete revision history.
 
-If any revision is retained or under legal hold, the whole batch is refused and the document with its full revision history remains. Metadata is removed only after every Artifact accepts deletion and every ledger row is safely removed. Repeating `delete` at the current version retries an interrupted byte or metadata finalization.
+Otherwise `delete` marks the document as deleting while preserving the document, every revision, every file-ledger row, every link, every mark and every access grant. After that transaction commits, `Artifacts::delete_batch` locks and checks the complete revision set again before it tombstones any file, and metadata is removed only after every Artifact accepts deletion and every ledger row is safely removed. Repeating `delete` at the current version retries an interrupted byte or metadata finalization; a document already being deleted skips the first check, because it is unreadable and its retry is the batch check.
+
+### Delete from the list
+
+- Every row has a **Delete** icon, and a tick at the start of the row opens the selection bar's **Delete…**, both only for a reader with `core.document.manage`. A row shows its icon only for a document the reader holds an unended manage grant on. Ticks follow the list's selection: by id, across pages, or "every row the filters match" less those unticked, and they clear when the filters or sort change.
+- A confirmation says how many documents go and that each leaves every record it relates to. Confirm runs `core.document.delete` once per document at the version it reads then, each its own reviewed write, so one refusal never undoes the others. At most 100 documents go at once (the dialog refuses more, and says to narrow the filters or tick fewer).
+- One row's Delete reports with a flash ("Document deleted.", or the refusal's reason). Several documents, or any refusal, open a **Delete result**: how many were deleted and, for each document kept, its name and why (retained, under legal hold, no manage grant, changed since, gone). The same refusals come back from `core.document.delete` to an agent.
 
 ## Public facade
 
@@ -81,7 +95,7 @@ If any revision is retained or under legal hold, the whole batch is refused and 
 | `preview_revision`, `add_revision` | A checked revision, then the stored revision |
 | `link`, `unlink` | Add or remove a record reference |
 | `access`, `preview_share`, `share`, `preview_unshare`, `unshare` | Read and change explicit access |
-| `preview_delete`, `delete` | Review and start retention-safe deletion |
+| `preview_delete`, `delete` | Review (refusing a retained or held revision) and start retention-safe deletion |
 | `mark`, `preview_mark`, `marks` | The reader's own favourite and follow marks |
 | `duplicates`, `duplicates_of_file` | Look-alikes the reader may see |
 | `copy_file`, `preview_copy`, `copy` | A copy with its latest revision only |
@@ -93,7 +107,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 ## Contributions
 
 - Capabilities: `core.document.view`, `core.document.download`, `core.document.manage` and `core.document.merge`.
-- Pick-lists: `core.document.category`, `core.document.sub_category`, `core.document.type`, and `core.document.status`.
+- Pick-lists: `core.document.category`, `core.document.sub_category`, `core.document.type`, and `core.document.status`; category, type and status each start with a default (`other`, `other`, `active`).
 - Settings: `core.document.max_upload_bytes`, `core.document.allowed_types` and `core.document.expiry_reminder_days`.
 - Custom field record type `document`.
 - Record kind: `core.document.document`; holder table `document_links`.
@@ -108,7 +122,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 | `person.documents` | `person.documents` | `Record { kind: "core/person" }` | `core.document.view` |
 | `document.record-documents` | `record.documents` | `Record { kind: "*" }` | `core.document.view` |
 
-Core company and Core person discover their panel by kind and pass `company_id` or `person_id`. A Domain record page (a case, an opportunity) renders the `record.documents` slot with `kind` and `id` in the panel path; it never registers a Documents panel of its own. The panel shows at most 10 documents linked to the record, newest first (name, category, revision, publish date), and **View all** opens `/documents?related=<kind>:<id>`. **Add document** (with `core.document.manage`) opens the same filtered list, where New document files and relates it, so the panel writes nothing. The panel reads through `Documents::list`: a document with no explicit grant for the reader is absent, with no hidden count.
+Core company and Core person discover their panel by kind and pass `company_id` or `person_id`. A Domain record page (a case, an opportunity) renders the `record.documents` slot with `kind` and `id` in the panel path; it never registers a Documents panel of its own. The panel shows at most 10 documents linked to the record, newest first (name, category, revision, publish date), and **View all** opens `/documents?related=<kind>:<id>`. **Quick add** (with `core.document.manage`) files a document related to the record without leaving the page, and **Add document** opens the same filtered list, where New document files and relates it; the panel writes nothing else. The panel reads through `Documents::list`: a document with no explicit grant for the reader is absent, with no hidden count.
 
 Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share` (with `until` and `email`), `.unshare`, `.mark`, `.copy`, `.merge` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes (and the `copy_file` step of Copy, which then calls `core.document.copy`) is the declared page-write exception because operation input is bounded; an agent copies a file document by naming a file the page stored.
 

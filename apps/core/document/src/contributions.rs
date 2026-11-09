@@ -121,6 +121,7 @@ bilibi_picklists::declare!(
             Start::new("other", "Other"),
         ]
     )
+    .default("other")
 );
 bilibi_picklists::declare!(
     "core/document",
@@ -152,6 +153,7 @@ bilibi_picklists::declare!(
             Start::new("other", "Other"),
         ]
     )
+    .default("other")
 );
 inventory::submit! { Contribution::new(SEEDS, "core/document.picklists", provenance!(), &Seed {
     version: "core-document-picklists-v1", mode: SeedMode::Production,
@@ -362,6 +364,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
     service: crate::web::SERVICE,
     contracts: &[
         ("create", "core.document.create"),
+        ("quick_create", "core.document.create"),
         ("save_field", "core.document.update"),
         ("save_custom_field", "core.document.update"),
         ("add_revision", "core.document.add_revision"),

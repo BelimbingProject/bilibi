@@ -1460,7 +1460,11 @@ impl Store<'_> {
         .map_err(write_error)
     }
 
-    /// Everything `delete` checks, with no write: the document.
+    /// Everything `delete` checks, with no write: the document. A document
+    /// whose revision is retained or under legal hold is refused here, before
+    /// anything is marked, so it stays readable with its full history (ADR 23).
+    /// One already being deleted skips the check: repeating `delete` retries
+    /// its interrupted finalization.
     pub(crate) async fn prepare_delete(
         &self,
         on: On<'_>,
@@ -1471,7 +1475,45 @@ impl Store<'_> {
         let document = self
             .editable_including_deleting(on, scope, id, Some(version), MANAGE)
             .await?;
+        if document.deleting_at.is_none() {
+            self.ensure_unprotected(on, scope, &document).await?;
+        }
         Ok(document)
+    }
+
+    /// Refuses with `Retained` or `LegalHold` while any revision's file is
+    /// protected. On a commit the Artifact rows are locked, so a hold placed
+    /// meanwhile waits for this transaction.
+    async fn ensure_unprotected(
+        &self,
+        on: On<'_>,
+        scope: &Scope,
+        document: &Document,
+    ) -> WriteResult<()> {
+        let client = on.client();
+        let artifact_ids: Vec<String> = client
+            .query(
+                "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY artifact_id",
+                &[&scope.tenant(), &document.id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let company = bilibi_party_ids::OrganisationId::new(document.company_id)
+            .map_err(|_| Error::Internal)?;
+        match self
+            .artifacts
+            .for_owner(scope, company, &files::FILES)
+            .ensure_unprotected(client, &artifact_ids, on.locks())
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(bilibi_artifacts::Error::Retained) => Err(WriteError::Retained),
+            Err(bilibi_artifacts::Error::LegalHold) => Err(WriteError::LegalHold),
+            Err(bilibi_artifacts::Error::Database(error)) => Err(error.into()),
+            Err(_) => Err(Error::Internal.into()),
+        }
     }
 
     pub(crate) async fn delete(
