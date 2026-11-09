@@ -9,8 +9,8 @@ use crate::{Document, Filter};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    ActionLink, Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview, Html,
-    Modal, ModalWidth, StatusKind,
+    ActionLink, Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview, Html, Modal,
+    ModalWidth, StatusKind,
 };
 use serde_json::{json, Value};
 
@@ -54,7 +54,11 @@ impl Index {
         else {
             return Err(Error::Invalid);
         };
-        let allowed = self.pages.documents.granted(scope, &[id], "download").await?;
+        let allowed = self
+            .pages
+            .documents
+            .granted(scope, &[id], "download")
+            .await?;
         let document = match self.pages.documents.get(scope, id).await {
             Ok(document) if allowed.contains(&id) => Some(document),
             Ok(_) | Err(Error::NotFound | Error::Forbidden) => None,
@@ -71,10 +75,7 @@ impl Index {
         };
         self.preview = match (document, latest) {
             (Some(document), Some(revision))
-                if revision
-                    .content_type
-                    .as_deref()
-                    .is_some_and(previewable) =>
+                if revision.content_type.as_deref().is_some_and(previewable) =>
             {
                 Some(Previewing {
                     name: document.name,
@@ -328,19 +329,22 @@ impl Index {
     /// the preview. `entries` are the rows on screen, which name a single row.
     pub(super) fn dialogs(&self, entries: &[Document]) -> Result<Html> {
         let mut body = Html::EMPTY;
-            if let Some(what) = &self.confirm {
-                let plural = |n: u64| if n == 1 { "document" } else { "documents" };
-                let consequence = match what {
-                    Deletion::One(id) => match entries.iter().find(|d| d.id == *id) {
-                        Some(d) => format!("“{}” will be deleted with all its revisions.", d.name),
-                        None => "This document will be deleted with all its revisions.".into(),
-                    },
-                    Deletion::Selected => {
-                        let n = self.selection.count();
-                        format!("{n} {} will be deleted with all their revisions.", plural(n))
-                    }
-                };
-                body.push(&render(ConfirmDialog {
+        if let Some(what) = &self.confirm {
+            let plural = |n: u64| if n == 1 { "document" } else { "documents" };
+            let consequence = match what {
+                Deletion::One(id) => match entries.iter().find(|d| d.id == *id) {
+                    Some(d) => format!("“{}” will be deleted with all its revisions.", d.name),
+                    None => "This document will be deleted with all its revisions.".into(),
+                },
+                Deletion::Selected => {
+                    let n = self.selection.count();
+                    format!(
+                        "{n} {} will be deleted with all their revisions.",
+                        plural(n)
+                    )
+                }
+            };
+            body.push(&render(ConfirmDialog {
                     id: "documents-confirm",
                     consequence: &consequence,
                     detail: "Every revision's file is deleted too, and each document leaves every record it relates to. A document with a retained revision, or one under legal hold, is kept, and the result says why.",
@@ -349,13 +353,13 @@ impl Index {
                     confirm_event: "delete",
                     cancel_event: "cancel_delete",
                 })?);
-            }
-            if let Some(outcome) = &self.outcome {
-                body.push(&Self::outcome_dialog(outcome)?);
-            }
-            if let Some(preview) = &self.preview {
-                body.push(&Self::preview_dialog(preview)?);
-            }
+        }
+        if let Some(outcome) = &self.outcome {
+            body.push(&Self::outcome_dialog(outcome)?);
+        }
+        if let Some(preview) = &self.preview {
+            body.push(&Self::preview_dialog(preview)?);
+        }
         Ok(body)
     }
 }

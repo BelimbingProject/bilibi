@@ -13,11 +13,12 @@ use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, error_sentence, page::Uploads, params,
+    choices, error_sentence,
+    page::Uploads,
+    params,
     upload::{UploadSpec, UploadedFile},
-    ActionLink, Alert, Button,
-    ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind, Modal, ModalWidth,
-    RecordPicker, StatusKind,
+    ActionLink, Alert, Button, ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind,
+    Modal, ModalWidth, RecordPicker, StatusKind,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

@@ -253,7 +253,8 @@ impl LiveState<Scope, Error> for Panel {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
             if let LiveInput::Event(value) = request.input {
-                self.handle(request.scope, request.credential, value).await?;
+                self.handle(request.scope, request.credential, value)
+                    .await?;
             }
             Ok(LiveBody {
                 html: self.view(request.scope).await?.to_string(),

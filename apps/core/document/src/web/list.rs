@@ -336,7 +336,6 @@ impl Index {
         Ok(None)
     }
 
-
     fn row(
         &self,
         clock: &Clock,
@@ -466,7 +465,10 @@ impl Index {
         let downloadable = if latest.is_empty() {
             HashSet::new()
         } else {
-            self.pages.documents.granted(scope, &ids, "download").await?
+            self.pages
+                .documents
+                .granted(scope, &ids, "download")
+                .await?
         };
         self.page_keys = ids.iter().map(i64::to_string).collect();
         let rows = page
@@ -612,7 +614,7 @@ impl Index {
                 })?,
                 ..self.selection.clone()
             });
-            }
+        }
         table.actions = may_manage || !downloadable.is_empty();
         if page.entries.is_empty() {
             let clear = render(Button {
@@ -656,7 +658,12 @@ impl Index {
             )?);
         }
         if let Some(quick) = &self.quick {
-            body.push(&quick.render(&self.uploads, "documents-quick", "close_quick", self.framed)?);
+            body.push(&quick.render(
+                &self.uploads,
+                "documents-quick",
+                "close_quick",
+                self.framed,
+            )?);
         }
         body.push(&self.dialogs(&page.entries)?);
         let region = render(Region {

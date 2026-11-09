@@ -65,6 +65,12 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 - A refusal (size, type, scan, a missing name) stays in the form with the file kept, so Add document can be pressed again. A file another document you may see already holds is filed anyway; the message says how many hold it.
 - Nothing else changes: the New document dialog stays the place for a publish date, status, sub-category and an arbitrary related record.
 
+## Preview
+
+- A row's **Preview** icon (with `core.document.download`) opens the document's latest file in place, in a dialog with a Download link beside it, for a revision whose type is a PNG, JPEG, GIF or WebP picture, a PDF or plain text. Other types (Office files, CSV, a link) show no icon: the browser cannot show them in place.
+- The icon shows only for a document the reader holds an unended download grant on. The dialog frames `/documents/{id}/revisions/{revision}/preview`, a download route with the same `core.document.download` capability that calls `Documents::read_file`: the same read, the same grant check and the same `artifacts.read` audit as the file download, never a second path to the bytes. It answers inline only for the types above (anything else is not found), with the download's response policy: no scripts, framing by this origin only, `nosniff` and `no-store`.
+- The page reads nothing itself, so a grant ended or a file quarantined after the list drew shows the frame the same refusal a download gets.
+
 ## Files and scanning
 
 `store_file` validates the configured size and file types, stages the upload through `base/media`, and waits for a clean malware result before copying it into private `base/artifacts`. Pending, infected, failed or unscanned content is refused and never becomes a readable revision.
@@ -82,6 +88,49 @@ Otherwise `delete` marks the document as deleting while preserving the document,
 - Every row has a **Delete** icon, and a tick at the start of the row opens the selection bar's **Delete…**, both only for a reader with `core.document.manage`. A row shows its icon only for a document the reader holds an unended manage grant on. Ticks follow the list's selection: by id, across pages, or "every row the filters match" less those unticked, and they clear when the filters or sort change.
 - A confirmation says how many documents go and that each leaves every record it relates to. Confirm runs `core.document.delete` once per document at the version it reads then, each its own reviewed write, so one refusal never undoes the others. At most 100 documents go at once (the dialog refuses more, and says to narrow the filters or tick fewer).
 - One row's Delete reports with a flash ("Document deleted.", or the refusal's reason). Several documents, or any refusal, open a **Delete result**: how many were deleted and, for each document kept, its name and why (retained, under legal hold, no manage grant, changed since, gone). The same refusals come back from `core.document.delete` to an agent.
+
+## Audit trail
+
+Every action that changes or reads a document leaves audited evidence, so there is no unrecorded way in. A change is a `base/audit` mutation written in the action's own transaction; a file read is an Artifacts action. Refused and failed actions write nothing to the document.
+
+| Action | Evidence |
+| --- | --- |
+| Create, Quick add, Copy | `core.document.document` created, `core.document.revision` created, the creator's `core.document.access`, a `core.document.link` per related record |
+| Update, in-place edit, expiry date, custom field | `core.document.document` updated (a reminder task is Core Activity's own change) |
+| New revision | `core.document.revision` created, `core.document.document` updated |
+| Link, Unlink | `core.document.link` created or deleted |
+| Share, Unshare, Access until | `core.document.access` created, updated or deleted |
+| Email them a link | `core.document.email` created, then updated when it is sent, failed, suppressed or rate limited |
+| Favourite, Follow | `core.document.mark` created or updated (the reader's own flags) |
+| Merge | the survivor's revisions, links, access and marks created or updated; every source's rows deleted |
+| Delete, one or from the list | `core.document.document` updated (marked as deleting), then every row of the document deleted once the files are gone |
+| Upload, discard a stored file | `core.document.file` ledger changes |
+| Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
+
+Every row of a document's parts carries its `document_id`, so one query finds the whole trail. Run it on **Administration › System › Database Queries** with the tenant and document IDs; **Audit Log › Data Mutations** lists the same mutations tenant-wide (search `core.document`).
+
+```sql
+SELECT id, occurred_at, auditable_type, event, actor_type, actor_id
+FROM base_audit_mutations
+WHERE tenant_id = 1 AND auditable_type LIKE 'core.document.%'
+  AND ((auditable_type = 'core.document.document' AND auditable_id = '42')
+    OR new_values ->> 'document_id' = '42' OR old_values ->> 'document_id' = '42')
+ORDER BY id;
+
+SELECT id, occurred_at, event, actor_type, actor_id
+FROM base_audit_actions
+WHERE tenant_id = 1 AND event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'core.document'
+  AND payload ->> 'artifact_id' IN (SELECT artifact_id FROM core_document_revisions WHERE tenant_id = 1 AND document_id = 42)
+ORDER BY id;
+```
+
+The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable migrated database it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
+
+```sh
+BILIBI_DOCUMENT_AUDIT=disposable cargo run -p bilibi-document --example audit-coverage --locked
+```
+
+A new document action belongs in that example in the same change.
 
 ## Public facade
 
@@ -111,7 +160,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 - Settings: `core.document.max_upload_bytes`, `core.document.allowed_types` and `core.document.expiry_reminder_days`.
 - Custom field record type `document`.
 - Record kind: `core.document.document`; holder table `document_links`.
-- Routes: `/documents`, `/documents/{id}`, revision downloads and `/documents/export.csv`.
+- Routes: `/documents`, `/documents/{id}`, revision downloads and previews, and `/documents/export.csv`.
 - Menu item: `Documents`, under Core.
 - Media subject: `core.document.upload`.
 - Record panels (embeds), the one Documents panel of each record kind:

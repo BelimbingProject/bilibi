@@ -6,9 +6,7 @@ use crate::{Source, LIST_CATEGORY, LIST_TYPE};
 use bilibi_database::Result;
 use bilibi_records::Resolved;
 use bilibi_tenancy::Scope;
-use bilibi_ui::{
-    choices, error_sentence, page::Uploads, Html, InputKind, Modal, ModalWidth,
-};
+use bilibi_ui::{choices, error_sentence, page::Uploads, Html, InputKind, Modal, ModalWidth};
 use serde_json::{json, Value};
 
 /// The document a quick add filed.
@@ -60,7 +58,13 @@ impl QuickDocument {
         match name {
             "document_change" => self.state.read(
                 value,
-                &["name", "source", "external_url", "category", "document_type"],
+                &[
+                    "name",
+                    "source",
+                    "external_url",
+                    "category",
+                    "document_type",
+                ],
             )?,
             _ => return Ok(false),
         }
