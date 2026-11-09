@@ -207,6 +207,8 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
         ("add_guest_email", "core.activity.add_guest"),
         ("remove_guest", "core.activity.remove_guest"),
         ("send_invites", "core.activity.send_invites"),
+        ("create_person", "core.activity.create_person_guest"),
+        ("save_reminder_defaults", "core.activity.set_reminder_defaults"),
         ("save_field", "core.activity.update"),
         ("pick_related", "core.activity.update"),
         ("clear_related", "core.activity.update"),

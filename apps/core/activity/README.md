@@ -7,7 +7,7 @@
 - Activities and their guests (`core_activities`, `core_activity_guests`).
 - Repeating series: the rule (`core_activity_series`) and one activity per occurrence.
 - One Activities list (`/activities`), shown as a table or as a calendar, one record page (`/activities/{id}`) and the Activities panel on record pages.
-- Reminders: a per-tenant scheduled sweep, the bell's To do rows and the optional reminder email.
+- Reminders: a per-tenant scheduled sweep, each activity's own reminder offsets (else the creator's default, else the tenant's), the bell's To do rows and the optional reminder email to the assignee and to guests without an account.
 - Invitations: Send invites, the bell notice to colleagues, the invitation email worker, and the `core/activity.invitation_gates` registry a Domain contributes its contact rules to.
 - The `core/activity.happened` event, record kind `core.activity.activity` and the agent operations.
 
@@ -47,11 +47,14 @@ Not here: syncing with outside calendars (Google, Outlook, iCalendar feeds), cus
 | `related_kind`, `related_id` | The `base/records` reference, both or neither |
 | `shared` | Readers of the related record see it too. Default `false` |
 | `assignee_user_id` | An active account of the tenant; the creator by default |
-| `reminded_at` | When the sweep reminded the assignee; cleared when `starts_at`, `due_at` or the assignee changes |
+| `reminded_at` | When the sweep last reminded; cleared, with the offsets already reminded at, when `starts_at`, `due_at` or the assignee changes |
+| `reminder_minutes`, `reminder_email` | Its own reminders ([Reminders](#reminders)): up to five offsets in minutes before (0–10,080), `[]` for none, `NULL` for the default; whether each reminder is also emailed, `NULL` for the default |
 | `series_id`, `series_index` | The repeating series it is an occurrence of, and its number there (1–200); both or neither |
 | `created_by`, `created_at`, `updated_at`, `closed_at`, `deleted_at`, `version` | `closed_at` is set exactly while the status is a closing one |
 
 `core_activity_series`: the rule a series was created with (frequency, `every`, weekly `weekdays`, monthly `month_day`, `until` or `occurrences`, the `work_calendar` whose non-working days were left out, and the `timezone` the time repeats in). It is never changed; see [Repeating series](#repeating-series).
+
+`core_activity_guest_reminders`: one row per guest reminder email sent (guest, the time it was for, the offset), so a retried job never emails a guest twice.
 
 `core_activity_guests`: one row per guest. A guest is an account, a Core person or an email address; `role` is `creator`, `assignee`, `related` or `invited`; `response` is `none`, `accepted`, `declined` or `tentative`; `invited_at` is when Send invites last included them and `invite_sent_at` when that invitation's email went out.
 
@@ -71,6 +74,8 @@ Every write runs in the caller's `MutationTransaction` with its sealed scope and
 | `close_and_create_new` | Closes, and returns an unsaved copy with the same values and guests |
 | `delete` | Soft delete, fenced on `version` |
 | `delete_related(id, related)` | For the owner of `related` (Core Document's expiry reminder), after its own authorization: removes task `id` when it is still about `related`, whoever created it; a task already gone is left alone |
+| `create_person_guest(id, guest_id, name)` | Creates a Core person from an email-address guest (`core/person` creation, under the actor's own right to create people) and makes the guest that person instead of the address, keeping their answer and invitation. Refused when a person already has the address |
+| `reminder_defaults`, `set_reminder_defaults` | The reader's own default offsets and email choice ([Reminders](#reminders)) |
 | `add_guest`, `remove_guest` | Invites an active account, a person the actor may view or an email address (at most 50 guests); removes anyone but the assignee (`AssigneeNotRemovable`). No version; the activity is locked |
 | `respond` | Records `accepted`, `declined`, `tentative` or `none`. An account guest answers for themselves with `core.activity.view`; anyone else's answer needs the right to change the activity |
 | `send_invites` | For an open call or meeting still ahead: stamps every guest but the sender `invited_at`, tells account guests in the bell, and queues the invitation email to the others (Invitations) |
@@ -111,13 +116,24 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 **A scheduled sweep runs every minute in each tenant that lets the scheduler work there** (`core/activity.reminders`, `Reach::EachTenant`, ADR 17). A tenant administrator allows it on Administration › Authorization › Automation access.
 
-1. It finds open tasks with a due date and open calls and meetings whose time is within the tenant setting `core.activity.reminder_minutes` (default 15), and that have not been reminded.
-2. In one audited transaction per 200 it sets `reminded_at` and rings each assignee's bell after commit (`NotificationBoundary::todos_changed_for`), and the bells of a call's or meeting's account guests who have not declined. A run reminds at most 2,000; the next run takes the rest.
-3. When `core.activity.reminder_email` is on (default off), it then emails each assignee the kind, subject, time and a link to the activity. Mail is sent after commit; a refused message is logged and not retried, because the bell already holds the reminder.
+**Which offsets an activity reminds at**, first that is set:
 
-**The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count: those assigned to them, and calls and meetings they are an account guest of and have not declined. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from those people's To do and refreshes their bells at once; declining or being removed takes it off that guest's. Moving its due time or reassigning it waits for a new reminder. See all opens `/activities`.
+1. The activity's own `reminder_minutes` (up to five offsets of 0–10,080 minutes before it starts or is due; `[]` is no reminder). Each occurrence of a series has its own; Change series copies one to the later occurrences.
+2. The creator's default (`core.activity.default_reminder_minutes`, a personal setting), copied onto the activity when they create it. A person sets it with **Reminder defaults** on the Activities list; it changes no activity they already made.
+3. The tenant setting `core.activity.reminder_minutes` (default 15), one reminder, read at each sweep.
 
-One activity has one reminder, at the tenant's lead time. There is no second reminder system for meetings. Each occurrence of a series is reminded on its own.
+**Whether it also emails** follows the same order: the activity's `reminder_email`, the creator's default (`core.activity.default_reminder_email`), then the tenant setting `core.activity.reminder_email` (default off). A note has no reminders.
+
+1. The sweep finds open tasks with a due date and open calls and meetings with an offset that has come due and not been reminded at (`reminders_sent`).
+2. In one audited transaction per 200 it stamps `reminded_at` and the offsets, and rings each assignee's bell after commit (`NotificationBoundary::todos_changed_for`), and the bells of a call's or meeting's account guests who have not declined. A run reminds at most 2,000; the next run takes the rest. An activity with several offsets due at once (the sweep was down) is reminded once.
+3. When email is on for the activity, it then emails the assignee the kind, subject, time and a link to the activity. Mail is sent after commit; a refused message is logged and not retried, because the bell already holds the reminder.
+4. For a call or meeting with email on, it queues `core/activity-guest-reminders` as the assignee (else the creator), who must still hold `core.activity.manage`. It runs as that person, not as the sweep's principal, because an invitation gate is asked for a sender (their desk, their right to ask) and the guest's `Reply-To` is that person; Queue re-proves the live account, desk and capability on every attempt, so it grants nothing the assignee lacks. The job emails each guest **without an account**, **sent the invitation** (`invite_sent_at`) and **not declined**: the guest's address, or a person's email as Core Person lets the assignee read it. It skips a closed activity and one moved since the reminder was due, asks every `core/activity.invitation_gates` gate for each guest exactly as the invitation worker does (one refusal skips the guest), sends one `base/mail` message (what, when in the filing company's zone and UTC, where, the join link; `Reply-To` the assignee; never the internal notes or a link into Bilibi), and records it in `core_activity_guest_reminders`. Delivery is outside any transaction: a crash between sending and recording sends that guest's reminder once more; a relay refusal retries the unreminded guests.
+
+**Guest reminders are transactional mail, not marketing.** A guest receives one only about a meeting they were invited to, so Core asks no consent of its own and depends on no Domain. A Domain that keeps contact rules (a suppression, a consent) contributes an invitation gate, which then also decides these emails; with none contributed, every usable address is emailed.
+
+**The bell's To do** lists the reader's reminded open activities, soonest first, up to five rows and a count: those assigned to them, and calls and meetings they are an account guest of and have not declined. A row opens the related record when the reader may view it, otherwise the activity. Closing, deleting or reassigning it removes it from those people's To do and refreshes their bells at once; declining or being removed takes it off that guest's. Moving its due time or reassigning it waits for new reminders. See all opens `/activities`.
+
+There is no second reminder system for meetings. Each occurrence of a series is reminded on its own.
 
 ## Invitations
 
@@ -132,9 +148,13 @@ For each guest without an account invited at that moment and not yet sent, the w
 
 Delivery is outside any transaction: a crash between sending and stamping sends that guest's invitation once more. A relay refusal retries the unsent guests.
 
+### Create a person from a guest
+
+**An email-address guest with no Core person can become one.** On the activity page (and `core.activity.create_person_guest`) an address guest shows **Create person** when the reader may create people and no person has that address. The dialog asks the name; the person gets the address as their email. In one transaction the guest row points at the new person instead of the address, keeping its answer, invitation and reminders. Refused when a person already has the address (pick them instead) or the reader may not create people.
+
 ### Invitation gates (`core/activity.invitation_gates`)
 
-A Domain that keeps contact rules (consent, suppressions) contributes an `InvitationGate`. Core never names the Domain.
+A Domain that keeps contact rules (consent, suppressions) contributes an `InvitationGate`. Core never names the Domain. The same gates decide the guest reminder emails ([Reminders](#reminders)).
 
 | Field | Called | Answers |
 | --- | --- | --- |
@@ -162,8 +182,8 @@ The subject is `core.activity.activity:<id>` and the key `<id>:<version>`. The p
 ## Contributions
 
 - Capabilities: `core.activity.view`, `core.activity.manage`, `core.activity.all.view`, `core.activity.all.manage`. The `tenant_owner` role gets `view` and `manage` only.
-- Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`.
-- Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue worker `core/activity-invites`.
+- Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`. Personal (user scope, set with Reminder defaults on the Activities list): `core.activity.default_reminder_minutes`, `core.activity.default_reminder_email`.
+- Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue workers `core/activity-invites` and `core/activity-guest-reminders`.
 - Registry `core/activity.invitation_gates` (declared here; Domains contribute).
 - Uses `core/work_calendar` (default calendar and resolved days) for "working days only" and the calendar's day marks.
 - Record kind `core.activity.activity` (page `/activities/{id}`); holder table `activities`.
@@ -180,11 +200,11 @@ Any record page shows the generic panel by placing `core/activity.record` with i
 
 ## Agent operations
 
-Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, with `series_id` one series) and `core.activity.get` (with guests and their ids, and the series rule). Reviewed writes `core.activity.create_task`, `.log_call`, `.create_meeting` (each with an optional `repeat`), `.create_note`, `.update`, `.close`, `.add_guest`, `.remove_guest`, `.respond` (declares `view`: a guest answers for themselves), `.send_invites`, `.delete`, `.update_series` and `.delete_series` (`apply`: `following` or `all`). Guide `core.activity`. References are `{kind, id}`; reads add `label` and `path`. Pages and panels call the same write contracts.
+Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, with `series_id` one series) and `core.activity.get` (with guests and their ids, and the series rule). Reviewed writes `core.activity.create_task`, `.log_call`, `.create_meeting` (each with an optional `repeat`), `.create_note`, `.update`, `.close`, `.add_guest`, `.create_person_guest`, `.remove_guest`, `.respond` (declares `view`: a guest answers for themselves), `.send_invites`, `.delete`, `.update_series` and `.delete_series` (`apply`: `following` or `all`), `.set_reminder_defaults`; and the read `core.activity.reminder_defaults`. Guide `core.activity`. References are `{kind, id}`; reads add `label` and `path`. Pages and panels call the same write contracts.
 
 ## Migrations
 
-`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`).
+`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`), `core-activity-004-reminders` (`reminder_minutes`, `reminder_email` and `reminders_sent` on activities, `core_activity_guest_reminders`).
 
 ## How to try it
 
@@ -194,3 +214,4 @@ Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, 
 4. When the reminder comes due, the bell's **To do** tab lists it; the row opens the related record.
 5. Choose **New meeting**, set **Repeats** to Weekly on two days, **Ends** after 6 times, and save: the record page says how it repeats, **See all** lists the six, and **Change series** moves the later ones to another hour. The **Calendar** tab shows them on the week, and dragging one moves only it.
 6. For a meeting, choose **New meeting**, set a time a few minutes ahead and save. On its page add a person or an email address as a guest, then **Send invites**: the email lands in the development mailbox (`.local/mailbox`) and a colleague guest gets the invitation in the bell, answers it on the page, and sees the reminder in To do.
+7. Choose **Reminder defaults** on the Activities list, pick "1 hour and 10 minutes before" and email on, and save. A meeting you create now starts with them; on its page, **Reminders** and **Email reminders** change them in place. Add an email-address guest, **Send invites**, then **Create person** on that guest to turn the address into a person. Enable the schedule (the scheduler needs the two grants on Automation access, including the tenant directory one in the operator tenant): the next sweep reminds the assignee and emails the guest.

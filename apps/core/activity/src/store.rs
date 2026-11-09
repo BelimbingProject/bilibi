@@ -23,14 +23,14 @@ use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row};
 
-const COLUMNS: &str = "a.id,a.company_id,a.kind,a.subject,a.status,a.priority,a.direction,a.starts_at,a.ends_at,a.due_at,a.start_at,a.location,a.join_url,a.meeting_type,a.call_outcome,a.description,a.internal_notes,a.related_kind,a.related_id,a.shared,a.assignee_user_id,a.created_by,a.created_at,a.updated_at,a.closed_at,a.reminded_at,a.series_id,a.series_index,a.version";
+const COLUMNS: &str = "a.id,a.company_id,a.kind,a.subject,a.status,a.priority,a.direction,a.starts_at,a.ends_at,a.due_at,a.start_at,a.location,a.join_url,a.meeting_type,a.call_outcome,a.description,a.internal_notes,a.related_kind,a.related_id,a.shared,a.assignee_user_id,a.created_by,a.created_at,a.updated_at,a.closed_at,a.reminded_at,a.series_id,a.series_index,a.reminder_minutes,a.reminder_email,a.version";
 /// The activities the reader takes part in, with `$2` the reader's account:
 /// they created it, are assigned it or are an account guest. Nothing else
 /// (filing company, a related record) reaches a private activity.
 pub(crate) const MINE: &str = "(a.created_by=$2 OR a.assignee_user_id=$2 OR EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2))";
 
 /// The columns a guest row is read with.
-const GUEST_COLUMNS: &str =
+pub(crate) const GUEST_COLUMNS: &str =
     "id,guest_user_id,guest_person_id,guest_email,role,response,invited_at,invite_sent_at";
 
 pub(crate) fn time(value: Option<SystemTime>) -> Result<Option<Timestamp>> {
@@ -83,6 +83,8 @@ fn from_row(row: &Row) -> Result<Activity> {
         reminded_at: time(row.get("reminded_at"))?,
         series_id: row.get("series_id"),
         series_index: row.get("series_index"),
+        reminder_minutes: row.get("reminder_minutes"),
+        reminder_email: row.get("reminder_email"),
         version: row.get("version"),
     })
 }
@@ -112,6 +114,8 @@ fn audit_values(a: &Activity) -> Value {
         "closed_at": iso(a.closed_at),
         "series_id": a.series_id,
         "series_index": a.series_index,
+        "reminder_minutes": a.reminder_minutes,
+        "reminder_email": a.reminder_email,
         "version": a.version,
     })
 }
@@ -208,7 +212,7 @@ pub(crate) async fn guests(
         .map(guest_row)
         .collect()
 }
-fn guest_row(row: &Row) -> Result<GuestRow> {
+pub(crate) fn guest_row(row: &Row) -> Result<GuestRow> {
     Ok(GuestRow {
         id: row.get("id"),
         user_id: row.get("guest_user_id"),
@@ -452,7 +456,7 @@ async fn editable(
 /// The activity a guest change acts on: live, one the actor may see and
 /// change. Guest changes touch no field of the activity, so they name no
 /// version; `lock` queues them behind any other write to it.
-async fn editable_now(
+pub(crate) async fn editable_now(
     client: &dyn ProofClient,
     scope: &Scope,
     id: i64,
@@ -500,6 +504,8 @@ pub(crate) struct Store<'s> {
     pub notifications: &'s bilibi_notifications::NotificationBoundary,
     pub queue: &'s bilibi_queue::Queue,
     pub calendars: &'s bilibi_work_calendar::WorkCalendars,
+    pub settings: &'s bilibi_settings::Settings,
+    pub people: &'s bilibi_person::PersonService,
 }
 /// Which references a change touches, so unchanged ones are not rechecked
 /// (a record the actor can no longer view does not block other edits).
@@ -641,6 +647,15 @@ impl Store<'_> {
         draft.assignee = Some(draft.assignee.unwrap_or(scope.user()));
         if draft.kind.closing().is_none() {
             draft.status = None;
+        }
+        // What the creator did not choose starts as their own default; the
+        // tenant's follows from what stays unset.
+        if draft.kind != Kind::Note
+            && (draft.reminder_minutes.is_none() || draft.reminder_email.is_none())
+        {
+            let defaults = crate::reminder_defaults::read(self.settings, client, scope).await?;
+            draft.reminder_minutes = draft.reminder_minutes.or(defaults.minutes);
+            draft.reminder_email = draft.reminder_email.or(defaults.email);
         }
         if filing_company(scope).is_none() {
             return Err(WriteError::Invalid(vec![FieldError::new(
@@ -791,8 +806,8 @@ impl Store<'_> {
                     let row = sql
                         .query_one(
                             &format!(
-                                "INSERT INTO core_activities AS a (tenant_id,company_id,kind,subject,status,priority,direction,starts_at,ends_at,due_at,start_at,call_outcome,description,internal_notes,related_kind,related_id,shared,assignee_user_id,created_by,closed_at,location,join_url,meeting_type,series_id,series_index)
-                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,CASE WHEN $20 THEN now() END,$21,$22,$23,$24,$25)
+                                "INSERT INTO core_activities AS a (tenant_id,company_id,kind,subject,status,priority,direction,starts_at,ends_at,due_at,start_at,call_outcome,description,internal_notes,related_kind,related_id,shared,assignee_user_id,created_by,closed_at,location,join_url,meeting_type,series_id,series_index,reminder_minutes,reminder_email)
+                                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,CASE WHEN $20 THEN now() END,$21,$22,$23,$24,$25,$26,$27)
                                  RETURNING {COLUMNS}"
                             ),
                             &[
@@ -821,6 +836,8 @@ impl Store<'_> {
                                 &draft.meeting_type,
                                 &series_id,
                                 &series_index,
+                                &draft.reminder_minutes,
+                                &draft.reminder_email,
                             ],
                         )
                         .await?;
@@ -914,6 +931,8 @@ impl Store<'_> {
                                 "UPDATE core_activities a SET subject=$4,status=$5,priority=$6,direction=$7,starts_at=$8,ends_at=$9,due_at=$10,start_at=$11,call_outcome=$12,description=$13,internal_notes=$14,related_kind=$15,related_id=$16,shared=$17,assignee_user_id=$18,location=$21,join_url=$22,meeting_type=$23,
                                    closed_at=CASE WHEN NOT $19 THEN NULL WHEN a.closed_at IS NULL THEN now() ELSE a.closed_at END,
                                    reminded_at=CASE WHEN $20 OR a.assignee_user_id<>$18 THEN NULL ELSE a.reminded_at END,
+                                   reminders_sent=CASE WHEN $20 OR a.assignee_user_id<>$18 THEN '{{}}' ELSE a.reminders_sent END,
+                                   reminder_minutes=$24,reminder_email=$25,
                                    version=a.version+1,updated_at=now()
                                  WHERE a.tenant_id=$1 AND a.id=$2 AND a.version=$3 AND a.deleted_at IS NULL RETURNING {COLUMNS}"
                             ),
@@ -941,6 +960,8 @@ impl Store<'_> {
                                 &after.location,
                                 &after.join_url,
                                 &after.meeting_type,
+                                &after.reminder_minutes,
+                                &after.reminder_email,
                             ],
                         )
                         .await?
@@ -1561,7 +1582,7 @@ impl Store<'_> {
 // write to it.
 
 /// The one guest `guest` names on `activity`: a field error when it has none.
-async fn guest(
+pub(crate) async fn guest(
     client: &dyn ReadClient,
     scope: &Scope,
     activity: i64,
@@ -1582,7 +1603,7 @@ async fn guest(
     }
 }
 
-fn guest_values(guest: &GuestRow, activity: i64) -> Value {
+pub(crate) fn guest_values(guest: &GuestRow, activity: i64) -> Value {
     json!({
         "activity_id": activity,
         "user_id": guest.user_id,

@@ -3,9 +3,13 @@
 //! the pages follow the Platform's list, record and record-panel patterns
 //! (Core Person), and the related record is a `base/records` reference.
 mod agent_operations;
+mod agent_reminders;
 mod contributions;
+mod guest_person;
+mod guest_reminders;
 mod invitations;
 mod model;
+mod reminder_defaults;
 mod reminders;
 mod series;
 mod store;
@@ -24,8 +28,10 @@ pub use contributions::{MANAGE, MANAGE_ALL, VIEW, VIEW_ALL};
 pub use invitations::{GateFuture, InvitationGate, Invitee, INVITATION_GATES};
 pub use model::{
     CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
-    NoteInput, Patch, Priority, Response, Status, TaskInput, MAX_GUESTS,
+    NoteInput, Patch, Priority, Response, Status, TaskInput, MAX_GUESTS, MAX_REMINDERS,
+    MAX_REMINDER_MINUTES,
 };
+pub use reminder_defaults::{ReminderDefaults, DEFAULT_EMAIL, DEFAULT_MINUTES};
 pub use series::{
     weekday, weekday_code, Apply, Frequency, Repeat, Series, MAX_OCCURRENCES, WEEKDAYS,
 };
@@ -93,6 +99,12 @@ pub struct Activity {
     /// The repeating series it is an occurrence of, and its number there.
     pub series_id: Option<i64>,
     pub series_index: Option<i16>,
+    /// Minutes before it starts or is due that its reminders go out; `None`
+    /// follows the creator's default and then the tenant setting.
+    pub reminder_minutes: Option<Vec<i32>>,
+    /// Whether each reminder is also emailed; `None` follows the tenant
+    /// setting.
+    pub reminder_email: Option<bool>,
     pub version: i64,
 }
 impl Activity {
@@ -126,6 +138,8 @@ impl Activity {
             shared: self.shared,
             assignee: Some(self.assignee_user_id),
             guests: Vec::new(),
+            reminder_minutes: self.reminder_minutes.clone(),
+            reminder_email: self.reminder_email,
         }
     }
 }
@@ -275,6 +289,8 @@ pub struct Activities {
     notifications: Arc<bilibi_notifications::NotificationBoundary>,
     queue: Arc<bilibi_queue::Queue>,
     calendars: Arc<bilibi_work_calendar::WorkCalendars>,
+    settings: Arc<bilibi_settings::Settings>,
+    people: Arc<bilibi_person::PersonService>,
 }
 impl Activities {
     async fn fresh(
@@ -295,6 +311,8 @@ impl Activities {
             notifications: &self.notifications,
             queue: &self.queue,
             calendars: &self.calendars,
+            settings: &self.settings,
+            people: &self.people,
         }
     }
 
@@ -697,6 +715,94 @@ impl Activities {
         let scope = self.fresh(tx.sql(), scope).await?;
         self.store().send_invites(tx, &scope, id).await
     }
+    /// The checks `create_person_guest` makes, with no write: the activity,
+    /// the address guest and the person that would be created.
+    pub async fn preview_create_person_guest(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        guest_id: i64,
+        name: &str,
+    ) -> WriteResult<(Activity, GuestRow, bilibi_person::PersonInput)> {
+        self.store()
+            .prepare_person_guest(client, scope, id, guest_id, name)
+            .await
+    }
+    /// Creates a Core person named `name` with an email-address guest's
+    /// address, and makes the guest that person instead of the address, in the
+    /// caller's transaction and under the actor's right to create people.
+    /// Refused when a person with that address exists: pick them instead.
+    pub async fn create_person_guest(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        guest_id: i64,
+        name: &str,
+    ) -> WriteResult<GuestRow> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .create_person_guest(tx, &scope, id, guest_id, name)
+            .await
+    }
+    /// Whether an email-address guest matches no Core person the reader may
+    /// find, so the panel may offer to create one. `false` when the reader
+    /// may not create people or look for a match.
+    pub async fn may_create_person_for(&self, scope: &Scope, email: &str) -> Result<bool> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        let probe = bilibi_person::PersonInput {
+            name: "Guest".into(),
+            kind: bilibi_person::PersonKind::Human,
+            email: Some(email.to_owned()),
+            phone: None,
+        };
+        if bilibi_person::preview_person(&**client, &scope, &probe)
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let found = self
+            .people
+            .match_contact_in(
+                &**client,
+                &scope,
+                &bilibi_person::ContactAddress::Email(email.to_owned()),
+                1,
+            )
+            .await;
+        Ok(matches!(found, Ok(m) if m.entries.is_empty() && m.complete()))
+    }
+    /// The reader's own reminder defaults ([`ReminderDefaults`]).
+    pub async fn reminder_defaults(&self, scope: &Scope) -> Result<ReminderDefaults> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        reminder_defaults::may_read(&**client, &scope).await?;
+        reminder_defaults::read(&self.settings, &**client, &scope).await
+    }
+    /// The checks `set_reminder_defaults` makes, with no write.
+    pub async fn preview_set_reminder_defaults(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        defaults: &ReminderDefaults,
+    ) -> WriteResult<ReminderDefaults> {
+        reminder_defaults::prepare(client, scope, defaults).await
+    }
+    /// Stores the reader's reminder defaults in the caller's transaction:
+    /// the offsets and email choice their new activities start with. Unset
+    /// ones follow the tenant. Existing activities keep their own.
+    pub async fn set_reminder_defaults(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        defaults: &ReminderDefaults,
+    ) -> WriteResult<ReminderDefaults> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        reminder_defaults::write(&self.settings, tx, &scope, defaults).await
+    }
     /// The repeating series `activity` is an occurrence of, with its rule
     /// and how many occurrences are still live. The caller read `activity`
     /// under the visibility rule.
@@ -831,6 +937,7 @@ inventory::submit! { Module {
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
         ("core-activity-003-series", include_str!("../migrations/003-series.sql")),
+        ("core-activity-004-reminders", include_str!("../migrations/004-reminders.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;
@@ -845,6 +952,8 @@ inventory::submit! { Module {
             notifications: s.get("base/notifications.sink")?,
             queue: s.get("base/queue.store")?,
             calendars: s.get(bilibi_work_calendar::SERVICE)?,
+            settings: s.get("base/settings.store")?,
+            people: s.get(bilibi_person::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;
         s.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?
@@ -862,7 +971,17 @@ inventory::submit! { Module {
             notifications: s.get("base/notifications.sink")?,
             settings: s.get("base/settings.store")?,
             mailer: s.get("base/mail.mailer")?,
+            mutations: s.get("base/database.mutations")?,
+            queue: s.get("base/queue.store")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
+        }))))
+    }}, Service { id: guest_reminders::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(guest_reminders::GuestReminderJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            mailer: s.get("base/mail.mailer")?,
+            settings: s.get("base/settings.store")?,
+            directory: s.get("base/principal_directory.directory")?,
+            authentication: s.get("base/tenancy.authentication")?,
         }))))
     }}, Service { id: invitations::HANDLER, factory: |s| {
         Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(invitations::InviteJob {

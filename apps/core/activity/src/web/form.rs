@@ -1,7 +1,7 @@
 //! The Log call, New meeting, New task and New note dialog, shared by the list, the
 //! record page (Close and create new) and the record panels. Changes keep the
 //! server's draft; Enter or Save submits it to the kind's create contract.
-use super::{refusal, render, Clock, Pages, Refusal};
+use super::{refusal, reminder_choices, render, Clock, Pages, Refusal};
 use crate::{Draft, Guest, Kind, Priority, Reference, RECORD};
 use askama::Template;
 use bilibi_database::{Error, Result};
@@ -56,6 +56,7 @@ fn field_of(path: &str) -> &str {
     let key = path.split('.').next().unwrap_or(path);
     match key {
         "assignee_user_id" => "assignee",
+        "reminder_minutes" => "reminders",
         "guests" | "company" | "kind" => "notice",
         other => other,
     }
@@ -79,6 +80,8 @@ fn label_of(field: &str) -> &'static str {
         "description" => "Description",
         "internal_notes" => "Internal notes",
         "shared" => "Share with readers of the related record",
+        "reminders" => "Reminders",
+        "reminder_email" => "Email reminders",
         "repeat" | "repeat_every" | "repeat_count" | "repeat_until" => "Repeats",
         _ => "",
     }
@@ -91,6 +94,8 @@ impl Dialog {
         values.insert("status".into(), "held".into());
         values.insert("direction".into(), "outbound".into());
         values.insert("repeat".into(), "none".into());
+        values.insert("reminders".into(), reminder_choices::DEFAULT.into());
+        values.insert("reminder_email".into(), "default".into());
         values.insert("repeat_every".into(), "1".into());
         values.insert("repeat_end".into(), "count".into());
         values.insert("repeat_count".into(), "10".into());
@@ -254,6 +259,8 @@ impl Dialog {
             "repeat_count",
             "repeat_until",
             "repeat_working",
+            "reminders",
+            "reminder_email",
         ] {
             if let Some(v) = form.get(key) {
                 self.values.insert(key.into(), v.clone());
@@ -358,6 +365,16 @@ impl Dialog {
                 && (key == "description" || self.kind != Kind::Note)
             {
                 input[key] = json!(self.value(key));
+            }
+        }
+        if self.kind != Kind::Note {
+            if let Some(minutes) = reminder_choices::parse(self.value("reminders")).flatten() {
+                input["reminder_minutes"] = json!(minutes);
+            }
+            if let Some(email) =
+                reminder_choices::parse_email(self.value("reminder_email")).flatten()
+            {
+                input["reminder_email"] = json!(email);
             }
         }
         if let Some(related) = &self.related {
@@ -672,6 +689,24 @@ impl Dialog {
         }
         if self.kind != Kind::Note {
             fields.extend(self.repeat_fields(prefix));
+            let options = reminder_choices::options(None, "Default");
+            fields.push(
+                self.field(prefix, "reminders", "Reminders")
+                    .kind(InputKind::Select)
+                    .options(choices(
+                        &options
+                            .iter()
+                            .map(|(l, v)| (l.as_str(), v.as_str()))
+                            .collect::<Vec<_>>(),
+                    ))
+                    .hint("Default is your own setting, then the organisation's. Change yours with Reminder defaults on the Activities list."),
+            );
+            fields.push(
+                self.field(prefix, "reminder_email", "Email reminders")
+                    .kind(InputKind::Select)
+                    .options(choices(reminder_choices::EMAIL))
+                    .hint("Emails the assignee, and guests without an account who were sent the invitation."),
+            );
         }
         let mut assignees = vec![("Me".to_owned(), "me".to_owned())];
         if let Some((user, name)) = &self.assignee {

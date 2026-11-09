@@ -4,7 +4,7 @@
 use crate::{
     Activities, Activity, Apply, CallStatus, Common, Direction, Draft, Filter, Frequency, Guest,
     GuestRow, Kind, Mine, Patch, Priority, Reference, Repeat, Response, State, Status, WriteError,
-    MANAGE, MAX_OCCURRENCES, VIEW,
+    MANAGE, MAX_OCCURRENCES, MAX_REMINDERS, MAX_REMINDER_MINUTES, VIEW,
 };
 use bilibi_agent_api::{
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
@@ -30,7 +30,7 @@ pub(crate) fn bind(owner: Arc<Activities>) -> bilibi_module_registry::Result<()>
         )
     })
 }
-fn owner() -> bilibi_agent_api::Result<&'static Activities> {
+pub(crate) fn owner() -> bilibi_agent_api::Result<&'static Activities> {
     OWNER.get().map(Arc::as_ref).ok_or(Error::Internal.into())
 }
 
@@ -112,6 +112,32 @@ impl<'a> Reader<'a> {
     fn flag(&self, key: &str) -> Option<bool> {
         self.at()[key].as_bool()
     }
+    /// `None` when omitted; else the offsets, each a whole number of minutes.
+    fn minutes(&mut self, key: &str) -> Option<Option<Vec<i32>>> {
+        let value = self.at().get(key)?;
+        let parsed = value.as_array().and_then(|items| {
+            items
+                .iter()
+                .map(|item| item.as_i64().and_then(|m| i32::try_from(m).ok()))
+                .collect::<Option<Vec<i32>>>()
+        });
+        if parsed.is_none() {
+            self.refuse(key, "must be a list of whole numbers of minutes");
+        }
+        parsed.map(Some)
+    }
+    /// `None` when omitted; `Some(None)` for null (the default).
+    fn optional_flag(&mut self, key: &str) -> Option<Option<bool>> {
+        let value = self.at().get(key)?;
+        if value.is_null() {
+            return Some(None);
+        }
+        if value.as_bool().is_none() {
+            self.refuse(key, "must be true, false or null");
+            return None;
+        }
+        Some(value.as_bool())
+    }
     fn guests(&mut self) -> Vec<Guest> {
         let Some(items) = self.at().get("guests").and_then(Value::as_array) else {
             return Vec::new();
@@ -141,6 +167,8 @@ impl<'a> Reader<'a> {
             guests: self.guests(),
             description: self.text("description"),
             internal_notes: self.text("internal_notes"),
+            reminder_minutes: self.minutes("reminder_minutes").flatten(),
+            reminder_email: self.optional_flag("reminder_email").flatten(),
         }
     }
     fn done<T>(self, value: T) -> bilibi_agent_api::Result<T> {
@@ -331,7 +359,19 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
         related: reader.reference("related"),
         shared: reader.flag("shared"),
         assignee: reader.at()["assignee_user_id"].as_i64(),
+        reminder_minutes: reader.minutes("reminder_minutes"),
+        reminder_email: reader.optional_flag("reminder_email"),
     };
+    let mut patch = patch;
+    if reader.flag("reminder_minutes_default") == Some(true) {
+        if patch.reminder_minutes.is_some() {
+            reader.refuse(
+                "reminder_minutes_default",
+                "cannot come with reminder_minutes",
+            );
+        }
+        patch.reminder_minutes = Some(None);
+    }
     for key in ["starts_at", "ends_at"] {
         if reader.present(key) && reader.text(key).is_some_and(|v| v.trim().is_empty()) {
             reader.refuse(key, "can't be blank");
@@ -340,7 +380,7 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
     reader.done(patch)
 }
 
-fn id(input: &Value) -> bilibi_agent_api::Result<i64> {
+pub(crate) fn id(input: &Value) -> bilibi_agent_api::Result<i64> {
     Ok(input["id"]
         .as_i64()
         .filter(|id| *id > 0)
@@ -414,6 +454,8 @@ pub(crate) fn record(activity: &Activity, related: Option<&Resolved>) -> Value {
         "related": activity.related.as_ref().map(|r| reference(r, related)),
         "shared": activity.shared,
         "reminded_at": iso(activity.reminded_at),
+        "reminder_minutes": activity.reminder_minutes,
+        "reminder_email": activity.reminder_email,
         "assignee_user_id": activity.assignee_user_id,
         "created_by": activity.created_by,
         "company_id": activity.company_id,
@@ -478,7 +520,7 @@ fn guest_input(guest: &Guest) -> Value {
         Guest::Address { email, related } => json!({"email": email, "related": related}),
     }
 }
-fn guest_record(guest: &GuestRow) -> Value {
+pub(crate) fn guest_record(guest: &GuestRow) -> Value {
     json!({
         "id": guest.id,
         "user_id": guest.user_id,
@@ -872,7 +914,7 @@ impl WriteHandler for DeleteSeries {
     }
 }
 
-fn guest_id(input: &Value) -> bilibi_agent_api::Result<i64> {
+pub(crate) fn guest_id(input: &Value) -> bilibi_agent_api::Result<i64> {
     Ok(input["guest_id"]
         .as_i64()
         .filter(|id| *id > 0)
@@ -1105,7 +1147,16 @@ fn common_properties() -> serde_json::Map<String, Value> {
         "internal_notes".into(),
         json!({"type":"string","maxLength":10000,"description":"Never sent to guests."}),
     );
+    // Notes have no reminders; the rule refuses them there.
+    properties.insert("reminder_minutes".into(), reminder_minutes_schema());
+    properties.insert("reminder_email".into(), reminder_email_schema());
     properties
+}
+fn reminder_minutes_schema() -> Value {
+    json!({"type":"array","items":{"type":"integer","minimum":0,"maximum":MAX_REMINDER_MINUTES},"description":format!("Minutes before it starts or is due to remind at, up to {MAX_REMINDERS} (0 reminds at the time). An empty list asks for no reminder; omitted follows your default, then the organisation's.")})
+}
+fn reminder_email_schema() -> Value {
+    json!({"type":"boolean","nullable":true,"description":"Also email each reminder: to the assignee, and for a call or meeting to guests who were sent the invitation and have no account. Omitted follows your default, then the organisation's; in a change, null goes back to following them."})
 }
 fn repeat_schema() -> Value {
     json!({"type":"object","required":["frequency","timezone"],"description":"Repeat it: one activity per occurrence, each with its own status, answers and reminder. Give until or count, not both.","properties":{
@@ -1223,7 +1274,10 @@ fn update_schema() -> Value {
             "internal_notes":{"type":"string","maxLength":10000},
             "related":{"type":"object","properties":{"kind":{"type":"string","maxLength":100},"id":{"type":"string","maxLength":64}}},
             "shared":shared_schema(),
-            "assignee_user_id":{"type":"integer","minimum":1}
+            "assignee_user_id":{"type":"integer","minimum":1},
+            "reminder_minutes":reminder_minutes_schema(),
+            "reminder_minutes_default":{"type":"boolean","description":"true: forget this activity's own reminders and follow your default, then the organisation's. Not with reminder_minutes."},
+            "reminder_email":reminder_email_schema()
         }}
     }})
 }
@@ -1271,7 +1325,7 @@ fn list_schema() -> Value {
     }})
 }
 fn activity_output() -> Value {
-    json!({"type":"object","description":"An activity: id, kind (call, meeting, task, note), title, status, priority, direction, starts_at, ends_at, due_at, start_at, outcome, location, join_url, meeting_type, description, internal_notes, related {kind, id, label, path}, shared, reminded_at, assignee_user_id, created_by, company_id, created_at, updated_at, closed_at, series_id and series_index (its number in a repeating series) and version. Times are ISO UTC strings; get adds guests, each with id, user_id, person_id, email, role, response, invited_at and invite_sent_at, and series (the rule in words and its parts, and how many occurrences are live) for an occurrence."})
+    json!({"type":"object","description":"An activity: id, kind (call, meeting, task, note), title, status, priority, direction, starts_at, ends_at, due_at, start_at, outcome, location, join_url, meeting_type, description, internal_notes, related {kind, id, label, path}, shared, reminded_at, reminder_minutes (the offsets it reminds at, null for the default) and reminder_email (null for the default), assignee_user_id, created_by, company_id, created_at, updated_at, closed_at, series_id and series_index (its number in a repeating series) and version. Times are ISO UTC strings; get adds guests, each with id, user_id, person_id, email, role, response, invited_at and invite_sent_at, and series (the rule in words and its parts, and how many occurrences are live) for an occurrence."})
 }
 fn list_output() -> Value {
     json!({"type":"object","description":"activities (each as core.activity.get without guests), total, page and page_size."})
