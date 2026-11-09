@@ -204,6 +204,13 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 <iframe id="{{ id }}" title="{{ title }}" srcdoc="{{ document }}" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" loading="lazy" class="block h-96 w-full rounded-xl border border-line bg-white"></iframe>
 {% endmacro %}
 
+{#- A file the owner serves from its own route, shown in place
+    (bilibi_ui::FilePreview): an image, PDF or plain text in a same-origin
+    frame. The route decides who may read it and what it may show. -#}
+{% macro file_preview(id, src, title) %}
+<iframe id="{{ id }}" src="{{ src }}" title="{{ title }}" referrerpolicy="no-referrer" class="block h-[65vh] min-h-80 w-full rounded-xl border border-line bg-surface"></iframe>
+{% endmacro %}
+
 {#- A same-origin interactive document hosted inside a live page. The shared
     AppFrame hook translates its postMessage protocol into owner live events;
     the owner still decides every read and write. -#}

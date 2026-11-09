@@ -3,3 +3,7 @@
 <p class="mb-3 text-xs text-ink-muted">Sanitised mail HTML in a sandboxed frame: no script runs, nothing is fetched from elsewhere, and only data images show. A clicked link opens a new tab. Inline styles are kept in storage but not applied here, because the frame takes the page's policy.</p>
 {{ mail_frame }}
 {% endcall %}
+{% call ui::card(id="specimen-file-preview-card", title="File preview", inner_class="p-4") %}
+<p class="mb-3 text-xs text-ink-muted">A file the owner serves from its own route, shown in place: an image, PDF or plain text. The route decides who may read it; the frame only shows the address.</p>
+{{ file_preview }}
+{% endcall %}

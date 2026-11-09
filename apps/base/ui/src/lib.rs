@@ -43,7 +43,7 @@ pub use markdown::Markdown;
 mod live_transport;
 mod mail_frame;
 pub use live_transport::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
-pub use mail_frame::MailFrame;
+pub use mail_frame::{FilePreview, MailFrame};
 mod page_search;
 pub mod params;
 mod record_fields;

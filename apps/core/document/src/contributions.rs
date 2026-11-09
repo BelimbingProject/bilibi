@@ -343,6 +343,10 @@ inventory::submit! { Contribution::new(DOWNLOADS, "core/document.file", provenan
     path: "/documents/{id}/revisions/{revision}/file", service: crate::web::FILES, operation: "file",
     access: Access::Capability(DOWNLOAD),
 }) }
+inventory::submit! { Contribution::new(DOWNLOADS, "core/document.preview", provenance!(), &Download {
+    path: "/documents/{id}/revisions/{revision}/preview", service: crate::web::FILES, operation: "preview",
+    access: Access::Capability(DOWNLOAD),
+}) }
 inventory::submit! { Contribution::new(DOWNLOADS, "core/document.export", provenance!(), &Download {
     path: "/documents/export.csv", service: crate::web::FILES, operation: "export",
     access: Access::Capability(VIEW),

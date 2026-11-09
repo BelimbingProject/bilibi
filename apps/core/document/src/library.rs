@@ -18,7 +18,7 @@ use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_notifications::Notice;
 use bilibi_principal_directory::{PrincipalKind, PrincipalRef, Query};
-use bilibi_tenancy::{ReadClient, Scope};
+use bilibi_tenancy::{ProofClient, ReadClient, Scope};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +29,34 @@ const DUPLICATE_ROWS: i64 = 50;
 
 fn mark_values(document: i64, user: i64, marks: Marks) -> Value {
     json!({"document_id": document, "user_id": user, "favourite": marks.favourite, "following": marks.following})
+}
+
+/// Which of `ids` the reader holds `permission` (`"manage"` or `"download"`)
+/// on: the module capability and an explicit grant that has not ended, in
+/// one read, for the pages that draw a control per row.
+pub(crate) async fn granted(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    ids: &[i64],
+    permission: &str,
+) -> Result<HashSet<i64>> {
+    let (capability, column) = match permission {
+        "manage" => (MANAGE, "can_manage"),
+        "download" => (crate::DOWNLOAD, "can_download"),
+        _ => return Err(Error::Internal),
+    };
+    if !bilibi_authz::holds_proof(client, scope, capability).await? {
+        return Ok(HashSet::new());
+    }
+    Ok(client
+        .query(
+            &format!("SELECT document_id FROM core_document_access WHERE tenant_id=$1 AND user_id=$2 AND document_id = ANY($3) AND {column} AND (expires_at IS NULL OR expires_at > now())"),
+            &[&scope.tenant(), &scope.user(), &ids],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect())
 }
 
 /// The reader's own marks on `ids` they may see.
@@ -107,6 +135,41 @@ struct MergeCheck {
 }
 
 impl Store<'_> {
+    /// Refuses with `Retained` or `LegalHold` while any revision's file is
+    /// protected. On a commit the Artifact rows are locked, so a hold placed
+    /// meanwhile waits for this transaction.
+    pub(crate) async fn ensure_unprotected(
+        &self,
+        on: On<'_>,
+        scope: &Scope,
+        document: &Document,
+    ) -> WriteResult<()> {
+        let client = on.client();
+        let artifact_ids: Vec<String> = client
+            .query(
+                "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY artifact_id",
+                &[&scope.tenant(), &document.id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let company = bilibi_party_ids::OrganisationId::new(document.company_id)
+            .map_err(|_| Error::Internal)?;
+        match self
+            .artifacts
+            .for_owner(scope, company, &crate::files::FILES)
+            .ensure_unprotected(client, &artifact_ids, on.locks())
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(bilibi_artifacts::Error::Retained) => Err(WriteError::Retained),
+            Err(bilibi_artifacts::Error::LegalHold) => Err(WriteError::LegalHold),
+            Err(bilibi_artifacts::Error::Database(error)) => Err(error.into()),
+            Err(_) => Err(Error::Internal.into()),
+        }
+    }
+
     /// Active accounts among `principals`.
     async fn active_accounts(
         &self,

@@ -663,27 +663,17 @@ impl Documents {
         let ids: Vec<i64> = documents.iter().map(|d| d.id).collect();
         store::latest_revisions(&**client, &scope, &ids).await
     }
-    /// Which of `ids` the reader may change: the manage capability and an
-    /// explicit grant that has not ended, in one read, for the pages.
-    pub(crate) async fn changeable(
+    /// Which of `ids` the reader holds `permission` (`"manage"` or
+    /// `"download"`) on, in one read, for the pages that draw a control per row.
+    pub(crate) async fn granted(
         &self,
         scope: &Scope,
         ids: &[i64],
+        permission: &str,
     ) -> Result<std::collections::HashSet<i64>> {
         let client = self.db.get().await?;
         let scope = self.fresh(&**client, scope).await?;
-        if !bilibi_authz::holds_proof(&**client, &scope, MANAGE).await? {
-            return Ok(std::collections::HashSet::new());
-        }
-        Ok(client
-            .query(
-                "SELECT document_id FROM core_document_access WHERE tenant_id=$1 AND user_id=$2 AND document_id = ANY($3) AND can_manage AND (expires_at IS NULL OR expires_at > now())",
-                &[&scope.tenant(), &scope.user(), &ids],
-            )
-            .await?
-            .iter()
-            .map(|row| row.get(0))
-            .collect())
+        library::granted(&**client, &scope, ids, permission).await
     }
     /// The records the document relates to, oldest link first.
     pub async fn links(&self, scope: &Scope, id: i64) -> Result<Vec<Link>> {

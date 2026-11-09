@@ -1481,41 +1481,6 @@ impl Store<'_> {
         Ok(document)
     }
 
-    /// Refuses with `Retained` or `LegalHold` while any revision's file is
-    /// protected. On a commit the Artifact rows are locked, so a hold placed
-    /// meanwhile waits for this transaction.
-    async fn ensure_unprotected(
-        &self,
-        on: On<'_>,
-        scope: &Scope,
-        document: &Document,
-    ) -> WriteResult<()> {
-        let client = on.client();
-        let artifact_ids: Vec<String> = client
-            .query(
-                "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY artifact_id",
-                &[&scope.tenant(), &document.id],
-            )
-            .await?
-            .iter()
-            .map(|row| row.get(0))
-            .collect();
-        let company = bilibi_party_ids::OrganisationId::new(document.company_id)
-            .map_err(|_| Error::Internal)?;
-        match self
-            .artifacts
-            .for_owner(scope, company, &files::FILES)
-            .ensure_unprotected(client, &artifact_ids, on.locks())
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(bilibi_artifacts::Error::Retained) => Err(WriteError::Retained),
-            Err(bilibi_artifacts::Error::LegalHold) => Err(WriteError::LegalHold),
-            Err(bilibi_artifacts::Error::Database(error)) => Err(error.into()),
-            Err(_) => Err(Error::Internal.into()),
-        }
-    }
-
     pub(crate) async fn delete(
         &self,
         tx: &mut MutationTransaction<'_>,
