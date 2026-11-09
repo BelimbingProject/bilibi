@@ -283,7 +283,7 @@ impl UserService {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("UPDATE users SET status=$3 WHERE tenant_id=$1 AND id=$2 RETURNING {CUSTOMER_COLUMNS}"),
+                            &format!("UPDATE users u SET status=$3 FROM user_identities i WHERE u.tenant_id=$1 AND u.id=$2 AND i.id=u.identity_id RETURNING {CUSTOMER_COLUMNS}"),
                             &[&tenant, &user, &status],
                         )
                         .await?;
