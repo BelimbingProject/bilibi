@@ -274,6 +274,7 @@
 
   /* Selection — current place or choice. */
   --color-selection-line: var(--color-lime-300);
+  --color-selection-ink: var(--color-lime-950);
 
   /* Status — honest feedback only. `info` is a statement that informs without
    * confirming a write; it is blue, as in Belimbing, so it never reads as a
@@ -368,6 +369,7 @@
     --color-brand-strong: var(--color-lime-500);
     --color-brand-ink: var(--color-lime-100);
     --color-selection-line: var(--color-lime-800);
+    --color-selection-ink: var(--color-lime-950);
     --color-success: var(--color-emerald-500);
     --color-success-surface: var(--color-emerald-950);
     --color-success-line: var(--color-emerald-800);
@@ -434,6 +436,7 @@
   --color-brand-strong: var(--color-lime-500);
   --color-brand-ink: var(--color-lime-100);
   --color-selection-line: var(--color-lime-800);
+  --color-selection-ink: var(--color-lime-950);
   --color-success: var(--color-emerald-500);
   --color-success-surface: var(--color-emerald-950);
   --color-success-line: var(--color-emerald-800);
@@ -479,7 +482,7 @@
 
 ::selection {
   background: var(--color-brand);
-  color: var(--color-brand-ink);
+  color: var(--color-selection-ink);
 }
 
 body {
