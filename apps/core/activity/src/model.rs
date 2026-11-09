@@ -164,6 +164,13 @@ pub struct Common {
     pub guests: Vec<Guest>,
     pub description: Option<String>,
     pub internal_notes: Option<String>,
+    /// Minutes before it starts or is due to remind at (up to five); `None`
+    /// follows the creator's default, then the tenant's, an empty list asks
+    /// for no reminder.
+    pub reminder_minutes: Option<Vec<i32>>,
+    /// Whether each reminder is also emailed; `None` follows the creator's
+    /// default, then the tenant's.
+    pub reminder_email: Option<bool>,
 }
 
 /// `create_task`.
@@ -229,6 +236,9 @@ pub struct Patch {
     pub related: Option<Option<Reference>>,
     pub shared: Option<bool>,
     pub assignee: Option<i64>,
+    /// `Some(None)` goes back to the default.
+    pub reminder_minutes: Option<Option<Vec<i32>>>,
+    pub reminder_email: Option<Option<bool>>,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
@@ -249,6 +259,8 @@ impl Patch {
             && self.related.is_none()
             && self.shared.is_none()
             && self.assignee.is_none()
+            && self.reminder_minutes.is_none()
+            && self.reminder_email.is_none()
     }
 }
 
@@ -269,6 +281,17 @@ impl FieldError {
 
 /// At most this many guests per activity.
 pub const MAX_GUESTS: usize = 50;
+/// At most this many reminders per activity, and how far ahead the earliest
+/// may be (one week).
+pub const MAX_REMINDERS: usize = 5;
+pub const MAX_REMINDER_MINUTES: i32 = 10_080;
+
+/// Reminder offsets as they are kept: the furthest ahead first, each once.
+pub(crate) fn offsets(mut minutes: Vec<i32>) -> Vec<i32> {
+    minutes.sort_unstable_by(|a, b| b.cmp(a));
+    minutes.dedup();
+    minutes
+}
 
 /// An activity's values before it is saved: a reviewed create, the unsaved
 /// copy Close and create new returns, or an activity's values before and
@@ -295,6 +318,9 @@ pub struct Draft {
     /// The creator when `None`.
     pub assignee: Option<i64>,
     pub guests: Vec<Guest>,
+    /// See [`Common::reminder_minutes`].
+    pub reminder_minutes: Option<Vec<i32>>,
+    pub reminder_email: Option<bool>,
 }
 impl Draft {
     /// An empty draft of `kind` in its opening status (medium priority for
@@ -320,6 +346,8 @@ impl Draft {
             shared: false,
             assignee: None,
             guests: Vec::new(),
+            reminder_minutes: None,
+            reminder_email: None,
         }
     }
     fn common(kind: Kind, common: &Common) -> Self {
@@ -331,6 +359,8 @@ impl Draft {
             shared: common.shared,
             assignee: common.assignee,
             guests: common.guests.clone(),
+            reminder_minutes: common.reminder_minutes.clone().map(offsets),
+            reminder_email: common.reminder_email,
             ..Self::new(kind)
         }
     }
@@ -497,6 +527,33 @@ pub(crate) fn check(values: &Draft) -> Vec<FieldError> {
     if values.assignee.is_none_or(|id| id <= 0) {
         errors.push(FieldError::new("assignee", "can't be blank"));
     }
+    if let Some(minutes) = &values.reminder_minutes {
+        if kind == Kind::Note {
+            errors.push(FieldError::new(
+                "reminder_minutes",
+                "is not for notes, which nobody is reminded of",
+            ));
+        } else if minutes.len() > MAX_REMINDERS {
+            errors.push(FieldError::new(
+                "reminder_minutes",
+                format!("must name at most {MAX_REMINDERS} reminders"),
+            ));
+        } else if minutes
+            .iter()
+            .any(|m| !(0..=MAX_REMINDER_MINUTES).contains(m))
+        {
+            errors.push(FieldError::new(
+                "reminder_minutes",
+                format!("must be between 0 and {MAX_REMINDER_MINUTES} minutes (one week) before"),
+            ));
+        }
+    }
+    if values.reminder_email.is_some() && kind == Kind::Note {
+        errors.push(FieldError::new(
+            "reminder_email",
+            "is not for notes, which nobody is reminded of",
+        ));
+    }
     if values.guests.len() > MAX_GUESTS {
         errors.push(FieldError::new(
             "guests",
@@ -618,6 +675,12 @@ pub(crate) fn patched(before: &Draft, patch: &Patch) -> Draft {
     }
     if let Some(assignee) = patch.assignee {
         after.assignee = Some(assignee);
+    }
+    if let Some(minutes) = &patch.reminder_minutes {
+        after.reminder_minutes = minutes.clone().map(offsets);
+    }
+    if let Some(email) = patch.reminder_email {
+        after.reminder_email = email;
     }
     after
 }

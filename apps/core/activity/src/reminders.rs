@@ -1,13 +1,16 @@
 //! Reminders: a per-tenant scheduled sweep (ADR 17) marks each open task,
 //! call or meeting whose time has come as reminded, rings its assignee's
 //! bell (and a call's or meeting's account guests' who have not declined)
-//! and, when the tenant asks, emails the assignee. The bell's To do lists the
-//! reader's reminded open activities until they close them; a row opens the
-//! related record. README, Reminders.
+//! and, when email is on for the activity (its own choice, else its creator's
+//! default, else the tenant's), emails the assignee and queues the guests'
+//! emails (`guest_reminders.rs`). An activity reminds at each of its offsets
+//! (its own, its creator's default, else the tenant's lead time). The bell's
+//! To do lists the reader's reminded open activities until they close them;
+//! a row opens the related record. README, Reminders.
 use crate::contributions::{REMINDER_EMAIL, REMINDER_MINUTES};
 use crate::{Kind, Reference, RECORD, VIEW};
 use bilibi_authz::holds_proof;
-use bilibi_database::{Change, Db, Error, Result};
+use bilibi_database::{Change, Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_notifications::{NotificationBoundary, TodoFuture, TodoItem, TodoList, TodoSource};
 use bilibi_queue::{
@@ -64,6 +67,14 @@ struct Reminded {
     kind: Kind,
     title: String,
     due: Option<jiff::Timestamp>,
+    /// The filing company, and who created it: where a guest reminder runs
+    /// when the assignee cannot.
+    company: i64,
+    creator: i64,
+    /// Whether this reminder is also emailed.
+    email: bool,
+    /// The smallest offset that came due: the reminder's own number.
+    minutes: i32,
 }
 
 pub(crate) struct Sweep {
@@ -73,6 +84,8 @@ pub(crate) struct Sweep {
     pub notifications: Arc<NotificationBoundary>,
     pub settings: Arc<Settings>,
     pub mailer: Arc<bilibi_mail::Mailer>,
+    pub mutations: Arc<MutationBoundary>,
+    pub queue: Arc<bilibi_queue::Queue>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
     pub origin: String,
 }
@@ -114,7 +127,7 @@ impl Sweep {
         };
         let mut reminded = Vec::new();
         for _ in 0..BATCHES {
-            let batch = self.batch(execution, minutes).await?;
+            let batch = self.batch(execution, minutes, email).await?;
             let full = batch.len() as i64 == BATCH;
             reminded.extend(batch);
             if !full {
@@ -124,35 +137,46 @@ impl Sweep {
         // Mail goes after the reminders commit, never inside the
         // transaction. The bell already holds each one; a refused message is
         // logged and not sent again.
-        if email {
-            for reminder in &reminded {
-                self.mail(execution.tenant(), reminder).await;
+        for reminder in reminded.iter().filter(|r| r.email) {
+            self.mail(execution.tenant(), reminder).await;
+            if reminder.kind.timed() {
+                self.queue_guests(execution.tenant(), reminder).await;
             }
         }
         Ok(())
     }
 
-    /// One transaction: marks up to `BATCH` due activities reminded and
-    /// wakes their assignees' bells after commit.
-    async fn batch(&self, execution: &Execution, minutes: i64) -> Result<Vec<Reminded>> {
+    /// One transaction: reminds up to `BATCH` activities that have an offset
+    /// due, and wakes their assignees' bells after commit. An activity with
+    /// several offsets due at once (the sweep was down) is reminded once.
+    async fn batch(
+        &self,
+        execution: &Execution,
+        minutes: i64,
+        email: bool,
+    ) -> Result<Vec<Reminded>> {
         let tenant = execution.tenant();
         let mut client = self.db.get().await?;
         let mut tx = execution
             .begin(&mut client, "core.activity.reminders")
             .await?;
-        let lead = jiff::SignedDuration::from_mins(minutes);
-        let horizon = SystemTime::from(jiff::Timestamp::now() + lead);
+        // The tenant's lead time is the one reminder of an activity with no
+        // offsets of its own; `reminders_sent` marks it -1, so changing the
+        // setting later does not remind again.
+        let lead = i32::try_from(minutes).unwrap_or(15);
         // Lock what is due first: a write with no change is refused, so a
         // run with nothing due writes nothing.
         let due: Vec<i64> = tx
             .sql()
             .query(
                 "SELECT b.id FROM core_activities b
-                 WHERE b.tenant_id=$1 AND b.deleted_at IS NULL AND b.closed_at IS NULL AND b.reminded_at IS NULL AND b.kind <> 'note'
-                   AND COALESCE(b.starts_at, b.due_at) <= $2
+                 WHERE b.tenant_id=$1 AND b.deleted_at IS NULL AND b.closed_at IS NULL AND b.kind <> 'note'
+                   AND EXISTS (SELECT 1 FROM unnest(COALESCE(b.reminder_minutes, ARRAY[$3::int])) AS o(m)
+                               WHERE (CASE WHEN b.reminder_minutes IS NULL THEN -1 ELSE o.m END) <> ALL(b.reminders_sent)
+                                 AND COALESCE(b.starts_at, b.due_at) - o.m * interval '1 minute' <= now())
                  ORDER BY COALESCE(b.starts_at, b.due_at), b.id
-                 LIMIT $3 FOR UPDATE SKIP LOCKED",
-                &[&tenant, &horizon, &BATCH],
+                 LIMIT $2 FOR UPDATE SKIP LOCKED",
+                &[&tenant, &BATCH, &lead],
             )
             .await?
             .iter()
@@ -167,10 +191,16 @@ impl Sweep {
                 Box::pin(async move {
                     let rows = sql
                         .query(
-                            "UPDATE core_activities a SET reminded_at=now()
-                             WHERE a.tenant_id=$1 AND a.id=ANY($2) AND a.reminded_at IS NULL
-                             RETURNING a.id, a.assignee_user_id, a.kind, a.subject, COALESCE(a.starts_at, a.due_at), a.reminded_at",
-                            &[&tenant, &due],
+                            "UPDATE core_activities a SET reminded_at=now(), reminders_sent=a.reminders_sent || f.keys
+                             FROM (SELECT b.id, array_agg(CASE WHEN b.reminder_minutes IS NULL THEN -1 ELSE o.m END) AS keys, min(o.m) AS minutes
+                                   FROM core_activities b, unnest(COALESCE(b.reminder_minutes, ARRAY[$3::int])) AS o(m)
+                                   WHERE b.tenant_id=$1 AND b.id=ANY($2)
+                                     AND (CASE WHEN b.reminder_minutes IS NULL THEN -1 ELSE o.m END) <> ALL(b.reminders_sent)
+                                     AND COALESCE(b.starts_at, b.due_at) - o.m * interval '1 minute' <= now()
+                                   GROUP BY b.id) f
+                             WHERE a.tenant_id=$1 AND a.id=f.id
+                             RETURNING a.id, a.assignee_user_id, a.kind, a.subject, COALESCE(a.starts_at, a.due_at), a.reminded_at, a.company_id, a.created_by, COALESCE(a.reminder_email, $4), f.minutes",
+                            &[&tenant, &due, &lead, &email],
                         )
                         .await?;
                     let mut reminded = Vec::with_capacity(rows.len());
@@ -182,11 +212,12 @@ impl Sweep {
                             .and_then(|t| jiff::Timestamp::try_from(t).ok());
                         let at = jiff::Timestamp::try_from(row.get::<_, SystemTime>(5))
                             .map_err(|_| Error::Internal)?;
+                        let minutes: i32 = row.get(9);
                         changes.push(Change {
                             kind: RECORD.into(),
                             id: row.get(0),
                             old: json!({"reminded_at": null}),
-                            new: json!({"reminded_at": at.to_string()}),
+                            new: json!({"reminded_at": at.to_string(), "reminded_minutes": minutes}),
                         });
                         reminded.push(Reminded {
                             id: row.get(0),
@@ -194,6 +225,10 @@ impl Sweep {
                             kind,
                             title: row.get(3),
                             due,
+                            company: row.get(6),
+                            creator: row.get(7),
+                            email: row.get(8),
+                            minutes,
                         });
                     }
                     Ok((reminded, changes))
@@ -221,6 +256,62 @@ impl Sweep {
         self.notifications.todos_changed_for(&mut tx, &people)?;
         tx.commit().await?;
         Ok(reminded)
+    }
+
+    /// Queues the email to the guests without an account (a call or meeting
+    /// with someone to remind) as the assignee, else the creator: the job
+    /// asks every invitation gate as that person, as an invitation does. A
+    /// failure is logged and not retried, like the assignee's email.
+    async fn queue_guests(&self, tenant: i64, reminder: &Reminded) {
+        if let Err(error) = self.try_queue_guests(tenant, reminder).await {
+            eprintln!(
+                "error: activity {} guest reminders could not be queued: {error}",
+                reminder.id
+            );
+        }
+    }
+    async fn try_queue_guests(&self, tenant: i64, reminder: &Reminded) -> Result<()> {
+        let Some(due) = reminder.due else {
+            return Ok(());
+        };
+        let mut client = self.db.get().await?;
+        let anyone = client
+            .query_opt(
+                "SELECT 1 FROM core_activity_guests WHERE tenant_id=$1 AND activity_id=$2 AND guest_user_id IS NULL AND response<>'declined' AND invite_sent_at IS NOT NULL LIMIT 1",
+                &[&tenant, &reminder.id],
+            )
+            .await?
+            .is_some();
+        if !anyone {
+            return Ok(());
+        }
+        for user in [reminder.assignee, reminder.creator] {
+            let Ok(scope) = self
+                .authentication
+                .authenticate_job(&**client, tenant, user, Some(reminder.company))
+                .await
+            else {
+                continue;
+            };
+            let mut tx = self
+                .mutations
+                .begin(
+                    &mut client,
+                    scope.mutation_context("core.activity.guest_reminders"),
+                )
+                .await?;
+            self.queue
+                .enqueue_for(
+                    &mut tx,
+                    &scope,
+                    crate::guest_reminders::WORKER,
+                    json!({"activity_id": reminder.id, "at": due.to_string(), "minutes": reminder.minutes}),
+                )
+                .await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+        Ok(())
     }
 
     /// Emails one reminder to its assignee: the kind, title and when, and a

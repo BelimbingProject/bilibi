@@ -6,8 +6,11 @@
 //! edited in place on its own (an exception); Change series reaches it and
 //! the later ones, or all of them, and Delete asks which.
 use super::{
-    event, field_of, form::Dialog, icon, label, refusal, render, sentences, status_badge,
-    BrowserZone, Clock, Pages, Refusal, Region, FIELDS,
+    event, field_of,
+    form::Dialog,
+    guest_person::{self, PersonDialog},
+    icon, label, refusal, reminder_choices, render, sentences, status_badge, BrowserZone, Clock,
+    Pages, Refusal, Region, FIELDS,
 };
 use crate::{Activity, Direction, GuestRow, Kind, Priority, Reference, Response, RECORD};
 use askama::Template;
@@ -142,6 +145,8 @@ pub(crate) struct Detail {
     guest_email: String,
     /// The Change series dialog, when open.
     series_form: Option<SeriesForm>,
+    /// The Create person dialog for an address guest, when open.
+    person_dialog: Option<PersonDialog>,
     /// The Delete dialog of an occurrence (which ones to delete), when
     /// open, with what the last attempt refused.
     delete_dialog: Option<Vec<String>>,
@@ -166,6 +171,7 @@ impl Detail {
             guest_hits: Vec::new(),
             guest_email: String::new(),
             series_form: None,
+            person_dialog: None,
             delete_dialog: None,
             flash: None,
         })
@@ -368,6 +374,15 @@ impl Detail {
                 }
             },
             "shared" => patch["shared"] = json!(submitted == "shared"),
+            "reminders" => match reminder_choices::parse(submitted) {
+                Some(Some(minutes)) => patch["reminder_minutes"] = json!(minutes),
+                Some(None) => patch["reminder_minutes_default"] = json!(true),
+                None => return Err(Error::Invalid),
+            },
+            "reminder_email" => match reminder_choices::parse_email(submitted) {
+                Some(email) => patch["reminder_email"] = json!(email),
+                None => return Err(Error::Invalid),
+            },
             "assignee" => {
                 let user = if submitted == "me" {
                     scope.user()
@@ -542,6 +557,58 @@ impl Detail {
                     self.guest_email = email.clone();
                     self.add_guest(scope, credential, name, json!({"email": email.trim()}))
                         .await?;
+                }
+            }
+            "request_person" => {
+                let guest = value["guest"]
+                    .as_str()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let rows = self.pages.activities.guests(scope, self.id).await?;
+                let email = rows
+                    .iter()
+                    .find(|g| g.id == guest && g.user_id.is_none() && g.person.is_none())
+                    .and_then(|g| g.email.clone())
+                    .ok_or(Error::Invalid)?;
+                self.person_dialog = Some(PersonDialog {
+                    guest,
+                    email,
+                    name: String::new(),
+                    errors: Vec::new(),
+                });
+            }
+            "cancel_person" => self.person_dialog = None,
+            "create_person" => {
+                let form = params::form_values_checked(value, "person", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let Some(dialog) = &mut self.person_dialog else {
+                    return Ok(None);
+                };
+                dialog.name = form.get("name").cloned().unwrap_or_default();
+                let input = json!({"id": self.id, "guest_id": dialog.guest, "name": dialog.name});
+                match self
+                    .submit(
+                        scope,
+                        credential,
+                        name,
+                        "core.activity.create_person_guest",
+                        input,
+                    )
+                    .await?
+                {
+                    Ok(_) => {
+                        self.person_dialog = None;
+                        self.flash = Some((
+                            StatusKind::Success,
+                            "Person created; they are on the guest list in place of the address."
+                                .into(),
+                        ));
+                    }
+                    Err(refusal) => {
+                        if let Some(dialog) = &mut self.person_dialog {
+                            dialog.errors = vec![Self::refused(refusal)];
+                        }
+                    }
                 }
             }
             "remove_guest" => {
@@ -990,6 +1057,39 @@ impl Detail {
                 editable && a.related.is_some(),
             )?,
         ));
+        if a.kind != Kind::Note {
+            let own = a.reminder_minutes.as_deref();
+            let offered = reminder_choices::options(own, "Default");
+            let offered: Vec<(&str, &str)> = offered
+                .iter()
+                .map(|(label, code)| (label.as_str(), code.as_str()))
+                .collect();
+            items.push((
+                "Reminders",
+                "reminders".into(),
+                self.choice(
+                    a,
+                    "reminders",
+                    (&reminder_choices::code(own), &reminder_choices::label(own)),
+                    &offered,
+                    editable,
+                )?,
+            ));
+            items.push((
+                "Email reminders",
+                "reminder-email".into(),
+                self.choice(
+                    a,
+                    "reminder_email",
+                    (
+                        reminder_choices::email_code(a.reminder_email),
+                        reminder_choices::email_label(a.reminder_email),
+                    ),
+                    reminder_choices::EMAIL,
+                    editable,
+                )?,
+            ));
+        }
         if let (Some(series), Some(index)) = (series, a.series_index) {
             let mut repeats = Html::text(&format!(
                 "{}. This is occurrence {index}; {} in the series now. ",
@@ -1116,7 +1216,7 @@ impl Detail {
         scope: &Scope,
         a: &Activity,
         guests: &[GuestRow],
-        emails: &HashMap<i64, String>,
+        (emails, creatable): (&HashMap<i64, String>, &std::collections::HashSet<i64>),
         clock: &Clock,
         editable: bool,
     ) -> Result<Html> {
@@ -1225,6 +1325,19 @@ impl Detail {
                     value: &id,
                     working: "Removing…",
                     body: Html::text("Remove"),
+                    ..Button::default()
+                })?);
+            }
+            if creatable.contains(&guest.id) {
+                who.push(&Html::text(" "));
+                let id = guest.id.to_string();
+                who.push(&render(Button {
+                    id: &format!("activity-guest-{}-create-person", guest.id),
+                    button_type: "button",
+                    event: "request_person",
+                    name: "guest",
+                    value: &id,
+                    body: Html::text("Create person"),
                     ..Button::default()
                 })?);
             }
@@ -1513,9 +1626,28 @@ impl Detail {
         body.push(&self.overlaps(scope, &clock, &a, &guests).await?);
         body.push(&self.related(scope, &a, editable).await?);
         let emails = self.pages.activities.guest_emails(scope, &guests).await?;
+        // An address guest nobody in People has: the panel offers to create them.
+        let mut creatable = std::collections::HashSet::new();
+        if editable {
+            for guest in guests
+                .iter()
+                .filter(|g| g.user_id.is_none() && g.person.is_none())
+            {
+                if let Some(email) = &guest.email {
+                    if self
+                        .pages
+                        .activities
+                        .may_create_person_for(scope, email)
+                        .await?
+                    {
+                        creatable.insert(guest.id);
+                    }
+                }
+            }
+        }
         body.push(
             &self
-                .guests(scope, &a, &guests, &emails, &clock, editable)
+                .guests(scope, &a, &guests, (&emails, &creatable), &clock, editable)
                 .await?,
         );
         if let Some(confirm) = self.confirm {
@@ -1578,6 +1710,9 @@ impl Detail {
         }
         if let (Some(errors), true) = (&self.delete_dialog, editable) {
             body.push(&delete_dialog(&a, errors)?);
+        }
+        if let (Some(dialog), true) = (&self.person_dialog, editable) {
+            body.push(&guest_person::dialog(dialog)?);
         }
         let region = render(Region {
             id: "activity-region",

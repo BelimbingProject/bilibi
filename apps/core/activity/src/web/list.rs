@@ -4,8 +4,11 @@
 //! calendar (`display=calendar`, base/ui `Calendar`): the filters apply to
 //! both, and dragging on the calendar calls the same change contract.
 use super::{
-    event, form::Dialog, icon, refusal, render, sentences, status_badge, BrowserZone, Clock, Pages,
-    Refusal, Region,
+    event,
+    form::Dialog,
+    icon, refusal,
+    reminder_defaults::{self, DefaultsDialog},
+    render, sentences, status_badge, BrowserZone, Clock, Pages, Refusal, Region,
 };
 use crate::{Activity, Filter, Kind, Mine, Reference, Sort, State};
 use bilibi_database::{Error, Result};
@@ -134,6 +137,8 @@ pub(crate) struct Index {
     framed: bool,
     zone: BrowserZone,
     dialog: Option<Dialog>,
+    /// The Reminder defaults dialog, when open.
+    defaults: Option<DefaultsDialog>,
     /// The activity Close asks about: its id, title and version.
     confirm: Option<(i64, String, i64)>,
     flash: Option<(StatusKind, String)>,
@@ -154,6 +159,7 @@ impl Index {
             framed,
             zone: BrowserZone::new(),
             dialog: None,
+            defaults: None,
             confirm: None,
             flash: None,
         })
@@ -292,6 +298,51 @@ impl Index {
                 }
             }
             "close_modal" => self.dialog = None,
+            "request_defaults" => {
+                if self.pages.activities.may_create(scope).await? {
+                    let current = self.pages.activities.reminder_defaults(scope).await?;
+                    self.defaults = Some(DefaultsDialog::new(&current));
+                }
+            }
+            "cancel_defaults" => self.defaults = None,
+            "save_reminder_defaults" => {
+                let form = params::form_values_checked(value, "defaults", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let Some(dialog) = &mut self.defaults else {
+                    return Ok(None);
+                };
+                if !dialog.read(&form) {
+                    return Err(Error::Invalid);
+                }
+                let input = dialog.input();
+                let call = self.pages.call(
+                    scope,
+                    credential,
+                    "save_reminder_defaults",
+                    "core.activity.set_reminder_defaults",
+                );
+                match self.pages.contracts.submit(&call, input).await {
+                    Ok(_) => {
+                        self.defaults = None;
+                        self.flash = Some((
+                            StatusKind::Success,
+                            "Reminder defaults saved. They apply to activities you create from now on."
+                                .into(),
+                        ));
+                    }
+                    Err(error) => {
+                        let message = match refusal(
+                            error,
+                            "You do not have permission to change reminder defaults.",
+                            "The defaults were not saved. Try again.",
+                        )? {
+                            Refusal::Message(message) => message,
+                            Refusal::Fields(fields) => sentences(&fields),
+                        };
+                        dialog.errors = vec![message];
+                    }
+                }
+            }
             "create_task" | "log_call" | "create_meeting" | "create_note" => {
                 let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
                 let pages = self.pages.shared();
@@ -672,6 +723,15 @@ impl Index {
                 })?);
             }
         }
+        if may_create {
+            actions.push(&render(Button {
+                id: "activities-reminder-defaults",
+                button_type: "button",
+                event: "request_defaults",
+                body: Html::text("Reminder defaults"),
+                ..Button::default()
+            })?);
+        }
         let mut flash = NO_FLASH;
         if let Some((kind, message)) = &self.flash {
             match kind {
@@ -780,6 +840,9 @@ impl Index {
                 confirm_event: "close",
                 cancel_event: "cancel_close",
             })?);
+        }
+        if let Some(dialog) = &self.defaults {
+            body.push(&reminder_defaults::dialog(dialog)?);
         }
         if let Some(dialog) = &self.dialog {
             body.push(&dialog.render(

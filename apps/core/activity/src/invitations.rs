@@ -69,7 +69,7 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 inventory::submit! { Consumer::new::<InvitationGate>(INVITATION_GATES, crate::MODULE, validate) }
 
-fn gates() -> impl Iterator<Item = &'static InvitationGate> {
+pub(crate) fn gates() -> impl Iterator<Item = &'static InvitationGate> {
     inventory::iter::<Contribution>
         .into_iter()
         .filter(|entry| entry.consumer == INVITATION_GATES)
@@ -115,7 +115,11 @@ inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &Handler
 
 /// A person's email as the reader may read it: none when restricted or
 /// masked for them, retired, or not an address.
-async fn person_email(client: &dyn ReadClient, scope: &Scope, person: PersonId) -> Option<String> {
+pub(crate) async fn person_email(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    person: PersonId,
+) -> Option<String> {
     let person = bilibi_person::read_person(client, scope, person)
         .await
         .ok()?;
@@ -149,7 +153,7 @@ pub(crate) async fn guest_emails(
 
 /// The activity's time as its filing company reads it, named, and in UTC:
 /// "6 Nov 2026, 10:00 – 11:00 (Asia/Kuala_Lumpur); 02:00 – 03:00 UTC".
-async fn when(
+pub(crate) async fn when(
     settings: &Settings,
     client: &dyn ReadClient,
     scope: &Scope,
@@ -199,7 +203,7 @@ async fn when(
 }
 
 /// At most `max` bytes of `text`, cut on a character boundary.
-fn bounded(text: &str, max: usize) -> String {
+pub(crate) fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
@@ -321,35 +325,7 @@ impl InviteJob {
                 "core.activity.invite:{guest}:{}",
                 invited_at.as_microsecond()
             );
-            let mut allowed = true;
-            for gate in gates() {
-                let mut tx = execution.begin(&mut client, "core.activity.invite").await?;
-                match (gate.allow)(&mut tx, &scope, &invitee, &key).await {
-                    Ok(answer) => {
-                        tx.commit().await?;
-                        allowed &= answer;
-                    }
-                    // A question the gate will not answer (an address it
-                    // cannot take, a sender it refuses): not sent, and said in
-                    // the log without the address.
-                    Err(error @ (Error::Invalid | Error::Forbidden | Error::NotFound)) => {
-                        tx.rollback().await?;
-                        eprintln!(
-                            "error: an invitation gate did not answer (job {}, guest {guest}): {error}",
-                            execution.job_id
-                        );
-                        allowed = false;
-                    }
-                    Err(error) => {
-                        tx.rollback().await?;
-                        return Err(error);
-                    }
-                }
-                if !allowed {
-                    break;
-                }
-            }
-            if !allowed {
+            if !allowed(execution, &mut client, &scope, &invitee, &key, guest).await? {
                 continue;
             }
             let Ok(to) = Address::new(None, &email) else {
@@ -395,13 +371,59 @@ impl InviteJob {
         Ok(delivered)
     }
     async fn sender(&self, client: &dyn ReadClient, scope: &Scope) -> Result<String> {
-        let me =
-            PrincipalRef::new(PrincipalKind::User, scope.user()).map_err(|_| Error::Internal)?;
-        let ranked = self
-            .directory
-            .rank(&store::Directory(client), scope, &[me], &Query::default())
-            .await
-            .map_err(|_| Error::Internal)?;
-        Ok(ranked.label(me))
+        sender_label(&self.directory, client, scope).await
     }
+}
+
+/// How the acting account is named to a guest, as the principal directory
+/// ranks it for them.
+pub(crate) async fn sender_label(
+    directory: &PrincipalDirectory,
+    client: &dyn ReadClient,
+    scope: &Scope,
+) -> Result<String> {
+    let me = PrincipalRef::new(PrincipalKind::User, scope.user()).map_err(|_| Error::Internal)?;
+    let ranked = directory
+        .rank(&store::Directory(client), scope, &[me], &Query::default())
+        .await
+        .map_err(|_| Error::Internal)?;
+    Ok(ranked.label(me))
+}
+
+/// Asks every contributed gate, each in a transaction of its own under `key`,
+/// whether `invitee` may be emailed now. One refusal says no. A question a
+/// gate will not answer (an address it cannot take, a sender it refuses) is
+/// a no, said in the log without the address; any other error stops the job
+/// so it is tried again.
+pub(crate) async fn allowed(
+    execution: &Execution,
+    client: &mut tokio_postgres::Client,
+    scope: &Scope,
+    invitee: &Invitee,
+    key: &str,
+    guest: i64,
+) -> Result<bool> {
+    for gate in gates() {
+        let mut tx = execution.begin(client, "core.activity.invite").await?;
+        match (gate.allow)(&mut tx, scope, invitee, key).await {
+            Ok(true) => tx.commit().await?,
+            Ok(false) => {
+                tx.commit().await?;
+                return Ok(false);
+            }
+            Err(error @ (Error::Invalid | Error::Forbidden | Error::NotFound)) => {
+                tx.rollback().await?;
+                eprintln!(
+                    "error: an invitation gate did not answer (job {}, guest {guest}): {error}",
+                    execution.job_id
+                );
+                return Ok(false);
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
+    }
+    Ok(true)
 }

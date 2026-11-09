@@ -4,9 +4,12 @@
 //! (declared in `PageWrites`). No Bilimbi counterpart; the shapes follow
 //! Core Person's list and record pages and Core Company's record panels.
 mod form;
+mod guest_person;
 mod list;
 mod panel;
 mod record;
+mod reminder_choices;
+mod reminder_defaults;
 
 use crate::{Activities, Activity, Kind, Status};
 use askama::Template;
@@ -268,6 +271,8 @@ pub(crate) const FIELDS: &[(&str, &str)] = &[
     ("guests", "Guests"),
     ("guest", "Guest"),
     ("shared", "Who can see it"),
+    ("reminders", "Reminders"),
+    ("reminder_email", "Email reminders"),
     ("description", "Description"),
     ("internal_notes", "Internal notes"),
 ];
@@ -280,7 +285,10 @@ pub(crate) fn label(field: &str) -> &'static str {
 
 /// The page field a refusal's input path names (`patch.ends_at` is `ends_at`).
 pub(crate) fn field_of(path: &str) -> &str {
-    path.strip_prefix("patch.").unwrap_or(path)
+    match path.strip_prefix("patch.").unwrap_or(path) {
+        "reminder_minutes" => "reminders",
+        field => field,
+    }
 }
 
 /// Field refusals as one notice, each a sentence with its field's label:
