@@ -80,6 +80,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         println!("PASS: portal credential-counter reset and session admission both retain customer audit attribution");
+        // The owner API must return the same customer identity on both transitions,
+        // deny another tenant and a customer actor, and end the live session.
+        let customer_scope = authentication
+            .authenticate(&**client, 1, customer, String::new())
+            .await?;
+        let other_login = users
+            .login(
+                "manager@other.example.test",
+                bilibi_walkthrough_fixture::PASSWORD,
+            )
+            .await?;
+        let other = app.security.guard(&other_login.token).await?;
+        for (scope, forbidden) in [(&other, false), (&customer_scope, true)] {
+            let mut tx = boundary
+                .begin(
+                    &mut client,
+                    scope.mutation_context("identity.customer.denied"),
+                )
+                .await?;
+            let result = users
+                .set_customer_active_in(&mut tx, scope, customer, false)
+                .await;
+            assert!(if forbidden {
+                matches!(result, Err(bilibi_database::Error::Forbidden))
+            } else {
+                matches!(result, Err(bilibi_database::Error::NotFound))
+            });
+            tx.rollback().await?;
+        }
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                manager.mutation_context("identity.customer.suspend"),
+            )
+            .await?;
+        let suspended = users
+            .set_customer_active_in(&mut tx, &manager, customer, false)
+            .await?;
+        assert_eq!(
+            (suspended.id, suspended.email.as_str(), suspended.active),
+            (customer, "identity-customer@example.test", false)
+        );
+        tx.commit().await?;
+        assert!(app
+            .security
+            .guard_portal(&customer_login.token)
+            .await
+            .is_err());
+        assert!(users
+            .portal_login(
+                1,
+                "identity-customer@example.test",
+                bilibi_walkthrough_fixture::PASSWORD
+            )
+            .await
+            .is_err());
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                manager.mutation_context("identity.customer.restore"),
+            )
+            .await?;
+        let restored = users
+            .set_customer_active_in(&mut tx, &manager, customer, true)
+            .await?;
+        assert_eq!(
+            (restored.id, restored.email.as_str(), restored.active),
+            (customer, "identity-customer@example.test", true)
+        );
+        tx.commit().await?;
+        assert!(app
+            .security
+            .guard_portal(&customer_login.token)
+            .await
+            .is_err());
+        assert!(users
+            .portal_login(
+                1,
+                "identity-customer@example.test",
+                bilibi_walkthrough_fixture::PASSWORD
+            )
+            .await
+            .is_ok());
+        println!("PASS: customer suspension and restoration preserve identity and isolate access");
     }
     let login = users
         .login(
