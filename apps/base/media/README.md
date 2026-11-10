@@ -175,7 +175,9 @@ contributes `Subject { owner: &OWNER }` under a stable lowercase key
 (`orders.order`) to `SUBJECTS`. `Media::authorize_subject` calls the owner's
 `SubjectOwner::authorize` with the caller's sealed scope and a `SubjectAction`.
 The owner resolves its live record and checks its own capability; unknown
-subjects have no access. Contributions from modules that do not depend on
+subjects have no access. An owner whose records are about a person answers
+`person_subject` too, so a privacy request reaches their files (Personal-data
+erasure, below). Contributions from modules that do not depend on
 `base/media` fail at boot.
 
 A module that only needs other modules to point at its records, not to hold files for them, registers a record kind with Base Records instead: [`../records/README.md`](../records/README.md). Its `RecordOwner` follows the same access pattern as `SubjectOwner`.
@@ -221,7 +223,10 @@ drafts for one tenant with the host command, which has no automatic schedule:
 
 **Only a sealed `base/personal_data` grant reaches a subject's files for a request** ([ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md), migration `base-media-004-erasure`).
 
-- `disclosed_attachments` / `disclosed_attachment` (with `Disclosure`): every live attachment of the subject and its bytes, for an export; the subject's owner is not asked.
+- A grant reaches a subject when its kind is in some store's `person_subjects` and its ID is the request's person, or when its registered owner answers `SubjectOwner::person_subject` yes for that person: a record about a person (a case) whose ID is not a person ID. A sweep grant names no person and reaches no files.
+- The owner vouches for the whole subject, never one file: yes reaches every attachment filed under it. Answer yes only when every file under that subject belongs to the grant's person. If one record holds different people's files, file each person's attachments under a separate subject (for example, a note) that the owner can vouch for. The default answers no.
+- The owner answers from its own live record on the caller's connection (inside the erasure's transaction for `erase_attachments`), for `scope`'s tenant. A held erasure may resume much later, and `remove_erased_bytes` asks again after commit: keep the subject linked to the person until no hold keeps any of its files and their bytes are removed.
+- `disclosed_attachments` / `disclosed_attachment` (with `Disclosure`): every live attachment of the subject and its bytes, for an export; the subject's owner is not asked to authorize (only, for a subject that is not a person ID, whether it is the person's).
 - `erase_attachments(tx, scope, &Erasure, subject, &Holds)`: each attachment no hold names, on the attachment or on its asset, becomes a tombstone and its asset row goes, through `base_media_erase_attachment` (the only path the guard admits). The asset's change records `original_filename` as `[erased]`; the caller clears both kinds' evidence (`base/media/attachment`, `base/media/asset`). `erased_by` names the user, or is empty when a system principal erased (owed cleanup after a hold). The asset kind's personal field is declared in `base_personal_data_kinds` by this migration.
 - `remove_erased_bytes(client, scope, &Erasure, subject)`: one file per transaction, claimed under its row lock, removed and recorded once; `Removal.more` says files remain.
 - `count_attachments` counts a subject's files for a reader its owner allows.

@@ -12,12 +12,13 @@ pub enum SettingsTab {
     Appearance,
     Search,
     AiConnections,
+    CalendarFeed,
     Sessions,
 }
 
 /// One navigation source for every personal settings page: its tab, id, label
 /// and address.
-const PAGES: [(SettingsTab, &str, &str, &str); 7] = [
+const PAGES: [(SettingsTab, &str, &str, &str); 8] = [
     (
         SettingsTab::Profile,
         "settings-nav-profile",
@@ -55,6 +56,12 @@ const PAGES: [(SettingsTab, &str, &str, &str); 7] = [
         "/settings/ai-connections",
     ),
     (
+        SettingsTab::CalendarFeed,
+        "settings-nav-calendar-feed",
+        "Calendar feed",
+        "/settings/calendar-feed",
+    ),
+    (
         SettingsTab::Sessions,
         "settings-nav-sessions",
         "Sessions",
@@ -66,14 +73,14 @@ const PAGES: [(SettingsTab, &str, &str, &str); 7] = [
 pub const SETTINGS_LOCATION: [&str; 2] = ["Account", "My settings"];
 
 impl SettingsTab {
-    pub fn tabs(&self) -> [Tab<'static>; 7] {
+    pub fn tabs(&self) -> [Tab<'static>; 8] {
         PAGES.map(|(section, id, label, href)| Tab {
             id,
             ..Tab::link(href, label, *self == section)
         })
     }
     /// Every personal settings page as (label, address), in tab order.
-    pub fn pages() -> [(&'static str, &'static str); 7] {
+    pub fn pages() -> [(&'static str, &'static str); 8] {
         PAGES.map(|(_, _, label, href)| (label, href))
     }
 }

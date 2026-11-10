@@ -12,7 +12,7 @@ Single selects and multi-selects share the 16 px outline chevron and right align
 
 Multi-selects show the inset label and selected count above removable chips inside one field. The default keeps chips on one line with “…” for hidden selections; `.wrap_chips()` lets the field grow onto multiple lines. The empty prompt defaults to “Select options…”. Removal uses the checkbox's normal change event; `.chips(event)` can retain an owner's explicit remove event. Every selection remains available in the dropdown, including chips hidden by overflow.
 
-List toolbars put search first and filter boxes to its right, and on a phone fold them into one Filters button that opens a sheet, with each set filter shown as a removable chip. `FilterToolbar::new` preserves the order of filters while placing search first.
+List toolbars put search first and filter boxes to its right, and on a phone fold them into one Filters button that opens a sheet, with each set filter shown as a removable chip. `FilterToolbar::new` preserves the order of filters while placing search first. Controls are `ToolbarControl::search`, `select`, `multi_select`, `date` and `text` (a typed value in the sheet, such as a custom field's text; `.numeric()` gives a phone the decimal keypad). A toolbar label is screen-reader only, so a text control shows its label as the placeholder and a date control says what it bounds in its hint.
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
@@ -163,7 +163,7 @@ A work calendar's resolved day is a `DayTile` (Belimbing's `x-ui.day-tile`): the
 
 ## Calendar
 
-`Calendar` (`src/calendar.rs`, `templates/calendar.html`, hook `Calendar` in `assets/calendar.js`) draws a Domain's records on a day, week, month or shared view (one column per person or resource) without the Domain owning any markup, CSS or JavaScript. The component never writes; the owner does. The running owner is `apps/web/examples/schedule-reference.rs`, and the specimens are at `/assets/ui-components.html#specimen-calendars`.
+`Calendar` (`src/calendar.rs`, `templates/calendar.html`, hook `Calendar` in `assets/calendar.js`) draws a Domain's records on a day, week, month, year or shared view (one column per person or resource) without the Domain owning any markup, CSS or JavaScript. The component never writes; the owner does. The running owner is `apps/web/examples/schedule-reference.rs`, and the specimens are at `/assets/ui-components.html#specimen-calendars`.
 
 The owner's side, in order:
 
@@ -172,6 +172,11 @@ The owner's side, in order:
 3. **Describe each record.** `CalendarItem::timed(id, title, start, end)` takes instants, `CalendarItem::all_day(id, title, first, last)` takes dates. `.kind(word, tone)` names the kind in words and picks a `cat-1..8` data colour (never a status colour); `.lane(key)` places it in a shared view; `.href(page)` makes the title a link. Call `.movable(version)` (and `.resizable()` for a timed one) **only when the viewer holds the update capability**: an item that is not movable has no drag handle and no Move action, and nothing else hides them.
 4. **Handle the four events.** `calendar::MOVE` (a drop or a resize) and `calendar::MOVE_SUBMIT` (the Move dialog) decode with `CalendarMove::from_event(event, zone)` into one `CalendarMove { id, version, when, lane }`: a wall-clock date and minute in the display zone, resolved with the zone's own rules, so a move across a daylight-saving change keeps its wall-clock time (a time in the gap becomes the first valid instant, one in the fold the earlier). The `Err` is a sentence to show. `calendar::MOVE_OPEN` carries the item to open in the dialog (`calendar::item_id`); set `Calendar::moving`, and clear it on `calendar::MOVE_CANCEL`. Keep an `Err` of the dialog in `Calendar::move_errors`.
 5. **Write through your own operation.** Pass the `CalendarMove` and its `version` to the facade that rechecks the capability and the version inside its `MutationBoundary` and refuses a stale one. Show the result in `Calendar::notice` (`StatusKind::Success`, or `Error` with the owner's own message, never a lower module's error text); a refusal must not be an `Error::Forbidden` or `Error::Internal`, which the transport treats as fatal. Re-read after every event: the browser never moves an item itself, so a refused move leaves the item where the server drew it.
+
+6. **Optional: create from a free slot.** Set `Calendar::creatable` only for a viewer who may create the record. A click or a drag down a free time column (a tap on touch), and a click, a tap or Enter on an empty day cell, raise `calendar::SLOT`; decode it with `CalendarSlot::from_event(event, zone)` (`when` is `Timed` for a time column, a one-date `AllDay` for a day) and open your own create dialog with the time filled in. The create itself goes through your own create operation, as every other key to that door does.
+7. **Optional: mark late and soon.** `CalendarItem::urgency(Some(Urgency::Overdue | Urgency::Imminent))` (and `BoardCard::urgency`) tints the item's box and writes "Overdue" or "Due soon" beside its time; the owner decides which items qualify and the window. Never use it as the kind colour.
+
+The year view draws twelve small months: each day shows how many items fall on it (with a `!` and the danger colour when one is overdue) and links to that day's view; the month's name links to the month. **Give it `Calendar::day_totals`** (one `DayTotal { date, count, late }` per day that holds something, from one grouped count in your own facade under the same rule as the items) so a year is right however many items it holds; the year is then drawn from the totals and needs no items. Without `day_totals` it counts `items`, which is right only while the year stays under the 500-item bound.
 
 `Calendar::day_marks` puts a `DayKind` tint and word on a week or month cell (the same colours as `DayTile`). Snap is 15 minutes (`snap_minutes` 5, 10, 15, 30 or 60). Positions are classes on a grid of five-minute rows, never a `style` attribute.
 
@@ -194,6 +199,14 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 ## Record references
 
 `RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md).
+
+## File preview
+
+**Show a file in place with `FilePreview { id, src, title }`** (an image, PDF or plain text in a same-origin frame), never a hand-written `<iframe>`, `<img>` or `<embed>` of your own.
+
+- `src` is a route the owner contributes under `DOWNLOADS` and answers with `FileBody::preview(bytes, content_type, filename)`, behind the same authorization and audit as its download. `preview` returns `None` for anything but PNG, JPEG, GIF, WebP, PDF and plain text (`FileBody::PREVIEW_TYPES`, `FileBody::previewable` for deciding whether to offer one), and the route answers not found: the shared contract refuses an SVG or HTML upload, not each owner's own list. The inline policy forbids scripts and framing by another origin.
+- The frame adds no write path and no second way to the bytes. Put it in a `Modal` with a Download link beside it; Close and Escape are the modal's.
+- Give it a stable `id` (the live patcher keys an iframe by it). The component specimen's File preview card is the running example; Documents' list preview is its first owner.
 
 ## Received mail
 

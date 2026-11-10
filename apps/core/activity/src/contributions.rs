@@ -3,8 +3,8 @@ use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribu
 use bilibi_database::Error;
 use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
 use bilibi_module_registry::contributions::{
-    Access, CompanyScope, Embed, EmbedContext, Method, PageWrites, Pending, Route, EMBEDS,
-    PAGE_WRITES, ROUTES,
+    Access, CompanyScope, CredentialPath, Embed, EmbedContext, Method, PageWrites, Pending,
+    PublicEndpoint, Route, CREDENTIAL_PATHS, EMBEDS, PAGE_WRITES, PUBLIC_ENDPOINTS, ROUTES,
 };
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_records::{Holder, RecordKind, RecordOwner};
@@ -46,7 +46,7 @@ macro_rules! provenance {
 // `view` and `manage` are the Platform's verbs.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
     domains: &["core"], verbs: &[],
-    capabilities: &[C::tenant(VIEW), C::tenant(VIEW_ALL), C::tenant(MANAGE), C::tenant(MANAGE_ALL), C::tenant(crate::SYSTEM_CREATE)],
+    capabilities: &[C::tenant(VIEW), C::tenant(VIEW_ALL), C::tenant(MANAGE), C::tenant(MANAGE_ALL), C::tenant(crate::MANAGE_FEEDS), C::tenant(crate::SYSTEM_CREATE)],
     roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: OWNER_CAPABILITIES }],
     system_principals: &[],
 }) }
@@ -166,6 +166,21 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.detail", provenanc
     company_scope: CompanyScope::Tenant,
 }) }
 
+// The calendar feed: a read-only iCalendar link a person's calendar app
+// subscribes to. The key in the path is the only credential, so Web redacts it
+// from logs and rate-limits each sender; the owner proves the person and
+// their rights on every read (`feed.rs`).
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/activity.feed", provenance!(), &CredentialPath { path: crate::FEED_PATH }) }
+inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "core/activity.feed", provenance!(), &PublicEndpoint {
+    method: Method::Get, path: crate::FEED_PATH, service: crate::FEED_SERVICE, operation: "feed",
+}) }
+// The person's own page for it, among their settings.
+inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", provenance!(), &Route {
+    method: Method::Get, path: "/settings/calendar-feed", service: crate::web::SERVICE, operation: "feed",
+    access: Access::Capability(VIEW), framed: true,
+    company_scope: CompanyScope::Tenant,
+}) }
+
 bilibi_menu::contribute!(
     "core/activity",
     bilibi_menu::MenuItem::page("core.activity", "Activities", "/activities")
@@ -202,6 +217,9 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
         ("log_call", "core.activity.log_call"),
         ("create_meeting", "core.activity.create_meeting"),
         ("create_note", "core.activity.create_note"),
+        ("make_link", "core.activity.create_feed_key"),
+        ("replace_link", "core.activity.create_feed_key"),
+        ("revoke_link", "core.activity.revoke_feed_key"),
         ("respond", "core.activity.respond"),
         ("pick_guest", "core.activity.add_guest"),
         ("add_guest_email", "core.activity.add_guest"),
@@ -223,6 +241,9 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/activity.pages", prove
         // the same change contract.
         (bilibi_ui::calendar::MOVE, "core.activity.update"),
         (bilibi_ui::calendar::MOVE_SUBMIT, "core.activity.update"),
+        // The status tiles' drop and Move dialog set a task's status through it too.
+        (bilibi_ui::board::MOVE, "core.activity.update"),
+        (bilibi_ui::board::MOVE_SUBMIT, "core.activity.update"),
     ],
     pending: Pending::None,
 }) }

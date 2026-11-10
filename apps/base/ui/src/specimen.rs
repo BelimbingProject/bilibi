@@ -5,7 +5,6 @@
 //! page exercises both the macro and the Rust paths.
 use crate::inline_specimen::InlineSamples;
 use crate::section::sections;
-use crate::MailFrame;
 use crate::{
     choices, error_sentence, ActionLink, AddMore, BadgeKind, Button, ButtonVariant, Card, Choice,
     Chrome, ClientEntry, CodeInput, Combobox, DayKind, DayMonth, DayTile, ErrorSummary, Field,
@@ -13,6 +12,7 @@ use crate::{
     PageVariant, RadioGroup, Restricted, RestrictedField, SecretInput, StatItem, UploadSpec,
     Uploads,
 };
+use crate::{FilePreview, MailFrame};
 use askama::Template;
 
 /// Mostly sanitiser output, plus what the frame must refuse by itself.
@@ -76,6 +76,8 @@ pub struct ComponentsSpecimen {
     /// remote image and an inline style that the sanitiser would remove, to
     /// show that the frame refuses them on its own as well.
     mail_frame: Html,
+    /// A file preview in its frame (the sample is a served stylesheet).
+    file_preview: Html,
 }
 
 sections! {
@@ -666,6 +668,11 @@ impl ComponentsSpecimen {
                 "Received mail: Broken part, photo attached",
                 MAIL_SAMPLE,
             ))?,
+            file_preview: Html::render(&FilePreview {
+                id: "specimen-file-preview",
+                src: "/assets/mail-frame.css",
+                title: "Preview of mail-frame.css",
+            })?,
         })
     }
 
@@ -1216,6 +1223,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
             .movable("2"),
         CalendarItem::timed("m3", "Design review", at(25, 11, 0), at(25, 12, 30))
             .kind("Meeting", 1)
+            .urgency(Some(crate::calendar::Urgency::Overdue))
             .href("#review")
             .lane("amira"),
         CalendarItem::all_day("a1", "Stocktake", date(2026, 3, 26), date(2026, 3, 27))
@@ -1234,6 +1242,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         .resizable(),
         CalendarItem::timed("d2", "Weekly planning", at(29, 14, 0), at(29, 15, 0))
             .kind("Meeting", 1)
+            .urgency(Some(crate::calendar::Urgency::Imminent))
             .lane("chen")
             .movable("1")
             .resizable(),
@@ -1261,6 +1270,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         calendar.lanes = lanes.clone();
         calendar.items = items.clone();
         calendar.day_marks = marks.clone();
+        calendar.creatable = true;
         calendar
     };
     let mut refused = make(
@@ -1306,6 +1316,11 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         make(
             "specimen-calendar-month",
             CalendarView::Month,
+            date(2026, 3, 25),
+        ),
+        make(
+            "specimen-calendar-year",
+            CalendarView::Year,
             date(2026, 3, 25),
         ),
         make(

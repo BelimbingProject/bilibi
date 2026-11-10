@@ -63,7 +63,11 @@ pub async fn read(
     Ok(Person::from_row(&row)?.redact(&restrictions))
 }
 
-pub async fn search(client: &impl GenericClient, scope: &Scope, query: &Search) -> Result<Page> {
+pub async fn search(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    query: &Search,
+) -> Result<Page> {
     authorize_key(client, scope, LIST).await?;
     query.check()?;
     let masked = fields(client, scope).await?;
@@ -90,41 +94,88 @@ pub async fn search(client: &impl GenericClient, scope: &Scope, query: &Search) 
         )
         .await?
     };
-    let predicate = format!("tenant_id=$1 AND ($4 OR retired_at IS NULL) AND ($5::text IS NULL OR kind=$5) AND ($3='' OR position($3 in lower(name))>0 OR position($3 in lower(code))>0 OR ($6 AND position($3 in lower(email))>0) OR ($7 AND position($3 in lower(phone))>0) OR id IN ({work}))");
-    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
-        &scope.tenant(),
-        &scope.user(),
-        &needle,
-        &query.include_retired,
-        &kind,
-        &email,
-        &phone,
+    type Arg = Box<dyn tokio_postgres::types::ToSql + Sync + Send>;
+    let mut args: Vec<Arg> = vec![
+        Box::new(scope.tenant()),
+        Box::new(scope.user()),
+        Box::new(needle.clone()),
+        Box::new(query.include_retired),
+        Box::new(kind),
+        Box::new(email),
+        Box::new(phone),
     ];
+    let mut predicate = format!("tenant_id=$1 AND ($4 OR retired_at IS NULL) AND ($5::text IS NULL OR kind=$5) AND ($3='' OR position($3 in lower(name))>0 OR position($3 in lower(code))>0 OR ($6 AND position($3 in lower(email))>0) OR ($7 AND position($3 in lower(phone))>0) OR id IN ({work}))");
+    // Custom field conditions and sort name active fields only; each key and
+    // value is a bound parameter. An unknown or archived field, an operator
+    // that does not suit it or a value it cannot hold is refused.
+    let custom_sort = query.sort.strip_prefix("cf_");
+    let active = if query.custom.is_empty() && custom_sort.is_none() {
+        Vec::new()
+    } else {
+        crate::custom::fields()?
+            .active(client, scope, crate::custom::RECORD_TYPE)
+            .await?
+    };
+    for filter in &query.custom {
+        let definition = active
+            .iter()
+            .find(|d| d.key == filter.key)
+            .ok_or(Error::Invalid)?;
+        args.push(Box::new(filter.key.clone()));
+        let expression = crate::custom::expression(args.len(), definition.kind);
+        args.push(Box::new(filter.value.trim().to_owned()));
+        let condition = crate::custom::condition(definition, filter, &expression, args.len())
+            .ok_or(Error::Invalid)?;
+        predicate.push_str(" AND ");
+        predicate.push_str(&condition);
+    }
+    fn binds(args: &[Arg]) -> Vec<&(dyn tokio_postgres::types::ToSql + Sync)> {
+        args.iter()
+            .map(|arg| arg.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect()
+    }
     let total = client
         .query_one(
             &format!("SELECT count(*) FROM persons WHERE {predicate}"),
-            params,
+            &binds(&args),
         )
         .await?
         .get(0);
-    let limit = query.page_size;
-    let offset = (query.page - 1) * limit;
-    let mut paged = params.to_vec();
-    paged.extend([
-        &limit as &(dyn tokio_postgres::types::ToSql + Sync),
-        &offset,
-    ]);
     // Only owner-declared sort expressions reach SQL; contacts never sort
-    // through a hidden field, and ties retain stable IDs across pages.
-    let sort = match query.sort.as_str() {
-        "code" => "code",
-        "kind" => "kind",
-        "state" => "(retired_at IS NOT NULL)",
-        "created_at" => "created_at",
-        _ => "lower(name)",
-    };
+    // through a hidden field, and ties retain stable IDs across pages. A
+    // custom sort key is bound in the page statement only, so the count above
+    // has no unused parameter; contacts without a value come last.
     let direction = if query.descending { "DESC" } else { "ASC" };
-    let rows = client.query(&format!("SELECT {COLUMNS} FROM persons WHERE {predicate} ORDER BY {sort} {direction},id {direction} LIMIT $8 OFFSET $9"), &paged).await?;
+    let sort = match custom_sort {
+        Some(key) => {
+            let definition = active.iter().find(|d| d.key == key).ok_or(Error::Invalid)?;
+            args.push(Box::new(key.to_owned()));
+            format!(
+                "{} {direction} NULLS LAST",
+                crate::custom::expression(args.len(), definition.kind)
+            )
+        }
+        None => format!(
+            "{} {direction}",
+            match query.sort.as_str() {
+                "code" => "code",
+                "kind" => "kind",
+                "state" => "(retired_at IS NOT NULL)",
+                "created_at" => "created_at",
+                _ => "lower(name)",
+            }
+        ),
+    };
+    args.push(Box::new(query.page_size));
+    let limit = args.len();
+    args.push(Box::new((query.page - 1) * query.page_size));
+    let offset = args.len();
+    let rows = client
+        .query(
+            &format!("SELECT {COLUMNS} FROM persons WHERE {predicate} ORDER BY {sort},id {direction} LIMIT ${limit} OFFSET ${offset}"),
+            &binds(&args),
+        )
+        .await?;
     Ok(Page {
         entries: rows
             .iter()

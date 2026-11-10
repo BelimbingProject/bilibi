@@ -3,6 +3,7 @@
 //! every write calls an operation contract through `PageContracts`
 //! (declared in `PageWrites`). No Bilimbi counterpart; the shapes follow
 //! Core Person's list and record pages and Core Company's record panels.
+mod feed;
 mod form;
 mod guest_person;
 mod list;
@@ -10,6 +11,7 @@ mod panel;
 mod record;
 mod reminder_choices;
 mod reminder_defaults;
+mod series_delete;
 
 use crate::{Activities, Activity, Kind, Status};
 use askama::Template;
@@ -33,6 +35,7 @@ pub struct Pages {
     pub directory: Arc<PrincipalDirectory>,
     pub display: Arc<bilibi_datetime::DisplayPolicy>,
     pub locales: Arc<bilibi_locale::Locales>,
+    pub step_up: Arc<bilibi_step_up::StepUp>,
     pub db: Db,
 }
 impl Pages {
@@ -44,6 +47,7 @@ impl Pages {
             directory: self.directory.clone(),
             display: self.display.clone(),
             locales: self.locales.clone(),
+            step_up: self.step_up.clone(),
             db: self.db.clone(),
         }
     }
@@ -231,9 +235,33 @@ pub(crate) fn icon(kind: Kind) -> &'static str {
     }
 }
 
+/// An open activity's timing: overdue once its start or due time has
+/// passed, imminent inside `window` (the tenant's
+/// `Activities::imminent_window`). A closed one, a note and one with no time
+/// are neither.
+pub(crate) fn urgency(
+    activity: &Activity,
+    now: Timestamp,
+    window: jiff::SignedDuration,
+) -> Option<bilibi_ui::calendar::Urgency> {
+    use bilibi_ui::calendar::Urgency;
+    if activity.is_closed() {
+        return None;
+    }
+    let when = activity.starts_at.or(activity.due_at)?;
+    if when < now {
+        Some(Urgency::Overdue)
+    } else if when < now + window {
+        Some(Urgency::Imminent)
+    } else {
+        None
+    }
+}
+
 /// The status as a badge: closed ones neutral or green, open ones overdue in
-/// red and imminent (within a day) in amber.
-pub(crate) fn status_badge(activity: &Activity) -> Result<Html> {
+/// red and imminent (inside the tenant's `window`) in amber.
+pub(crate) fn status_badge(activity: &Activity, window: jiff::SignedDuration) -> Result<Html> {
+    use bilibi_ui::calendar::Urgency;
     let Some(status) = activity.status else {
         return render(Badge::status(BadgeKind::Plain, "Note"));
     };
@@ -243,11 +271,10 @@ pub(crate) fn status_badge(activity: &Activity) -> Result<Html> {
             _ => BadgeKind::Neutral,
         }
     } else {
-        let now = Timestamp::now();
-        match activity.starts_at.or(activity.due_at) {
-            Some(when) if when < now => BadgeKind::Danger,
-            Some(when) if when < now + jiff::SignedDuration::from_hours(24) => BadgeKind::Warning,
-            _ => BadgeKind::Neutral,
+        match urgency(activity, Timestamp::now(), window) {
+            Some(Urgency::Overdue) => BadgeKind::Danger,
+            Some(Urgency::Imminent) => BadgeKind::Warning,
+            None => BadgeKind::Neutral,
         }
     };
     render(Badge::status(kind, status.label()))
@@ -309,6 +336,10 @@ pub(crate) fn sentences(fields: &std::collections::BTreeMap<String, Vec<String>>
         .join(" ")
 }
 
+/// What a stale version says on a page.
+pub(crate) const STALE: &str =
+    "The activity changed since this page loaded. Reload before trying again.";
+
 /// What a refused contract call says on the page. `Unauthorized` and a
 /// step-up request go back to the host unchanged.
 pub(crate) enum Refusal {
@@ -326,9 +357,7 @@ pub(crate) fn refusal(
             return Err(error)
         }
         E::Forbidden | E::Backend(Error::Forbidden) => Refusal::Message(forbidden.into()),
-        E::Backend(Error::Conflict) | E::PlanRejected(_) => Refusal::Message(
-            "The activity changed since this page loaded. Reload before trying again.".into(),
-        ),
+        E::Backend(Error::Conflict) | E::PlanRejected(_) => Refusal::Message(STALE.into()),
         E::NotFound => Refusal::Message("The activity could not be found.".into()),
         E::InvalidInput(fields) => match fields.get("already_closed") {
             Some(_) => Refusal::Message("This activity is already closed.".into()),
@@ -351,6 +380,7 @@ impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         match operation {
             "list" | "detail" => Some("Activities"),
+            "feed" => Some("Calendar feed"),
             _ => None,
         }
     }
@@ -395,6 +425,7 @@ impl Pages {
                 record::Detail::new(self.shared(), scope, record_id(request)?, request.framed)
                     .await?,
             ),
+            "feed" => Box::new(feed::Feed::new(self.shared(), request.query)?),
             "company" | "person" | "record" => Box::new(panel::Panel::new(self.shared(), request)?),
             _ => return Err(Error::NotFound),
         })

@@ -347,6 +347,11 @@ impl Vocabulary {
         }
         Ok(())
     }
+    /// The module that declared `principal`, so a contribution naming a
+    /// principal can be held to its own module's.
+    pub fn principal_module(&self, principal: &str) -> Option<&'static str> {
+        self.principal_modules.get(principal).copied()
+    }
     /// Whether `principal` holds `key` in every tenant that has not denied it.
     pub fn standing(&self, principal: &str, key: &str) -> bool {
         self.standing

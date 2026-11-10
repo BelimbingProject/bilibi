@@ -121,6 +121,7 @@ fn status_badge(request: &RequestView) -> Result<Html> {
     let kind = match request.status.as_str() {
         "completed" => BadgeKind::Success,
         "refused" => BadgeKind::Neutral,
+        "failed" => BadgeKind::Danger,
         _ if request.late => BadgeKind::Danger,
         "running" => BadgeKind::Warning,
         _ => BadgeKind::Neutral,
@@ -131,13 +132,16 @@ fn status_badge(request: &RequestView) -> Result<Html> {
         "approved" => "Approved",
         "running" if request.late => "Running · late",
         "running" => "Running",
+        "failed" => "Failed",
         "completed" => "Completed",
         "refused" => "Refused",
         _ => "Unknown",
     };
     let label = if request.late
-        && !matches!(request.status.as_str(), "running" | "completed" | "refused")
-    {
+        && !matches!(
+            request.status.as_str(),
+            "running" | "failed" | "completed" | "refused"
+        ) {
         format!("{label} · late")
     } else {
         label.to_owned()
@@ -603,6 +607,16 @@ enum Dialog {
         errors: BTreeMap<String, Vec<String>>,
     },
     Approve,
+    RunAgain,
+}
+/// Why a request's background work stopped, in plain words, from its code
+/// (`cancelled_actor_refused`, `discarded_store_failed`, …).
+fn stopped_because(code: &str) -> &'static str {
+    match code {
+        "cancelled_actor_refused" => "the person it runs as is no longer allowed to run it",
+        code if code.starts_with("discarded_") => "a step kept failing until its retries ran out",
+        _ => "its background work was stopped",
+    }
 }
 struct RequestPage {
     pages: Pages,
@@ -743,7 +757,8 @@ impl RequestPage {
                 })
             }
             "request_approve" => self.dialog = Some(Dialog::Approve),
-            "close_modal" | "cancel_approve" => self.dialog = None,
+            "request_run_again" => self.dialog = Some(Dialog::RunAgain),
+            "close_modal" | "cancel_approve" | "cancel_run_again" => self.dialog = None,
             "verify" | "refuse" => {
                 let verify = value["type"] == "verify";
                 let values = params::form_values(value, NOTE_FORM);
@@ -845,6 +860,35 @@ impl RequestPage {
                     }
                 }
             }
+            "run_again" => {
+                if !matches!(self.dialog.take(), Some(Dialog::RunAgain)) {
+                    return Ok(());
+                }
+                let input = json!({"id": id, "version": self.version()});
+                match self
+                    .pages
+                    .contracts
+                    .submit(
+                        &call(scope, credential, "run_again", "base.privacy.request.run_again"),
+                        input,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        self.flash = Some((
+                            StatusKind::Success,
+                            "Running again. Every store that had not answered is asked again in the background.".into(),
+                        ))
+                    }
+                    Err(error) => {
+                        self.flash = Some(refusal(
+                            error,
+                            "You cannot run this request again.",
+                            "The request could not be run again.",
+                        )?)
+                    }
+                }
+            }
             "submit" => {
                 let input = json!({"id": id, "version": self.version()});
                 match self.pages.contracts.submit(&call(scope, credential, "submit", "base.privacy.erasure.submit"), input).await {
@@ -942,6 +986,14 @@ impl RequestPage {
                     attempts: 0,
                 });
             row.state = match progress.state.as_str() {
+                "pending" if request.status == "failed" => match progress.last_error.as_deref() {
+                    Some(code)
+                        if code.starts_with("cancelled_") || code.starts_with("discarded_") =>
+                    {
+                        format!("Stopped: {}", stopped_because(code))
+                    }
+                    _ => "Not answered yet".into(),
+                },
                 "pending" if progress.attempts > 0 => format!(
                     "Retrying ({})",
                     progress.last_error.as_deref().unwrap_or("failed")
@@ -974,6 +1026,15 @@ impl RequestPage {
                 event: "request_approve",
                 id: "privacy-approve",
                 body: Html::text("Approve"),
+                ..Button::default()
+            })?);
+        }
+        if can_approve && request.status == "failed" {
+            actions.push(&render(Button {
+                variant: ButtonVariant::Primary,
+                event: "request_run_again",
+                id: "privacy-run-again",
+                body: Html::text("Run again"),
                 ..Button::default()
             })?);
         }
@@ -1126,6 +1187,10 @@ impl RequestPage {
                         &request.finish_error,
                     ) {
                         (Some(reason), _, _) => format!("Refused: {reason}"),
+                        _ if request.failure.is_some() => format!(
+                            "Failed: {}. Fix the cause, then run it again.",
+                            stopped_because(request.failure.as_deref().unwrap_or_default())
+                        ),
                         (None, Some(at), _) => format!("Completed {}", when(&display, Some(at))),
                         (None, None, Some(code)) => format!(
                             "Finishing failed {} time(s) ({}); it is retried",
@@ -1147,6 +1212,8 @@ impl RequestPage {
             id: "privacy-request-stores-heading",
             description: if open {
                 "What each store holds about the person. Verifying confirms the email and phone matches; approving runs every store."
+            } else if request.status == "failed" {
+                "Run again asks every store that has not answered; the others keep their answers."
             } else {
                 "Every store mounted on this server must answer before the request completes."
             },
@@ -1330,6 +1397,28 @@ impl RequestPage {
                 )?,
                 ..Modal::default()
             })?,
+            Some(Dialog::RunAgain) => {
+                let (consequence, detail) = if request.kind == RequestKind::Erasure {
+                    (
+                        format!("Continue erasing person {}'s data?", request.person.get()),
+                        "Every store that has not answered erases what is approved, in the background, as you. Records under a legal hold are kept. This cannot be undone.".to_owned(),
+                    )
+                } else {
+                    (
+                        format!("Ask again for person {}'s data?", request.person.get()),
+                        "Every store that has not answered adds its records, in the background, as you.".to_owned(),
+                    )
+                };
+                render(ConfirmDialog {
+                    id: "privacy-run-again-confirm",
+                    consequence: &consequence,
+                    detail: &detail,
+                    confirm: "Run again",
+                    working: "Starting…",
+                    confirm_event: "run_again",
+                    cancel_event: "cancel_run_again",
+                })?
+            }
             Some(Dialog::Approve) => {
                 let (consequence, detail) = if request.kind == RequestKind::Erasure {
                     (

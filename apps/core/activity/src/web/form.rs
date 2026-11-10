@@ -115,6 +115,33 @@ impl Dialog {
             created: 0,
         }
     }
+    /// The dialog for a slot chosen on the calendar: a call or meeting
+    /// starts and ends there (a call in the future is planned, not held), a
+    /// task falls due at its start.
+    pub fn at(mut self, start: jiff::Timestamp, end: jiff::Timestamp, clock: &Clock) -> Self {
+        match self.kind {
+            Kind::Task => {
+                self.values
+                    .insert("due_at".into(), clock.local(Some(start)));
+            }
+            Kind::Call | Kind::Meeting => {
+                self.values
+                    .insert("starts_at".into(), clock.local(Some(start)));
+                self.values.insert("ends_at".into(), clock.local(Some(end)));
+                if self.kind == Kind::Call && start > jiff::Timestamp::now() {
+                    self.values.insert("status".into(), "planned".into());
+                }
+            }
+            Kind::Note => {}
+        }
+        self
+    }
+    /// Starts the dialog assigned to another account (a slot chosen on
+    /// their lane of the shared calendar); `None` leaves it the reader's.
+    pub fn assigned(mut self, assignee: Option<(i64, String)>) -> Self {
+        self.assignee = assignee;
+        self
+    }
     /// What the page says after a save.
     pub fn created_message(&self) -> String {
         let noun = self.kind.label();

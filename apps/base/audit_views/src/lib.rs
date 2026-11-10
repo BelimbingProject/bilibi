@@ -14,6 +14,7 @@
 mod actions;
 mod activity;
 mod diff;
+mod extensions;
 mod history;
 mod integrity;
 mod mutations;
@@ -30,6 +31,8 @@ use bilibi_ui::page::PageService;
 use std::sync::Arc;
 
 /// Opens the Audit screens and the dashboard feed.
+pub use extensions::{HistoryKind, HISTORY_KINDS, HISTORY_KINDS_PER_RECORD};
+
 pub const LIST: &str = "admin.audit.log.list";
 /// Retains and releases an action. The control is shown only to holders, and
 /// the write asks again.
@@ -170,6 +173,7 @@ inventory::submit! {
                     db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
                     display: services.get("base/datetime.display")?,
                     locales: services.get("base/locale.locales")?,
+                    extensions: Arc::new(extensions::by_record()?),
                 }))))
             } },
             Service { id: "base/audit_views.activity", factory: |services| {

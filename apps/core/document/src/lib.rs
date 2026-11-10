@@ -577,8 +577,10 @@ impl Documents {
     /// Removes the document with its revisions, links and marks in the
     /// caller's transaction, fenced on `version`. Its files remain attached
     /// and readable until `base/artifacts` deletes them as one protected
-    /// batch once it commits. A retained or held revision refuses the whole
-    /// batch, leaving every file and all metadata available for a retry.
+    /// batch once it commits. A retained or held revision refuses the delete
+    /// before anything is marked (`WriteError::Retained` or `LegalHold`, in
+    /// `preview_delete` too), so the document stays readable with its full
+    /// history; the later batch check is the same fence under its own locks.
     pub async fn delete(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -667,6 +669,18 @@ impl Documents {
         let scope = self.fresh(&**client, scope).await?;
         let ids: Vec<i64> = documents.iter().map(|d| d.id).collect();
         store::latest_revisions(&**client, &scope, &ids).await
+    }
+    /// Which of `ids` the reader holds `permission` (`"manage"` or
+    /// `"download"`) on, in one read, for the pages that draw a control per row.
+    pub(crate) async fn granted(
+        &self,
+        scope: &Scope,
+        ids: &[i64],
+        permission: &str,
+    ) -> Result<std::collections::HashSet<i64>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        library::granted(&**client, &scope, ids, permission).await
     }
     /// The records the document relates to, oldest link first.
     pub async fn links(&self, scope: &Scope, id: i64) -> Result<Vec<Link>> {
@@ -1088,6 +1102,7 @@ inventory::submit! { Module {
         ("core-document-003-expiry-sharing-custom", include_str!("../migrations/003-expiry-sharing-custom.sql")),
         ("core-document-004-email-outbox", include_str!("../migrations/004-email-outbox.sql")),
         ("core-document-005-governance-references", include_str!("../migrations/005-governance-references.sql")),
+        ("core-document-006-email-job", include_str!("../migrations/006-email-job.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
@@ -1116,6 +1131,8 @@ inventory::submit! { Module {
             authentication: s.get("base/tenancy.authentication")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
         }))))
+    }}, Service { id: email::ENDED, factory: |_| {
+        Ok(Arc::new(bilibi_queue::EndingService(Arc::new(email::EmailEnded))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
     }}, Service { id: web::FILES, factory: |s| {

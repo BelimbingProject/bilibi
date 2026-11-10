@@ -50,6 +50,30 @@ impl FileBody {
             disposition: Disposition::Attachment,
         }
     }
+    /// The media types a preview shows in place: pictures every browser
+    /// draws, PDF and plain text. Never markup or SVG, which can carry script,
+    /// a form or a link that navigates the app's own origin, and never an
+    /// Office file, which a browser cannot show.
+    pub const PREVIEW_TYPES: &'static [&'static str] = &[
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+        "text/plain",
+    ];
+    /// Whether `content_type` is one a preview may show (`PREVIEW_TYPES`),
+    /// for deciding whether to offer one.
+    pub fn previewable(content_type: &str) -> bool {
+        Self::PREVIEW_TYPES.contains(&content_type)
+    }
+    /// The bytes to show in place in a `FilePreview` frame, or `None` for a
+    /// type a preview does not show. An owner serves a preview route through
+    /// this and answers not found on `None`, so the rule "never an SVG or HTML
+    /// upload" is the shared contract and not each owner's list.
+    pub fn preview(bytes: Vec<u8>, content_type: &str, filename: &str) -> Option<Self> {
+        Self::previewable(content_type).then(|| Self::inline(bytes, content_type, filename))
+    }
     pub fn inline(bytes: Vec<u8>, content_type: &str, filename: &str) -> Self {
         Self {
             bytes,

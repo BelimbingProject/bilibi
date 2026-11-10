@@ -1,7 +1,8 @@
 //! Manual running-service walkthrough of data-subject requests (ADR 05):
 //! access and erasure through every mounted store, with the queue running.
 //! Explicit disposable DB only; prints real outcomes and durable state for
-//! inspection. No assertions or test harness.
+//! inspection. Invitation regressions also check the exported and persisted
+//! state, failing the executable on a contract violation; no test harness.
 use bilibi_artifacts::{Artifacts, Reference};
 use bilibi_authz::grants::Grants;
 use bilibi_base::media::{AttachmentSubject, Media, Rules, Upload};
@@ -24,8 +25,12 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[path = "support/case_files.rs"]
+mod case_files;
 #[path = "support/erasure.rs"]
 mod erasure_approval;
+#[path = "support/invitations.rs"]
+mod invitations;
 
 // The same browser-bound write authority as the masking/export walkthroughs.
 struct Browser<'a> {
@@ -279,6 +284,7 @@ async fn main() -> Result<()> {
     let one = OrganisationId::new(1)?;
     let ada = PersonId::new(1)?;
     let kim = PersonId::new(2)?;
+    invitations::prepare(&app, &mut client, &admin, &boundary, &privacy).await?;
 
     println!("== stage 7 regression: detached, shared and held addresses");
     use bilibi_core::address::{AddressInput, AddressService, AttachmentInput, PartyId};
@@ -443,6 +449,49 @@ async fn main() -> Result<()> {
         attachment.public_id, document.id
     );
 
+    println!("== case files: attachments on a record about a person (#478)");
+    case_files::install(&client, media.clone()).await?;
+    client
+        .batch_execute("INSERT INTO walkthrough_cases(tenant_id,id,person_id) VALUES(1,101,1),(1,202,2) ON CONFLICT DO NOTHING")
+        .await?;
+    for (case, filename, text) in [
+        ("101", "ada-case-note.txt", "Ada case note\n"),
+        ("202", "kim-case-note.txt", "Kim case note\n"),
+    ] {
+        let subject = AttachmentSubject {
+            kind: case_files::CASE,
+            id: case,
+        };
+        let file = media
+            .upload_attachment(
+                &mut client,
+                &admin,
+                subject,
+                Upload {
+                    filename: filename.into(),
+                    bytes: text.as_bytes().to_vec(),
+                },
+                Rules::default(),
+            )
+            .await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("privacy.walkthrough.case_file"),
+            )
+            .await?;
+        media
+            .submit_attachments(&mut tx, &admin, subject, &[file.public_id.as_str()])
+            .await?;
+        tx.commit().await?;
+        println!(
+            "case {case} ({}): attachment {} submitted on subject {}",
+            if case == "101" { "Ada" } else { "Kim" },
+            file.public_id,
+            case_files::CASE
+        );
+    }
+
     // Queue workers, as the app runs them.
     let executor = bilibi_base::queue::Executor::from_services(
         &app.services,
@@ -584,6 +633,16 @@ async fn main() -> Result<()> {
         .await?;
     println!("received {} due {}", access.id, access.due_at);
     for (store, label, located) in privacy.locate(&client, &admin, access.id).await? {
+        if store == "core/portal.invitations"
+            && (located.kinds.len() != 1
+                || located.kinds[0].by_person != 5
+                || located.kinds[0].by_identifier != 1
+                || !located.candidates.is_empty())
+        {
+            return Err(
+                "invitation locate lost linked rows or offered another Person's record".into(),
+            );
+        }
         println!("  locate {store} ({label}): {located:?}");
     }
     let access = privacy
@@ -621,12 +680,19 @@ async fn main() -> Result<()> {
                 zip.by_name("export.json")?.read_to_string(&mut text)?;
                 serde_json::from_str(&text).unwrap_or(Value::Null)
             };
+            invitations::disclosure(&bundle)?;
             for store in bundle["stores"].as_array().into_iter().flatten() {
                 if store["store"] == "core/user.accounts" {
                     println!("SCIM access disclosure: {}", store["records"]["accounts"]);
                 }
                 if store["store"] == "core/address.addresses" {
                     println!("detached address disclosure: {}", store["records"]);
+                }
+                if store["store"] == "wt_cases/cases.files" {
+                    println!(
+                        "case files disclosure: {} files {}",
+                        store["records"], store["files"]
+                    );
                 }
             }
             let stores: Vec<String> =
@@ -665,6 +731,10 @@ async fn main() -> Result<()> {
          WHERE event='artifacts.read' ORDER BY id DESC LIMIT 2",
     )
     .await?;
+    println!(
+        "case files of another person, under Ada's grant: {:?}",
+        case_files::refused()
+    );
     println!("== a reader who sees a field masked needs a reason for the export");
     client
         .batch_execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,4,'persons','email','mask')")
@@ -694,6 +764,42 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("== due notices: an open request due tomorrow");
+    let portable = privacy
+        .receive(
+            &mut client,
+            &admin,
+            NewRequest {
+                kind: RequestKind::Portability,
+                person: ada,
+                identifiers: Vec::new(),
+                company: one,
+            },
+        )
+        .await?;
+    let portable = privacy
+        .verify(
+            &mut client,
+            &admin,
+            portable.id,
+            portable.version,
+            "Identity checked",
+            &[],
+        )
+        .await?;
+    let portable = privacy
+        .approve(&mut client, &admin, portable.id, portable.version)
+        .await?;
+    let portable = settle(&privacy, &client, &admin, portable.id, 60).await?;
+    let (_, bytes, _) = privacy
+        .request_document(&mut client, &admin, portable.id, None)
+        .await?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let bundle: Value = serde_json::from_reader(zip.by_name("export.json")?)?;
+    invitations::disclosure(&bundle)?;
+    println!(
+        "invitation portability: linked invitation and registration exported without identifiers"
+    );
+
     let open = privacy
         .receive(
             &mut client,
@@ -1055,6 +1161,7 @@ async fn main() -> Result<()> {
     certificate(&privacy, &mut client, &admin, erasure.id).await?;
 
     println!("== state after erasure");
+    invitations::erased(&client).await?;
     for row in &reservations {
         let id: String = row.get("public_id");
         let path = std::path::Path::new(row.get::<_, &str>("storage_root")).join(&id);
@@ -1138,6 +1245,16 @@ async fn main() -> Result<()> {
     rows(&client, "requests of person 1", "SELECT row_to_json(r)::text FROM (SELECT id,kind,status,identifiers,verification,refused_reason,export_artifact,erased_at IS NOT NULL AS erased FROM base_privacy_requests WHERE person_id=1 ORDER BY id) r").await?;
     let files = walk(std::path::Path::new(&root));
     println!("files under the media root containing the scan: {}", files);
+    rows(&client, "case attachment", "SELECT row_to_json(a)::text FROM (SELECT subject_id AS case_id,state,erased_at IS NOT NULL AS erased,bytes_removed_at IS NOT NULL AS bytes_removed,EXISTS (SELECT 1 FROM base_media_assets m WHERE m.id=a.media_asset_id) AS asset_row FROM base_media_attachments a WHERE a.subject_type='wt_cases.case' ORDER BY a.id) a").await?;
+    println!(
+        "files under the media root holding Ada's case note: {}, Kim's: {}",
+        holding(std::path::Path::new(&root), b"Ada case note"),
+        holding(std::path::Path::new(&root), b"Kim case note")
+    );
+    println!(
+        "case files of another person, under Ada's grants: {:?}",
+        case_files::refused()
+    );
 
     println!("== read-only search for erased values");
     search(

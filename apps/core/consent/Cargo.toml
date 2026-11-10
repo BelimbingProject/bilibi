@@ -16,6 +16,7 @@ bilibi-locale.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-party-ids.workspace = true
+bilibi-personal-data.workspace = true
 bilibi-person.workspace = true
 bilibi-picklists.workspace = true
 bilibi-principal-directory.workspace = true
@@ -24,8 +25,22 @@ bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true
 bilibi-user.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
 inventory.workspace = true
 jiff.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio-postgres.workspace = true
+
+[dev-dependencies]
+bilibi-base.workspace = true
+bilibi-core.workspace = true
+bilibi-privacy.workspace = true
+bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+bilibi-web = { path = "../../web" }
+sha1.workspace = true
+bilibi-workflow.workspace = true
+tokio.workspace = true
+zip.workspace = true

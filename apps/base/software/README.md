@@ -99,7 +99,7 @@ The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) keeps its 
 
 ## Jobs and upgrades
 
-**Only install and undo jobs are queued.** One job per tenant can be queued or running. Jobs finish as `done`, `failed`, `cancelled` or `interrupted`; their result explains the outcome.
+**Only install and undo jobs are queued.** One job per tenant can be queued or running. Jobs finish as `done`, `failed`, `cancelled` or `interrupted`; their result explains the outcome. A running job whose installer is gone for good would hold that rule for ever, so the installer marks it alive every half minute (`heartbeat_at`) and the server's settle loop (every 15 seconds) ends a running job that has not begun its pause (`paused_at` empty) as `interrupted` once its installer has been silent for `software.installer_silence_minutes` (20; 5–1440, server owner only). Nothing changed, so the owner starts the install again; the job is then audited and announced like any outcome. A job whose installer never reported is left to it, and one past its pause is left to the installer's recovery, which alone knows how far the switch got.
 
 Install steps are *fetch, backup, migrate, switch, verify*, with *download* first for a GitHub file. Undo uses *backup, restore* (when needed), *switch, verify*. The first `backup` pauses the instance; cancellation is refused after it starts. The installer backs up before updating, checks the new program, and automatically switches back on a failed check. Undo restores the earlier backup when migrations changed the database; its review names the backup time and the page separately refreshes the count of later audited changes. The committed review records `lost_at_commit`.
 
@@ -120,8 +120,9 @@ The separate installer (`apps/installer`) reads and writes the durable job table
 
 1. Listen on `bilibi_software_jobs` and poll on startup. Claim the oldest queued install or undo with a conditional update; ignore installs whose download step has not finished.
 2. Mark each step running, then done, failed or skipped, with timestamps and a plain `detail.message`. Send `NOTIFY` after changes. A switch-back step may be appended after failure.
-3. Lock the job before starting the pausing step. Honour `cancel_requested_at` there, or start the pause under the same lock, so cancel cannot cross it.
-4. Finish with state, time and result. Result keys include `release`, `previous_release`, `migrated`, `backup`, `backup_at`, composition and `changes`, `pause_seconds`, and a plain `message`. An undo with a restore records `lost: {since, changes, by_kind}`; status adds its loss sentence.
+2a. While it works on a job, write `heartbeat_at = now()` every 30 seconds (its own connection), so the server can tell a silent installer from a slow step.
+3. Lock the job before starting the pausing step. Honour `cancel_requested_at` there, or start the pause under the same lock, so cancel cannot cross it. In the same transaction set `paused_at`: a restart reads it to know the service was stopped, never a step's state.
+4. Finish with state, time and result, and skip the steps not reached in that same transaction, so a job is never found running with its steps already skipped. Result keys include `release`, `previous_release`, `migrated`, `backup`, `backup_at`, composition and `changes`, `pause_seconds`, and a plain `message`. An undo with a restore records `lost: {since, changes, by_kind}`; status adds its loss sentence.
 5. Apply `plugins/enabled.json` from the release in the transaction that finishes the job and record `plugins: {before, after}`. Undo restores `before`. An absent file preserves existing add-ons.
 6. The server settles finished outcomes every 15 seconds and at startup through `MutationBoundary` as a `base/software.job` change under `software.finished`, attributed to the recorded worker. After commit it re-proves the requester’s live account through `Authentication` and sends a `software.job` notice. Missing accounts get no notice; notification failure never prevents settlement. Notice bodies are bounded to 900 characters.
 

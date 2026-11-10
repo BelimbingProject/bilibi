@@ -114,6 +114,25 @@ and uniqueness policy remain separate extensions.
 Impersonation is refused until Tenancy supplies a sealed impersonator facet;
 caller-supplied audit attribution cannot create execution authority.
 
+## When a job ends without finishing
+
+**A worker whose owner keeps a record waiting on its job declares an `EndingBinding` under `ENDINGS`; Queue then tells the owner once when that job is cancelled or discarded.** Without one, a record waiting on a job that Queue cancelled (actor refused, arguments refused, the handler's own cancel, an owner cancel) or discarded (out of attempts) waits for ever.
+
+| Part | Rule |
+| --- | --- |
+| Contribution | `Contribution::new(ENDINGS, <worker id>, provenance, &EndingBinding { service, principal, capability })` from the worker's own module |
+| `service` | The owner's service, resolving to `EndingService(Arc<dyn Ending>)` |
+| `principal` | A system principal the same module declares; boot refuses another module's |
+| `capability` | Inside that principal's declaration; decided (`authorize_system`) in the telling transaction. Give the principal a standing grant (`bilibi_authz::STANDING_GRANTS`) so no tenant has to switch the way out on; a tenant's deny still wins |
+| Call | `Ending::ended(tx, scope, &Ended)`: `scope` is the principal's sealed scope in the job's tenant, `Ended` has the job ID, worker, `State::Cancelled` or `State::Discarded`, failure code and validated arguments, never the actor |
+| Transaction | One audited transaction per job, attributed to `System · <principal>` (action `queue.job.ended`); the owner's writes and the job's `ending='told'` commit together, so the owner is told exactly once |
+| Idempotent | Level-triggered: return `Ok` when nothing waits on the job any more (the record moved on or is gone) |
+| Failure | An error, panic or timeout rolls back and is tried again with the job backoff (`min(3600, 2^n)` seconds), 25 times, then `ending='failed'`, counted on System Info |
+| Retry | `retry_for` makes the job alive again and clears its ending, so a second ending is told again |
+
+- Each executor runs one endings loop beside its slots, every poll, up to 100 jobs; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
+- Move the waiting record to a named state through the owner's normal path (a Workflow edge for a business status), and give people a permission-gated way to run it again. `base/privacy` is the first user: a request job that ends moves the request `running → failed`, as `privacy-monitor`.
+
 ## Running proof (no unit tests)
 
 Use an explicitly disposable PostgreSQL database, never the normal development
@@ -189,4 +208,4 @@ disposable specimen DB.
 
 User job scopes carry `Channel::Job` through `Execution::scope`, `Execution::identity` and live reproof. Passing a job scope directly to an owner facade keeps background restrictions, including Workflow's refusal to approve.
 
-Queue's implementation modules are private. Import `Execution`, `Executor`, `Config`, handlers, observers and job-state types from `bilibi_queue`; use its root `lookup`, `states`, `cancel_for`, `retry_for` and `validate_arguments` APIs. Their authorization and lease rules are unchanged.
+Queue's implementation modules are private. Import `Execution`, `Executor`, `Config`, handlers, observers, endings and job-state types from `bilibi_queue`; use its root `lookup`, `states`, `cancel_for`, `retry_for` and `validate_arguments` APIs. Their authorization and lease rules are unchanged.

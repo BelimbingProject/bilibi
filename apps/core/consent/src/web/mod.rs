@@ -101,12 +101,13 @@ pub(crate) fn event(value: &Value) -> Result<&str> {
         .ok_or(Error::Invalid)
 }
 
-/// What a suppression is about: its address, or the person.
+/// What a suppression is about: its address, or the person. A privacy
+/// erasure leaves an address suppression with neither.
 pub(crate) fn subject(suppression: &Suppression) -> String {
     match (&suppression.contact.address, suppression.contact.person) {
         (Some(address), _) => address.clone(),
         (None, Some(person)) => format!("Person #{}", person.get()),
-        (None, None) => String::new(),
+        (None, None) => "Erased address".into(),
     }
 }
 

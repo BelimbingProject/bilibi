@@ -79,6 +79,7 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 | A resolved day (working, rest, off, holiday) and a month of them, Monday first | `day_tile` and `day_month` in `templates/components.html`, through `DayTile`, `DayMonth` and `DayKind` in `src/components.rs` | `apps/base/ui` |
 | Calendar (day, week, month and shared views of records with a start and end; drag to move, drag the edge to resize, Move… for keyboard and touch) | `templates/calendar.html` and `src/calendar.rs` (`Calendar`, `CalendarState`, `CalendarItem`, `CalendarMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
 | Safe Markdown reading view beside the existing plain-text textarea | `Markdown` in `src/markdown.rs`; syntax and trust boundary in `apps/base/ui/README.md` | `apps/base/ui` |
+| File preview (an image, PDF or plain text from the owner's own authorized route, in a modal) | `file_preview` in `templates/components.html`, through `FilePreview` in `src/file_preview.rs`, served with `FileBody::preview` | `apps/base/ui` |
 | Status board (columns by a status, cards dragged between them; Move… for keyboard and touch) | `templates/board.html` and `src/board.rs` (`Board`, `BoardState`, `BoardCard`, `BoardMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
 
 - Name variants through the enums (`ButtonVariant`, `BadgeKind`, `PageVariant`), not class strings.
@@ -206,12 +207,14 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 *Built.* A calendar is another way to look at records that already have a list and a record page; it keeps nothing of its own. See `apps/base/ui/README.md` for the owner contract.
 
 - **One door, many keys.** An item links to its record's one page. Dragging, resizing, the Move dialog and an AI agent all reach the same operation of the owning module, with the record's version; the calendar only asks. A refused or stale move leaves the item where it was and the page says why in the owner's words.
-- **Views.** Day, week (Monday first), month and shared (one column per person or resource, at most 20). The address holds the view, the date and the lanes, so Back, reload and a shared link reopen the same view.
+- **Views.** Day, week (Monday first), month, year and shared (one column per person or resource, at most 20). The year is twelve small months; each day shows how many items it holds and links to its day view. The address holds the view, the date and the lanes, so Back, reload and a shared link reopen the same view.
 - **Time.** Times are drawn in the display zone, and the page says which. A drop names a wall-clock time, so a move across a daylight-saving change keeps it. All-day items are dates.
 - **Colour is a kind, not a status.** An item's colour is a `cat-1..8` data role on its left edge, and the kind is also written in words. A day mark uses the `day-*` tints with its word.
+- **Late and soon are marks, not kinds.** The owner may mark an open item `Overdue` (danger tint) or `Due soon` (warning tint) with `Urgency`; the tint sits on the item's box, the kind colour stays on its left edge, and the word is always written beside the time. A board card carries the same two marks.
+- **Create from a free slot.** A calendar the viewer may create in (`Calendar::creatable`) reports `calendar_slot` for a click or a drag down a free time (a tap on touch) and for a click, a tap or Enter on an empty day; the owner opens its own create dialog with the time filled in. A viewer who may not create gets no such events, and the page says what to do beside the title.
 - **Hidden, not refused.** Someone who may not update a record sees no drag handle and no Move action on it.
 - **Keyboard, touch and small screens.** Every movable item has a Move action that opens a dialog with date and time fields; the month is a grid with arrow keys. On a phone the grids become an agenda list, drag is off on coarse pointers, and Move is the path.
-- **Bounded.** At most 500 items are drawn; past that the calendar asks for a narrower filter.
+- **Bounded.** At most 500 items are drawn; past that the calendar asks for a narrower filter. The year is the exception: its numbers come from the owner's count of each day, so it is right however many items the year holds.
 
 ## Board
 

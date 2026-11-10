@@ -196,6 +196,7 @@ impl Panel {
         clock: &Clock,
         activity: &Activity,
         names: &HashMap<i64, String>,
+        soon: jiff::SignedDuration,
     ) -> Result<FlexRow> {
         let id = activity.id.to_string();
         let mut kind = render(Icon {
@@ -216,7 +217,7 @@ impl Panel {
                 })?,
             )
             .slot("kind", kind)
-            .slot("status", status_badge(activity)?)
+            .slot("status", status_badge(activity, soon)?)
             .slot(
                 "assignee",
                 Html::text(
@@ -259,9 +260,10 @@ impl Panel {
             .await?;
         let users: Vec<i64> = page.entries.iter().map(|a| a.assignee_user_id).collect();
         let names = self.pages.names(scope, &users).await?;
+        let soon = self.pages.activities.imminent_window(scope).await?;
         let mut rows = Vec::with_capacity(page.entries.len());
         for activity in &page.entries {
-            rows.push(self.row(scope, &clock, activity, &names).await?);
+            rows.push(self.row(scope, &clock, activity, &names, soon).await?);
         }
         let anchor = self.anchor.clone();
         let mut actions = Html::EMPTY;

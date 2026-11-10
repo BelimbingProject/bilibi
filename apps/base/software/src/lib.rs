@@ -91,6 +91,10 @@ const ACTION_NOTIFIED: &str = "software.notified";
 const NOTICE_BODY_CHARS: usize = 900;
 /// How often the server records the outcomes workers wrote.
 const SETTLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+/// How many minutes the installer of a running job may stay silent, before it
+/// paused the service, until the job ends `interrupted`.
+pub const INSTALLER_SILENCE_MINUTES: &str = "software.installer_silence_minutes";
+const DEFAULT_SILENCE_MINUTES: i64 = 20;
 
 bilibi_step_up::declare!(
     "base/software",
@@ -306,6 +310,32 @@ impl Software {
         }
         Ok(settled)
     }
+    /// Ends the running jobs whose installer has been silent for
+    /// `software.installer_silence_minutes` before it paused the service, as
+    /// `interrupted`, so one installer that is gone for good cannot hold the
+    /// one-active-job rule for ever. The installer marks its job alive every
+    /// half minute (`apps/installer`); `settle` then records and announces the
+    /// outcome like any other. Returns how many jobs were ended.
+    pub async fn end_silent(&self) -> Result<usize> {
+        let mut client = self.db.get().await?;
+        let client: &mut tokio_postgres::Client = &mut client;
+        let minutes = self
+            .settings
+            .get_global(&*client, INSTALLER_SILENCE_MINUTES)
+            .await?
+            .as_i64()
+            .filter(|minutes| (5..=1440).contains(minutes))
+            .unwrap_or(DEFAULT_SILENCE_MINUTES) as i32;
+        let mut ended = 0;
+        for (tenant, id) in jobs::silent(&*client, minutes).await? {
+            let tx = client.transaction().await?;
+            if jobs::end_silent(&tx, tenant, id, minutes).await? {
+                ended += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok(ended)
+    }
     /// Tells the person who asked how their job ended after the outcome is
     /// recorded, so a notification that
     /// cannot be sent never keeps a job unsettled. Their account is
@@ -374,6 +404,9 @@ impl Software {
         loop {
             if *stop.borrow() {
                 return Ok(());
+            }
+            if let Err(error) = self.end_silent().await {
+                eprintln!("warning: silent software jobs were not ended this round: {error:?}");
             }
             if let Err(error) = self.settle().await {
                 eprintln!("warning: software outcomes were not settled this round: {error:?}");
@@ -812,6 +845,14 @@ inventory::submit! { Contribution::new(DEFINITIONS, github::REFRESH_MINUTES, pro
         help: "15 means the release list is refreshed at most every 15 minutes, and again when you choose Refresh. Server owner only.",
         capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
+inventory::submit! { Contribution::new(DEFINITIONS, INSTALLER_SILENCE_MINUTES, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(DEFAULT_SILENCE_MINUTES), nullable: false, encrypted: false,
+    minimum: Some(5.0), maximum: Some(1440.0),
+    validator: None,
+    editor: Some(Editor { group: "Software", label: "Installer silence before a job is interrupted (minutes)",
+        help: "20 means a running install or undo whose installer has not answered for 20 minutes, and has not yet stopped the service, is ended as interrupted so you can start again. Server owner only.",
+        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+})) }
 // The Software page: server owners' view of what runs and the way to change
 // it. Seeing it needs the platform `view` capability; the owner's facade
 // rechecks `manage` on every write.
@@ -844,7 +885,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql"))],
+        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql")), ("base-software-006-installer-heartbeat", include_str!("../migrations/006-installer-heartbeat.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let software = Arc::new(Software {

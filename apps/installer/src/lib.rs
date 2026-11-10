@@ -26,6 +26,9 @@ use tokio_postgres::{AsyncMessage, Client, NoTls};
 const SCAN_EVERY: Duration = Duration::from_secs(30);
 /// After a lost database connection or a failed scan, before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
+/// How often a job being worked on is marked alive (`heartbeat_at`), well
+/// inside the shortest silence the app accepts.
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
 pub struct Installer {
     layout: Layout,
@@ -161,6 +164,10 @@ impl Installer {
                 None => return Ok(false),
             },
         };
+        // Beside the work, on a connection of its own: a step can run for
+        // minutes, and the app ends a running job whose installer has been
+        // silent too long. Dropped, it stops with the job.
+        let _alive = Heartbeat(self.heartbeat(job.tenant, job.id));
         let mut run =
             flow::Run::new(client, &self.layout, &self.service, &self.pg, job, resumed).await?;
         if resumed && run.resume().await? {
@@ -178,6 +185,33 @@ impl Installer {
             }
         }
         Ok(true)
+    }
+    /// Marks the job alive every [`HEARTBEAT_EVERY`] until stopped. A write
+    /// that fails (the database is restarting, or a restore has the job
+    /// tables empty) is tried again with a fresh connection next time.
+    fn heartbeat(&self, tenant: i64, id: i64) -> tokio::task::JoinHandle<()> {
+        let url = self.database_url.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((client, connection)) = tokio_postgres::connect(&url, NoTls).await {
+                    let connection = tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    while client
+                        .execute(
+                            "UPDATE base_software_jobs SET heartbeat_at=now() WHERE tenant_id=$1 AND id=$2 AND state='running'",
+                            &[&tenant, &id],
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        tokio::time::sleep(HEARTBEAT_EVERY).await;
+                    }
+                    connection.abort();
+                }
+                tokio::time::sleep(HEARTBEAT_EVERY).await;
+            }
+        })
     }
     /// A restore cut off by a restart may have left the job tables empty,
     /// holding only the backup's rows, or gone, so the job cannot be found
@@ -209,5 +243,13 @@ impl Installer {
             finished = true;
         }
         Ok(finished)
+    }
+}
+
+/// Stops a job's heartbeat when the job's work returns, however it returns.
+struct Heartbeat(tokio::task::JoinHandle<()>);
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }

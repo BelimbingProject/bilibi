@@ -11,13 +11,14 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::SystemTime,
 };
 use tokio::sync::broadcast;
 use tokio_postgres::GenericClient;
 
 mod contributions;
+mod ended;
 mod expiry;
 mod sign_ins;
 mod web;
@@ -26,6 +27,7 @@ pub use contributions::{
     LIVE_SOCKETS_PER_CUSTOMER_KEY, LIVE_SOCKETS_PER_SESSION_KEY, LIVE_SOCKETS_TOTAL_KEY, MANAGE,
     TOUCH_KEY,
 };
+pub use ended::{EndNotice, Ended, Ending, NoticeFuture, TenantProof};
 use sign_ins::SIGN_IN_HISTORY_DAYS;
 pub use sign_ins::{
     client_name, NewDevice, PreviousSignIn, SignInAlertRecord, SignInExport, SignInRecord,
@@ -245,6 +247,7 @@ pub struct Sessions {
     terminations: broadcast::Sender<Terminated>,
     factors: Option<Arc<bilibi_step_up::StepUp>>,
     credential_revokers: RwLock<BTreeMap<&'static str, Arc<dyn CredentialRevoker>>>,
+    end_notice: OnceLock<Arc<dyn EndNotice>>,
 }
 impl Sessions {
     pub fn new(authentication: Arc<Authentication>, settings: Arc<Settings>) -> Self {
@@ -255,6 +258,7 @@ impl Sessions {
             terminations,
             factors: None,
             credential_revokers: RwLock::new(BTreeMap::new()),
+            end_notice: OnceLock::new(),
         }
     }
     /// Wire the factor registry for account-wide revocation. A standalone
@@ -334,7 +338,11 @@ impl Sessions {
             })
         })
         .await?;
-        Self::end_user_sessions(tx.sql(), tx.context().tenant, user, except).await
+        let ending = match account.reason {
+            CredentialRevocationReason::SignedOut => Ending::SignedOut,
+            _ => Ending::Terminated,
+        };
+        self.end_user_sessions(tx, user, except, ending).await
     }
     /// The current operator policy. Read on every check, so a changed lifetime
     /// applies to the next request without a restart.
@@ -474,7 +482,10 @@ impl Sessions {
     /// not tenant-owned, and the dashboard asks the operational question.
     pub async fn count(&self, client: &impl GenericClient) -> Result<i64> {
         Ok(client
-            .query_one("SELECT count(*) FROM sessions", &[])
+            .query_one(
+                "SELECT count(*) FROM sessions WHERE ended_reason IS NULL",
+                &[],
+            )
             .await?
             .get(0))
     }
@@ -492,7 +503,7 @@ impl Sessions {
         };
         let total: i64 = client
             .query_one(
-                "SELECT count(*) FROM sessions WHERE $1::text IS NULL OR ip_address ILIKE $1 OR user_agent ILIKE $1",
+                "SELECT count(*) FROM sessions WHERE ended_reason IS NULL AND ($1::text IS NULL OR ip_address ILIKE $1 OR user_agent ILIKE $1)",
                 &[&search],
             )
             .await?
@@ -508,7 +519,7 @@ impl Sessions {
             (SortBy::UserAgent, false) => "user_agent ASC NULLS LAST, id ASC",
         };
         let sql = format!(
-            "SELECT id,tenant_id,user_id,ip_address,user_agent,floor(extract(epoch FROM now()-last_activity))::bigint FROM sessions WHERE $1::text IS NULL OR ip_address ILIKE $1 OR user_agent ILIKE $1 ORDER BY {order} LIMIT $2 OFFSET $3"
+            "SELECT id,tenant_id,user_id,ip_address,user_agent,floor(extract(epoch FROM now()-last_activity))::bigint FROM sessions WHERE ended_reason IS NULL AND ($1::text IS NULL OR ip_address ILIKE $1 OR user_agent ILIKE $1) ORDER BY {order} LIMIT $2 OFFSET $3"
         );
         let limit = query.page_size as i64;
         let offset = query.page.saturating_sub(1).saturating_mul(query.page_size) as i64;
@@ -527,229 +538,6 @@ impl Sessions {
                 .collect(),
             total_entries: total.max(0) as u64,
         })
-    }
-    /// An operator ends one listed session. The caller already authorized
-    /// `admin.system.session.manage`; the audit row records whose session ended
-    /// and from where, never the token. Announced after the commit, so a rolled
-    /// back termination signs nobody out.
-    pub async fn terminate(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        id: &str,
-        current: &str,
-    ) -> Result<Termination> {
-        if id.is_empty() || current.is_empty() {
-            return Err(Error::Invalid);
-        }
-        if id == current {
-            return Ok(Termination::CurrentSession);
-        }
-        let id = id.to_owned();
-        let ended = tx
-            .mutate(move |sql| {
-                Box::pin(async move {
-                    let row = sql.query_opt("SELECT tenant_id,user_id,ip_address,user_agent,last_activity::text FROM sessions WHERE id=$1 FOR UPDATE", &[&id]).await?;
-                    let Some(row) = row else {
-                        return Ok((None, Vec::new()));
-                    };
-                    sql.execute("DELETE FROM sessions WHERE id=$1", &[&id])
-                        .await?;
-                    let user: i64 = row.get(1);
-                    let change = Change {
-                        kind: "session".into(),
-                        id: user,
-                        old: json!({
-                            "tenant_id": row.get::<_, i64>(0), "user_id": user,
-                            "ip_address": row.get::<_, Option<String>>(2),
-                            "user_agent": row.get::<_, Option<String>>(3),
-                            "last_activity": row.get::<_, String>(4), "payload": "[redacted]",
-                        }),
-                        new: json!({}),
-                    };
-                    Ok((Some(id), vec![change]))
-                })
-            })
-            .await?;
-        match ended {
-            Some(id) => {
-                let sessions = self.terminations.clone();
-                tx.after_commit(move || {
-                    let _ = sessions.send(Terminated { id, redirect: None });
-                });
-                Ok(Termination::Terminated)
-            }
-            None => Ok(Termination::NotFound),
-        }
-    }
-    /// The account holder ends one of their own other sessions. Ownership is
-    /// part of the locked read and delete, not trusted from mounted page state.
-    async fn terminate_own(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        scope: &Scope,
-        id: &str,
-        current: &str,
-    ) -> Result<Termination> {
-        if id.is_empty() || current.is_empty() {
-            return Err(Error::Invalid);
-        }
-        if id == current {
-            return Ok(Termination::CurrentSession);
-        }
-        if scope.impersonator().is_some()
-            || scope.agent().is_some()
-            || scope.principal().is_some()
-            || scope.actor().kind() != AccountKind::Staff
-        {
-            return Err(Error::Forbidden);
-        }
-        let tenant = scope.tenant();
-        let user = scope.user();
-        let id = id.to_owned();
-        let Some(row) = tx.sql().query_opt(
-            "SELECT ip_address,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND impersonator_id IS NULL FOR UPDATE",
-            &[&tenant, &user, &id],
-        ).await? else {
-            return Ok(Termination::NotFound);
-        };
-        let ip: Option<String> = row.get(0);
-        let agent: Option<String> = row.get(1);
-        let signed_in: String = row.get(2);
-        let activity: String = row.get(3);
-        let ended = id.clone();
-        tx.mutate(move |sql| Box::pin(async move {
-            sql.execute(
-                "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND impersonator_id IS NULL",
-                &[&tenant, &user, &ended],
-            ).await?;
-            Ok(((), vec![Change {
-                kind: "session".into(), id: user,
-                old: json!({"tenant_id":tenant,"user_id":user,"ip_address":ip,"user_agent":agent,"signed_in_at":signed_in,"last_activity":activity,"payload":"[redacted]"}),
-                new: json!({"ended_by_account":true}),
-            }]))
-        })).await?;
-        let sessions = self.terminations.clone();
-        tx.after_commit(move || {
-            let _ = sessions.send(Terminated { id, redirect: None });
-        });
-        Ok(Termination::Terminated)
-    }
-
-    /// The account holder ends every own session except the one making the
-    /// request. Each ended session is a separate audited change.
-    async fn terminate_others(
-        &self,
-        tx: &mut MutationTransaction<'_>,
-        scope: &Scope,
-        current: &str,
-    ) -> Result<Vec<String>> {
-        if current.is_empty() {
-            return Err(Error::Invalid);
-        }
-        if scope.impersonator().is_some()
-            || scope.agent().is_some()
-            || scope.principal().is_some()
-            || scope.actor().kind() != AccountKind::Staff
-        {
-            return Err(Error::Forbidden);
-        }
-        let tenant = scope.tenant();
-        let user = scope.user();
-        let current = current.to_owned();
-        let policy = self.policy(tx.sql()).await?;
-        let rows = tx.sql().query(
-            "SELECT id,ip_address,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id<>$3 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $4::double precision) FOR UPDATE",
-            &[&tenant, &user, &current, &(policy.idle_seconds as f64)],
-        ).await?;
-        if rows.is_empty() {
-            return Ok(Vec::new());
-        }
-        let metadata: Vec<OwnTermination> = rows
-            .iter()
-            .map(|row| OwnTermination {
-                id: row.get(0),
-                ip_address: row.get(1),
-                user_agent: row.get(2),
-                signed_in_at: row.get(3),
-                last_activity: row.get(4),
-            })
-            .collect();
-        let ids: Vec<String> = metadata.iter().map(|row| row.id.clone()).collect();
-        let deleting = ids.clone();
-        tx.mutate(move |sql| {
-                Box::pin(async move {
-                    sql.execute(
-                        "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=ANY($3) AND impersonator_id IS NULL",
-                        &[&tenant, &user, &deleting],
-                    ).await?;
-                    let changes = metadata
-                        .iter()
-                        .map(|row| Change {
-                            kind: "session".into(),
-                            id: user,
-                            old: json!({
-                                "tenant_id": tenant,
-                                "user_id": user,
-                                "ip_address": row.ip_address.clone(),
-                                "user_agent": row.user_agent.clone(),
-                                "signed_in_at": row.signed_in_at.clone(),
-                                "last_activity": row.last_activity.clone(),
-                                "payload": "[redacted]",
-                            }),
-                            new: json!({"ended_by_account": true}),
-                        })
-                        .collect();
-                    Ok(((), changes))
-                })
-            })
-            .await?;
-        let announced = ids.clone();
-        let sessions = self.terminations.clone();
-        tx.after_commit(move || {
-            for id in announced {
-                let _ = sessions.send(Terminated { id, redirect: None });
-            }
-        });
-        Ok(ids)
-    }
-    /// Ends a user's sessions inside the caller's own write, except the one
-    /// named: a credential change keeps the session that made it. A session
-    /// the user holds as an impersonating operator ends too. Returns the
-    /// ended ids for [`Sessions::announce`] after the caller's commit. The
-    /// caller's audit row (the credential change) covers the sign-outs.
-    async fn end_user_sessions(
-        sql: &impl GenericClient,
-        tenant: i64,
-        user: i64,
-        except: Option<&str>,
-    ) -> Result<Vec<String>> {
-        if tenant <= 0 || user <= 0 || except.is_some_and(str::is_empty) {
-            return Err(Error::Invalid);
-        }
-        // The holder's agents lose their step-up windows with the sessions.
-        bilibi_step_up::end_agent_windows(sql, tenant, user).await?;
-        let rows = sql
-            .query(
-                "DELETE FROM sessions WHERE tenant_id=$1 AND (user_id=$2 OR impersonator_id=$2) AND ($3::text IS NULL OR id<>$3) RETURNING id",
-                &[&tenant, &user, &except],
-            )
-            .await?;
-        Ok(rows.iter().map(|row| row.get(0)).collect())
-    }
-    /// The signed-in holder ends their own session (logout): nobody decided
-    /// about someone else, so no audit row; every other live page of that
-    /// session is told at once.
-    pub async fn delete(&self, client: &impl GenericClient, scope: &Scope, id: &str) -> Result<()> {
-        let count = client
-            .execute(
-                "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
-                &[&scope.tenant(), &scope.user(), &id],
-            )
-            .await?;
-        if count > 0 {
-            self.announce(vec![id.to_owned()]);
-        }
-        Ok(())
     }
     /// Moves a live session to another identity inside the caller's
     /// transaction: the impersonation switch, both ways. The row must still be
@@ -921,39 +709,6 @@ impl Sessions {
     pub fn subscribe_terminations(&self) -> broadcast::Receiver<Terminated> {
         self.terminations.subscribe()
     }
-    /// Deletes sessions that can no longer authenticate: past the absolute
-    /// expiry or idle longer than the policy allows. Expiry never depends on
-    /// this sweep (`check` refuses them already); it only reclaims rows.
-    /// Housekeeping that nobody decided, so no Audit row per session; each
-    /// removed session is announced so what it held can be shown as ended.
-    pub async fn prune_expired(&self, client: &(impl GenericClient + Sync)) -> Result<u64> {
-        let policy = self.policy(client).await?;
-        let ids: Vec<String> = client
-            .query(
-                "DELETE FROM sessions WHERE expires_at<=now() OR last_activity<=now()-make_interval(secs => $1::double precision) RETURNING id",
-                &[&(policy.idle_seconds as f64)],
-            )
-            .await?
-            .iter()
-            .map(|row| row.get(0))
-            .collect();
-        client
-            .execute(
-                "DELETE FROM session_sign_ins WHERE signed_in_at<now()-make_interval(days => $1::int)",
-                &[&SIGN_IN_HISTORY_DAYS],
-            )
-            .await?;
-        // A claim only limits today's new-device email; the audit keeps it.
-        client
-            .execute(
-                "DELETE FROM session_sign_in_alerts WHERE alerted_on<(now() AT TIME ZONE 'UTC')::date-1",
-                &[],
-            )
-            .await?;
-        let pruned = ids.len() as u64;
-        self.announce(ids);
-        Ok(pruned)
-    }
     async fn resolve(
         &self,
         client: &(impl GenericClient + Sync),
@@ -1029,6 +784,7 @@ inventory::submit! {
             ("base-session-005-signed-in-at", include_str!("../migrations/005-signed-in-at.sql")),
             ("base-session-006-sign-in-history", include_str!("../migrations/006-sign-in-history.sql")),
             ("base-session-007-sign-in-devices", include_str!("../migrations/007-sign-in-devices.sql")),
+            ("base-session-008-ended-reason", include_str!("../migrations/008-ended-reason.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },
@@ -1036,6 +792,7 @@ inventory::submit! {
                 schedule: services.get("base/schedule.store")?,
                 sessions: services.get("base/session.sessions")?,
                 db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
+                boundary: services.get("base/database.mutations")?,
             })))) },
             bilibi_module_registry::Service { id: "base/session.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(
                 services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
@@ -1048,6 +805,9 @@ inventory::submit! {
         ],
     }
 }
+
+// Core User binds the session-ended notice; no session may end without one.
+inventory::submit! { bilibi_module_registry::Ready { module: "base/session", check: |services| services.get::<Sessions>("base/session.sessions")?.notice_ready() } }
 
 // ADR 01 gap, listed so it stays visible: these pages still write through
 // the facade rather than an operation contract (`base/agent_api` page).

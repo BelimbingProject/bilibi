@@ -10,12 +10,18 @@
 //
 // Drag is off on coarse pointers (touch); "Move…" is the path there, and for
 // the keyboard. The month grid moves focus between days with the arrow keys.
+//
+// A calendar marked `data-creatable` also reports `calendar_slot` for a free
+// slot: a click or a drag down a time column (a tap on touch), and a click, a
+// tap or Enter on an empty day. Like a move it only reports (date, minute,
+// length, lane); the owner opens its own create dialog.
 (() => {
   const SNAP_DEFAULT = 15
   const ROW_MINUTES = 5
   const DAY_MINUTES = 24 * 60
   const ITEM = "[data-cal-item]"
   const TARGET = "[data-cal-column], [data-cal-cell]"
+  const DEFAULT_SLOT = 60
   const GHOST = "pointer-events-none z-10 col-span-full rounded-sm border-2 border-dashed border-brand-strong bg-brand-surface/50"
   const coarse = () => matchMedia("(pointer: coarse)").matches
   const number = (value, fallback = 0) => {
@@ -26,6 +32,7 @@
   const Calendar = {
     mounted() {
       this.drag = null
+      this.slot = null
       this.resize = null
       this.ghost = null
       this.snap = () => number(this.el.dataset.snap, SNAP_DEFAULT) || SNAP_DEFAULT
@@ -160,7 +167,56 @@
         try { handle.setPointerCapture(event.pointerId) } catch { /* a synthetic or ended pointer */ }
         this.resize = {item, column, handle, pointer: event.pointerId, length: number(item.dataset.length)}
       }
+      // Create: press on a free part of a time column and drag down.
+      this.creatable = () => this.el.hasAttribute("data-creatable")
+      this.emitSlot = (column, minute, length) => {
+        this.emit("calendar_slot", {date: column.dataset.date, lane: column.dataset.lane || "", minute, length: Math.max(1, Math.min(length, DAY_MINUTES - minute))})
+      }
+      this.onSlotDown = event => {
+        if (!this.creatable() || event.button !== 0 || coarse() || this.resize) return
+        const target = event.target instanceof Element ? event.target : null
+        const column = target?.closest("[data-cal-column]")
+        if (!column || target.closest(ITEM) || !this.el.contains(column)) return
+        event.preventDefault()
+        try { column.setPointerCapture(event.pointerId) } catch { /* a synthetic or ended pointer */ }
+        const from = this.minuteAt(column, event.clientY)
+        this.slot = {column, pointer: event.pointerId, from, length: this.snap(), moved: false}
+        this.showGhost(column, from, DEFAULT_SLOT)
+      }
+      this.onSlotMove = event => {
+        const slot = this.slot
+        if (!slot || event.pointerId !== slot.pointer) return
+        const end = Math.max(slot.from + this.snap(), this.minuteAt(slot.column, event.clientY, Math.ceil))
+        slot.length = Math.min(end, DAY_MINUTES) - slot.from
+        slot.moved = slot.moved || slot.length > this.snap()
+        this.showGhost(slot.column, slot.from, slot.moved ? slot.length : DEFAULT_SLOT)
+      }
+      this.finishSlot = (event, apply) => {
+        const slot = this.slot
+        if (!slot || event.pointerId !== slot.pointer) return
+        this.slot = null
+        try { slot.column.releasePointerCapture(slot.pointer) } catch { /* already released */ }
+        this.clearGhost()
+        if (apply) this.emitSlot(slot.column, slot.from, slot.moved ? slot.length : DEFAULT_SLOT)
+      }
+      // A tap on touch, and a click on an empty day cell with any pointer.
+      this.onClick = event => {
+        if (!this.creatable()) return
+        const target = event.target instanceof Element ? event.target : null
+        if (!target || target.closest(`${ITEM}, a, button`)) return
+        const column = target.closest("[data-cal-column]")
+        if (column && coarse()) {
+          this.emitSlot(column, this.minuteAt(column, event.clientY), DEFAULT_SLOT)
+          return
+        }
+        const cell = target.closest("[data-cal-cell]")
+        if (cell && !column) {
+          this.emit("calendar_slot", {date: cell.dataset.date, lane: cell.dataset.lane || "", all_day: "true"})
+        }
+      }
+
       this.onPointerMove = event => {
+        this.onSlotMove(event)
         const state = this.resize
         if (!state || event.pointerId !== state.pointer) return
         const start = number(state.item.dataset.startMinute)
@@ -179,13 +235,18 @@
           this.report(state.item, {date: state.item.dataset.startDate, minute: number(state.item.dataset.startMinute), lane: state.item.dataset.lane || ""}, state.length)
         }
       }
-      this.onPointerUp = event => this.finishResize(event, true)
-      this.onPointerCancel = event => this.finishResize(event, false)
+      this.onPointerUp = event => { this.finishSlot(event, true); this.finishResize(event, true) }
+      this.onPointerCancel = event => { this.finishSlot(event, false); this.finishResize(event, false) }
 
       // The month grid: arrow keys move between days (a grid with one tab stop).
       this.onKeyDown = event => {
         const cell = event.target instanceof Element && event.target.matches("[role=gridcell]") ? event.target : null
         if (!cell || event.altKey || event.ctrlKey || event.metaKey) return
+        if ((event.key === "Enter" || event.key === " ") && cell.matches("[data-cal-cell]") && this.creatable()) {
+          event.preventDefault()
+          this.emit("calendar_slot", {date: cell.dataset.date, lane: "", all_day: "true"})
+          return
+        }
         const cells = [...this.el.querySelectorAll("[role=gridcell]")]
         const index = cells.indexOf(cell)
         const step = {ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7}[event.key]
@@ -207,6 +268,8 @@
       this.el.addEventListener("drop", this.onDrop)
       this.el.addEventListener("dragend", this.onDragEnd)
       this.el.addEventListener("pointerdown", this.onPointerDown)
+      this.el.addEventListener("pointerdown", this.onSlotDown)
+      this.el.addEventListener("click", this.onClick)
       this.el.addEventListener("pointermove", this.onPointerMove)
       this.el.addEventListener("pointerup", this.onPointerUp)
       this.el.addEventListener("pointercancel", this.onPointerCancel)
@@ -220,6 +283,8 @@
       this.el.removeEventListener("drop", this.onDrop)
       this.el.removeEventListener("dragend", this.onDragEnd)
       this.el.removeEventListener("pointerdown", this.onPointerDown)
+      this.el.removeEventListener("pointerdown", this.onSlotDown)
+      this.el.removeEventListener("click", this.onClick)
       this.el.removeEventListener("pointermove", this.onPointerMove)
       this.el.removeEventListener("pointerup", this.onPointerUp)
       this.el.removeEventListener("pointercancel", this.onPointerCancel)

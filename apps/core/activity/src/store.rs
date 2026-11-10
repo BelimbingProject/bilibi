@@ -5,9 +5,8 @@
 use crate::model::{self, Draft, FieldError, Guest, Kind, Response, Status};
 use crate::series::{self, Apply, Frequency, Repeat, Series};
 use crate::{
-    Activity, Conflict, Direction, Filter, GuestRow, Invites, Mine, Page, Patch, Priority,
-    Reference, Sort, State, WriteError, WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD,
-    SERIES_RECORD, VIEW, VIEW_ALL,
+    Activity, Conflict, Direction, GuestRow, Invites, Patch, Priority, Reference, WriteError,
+    WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD, SERIES_RECORD, VIEW, VIEW_ALL,
 };
 use bilibi_authz::{authorize_proof, holds_proof};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -22,6 +21,9 @@ use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row};
+
+mod listing;
+pub(crate) use listing::{day_counts, list};
 
 const COLUMNS: &str = "a.id,a.company_id,a.kind,a.subject,a.status,a.priority,a.direction,a.starts_at,a.ends_at,a.due_at,a.start_at,a.location,a.join_url,a.meeting_type,a.call_outcome,a.description,a.internal_notes,a.related_kind,a.related_id,a.shared,a.assignee_user_id,a.created_by,a.created_at,a.updated_at,a.closed_at,a.reminded_at,a.series_id,a.series_index,a.reminder_minutes,a.reminder_email,a.version";
 /// The activities the reader takes part in, with `$2` the reader's account:
@@ -282,119 +284,6 @@ pub(crate) async fn conflicts(
             })
         })
         .collect()
-}
-
-/// `related_readable`: the reader may view `filter.related` (the caller ran
-/// `base/records.check`), so the shared activities on it count too.
-pub(crate) async fn list(
-    client: &dyn ReadClient,
-    scope: &Scope,
-    filter: &Filter,
-    related_readable: bool,
-) -> Result<Page> {
-    let reader = reader(client, scope).await?;
-    // A calendar reads the whole range it shows, up to what it can draw.
-    let largest = if filter.between.is_some() {
-        crate::CALENDAR_LIMIT
-    } else {
-        300
-    };
-    let page_size = filter.page_size.clamp(1, largest);
-    let offset = (filter.page.max(1) - 1).saturating_mul(page_size);
-    let search = filter.search.trim().chars().take(200).collect::<String>();
-    let pattern = format!(
-        "%{}%",
-        search
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
-    let kind = filter.kind.map(Kind::code);
-    let state = match filter.state {
-        State::Open => "open",
-        State::Closed => "closed",
-        State::All => "all",
-    };
-    let mine = match filter.mine {
-        Mine::Any => "any",
-        Mine::Assignee => "assignee",
-        Mine::Guest => "guest",
-    };
-    let (related_kind, related_id) = filter.related.as_ref().map_or((None, None), |r| {
-        (Some(r.kind.as_str()), Some(r.id.as_str()))
-    });
-    // A person's activities include those they are a guest of.
-    let person = filter
-        .related
-        .as_ref()
-        .filter(|r| r.kind == "person")
-        .and_then(|r| r.id.parse::<i64>().ok());
-    let shared = related_readable && filter.related.is_some();
-    let (from, to) = filter.between.map_or((None, None), |(from, to)| {
-        (Some(SystemTime::from(from)), Some(SystemTime::from(to)))
-    });
-    // Visible: oversight, taking part, or shared on the record the list is
-    // narrowed to when the reader may view that record.
-    let conditions = format!(
-        "a.tenant_id=$1 AND a.deleted_at IS NULL
-         AND ($3 OR {MINE} OR ($4 AND a.shared AND a.related_kind = $10 AND a.related_id = $11))
-         AND ($5 = '' OR a.subject ILIKE $6)
-         AND ($7::text IS NULL OR a.kind = $7)
-         AND ($8 = 'all' OR ($8 = 'open') = (a.closed_at IS NULL AND a.kind <> 'note'))
-         AND ($9 = 'any'
-              OR ($9 = 'assignee' AND a.assignee_user_id = $2)
-              OR ($9 = 'guest' AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.role IN ('related','invited'))))
-         AND ($10::text IS NULL
-              OR (a.related_kind = $10 AND a.related_id = $11)
-              OR ($12::bigint IS NOT NULL AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_person_id=$12)))
-         AND ($13::timestamptz IS NULL
-              OR (a.kind IN ('call','meeting') AND a.starts_at < $14 AND a.ends_at > $13)
-              OR (a.kind = 'task' AND a.due_at >= $13 AND a.due_at < $14))
-         AND ($15::bigint IS NULL OR a.series_id = $15)"
-    );
-    let params: [&(dyn ToSql + Sync); 15] = [
-        &reader.tenant,
-        &reader.user,
-        &reader.all,
-        &shared,
-        &search,
-        &pattern,
-        &kind,
-        &state,
-        &mine,
-        &related_kind,
-        &related_id,
-        &person,
-        &from,
-        &to,
-        &filter.series,
-    ];
-    let total: i64 = client
-        .query_opt(
-            &format!("SELECT count(*) FROM core_activities a WHERE {conditions}"),
-            &params,
-        )
-        .await?
-        .ok_or(Error::Internal)?
-        .get(0);
-    let order = match filter.sort {
-        Sort::When if filter.series.is_some() => "a.series_index",
-        Sort::When => "COALESCE(a.starts_at, a.due_at, a.created_at)",
-        Sort::Title => "lower(a.subject)",
-        Sort::Status => "a.status",
-        Sort::Created => "a.created_at",
-    };
-    let direction = if filter.descending { "DESC" } else { "ASC" };
-    let sql = format!(
-        "SELECT {COLUMNS} FROM core_activities a WHERE {conditions} ORDER BY {order} {direction} NULLS LAST, a.id {direction} LIMIT {page_size} OFFSET {offset}"
-    );
-    let entries = client
-        .query(&sql, &params)
-        .await?
-        .iter()
-        .map(from_row)
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Page { entries, total })
 }
 
 /// Every write needs `core.activity.manage`, the capability the operations

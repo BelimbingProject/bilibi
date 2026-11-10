@@ -19,8 +19,8 @@
 //!   kept in the address; drag is off on coarse pointers and "Move…" is the
 //!   path.
 use crate::{
-    Alert, Button, ButtonVariant, Choice, Field, Form, Html, InputKind, Modal, ModalWidth,
-    StatusKind, Tab, Tabs,
+    calendar::Urgency, Alert, Button, ButtonVariant, Choice, Field, Form, Html, InputKind, Modal,
+    ModalWidth, StatusKind, Tab, Tabs,
 };
 use askama::Template;
 use std::collections::HashMap;
@@ -90,6 +90,8 @@ pub struct BoardCard {
     /// The columns this viewer may move it to (for a workflow subject, the
     /// statuses its edges allow for this person). Empty: not movable.
     pub targets: Vec<String>,
+    /// An open card that is late or due soon: drawn with its word.
+    pub urgency: Option<Urgency>,
 }
 
 impl BoardCard {
@@ -102,7 +104,14 @@ impl BoardCard {
             href: String::new(),
             version: String::new(),
             targets: Vec::new(),
+            urgency: None,
         }
+    }
+
+    /// Marks an open card as overdue or due soon.
+    pub fn urgency(mut self, urgency: Option<Urgency>) -> Self {
+        self.urgency = urgency;
+        self
     }
 
     pub fn fact(mut self, fact: impl Into<String>) -> Self {
@@ -318,6 +327,9 @@ struct CardView {
     targets: String,
     movable: bool,
     name: String,
+    /// The box's border and background, and the word that goes with them.
+    surface: &'static str,
+    urgency: &'static str,
 }
 
 struct ColumnView {
@@ -447,7 +459,14 @@ impl View {
         for fact in card.facts.iter().take(MAX_FACTS) {
             name.push_str(&format!(", {fact}"));
         }
+        if let Some(urgency) = card.urgency {
+            name.push_str(&format!(", {}", urgency.label().to_lowercase()));
+        }
         CardView {
+            surface: card
+                .urgency
+                .map_or("border-line bg-surface", Urgency::surface),
+            urgency: card.urgency.map_or("", Urgency::label),
             dom_id: format!("{}-card-{}", board.id, sanitized(&card.id)),
             id: card.id.clone(),
             title: card.title.clone(),

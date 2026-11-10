@@ -1567,7 +1567,11 @@ impl Store<'_> {
         .map_err(write_error)
     }
 
-    /// Everything `delete` checks, with no write: the document.
+    /// Everything `delete` checks, with no write: the document. A document
+    /// whose revision is retained or under legal hold is refused here, before
+    /// anything is marked, so it stays readable with its full history (ADR 23).
+    /// One already being deleted skips the check: repeating `delete` retries
+    /// its interrupted finalization.
     pub(crate) async fn prepare_delete(
         &self,
         on: On<'_>,
@@ -1578,6 +1582,9 @@ impl Store<'_> {
         let document = self
             .editable_including_deleting(on, scope, id, Some(version), MANAGE)
             .await?;
+        if document.deleting_at.is_none() {
+            self.ensure_unprotected(on, scope, &document).await?;
+        }
         Ok(document)
     }
 

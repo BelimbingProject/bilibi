@@ -148,6 +148,7 @@ impl Reviews {
     /// originating AI connection is re-proved separately before the card may
     /// call a tool; a terminal review exposes only its ended state.
     pub async fn browser(&self, scope: &bilibi_tenancy::Scope, id: &str) -> Result<BrowserReview> {
+        self.end_orphaned(scope.tenant(), scope.user()).await?;
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let row = client.query_opt(
             "SELECT connection_id,card,status,agent_self_report,client_identity FROM base_agent_api_reviews WHERE id=$1 AND tenant_id=$2 AND user_id=$3",
@@ -248,6 +249,23 @@ impl Reviews {
         Ok(())
     }
 
+    /// Ends the account's pending reviews whose browser session no longer
+    /// lives. A termination event reaches `cancel_session` only while this
+    /// program listens, so one lost to a restart would leave its review `open`
+    /// for ever, in the bell's To do list and as the card an agent waits on.
+    /// Level-triggered, run wherever pending reviews are read.
+    async fn end_orphaned(&self, tenant: i64, user: i64) -> Result<()> {
+        let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
+        let rows = client.query(
+            "UPDATE base_agent_api_reviews r SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.status IN ('open','refused') AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.tenant_id=r.tenant_id AND s.user_id=r.user_id AND s.expires_at>now() AND sha256(convert_to(s.id,'UTF8'))=r.browser_session_hash) RETURNING r.id",
+            &[&tenant, &user],
+        ).await.map_err(bilibi_database::Error::from)?;
+        for row in rows {
+            let _ = self.changed.send(row.get(0));
+        }
+        Ok(())
+    }
+
     pub async fn status(
         &self,
         scope: &bilibi_tenancy::Scope,
@@ -258,6 +276,7 @@ impl Reviews {
         let session = agent
             .browser_session_fingerprint()
             .ok_or(Error::Forbidden)?;
+        self.end_orphaned(scope.tenant(), scope.user()).await?;
         let read = || async {
             let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
             let row = client.query_opt(
@@ -295,6 +314,9 @@ impl bilibi_notifications::TodoSource for Reviews {
         scope: &'a bilibi_tenancy::Scope,
     ) -> bilibi_notifications::TodoFuture<'a> {
         Box::pin(async move {
+            self.end_orphaned(scope.tenant(), scope.user())
+                .await
+                .map_err(|_| bilibi_database::Error::Internal)?;
             let client = self.db.get().await?;
             let rows = client
                 .query(
@@ -555,6 +577,18 @@ pub(crate) async fn open(
                 }
                 other => other?,
             };
+            // A result that holds a one-time secret (a link or key shown once)
+            // would be reported through the card into model context and the
+            // stored review outcome, so it is committed directly instead.
+            if description["output"]["x-one-time-secret"] == true {
+                return Err(crate::invalid(
+                    &format!("operations[{}].key", descriptions.len() + 1),
+                    format!(
+                        "`{}` returns a secret that is shown once, so it cannot go through a review card. Use plan and commit with the person's two-factor code.",
+                        op.key
+                    ),
+                ));
+            }
             if description["safe_write"] != true {
                 return Err(crate::invalid(
                     &format!("operations[{}].key", descriptions.len() + 1),

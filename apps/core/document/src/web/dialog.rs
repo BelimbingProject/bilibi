@@ -13,9 +13,12 @@ use bilibi_database::{Error, Result};
 use bilibi_records::{Hit, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices, error_sentence, page::Uploads, params, upload::UploadSpec, ActionLink, Alert, Button,
-    ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind, Modal, ModalWidth,
-    RecordPicker, StatusKind,
+    choices, error_sentence,
+    page::Uploads,
+    params,
+    upload::{UploadSpec, UploadedFile},
+    ActionLink, Alert, Button, ButtonVariant, Choice, ErrorSummary, Field, Form, Html, InputKind,
+    Modal, ModalWidth, RecordPicker, StatusKind,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -25,6 +28,9 @@ pub const UPLOAD: &str = "file";
 const FORM: &str = "document";
 /// Long text fields post up to this many characters.
 const LIMIT: usize = 10_000;
+
+mod quick;
+pub(crate) use quick::QuickDocument;
 
 #[derive(Template)]
 #[template(path = "documents_form.html")]
@@ -114,6 +120,11 @@ impl State {
                 .insert("file".into(), vec!["needs a file chosen first".into()]);
             return Ok(());
         };
+        self.keep(pages, scope, file).await
+    }
+    /// Keeps one received file with `store_file` and names the document from
+    /// it when the name is still blank.
+    async fn keep(&mut self, pages: &Pages, scope: &Scope, file: UploadedFile) -> Result<()> {
         match pages
             .documents
             .store_file(

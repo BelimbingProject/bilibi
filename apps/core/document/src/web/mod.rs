@@ -44,7 +44,10 @@ pub fn path(id: i64) -> String {
 pub fn file_path(id: i64, revision: i32) -> String {
     format!("{INDEX}/{id}/revisions/{revision}/file")
 }
-
+/// Where a revision's file shows in place, behind the download's authority.
+pub fn preview_path(id: i64, revision: i32) -> String {
+    format!("{INDEX}/{id}/revisions/{revision}/preview")
+}
 pub struct Pages {
     pub documents: Arc<Documents>,
     pub records: Arc<Records>,
@@ -398,8 +401,10 @@ fn csv_row(cells: &[String]) -> String {
 }
 
 /// The downloads: a revision's file (`/documents/{id}/revisions/{revision}/file`)
-/// read through `base/artifacts` every time, and the list's metadata as CSV
-/// (`/documents/export.csv`), never a file's content.
+/// read through `base/artifacts` every time, the same file shown in place when
+/// its type is one a browser shows safely (`.../preview`, the same read and
+/// the same authority, not a second path to the bytes), and the list's
+/// metadata as CSV (`/documents/export.csv`), never a file's content.
 pub struct Files(pub Arc<Documents>);
 impl Files {
     async fn export(&self, scope: &Scope, query: &HashMap<String, String>) -> Result<FileBody> {
@@ -482,6 +487,10 @@ impl Download<Scope, Error> for Files {
             let id = number("id")?;
             let revision = i32::try_from(number("revision")?).map_err(|_| Error::NotFound)?;
             match self.0.read_file(request.scope, id, revision).await {
+                Ok(file) if request.operation == "preview" => {
+                    FileBody::preview(file.bytes, &file.content_type, &file.file_name)
+                        .ok_or(Error::NotFound)
+                }
                 Ok(file) => Ok(FileBody::attachment(
                     file.bytes,
                     &file.content_type,

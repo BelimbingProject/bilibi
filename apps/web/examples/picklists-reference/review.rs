@@ -163,7 +163,6 @@ async fn audited_tenant(app: &bilibi_web::App, proof: &Proof, admin: &Scope) -> 
     let new = NewTenant {
         name: "Audited Tenant".into(),
         parent_id: None,
-        status: "active".into(),
     };
     let receipt = match tenants.create_in(&mut tx, admin, &new).await? {
         CreateOutcome::Created(receipt) => receipt,

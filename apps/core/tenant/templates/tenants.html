@@ -1,8 +1,8 @@
 {#- /tenancy/tenants: the platform
-    tenant list and its Add Tenant dialog. The table and its cells are rendered
-    by src/web.rs through the shared models; this file lays the page out. The
-    page renders its own flash outlet (the shell has none), and the open dialog
-    owns the same messages, as the source passes `flash` to its modal. -#}
+    tenant list, its Add Tenant dialog and the Suspend and Reactivate dialog. The
+    table and its cells are rendered by src/web.rs through the shared models; this
+    file lays the page out. The page renders its own flash outlet (the shell has
+    none), and the open dialogs own the same messages. -#}
 {%- import "components.html" as ui -%}
 {%- import "forms.html" as form -%}
 {%- import "feedback.html" as feedback -%}
@@ -18,7 +18,6 @@
 {% call feedback::error_summary(summary=create.summary) %}{% endcall %}
 {% call form::input(field=create.name) %}{% endcall %}
 {% call form::input(field=create.parent) %}{% endcall %}
-{% call form::input(field=create.status) %}{% endcall %}
 {% call form::input(field=create.primary_company) %}{% endcall %}
 {% call form::input(field=create.additional_companies) %}{% endcall %}
 <div class="flex items-center gap-4 pt-2">
@@ -27,4 +26,7 @@
 </div>
 </form>
 {% endcall %}
+{% endif %}
+{% if let Some(moving) = moving %}
+{{ moving|safe }}
 {% endif %}

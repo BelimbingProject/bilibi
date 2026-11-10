@@ -28,4 +28,4 @@ Set `expires_on` in `core.document.create` or `core.document.update` (an empty s
 
 ## Delete
 
-Use `core.document.delete` with the document's current version. Documents checks every revision together. Retention or legal hold refuses the deletion and keeps the document with its complete revision history.
+Use `core.document.delete` with the document's current version. Documents checks every revision together. Retention or legal hold refuses the deletion, in the preview too, and keeps the document readable with its complete revision history; the refusal says which. To delete several, call it once per document and report which were removed and which were refused.
