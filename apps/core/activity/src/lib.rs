@@ -1016,6 +1016,7 @@ inventory::submit! { Module {
             directory: s.get("base/principal_directory.directory")?,
             display: s.get("base/datetime.display")?,
             locales: s.get("base/locale.locales")?,
+            step_up: s.get(bilibi_step_up::SERVICE)?,
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
         }))))
     }}],

@@ -35,6 +35,7 @@ pub struct Pages {
     pub directory: Arc<PrincipalDirectory>,
     pub display: Arc<bilibi_datetime::DisplayPolicy>,
     pub locales: Arc<bilibi_locale::Locales>,
+    pub step_up: Arc<bilibi_step_up::StepUp>,
     pub db: Db,
 }
 impl Pages {
@@ -46,6 +47,7 @@ impl Pages {
             directory: self.directory.clone(),
             display: self.display.clone(),
             locales: self.locales.clone(),
+            step_up: self.step_up.clone(),
             db: self.db.clone(),
         }
     }

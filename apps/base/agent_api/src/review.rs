@@ -577,6 +577,18 @@ pub(crate) async fn open(
                 }
                 other => other?,
             };
+            // A result that holds a one-time secret (a link or key shown once)
+            // would be reported through the card into model context and the
+            // stored review outcome, so it is committed directly instead.
+            if description["output"]["x-one-time-secret"] == true {
+                return Err(crate::invalid(
+                    &format!("operations[{}].key", descriptions.len() + 1),
+                    format!(
+                        "`{}` returns a secret that is shown once, so it cannot go through a review card. Use plan and commit with the person's two-factor code.",
+                        op.key
+                    ),
+                ));
+            }
             if description["safe_write"] != true {
                 return Err(crate::invalid(
                     &format!("operations[{}].key", descriptions.len() + 1),

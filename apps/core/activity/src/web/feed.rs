@@ -7,12 +7,13 @@
 use super::{event, refusal, render, sentences, BrowserZone, Clock, Pages, Refusal};
 use crate::{FeedKey, FEED_PATH};
 use askama::Template;
+use bilibi_agent_api::Error as ContractError;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     page::*, params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ConfirmDialog,
-    Fact, Facts, FlashGroup, FlexRow, FlexTable, Header, Html, IconButton, IconKind, ListColumns,
-    SectionHeading, StatusKind, NO_FLASH,
+    Fact, Facts, FlashGroup, FlexRow, FlexTable, Form, Header, Html, IconButton, IconKind,
+    ListColumns, Modal, ModalWidth, ProofInput, SectionHeading, StatusKind, NO_FLASH,
 };
 use serde_json::{json, Value};
 
@@ -39,6 +40,8 @@ struct LinkBox<'a> {
 
 /// What a confirmation is about.
 enum Confirm {
+    /// Make a first link: asks for the 2FA code.
+    Make,
     Replace,
     Revoke,
     /// An administrator revoking another person's link.
@@ -52,6 +55,8 @@ pub(crate) struct Feed {
     /// The link made by this visit, shown until the page is left.
     link: Option<String>,
     confirm: Option<Confirm>,
+    /// What the last attempt with a code said, shown in the dialog.
+    code_error: Option<String>,
     flash: Option<(StatusKind, String)>,
 }
 
@@ -71,6 +76,7 @@ impl Feed {
             .map_err(|_| Error::Internal)?,
             link: None,
             confirm: None,
+            code_error: None,
             flash: None,
         })
     }
@@ -118,27 +124,69 @@ impl Feed {
                 } else {
                     "replace_link"
                 };
-                self.confirm = None;
-                if let Some(result) = self
-                    .write(
-                        scope,
-                        credential,
-                        name,
-                        "core.activity.create_feed_key",
-                        json!({}),
-                    )
-                    .await?
-                {
-                    if let Some(key) = result["result"]["key"].as_str() {
-                        self.link = Some(Self::url(key));
+                let code = value["code"].as_str().unwrap_or_default().trim().to_owned();
+                if code.is_empty() {
+                    self.code_error =
+                        Some("Enter the 6-digit code from your authenticator app.".into());
+                    return Ok(());
+                }
+                // The operator's fresh code rides on the request, as an
+                // agent's `step_up_code` does; the owner spends it inside
+                // the commit (`.always()`).
+                let presented = scope.clone().presenting_step_up(&code);
+                let call = self.pages.call(
+                    &presented,
+                    credential,
+                    name,
+                    "core.activity.create_feed_key",
+                );
+                match self.pages.contracts.submit(&call, json!({})).await {
+                    Ok(result) => {
+                        self.confirm = None;
+                        self.code_error = None;
+                        if let Some(key) = result["result"]["key"].as_str() {
+                            self.link = Some(Self::url(key));
+                        }
+                        self.flash = Some((
+                            StatusKind::Success,
+                            "Link made. Copy it now: it is shown only once.".into(),
+                        ));
                     }
-                    self.flash = Some((
-                        StatusKind::Success,
-                        "Link made. Copy it now: it is shown only once.".into(),
-                    ));
+                    Err(ContractError::Backend(Error::StepUpRequired { reason, operation })) => {
+                        self.code_error = Some(match reason {
+                            // Enrolment is the host's prompt: it enrols and comes back.
+                            "not_enrolled" => {
+                                return Err(Error::StepUpRequired { reason, operation })
+                            }
+                            "invalid_code" => "That code was not accepted. Enter the current code from your authenticator app.",
+                            "locked" => "Too many wrong codes. Wait a while, then try again with a fresh code.",
+                            "impersonating" => "A link cannot be made while viewing as someone else.",
+                            "unavailable" => "No authenticator is set up on this server, so a link cannot be made.",
+                            _ => "Enter the current 6-digit code from your authenticator app.",
+                        }.into());
+                    }
+                    Err(error) => {
+                        let message = match refusal(
+                            error,
+                            "You do not have permission to change calendar feed links.",
+                            "The link was not changed. Try again.",
+                        )? {
+                            Refusal::Message(message) => message,
+                            Refusal::Fields(fields) => sentences(&fields),
+                        };
+                        self.confirm = None;
+                        self.flash = Some((StatusKind::Error, message));
+                    }
                 }
             }
-            "request_replace" => self.confirm = Some(Confirm::Replace),
+            "request_make" => {
+                self.code_error = None;
+                self.confirm = Some(Confirm::Make);
+            }
+            "request_replace" => {
+                self.code_error = None;
+                self.confirm = Some(Confirm::Replace);
+            }
             "request_revoke" => self.confirm = Some(Confirm::Revoke),
             "request_revoke_user" => {
                 let user = value["user"]
@@ -154,7 +202,10 @@ impl Feed {
                     .unwrap_or_else(|| format!("Account {user}"));
                 self.confirm = Some(Confirm::RevokeUser(user, name));
             }
-            "cancel_confirm" => self.confirm = None,
+            "cancel_confirm" => {
+                self.confirm = None;
+                self.code_error = None;
+            }
             "revoke_link" => {
                 let Some(confirm) = self.confirm.take() else {
                     return Ok(());
@@ -246,9 +297,8 @@ impl Feed {
             actions.push(&render(Button {
                 id: "feed-make",
                 button_type: "button",
-                event: "make_link",
+                event: "request_make",
                 variant: ButtonVariant::Primary,
-                working: "Making…",
                 body: Html::text("Make link"),
                 ..Button::default()
             })?);
@@ -283,15 +333,8 @@ impl Feed {
         let everyone = self.everyone(scope, &clock).await?;
         let dialog = match &self.confirm {
             None => Html::EMPTY,
-            Some(Confirm::Replace) => render(ConfirmDialog {
-                id: "feed-confirm",
-                consequence: "Replace your calendar link?",
-                detail: "The old link stops working at once. Your calendar app needs the new one.",
-                confirm: "Replace",
-                working: "Replacing…",
-                confirm_event: "replace_link",
-                cancel_event: "cancel_confirm",
-            })?,
+            Some(Confirm::Make) => self.code_dialog(scope, "make_link", "Make your calendar link", "The link shows what you take part in, read only. Anyone who has it can read that until you revoke it. Enter your current authenticator code to make it.", "Make link").await?,
+            Some(Confirm::Replace) => self.code_dialog(scope, "replace_link", "Replace your calendar link?", "The old link stops working at once, and your calendar app needs the new one. Enter your current authenticator code to replace it.", "Replace link").await?,
             Some(Confirm::Revoke) => render(ConfirmDialog {
                 id: "feed-confirm",
                 consequence: "Revoke your calendar link?",
@@ -341,6 +384,70 @@ impl Feed {
         Ok(LiveBody {
             html: region.to_string(),
             ..LiveBody::default()
+        })
+    }
+
+    /// The dialog that asks for the operator's current authenticator code
+    /// before a link is made or replaced (`.always()`: every time).
+    async fn code_dialog(
+        &self,
+        scope: &Scope,
+        event: &str,
+        title: &str,
+        description: &str,
+        submit: &str,
+    ) -> Result<Html> {
+        let methods = self
+            .pages
+            .step_up
+            .enrolled_methods(scope)
+            .await?
+            .into_iter()
+            .map(|m| bilibi_ui::ProofMethod::new(m.id, m.label, m.code_length, m.numeric))
+            .collect::<Vec<_>>();
+        let mut step_up = bilibi_ui::StepUp::new(!methods.is_empty(), "/settings/calendar-feed");
+        step_up.body = match &self.code_error {
+            Some(message) => render(bilibi_ui::Alert {
+                kind: StatusKind::Error,
+                id: "feed-code-error",
+                class: "mb-3",
+                body: Html::text(message),
+            })?,
+            None => Html::EMPTY,
+        };
+        step_up.code = render(ProofInput::new("feed-code", "code", methods))?;
+        step_up.actions = render(Button {
+            id: "feed-code-submit",
+            button_type: "submit",
+            variant: ButtonVariant::Primary,
+            working: "Working…",
+            body: Html::text(submit),
+            ..Button::default()
+        })?;
+        step_up.secondary_actions = render(Button {
+            id: "feed-code-cancel",
+            button_type: "button",
+            event: "cancel_confirm",
+            body: Html::text("Cancel"),
+            ..Button::default()
+        })?;
+        step_up.reason = "to make this link.".into();
+        let form = render(Form {
+            id: "feed-code-form",
+            event,
+            change: false,
+            body: render(step_up)?,
+            actions: Html::EMPTY,
+            ..Form::default()
+        })?;
+        render(Modal {
+            id: "feed-code-dialog",
+            title,
+            cancel_event: "cancel_confirm",
+            width: ModalWidth::Narrow,
+            description,
+            body: form,
+            ..Modal::default()
         })
     }
 

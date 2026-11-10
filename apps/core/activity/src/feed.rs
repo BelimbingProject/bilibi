@@ -22,12 +22,14 @@ use std::{sync::Arc, time::SystemTime};
 
 /// The audit kind of a person's feed key.
 pub const FEED_RECORD: &str = "core.activity.feed_key";
-/// Making or replacing a feed key asks for a fresh second factor where the
-/// tenant's policy says so (a durable bearer link, outside the session).
+/// Making or replacing a feed key asks for a fresh second factor on every
+/// action, on every channel, development included: a durable bearer link
+/// that outlives the session. An agent presents the operator's code as
+/// `step_up_code`; the page asks for it in its dialog.
 pub const STEP_UP_FEED_KEY: &str = "core.activity.feed_key.create";
 bilibi_step_up::declare!(
     "core/activity",
-    bilibi_step_up::Operation::new(STEP_UP_FEED_KEY, "Make a calendar feed link").floor()
+    bilibi_step_up::Operation::new(STEP_UP_FEED_KEY, "Make a calendar feed link").always()
 );
 /// The feed's address; the key is `{token}`.
 pub const FEED_PATH: &str = "/feeds/activities/{token}";
