@@ -912,7 +912,7 @@ pub const SERVICE: &str = "base/media.store";
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/media", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/agent_api", "base/audit", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/notifications", "base/personal_data", "base/queue", "base/schedule", "base/settings", "base/system", "base/tenancy", "base/ui"],
+        dependencies: &["base/agent_api", "base/audit", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/queue", "base/schedule", "base/settings", "base/system", "base/tenancy", "base/ui"],
         migrations: &[
             ("base-media-001", include_str!("../migrations/001-media.sql")),
             ("base-media-002", include_str!("../migrations/002-attachments.sql")),

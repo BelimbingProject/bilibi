@@ -5,6 +5,7 @@
 //! its own public API and refuses missing, deleted or cross-tenant subjects.
 use crate::{Error, Result};
 use bilibi_module_registry::{Catalog, Consumer, Entry, Module, RegistryError};
+use bilibi_party_ids::PersonId;
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use std::collections::BTreeMap;
 
@@ -29,6 +30,23 @@ pub trait SubjectOwner: Send + Sync {
         action: SubjectAction,
         subject_id: &'a str,
     ) -> ProofFuture<'a, ()>;
+    /// Whether `subject_id`, one of this owner's subjects that is not a person
+    /// ID (a case about a person), belongs to `person` in `scope`'s tenant, so
+    /// an approved request about that person reaches its files for export and
+    /// erasure. Answer from your own record on `client`, the caller's
+    /// connection (inside the erasure's transaction for `erase_attachments`),
+    /// and keep answering yes after your erasure until the bytes are removed.
+    /// It is never an authorization: Media asks it only under a grant.
+    /// Default: no.
+    fn person_subject<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _scope: &'a Scope,
+        _person: PersonId,
+        _subject_id: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
 }
 /// Contribution payload: `Contribution::new(SUBJECTS, "orders.order", provenance, &Subject { owner: &OWNER })`.
 pub struct Subject {
@@ -101,5 +119,25 @@ impl Subjects {
         let owner = self.owners.get(key).ok_or(Error::UnknownSubject)?;
         owner.authorize(client, scope, action, subject_id).await?;
         Ok(())
+    }
+    /// Whether the registered owner of `key` says `subject_id` belongs to
+    /// `person`. An unknown key or an out-of-range ID is no.
+    pub(crate) async fn person_subject(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        key: &str,
+        person: PersonId,
+        subject_id: &str,
+    ) -> Result<bool> {
+        if subject_id.is_empty() || subject_id.len() > 255 {
+            return Ok(false);
+        }
+        let Some(owner) = self.owners.get(key) else {
+            return Ok(false);
+        };
+        Ok(owner
+            .person_subject(client, scope, person, subject_id)
+            .await?)
     }
 }
