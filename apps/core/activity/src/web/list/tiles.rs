@@ -5,7 +5,7 @@
 //! calendar slot is for. A child of `list.rs`, so it shares `Index`'s state.
 use super::Index;
 use crate::web::{refusal, render, sentences, urgency, Clock, Refusal};
-use crate::{Activity, Kind, Sort, State, Status};
+use crate::{Activity, Filter, Kind, Sort, State, Status};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
@@ -15,8 +15,12 @@ use bilibi_ui::{
 };
 use std::collections::HashMap;
 
-/// The tasks the status tiles read: more is refused with a notice.
+/// The open tasks the status tiles read, the most pressing first: more is
+/// refused with a notice.
 const BOARD_TASKS: i64 = 300;
+/// The closed tasks they read, the latest first, so a tenant's history
+/// never crowds the open work off the tiles.
+const BOARD_CLOSED: i64 = 100;
 /// A slot chosen on the calendar with no end of its own starts at 09:00 and
 /// lasts an hour.
 const SLOT_HOUR: i64 = 9;
@@ -119,17 +123,30 @@ impl Index {
     ) -> Result<(Html, HashMap<String, String>, usize)> {
         let mut filter = self.filter();
         filter.kind = Some(Kind::Task);
-        filter.state = State::All;
         filter.sort = Sort::When;
-        filter.descending = false;
         filter.page = 1;
-        filter.page_size = BOARD_TASKS;
-        let page = self.pages.activities.list(scope, &filter).await?;
-        let columns = board_columns(&page.entries);
+        let open = Filter {
+            state: State::Open,
+            descending: false,
+            page_size: BOARD_TASKS,
+            ..filter.clone()
+        };
+        let closed = Filter {
+            state: State::Closed,
+            descending: true,
+            page_size: BOARD_CLOSED,
+            ..filter
+        };
+        let open = self.pages.activities.list(scope, &open).await?;
+        let closed = self.pages.activities.list(scope, &closed).await?;
+        let total = open.total + closed.total;
+        let mut entries = open.entries;
+        entries.extend(closed.entries);
+        let columns = board_columns(&entries);
         let mut state = self.board.clone();
         state.read_column(&self.calendar_query, &columns);
         let me = scope.user();
-        let people: Vec<i64> = page.entries.iter().map(|a| a.assignee_user_id).collect();
+        let people: Vec<i64> = entries.iter().map(|a| a.assignee_user_id).collect();
         let names = self.pages.names(scope, &people).await?;
         let may_create = self.pages.activities.may_create(scope).await?;
         let edit_all = may_create && self.pages.activities.may_edit_all(scope).await?;
@@ -142,7 +159,7 @@ impl Index {
         let mut drawn = Board::new("activities-board", "/activities", state.clone(), columns);
         drawn.query = self.address();
         drawn.query.insert("display".into(), "board".into());
-        for a in &page.entries {
+        for a in &entries {
             let Some(status) = a.status else { continue };
             let mut card = BoardCard::new(a.id.to_string(), status.code(), a.title.clone())
                 .href(format!("/activities/{}", a.id))
@@ -167,13 +184,13 @@ impl Index {
         drawn.moving = self.board_moving.clone();
         drawn.move_errors = self.board_errors.clone();
         drawn.notice = self.board_notice.clone().or_else(|| {
-            (page.total > page.entries.len() as i64).then(|| {
+            (total > entries.len() as i64).then(|| {
                 (
                     StatusKind::Warning,
                     format!(
-                        "Showing the first {} of {} tasks. Search or choose Assigned to me to narrow them.",
-                        page.entries.len(),
-                        page.total
+                        "Showing {} of {} tasks: the open ones by due time, then the latest closed ones. Search or choose Assigned to me to narrow them.",
+                        entries.len(),
+                        total
                     ),
                 )
             })
@@ -182,7 +199,7 @@ impl Index {
         let mut query = self.address();
         query.insert("display".into(), "board".into());
         query.extend(state.to_params());
-        Ok((html, query, page.entries.len()))
+        Ok((html, query, entries.len()))
     }
 
     /// The Add dialog a free calendar slot opens: which kind to add there.

@@ -28,7 +28,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use bilibi_records::Reference;
 pub use contributions::{MANAGE, MANAGE_ALL, VIEW, VIEW_ALL};
-pub use feed::{FeedKey, FEED_PATH, FEED_RECORD};
+pub use feed::{FeedKey, FEED_PATH, FEED_RECORD, STEP_UP_FEED_KEY};
 pub use invitations::{GateFuture, InvitationGate, Invitee, INVITATION_GATES};
 pub use model::{
     CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
@@ -173,6 +173,9 @@ pub enum Mine {
     Assignee,
     /// The reader is a guest.
     Guest,
+    /// The reader takes part: creator, assignee or account guest. Never the
+    /// oversight set of `core.activity.all.view` (the calendar feed).
+    TakingPart,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,6 +302,7 @@ pub struct Activities {
     queue: Arc<bilibi_queue::Queue>,
     calendars: Arc<bilibi_work_calendar::WorkCalendars>,
     settings: Arc<bilibi_settings::Settings>,
+    step_up: Arc<bilibi_step_up::StepUp>,
     people: Arc<bilibi_person::PersonService>,
 }
 impl Activities {
@@ -941,7 +945,7 @@ impl Activities {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
@@ -963,6 +967,7 @@ inventory::submit! { Module {
             queue: s.get("base/queue.store")?,
             calendars: s.get(bilibi_work_calendar::SERVICE)?,
             settings: s.get("base/settings.store")?,
+            step_up: s.get(bilibi_step_up::SERVICE)?,
             people: s.get(bilibi_person::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;

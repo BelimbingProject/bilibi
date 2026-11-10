@@ -290,6 +290,7 @@ dependencies = [
  "bilibi-records",
  "bilibi-schedule",
  "bilibi-settings",
+ "bilibi-step-up",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",

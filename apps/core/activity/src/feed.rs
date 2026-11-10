@@ -8,8 +8,8 @@
 //! gets the one refusal. Only the SHA-256 of the key is stored; the key is
 //! shown once, when it is made. README, Calendar feed.
 use crate::{
-    ics, Activities, Filter, Sort, State, WriteError, WriteResult, CALENDAR_LIMIT, MANAGE_FEEDS,
-    VIEW,
+    ics, Activities, Filter, Mine, Sort, State, WriteError, WriteResult, CALENDAR_LIMIT,
+    MANAGE_FEEDS, VIEW,
 };
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -22,6 +22,13 @@ use std::{sync::Arc, time::SystemTime};
 
 /// The audit kind of a person's feed key.
 pub const FEED_RECORD: &str = "core.activity.feed_key";
+/// Making or replacing a feed key asks for a fresh second factor where the
+/// tenant's policy says so (a durable bearer link, outside the session).
+pub const STEP_UP_FEED_KEY: &str = "core.activity.feed_key.create";
+bilibi_step_up::declare!(
+    "core/activity",
+    bilibi_step_up::Operation::new(STEP_UP_FEED_KEY, "Make a calendar feed link").floor()
+);
 /// The feed's address; the key is `{token}`.
 pub const FEED_PATH: &str = "/feeds/activities/{token}";
 /// How far back the feed reaches, and how far ahead.
@@ -135,6 +142,14 @@ impl Activities {
     ) -> WriteResult<(FeedKey, String)> {
         let scope = self.fresh(tx.sql(), scope).await?;
         own(tx.sql(), &scope, VIEW).await?;
+        // A link anyone holding it can read: ask for the second factor first.
+        self.step_up
+            .require(
+                &scope,
+                STEP_UP_FEED_KEY,
+                &format!("feed_key:{}", scope.user()),
+            )
+            .await?;
         let token = new_token()?;
         let hash = digest(&token);
         let (tenant, user) = (scope.tenant(), scope.user());
@@ -272,8 +287,12 @@ impl Activities {
         };
         drop(client);
         let now = Timestamp::now();
+        // The owner's own calendar: what they take part in, never the
+        // tenant-wide oversight set, which would put every private activity
+        // on a third-party calendar server and crowd out their own at 501.
         let filter = Filter {
             state: State::All,
+            mine: Mine::TakingPart,
             between: Some((
                 now - SignedDuration::from_hours(24 * PAST_DAYS),
                 now + SignedDuration::from_hours(24 * AHEAD_DAYS),

@@ -3,14 +3,14 @@
 //! stored), and revoke it. The Settings page calls the same write contracts;
 //! an administrator revokes anyone's with `user_id`.
 use crate::agent_operations::{invalid, owner};
-use crate::{FeedKey, FEED_PATH, VIEW};
+use crate::{FeedKey, FEED_PATH, STEP_UP_FEED_KEY, VIEW};
 use bilibi_agent_api::{
     Channels, Definitions, Handler, Operation, OperationClient, OperationFuture, ReadHandler,
     WriteHandler, DEFINITIONS,
 };
 use bilibi_database::MutationTransaction;
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{Channel, Scope};
 use serde_json::{json, Value};
 
 const KEYWORDS: &[&str] = &[
@@ -154,7 +154,7 @@ static REVOKE: RevokeFeedKey = RevokeFeedKey;
 inventory::submit! { Contribution::new(DEFINITIONS, "core/activity.feed_operations", Provenance { module: crate::MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
         Operation { key: "core.activity.feed_key", title: "Read your calendar feed link's status", summary: "Whether you have a calendar feed link and when it was made and last read. The link itself is never shown again.", keywords: KEYWORDS, capability: VIEW, input: no_input, output: key_output, handler: Handler::Read(&GET), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.activity.create_feed_key", title: "Make or replace your calendar feed link", summary: "Make a read-only iCalendar link of the activities you may see, for a calendar app to subscribe to. It replaces your old link, which stops working at once. The link is returned once.", keywords: KEYWORDS, capability: VIEW, input: no_input, output: review_output, handler: Handler::SafeWrite(&CREATE), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.activity.create_feed_key", title: "Make or replace your calendar feed link", summary: "Make a read-only iCalendar link of the activities you take part in, for a calendar app to subscribe to. It replaces your old link, which stops working at once. Only the person's browser may make it: the link is shown once on My settings › Calendar feed.", keywords: KEYWORDS, capability: VIEW, input: no_input, output: review_output, handler: Handler::SafeWrite(&CREATE), channels: Channels::Only { channels: &[Channel::Web], reason: "The link is shown once, in the browser on My settings; an AI connection or a review card would keep it in model context and stored outcomes." }, step_up: &[STEP_UP_FEED_KEY] },
         Operation { key: "core.activity.revoke_feed_key", title: "Revoke a calendar feed link", summary: "Revoke your own calendar feed link, or with user_id and core.activity.feed.manage anyone's in the tenant. It stops working at once.", keywords: KEYWORDS, capability: VIEW, input: revoke_schema, output: review_output, handler: Handler::SafeWrite(&REVOKE), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[],

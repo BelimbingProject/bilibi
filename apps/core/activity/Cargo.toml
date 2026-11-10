@@ -26,6 +26,7 @@ bilibi-queue.workspace = true
 bilibi-records.workspace = true
 bilibi-schedule.workspace = true
 bilibi-settings.workspace = true
+bilibi-step-up.workspace = true
 bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true
 bilibi-user.workspace = true

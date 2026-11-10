@@ -340,7 +340,6 @@ impl Index {
                     .ok_or(Error::Invalid)?;
                 let activity = self.pages.activities.get(scope, id).await?;
                 if activity.series_id.is_some()
-                    && self.pages.activities.may_create(scope).await?
                     && self.pages.activities.may_edit(scope, &activity).await?
                 {
                     self.series_delete = Some((id, Vec::new()));
@@ -651,10 +650,7 @@ impl Index {
                 ..IconButton::new("check-circle", "Close")
             })?);
         }
-        if activity.series_id.is_some()
-            && self.pages.activities.may_create(scope).await?
-            && self.pages.activities.may_edit(scope, activity).await?
-        {
+        if activity.series_id.is_some() && self.pages.activities.may_edit(scope, activity).await? {
             row.actions.push(&render(IconButton {
                 id: &format!("activities-delete-series-{id}"),
                 event: "request_delete_series",

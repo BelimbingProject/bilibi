@@ -8,5 +8,6 @@ CREATE TABLE core_activity_feed_keys (
  key_hash bytea NOT NULL UNIQUE CHECK (octet_length(key_hash) = 32),
  created_at timestamptz NOT NULL DEFAULT now(),
  last_used_at timestamptz,
- PRIMARY KEY (tenant_id, user_id)
+ PRIMARY KEY (tenant_id, user_id),
+ FOREIGN KEY (tenant_id, user_id) REFERENCES users(tenant_id, id) ON DELETE CASCADE
 );

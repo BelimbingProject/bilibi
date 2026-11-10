@@ -119,7 +119,7 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 ### Status tiles
 
-`/activities?display=board`: the tasks the reader may see as tiles in a column for each status (not started, in progress, pending input, completed, deferred), through base/ui `Board`. Search and "whose" filter it; the kind and open-or-closed filters are hidden, because the tiles are tasks and closed ones have their own columns. A tile shows its subject, an Overdue or Due soon mark, the due time and the assignee. Dragging a tile (or Move…) calls `core.activity.update` with the status and the tile's version, after checking the task is still in the column it was drawn in; a stale or refused move says why and leaves the tile. It reads the first 300 tasks (by due time) and says when there are more.
+`/activities?display=board`: the tasks the reader may see as tiles in a column for each status (not started, in progress, pending input, completed, deferred), through base/ui `Board`. Search and "whose" filter it; the kind and open-or-closed filters are hidden, because the tiles are tasks and closed ones have their own columns. A tile shows its subject, an Overdue or Due soon mark, the due time and the assignee. Dragging a tile (or Move…) calls `core.activity.update` with the status and the tile's version, after checking the task is still in the column it was drawn in; a stale or refused move says why and leaves the tile. It reads the first 300 open tasks (by due time) and the latest 100 closed ones, and says when there are more.
 
 ## Calendar feed
 
@@ -127,9 +127,9 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 
 - **Address.** `GET /feeds/activities/{key}` (a `PUBLIC_ENDPOINTS` contribution, so Web redacts the key from logs, sends no referrer and rate-limits each sender per minute: Base Integration setting `public_endpoints.sender_per_minute`). The key is the only credential.
 - **Key.** 256 random bits as 64 hex characters, one per person and tenant. Only its SHA-256 is stored (`core_activity_feed_keys`); the key is shown once, when it is made, on **My settings › Calendar feed** (`/settings/calendar-feed`) and in the result of `core.activity.create_feed_key`.
-- **Same rule as the page and the agent API.** Each read acts as the key's owner: it proves the account live, then reads `Activities::list` for calls and meetings between 30 days ago and a year ahead, and tasks due in that range (at most 501), exactly the activities the owner may see ([Who sees an activity](#who-sees-an-activity)): theirs, never another person's, whoever holds the link. If the owner loses `core.activity.view` or is deactivated, the feed answers as for an unknown key.
+- **Same rule as the page and the agent API.** Each read acts as the key's owner: it proves the account live, then reads `Activities::list` for calls and meetings between 30 days ago and a year ahead, and tasks due in that range (at most 501), the activities the owner takes part in (creator, assignee, or an account guest who has not declined; [Who sees an activity](#who-sees-an-activity)): theirs, never another person's, whoever holds the link. A holder of `core.activity.all.view` gets their own calendar too, not the tenant's. If the owner loses `core.activity.view` or is deactivated, the feed answers as for an unknown key.
 - **What it shows.** Subject (tasks start with "Task: "), start and end, location, and the join link of a meeting. Never the description, internal notes, guests, related record, status or reminders.
-- **Make, replace, revoke.** The person makes a key, replaces it (the old link stops working at once) or revokes it on that page, which also shows when it was made and last read (a usage stamp, at most once a minute). The operations are `core.activity.feed_key`, `.create_feed_key` and `.revoke_feed_key`; creating, replacing and revoking are audited (`core.activity.feed_key`, no key or hash in the audit). A holder of `core.activity.feed.manage` (granted on purpose; no contributed role has it) also sees everyone's keys on that page and revokes any (`user_id`). Revoking deletes the row, so the link answers `404` from the next request.
+- **Make, replace, revoke.** The person makes a key, replaces it (the old link stops working at once) or revokes it on that page, which also shows when it was made and last read (a usage stamp, at most once a minute). **Making or replacing a key asks for a fresh second factor** where the tenant's policy says so (Base Step-up operation `core.activity.feed_key.create`, on the floor), and only the browser may make one: `core.activity.create_feed_key` is a Web-only operation, so an AI connection or a review card never holds the key (the key would sit in model context and in a stored review outcome). The operations are `core.activity.feed_key` (read), `.create_feed_key` and `.revoke_feed_key` (an agent may revoke); creating, replacing and revoking are audited (`core.activity.feed_key`, no key or hash in the audit). A holder of `core.activity.feed.manage` (granted on purpose; no contributed role has it) also sees everyone's keys on that page and revokes any (`user_id`). Revoking deletes the row, so the link answers `404` from the next request.
 - **One refusal.** An unknown, revoked, replaced or unusable key, and a request framed in an iframe, get the same bare `404`. Replies are never cached.
 
 ## Reminders
@@ -201,6 +201,7 @@ The subject is `core.activity.activity:<id>` and the key `<id>:<version>`. The p
 
 ## Contributions
 
+- Step-up: `core.activity.feed_key.create`.
 - Capabilities: `core.activity.view`, `core.activity.manage`, `core.activity.all.view`, `core.activity.all.manage`, `core.activity.feed.manage` (revoke anyone's feed key). The `tenant_owner` role gets `view` and `manage` only.
 - Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`. Personal (user scope, set with Reminder defaults on the Activities list): `core.activity.default_reminder_minutes`, `core.activity.default_reminder_email`.
 - Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue workers `core/activity-invites` and `core/activity-guest-reminders`.
@@ -225,7 +226,7 @@ Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, 
 
 ## Migrations
 
-`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`), `core-activity-004-reminders` (`reminder_minutes`, `reminder_email` and `reminders_sent` on activities, `core_activity_guest_reminders`), `core-activity-005-calendar-feeds` (`core_activity_feed_keys`).
+`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`), `core-activity-004-reminders` (`reminder_minutes`, `reminder_email` and `reminders_sent` on activities, `core_activity_guest_reminders`), `core-activity-005-calendar-feeds` (`core_activity_feed_keys`, one row per person, removed with the account).
 
 ## How to try it
 
