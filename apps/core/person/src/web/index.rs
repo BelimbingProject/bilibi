@@ -170,8 +170,12 @@ impl Index {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
-        let client = self.pages.db.get().await?;
-        let masked = withheld(&client, scope).await?;
+        // Each read below takes its own pooled connection; none is held
+        // across another, so many open lists cannot exhaust the pool.
+        let masked = {
+            let client = self.pages.db.get().await?;
+            withheld(&client, scope).await?
+        };
         // A field added, archived or renamed while the page is open: its
         // column, sort and filters follow, and a sort or filter on a field
         // the list no longer offers is dropped.
@@ -212,11 +216,13 @@ impl Index {
         let mut actions = Html::EMPTY;
         // What the person may do in bulk, from one look at their grants and
         // the restrictions this page already read.
-        let offers = self
-            .pages
-            .bulk
-            .offers(&**client, scope, EXPORT_TYPE, &self.masked)
-            .await?;
+        let offers = {
+            let client = self.pages.db.get().await?;
+            self.pages
+                .bulk
+                .offers(&**client, scope, EXPORT_TYPE, &self.masked)
+                .await?
+        };
         let (may_export, bulk_fields) = (offers.export, offers.fields);
         if may_export {
             actions.push(&render(Button {
@@ -553,6 +559,11 @@ impl Index {
     /// contacts), with the columns shown, through
     /// `base.bulk_data.export.start`, and opens it.
     async fn export(&mut self, scope: &Scope, credential: &str, event: &str) -> Result<LiveBody> {
+        let custom_shown = self
+            .columns
+            .columns
+            .iter()
+            .any(|column| column.spec.starts_with("cf_"));
         let mut input = json!({
             "record_type": EXPORT_TYPE,
             // The columns on screen: the person's arrangement or the defaults.
@@ -584,7 +595,12 @@ impl Index {
                         redirect: Some(format!("/exports/{id}")),
                         flash: Some((
                             bilibi_ui::StatusKind::Success,
-                            "Export started. You get a notice when the file is ready.".into(),
+                            if custom_shown {
+                                "Export started without the custom field columns, which a file cannot hold yet. You get a notice when the file is ready."
+                            } else {
+                                "Export started. You get a notice when the file is ready."
+                            }
+                            .into(),
                         )),
                         ..LiveBody::default()
                     });
