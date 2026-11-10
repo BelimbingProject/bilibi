@@ -763,10 +763,7 @@ impl PortalService {
                         kind: "portal.invitation".into(),
                         id: invitation.id,
                         old: Value::Null,
-                        new: json!({
-                            "person_id": person, "affiliation_id": affiliation,
-                            "company_id": organisation, "status": "pending",
-                        }),
+                        new: json!({"person_id": person, "affiliation_id": affiliation, "company_id": organisation, "status": "pending"}),
                     });
                     Ok((invitation, changes))
                 })
