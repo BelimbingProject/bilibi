@@ -195,6 +195,48 @@ async fn main() -> Result<()> {
     let [accounts_on, accounts_days, accounts_minimum] = setting_keys("core/user.closed_accounts");
     let [notices_on, notices_days, _] = setting_keys("core/user.notifications");
     let [invitations_on, invitations_days, _] = setting_keys("core/user.lapsed_invitations");
+    let [portal_on, portal_days, _] = setting_keys("core/portal.invitations");
+
+    // Synthetic portal lifecycle rows: expiration alone, early revocation,
+    // acceptance, a still-live link, a recent acceptance of an old invitation,
+    // two holds, another tenant, and another company's unchanged policy.
+    client.batch_execute("INSERT INTO persons(id,tenant_id,code,name,kind) VALUES(45105,1,'held_invitee','Held Invitee','human'); \
+        INSERT INTO customer_invitations(id,tenant_id,person_id,name,email,token_hash,invited_by,expires_at,accepted_at,user_id,revoked_at,affiliation_id,organisation_id,created_at) OVERRIDING SYSTEM VALUE \
+        SELECT 45200+n,tenant,person,'Retention Invitee','retention-'||n||'@example.test',decode(lpad(to_hex(45200+n),8,'0'),'hex'),4,expiry,accepted,CASE WHEN accepted IS NOT NULL THEN 2 END,revoked,affiliation,company,now()-interval '70 days' \
+        FROM (VALUES \
+          (1,1,1,now()-interval '40 days',NULL::timestamptz,now()-interval '2 days',NULL::bigint,NULL::bigint), \
+          (2,1,1,now()+interval '5 days',NULL,now()-interval '40 days',NULL,NULL), \
+          (3,1,1,now()+interval '5 days',now()-interval '40 days',NULL,NULL,NULL), \
+          (4,1,1,now()+interval '5 days',NULL,NULL,NULL,NULL), \
+          (5,1,1,now()+interval '5 days',now()-interval '2 days',NULL,NULL,NULL), \
+          (6,1,1,now()-interval '40 days',NULL,NULL,NULL,NULL), \
+          (7,1,45105,now()-interval '40 days',NULL,NULL,NULL,NULL), \
+          (8,2,1,now()-interval '40 days',NULL,NULL,NULL,NULL), \
+          (9,1,2,now()-interval '40 days',NULL,NULL,2,2)) \
+          AS fixture(n,tenant,person,expiry,accepted,revoked,affiliation,company); \
+        INSERT INTO customer_invitations(tenant_id,person_id,name,email,token_hash,invited_by,expires_at) \
+        SELECT 1,1,'Batched Invitee','batch-'||n||'@example.test',decode(lpad(to_hex(45300+n),8,'0'),'hex'),4,now()-interval '40 days' FROM generate_series(1,205) n;").await?;
+    let portal_record_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "portal.invitation".into(),
+                id: 45206,
+            },
+            "Invitation record hold",
+        )
+        .await?;
+    let portal_person_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Person {
+                person: bilibi_party_ids::PersonId::new(45105)?,
+            },
+            "Invitee hold",
+        )
+        .await?;
 
     println!("== record classes: nothing is swept until a company chooses");
     classes(&privacy, &client, &admin, "tenant 1").await?;
@@ -455,6 +497,34 @@ async fn main() -> Result<()> {
     .await?;
 
     println!("== company 1 turns both classes on");
+    let untouched: i64 = client
+        .query_one(
+            "SELECT count(*) FROM customer_invitations WHERE tenant_id=1 AND name='[erased]'",
+            &[],
+        )
+        .await?
+        .get(0);
+    if untouched != 0 {
+        return Err("portal invitations swept before class opt-in".into());
+    }
+    put(
+        &boundary,
+        &settings,
+        &mut client,
+        &admin,
+        &portal_days,
+        json!(30),
+    )
+    .await?;
+    put(
+        &boundary,
+        &settings,
+        &mut client,
+        &admin,
+        &portal_on,
+        json!(true),
+    )
+    .await?;
     show(
         "closed accounts on",
         put(
@@ -504,6 +574,16 @@ async fn main() -> Result<()> {
         .await,
     );
     sweep(&app, &mut client, &admin, "run 2").await?;
+    let portal_result: bool = client.query_one("SELECT \
+        (SELECT count(*)=208 FROM customer_invitations WHERE tenant_id=1 AND name='[erased]' AND email='[erased]' AND (accepted_at IS NOT NULL OR revoked_at IS NOT NULL)) \
+        AND NOT EXISTS(SELECT 1 FROM customer_invitations WHERE id BETWEEN 45204 AND 45209 AND name='[erased]') \
+        AND EXISTS(SELECT 1 FROM base_privacy_sweeps WHERE tenant_id=1 AND class='core/portal.invitations' AND acted=208 AND kept=2 AND batches>1 AND finished_at IS NOT NULL)", &[]).await?.get(0);
+    if !portal_result {
+        return Err(
+            "portal retention lifecycle, company/tenant isolation, hold or batching failed".into(),
+        );
+    }
+    println!("portal retention: 208 anonymised across batches; live/recent/held/other-company/other-tenant preserved");
     rows(&client, "invitation", "SELECT v.email||' '||u.name||' '||u.status||' accepted='||(v.accepted_at IS NOT NULL)||' closed='||(v.revoked_at IS NOT NULL) FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id WHERE v.tenant_id=1 AND (v.email LIKE '%invitee%' OR v.email LIKE '%invited%' OR v.email LIKE 'erased-inv-%') ORDER BY v.id").await?;
     rows(&client, "user", "SELECT u.id||' '||u.name||' '||i.email||' '||u.status||' anonymised='||(u.anonymised_at IS NOT NULL) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND u.id IN (2,3,7) ORDER BY u.id").await?;
     rows(
@@ -521,6 +601,22 @@ async fn main() -> Result<()> {
 
     println!("== the hold is released; the next run acts on user 3");
     privacy
+        .release_hold(
+            &mut client,
+            &admin,
+            portal_record_hold.id,
+            "Invitation evidence released",
+        )
+        .await?;
+    privacy
+        .release_hold(
+            &mut client,
+            &admin,
+            portal_person_hold.id,
+            "Invitee evidence released",
+        )
+        .await?;
+    privacy
         .release_hold(&mut client, &admin, hold.id, "Tribunal closed")
         .await?;
     privacy
@@ -532,6 +628,10 @@ async fn main() -> Result<()> {
         )
         .await?;
     sweep(&app, &mut client, &admin, "run 3").await?;
+    let released: i64 = client.query_one("SELECT count(*) FROM customer_invitations WHERE tenant_id=1 AND id IN (45206,45207) AND name='[erased]' AND email='[erased]'", &[]).await?.get(0);
+    if released != 2 {
+        return Err("released invitation holds did not resume retention".into());
+    }
     rows(&client, "user", "SELECT u.id||' '||u.name||' '||i.email||' anonymised='||(u.anonymised_at IS NOT NULL) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND u.id IN (2,3,7) ORDER BY u.id").await?;
     rows(&client, "sweep", "SELECT id||' '||class||' acted='||acted||' kept='||kept FROM base_privacy_sweeps ORDER BY id DESC LIMIT 2").await?;
 
