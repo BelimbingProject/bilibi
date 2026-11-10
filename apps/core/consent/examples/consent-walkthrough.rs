@@ -7,7 +7,7 @@
 //! tenant 2's rows for the same address are left alone. Explicit disposable DB
 //! only; fails the executable when the observed state breaks the contract.
 use bilibi_authz::grants::Grants;
-use bilibi_core::consent::{
+use bilibi_consent::{
     Answer, Capture, Channel, Consent, Contact, DecisionInput, Question, Reason, Refusal, Source,
     SuppressionInput, SERVICE as CONSENT,
 };
@@ -28,7 +28,7 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[allow(dead_code)]
-#[path = "support/erasure.rs"]
+#[path = "../../../base/privacy/examples/support/erasure.rs"]
 mod erasure_approval;
 
 const STORE: &str = "core/consent.consent";

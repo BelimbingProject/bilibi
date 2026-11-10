@@ -33,3 +33,14 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio-postgres.workspace = true
+
+[dev-dependencies]
+bilibi-base.workspace = true
+bilibi-core.workspace = true
+bilibi-privacy.workspace = true
+bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+bilibi-web = { path = "../../web" }
+sha1.workspace = true
+bilibi-workflow.workspace = true
+tokio.workspace = true
+zip.workspace = true

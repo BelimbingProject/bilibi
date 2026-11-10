@@ -54,7 +54,7 @@ All tables carry `tenant_id` and `company_id`. A subject is either one Core pers
 - The first erasure that needs the key creates it. Without `BILIBI_SETTINGS_KEY` that erasure refuses; once a tenant has a key, a check that cannot open it refuses rather than miss a suppression. Never replace a key: every hashed suppression would stop matching.
 - An erased address's decisions no longer answer for it; only its suppressions do.
 - A Domain that keeps a do-not-contact record of its own copies this pattern: keep the reason, replace the address with the keyed hash, and match the hash where it checks.
-- Runtime proof: `consent-walkthrough` in [`base/privacy`](../../base/privacy/README.md#runtime-checks).
+- Runtime proof: `cargo run -p bilibi-consent --example consent-walkthrough --locked` (`seed` first; same variables as the [`base/privacy`](../../base/privacy/README.md#runtime-checks) walkthroughs) on a disposable database. It checks that locate offers one candidate per matched address without showing it; the access export holds every decision version, suppression, lift reason and check of the person and confirmed addresses, nothing of another person's address or tenant 2; erasure leaves no address, evidence or correlation key in the four tables or their audit evidence and keeps both active address suppressions as keyed hashes that still answer `suppressed` on their own channel only; the lifted suppression keeps no hash; tenant 2's rows are untouched and it gets no key.
 
 ## Eligibility order
 
