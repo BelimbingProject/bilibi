@@ -30,14 +30,37 @@ All tables carry `tenant_id` and `company_id`. A subject is either one Core pers
 | --- | --- |
 | `core_consent_decisions` | Every decision version, including source, capture channel and evidence |
 | `core_consent_current` | The latest decision per company, subject, purpose and channel |
-| `core_consent_suppressions` | Active and lifted suppressions per company, subject and channel |
+| `core_consent_suppressions` | Active and lifted suppressions per company, subject and channel; an erased address keeps only its keyed hash |
 | `core_consent_log` | Every fresh dispatch-time answer, its caller and correlation key |
+| `core_consent_keys` | One sealed key per tenant for hashing erased addresses |
+
+## Privacy requests
+
+**Consent answers privacy requests as the `core/consent.consent` store (`src/privacy.rs`): an export has everything about the person and the addresses confirmed as theirs, and an erasure keeps only the bare facts.**
+
+- Found: rows linked to the person, and address-only rows that match an email the requester gave (exactly, as stored) or a phone number's digits. Each matched address is one candidate to confirm; the summary counts its rows and never shows the address.
+- Exported: every decision version, current state, suppression (with its lift reason) and dispatch check of the person and of each confirmed address.
+- Erased:
+
+| Record | Kept | Cleared |
+| --- | --- | --- |
+| Decision | Company, purpose, channel, grant or withdrawal, source, capture channel, version, times | Address, evidence |
+| Current state | A person's (it holds nothing personal) | An address's row is deleted |
+| Suppression | Company, channel, reason, times, lifted or not; an active one keeps a keyed hash of the address | Address, evidence, lift reason |
+| Check | Company, channel, purpose, outcome, caller, times | Address, correlation key |
+
+**Why:** proof that a person withdrew or complained may need to outlive the request, and an active suppression is the answer that stops future sends. Deleting it would let the next import of the same address be contacted again. So the suppression keeps an HMAC-SHA-256 of the normalised address under a random key per tenant (`core_consent_keys`, sealed with `Settings::seal_owned`), and `check` hashes the address it is asked about, so the erased address still answers `suppressed`. A plain digest is not enough: anyone who can read the table could hash a list of addresses and learn whose was erased. A lifted suppression stops nothing, so it keeps no hash.
+
+- The first erasure that needs the key creates it. Without `BILIBI_SETTINGS_KEY` that erasure refuses; once a tenant has a key, a check that cannot open it refuses rather than miss a suppression. Never replace a key: every hashed suppression would stop matching.
+- An erased address's decisions no longer answer for it; only its suppressions do.
+- A Domain that keeps a do-not-contact record of its own copies this pattern: keep the reason, replace the address with the keyed hash, and match the hash where it checks.
+- Runtime proof: `consent-walkthrough` in [`base/privacy`](../../base/privacy/README.md#runtime-checks).
 
 ## Eligibility order
 
 `check` stops at the first refusal:
 
-1. An active suppression for the company, person or address on the channel returns `suppressed`.
+1. An active suppression for the company, person or address (or the address's keyed hash, after an erasure) on the channel returns `suppressed`.
 2. The latest decision for the purpose on the channel applies. If none exists, the purpose decision for `any` applies.
 3. Between person and address decisions, the most recently recorded decision wins. A tie refuses.
 4. A granted decision allows. A withdrawal returns `withdrawn`.
@@ -94,5 +117,5 @@ The descriptor, migrations and contributions are in this crate. Composition foll
 ## Where to go next
 
 - [ADR 26](../../../docs/architecture/decisions/26-communication-consent-in-core.md) explains why this record is Core.
-- [`base/personal_data`](../../base/personal_data/README.md) owns data-subject access and erasure orchestration.
+- [`base/personal_data`](../../base/personal_data/README.md) is the store contract Consent implements; [`base/privacy`](../../base/privacy/README.md) runs the requests.
 - [`base/mail`](../../base/mail/README.md) owns email transport, not consent decisions.

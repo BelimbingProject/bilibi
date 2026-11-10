@@ -5,6 +5,7 @@
 mod agent_operations;
 mod contributions;
 mod model;
+mod privacy;
 mod store;
 mod web;
 
@@ -205,6 +206,21 @@ impl Consent {
             .and_then(NewAddress::parse)
             .unwrap_or(NewAddress::OptedOut))
     }
+    /// The keyed hash an erased suppression of the question's address keeps.
+    async fn address_hash(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        question: &Question,
+    ) -> Result<Option<Vec<u8>>> {
+        privacy::address_hash(
+            client,
+            &self.settings,
+            scope.tenant(),
+            question.contact.address.as_deref(),
+        )
+        .await
+    }
     /// The question with its address normalised.
     fn question(question: &Question, errors: &mut Vec<FieldError>) -> Question {
         if question.channel == Channel::Any {
@@ -267,7 +283,8 @@ impl Consent {
         lock_writable(tx, &scope, question.company_id).await?;
         self.lock_purpose(tx, &scope, &question.purpose).await?;
         let default = self.default(tx.sql(), &scope).await?;
-        Ok(store::log(tx, &scope, &question, key, caller, default).await?)
+        let hash = self.address_hash(tx.sql(), &scope, &question).await?;
+        Ok(store::log(tx, &scope, &question, key, caller, default, hash.as_deref()).await?)
     }
     /// Locks the purpose `FOR SHARE` on the write's transaction, so a
     /// concurrent retirement waits for this write.
@@ -302,7 +319,8 @@ impl Consent {
         invalid(errors)?;
         bilibi_company::authorize_work_target(&**client, &scope, question.company_id, VIEW).await?;
         let default = self.default(&**client, &scope).await?;
-        Ok(store::answer(&**client, &scope, &question, default).await?)
+        let hash = self.address_hash(&**client, &scope, &question).await?;
+        Ok(store::answer(&**client, &scope, &question, default, hash.as_deref()).await?)
     }
 
     /// A person's consent matrix and active suppressions. Needs
@@ -541,11 +559,12 @@ impl Consent {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/party_ids", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
     migrations: &[
         ("core-consent-001-decisions", include_str!("../migrations/001-decisions.sql")),
         ("core-consent-002-suppressions", include_str!("../migrations/002-suppressions.sql")),
         ("core-consent-003-log", include_str!("../migrations/003-log.sql")),
+        ("core-consent-004-personal-data", include_str!("../migrations/004-personal-data.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let consent = Arc::new(Consent {
@@ -554,6 +573,7 @@ inventory::submit! { Module {
             picklists: s.get(bilibi_picklists::SERVICE)?,
             settings: s.get("base/settings.store")?,
         });
+        privacy::bind(consent.settings.clone())?;
         agent_operations::bind(consent.clone())?;
         Ok(consent)
     }}, Service { id: web::SERVICE, factory: |s| {

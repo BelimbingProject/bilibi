@@ -161,15 +161,17 @@ pub(crate) async fn answer(
     scope: &Scope,
     question: &Question,
     default: NewAddress,
+    hash: Option<&[u8]>,
 ) -> Result<Answer> {
     let tenant = scope.tenant();
     let person = question.contact.person.map(|p| p.get());
     let address = question.contact.address.as_deref();
     let channel = question.channel.code();
+    // An erased suppression keeps only its address's keyed hash.
     let reasons = client
         .query(
-            "SELECT DISTINCT reason FROM core_consent_suppressions WHERE tenant_id=$1 AND company_id=$2 AND channel=$3 AND lifted_at IS NULL AND (person_id=$4 OR address=$5)",
-            &[&tenant, &question.company_id, &channel, &person, &address],
+            "SELECT DISTINCT reason FROM core_consent_suppressions WHERE tenant_id=$1 AND company_id=$2 AND channel=$3 AND lifted_at IS NULL AND (person_id=$4 OR address=$5 OR address_hash=$6)",
+            &[&tenant, &question.company_id, &channel, &person, &address, &hash],
         )
         .await?;
     let reasons: Vec<Reason> = reasons
@@ -204,10 +206,11 @@ pub(crate) async fn log(
     key: &str,
     caller: &'static str,
     default: NewAddress,
+    hash: Option<&[u8]>,
 ) -> Result<Answer> {
     let tenant = scope.tenant();
     let company_id = question.company_id;
-    let answer = answer(tx.sql(), scope, question, default).await?;
+    let answer = answer(tx.sql(), scope, question, default, hash).await?;
     let person = question.contact.person.map(|p| p.get());
     let address = question.contact.address.clone();
     let channel = question.channel.code();
