@@ -368,7 +368,6 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
     service: crate::web::SERVICE,
     contracts: &[
         ("create", "core.document.create"),
-        ("quick_create", "core.document.create"),
         ("save_field", "core.document.update"),
         ("save_custom_field", "core.document.update"),
         ("add_revision", "core.document.add_revision"),
@@ -381,5 +380,5 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("copy", "core.document.copy"),
         ("merge", "core.document.merge"),
     ],
-    pending: Pending::Events { events: &["upload", "copy_file"], reason: "Receiving a file, or copying a revision's file, stores it as a private artifact: Artifacts takes bytes outside a contract, whose input is bounded at 1 MiB. Agent-supplied files come later (issue 133)." },
+    pending: Pending::Events { events: &["upload", "copy_file", "quick_create"], reason: "Storing an uploaded or copied file (also Quick add, which then calls create) takes bytes outside a contract; Artifacts bounds contract input at 1 MiB. Agent-supplied files: issue 133." },
 }) }

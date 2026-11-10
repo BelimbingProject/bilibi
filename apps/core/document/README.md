@@ -124,10 +124,10 @@ WHERE tenant_id = 1 AND event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'c
 ORDER BY id;
 ```
 
-The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable migrated database it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
+The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable database that is migrated and seeded (`bilibi-web migrate`, then `bilibi-web seed-production`, which carries the pick-lists) it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
 
 ```sh
-BILIBI_DOCUMENT_AUDIT=disposable cargo run -p bilibi-document --example audit-coverage --locked
+BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder cargo run -p bilibi-document --example audit-coverage --locked
 ```
 
 A new document action belongs in that example in the same change.

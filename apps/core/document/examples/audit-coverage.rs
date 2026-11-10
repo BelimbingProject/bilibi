@@ -6,20 +6,47 @@
 //! per-document query in the module README finds every document row the action
 //! wrote. No mocks and no test runner; prints one line per action.
 //!
-//! `BILIBI_DOCUMENT_AUDIT=disposable DATABASE_URL=… cargo run -p bilibi-document
-//! --example audit-coverage --locked`
+//! Files need private storage and a scanner, which a plain build carries
+//! neither of: the example makes a private folder under
+//! `BILIBI_DOCUMENT_AUDIT_ROOT`, points the settings at it, binds a scanner
+//! that calls everything clean (it exists only in this executable) and runs
+//! Queue's executor in process, as a deployed host would.
+//!
+//! On a migrated database that `bilibi-web seed-production` has seeded (the
+//! pick-lists a document is filed under):
+//!
+//! `BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder
+//! DATABASE_URL=… cargo run -p bilibi-document --example audit-coverage --locked`
 use bilibi_database::{pool, Db};
 use bilibi_document::{
     Documents, Draft, MarkPatch, MergeSource, Patch, Reference, RevisionInput, ShareInput, Source,
     Upload, SERVICE,
 };
+use bilibi_media::{Media, ScanFacts, ScanFuture, Scanner, Verdict};
+use bilibi_queue::{Config, Executor};
 use bilibi_tenancy::Scope;
+use serde_json::json;
 use std::time::Duration;
+use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Fixture scanner, not a production adapter.
+struct Clean;
+impl Scanner for Clean {
+    fn name(&self) -> &str {
+        "audit-coverage"
+    }
+    fn version(&self) -> String {
+        "1.0 (example)".into()
+    }
+    fn scan<'a>(&'a self, _bytes: &'a [u8], _facts: ScanFacts<'a>) -> ScanFuture<'a> {
+        Box::pin(async { Verdict::Clean })
+    }
+}
 
 /// The rows the per-document query in the README finds for `document`.
 const FOR_DOCUMENT: &str = "SELECT id FROM base_audit_mutations
@@ -79,7 +106,10 @@ impl Trail<'_> {
         let mut missed = Vec::new();
         for row in &mutations {
             let (id, kind, event): (i64, String, String) = (row.get(0), row.get(1), row.get(2));
-            kinds.push(format!("{} {event}", kind.trim_start_matches("core.document.")));
+            kinds.push(format!(
+                "{} {event}",
+                kind.trim_start_matches("core.document.")
+            ));
             if kind != "core.document.file" && !found.contains(&id) {
                 missed.push(format!("{kind} {event} (#{id})"));
             }
@@ -91,7 +121,8 @@ impl Trail<'_> {
             kinds.join(", ")
         );
         if evidence == 0 {
-            self.gaps.push(format!("{action}: left no audited change or event"));
+            self.gaps
+                .push(format!("{action}: left no audited change or event"));
         }
         if !missed.is_empty() {
             self.gaps.push(format!(
@@ -126,8 +157,48 @@ async fn main() -> Result<()> {
         );
     }
     let db = pool(&std::env::var("DATABASE_URL")?)?;
+    let root = std::path::PathBuf::from(std::env::var("BILIBI_DOCUMENT_AUDIT_ROOT")?);
     bilibi_walkthrough_fixture::install(&db).await?;
+    // A workplace for the administrator: files can only be kept by someone
+    // signed in to a company.
+    db.get().await?.batch_execute(
+        "WITH p AS (INSERT INTO persons(tenant_id,code,name,kind) SELECT 1,'audit_coverage_admin','Audit Coverage Admin','human' WHERE NOT EXISTS (SELECT 1 FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND i.email='admin@example.test' AND u.person_id IS NOT NULL) RETURNING id),
+              u AS (UPDATE users SET person_id=p.id FROM p, user_identities i WHERE users.identity_id=i.id AND users.tenant_id=1 AND i.email='admin@example.test' RETURNING users.person_id)
+         INSERT INTO user_desks(tenant_id,person_id,company_id) SELECT 1,person_id,1 FROM u ON CONFLICT DO NOTHING",
+    ).await?;
     let app = bilibi_web::App::new(db.clone(), "http://localhost:35563")?;
+    for (key, folder) in [
+        ("artifacts.storage_root", "artifacts"),
+        ("media.disks", "media"),
+    ] {
+        let path = root.join(folder);
+        std::fs::DirBuilder::new().recursive(true).create(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        let value = if key == "media.disks" {
+            json!({"local": path})
+        } else {
+            json!(path)
+        };
+        db.get().await?.execute(
+            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES($1,0,'global',0,$2,false) ON CONFLICT (key,tenant_id,scope_type,scope_id) DO UPDATE SET value = excluded.value",
+            &[&key, &value],
+        ).await?;
+    }
+    app.services
+        .get::<Media>("base/media.store")?
+        .bind_scanner(Arc::new(Clean))?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(
+        Executor::from_services(
+            &app.services,
+            Config {
+                concurrency: 2,
+                poll_interval: std::time::Duration::from_millis(200),
+                ..Config::default()
+            },
+        )?
+        .run(stopped),
+    );
     let documents = app.services.get::<Documents>(SERVICE)?;
     let login = app
         .user
@@ -160,7 +231,11 @@ async fn main() -> Result<()> {
     // Create, which Quick add and Copy also call.
     trail.start().await?;
     let a = write!(app, scope, "core.document.create", |tx| documents
-        .create(&mut tx, &scope, &link("Audit coverage A", "https://example.test/a"))
+        .create(
+            &mut tx,
+            &scope,
+            &link("Audit coverage A", "https://example.test/a")
+        )
         .await?);
     trail.finish("create / quick add", &[a.id]).await?;
 
@@ -225,6 +300,25 @@ async fn main() -> Result<()> {
         )
         .await?);
     trail.finish("share, email a link", &[a.id]).await?;
+    // The queued delivery settles in the background (sent, failed or
+    // suppressed) and is audited on its own.
+    trail.start().await?;
+    for _ in 0..100 {
+        let queued: i64 = db
+            .get()
+            .await?
+            .query_one(
+                "SELECT count(*) FROM core_document_emails WHERE tenant_id = $1 AND state = 'queued'",
+                &[&scope.tenant()],
+            )
+            .await?
+            .get(0);
+        if queued == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    trail.finish("email delivery", &[a.id]).await?;
     let grant = documents
         .access(&scope, a.id)
         .await?
@@ -258,7 +352,11 @@ async fn main() -> Result<()> {
     trail.finish("copy", &[copy.id]).await?;
 
     let b = write!(app, scope, "core.document.create", |tx| documents
-        .create(&mut tx, &scope, &link("Audit coverage B", "https://example.test/b"))
+        .create(
+            &mut tx,
+            &scope,
+            &link("Audit coverage B", "https://example.test/b")
+        )
         .await?);
     let a = documents.get(&scope, a.id).await?;
     trail.start().await?;
@@ -312,9 +410,19 @@ async fn main() -> Result<()> {
         write!(app, scope, "core.document.delete", |tx| documents
             .delete(&mut tx, &scope, id, document.version)
             .await?);
-        // Metadata goes once the files are; wait for the finalizing write.
-        for _ in 0..50 {
-            if documents.get(&scope, id).await.is_err() {
+        // A deleting document is already unreadable; its metadata goes once
+        // the files are, so wait for the row itself.
+        for _ in 0..100 {
+            let left: i64 = db
+                .get()
+                .await?
+                .query_one(
+                    "SELECT count(*) FROM core_documents WHERE tenant_id = $1 AND id = $2",
+                    &[&scope.tenant(), &id],
+                )
+                .await?
+                .get(0);
+            if left == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -322,6 +430,8 @@ async fn main() -> Result<()> {
         trail.finish(action, &[id]).await?;
     }
 
+    let _ = stop.send(true);
+    let _ = worker.await;
     if trail.gaps.is_empty() {
         println!("\nevery document action left audited evidence the per-document query finds");
         Ok(())

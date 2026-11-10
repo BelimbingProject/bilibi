@@ -416,6 +416,7 @@ impl Index {
             bilibi_ui::flex_table::Cell::instant(clock.instant(d.last_revision_at)),
         );
         row.dom_id = Some(format!("documents-{id}"));
+        row.label = Some(d.name.clone());
         if can_preview {
             row.actions.push(&render(IconButton {
                 id: &format!("documents-{id}-preview"),

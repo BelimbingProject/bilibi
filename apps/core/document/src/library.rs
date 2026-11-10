@@ -18,7 +18,7 @@ use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_notifications::Notice;
 use bilibi_principal_directory::{PrincipalKind, PrincipalRef, Query};
-use bilibi_tenancy::{ProofClient, ReadClient, Scope};
+use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -35,7 +35,7 @@ fn mark_values(document: i64, user: i64, marks: Marks) -> Value {
 /// on: the module capability and an explicit grant that has not ended, in
 /// one read, for the pages that draw a control per row.
 pub(crate) async fn granted(
-    client: &dyn ProofClient,
+    client: &dyn ReadClient,
     scope: &Scope,
     ids: &[i64],
     permission: &str,
@@ -48,6 +48,7 @@ pub(crate) async fn granted(
     if !bilibi_authz::holds_proof(client, scope, capability).await? {
         return Ok(HashSet::new());
     }
+    let ids = ids.to_vec();
     Ok(client
         .query(
             &format!("SELECT document_id FROM core_document_access WHERE tenant_id=$1 AND user_id=$2 AND document_id = ANY($3) AND {column} AND (expires_at IS NULL OR expires_at > now())"),

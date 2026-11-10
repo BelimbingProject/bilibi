@@ -9,8 +9,8 @@ use crate::{Document, Filter};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    ActionLink, Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview, Html, Modal,
-    ModalWidth, StatusKind,
+    Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview, Html, Modal, ModalWidth,
+    StatusKind,
 };
 use serde_json::{json, Value};
 
@@ -237,21 +237,22 @@ impl Index {
             src: &preview.path,
             title: &format!("Preview of {}", preview.file_name),
         })?;
-        let mut actions = render(ActionLink {
+        body.push(&render(Button {
             id: "documents-preview-download",
             href: &preview.download,
+            class: "mt-3",
             body: Html::text("Download"),
-            ..ActionLink::default()
-        })?;
-        actions.push(&render(Button {
+            ..Button::default()
+        })?);
+        body.push(&render(Button {
             id: "documents-preview-close",
             button_type: "button",
             event: "close_preview",
             variant: ButtonVariant::Primary,
+            class: "mt-3 ml-2",
             body: Html::text("Close"),
             ..Button::default()
         })?);
-        body.push(&actions);
         render(Modal {
             id: "documents-preview-modal",
             title: &preview.name,

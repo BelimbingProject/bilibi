@@ -208,7 +208,7 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
     (bilibi_ui::FilePreview): an image, PDF or plain text in a same-origin
     frame. The route decides who may read it and what it may show. -#}
 {% macro file_preview(id, src, title) %}
-<iframe id="{{ id }}" src="{{ src }}" title="{{ title }}" referrerpolicy="no-referrer" class="block h-[65vh] min-h-80 w-full rounded-xl border border-line bg-surface"></iframe>
+<iframe id="{{ id }}" src="{{ src }}" title="{{ title }}" referrerpolicy="no-referrer" class="block h-[65vh] max-h-[40rem] min-h-80 w-full rounded-xl border border-line bg-surface"></iframe>
 {% endmacro %}
 
 {#- A same-origin interactive document hosted inside a live page. The shared

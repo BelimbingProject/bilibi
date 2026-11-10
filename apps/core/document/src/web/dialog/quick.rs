@@ -123,7 +123,7 @@ impl QuickDocument {
                 return Ok(None);
             }
         }
-        let call = pages.call(scope, credential, "quick_create", "core.document.create");
+        let call = pages.call(scope, credential, "create", "core.document.create");
         match pages.contracts.submit(&call, self.input()).await {
             Ok(result) => Ok(Some(Added {
                 name: result["result"]["name"]
