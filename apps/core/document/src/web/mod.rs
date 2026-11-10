@@ -366,6 +366,7 @@ pub(crate) fn filter_of(query: &HashMap<String, String>) -> Filter {
         marked: query
             .get("show")
             .and_then(|v| crate::MarkFilter::parse(v.trim())),
+        retention_due: query.get("show").is_some_and(|v| v == "retention_due"),
         ..Filter::default()
     }
 }
@@ -432,6 +433,7 @@ impl Files {
                 "relation",
                 "revision",
                 "last_revision_at",
+                "retention_due_at",
                 "filing_company_id",
                 "created_at",
             ]
@@ -439,7 +441,7 @@ impl Files {
         );
         let text = |v: &Option<String>| v.clone().unwrap_or_default();
         for d in &page.entries {
-            csv.push_str(&csv_row(&row(d, text)));
+            csv.push_str(&csv_row(&row(d, text, page.retention_due_at.get(&d.id))));
         }
         Ok(FileBody::attachment(
             csv.into_bytes(),
@@ -448,7 +450,11 @@ impl Files {
         ))
     }
 }
-fn row(d: &Document, text: impl Fn(&Option<String>) -> String) -> Vec<String> {
+fn row(
+    d: &Document,
+    text: impl Fn(&Option<String>) -> String,
+    due: Option<&std::time::SystemTime>,
+) -> Vec<String> {
     vec![
         d.id.to_string(),
         d.name.clone(),
@@ -466,6 +472,9 @@ fn row(d: &Document, text: impl Fn(&Option<String>) -> String) -> Vec<String> {
         text(&d.relation),
         d.revision.to_string(),
         d.last_revision_at.to_string(),
+        due.and_then(|at| jiff::Timestamp::try_from(*at).ok())
+            .map(|at| at.to_string())
+            .unwrap_or_default(),
         d.company_id.to_string(),
         d.created_at.to_string(),
     ]

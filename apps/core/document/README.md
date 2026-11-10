@@ -78,6 +78,29 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 
 Internal revisions store one Artifact ID in `core_document_revisions`; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
+## Tenant retention and due documents
+
+Settings › Documents offers **Keep new document files for (days)**
+(`core.document.retention_days`, 0 by default). Zero leaves ordinary Artifact
+expiry and explicit deletion as before. When a tenant chooses a positive period
+(1–36500 days), every newly attached **private file revision** receives an
+irreversible Base retain-until from its attachment time. The owner calls
+`Artifacts::retain_in` inside the same mutation as the revision and file ledger
+attachment; a failed retention rejects the whole document write. Changing the
+setting affects future revisions only and cannot shorten an existing retain-until.
+External HTTPS links have no bytes in Base Artifacts, so this file-retention
+rule does not claim to retain a remote file.
+
+The Documents list's **Show › Retention due** view is for a person with
+`core.document.manage` and an explicit manage grant on each document. It shows
+private documents only when *every* file revision's Base retain-until has passed
+and no revision is under legal hold; the latest retain-until appears in the list
+and filtered CSV/agent list output. The record page shows each revision's Base
+retention and hold state to its manager. Due means the document may be considered
+for an explicit reviewed deletion; nothing is deleted automatically. Base still
+rechecks every revision under lock in delete and merge, so a new hold refuses
+those actions even after the list was read.
+
 ## Retention-safe deletion
 
 Deleting a document first checks every revision's file. If any revision is retained or under legal hold, `preview_delete` and `delete` refuse with `Retained` or `LegalHold` before anything changes (the check reads the Artifacts rows `FOR SHARE` inside the commit, so a hold placed meanwhile waits). The document stays readable with its complete revision history.
@@ -158,7 +181,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 
 - Capabilities: `core.document.view`, `core.document.download`, `core.document.manage` and `core.document.merge`.
 - Pick-lists: `core.document.category`, `core.document.sub_category`, `core.document.type`, and `core.document.status`; category, type and status each start with a default (`other`, `other`, `active`).
-- Settings: `core.document.max_upload_bytes`, `core.document.allowed_types` and `core.document.expiry_reminder_days`.
+- Settings: `core.document.max_upload_bytes`, `core.document.allowed_types`, `core.document.expiry_reminder_days` and `core.document.retention_days`.
 - Custom field record type `document`.
 - Record kind: `core.document.document`; holder table `document_links`.
 - Routes: `/documents`, `/documents/{id}`, revision downloads and previews, and `/documents/export.csv`.
