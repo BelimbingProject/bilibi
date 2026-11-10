@@ -60,7 +60,10 @@ fn refuse<T>(
     case: i64,
     result: std::result::Result<T, bilibi_base::media::Error>,
 ) -> Result<()> {
-    if !matches!(result, Err(bilibi_base::media::Error::Database(Error::Forbidden))) {
+    if !matches!(
+        result,
+        Err(bilibi_base::media::Error::Database(Error::Forbidden))
+    ) {
         return Err(Error::Internal);
     }
     if let Ok(mut refused) = REFUSED.lock() {
