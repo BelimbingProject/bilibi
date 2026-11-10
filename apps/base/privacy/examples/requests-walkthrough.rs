@@ -1,7 +1,8 @@
 //! Manual running-service walkthrough of data-subject requests (ADR 05):
 //! access and erasure through every mounted store, with the queue running.
 //! Explicit disposable DB only; prints real outcomes and durable state for
-//! inspection. No assertions or test harness.
+//! inspection. Invitation regressions also check the exported and persisted
+//! state, failing the executable on a contract violation; no test harness.
 use bilibi_artifacts::{Artifacts, Reference};
 use bilibi_authz::grants::Grants;
 use bilibi_base::media::{AttachmentSubject, Media, Rules, Upload};
@@ -26,6 +27,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[path = "support/erasure.rs"]
 mod erasure_approval;
+#[path = "support/invitations.rs"]
+mod invitations;
 
 // The same browser-bound write authority as the masking/export walkthroughs.
 struct Browser<'a> {
@@ -279,6 +282,7 @@ async fn main() -> Result<()> {
     let one = OrganisationId::new(1)?;
     let ada = PersonId::new(1)?;
     let kim = PersonId::new(2)?;
+    invitations::prepare(&app, &mut client, &admin, &boundary, &privacy).await?;
 
     println!("== stage 7 regression: detached, shared and held addresses");
     use bilibi_core::address::{AddressInput, AddressService, AttachmentInput, PartyId};
@@ -584,6 +588,16 @@ async fn main() -> Result<()> {
         .await?;
     println!("received {} due {}", access.id, access.due_at);
     for (store, label, located) in privacy.locate(&client, &admin, access.id).await? {
+        if store == "core/portal.invitations"
+            && (located.kinds.len() != 1
+                || located.kinds[0].by_person != 5
+                || located.kinds[0].by_identifier != 1
+                || !located.candidates.is_empty())
+        {
+            return Err(
+                "invitation locate lost linked rows or offered another Person's record".into(),
+            );
+        }
         println!("  locate {store} ({label}): {located:?}");
     }
     let access = privacy
@@ -621,6 +635,7 @@ async fn main() -> Result<()> {
                 zip.by_name("export.json")?.read_to_string(&mut text)?;
                 serde_json::from_str(&text).unwrap_or(Value::Null)
             };
+            invitations::disclosure(&bundle)?;
             for store in bundle["stores"].as_array().into_iter().flatten() {
                 if store["store"] == "core/user.accounts" {
                     println!("SCIM access disclosure: {}", store["records"]["accounts"]);
@@ -694,6 +709,42 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("== due notices: an open request due tomorrow");
+    let portable = privacy
+        .receive(
+            &mut client,
+            &admin,
+            NewRequest {
+                kind: RequestKind::Portability,
+                person: ada,
+                identifiers: Vec::new(),
+                company: one,
+            },
+        )
+        .await?;
+    let portable = privacy
+        .verify(
+            &mut client,
+            &admin,
+            portable.id,
+            portable.version,
+            "Identity checked",
+            &[],
+        )
+        .await?;
+    let portable = privacy
+        .approve(&mut client, &admin, portable.id, portable.version)
+        .await?;
+    let portable = settle(&privacy, &client, &admin, portable.id, 60).await?;
+    let (_, bytes, _) = privacy
+        .request_document(&mut client, &admin, portable.id, None)
+        .await?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let bundle: Value = serde_json::from_reader(zip.by_name("export.json")?)?;
+    invitations::disclosure(&bundle)?;
+    println!(
+        "invitation portability: linked invitation and registration exported without identifiers"
+    );
+
     let open = privacy
         .receive(
             &mut client,
@@ -1055,6 +1106,7 @@ async fn main() -> Result<()> {
     certificate(&privacy, &mut client, &admin, erasure.id).await?;
 
     println!("== state after erasure");
+    invitations::erased(&client).await?;
     for row in &reservations {
         let id: String = row.get("public_id");
         let path = std::path::Path::new(row.get::<_, &str>("storage_root")).join(&id);

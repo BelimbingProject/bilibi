@@ -10,7 +10,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 | Staff page | `/customer-access` (`admin.customer-access.view`; writes need `admin.customer-access.manage`) |
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
 | Portal role | `portal_customer`, given to every customer an invitation admits |
-| Settings | `customer_portal.invitation_days` (tenant, default 7), the installation-wide `customer_portal.registration_*` lifetime and abuse limits, and the company retention class `core/portal.registration_requests` |
+| Settings | `customer_portal.invitation_days` (tenant, default 7), the installation-wide `customer_portal.registration_*` lifetime and abuse limits, and the company retention classes `core/portal.registration_requests` and `core/portal.invitations` |
 | Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`, `customer_registration_limits`; customer accounts stay in Core User's `users` |
 
 ## Portal site
@@ -31,6 +31,13 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 - Accepting creates the account through Core User (`create_customer_in`, address verified), gives it `portal_customer` through Authz (`assign_portal_role_in`) and closes the invitation, in one transaction audited as `system · portal`. The host then signs the customer in with the password just chosen, through the ordinary portal sign-in; when that cannot finish (a tenant that requires a second step), the customer signs in on the next page.
 - **Resend** sends a new link to an invitation's Person and address through the same contract as a new invitation, which revokes the old link.
 - A Person that retired, an affiliation that ended or a company that was archived since the invitation makes the link invalid.
+
+### Personal data and retention
+
+- `portal.invitation` declares `name` and `email` as personal. Access and portability export every invitation linked to the request's Person, including accepted, revoked and expired invitations, without token digests. Invitations always have a Person; an equal email never discloses an invitation linked to another Person, and unlinked account requests follow the separate registration policy below.
+- Erasure replaces the copied name and email with `[erased]`, revokes any invitation still awaiting acceptance, and clears those fields from earlier audit evidence through Base Privacy. It preserves IDs, Person and registration links, lifecycle times and accepted accounts. A record or Person legal hold keeps the values until release; Base's owed cleanup then retries them. Repeated erasure is a no-op unless personal values were added again.
+- New invitation audit evidence records links and status without copying the name or email.
+- The shared retention class **Customer invitations** anonymises accepted, revoked and expired invitations after the owning company's configured period, measured from the first acceptance, revocation or expiry. Replacing an already expired invitation does not restart its clock. Invitations without a company follow the primary company's settings. Record and Person holds apply. No period or automatic cleanup is enabled by default; an operator sets the period, enables the class and enables the daily Privacy sweep. Active invitations are never eligible merely because they were created long ago.
 
 ## Requests for an account
 
