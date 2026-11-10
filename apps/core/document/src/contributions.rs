@@ -36,6 +36,8 @@ pub(crate) const ACTIVE: &str = "active";
 pub const MAX_UPLOAD_BYTES: &str = "core.document.max_upload_bytes";
 /// The file types the tenant accepts, from `FILE_TYPES`.
 pub const ALLOWED_TYPES: &str = "core.document.allowed_types";
+/// Minimum number of days to keep each newly attached private revision.
+pub const RETENTION_DAYS: &str = "core.document.retention_days";
 
 macro_rules! provenance {
     () => {
@@ -191,6 +193,19 @@ inventory::submit! { Contribution::new(DEFINITIONS, crate::reminders::REMINDER_D
         group: "Documents",
         label: "Days before a document expires to remind",
         help: "How many days before its expiry date a document's reminder task is due. The task is created for the person who sets the date.",
+        capability: None,
+        reveal_duration_ms: 5_000,
+    }),
+})) }
+// Zero leaves ordinary Artifact expiry and explicit deletion unchanged.
+// Retention is irreversible, so a new rule applies to future revisions only.
+inventory::submit! { Contribution::new(DEFINITIONS, RETENTION_DAYS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global, ScopeKind::Tenant], default: || json!(0),
+    nullable: false, encrypted: false, minimum: Some(0.0), maximum: Some(36500.0), validator: None,
+    editor: Some(Editor {
+        group: "Documents",
+        label: "Keep new document files for (days)",
+        help: "Zero leaves retention off. A positive period protects each new private revision from deletion for that many days. Existing retention can only be extended, even if this setting is lowered later.",
         capability: None,
         reveal_duration_ms: 5_000,
     }),

@@ -26,13 +26,13 @@ use bilibi_records::Records;
 use bilibi_settings::Settings;
 use bilibi_tenancy::{Authentication, ReadClient, Scope};
 use jiff::{civil::Date, Timestamp};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use store::On;
 
 pub use bilibi_records::Reference;
 pub use contributions::{
     ALLOWED_TYPES, DOWNLOAD, LIST_CATEGORY, LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE, MANAGE,
-    MAX_UPLOAD_BYTES, MERGE, VIEW,
+    MAX_UPLOAD_BYTES, MERGE, RETENTION_DAYS, VIEW,
 };
 pub use email::{ACTOR_PER_HOUR, EMAIL_RECORD, RECIPIENT_PER_DAY, TENANT_PER_HOUR};
 pub use model::{
@@ -350,6 +350,8 @@ pub struct Filter {
     /// Only the reader's own favourites or follows.
     pub marked: Option<MarkFilter>,
     pub expiry: Option<ExpiryFilter>,
+    /// Show only private documents whose complete revision set is due.
+    pub retention_due: bool,
     pub sort: Sort,
     pub descending: bool,
     pub page: i64,
@@ -365,6 +367,7 @@ impl Default for Filter {
             related: None,
             marked: None,
             expiry: None,
+            retention_due: false,
             sort: Sort::LastRevision,
             descending: true,
             page: 1,
@@ -377,6 +380,8 @@ impl Default for Filter {
 pub struct Page {
     pub entries: Vec<Document>,
     pub total: i64,
+    /// For the due view, the latest retain-until among each document's files.
+    pub retention_due_at: HashMap<i64, SystemTime>,
 }
 
 pub type WriteResult<T> = std::result::Result<T, WriteError>;
@@ -650,6 +655,57 @@ impl Documents {
         self.store().get(&**client, &scope, id).await?;
         store::revisions(&**client, &scope, id).await
     }
+    /// Base retention and legal hold for each private revision this manager
+    /// may change. A viewer without the document's manage grant learns none.
+    pub async fn retention_statuses(
+        &self,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<HashMap<i32, bilibi_artifacts::RetentionStatus>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        let document = self.store().get(&**client, &scope, id).await?;
+        bilibi_authz::authorize_proof(&**client, &scope, MANAGE).await?;
+        if !store::permission(&**client, &scope, id, "manage").await? {
+            return Err(Error::Forbidden);
+        }
+        let rows = client.query(
+            "SELECT revision,artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY revision",
+            &[&scope.tenant(), &id],
+        ).await?;
+        let mut revisions = HashMap::new();
+        for row in rows {
+            revisions.insert(row.get::<_, String>(1), row.get::<_, i32>(0));
+        }
+        let ids: Vec<String> = revisions.keys().cloned().collect();
+        let company = bilibi_party_ids::OrganisationId::new(document.company_id)
+            .map_err(|_| Error::Internal)?;
+        let owned = self.artifacts.for_owner(&scope, company, &files::FILES);
+        let mut result = HashMap::new();
+        for chunk in ids.chunks(1000) {
+            let states =
+                owned
+                    .retention_statuses(&client, chunk)
+                    .await
+                    .map_err(|error| match error {
+                        bilibi_artifacts::Error::Database(Error::Forbidden) => Error::Forbidden,
+                        bilibi_artifacts::Error::NotFound => Error::NotFound,
+                        other => {
+                            eprintln!(
+                                "error: document retention status unavailable: {}",
+                                other.code()
+                            );
+                            Error::Internal
+                        }
+                    })?;
+            for state in states {
+                if let Some(revision) = revisions.get(&state.id) {
+                    result.insert(*revision, state);
+                }
+            }
+        }
+        Ok(result)
+    }
     /// The latest revision of each document given, by document id, in one
     /// read, for the pages. The documents are ones `list` or `get` returned
     /// to this reader.
@@ -697,7 +753,7 @@ impl Documents {
             .in_tz(&zone)
             .map_err(|_| Error::Internal)?
             .date();
-        self.store().list(&**client, &scope, filter, today).await
+        self.store().list(&client, &scope, filter, today).await
     }
     /// The documents linked to `record`, newest revision first; the record
     /// must be one the reader may view.

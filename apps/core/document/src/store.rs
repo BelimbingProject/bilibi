@@ -17,16 +17,20 @@ use bilibi_custom_fields::CustomFields;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_notifications::NotificationBoundary;
+use bilibi_party_ids::OrganisationId;
 use bilibi_picklists::PickLists;
 use bilibi_principal_directory::{
     DirectoryClient, DirectoryFuture, PrincipalDirectory, PrincipalKind, PrincipalRef, Query,
 };
 use bilibi_records::Records;
-use bilibi_settings::Settings;
+use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ProofClient, ReadClient, Scope};
 use jiff::{civil::Date, Timestamp};
 use serde_json::{json, Value};
-use std::time::SystemTime;
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::{Duration, SystemTime},
+};
 use tokio_postgres::{types::ToSql, Row, Transaction};
 
 pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on::text AS expires_on,d.expiry_activity_id,d.expiry_user_id,d.custom_fields,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
@@ -383,6 +387,52 @@ pub(crate) struct Store<'s> {
     pub queue: &'s bilibi_queue::Queue,
 }
 impl Store<'_> {
+    /// The tenant rule is captured when each private revision is attached.
+    /// Base owns the irreversible protection and its audit history.
+    async fn retain_new_file(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        company: i64,
+        artifact_id: Option<&str>,
+    ) -> WriteResult<()> {
+        let Some(artifact_id) = artifact_id else {
+            return Ok(());
+        };
+        let days = self
+            .settings
+            .get(
+                tx.sql(),
+                scope,
+                Target::Tenant,
+                crate::contributions::RETENTION_DAYS,
+            )
+            .await?
+            .value
+            .as_i64()
+            .ok_or(Error::Internal)?;
+        if days == 0 {
+            return Ok(());
+        }
+        if !(1..=36500).contains(&days) {
+            return Err(Error::Internal.into());
+        }
+        let until = SystemTime::now()
+            .checked_add(Duration::from_secs(days as u64 * 86_400))
+            .ok_or(Error::Internal)?;
+        let company = OrganisationId::new(company).map_err(|_| Error::Internal)?;
+        self.artifacts
+            .for_owner(scope, company, &files::FILES)
+            .retain_in(
+                tx,
+                artifact_id,
+                until,
+                Some("tenant document retention rule"),
+            )
+            .await
+            .map_err(files::artifact_error)?;
+        Ok(())
+    }
     /// Links are filing aids only. They never grant document access.
     async fn visible(
         &self,
@@ -591,9 +641,76 @@ impl Store<'_> {
         Ok(result)
     }
 
+    /// Which manager-visible private documents have every revision past its
+    /// Base retain-until and no legal hold. Base alone decides each file's
+    /// current protection; Core only combines its own revision set.
+    async fn retention_due_ids(
+        &self,
+        client: &tokio_postgres::Client,
+        scope: &Scope,
+    ) -> Result<HashMap<i64, SystemTime>> {
+        authorize_proof(client, scope, MANAGE).await?;
+        let rows = client.query(
+            "SELECT d.id,d.company_id,r.artifact_id FROM core_documents d JOIN core_document_access a ON a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND a.can_manage AND (a.expires_at IS NULL OR a.expires_at > now()) JOIN core_document_revisions r ON r.tenant_id=d.tenant_id AND r.document_id=d.id WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND d.source='internal' AND r.artifact_id IS NOT NULL ORDER BY d.id,r.revision",
+            &[&scope.tenant(), &scope.user()],
+        ).await?;
+        let mut by_company: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        let mut by_document: HashMap<i64, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (document, company, artifact): (i64, i64, String) =
+                (row.get(0), row.get(1), row.get(2));
+            by_company
+                .entry(company)
+                .or_default()
+                .push(artifact.clone());
+            by_document.entry(document).or_default().push(artifact);
+        }
+        let mut status = HashMap::new();
+        for (company, mut ids) in by_company {
+            let company = OrganisationId::new(company).map_err(|_| Error::Internal)?;
+            ids.sort_unstable();
+            ids.dedup();
+            let owned = self.artifacts.for_owner(scope, company, &files::FILES);
+            for chunk in ids.chunks(1000) {
+                let states = match owned.retention_statuses(client, chunk).await {
+                    Ok(states) => states,
+                    Err(bilibi_artifacts::Error::Database(Error::Forbidden)) => continue,
+                    Err(error) => {
+                        eprintln!(
+                            "error: document retention status unavailable: {}",
+                            error.code()
+                        );
+                        return Err(Error::Internal);
+                    }
+                };
+                for state in states {
+                    status.insert(state.id, (state.due, state.retain_until));
+                }
+            }
+        }
+        let mut due = HashMap::new();
+        for (id, files) in by_document {
+            let mut latest = SystemTime::UNIX_EPOCH;
+            let mut all_due = true;
+            for file in files {
+                match status.get(&file) {
+                    Some((true, Some(until))) => latest = latest.max(*until),
+                    _ => {
+                        all_due = false;
+                        break;
+                    }
+                }
+            }
+            if all_due {
+                due.insert(id, latest);
+            }
+        }
+        Ok(due)
+    }
+
     pub(crate) async fn list(
         &self,
-        client: &dyn ReadClient,
+        client: &tokio_postgres::Client,
         scope: &Scope,
         filter: &Filter,
         today: Date,
@@ -625,6 +742,14 @@ impl Store<'_> {
         let (related_kind, related_id) = related.as_ref().map_or((None, None), |r| {
             (Some(r.kind.as_str()), Some(r.id.as_str()))
         });
+        let retention_due_at = if filter.retention_due {
+            self.retention_due_ids(client, scope).await?
+        } else {
+            HashMap::new()
+        };
+        let due_ids: Option<Vec<i64>> = filter
+            .retention_due
+            .then(|| retention_due_at.keys().copied().collect());
         let conditions = "d.tenant_id=$1 AND d.deleting_at IS NULL
              AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$2)
              AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$4))
@@ -633,11 +758,12 @@ impl Store<'_> {
              AND ($8::text IS NULL OR d.document_type = $8)
              AND ($9::text IS NULL OR d.status = $9)
              AND ($11::text IS NULL OR ($11 = 'expired' AND d.expires_on < $12::text::date) OR ($11 = 'soon' AND d.expires_on >= $12::text::date AND d.expires_on <= $12::text::date + 30))
-             AND ($10::text IS NULL OR EXISTS (SELECT 1 FROM core_document_marks m WHERE m.tenant_id=d.tenant_id AND m.document_id=d.id AND m.user_id=$2 AND CASE WHEN $10 = 'favourites' THEN m.favourite ELSE m.following END))";
+             AND ($10::text IS NULL OR EXISTS (SELECT 1 FROM core_document_marks m WHERE m.tenant_id=d.tenant_id AND m.document_id=d.id AND m.user_id=$2 AND CASE WHEN $10 = 'favourites' THEN m.favourite ELSE m.following END))
+             AND ($13::bigint[] IS NULL OR d.id=ANY($13))";
         let marked = filter.marked.map(|m| m.code());
         let expiry = filter.expiry.map(|e| e.code());
         let today = today.to_string();
-        let params: [&(dyn ToSql + Sync); 12] = [
+        let params: [&(dyn ToSql + Sync); 13] = [
             &reader.tenant,
             &reader.user,
             &related_kind,
@@ -650,6 +776,7 @@ impl Store<'_> {
             &marked,
             &expiry,
             &today,
+            &due_ids,
         ];
         let total: i64 = client
             .query_opt(
@@ -675,7 +802,11 @@ impl Store<'_> {
             .iter()
             .map(from_row)
             .collect::<Result<Vec<_>>>()?;
-        Ok(Page { entries, total })
+        Ok(Page {
+            entries,
+            total,
+            retention_due_at,
+        })
     }
 
     /// The document a write acts on, with explicit manage access.
@@ -1054,6 +1185,8 @@ impl Store<'_> {
             .prepare_create(On::Commit(tx.sql()), scope, draft)
             .await?;
         let (tenant, user) = (scope.tenant(), scope.user());
+        let attached = plan.file.as_ref().map(|file| file.artifact_id().to_owned());
+        let company = plan.company;
         let document = tx.mutate(move |sql| {
             Box::pin(async move {
                 let CreatePlan { company, values, source, external_url, change_log, file, related, .. } = plan;
@@ -1089,6 +1222,8 @@ impl Store<'_> {
         })
         .await
         .map_err(write_error)?;
+        self.retain_new_file(tx, scope, company, attached.as_deref())
+            .await?;
         let document = if document.expires_on.is_some() {
             self.refresh_reminder(tx, scope, &document, None).await?
         } else {
@@ -1335,6 +1470,8 @@ impl Store<'_> {
             .prepare_revision(On::Commit(tx.sql()), scope, id, version, input)
             .await?;
         let (tenant, user) = (scope.tenant(), scope.user());
+        let attached = plan.file.as_ref().map(|file| file.artifact_id().to_owned());
+        let company = plan.document.company_id;
         let revision = tx.mutate(move |sql| {
             Box::pin(async move {
                 let RevisionPlan { document: before, revision: number, change_log, external_url, file } = plan;
@@ -1360,6 +1497,8 @@ impl Store<'_> {
         })
         .await
         .map_err(write_error)?;
+        self.retain_new_file(tx, scope, company, attached.as_deref())
+            .await?;
         self.notify_followers(tx, scope, &revision).await?;
         Ok(revision)
     }

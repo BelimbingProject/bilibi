@@ -62,6 +62,16 @@ pub struct RetentionEvent {
     pub system_principal: Option<String>,
     pub recorded_at: String,
 }
+/// Retention state of an owned artifact, with no bytes or storage location.
+#[derive(Clone, Debug)]
+pub struct RetentionStatus {
+    pub id: String,
+    pub retain_until: Option<SystemTime>,
+    pub legal_hold: bool,
+    /// The retained period has elapsed and there is no legal hold.
+    pub due: bool,
+}
+
 /// A document whose purge an operator must retry or resolve.
 #[derive(Clone, Debug)]
 pub struct PurgeHold {
@@ -136,10 +146,24 @@ impl<O: Owner> Owned<'_, O> {
         retain_until: SystemTime,
         why: Option<&str>,
     ) -> Result<crate::Metadata> {
+        let mut tx = self.begin(client, "artifacts.retain").await?;
+        let metadata = self.retain_in(&mut tx, id, retain_until, why).await?;
+        tx.commit().await?;
+        Ok(metadata)
+    }
+    /// Apply the same retention in the owner's already-open mutation, after
+    /// its record has attached the artifact. The owner commits both changes
+    /// together; Base still authorizes, audits and records the retention event.
+    pub async fn retain_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        id: &str,
+        retain_until: SystemTime,
+        why: Option<&str>,
+    ) -> Result<crate::Metadata> {
         future(retain_until)?;
         reason(why)?;
-        let mut tx = self.begin(client, "artifacts.retain").await?;
-        let row = self.retainable(&tx, id).await?;
+        let row = self.retainable(tx, id).await?;
         let event = if row.metadata.retain_until.is_some() {
             let later: bool = tx
                 .sql()
@@ -158,7 +182,7 @@ impl<O: Owner> Owned<'_, O> {
         };
         let next = self
             .write_retention(
-                &mut tx,
+                tx,
                 &row,
                 "UPDATE base_artifacts SET retain_until=$2,expires_at=NULL WHERE id=$1",
                 &[&row.key, &retain_until],
@@ -166,7 +190,6 @@ impl<O: Owner> Owned<'_, O> {
                 why,
             )
             .await?;
-        tx.commit().await?;
         Ok(next.metadata)
     }
     /// Refuses deletion and purge until released, whatever the retain-until.
@@ -223,6 +246,52 @@ impl<O: Owner> Owned<'_, O> {
             .await?;
         tx.commit().await?;
         Ok(next.metadata)
+    }
+    /// Current state for a bounded batch of this owner's attached artifacts.
+    /// Each row needs the owner's `Retain` grant. Unknown or unavailable IDs
+    /// refuse the whole request, so callers cannot infer cross-tenant files.
+    pub async fn retention_statuses(
+        &self,
+        client: &Client,
+        ids: &[String],
+    ) -> Result<Vec<RetentionStatus>> {
+        let mut unique = ids.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(Vec::new());
+        }
+        if unique.len() > 1000 {
+            return Err(Error::Invalid);
+        }
+        let rows = client
+            .query(
+                &format!("SELECT {COLUMNS},retain_until AS retain_until_instant FROM base_artifacts WHERE public_id=ANY($1) AND tenant_id=$2 AND company_id=$3 AND owner_id=$4 AND owner_adapter=$5 ORDER BY public_id"),
+                &[&unique, &self.scope.tenant(), &self.company.get(), &self.owner.owner_id(), &std::any::type_name::<O>()],
+            )
+            .await?;
+        if rows.len() != unique.len() {
+            return Err(Error::NotFound);
+        }
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let until: Option<SystemTime> = row.get("retain_until_instant");
+            let row = stored(row);
+            self.authorize(client, Operation::Retain, Some(&row.metadata.reference))
+                .await?;
+            if !row.ready || row.deleted {
+                return Err(Error::NotFound);
+            }
+            let held = row.on_hold();
+            let due = row.metadata.retain_until.is_some() && !row.retained && !held;
+            result.push(RetentionStatus {
+                id: row.metadata.id,
+                retain_until: until,
+                legal_hold: held,
+                due,
+            });
+        }
+        Ok(result)
     }
     /// Retention events, oldest first. Needs `Read`; tombstones keep history.
     pub async fn retention_history(

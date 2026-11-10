@@ -367,6 +367,7 @@ impl ReadHandler for List {
                     .text("expiry")
                     .as_deref()
                     .and_then(crate::ExpiryFilter::parse),
+                retention_due: input["retention_due"].as_bool().unwrap_or(false),
                 sort,
                 descending: sort != Sort::Name,
                 page: input["page"].as_i64().unwrap_or(1).max(1),
@@ -380,7 +381,18 @@ impl ReadHandler for List {
             let documents: Vec<Value> = page
                 .entries
                 .iter()
-                .map(|d| with_marks(record(d), marks.get(&d.id).copied().unwrap_or_default()))
+                .map(|d| {
+                    let mut value =
+                        with_marks(record(d), marks.get(&d.id).copied().unwrap_or_default());
+                    if let (Some(at), Some(object)) =
+                        (page.retention_due_at.get(&d.id), value.as_object_mut())
+                    {
+                        if let Ok(at) = jiff::Timestamp::try_from(*at) {
+                            object.insert("retention_due_at".into(), json!(at.to_string()));
+                        }
+                    }
+                    value
+                })
                 .collect();
             Ok(json!({"documents": documents, "total": page.total, "page": filter.page, "page_size": filter.page_size}).into())
         })
@@ -408,6 +420,13 @@ impl ReadHandler for Get {
             let named = owner.records().resolve(scope, &records).await?;
             let marks = owner.marks(scope, &[id]).await?;
             let definitions = owner.custom_fields(scope).await?;
+            let retention = if owner.may_manage(scope).await?
+                && owner.granted(scope, &[id], "manage").await?.contains(&id)
+            {
+                Some(owner.retention_statuses(scope, id).await?)
+            } else {
+                None
+            };
             let mut value = with_marks(
                 record(&document),
                 marks.get(&id).copied().unwrap_or_default(),
@@ -423,7 +442,22 @@ impl ReadHandler for Get {
                 .collect::<Vec<_>>());
             value["revisions"] = json!(revisions
                 .iter()
-                .map(|r| revision_record(id, r))
+                .map(|r| {
+                    let mut value = revision_record(id, r);
+                    if let Some(state) = retention
+                        .as_ref()
+                        .and_then(|states| states.get(&r.revision))
+                    {
+                        value["retention"] = json!({
+                            "retain_until": state.retain_until
+                                .and_then(|at| jiff::Timestamp::try_from(at).ok())
+                                .map(|at| at.to_string()),
+                            "legal_hold": state.legal_hold,
+                            "due": state.due,
+                        });
+                    }
+                    value
+                })
                 .collect::<Vec<_>>());
             value["related"] = json!(links
                 .iter()
@@ -1079,13 +1113,14 @@ fn list_schema() -> Value {
         "related":reference_schema("Only documents linked to this record."),
         "mark":{"type":"string","enum":["favourites","following"],"description":"Only your own favourites or the documents you follow."},
         "expiry":{"type":"string","enum":["expired","soon"],"description":"Only documents past their expiry date, or expiring within 30 days."},
+        "retention_due":{"type":"boolean","description":"Only private documents you may manage whose every file revision has passed its Base retention date and has no legal hold. Returns retention_due_at for each."},
         "sort":{"type":"string","enum":["last_revision","name","publish_date","created"],"description":"Newest revision first by default."},
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}
     }})
 }
 fn document_output() -> Value {
-    json!({"type":"object","description":"A document: id, name, publish_date, source, external_url, category, sub_category, document_type, status, revision, last_revision_at, company_id, created_by, created_at, updated_at, version and path. get adds revisions (newest first, each with its download_path) and related records {kind, id, label, path}."})
+    json!({"type":"object","description":"A document: id, name, publish_date, source, external_url, category, sub_category, document_type, status, revision, last_revision_at, company_id, created_by, created_at, updated_at, version and path. get adds revisions (newest first, each with its download_path and manager-visible Base retention state) and related records {kind, id, label, path}."})
 }
 fn list_output() -> Value {
     json!({"type":"object","description":"documents (each as core.document.get without revisions and related), total, page and page_size."})
@@ -1119,7 +1154,7 @@ const KEYWORDS: &[&str] = &[
 ];
 inventory::submit! { Contribution::new(DEFINITIONS, "core/document.operations", Provenance { module: crate::MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: "core.document.list", title: "List documents", summary: "Documents you may see, by name, category, type or status, or those linked to one record.", keywords: KEYWORDS, capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&LIST), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.document.list", title: "List documents", summary: "Documents you may see, including private documents due after every file revision's retention period.", keywords: KEYWORDS, capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&LIST), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.get", title: "Read a document", summary: "One document with its revisions and related records.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: document_output, handler: Handler::Read(&GET), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.access", title: "List document access", summary: "The people explicitly allowed to use one document. Needs sharing permission on that document.", keywords: KEYWORDS, capability: VIEW, input: get_schema, output: review_output, handler: Handler::Read(&ACCESS), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.document.share", title: "Share a document", summary: "Give an active account explicit document access.", keywords: KEYWORDS, capability: MANAGE, input: share_schema, output: review_output, handler: Handler::SafeWrite(&SHARE), channels: Channels::Every, step_up: &[] },

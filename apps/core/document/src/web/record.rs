@@ -21,6 +21,7 @@ use bilibi_ui::{
     PageVariant, RecordPicker, SectionHeading, StatusKind, TableEmpty, NO_FLASH,
 };
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 #[derive(Template)]
 #[template(path = "documents_detail.html")]
@@ -88,6 +89,7 @@ impl Detail {
                     BuiltinColumn::new("file", "File"),
                     BuiltinColumn::new("size", "Size"),
                     BuiltinColumn::new("change_log", "Change log"),
+                    BuiltinColumn::new("retention", "Retention"),
                     BuiltinColumn::new("by", "By"),
                     BuiltinColumn::new("at", "Added"),
                 ],
@@ -924,6 +926,7 @@ impl Detail {
         clock: &Clock,
         d: &Document,
         revisions: &[Revision],
+        retention: &HashMap<i32, bilibi_artifacts::RetentionStatus>,
         editable: bool,
     ) -> Result<Html> {
         let may_download = self.pages.documents.may_download(scope).await?;
@@ -952,6 +955,29 @@ impl Detail {
                 })?,
                 _ => Html::text("—"),
             };
+            let retained = retention
+                .get(&r.revision)
+                .map(|state| {
+                    let until = state
+                        .retain_until
+                        .and_then(|at| jiff::Timestamp::try_from(at).ok())
+                        .map(|at| clock.text(at))
+                        .unwrap_or_else(|| "—".into());
+                    if state.legal_hold {
+                        if state.retain_until.is_some() {
+                            format!("Legal hold · retention date {until}")
+                        } else {
+                            "Legal hold".into()
+                        }
+                    } else if state.due {
+                        format!("Due since {until}")
+                    } else if state.retain_until.is_some() {
+                        format!("Keep until {until}")
+                    } else {
+                        "No tenant retention".into()
+                    }
+                })
+                .unwrap_or_default();
             let mut row = FlexRow::new(&number)
                 .slot("revision", Html::text(&number))
                 .slot("file", file)
@@ -960,6 +986,7 @@ impl Detail {
                     Html::text(&r.byte_size.map(size).unwrap_or_default()),
                 )
                 .slot("change_log", Html::text(&r.change_log))
+                .slot("retention", Html::text(&retained))
                 .slot(
                     "by",
                     Html::text(names.get(&r.created_by).map_or("—", String::as_str)),
@@ -1298,9 +1325,17 @@ impl Detail {
             ..Card::default()
         })?);
         let revisions = self.pages.documents.revisions(scope, self.id).await?;
+        let retention = if editable {
+            self.pages
+                .documents
+                .retention_statuses(scope, self.id)
+                .await?
+        } else {
+            HashMap::new()
+        };
         body.push(
             &self
-                .revisions(scope, &clock, &d, &revisions, editable)
+                .revisions(scope, &clock, &d, &revisions, &retention, editable)
                 .await?,
         );
         let links = self.pages.documents.links(scope, self.id).await?;

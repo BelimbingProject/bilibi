@@ -21,10 +21,12 @@ use bilibi_ui::{
     IconButton, IconKind, ListColumns, ListSpec, ListState, PageCounts, Pagination, Selection,
     SortDir, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
 };
+use jiff::Timestamp;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, LazyLock},
+    time::SystemTime,
 };
 
 mod actions;
@@ -69,6 +71,7 @@ fn columns() -> Result<ListColumns> {
             BuiltinColumn::new("status", "Status"),
             BuiltinColumn::new("marks", "Marks"),
             BuiltinColumn::new("expires", "Expires"),
+            BuiltinColumn::new("retention", "Retention ended"),
             BuiltinColumn::new("revision", "Revision"),
             BuiltinColumn::new("publish_date", "Published").sortable("publish_date"),
             BuiltinColumn::new("last_revision", "Last revision").sortable("last_revision"),
@@ -92,6 +95,13 @@ fn label(options: &[Choice], code: Option<&str>) -> String {
 fn with_all(label: &str, mut options: Vec<Choice>) -> Vec<Choice> {
     options.insert(0, Choice::new(label, "all"));
     options
+}
+
+struct RowState {
+    marks: Marks,
+    can_delete: bool,
+    can_preview: bool,
+    retention_due_at: Option<SystemTime>,
 }
 
 pub(crate) struct Index {
@@ -341,10 +351,14 @@ impl Index {
         clock: &Clock,
         d: &Document,
         latest: Option<&crate::Revision>,
-        marks: Marks,
-        can_delete: bool,
-        can_preview: bool,
+        state: RowState,
     ) -> Result<FlexRow> {
+        let RowState {
+            marks,
+            can_delete,
+            can_preview,
+            retention_due_at,
+        } = state;
         let id = d.id.to_string();
         let file = match (d.source, latest) {
             (Source::External, _) => match &d.external_url {
@@ -408,6 +422,15 @@ impl Index {
                     Some(on) => clock.date(on),
                     None => String::new(),
                 }),
+            )
+            .slot(
+                "retention",
+                Html::text(
+                    &retention_due_at
+                        .and_then(|at| Timestamp::try_from(at).ok())
+                        .map(|at| clock.text(at))
+                        .unwrap_or_default(),
+                ),
             )
             .slot("revision", Html::text(&d.revision.to_string()))
             .slot("publish_date", Html::text(&clock.date(d.publish_date)));
@@ -480,13 +503,16 @@ impl Index {
                     &clock,
                     d,
                     latest.get(&d.id),
-                    marks.get(&d.id).copied().unwrap_or_default(),
-                    changeable.contains(&d.id),
-                    downloadable.contains(&d.id)
-                        && latest
-                            .get(&d.id)
-                            .and_then(|r| r.content_type.as_deref())
-                            .is_some_and(FileBody::previewable),
+                    RowState {
+                        marks: marks.get(&d.id).copied().unwrap_or_default(),
+                        can_delete: changeable.contains(&d.id),
+                        can_preview: downloadable.contains(&d.id)
+                            && latest
+                                .get(&d.id)
+                                .and_then(|r| r.content_type.as_deref())
+                                .is_some_and(FileBody::previewable),
+                        retention_due_at: page.retention_due_at.get(&d.id).copied(),
+                    },
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -525,9 +551,17 @@ impl Index {
             id: "documents-flash",
             flash,
         })?;
-        let subtitle = match &self.related {
-            Some(_) => "Linked to one record. Clear the filters to see every document.",
-            None => "Agreements, brochures and other files, with every revision.",
+        let subtitle = if self
+            .query()
+            .get("show")
+            .is_some_and(|v| v == "retention_due")
+        {
+            "Private documents whose every file revision has passed its retention date and has no legal hold. Deletion remains a separate reviewed action."
+        } else {
+            match &self.related {
+                Some(_) => "Linked to one record. Clear the filters to see every document.",
+                None => "Agreements, brochures and other files, with every revision.",
+            }
         };
         body.push(&render(Header {
             title: Html::text("Documents"),
@@ -536,6 +570,14 @@ impl Index {
             ..Header::default()
         })?);
         let form = self.list.filters_form();
+        let mut show_choices = vec![
+            Choice::new("All documents", "all"),
+            Choice::new("My favourites", "favourites"),
+            Choice::new("Documents I follow", "following"),
+        ];
+        if may_manage {
+            show_choices.push(Choice::new("Retention due", "retention_due"));
+        }
         body.push(&render(FilterToolbar::new(
             "documents-filters",
             vec![
@@ -572,11 +614,7 @@ impl Index {
                     "show",
                     "Show",
                     &form["show"],
-                    vec![
-                        Choice::new("All documents", "all"),
-                        Choice::new("My favourites", "favourites"),
-                        Choice::new("Documents I follow", "following"),
-                    ],
+                    show_choices,
                 ),
                 ToolbarControl::select(
                     "documents-expiry",
@@ -625,12 +663,20 @@ impl Index {
                 body: Html::text("Clear filters"),
                 ..Button::default()
             })?;
-            table.empty = Some(TableEmpty::State(
-                EmptyState::missing(
+            let (title, detail) = if self
+                .query()
+                .get("show")
+                .is_some_and(|v| v == "retention_due")
+            {
+                ("No documents due", "A private document is due only after every file revision's retention date passes and no legal hold remains.")
+            } else {
+                (
                     "No documents match",
                     "Clear the filters to see every document you may see.",
                 )
-                .action(clear),
+            };
+            table.empty = Some(TableEmpty::State(
+                EmptyState::missing(title, detail).action(clear),
             ));
         }
         let mut card = render(table)?;

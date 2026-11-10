@@ -16,7 +16,7 @@ pub use queued::{
     validate_args as validate_render_job, CompletionFuture, PdfMode, PdfRenderHandler, PdfRequest,
     QueuedPdfOwner, Rendered, RequestFuture, RENDER_WORKER,
 };
-pub use retention::{PurgeHold, Retention, RetentionEvent};
+pub use retention::{PurgeHold, Retention, RetentionEvent, RetentionStatus};
 
 use bilibi_database::{Change, Db, MutationBoundary, MutationTransaction};
 use bilibi_module_registry::Service;
