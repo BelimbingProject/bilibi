@@ -42,6 +42,9 @@ Validation must be deterministic and perform no IO. Contributors supply static
 payloads; registry validation never calls Core business APIs. Catalogs preserve
 provenance and enforce the same type when retrieved with `entries::<T>(key)`.
 Consumers own semantic checks and cross-entry rules beyond generic duplicates.
+`Catalog::installed(module)` and `Catalog::dependencies(module)` tell a
+consumer which modules this composition holds, for a contribution that applies
+only while another module is mounted (Authz's `OPTIONAL_CAPABILITIES`).
 
 Service factories may resolve only their own module and declared direct
 module dependencies. `bootstrap.*` values are explicit host-supplied
