@@ -27,8 +27,9 @@ pub use identity::{
     update as update_person, BindingIdentity,
 };
 pub use model::{
-    validate as validate_person, CreatePreview, Custom, CustomFieldError, DuplicateQuery,
-    FieldError, Page, Person, PersonId, PersonInput, PersonKind, Search, Update,
+    validate as validate_person, CreatePreview, Custom, CustomFieldError, CustomFilter,
+    DuplicateQuery, FieldError, Page, Person, PersonId, PersonInput, PersonKind, Search, Update,
+    CUSTOM_FILTERS_MAX,
 };
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;

@@ -199,11 +199,25 @@ pub struct Search {
     pub search: String,
     pub kind: Option<PersonKind>,
     pub include_retired: bool,
+    /// A built-in sort, or `cf_<key>` for an active custom field.
     pub sort: String,
     pub descending: bool,
     pub page: i64,
     pub page_size: i64,
+    /// Conditions on custom field values, all of which must hold.
+    pub custom: Vec<CustomFilter>,
 }
+/// One condition on a custom field value: `contains` (text), `eq` (text or
+/// choice code), `gte` or `lte` (number or date).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomFilter {
+    pub key: String,
+    pub op: String,
+    pub value: String,
+}
+/// The most custom conditions one search takes.
+pub const CUSTOM_FILTERS_MAX: usize = 50;
 impl Default for Search {
     fn default() -> Self {
         Self {
@@ -214,12 +228,17 @@ impl Default for Search {
             descending: false,
             page: 1,
             page_size: 25,
+            custom: Vec::new(),
         }
     }
 }
 impl Search {
+    /// The shape checks; a custom sort or condition is checked against the
+    /// tenant's active fields when the search runs.
     pub(crate) fn check(&self) -> Result<()> {
-        if !["name", "code", "kind", "state", "created_at"].contains(&self.sort.as_str())
+        if !(["name", "code", "kind", "state", "created_at"].contains(&self.sort.as_str())
+            || self.sort.starts_with("cf_") && self.sort.len() <= 43)
+            || self.custom.len() > CUSTOM_FILTERS_MAX
             || self.search.chars().count() > 255
             || self.search.contains('\0')
             || !(1..=1_000_000).contains(&self.page)

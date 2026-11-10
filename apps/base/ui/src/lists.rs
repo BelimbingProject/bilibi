@@ -78,6 +78,9 @@ pub enum ControlKind {
     Select,
     MultiSelect(Box<MultiSelect>),
     Date,
+    /// A typed value in the filter sheet (text or a number), unlike the
+    /// toolbar's one search box.
+    Text,
 }
 
 /// One toolbar cell. Framing, the magnifier, debounce, length cap and the
@@ -128,6 +131,30 @@ impl ToolbarControl {
         Self::new(ControlKind::Date, id, label, field)
     }
 
+    /// A text field in the filter sheet posting `filters[key]`, debounced like
+    /// search, for a value the list matches or compares (a custom field's
+    /// text, a number bound). Its chip shows the value while it is set.
+    pub fn text(id: &str, key: &str, label: &str, value: &str) -> Self {
+        let mut field = Field::in_form(FILTERS_FORM, key)
+            .id(id)
+            .kind(InputKind::Text)
+            .wrapper_class("mb-0")
+            .value(value)
+            .attr("data-debounce", "300")
+            .autocomplete("off")
+            // A toolbar label is screen-reader only: the empty box says what
+            // it filters.
+            .placeholder(label);
+        field.attrs.maxlength = Some("256".into());
+        Self::new(ControlKind::Text, id, label, field)
+    }
+
+    /// A text control for a number: the decimal keypad on a phone.
+    pub fn numeric(mut self) -> Self {
+        self.field = self.field.attr("inputmode", "decimal");
+        self
+    }
+
     /// A multi-select; its label is rendered by the control, screen-reader only.
     pub fn multi_select(control: MultiSelect) -> Self {
         let mut control = control;
@@ -148,7 +175,9 @@ impl ToolbarControl {
         match &mut self.kind {
             ControlKind::Search => self.hint = hint.into(),
             ControlKind::MultiSelect(control) => control.hint = hint.into(),
-            ControlKind::Select | ControlKind::Date => self.field.hint = hint.into(),
+            ControlKind::Select | ControlKind::Date | ControlKind::Text => {
+                self.field.hint = hint.into()
+            }
         }
         self
     }
@@ -191,7 +220,8 @@ pub struct FilterChip {
 impl ToolbarControl {
     /// What this filter is set to, or `None` while it shows everything: a
     /// select away from its first choice (the "All" a list offers first), a
-    /// date with a day, a multi-select with a tick. A search is never a chip.
+    /// date with a day, a multi-select with a tick, a text with a value. A
+    /// search is never a chip.
     pub fn chip(&self) -> Option<FilterChip> {
         let value = match &self.kind {
             ControlKind::Search => return None,
@@ -222,6 +252,12 @@ impl ToolbarControl {
                     .parse::<jiff::civil::Date>()
                     .map(|date| date.strftime("%-d %b %Y").to_string())
                     .unwrap_or_else(|_| self.field.value.clone())
+            }
+            ControlKind::Text => {
+                if self.field.value.trim().is_empty() {
+                    return None;
+                }
+                self.field.value.trim().to_owned()
             }
             ControlKind::MultiSelect(control) => {
                 let labels: Vec<&str> = control

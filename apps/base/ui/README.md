@@ -12,7 +12,7 @@ Single selects and multi-selects share the 16 px outline chevron and right align
 
 Multi-selects show the inset label and selected count above removable chips inside one field. The default keeps chips on one line with “…” for hidden selections; `.wrap_chips()` lets the field grow onto multiple lines. The empty prompt defaults to “Select options…”. Removal uses the checkbox's normal change event; `.chips(event)` can retain an owner's explicit remove event. Every selection remains available in the dropdown, including chips hidden by overflow.
 
-List toolbars put search first and filter boxes to its right, and on a phone fold them into one Filters button that opens a sheet, with each set filter shown as a removable chip. `FilterToolbar::new` preserves the order of filters while placing search first.
+List toolbars put search first and filter boxes to its right, and on a phone fold them into one Filters button that opens a sheet, with each set filter shown as a removable chip. `FilterToolbar::new` preserves the order of filters while placing search first. Controls are `ToolbarControl::search`, `select`, `multi_select`, `date` and `text` (a typed value in the sheet, such as a custom field's text; `.numeric()` gives a phone the decimal keypad). A toolbar label is screen-reader only, so a text control shows its label as the placeholder and a date control says what it bounds in its hint.
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
