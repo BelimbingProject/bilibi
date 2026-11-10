@@ -618,7 +618,7 @@ async fn admitted(
     site: &Site,
     session: &bilibi_user::Login,
 ) -> Result<Response, HttpError> {
-    let client = app.db.get().await.map_err(Error::from)?;
+    let mut client = app.db.get().await.map_err(Error::from)?;
     // One browser holds one portal session: the one the cookie held before,
     // this tenant's or another's, ends now.
     if let Ok(previous) = portal::token(headers) {
@@ -628,10 +628,15 @@ async fn admitted(
             .check_portal(&**client, &previous)
             .await
         {
+            let mut tx = app
+                .mutations
+                .begin(&mut client, scope.mutation_context("session.sign_out"))
+                .await?;
             app.security
                 .sessions
-                .delete(&**client, &scope, &previous)
+                .delete(&mut tx, &scope, &previous)
                 .await?;
+            tx.commit().await?;
         }
     }
     // The portal has no Your sessions page, so a customer gets no

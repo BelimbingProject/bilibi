@@ -4,7 +4,7 @@
 
 **Not for:** cookies, tokens or a sessions table of your own.
 
-`base/session.sessions` (`Sessions` in `src/lib.rs`) owns the durable session store: authentication of the opaque cookie token, the account and operator lists, termination commands, the termination broadcast, and the scheduled sweep. The account page is at `/settings/sessions`; the operator page is at `/system/sessions`, with a dashboard stats panel.
+`base/session.sessions` (`Sessions` in `src/lib.rs`) owns the durable session store: authentication of the opaque cookie token, the account and operator lists, termination commands, the termination broadcast, the session-ended notice seam, and the scheduled sweep. The account page is at `/settings/sessions`; the operator page is at `/system/sessions`, with a dashboard stats panel.
 
 ## Guard boundary
 
@@ -66,7 +66,7 @@ The web proof of Base Step-up (`apps/base/step_up/README.md`) lives on the sessi
 `admin.system.session.list`; terminating needs `admin.system.session.manage`
 too. The contributed system roles `auditor` and `system_viewer` list sessions.
 The list is platform-global, like `count`, because the store is not
-tenant-owned; it reads only metadata and never a payload. Each row names its
+tenant-owned; it reads only metadata and never a payload. A session marked ended (below) is left out of both. Each row names its
 user through `base/principal_directory`: a user in the operator's tenant shows
 their name, one outside it shows `User <id>`, so no name crosses a tenant
 boundary. The user column sorts by `user_id`. Search matches the IP address or
@@ -104,7 +104,7 @@ An impersonating operator, agent bearer or system principal cannot open the page
 
 ## Ending a session
 
-`terminate(tx, id, current)` is the operator command: the caller's own session is refused before any row is read (`Termination::CurrentSession`), the delete is an audited mutation recording whose session ended and from where (the payload is marked redacted; the token is never written), and the termination is announced after the commit. `terminate_own` and `terminate_others` are the account commands: both re-bind every target to the sealed tenant and user, audit each ended session and keep the current session. `end_tenant(tx, tenant)` ends every session of one tenant inside the caller's transaction (Core Tenant's suspend operation, which holds the platform capability): each ended session is an audited change without its token, and every open page of it is told after the commit. `delete(client, scope, id)` is logout: the holder's own session, no audit row. `revoke(tx, user, except)` runs inside an owner's mutation transaction (Core User's password change and reset), invokes every registered factor revocation hook and delegated-credential revoker, and returns the ended ids for `announce` after that commit, so a rolled-back credential change signs nobody out or disconnects an app. Each delegated revoker receives a `RevocationAccount` carrying a `CredentialRevocationReason` (password changed or reset, signed out, administrator action, or the neutral account changed) taken from the transaction's action; unknown actions map to account changed.
+`terminate(tx, id, current)` is the operator command: the caller's own session is refused before any row is read (`Termination::CurrentSession`), the delete is an audited mutation recording whose session ended and from where (the payload is marked redacted; the token is never written), and the termination is announced after the commit. `terminate_own` and `terminate_others` are the account commands: both re-bind every target to the sealed tenant and user, audit each ended session and keep the current session. `end_tenant(tx, tenant)` ends every session of one tenant inside the caller's transaction (Core Tenant's suspend operation, which holds the platform capability): each ended session is an audited change without its token, and every open page of it is told after the commit. `delete(tx, scope, id)` is logout, in the caller's transaction: the holder's own session, with no session audit row (the transaction's action row and the notice's event row remain). `revoke(tx, user, except)` runs inside an owner's mutation transaction (Core User's password change and reset), invokes every registered factor revocation hook and delegated-credential revoker, and returns the ended ids for `announce` after that commit, so a rolled-back credential change signs nobody out or disconnects an app. Each delegated revoker receives a `RevocationAccount` carrying a `CredentialRevocationReason` (password changed or reset, signed out, administrator action, or the neutral account changed) taken from the transaction's action; unknown actions map to account changed.
 
 `subscribe_terminations()` is the broadcast the host consumes: every live
 socket subscribes once (`apps/web/src/live.rs`) and, when its own session is
@@ -113,16 +113,43 @@ page's guard then forwards to sign-in with the expired-session message. A
 lagged subscriber may miss an announcement; the next guarded action or 15 s
 refresh still refuses an ended session, so promptness, not correctness, depends
 on the broadcast. `prune_expired` announces each session it removes, so what a
-session held (an AI connection's switch) can be shown as ended. A session that
+session held (an AI connection's switch) can be shown as ended. The broadcast
+is in process and carries the session ID; Domains use the durable notice
+above instead. A session that
 expired but is not yet pruned announces nothing; its holders re-check on their
 own schedule.
+
+## Session-ended notice
+
+**Every ending records one durable notice per account and reason, in the ending transaction: the `core/user.session_ended` event on Base Events.** It names the tenant, the account and why; never the token, its digest or the session ID. A Domain subscribes to it by name (payload and versions: [Core User](../../core/user/README.md#session-ended-notice-coreusersession_ended)). Session decides when a notice is due (`src/ended.rs`); Core User records it through the `EndNotice` it binds at installation, because Session cannot depend on Base Events. Boot is refused without that binding.
+
+| How the session ended | Reason | Recorded |
+| --- | --- | --- |
+| Logout (`delete`), portal logout, the portal replacing a browser's earlier session | `signed_out` | With the sign-out |
+| The holder ends one or all of their other sessions (`/settings/sessions`) | `signed_out` | With the sign-out, one notice for all of them |
+| The identity provider's back-channel sign-out (`revoke` under `user.sso.backchannel_logout`) | `signed_out` | With the sign-out |
+| An operator terminates it (`terminate`) in the operator's own tenant | `terminated` | With the termination |
+| A credential or account change ends it (`revoke`: password change or reset, desk removal, deprovisioning, erasure, a second-factor reset) | `terminated` | With the change |
+| It lapsed: idle beyond the lifetime or past the absolute expiry | `expired` | By the expiry sweep, which deletes it |
+
+- **Account.** The holder of the session; for an impersonated session, the impersonating operator, since the viewed account was never signed in.
+- **One per account and reason.** Ending three of an account's sessions in one transaction is one notice with `sessions: 3`. An ended session that had already lapsed is reported `expired`.
+- **Delayed to the sweep.** An operator ending another tenant's session, and an ending written as an impersonator (whose writes may not enqueue work), cannot record in that transaction. The row is marked ended instead (`ended_reason`, migration `008-ended-reason`): it stops authenticating at once and leaves the operator list, and the next sweep deletes it and records the notice in the session's own tenant.
+- **No notice.** Suspending a tenant (`end_tenant`): nothing runs in a suspended tenant, including event delivery. A session moved into another membership of the same identity (Core User's tenant switch and `retire_replaced_session`): the tenant left hears nothing. A Domain's own heartbeat sweep still covers these and dropped connections.
+
+Two reads answer "is anyone still here" without a session ID:
+
+| Read | Answers |
+| --- | --- |
+| `signed_in(client, scope, account)` | Whether the account holds any live session in the scope's tenant: its own, or one where it is the impersonating operator. `scope` is a sealed `Scope` or the `SystemScope` an event subscriber receives (`TenantProof`). Another tenant's sessions never count |
+| `stands(client, scope)` | Whether the session behind this sealed scope still stands: not signed out, terminated, moved or expired. A page's beat uses it to end itself before its socket closes. Answered from the scope's proof; returns only the bool |
 
 ## Cleanup
 
 **Prune expired sessions** (`src/expiry.rs`, `base/session-expiry`, every five
-minutes) deletes rows past the absolute expiry or idle beyond the lifetime
-setting. Review and enable it at `/system/schedule` before expecting scheduled
-cleanup; the enablement and delivery rules belong to Base Schedule.
+minutes) deletes rows past the absolute expiry, idle beyond the lifetime
+setting, or marked ended. Each tenant's rows are deleted in one write as the `session-expiry` system principal, which records the notices above; a tenant that fails keeps its rows for the next run while the others commit. Review and enable it at `/system/schedule` before expecting scheduled
+cleanup or expiry notices; the enablement and delivery rules belong to Base Schedule.
 
 The same sweep deletes `session_sign_ins` rows more than 90 days after the sign-in and `session_sign_in_alerts` claims after one to two days, for every tenant in one statement each. Until an operator enables the task, neither table is pruned, so enable it in production.
 

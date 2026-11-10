@@ -321,6 +321,25 @@ The person then signs in with their password and sets the app up again.
 
 The step-up window, cap and per-operation policy belong to Base Step-up, not here.
 
+## Session-ended notice (`core/user.session_ended`)
+
+**Core User publishes the durable notice that an account's session ended; Base Session decides when.** Session calls the bound `EndNotice` (`src/session_notice.rs`) inside the ending transaction, so the event, its deliveries and the delivery job commit or roll back with the ending. Which endings record it, and when: [Base Session](../../base/session/README.md#session-ended-notice).
+
+| Part | Value |
+| --- | --- |
+| Name, version | `core/user.session_ended`, 1 |
+| Tenant | The ending transaction's, which is always the session's own |
+| Subject | `account:<user id>`, so one account's notices arrive in order |
+| Key | `session_ended:<random>`, never derived from the session |
+| Payload | `{"account": 12, "reason": "signed_out", "sessions": 1, "still_signed_in": false}` |
+
+- `reason` is `signed_out`, `terminated` or `expired`.
+- `sessions` counts the account's sessions this one ending closed.
+- `still_signed_in` is whether the account held another live session as the ending committed. To know now, call `Sessions::signed_in` with the subscriber's scope.
+- The payload never holds the token, its digest, the session ID or the operator list's row key.
+
+A subscriber's Cargo manifest names `bilibi-user` so the publisher is linked (ADR 25); no code needs to call it. `apps/web/examples/session-ended-walkthrough.rs` proves the notice with the reference subscriber `fixtures/containers/session_listener`.
+
 ## Audit
 
 Credential writes are audited as kind `user_identity` with marker values
