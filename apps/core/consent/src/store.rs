@@ -453,7 +453,7 @@ pub(crate) async fn lift(
         Box::pin(async move {
             let row = sql
                 .query_opt(
-                    &format!("UPDATE core_consent_suppressions SET lifted_at=now(),lifted_by=$3,lifted_principal=$4,lift_reason=$5 WHERE tenant_id=$1 AND id=$2 AND lifted_at IS NULL RETURNING {SUPPRESSION_COLUMNS}"),
+                    &format!("UPDATE core_consent_suppressions SET lifted_at=now(),lifted_by=$3,lifted_principal=$4,lift_reason=$5,address_hash=NULL WHERE tenant_id=$1 AND id=$2 AND lifted_at IS NULL RETURNING {SUPPRESSION_COLUMNS}"),
                     &[&tenant, &before.id, &lifted_by, &lifted_principal, &reason],
                 )
                 .await?

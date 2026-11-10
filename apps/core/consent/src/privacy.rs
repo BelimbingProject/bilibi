@@ -559,7 +559,7 @@ async fn suppressions(
         Box::pin(async move {
             for (id, hash) in &writes {
                 sql.execute(
-                    "UPDATE core_consent_suppressions SET address_hash=COALESCE($3,address_hash),address=NULL,evidence=NULL,\
+                    "UPDATE core_consent_suppressions SET address_hash=$3,address=NULL,evidence=NULL,\
                      lift_reason=CASE WHEN lift_reason IS NULL THEN NULL ELSE '[erased]' END,erased_at=now() WHERE tenant_id=$1 AND id=$2",
                     &[&tenant, id, hash],
                 )
