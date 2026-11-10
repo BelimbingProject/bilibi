@@ -29,6 +29,8 @@ zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2
 tar = "0.4.44"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 sha2 = "0.11"
+# Local fastText inference; pure Rust, no native toolchain or inference service.
+fasttext = "=0.8.1"
 # Keyed digests: signed streams (Media), webhook signatures (Integration, People connector).
 hmac = "0.13.0"
 futures-core = "0.3"
@@ -71,6 +73,7 @@ bilibi-design-library = { path = "apps/base/design_library" }
 bilibi-grid = { path = "apps/base/grid" }
 bilibi-integration = { path = "apps/base/integration" }
 bilibi-locale = { path = "apps/base/locale" }
+bilibi-language-detection = { path = "apps/base/language_detection" }
 bilibi-mail = { path = "apps/base/mail" }
 bilibi-media = { path = "apps/base/media" }
 bilibi-party-ids = { path = "apps/base/party_ids" }

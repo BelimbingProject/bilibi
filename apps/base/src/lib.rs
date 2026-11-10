@@ -14,6 +14,7 @@ pub use bilibi_design_library as design_library;
 pub use bilibi_events as events;
 pub use bilibi_grid as grid;
 pub use bilibi_integration as integration;
+pub use bilibi_language_detection as language_detection;
 pub use bilibi_locale as locale;
 pub use bilibi_mail as mail;
 pub use bilibi_media as media;
