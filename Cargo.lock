@@ -1775,6 +1775,7 @@ dependencies = [
  "bilibi-dashboard",
  "bilibi-database",
  "bilibi-datetime",
+ "bilibi-events",
  "bilibi-grid",
  "bilibi-integration",
  "bilibi-locale",

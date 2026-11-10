@@ -189,8 +189,13 @@ impl UserService {
             Ok(()) => Ok(Left::Restored),
             Err(error) => {
                 eprintln!("warning: leaving impersonation failed, ending the session: {error:?}");
-                let client = self.db.get().await?;
-                self.sessions.delete(&**client, &scope, token).await?;
+                let mut client = self.db.get().await?;
+                let mut tx = self
+                    .mutations
+                    .begin(&mut client, scope.mutation_context("session.sign_out"))
+                    .await?;
+                self.sessions.delete(&mut tx, &scope, token).await?;
+                tx.commit().await?;
                 Ok(Left::SignedOut)
             }
         }

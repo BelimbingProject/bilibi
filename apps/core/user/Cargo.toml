@@ -43,6 +43,7 @@ bilibi-mail = { path = "../../base/mail" }
 bilibi-media.workspace = true
 bilibi-settings = { path = "../../base/settings" }
 bilibi-session.workspace = true
+bilibi-events.workspace = true
 bilibi-step-up.workspace = true
 bilibi-datetime = { path = "../../base/datetime" }
 bilibi-locale = { path = "../../base/locale" }
