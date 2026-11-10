@@ -7,6 +7,9 @@ pub const VOCABULARY: &str = "base/authz.vocabulary";
 /// capabilities in: `Contribution::new(STANDING_GRANTS, "<principal>",
 /// provenance, &StandingGrant { principal, capabilities })`.
 pub const STANDING_GRANTS: &str = "base/authz.standing_grants";
+/// The catalog a module names, for its own system principal, capabilities of
+/// a module it uses only while that module is mounted (`OptionalCapabilities`).
+pub const OPTIONAL_CAPABILITIES: &str = "base/authz.optional_capabilities";
 /// A role owner can require a named company engagement on assignments.
 pub const ENGAGEMENT_ROLES: &str = "base/authz.engagement_roles";
 #[derive(Clone, Copy, Debug)]
@@ -99,6 +102,24 @@ pub struct SystemPrincipalDefinition {
 pub struct StandingGrant {
     pub principal: &'static str,
     pub capabilities: &'static [&'static str],
+}
+/// Capabilities of `module`, a module the declaring module calls only while
+/// it is mounted (a connector behind a port), added to the bounds of the
+/// declaring module's own `principal` while `module` is installed. With
+/// `module` absent the entry is ignored and grants nothing; with it present,
+/// boot refuses a key `module` does not contribute, a portal key, an entry from
+/// a module that does not declare the principal, a `module` that is the
+/// declaring module or one of its dependencies (declare those keys in
+/// `SystemPrincipalDefinition`), and a second entry for one principal and
+/// module. The keys never enter a role. `standing` also holds them in every
+/// live tenant with no stored grant, as a `StandingGrant` does (tenant
+/// capabilities only); otherwise a tenant administrator grants them.
+#[derive(Clone, Copy, Debug)]
+pub struct OptionalCapabilities {
+    pub principal: &'static str,
+    pub module: &'static str,
+    pub capabilities: &'static [&'static str],
+    pub standing: bool,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VocabularyContribution {
@@ -293,6 +314,10 @@ impl Vocabulary {
         let mut vocabulary =
             Self::from_entries(catalog.entries::<VocabularyContribution>(VOCABULARY)?)?;
         vocabulary.add_standing(catalog.entries::<StandingGrant>(STANDING_GRANTS)?)?;
+        vocabulary.add_optional(
+            catalog,
+            catalog.entries::<OptionalCapabilities>(OPTIONAL_CAPABILITIES)?,
+        )?;
         for entry in catalog.entries::<EngagementRole>(ENGAGEMENT_ROLES)? {
             let rule = entry.get::<EngagementRole>()?;
             let role = vocabulary
@@ -343,6 +368,88 @@ impl Vocabulary {
                     "invalid standing grant {} at {}:{}",
                     entry.id, entry.provenance.source, entry.provenance.line
                 )));
+            }
+        }
+        Ok(())
+    }
+    fn add_optional(
+        &mut self,
+        catalog: &bilibi_module_registry::Catalog,
+        entries: &[Entry],
+    ) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for entry in entries {
+            let grant = entry.get::<OptionalCapabilities>()?;
+            let refuse = |why: &str| {
+                invalid(format!(
+                    "invalid optional capabilities {} at {}:{}: {why}",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                ))
+            };
+            let owner = entry.provenance.module;
+            if self.principal_modules.get(grant.principal) != Some(&owner) {
+                return Err(refuse("the principal is not declared by this module"));
+            }
+            if grant.module == owner
+                || catalog
+                    .dependencies(owner)
+                    .is_some_and(|dependencies| dependencies.contains(&grant.module))
+            {
+                return Err(refuse(
+                    "the module is a dependency; declare its keys on the principal",
+                ));
+            }
+            if !seen.insert((grant.principal, grant.module)) {
+                return Err(refuse("a second entry for this principal and module"));
+            }
+            let mut keys = BTreeSet::new();
+            if grant.capabilities.is_empty()
+                || !grant
+                    .capabilities
+                    .iter()
+                    .all(|key| valid_key(key) && keys.insert(*key))
+            {
+                return Err(refuse("empty, invalid or repeated keys"));
+            }
+            if !catalog.installed(grant.module) {
+                continue;
+            }
+            let declared = self.system_principals[grant.principal];
+            for key in grant.capabilities {
+                let Some(capability) = self.capabilities.get(key) else {
+                    return Err(refuse(&format!("{key} is not declared")));
+                };
+                if capability.provenance.module != grant.module
+                    || capability.definition.audience == Audience::Portal
+                    || (grant.standing && capability.definition.audience != Audience::Tenant)
+                    || declared.capabilities.contains(key)
+                {
+                    return Err(refuse(&format!(
+                        "{key} is not a {} capability of {} the principal lacks",
+                        if grant.standing { "tenant" } else { "staff" },
+                        grant.module
+                    )));
+                }
+            }
+            // The snapshot is built once per process (`vocabulary()`) and
+            // lives as long as the contributions it joins, so the merged
+            // bounds are `'static` like every other declaration: each
+            // reader sees one list, whichever modules are mounted.
+            let merged: Vec<&'static str> = declared
+                .capabilities
+                .iter()
+                .chain(grant.capabilities)
+                .copied()
+                .collect();
+            self.system_principals
+                .get_mut(grant.principal)
+                .expect("declared principal")
+                .capabilities = Vec::leak(merged);
+            if grant.standing {
+                self.standing
+                    .entry(grant.principal)
+                    .or_default()
+                    .extend(grant.capabilities.iter().copied());
             }
         }
         Ok(())
@@ -439,6 +546,7 @@ impl Vocabulary {
 inventory::submit! { Consumer::new::<VocabularyContribution>(VOCABULARY,"base/authz",|entries| Vocabulary::from_entries(entries).map(|_|())) }
 // The principal and capability checks need the whole vocabulary; `from_catalog` runs them.
 inventory::submit! { Consumer::new::<StandingGrant>(STANDING_GRANTS,"base/authz",|entries| entries.iter().try_for_each(|entry| entry.get::<StandingGrant>().map(|_| ()))) }
+inventory::submit! { Consumer::new::<OptionalCapabilities>(OPTIONAL_CAPABILITIES,"base/authz",|entries| entries.iter().try_for_each(|entry| entry.get::<OptionalCapabilities>().map(|_| ()))) }
 
 use CapabilityDefinition as C;
 const fn role(

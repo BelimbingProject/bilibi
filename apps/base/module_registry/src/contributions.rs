@@ -87,6 +87,8 @@ impl Entry {
 pub struct Catalog {
     entries: BTreeMap<&'static str, Vec<Entry>>,
     types: BTreeMap<&'static str, TypeId>,
+    /// Each installed module's declared dependencies.
+    modules: BTreeMap<&'static str, &'static [&'static str]>,
 }
 impl Catalog {
     pub fn discover(modules: &[&Module]) -> Result<Self> {
@@ -166,7 +168,11 @@ impl Catalog {
             items.sort_by_key(|entry| (entry.provenance.module, entry.id));
             validators[consumer](items)?;
         }
-        let catalog = Self { entries, types };
+        let catalog = Self {
+            entries,
+            types,
+            modules: modules.iter().map(|m| (m.id, m.dependencies)).collect(),
+        };
         catalog.validate_credential_routes()?;
         catalog.validate_references(modules)?;
         Ok(catalog)
@@ -178,6 +184,15 @@ impl Catalog {
             )));
         }
         Ok(&self.entries[consumer])
+    }
+    /// Whether `module` is part of this composition, for a contribution that
+    /// applies only while another module is mounted.
+    pub fn installed(&self, module: &str) -> bool {
+        self.modules.contains_key(module)
+    }
+    /// An installed module's declared dependencies.
+    pub fn dependencies(&self, module: &str) -> Option<&'static [&'static str]> {
+        self.modules.get(module).copied()
     }
     fn validate_references(&self, modules: &[&Module]) -> Result<()> {
         let services: BTreeMap<_, _> = modules

@@ -86,6 +86,8 @@ Notice the three helpers it uses:
 
 The facade checks the provider's own capability against the caller's scope, exactly as it does for any other caller. **A port is never a way around authorization.** A consumer that holds its own capability but not the provider's is refused by the provider.
 
+A consumer's system job that calls a provider it may run without declares the provider's capability for its own principal through Authz's `OPTIONAL_CAPABILITIES` (`apps/base/authz/README.md`, "Optional capabilities"). The provider checks its own capability; it never accepts the consumer's instead.
+
 ### Documenting the shape
 
 Write the request and the answer in the provider module's README. **That documented shape is the whole contract.** The consumer never sees the provider's Rust types; it reads only what the README says.
