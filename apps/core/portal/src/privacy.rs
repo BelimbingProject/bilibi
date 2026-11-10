@@ -21,7 +21,7 @@ use tokio_postgres::{Client, GenericClient};
 pub(crate) const KIND: &str = "portal.registration";
 const FIELDS: [&str; 3] = ["name", "email", "company_name"];
 
-fn emails(subject: &Subject) -> Vec<String> {
+pub(crate) fn emails(subject: &Subject) -> Vec<String> {
     subject
         .identifiers
         .iter()

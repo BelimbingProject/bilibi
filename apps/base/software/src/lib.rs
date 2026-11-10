@@ -844,7 +844,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/software", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/settings", "base/step_up", "base/system", "base/notifications", "base/integration", "base/audit", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql"))],
+        migrations: &[("base-software-001-jobs", include_str!("../migrations/001-jobs.sql")), ("base-software-002-settled", include_str!("../migrations/002-settled.sql")), ("base-software-003-local-builds", include_str!("../migrations/003-local-builds.sql")), ("base-software-004-github-and-upload", include_str!("../migrations/004-github-and-upload.sql")), ("base-software-005-paused", include_str!("../migrations/005-paused.sql"))],
         // Declaration order is build order: the page service reads this one.
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let software = Arc::new(Software {

@@ -6,6 +6,7 @@
 //! `README.md`.
 mod delivery;
 mod facade;
+mod invitation_privacy;
 mod operations;
 mod panel;
 mod portal;
@@ -93,6 +94,10 @@ const REGISTRATION_LIMITS_MIGRATION: (&str, &str) = (
     "core-portal-007-registration-limits",
     include_str!("../migrations/007-registration-limits.sql"),
 );
+const INVITATION_PERSONAL_DATA_MIGRATION: (&str, &str) = (
+    "core-portal-008-invitation-personal-data",
+    include_str!("../migrations/008-invitation-personal-data.sql"),
+);
 const REGISTRATION_MIGRATION: (&str, &str) = (
     "core-customer_access-003-registration",
     include_str!("../migrations/003-registration.sql"),
@@ -114,7 +119,7 @@ inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
-        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION],
+        migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let desk = delivery::Desk {
