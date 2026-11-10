@@ -25,6 +25,8 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[path = "support/case_files.rs"]
+mod case_files;
 #[path = "support/erasure.rs"]
 mod erasure_approval;
 #[path = "support/invitations.rs"]
@@ -447,6 +449,49 @@ async fn main() -> Result<()> {
         attachment.public_id, document.id
     );
 
+    println!("== case files: attachments on a record about a person (#478)");
+    case_files::install(&client, media.clone()).await?;
+    client
+        .batch_execute("INSERT INTO walkthrough_cases(tenant_id,id,person_id) VALUES(1,1,1),(1,2,2) ON CONFLICT DO NOTHING")
+        .await?;
+    for (case, filename, text) in [
+        ("1", "ada-case-note.txt", "Ada case note\n"),
+        ("2", "kim-case-note.txt", "Kim case note\n"),
+    ] {
+        let subject = AttachmentSubject {
+            kind: case_files::CASE,
+            id: case,
+        };
+        let file = media
+            .upload_attachment(
+                &mut client,
+                &admin,
+                subject,
+                Upload {
+                    filename: filename.into(),
+                    bytes: text.as_bytes().to_vec(),
+                },
+                Rules::default(),
+            )
+            .await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("privacy.walkthrough.case_file"),
+            )
+            .await?;
+        media
+            .submit_attachments(&mut tx, &admin, subject, &[file.public_id.as_str()])
+            .await?;
+        tx.commit().await?;
+        println!(
+            "case {case} ({}): attachment {} submitted on subject {}",
+            if case == "1" { "Ada" } else { "Kim" },
+            file.public_id,
+            case_files::CASE
+        );
+    }
+
     // Queue workers, as the app runs them.
     let executor = bilibi_base::queue::Executor::from_services(
         &app.services,
@@ -643,6 +688,12 @@ async fn main() -> Result<()> {
                 if store["store"] == "core/address.addresses" {
                     println!("detached address disclosure: {}", store["records"]);
                 }
+                if store["store"] == "wt_cases/cases.files" {
+                    println!(
+                        "case files disclosure: {} files {}",
+                        store["records"], store["files"]
+                    );
+                }
             }
             let stores: Vec<String> =
                 bundle
@@ -680,6 +731,10 @@ async fn main() -> Result<()> {
          WHERE event='artifacts.read' ORDER BY id DESC LIMIT 2",
     )
     .await?;
+    println!(
+        "case files of another person, under Ada's grant: {:?}",
+        case_files::refused()
+    );
     println!("== a reader who sees a field masked needs a reason for the export");
     client
         .batch_execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,4,'persons','email','mask')")
@@ -1190,6 +1245,16 @@ async fn main() -> Result<()> {
     rows(&client, "requests of person 1", "SELECT row_to_json(r)::text FROM (SELECT id,kind,status,identifiers,verification,refused_reason,export_artifact,erased_at IS NOT NULL AS erased FROM base_privacy_requests WHERE person_id=1 ORDER BY id) r").await?;
     let files = walk(std::path::Path::new(&root));
     println!("files under the media root containing the scan: {}", files);
+    rows(&client, "case attachment", "SELECT row_to_json(a)::text FROM (SELECT subject_id AS case_id,state,erased_at IS NOT NULL AS erased,bytes_removed_at IS NOT NULL AS bytes_removed,EXISTS (SELECT 1 FROM base_media_assets m WHERE m.id=a.media_asset_id) AS asset_row FROM base_media_attachments a WHERE a.subject_type='wt_cases.case' ORDER BY a.id) a").await?;
+    println!(
+        "files under the media root holding Ada's case note: {}, Kim's: {}",
+        holding(std::path::Path::new(&root), b"Ada case note"),
+        holding(std::path::Path::new(&root), b"Kim case note")
+    );
+    println!(
+        "case files of another person, under Ada's grants: {:?}",
+        case_files::refused()
+    );
 
     println!("== read-only search for erased values");
     search(
