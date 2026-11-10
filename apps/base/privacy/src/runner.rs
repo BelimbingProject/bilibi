@@ -17,7 +17,9 @@ use bilibi_party_ids::PersonId;
 use bilibi_personal_data::{
     Cause, Deferral, Erased, Erasure, HandlerFuture, Holds, Kept, KeptReason, KindAction, Progress,
 };
-use bilibi_queue::{Execution, Handler, HandlerFuture as JobFuture, Outcome};
+use bilibi_queue::{
+    Ended, Ending, EndingFuture, Execution, Handler, HandlerFuture as JobFuture, Outcome, State,
+};
 use bilibi_tenancy::Scope;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -527,12 +529,50 @@ async fn finish_when_done(
         .await?
         .get(0);
     if open == 0 {
-        privacy
+        let job = privacy
             .queue
             .enqueue_for(tx, scope, FINISH_WORKER, json!({"request_id": id}))
             .await?;
+        requests::track_finish_job(tx, scope.tenant(), id, job.id()).await?;
     }
     Ok(())
+}
+
+/// Queue's ending hook for both request workers (`bilibi_queue::ENDINGS`):
+/// a store or finish job that ended without finishing (its approver refused,
+/// out of attempts) moves its running request to `failed`, as the monitor
+/// principal, so the request never waits for ever on a job that is gone.
+pub(crate) struct JobEnded {
+    pub(crate) privacy: Arc<Privacy>,
+}
+impl Ending for JobEnded {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a> {
+        Box::pin(async move {
+            let Some(id) = job.args.get("request_id").and_then(Value::as_i64) else {
+                return Ok(());
+            };
+            let store = match job.worker_id.as_str() {
+                STORE_WORKER => job.args.get("store").and_then(Value::as_str),
+                _ => None,
+            };
+            let state = match job.state {
+                State::Discarded => "discarded",
+                _ => "cancelled",
+            };
+            // `cancelled_actor_refused`, `discarded_store_failed`: how the job
+            // ended and its code, within the request's 64-character code.
+            let mut failure = format!("{state}_{}", job.failure_code.as_deref().unwrap_or("ended"));
+            failure.truncate(64);
+            self.privacy
+                .job_ended_in(tx, scope, id, store, job.job_id, &failure)
+                .await
+        })
+    }
 }
 
 pub(crate) struct FinishJob {
@@ -831,7 +871,7 @@ async fn restart_export(
     })
     .await?;
     for (key, _, _) in privacy.stores.iter() {
-        privacy
+        let job = privacy
             .queue
             .enqueue_for(
                 &mut tx,
@@ -840,6 +880,7 @@ async fn restart_export(
                 json!({"request_id": id, "store": key}),
             )
             .await?;
+        requests::track_store_job(&mut tx, tenant, id, key, job.id()).await?;
     }
     tx.commit().await
 }

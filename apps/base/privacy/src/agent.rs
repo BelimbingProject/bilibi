@@ -53,7 +53,8 @@ pub(crate) fn request_json(request: &RequestView) -> Value {
         "received_by": request.received_by, "received_at": request.received_at, "due_at": request.due_at,
         "verified_by": request.verified_by, "approved_by": request.approved_by, "approved_at": request.approved_at,
         "approval_request": request.approval_request, "approval_awaiting": request.approval_awaiting,
-        "refused_reason": request.refused_reason, "completed_at": request.completed_at, "late": request.late,
+        "refused_reason": request.refused_reason, "failed_at": request.failed_at, "failure": request.failure,
+        "completed_at": request.completed_at, "late": request.late,
         "finish_attempts": request.finish_attempts, "finish_error": request.finish_error, "erased": request.erased,
         "confirmed": request.confirmed,
         "has_export": request.export_artifact.is_some(), "has_certificate": request.certificate_artifact.is_some(),
@@ -209,6 +210,7 @@ enum Write {
     Approve,
     Submit,
     Refuse,
+    RunAgain,
     PlaceHold,
     ReleaseHold,
     Reveal,
@@ -249,12 +251,13 @@ impl WriteHandler for Write {
                     let new = new_request(input)?;
                     json!({"summary": format!("Record a {} request for person {}, filed under company {}", new.kind.as_str(), new.person.get(), new.company.get())})
                 }
-                Self::Verify | Self::Approve | Self::Submit | Self::Refuse => {
+                Self::Verify | Self::Approve | Self::Submit | Self::Refuse | Self::RunAgain => {
                     let request = privacy.request(&**client, scope, id(input, "id")?).await?;
                     let verb = match self {
                         Self::Verify => "Verify",
                         Self::Approve => "Approve and run",
                         Self::Submit => "Send for approval",
+                        Self::RunAgain => "Run again",
                         _ => "Refuse",
                     };
                     json!({"summary": format!("{verb} {} request {} for person {} (now {})", request.kind.as_str(), request.id, request.person.get(), request.status), "request": request_json(&request)})
@@ -333,6 +336,12 @@ impl WriteHandler for Write {
                             version()?,
                             text(input, "reason")?,
                         )
+                        .await
+                        .map_err(refusal)?,
+                ),
+                Self::RunAgain => request_json(
+                    &privacy
+                        .run_again_in(tx, scope, id(input, "id")?, version()?)
                         .await
                         .map_err(refusal)?,
                 ),
@@ -494,9 +503,10 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/privacy", Provenance {
         write!("base.privacy.request.approve", "Approve a data-subject request", "Approve and run a verified access or portability request in every store, for a person who can file under its company. An erasure is sent with base.privacy.erasure.submit instead.", REQUEST_APPROVE, approve_schema, &Write::Approve, &[]),
         write!("base.privacy.erasure.submit", "Send an erasure for approval", "Send a verified erasure request to Workflow's approval case privacy.erasure; someone independent of it decides with base.privacy.erasure.decide, and the erasure runs when it is approved.", REQUEST_RECEIVE, approve_schema, &Write::Submit, &[]),
         write!("base.privacy.request.refuse", "Refuse a data-subject request", "Refuse a request that is not yet approved, with the reason.", REQUEST_RECEIVE, refuse_schema, &Write::Refuse, &[]),
+        write!("base.privacy.request.run_again", "Run a failed data-subject request again", "Ask again every store that has not answered a failed request (its approver lost the right to run it, or a store or the finish step ran out of attempts), for a person who may approve and can file under its company; the stores run as them.", REQUEST_APPROVE, approve_schema, &Write::RunAgain, &[]),
         write!("base.privacy.hold.place", "Place a legal hold", "Stop erasure and retention sweeps for a person or one record.", HOLD_MANAGE, place_schema, &Write::PlaceHold, &[]),
         write!("base.privacy.hold.release", "Release a legal hold", "Release an active legal hold; the next erasure or sweep acts on what it kept.", HOLD_MANAGE, release_schema, &Write::ReleaseHold, &[]),
     ],
     guides: &[Guide { key: "base.privacy", title: "Data-subject requests", summary: "Answer a person's access or erasure request in every store.", keywords: &["privacy", "pdpa", "gdpr", "erasure", "access request", "legal hold"], capability: REQUEST_VIEW,
-        body: "Record the request with base.privacy.request.receive (kind, person_id, company_id, and the emails or phones the person gave). Read base.privacy.request.locate to see what every store holds; records found only by email or phone are listed as candidates. Record how the person's identity was checked with base.privacy.request.verify, passing in confirm only the candidates that are this person's; nothing else found only by an identifier is touched. A person with privacy.request.approve, or you as their agent, then approves an access or portability request with base.privacy.request.approve. An erasure is sent for approval with base.privacy.erasure.submit and decided on Waiting for my approval or with base.privacy.erasure.decide, by someone independent of it: not the data subject or any account linked to them, not whoever received or verified it, and never while impersonating. Each decision asks for that person's Step-up code: when a commit answers step_up_required, ask them for their current authenticator code. A rejected or recalled erasure returns to whoever received it, to send again or refuse. Running answers each store in the background; read base.privacy.request.get until status is completed. A store that fails stays pending and the request shows late. Legal holds (base.privacy.hold.place) keep what they name through erasure; the certificate lists every store, what was kept and why." }],
+        body: "Record the request with base.privacy.request.receive (kind, person_id, company_id, and the emails or phones the person gave). Read base.privacy.request.locate to see what every store holds; records found only by email or phone are listed as candidates. Record how the person's identity was checked with base.privacy.request.verify, passing in confirm only the candidates that are this person's; nothing else found only by an identifier is touched. A person with privacy.request.approve, or you as their agent, then approves an access or portability request with base.privacy.request.approve. An erasure is sent for approval with base.privacy.erasure.submit and decided on Waiting for my approval or with base.privacy.erasure.decide, by someone independent of it: not the data subject or any account linked to them, not whoever received or verified it, and never while impersonating. Each decision asks for that person's Step-up code: when a commit answers step_up_required, ask them for their current authenticator code. A rejected or recalled erasure returns to whoever received it, to send again or refuse. Running answers each store in the background; read base.privacy.request.get until status is completed. A store that fails is retried and the request shows late; once its retries run out, or its approver can no longer run it, the request becomes failed with a failure code, and a person who may approve runs it again with base.privacy.request.run_again. Legal holds (base.privacy.hold.place) keep what they name through erasure; the certificate lists every store, what was kept and why." }],
 }) }

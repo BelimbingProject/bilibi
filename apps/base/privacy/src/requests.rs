@@ -2,9 +2,11 @@
 //! through the contributed Workflow flow `privacy.request` (received →
 //! verified → approved → running → completed, or refused). Approval starts one
 //! idempotent Queue job per mounted store; `runner` answers them and finishes
-//! the request with an export bundle or a completion certificate. An erasure
-//! is approved only through Workflow's shared approval case (`crate::approval`).
-use crate::{Privacy, REQUEST_APPROVE, REQUEST_RECEIVE, REQUEST_VIEW};
+//! the request with an export bundle or a completion certificate. A job that
+//! ends without finishing moves the request to `failed` (`runner::JobEnded`);
+//! a person who may approve runs it again. An erasure is approved only
+//! through Workflow's shared approval case (`crate::approval`).
+use crate::{Privacy, MONITOR, REQUEST_APPROVE, REQUEST_FAIL, REQUEST_RECEIVE, REQUEST_VIEW};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_party_ids::{OrganisationId, PersonId};
@@ -114,10 +116,14 @@ pub struct RequestView {
     pub approved_by: Option<i64>,
     pub approved_at: Option<String>,
     pub refused_reason: Option<String>,
+    /// When a background job ended without finishing, and its short code
+    /// (`cancelled_actor_refused`, `discarded_store_failed`, …), while failed.
+    pub failed_at: Option<String>,
+    pub failure: Option<String>,
     pub completed_at: Option<String>,
     pub export_artifact: Option<String>,
     pub certificate_artifact: Option<String>,
-    /// Open past its due date, or running with a store that has failed.
+    /// Open past its due date, failed, or running with a store that has failed.
     pub late: bool,
     /// Failed attempts of the finish step, and the last failure's code.
     pub finish_attempts: i32,
@@ -144,9 +150,10 @@ fn columns() -> String {
          to_char(due_at AT TIME ZONE 'UTC',{TIME}) AS due_at,verification,verified_by,\
          received_impersonator,verified_impersonator,approval_request,approval_awaiting,approved_by,\
          to_char(approved_at AT TIME ZONE 'UTC',{TIME}) AS approved_at,refused_reason,\
+         to_char(failed_at AT TIME ZONE 'UTC',{TIME}) AS failed_at,failure,\
          to_char(completed_at AT TIME ZONE 'UTC',{TIME}) AS completed_at,export_artifact,certificate_artifact,\
          finish_attempts,finish_error,erased_at IS NOT NULL AS erased,\
-         (status NOT IN ('completed','refused') AND (due_at < clock_timestamp() OR finish_error IS NOT NULL OR EXISTS (\
+         (status NOT IN ('completed','refused') AND (status = 'failed' OR due_at < clock_timestamp() OR finish_error IS NOT NULL OR EXISTS (\
             SELECT 1 FROM base_privacy_request_stores s WHERE s.request_id=base_privacy_requests.id \
             AND (s.state='pending' OR NOT s.finished) AND s.attempts>0))) AS late"
     )
@@ -172,6 +179,8 @@ fn view(row: &Row) -> Result<RequestView> {
         approved_by: row.get("approved_by"),
         approved_at: row.get("approved_at"),
         refused_reason: row.get("refused_reason"),
+        failed_at: row.get("failed_at"),
+        failure: row.get("failure"),
         completed_at: row.get("completed_at"),
         export_artifact: row.get("export_artifact"),
         certificate_artifact: row.get("certificate_artifact"),
@@ -191,6 +200,7 @@ pub(crate) fn evidence(request: &RequestView) -> Value {
         "status": request.status, "version": request.version,
         "verified_by": request.verified_by, "approved_by": request.approved_by,
         "approval_request": request.approval_request, "approval_awaiting": request.approval_awaiting,
+        "failure": request.failure,
         "export_artifact": request.export_artifact, "certificate_artifact": request.certificate_artifact,
     })
 }
@@ -369,6 +379,17 @@ impl SubjectAdapter for Requests {
         operation: Operation,
     ) -> OwnerFuture<'a, ()> {
         Box::pin(async move {
+            // The monitor reads a request and moves it out of `running` once
+            // its job ended without finishing: nothing else, and by its own
+            // key (a standing grant), never `privacy.request.view`.
+            if scope.principal().is_some() {
+                return match operation {
+                    Operation::Read | Operation::Transition => {
+                        bilibi_authz::authorize_key(tx, scope, REQUEST_FAIL).await
+                    }
+                    _ => Err(Error::Forbidden),
+                };
+            }
             match operation {
                 // An erasure's approval round: Workflow submits and decides
                 // it (`crate::approval` proves each access at the company)
@@ -424,6 +445,17 @@ impl SubjectAdapter for Requests {
                     tx.execute("UPDATE base_privacy_requests SET status='approved',version=version+1,approved_by=$3,approved_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &user]).await?;
                 }
                 "running" => {
+                    // Again from `failed`: a person or their agent who can
+                    // file under the request's company, never a principal
+                    // or a queued job.
+                    if before.status == "failed" {
+                        if scope.principal().is_some() || scope.channel() == Channel::Job {
+                            return Err(Error::Forbidden);
+                        }
+                        let bound = BOUND.get().ok_or(Error::Internal)?;
+                        eligible_with(&bound.parties, tx, scope, before.company, REQUEST_APPROVE)
+                            .await?;
+                    }
                     // Only once every mounted store has its row and job.
                     let mounted = bilibi_personal_data::Stores::installed()
                         .map_err(|_| Error::Internal)?
@@ -439,7 +471,21 @@ impl SubjectAdapter for Requests {
                     if started != mounted {
                         return Err(Error::Invalid);
                     }
-                    tx.execute("UPDATE base_privacy_requests SET status='running',version=version+1 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
+                    tx.execute("UPDATE base_privacy_requests SET status='running',version=version+1,runs=runs+1,failed_at=NULL,failure=NULL,finish_error=NULL WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
+                }
+                "failed" => {
+                    // Only the monitor, as Queue's ending hook tells it a
+                    // job ended, with the job's short code.
+                    if scope.principal() != Some(MONITOR) {
+                        return Err(Error::Forbidden);
+                    }
+                    let failure = request
+                        .input
+                        .get("failure")
+                        .and_then(Value::as_str)
+                        .filter(|code| failure_code(code))
+                        .ok_or(Error::Invalid)?;
+                    tx.execute("UPDATE base_privacy_requests SET status='failed',version=version+1,failed_at=clock_timestamp(),failure=$3 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &failure]).await?;
                 }
                 "completed" => {
                     // Only when every store has answered and finished and the
@@ -553,8 +599,41 @@ fn approvable(scope: &Scope, request: &RequestView) -> Result<()> {
         Err(Error::Forbidden)
     }
 }
+/// `running → failed`: only the monitor principal, never a person, whatever
+/// grants an administrator gives (the owner rechecks this in `persist`).
+struct Failed;
+impl Guard for Failed {
+    fn check<'a>(
+        &'a self,
+        _tx: &'a Transaction<'_>,
+        scope: &'a Scope,
+        _subject: &'a Proven,
+        _edge: &'a Transition,
+        _request: &'a Move,
+    ) -> OwnerFuture<'a, ()> {
+        Box::pin(async move {
+            if scope.principal() == Some(MONITOR) {
+                Ok(())
+            } else {
+                Err(Error::Forbidden)
+            }
+        })
+    }
+}
+/// A request's failure: a lowercase code of at most 64 characters, as the
+/// database checks it.
+pub(crate) fn failure_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
 static VERIFIED: Verified = Verified;
 static APPROVED: Approved = Approved;
+static FAILED: Failed = Failed;
 
 macro_rules! provenance {
     () => {
@@ -601,6 +680,8 @@ inventory::submit! { Contribution::new(CONTRIBUTIONS, "base/privacy.request.veri
 &Flowing::Guard { key: "privacy.request.verified", aliases: &[], adapter: &VERIFIED }) }
 inventory::submit! { Contribution::new(CONTRIBUTIONS, "base/privacy.request.approved", provenance!(),
 &Flowing::Guard { key: "privacy.request.approved", aliases: &[], adapter: &APPROVED }) }
+inventory::submit! { Contribution::new(CONTRIBUTIONS, "base/privacy.request.failed", provenance!(),
+&Flowing::Guard { key: "privacy.request.failed", aliases: &[], adapter: &FAILED }) }
 inventory::submit! { Contribution::new(CONTRIBUTIONS, "base/privacy.request.flow", provenance!(),
 &Flowing::Flow(Flow {
     code: FLOW, label: "Data-subject request", subject: SUBJECT, active: true,
@@ -611,6 +692,7 @@ inventory::submit! { Contribution::new(CONTRIBUTIONS, "base/privacy.request.flow
         status("running", "Running", 3),
         status("completed", "Completed", 4),
         status("refused", "Refused", 5),
+        status("failed", "Failed", 6),
     ],
     edges: &[
         edge("received", "verified", "Verify identity", REQUEST_RECEIVE, Some("privacy.request.verified"), 0),
@@ -619,12 +701,14 @@ inventory::submit! { Contribution::new(CONTRIBUTIONS, "base/privacy.request.flow
         edge("running", "completed", "Complete", REQUEST_APPROVE, None, 3),
         edge("received", "refused", "Refuse", REQUEST_RECEIVE, None, 4),
         edge("verified", "refused", "Refuse", REQUEST_RECEIVE, None, 5),
+        edge("running", "failed", "Mark failed", REQUEST_FAIL, Some("privacy.request.failed"), 6),
+        edge("failed", "running", "Run again", REQUEST_APPROVE, None, 7),
     ],
 })) }
 // The flow reaches the database through the host's explicit seed command, not
 // an operator's Workflow initialize.
 inventory::submit! { Contribution::new(bilibi_module_registry::contributions::SEEDS, "base/privacy.request.flow.seed", provenance!(),
-&bilibi_module_registry::contributions::Seed { version: "privacy-request-flow-v1",
+&bilibi_module_registry::contributions::Seed { version: "privacy-request-flow-v2",
     mode: bilibi_module_registry::contributions::SeedMode::Production,
     action: bilibi_module_registry::contributions::SeedAction::Service { service: bilibi_workflow::FLOW_SEEDS, operation: FLOW } }) }
 
@@ -918,7 +1002,8 @@ impl Privacy {
                 })
             })
             .await?;
-            self.queue
+            let job = self
+                .queue
                 .enqueue_for(
                     tx,
                     scope,
@@ -926,9 +1011,11 @@ impl Privacy {
                     json!({"request_id": id, "store": key}),
                 )
                 .await?;
+            track_store_job(tx, tenant, id, key, job.id()).await?;
         }
         if self.stores.is_empty() {
-            self.queue
+            let job = self
+                .queue
                 .enqueue_for(
                     tx,
                     scope,
@@ -936,7 +1023,177 @@ impl Privacy {
                     json!({"request_id": id}),
                 )
                 .await?;
+            track_finish_job(tx, tenant, id, job.id()).await?;
         }
+        Ok(())
+    }
+
+    /// `failed → running`: asks again every store that has not answered (or,
+    /// for an erasure, not finished), or finishes the request when all have.
+    /// A person or their AI agent who may approve and can file under the
+    /// request's company, never a system principal or a queued job; the jobs
+    /// run as them. An erasure's approval stands: running it again carries
+    /// out what was approved and decides nothing new.
+    pub async fn run_again(
+        &self,
+        client: &mut Client,
+        scope: &Scope,
+        id: i64,
+        expected_version: i64,
+    ) -> Result<RequestView> {
+        let mut tx = self
+            .boundary
+            .begin(client, scope.mutation_context("privacy.request.run_again"))
+            .await?;
+        let done = self
+            .run_again_in(&mut tx, scope, id, expected_version)
+            .await?;
+        tx.commit().await?;
+        Ok(done)
+    }
+    /// [`Privacy::run_again`] in the caller's transaction (the agent contract).
+    pub async fn run_again_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        expected_version: i64,
+    ) -> Result<RequestView> {
+        if scope.principal().is_some() || scope.channel() == Channel::Job {
+            return Err(Error::Forbidden);
+        }
+        let tenant = scope.tenant();
+        let subject = load(tx.sql(), tenant, id, true).await?;
+        eligible(self, tx.sql(), scope, subject.company).await?;
+        if subject.kind == RequestKind::Erasure {
+            // As at its first run: an access export of the person being
+            // published finishes first, and any later one starts again.
+            person_guard(tx.sql(), tenant, subject.person, true).await?;
+        }
+        let again = Move {
+            expected_version: Some(expected_version),
+            ..Move::default()
+        };
+        self.engine
+            .transition_in(tx, scope, SUBJECT, id, "running", again)
+            .await?;
+        let open: Vec<String> = tx
+            .sql()
+            .query(
+                "SELECT store FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND (state='pending' OR NOT finished) ORDER BY store",
+                &[&tenant, &id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        for store in &open {
+            let job = self
+                .queue
+                .enqueue_for(
+                    tx,
+                    scope,
+                    crate::runner::STORE_WORKER,
+                    json!({"request_id": id, "store": store}),
+                )
+                .await?;
+            track_store_job(tx, tenant, id, store, job.id()).await?;
+        }
+        if open.is_empty() {
+            let job = self
+                .queue
+                .enqueue_for(
+                    tx,
+                    scope,
+                    crate::runner::FINISH_WORKER,
+                    json!({"request_id": id}),
+                )
+                .await?;
+            track_finish_job(tx, tenant, id, job.id()).await?;
+        }
+        load(tx.sql(), tenant, id, false).await
+    }
+    /// Queue's ending hook (`runner::JobEnded`), as the monitor principal:
+    /// a store or finish job of a running request ended without finishing,
+    /// so the request moves to `failed` with the job's code, and the store
+    /// (if any) shows it. Nothing happens once the request is no longer
+    /// running, is gone, the store had already answered and finished, or `job` is
+    /// not the job the store (or the finish step) currently waits on.
+    pub(crate) async fn job_ended_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        store: Option<&str>,
+        job: i64,
+        failure: &str,
+    ) -> Result<()> {
+        if scope.principal() != Some(MONITOR) || !failure_code(failure) {
+            return Err(Error::Forbidden);
+        }
+        let tenant = scope.tenant();
+        let request = match load(tx.sql(), tenant, id, true).await {
+            Ok(request) => request,
+            Err(Error::NotFound) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if request.status != "running" {
+            return Ok(());
+        }
+        if store.is_none()
+            && tx
+                .sql()
+                .query_opt(
+                    "SELECT 1 FROM base_privacy_requests WHERE tenant_id=$1 AND id=$2 AND finish_job_id=$3",
+                    &[&tenant, &id, &job],
+                )
+                .await?
+                .is_none()
+        {
+            return Ok(());
+        }
+        if let Some(store) = store {
+            // A store that answered and finished owes nothing, and a job of
+            // an earlier run is not the one the store waits on: whatever
+            // ended, the request waits on another job, not this one.
+            let Some(row) = tx
+                .sql()
+                .query_opt(
+                    "SELECT id FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND store=$3 \
+                     AND job_id=$4 AND (state='pending' OR NOT finished) FOR UPDATE",
+                    &[&tenant, &id, &store, &job],
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            let (row, code, store): (i64, String, String) =
+                (row.get(0), failure.to_owned(), store.to_owned());
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE base_privacy_request_stores SET last_error=$2 WHERE id=$1",
+                        &[&row, &code],
+                    )
+                    .await?;
+                    let change = Change {
+                        kind: STORE_KIND.into(),
+                        id: row,
+                        old: json!({}),
+                        new: json!({"request": id, "store": store, "failed": code}),
+                    };
+                    Ok(((), vec![change]))
+                })
+            })
+            .await?;
+        }
+        let failed = Move {
+            input: json!({"failure": failure}),
+            ..Move::default()
+        };
+        self.engine
+            .transition_in(tx, scope, SUBJECT, id, "failed", failed)
+            .await?;
         Ok(())
     }
 
@@ -1141,9 +1398,11 @@ pub(crate) async fn person_guard(
     sql.execute(lock, &[&tenant, &person.get()]).await?;
     Ok(())
 }
-/// The person's erasure generation (erasures that have started running)
-/// and whether one is running now. The owner path moves approved to running
-/// in one transaction, so a committed `approved` erasure never ran a store.
+/// The person's erasure generation (how many times their erasures have
+/// started running, a failed one run again included) and whether one is
+/// running now. The owner path moves approved to running in one transaction,
+/// so a committed `approved` erasure never ran a store; a `failed` one is not
+/// running, so it holds back no access export.
 pub(crate) async fn erasure_generation(
     sql: &(impl GenericClient + Sync),
     tenant: i64,
@@ -1151,7 +1410,7 @@ pub(crate) async fn erasure_generation(
 ) -> Result<(i64, bool)> {
     let row = sql
         .query_one(
-            "SELECT count(*) FILTER (WHERE status IN ('running','completed')), \
+            "SELECT coalesce(sum(runs),0)::bigint, \
              count(*) FILTER (WHERE status = 'running') > 0 \
              FROM base_privacy_requests WHERE tenant_id=$1 AND person_id=$2 AND kind='erasure'",
             &[&tenant, &person.get()],
@@ -1213,4 +1472,60 @@ pub(crate) async fn forget_person(
         }
     }
     Ok(changes)
+}
+
+/// Records the job a store row now waits on.
+pub(crate) async fn track_store_job(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    request: i64,
+    store: &str,
+    job: i64,
+) -> Result<()> {
+    let store = store.to_owned();
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            let row: i64 = sql
+                .query_one(
+                    "UPDATE base_privacy_request_stores SET job_id=$4 WHERE tenant_id=$1 AND request_id=$2 AND store=$3 RETURNING id",
+                    &[&tenant, &request, &store, &job],
+                )
+                .await?
+                .get(0);
+            let change = Change {
+                kind: STORE_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": request, "store": store, "job": job}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
+}
+
+/// Records the finish job a request now waits on.
+pub(crate) async fn track_finish_job(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    request: i64,
+    job: i64,
+) -> Result<()> {
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            sql.query_one(
+                "UPDATE base_privacy_requests SET finish_job_id=$3 WHERE tenant_id=$1 AND id=$2 RETURNING id",
+                &[&tenant, &request, &job],
+            )
+            .await?;
+            let change = Change {
+                kind: REQUEST_KIND.into(),
+                id: request,
+                old: json!({}),
+                new: json!({"finish_job": job}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
 }
