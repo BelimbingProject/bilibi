@@ -10,6 +10,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Build stream headers with `StreamFile::delivery` (`src/response.rs`); only raster images may render inline, so never set `content-type` from stored metadata yourself.
 - A call that writes bytes takes a plain `&mut Client` because files and rows cannot share a rollback; use `register_original`/`register_derivative` inside your own `MutationTransaction` only for bytes you already placed.
 - Private files for your records go through `upload_attachment`/`submit_attachments`/`download_attachment` (`src/attachments.rs`), never `register_original` with `NewAsset::private`, a stored asset id or your own download route: only the attachment path rechecks the tenant and your `SubjectOwner` (a `Subject` contribution, `src/owner.rs`) on every access and keeps submitted evidence immutable.
+- A background job that receives files (mail import, connector) calls the same attachment API with its `SystemAuthentication::for_system` scope, never `register_original` or a person's scope; your `SubjectOwner` must refuse principals it does not expect (README, "Stored by a system principal").
 - Store the attachment ULID (`public_id`), not an asset id; call `submit_attachments` inside your own transaction so a rollback undoes the binding, and send bytes with `StreamFile::delivery(true)`.
 
 ## Maintaining this file

@@ -193,7 +193,7 @@ fn file_schema() -> Value {
     }})
 }
 fn list_output() -> Value {
-    json!({"type":"object","description":"scanner_installed, total (every matching file, not only this page), and each file: id, filename, type, size, scan_state, scanner and version, signature (infected), reason (failed or unscanned: too_large, scanner_unavailable, file_unavailable, scan_error), scanned_at, purge_requested_at (when a manager purged it), purged_at (when its contents were removed), created_at, uploaded_by_id and, for a private attachment, its subject."})
+    json!({"type":"object","description":"scanner_installed, total (every matching file, not only this page), and each file: id, filename, type, size, scan_state, scanner and version, signature (infected), reason (failed or unscanned: too_large, scanner_unavailable, file_unavailable, scan_error), scanned_at, purge_requested_at (when a manager purged it), purged_at (when its contents were removed), created_at, uploaded_by_id (the account that stored it) or uploaded_by_principal (the system principal that did) and, for a private attachment, its subject."})
 }
 fn write_output() -> Value {
     json!({"type":"object","description":"The file's scan facts after the write: scan_state, scanner, scanner_version, signature, reason, purge_requested (purged: nobody can open or rescan it, and its contents are removed right after the commit) and purged (its contents are gone)."})

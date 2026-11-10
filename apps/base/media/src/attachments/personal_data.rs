@@ -227,7 +227,8 @@ impl Media {
                     id,
                     old: facts(&row.summary),
                     new: json!({"public_id": row.summary.public_id, "subject_type": row.summary.subject_type,
-                        "subject_id": row.summary.subject_id, "state": "erased", "uploaded_by_id": row.summary.uploaded_by_id}),
+                        "subject_id": row.summary.subject_id, "state": "erased", "uploaded_by_id": row.summary.uploaded_by.user(),
+                        "uploaded_by_principal": row.summary.uploaded_by.principal()}),
                 },
                 Change {
                     kind: ASSET_KIND.into(),
