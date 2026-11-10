@@ -97,12 +97,32 @@ pub const RECONCILE_BATCH: i64 = 300;
 /// state (or vanished): `completed` is `succeeded`, anything else terminal is
 /// `failed`, and the forbid-overlap lease is released. Runs before every claim
 /// for the same key and on every poll, so a cancelled, discarded or pruned job
-/// cannot hold a lease forever. Returns how many rows were settled.
+/// cannot hold a lease forever, and the attempt rows they left `running`
+/// (`reconcile_runs`). Returns how many rows were settled.
 pub async fn reconcile(client: &impl GenericClient, key: Option<&str>) -> Result<usize> {
-    Ok(
-        reconcile_occurrences(client, key).await?
-            + reconcile_tenant_runs(client, key, None).await?,
-    )
+    Ok(reconcile_occurrences(client, key).await?
+        + reconcile_tenant_runs(client, key, None).await?
+        + reconcile_runs(client, key).await?)
+}
+/// Attempt rows left `running` that nothing is running any more: the wrapper
+/// that records an attempt's end died with its process or could not write,
+/// and either a later attempt of the same job began (Queue only retries a job
+/// whose earlier attempt ended) or the occurrence, or for a tenant's run that
+/// tenant's run row, already settled from the job. Each becomes `failed` with
+/// `abandoned`, so the board's latest run and its history never show running
+/// for ever. Runs after the two settlements above, so an attempt whose job
+/// just ended is found in the same pass.
+async fn reconcile_runs(client: &impl GenericClient, key: Option<&str>) -> Result<usize> {
+    Ok(client
+        .execute(
+            "UPDATE base_schedule_runs r SET status='failed',finished_at=clock_timestamp(),output_excerpt='abandoned',updated_at=clock_timestamp() \
+             WHERE r.status='running' AND ($1::text IS NULL OR r.key=$1) AND ( \
+               EXISTS (SELECT 1 FROM base_schedule_runs n WHERE n.job_id=r.job_id AND n.attempt>r.attempt) \
+               OR (r.tenant_id IS NULL AND EXISTS (SELECT 1 FROM base_schedule_occurrences o WHERE o.id=r.occurrence_id AND o.finished_at IS NOT NULL)) \
+               OR (r.tenant_id IS NOT NULL AND EXISTS (SELECT 1 FROM base_schedule_tenant_runs t WHERE t.occurrence_id=r.occurrence_id AND t.tenant_id=r.tenant_id AND t.finished_at IS NOT NULL)))",
+            &[&key],
+        )
+        .await? as usize)
 }
 async fn reconcile_occurrences(client: &impl GenericClient, key: Option<&str>) -> Result<usize> {
     let rows = client

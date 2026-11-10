@@ -1,5 +1,8 @@
 use crate::{MODULE, RECORD};
-use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{
+    CapabilityDefinition as C, RoleDefinition, StandingGrant, SystemPrincipalDefinition,
+    VocabularyContribution, STANDING_GRANTS, VOCABULARY,
+};
 use bilibi_database::Error;
 use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_media::{Subject as MediaSubject, SUBJECTS as MEDIA_SUBJECTS};
@@ -23,6 +26,10 @@ pub const MANAGE: &str = "core.document.manage";
 /// Merge duplicate documents into one survivor. A merge also needs the manage
 /// and share grants on every document it unites.
 pub const MERGE: &str = "core.document.merge";
+/// Settle a queued document email `failed` once its job ended without
+/// finishing. Only the document monitor principal holds it (a standing grant),
+/// and it belongs to no role.
+pub const EMAIL_FAIL: &str = "core.document.email.fail";
 const CAPABILITIES: &[&str] = &[VIEW, DOWNLOAD, MANAGE, MERGE];
 
 pub const LIST_CATEGORY: &str = "core.document.category";
@@ -51,11 +58,15 @@ inventory::submit! { Contribution::new(MEDIA_SUBJECTS, crate::files::MEDIA_SUBJE
 
 // `view` and `manage` are the Platform's verbs; the other three are ours.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
-    domains: &["core"], verbs: &["download", "merge"],
-    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE)],
+    domains: &["core"], verbs: &["download", "merge", "fail"],
+    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL)],
     roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: CAPABILITIES }],
-    system_principals: &[],
+    system_principals: &[SystemPrincipalDefinition { name: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] }],
 }) }
+// Recording that an email request's job is gone is the way out of `queued`: no
+// tenant should have to switch it on. A tenant that denies it keeps such a
+// request `queued`, as before.
+inventory::submit! { Contribution::new(STANDING_GRANTS, crate::email::MONITOR, provenance!(), &StandingGrant { principal: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] }) }
 
 // The Documents panel on record pages. Core company and Core person discover
 // their panel by record kind and pass `company_id` or `person_id`; neither

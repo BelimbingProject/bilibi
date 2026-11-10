@@ -44,6 +44,7 @@ pub const SERVICE: &str = "base/reports.reports";
 const DOWNLOAD: &str = "base/reports.export";
 const EXPORTED: &str = "base/reports.exported";
 const PREPARER: &str = "base/reports.preparer";
+const EXPORT_ENDED: &str = "base/reports.export_ended";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
 const MIGRATIONS: [(&str, &str); 7] = [
@@ -1458,6 +1459,8 @@ inventory::submit! {
             }))))
         }}, bilibi_module_registry::Service { id: PREPARER, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(exports::Preparer(services.get(SERVICE)?)))))
+        }}, bilibi_module_registry::Service { id: EXPORT_ENDED, factory: |services| {
+            Ok(Arc::new(bilibi_queue::EndingService(Arc::new(exports::ExportEnded(services.get(SERVICE)?)))))
         }}, bilibi_module_registry::Service { id: SWEEPER, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(schedules::Sweeper { reports: services.get(SERVICE)?, schedule: services.get("base/schedule.store")? }))))
         }}, bilibi_module_registry::Service { id: DELIVERER, factory: |services| {
@@ -1530,6 +1533,8 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
 // Scheduled deliveries: Schedule's recurrence sweeps due subscriptions as the
 // `scheduler` principal; each delivery then runs as its recipient. Like every
 // contributed recurrence it runs nothing until an operator enables it.
+// An export job that ends without finishing fails its export (queue README, "When a job ends without finishing").
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_queue::ENDINGS, exports::WORKER, bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_queue::EndingBinding { service: EXPORT_ENDED, principal: exports::MONITOR, capability: contributions::EXPORT_FAIL }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_queue::WORKERS, schedules::SWEEP, bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_queue::Worker { max_attempts: 5, validate: schedules::validate_sweep }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_queue::HANDLERS, schedules::SWEEP, bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_queue::HandlerBinding { service: SWEEPER, capability: bilibi_schedule::EXECUTE }) }
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_schedule::DEFINITIONS, "base/reports.deliveries", bilibi_module_registry::Provenance { module: "base/reports", source: file!(), line: line!() }, &bilibi_schedule::Definition {

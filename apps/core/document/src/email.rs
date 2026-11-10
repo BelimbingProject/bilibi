@@ -14,13 +14,18 @@
 //!    row `suppressed` and sends nothing.
 //! 3. **Outcome** (an audited write): `sent`, `failed` or `suppressed`, with a
 //!    reason code. A crash between sending and settling sends once more.
+//! 4. **Job ended** (Queue's ending hook, as `document-monitor`): a job Queue
+//!    cancels or discards without settling the row (the sender lost the right
+//!    first, or it ran out of attempts) settles it `failed`, so it never waits
+//!    in `queued` and counts against the limits for ever.
 use crate::store::Store;
 use crate::{Document, EmailOutcome, WriteResult, MANAGE, VIEW};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_mail::{Address, Mailer};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_queue::{
-    Execution, Handler, HandlerBinding, HandlerFuture, Outcome, Worker, HANDLERS, WORKERS,
+    Ended, Ending, EndingBinding, EndingFuture, Execution, Handler, HandlerBinding, HandlerFuture,
+    Outcome, State, Worker, ENDINGS, HANDLERS, WORKERS,
 };
 use bilibi_settings::{Setting, Target};
 use bilibi_tenancy::{Authentication, Scope};
@@ -31,6 +36,10 @@ use std::sync::Arc;
 pub const EMAIL_RECORD: &str = "core.document.email";
 pub(crate) const WORKER: &str = "core/document-email";
 pub(crate) const HANDLER: &str = "core/document.email";
+pub(crate) const ENDED: &str = "core/document.email_ended";
+/// The system principal Queue's ending hook runs as to fail a request whose
+/// job ended without settling it (`System · document-monitor`).
+pub const MONITOR: &str = "document-monitor";
 
 /// Most emails one person may request an hour.
 pub const ACTOR_PER_HOUR: &str = "core.document.email_actor_per_hour";
@@ -64,6 +73,7 @@ fn arguments(args: Value) -> Result<Value> {
 }
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: 5, validate: arguments }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: HANDLER, capability: MANAGE }) }
+inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBinding { service: ENDED, principal: MONITOR, capability: crate::contributions::EMAIL_FAIL }) }
 
 macro_rules! limit {
     ($key:expr, $default:expr, $label:expr, $help:expr) => {
@@ -175,9 +185,30 @@ impl Store<'_> {
         match refused {
             Some(reason) => Ok(EmailOutcome::RateLimited(reason)),
             None => {
-                self.queue
+                let job = self
+                    .queue
                     .enqueue_for(tx, scope, WORKER, json!({"email": request}))
-                    .await?;
+                    .await?
+                    .id();
+                // The job the row waits on, so an ending told late for an
+                // earlier job changes nothing.
+                tx.mutate(move |sql| {
+                    Box::pin(async move {
+                        sql.execute(
+                            "UPDATE core_document_emails SET job_id=$3 WHERE tenant_id=$1 AND id=$2",
+                            &[&tenant, &request, &job],
+                        )
+                        .await?;
+                        let change = Change {
+                            kind: EMAIL_RECORD.into(),
+                            id: request,
+                            old: json!({"job_id": null}),
+                            new: json!({"job_id": job}),
+                        };
+                        Ok(((), vec![change]))
+                    })
+                })
+                .await?;
                 Ok(EmailOutcome::Queued)
             }
         }
@@ -337,5 +368,66 @@ impl EmailJob {
         })
         .await?;
         tx.commit().await
+    }
+}
+
+/// Queue's ending hook for [`WORKER`]: settles a request still `queued` whose
+/// job ended without settling it as `failed`, with how the job ended
+/// (`cancelled_email_refused`, `discarded_email_failed`) as its reason. Fenced
+/// by the job id; a request that moved on owes nothing.
+pub(crate) struct EmailEnded;
+impl Ending for EmailEnded {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a> {
+        Box::pin(async move {
+            if scope.principal() != Some(MONITOR) {
+                return Err(Error::Forbidden);
+            }
+            let Some(request) = job.args["email"].as_i64() else {
+                return Ok(());
+            };
+            let state = match job.state {
+                State::Discarded => "discarded",
+                _ => "cancelled",
+            };
+            let mut reason = format!("{state}_{}", job.failure_code.as_deref().unwrap_or("ended"));
+            reason.truncate(64);
+            let (tenant, job_id) = (scope.tenant(), job.job_id);
+            // Nothing waits on this job any more (settled, or another job's
+            // row): level-triggered, so there is nothing to do.
+            if tx
+                .sql()
+                .query_opt(
+                    "SELECT 1 FROM core_document_emails WHERE tenant_id=$1 AND id=$2 AND job_id=$3 AND state='queued' FOR UPDATE",
+                    &[&tenant, &request, &job_id],
+                )
+                .await?
+                .is_none()
+            {
+                return Ok(());
+            }
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    let row = sql
+                        .query_one(
+                            "UPDATE core_document_emails SET state='failed',reason=$4,settled_at=now() WHERE tenant_id=$1 AND id=$2 AND job_id=$3 AND state='queued' RETURNING document_id,recipient_id,requested_by",
+                            &[&tenant, &request, &job_id, &reason],
+                        )
+                        .await?;
+                    let change = Change {
+                        kind: EMAIL_RECORD.into(),
+                        id: request,
+                        old: json!({"state": "queued"}),
+                        new: json!({"document_id": row.get::<_, i64>(0), "recipient_id": row.get::<_, i64>(1), "requested_by": row.get::<_, i64>(2), "state": "failed", "reason": reason}),
+                    };
+                    Ok(((), vec![change]))
+                })
+            })
+            .await
+        })
     }
 }
