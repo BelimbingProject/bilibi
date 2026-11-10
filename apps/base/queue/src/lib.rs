@@ -188,7 +188,7 @@ enum Actor {
 inventory::submit! {
     Module {id:"base/queue",layer:bilibi_module_registry::Layer::Base,
         dependencies:&["base/module_registry","base/database","base/audit","base/tenancy","base/authz"],
-        migrations:&[("base-queue-001",include_str!("../migrations/001-queue.sql")),("base-queue-002",include_str!("../migrations/002-queue-system-actor.sql")),("base-queue-003-work-company",include_str!("../migrations/003-work-company.sql"))],
+        migrations:&[("base-queue-001",include_str!("../migrations/001-queue.sql")),("base-queue-002",include_str!("../migrations/002-queue-system-actor.sql")),("base-queue-003-work-company",include_str!("../migrations/003-work-company.sql")),("base-queue-004-job-endings",include_str!("../migrations/004-job-endings.sql"))],
         services:&[Service {id:"base/queue.store",factory:|_| {
             let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
             Ok(Arc::new(Queue::new(Workers::from_catalog(&catalog)?)))
@@ -198,9 +198,9 @@ inventory::submit! {
 
 pub use arguments::validate as validate_arguments;
 pub use execution::{
-    CapabilityPolicy, Config, Execution, Executor, Handler, HandlerBinding, HandlerFuture,
-    HandlerService, Identity, JobFacts, Observer, ObserverBinding, ObserverService, Outcome,
-    CAPABILITY_POLICIES, HANDLERS, OBSERVERS,
+    CapabilityPolicy, Config, Ended, Ending, EndingBinding, EndingFuture, EndingService, Execution,
+    Executor, Handler, HandlerBinding, HandlerFuture, HandlerService, Identity, JobFacts, Observer,
+    ObserverBinding, ObserverService, Outcome, CAPABILITY_POLICIES, ENDINGS, HANDLERS, OBSERVERS,
 };
 pub use store::{cancel_for, health_status, lookup, retry_for, states, JobStatus, State};
 pub const SERVICE: &str = "base/queue.store";

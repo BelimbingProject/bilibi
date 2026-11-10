@@ -30,14 +30,20 @@ pub use retention::{
 };
 pub use runner::{FINISH_WORKER, STORE_WORKER};
 
-use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{
+    CapabilityDefinition, StandingGrant, SystemPrincipalDefinition, VocabularyContribution,
+    STANDING_GRANTS, VOCABULARY,
+};
 use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_module_registry::{
     Catalog, Consumer, Contribution, Layer, Module, Provenance, Ready, Result as RegistryResult,
     Service,
 };
 use bilibi_personal_data::{Issuer, Stores};
-use bilibi_queue::{HandlerBinding, HandlerService, Queue, Worker, HANDLERS, WORKERS};
+use bilibi_queue::{
+    EndingBinding, EndingService, HandlerBinding, HandlerService, Queue, Worker, ENDINGS, HANDLERS,
+    WORKERS,
+};
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use bilibi_tenancy::Scope;
 use serde_json::json;
@@ -66,9 +72,17 @@ pub const HOLD_MANAGE: &str = "privacy.hold.manage";
 pub const REQUEST_VIEW: &str = "privacy.request.view";
 /// Enter, verify and refuse requests.
 pub const REQUEST_RECEIVE: &str = "privacy.request.receive";
-/// Approve requests; the request jobs run as the approver. An erasure is
-/// decided through its approval case, by someone independent of it.
+/// Approve requests and run a failed one again; the request jobs run as the
+/// approver. An erasure is decided through its approval case, by someone
+/// independent of it.
 pub const REQUEST_APPROVE: &str = "privacy.request.approve";
+/// Move a running request to `failed` once its background job ended without
+/// finishing. Only [`MONITOR`] holds it (a standing grant); the flow's guard
+/// refuses anyone else, whatever an administrator grants.
+pub const REQUEST_FAIL: &str = "privacy.request.fail";
+/// The system principal Queue's ending hook runs as to record that a
+/// request's job ended without finishing (`System · privacy-monitor`).
+pub const MONITOR: &str = "privacy-monitor";
 /// Publish the erasure approval rules and review their exceptions.
 pub const APPROVAL_MANAGE: &str = "privacy.approval.manage";
 /// Read record classes, the tenant's retention periods and sweep results.
@@ -207,17 +221,24 @@ macro_rules! provenance {
 inventory::submit! { Consumer::new::<RecordClass>(RECORD_CLASSES, "base/privacy", retention::validate) }
 inventory::submit! { Contribution::new(VOCABULARY, "base/privacy.vocabulary", provenance!(), &VocabularyContribution {
     domains: &["privacy"],
-    verbs: &["view", "manage", "receive", "approve", "reveal"],
+    verbs: &["view", "manage", "receive", "approve", "reveal", "fail"],
     capabilities: &[
         CapabilityDefinition::tenant(HOLD_VIEW), CapabilityDefinition::tenant(HOLD_MANAGE),
         CapabilityDefinition::tenant(REQUEST_VIEW), CapabilityDefinition::tenant(REQUEST_RECEIVE),
         CapabilityDefinition::tenant(REQUEST_APPROVE), CapabilityDefinition::tenant(APPROVAL_MANAGE),
         CapabilityDefinition::tenant(RETENTION_VIEW), CapabilityDefinition::tenant(RETENTION_MANAGE),
-        CapabilityDefinition::tenant(FIELD_REVEAL),
+        CapabilityDefinition::tenant(FIELD_REVEAL), CapabilityDefinition::tenant(REQUEST_FAIL),
     ],
     roles: &[],
-    system_principals: &[],
+    system_principals: &[SystemPrincipalDefinition { name: MONITOR, capabilities: &[REQUEST_FAIL, TRANSITION_DELIVER] }],
 }) }
+/// Workflow's key for delivering a transition event at once (its outbox job
+/// runs as whoever moved the subject).
+const TRANSITION_DELIVER: &str = "workflow.transition.deliver";
+// Recording that a request's job is gone is the way out of `running`: no
+// tenant should have to switch it on, and its transition event is delivered
+// at once. A tenant that denies it keeps such a request `running`, as before.
+inventory::submit! { Contribution::new(STANDING_GRANTS, MONITOR, provenance!(), &StandingGrant { principal: MONITOR, capabilities: &[REQUEST_FAIL, TRANSITION_DELIVER] }) }
 bilibi_step_up::declare!(
     "base/privacy",
     // The owner's rule: a fresh 2FA check on every erasure decision, on every
@@ -288,6 +309,9 @@ inventory::submit! { Contribution::new(WORKERS, STORE_WORKER, provenance!(), &Wo
 inventory::submit! { Contribution::new(HANDLERS, STORE_WORKER, provenance!(), &HandlerBinding { service: "base/privacy.store_job", capability: REQUEST_APPROVE }) }
 inventory::submit! { Contribution::new(WORKERS, FINISH_WORKER, provenance!(), &Worker { max_attempts: 25, validate: runner::finish_arguments }) }
 inventory::submit! { Contribution::new(HANDLERS, FINISH_WORKER, provenance!(), &HandlerBinding { service: "base/privacy.finish_job", capability: REQUEST_APPROVE }) }
+// A request job that ends without finishing moves its request to `failed`.
+inventory::submit! { Contribution::new(ENDINGS, STORE_WORKER, provenance!(), &EndingBinding { service: "base/privacy.job_ended", principal: MONITOR, capability: REQUEST_FAIL }) }
+inventory::submit! { Contribution::new(ENDINGS, FINISH_WORKER, provenance!(), &EndingBinding { service: "base/privacy.job_ended", principal: MONITOR, capability: REQUEST_FAIL }) }
 
 use bilibi_module_registry::contributions::{
     Access, Download, Method, PageWrites, Pending, Route, DOWNLOADS, PAGE_WRITES, ROUTES,
@@ -331,6 +355,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, web::SERVICE, provenance!(),
         ("approve", "base.privacy.request.approve"),
         ("submit", "base.privacy.erasure.submit"),
         ("refuse", "base.privacy.request.refuse"),
+        ("run_again", "base.privacy.request.run_again"),
         ("place", "base.privacy.hold.place"),
         ("release", "base.privacy.hold.release"),
     ],
@@ -410,6 +435,7 @@ inventory::submit! {
             ("base-privacy-004-retention", include_str!("../migrations/004-retention.sql")),
             ("base-privacy-005-erasure-authority", include_str!("../migrations/005-erasure-authority.sql")),
             ("base-privacy-006-erasure-approval", include_str!("../migrations/006-erasure-approval.sql")),
+            ("base-privacy-007-request-failed", include_str!("../migrations/007-request-failed.sql")),
         ],
         services: &[
             Service { id: SERVICE, factory: |services| Ok(Arc::new(build(services)?)) },
@@ -444,6 +470,9 @@ inventory::submit! {
             } },
             Service { id: "base/privacy.finish_job", factory: |services| {
                 Ok(Arc::new(HandlerService(Arc::new(runner::FinishJob { privacy: services.get(SERVICE)? }))))
+            } },
+            Service { id: "base/privacy.job_ended", factory: |services| {
+                Ok(Arc::new(EndingService(Arc::new(runner::JobEnded { privacy: services.get(SERVICE)? }))))
             } },
             Service { id: "base/privacy.sweep_job", factory: |services| {
                 Ok(Arc::new(HandlerService(Arc::new(retention::SweepJob {

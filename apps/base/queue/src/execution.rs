@@ -133,6 +133,80 @@ fn validate_observers(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 inventory::submit! { Consumer::new::<ObserverBinding>(OBSERVERS,"base/queue",validate_observers) }
 
+/// Contributed by a worker's owner, entry id = the worker id: what that owner
+/// does when one of its jobs ends without finishing. See [`EndingBinding`].
+pub const ENDINGS: &str = "base/queue.endings";
+/// A job that ended without finishing, as its owner's [`Ending`] hears of it:
+/// how it ended and its arguments (references, validated again), never its
+/// actor or lease.
+#[derive(Clone, Debug)]
+pub struct Ended {
+    pub job_id: i64,
+    pub worker_id: String,
+    /// `Cancelled` (its actor was refused, its arguments or the handler
+    /// cancelled it, or an owner cancelled it) or `Discarded` (out of attempts).
+    pub state: store::State,
+    /// The bounded code the job ended with, such as `actor_refused`.
+    pub failure_code: Option<String>,
+    pub args: Value,
+}
+pub type EndingFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+/// The owner's way out for a record that waits on a job. Queue calls it once
+/// per ended job, in `tx`, which it commits together with marking the job
+/// told: either both happen or neither, and a failure is tried again later.
+/// Move the waiting record to its named state through the owner's normal
+/// path with `scope` (the binding's principal in the job's tenant). Return
+/// `Ok` when nothing waits on this job any more (the record moved on, or is
+/// gone): the call is level-triggered, not a command.
+pub trait Ending: Send + Sync {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a>;
+}
+pub struct EndingService(pub Arc<dyn Ending>);
+/// How a worker's owner is told that a job ended without finishing. The
+/// owner's `service` resolves to [`EndingService`]. Queue seals the scope of
+/// `principal`, a system principal the same module declares, in the job's
+/// tenant and decides `capability` (inside that principal's declaration) in
+/// the same transaction before calling it. The tenant's grant decides, so a
+/// principal that must always be able to record the way out also needs a
+/// standing grant (`bilibi_authz::STANDING_GRANTS`).
+#[derive(Clone, Copy)]
+pub struct EndingBinding {
+    pub service: &'static str,
+    pub principal: &'static str,
+    pub capability: &'static str,
+}
+fn validate_endings(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
+    for entry in entries {
+        let binding = entry.get::<EndingBinding>()?;
+        if !binding
+            .service
+            .starts_with(&format!("{}.", entry.provenance.module))
+            || [binding.principal, binding.capability]
+                .iter()
+                .any(|key| key.is_empty() || key.len() > 200)
+        {
+            return Err(RegistryError::Contribution(format!(
+                "invalid ending binding {}",
+                entry.id
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<EndingBinding>(ENDINGS,"base/queue",validate_endings) }
+struct BoundEnding {
+    service: Arc<EndingService>,
+    principal: &'static str,
+    capability: &'static str,
+}
+/// Ended jobs told per poll and process; the rest wait for the next poll.
+const ENDING_BATCH: i64 = 100;
+
 /// Who the job runs as, re-proven on every attempt and again in `begin`.
 #[derive(Clone, Debug)]
 pub enum Identity {
@@ -294,6 +368,7 @@ pub struct Executor {
     boundary: Arc<MutationBoundary>,
     handlers: BTreeMap<&'static str, BoundHandler>,
     observers: Vec<Arc<ObserverService>>,
+    endings: BTreeMap<&'static str, BoundEnding>,
     config: Config,
 }
 impl Executor {
@@ -344,6 +419,32 @@ impl Executor {
             .iter()
             .map(|entry| services.get(entry.get::<ObserverBinding>()?.service))
             .collect::<bilibi_module_registry::Result<_>>()?;
+        let mut endings = BTreeMap::new();
+        for entry in catalog.entries::<EndingBinding>(ENDINGS)? {
+            let binding = *entry.get::<EndingBinding>()?;
+            let worker = queue.workers().get(entry.id)?;
+            let vocabulary = bilibi_authz::vocabulary()?;
+            // The owner's own principal, deciding a key it declared: a module
+            // can never record its way out as another module's principal.
+            if worker.module != entry.provenance.module
+                || vocabulary.principal_module(binding.principal) != Some(entry.provenance.module)
+                || !vocabulary.capabilities.contains_key(binding.capability)
+                || !vocabulary
+                    .system_principals
+                    .get(binding.principal)
+                    .is_some_and(|declared| declared.capabilities.contains(&binding.capability))
+            {
+                return Err(Error::Invalid);
+            }
+            endings.insert(
+                entry.id,
+                BoundEnding {
+                    service: services.get(binding.service)?,
+                    principal: binding.principal,
+                    capability: binding.capability,
+                },
+            );
+        }
         Ok(Arc::new(Self {
             db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
             queue,
@@ -351,6 +452,7 @@ impl Executor {
             boundary: services.get("base/database.mutations")?,
             handlers,
             observers,
+            endings,
             config: config.validate()?,
         }))
     }
@@ -364,6 +466,9 @@ impl Executor {
             let stop = shutdown.clone();
             slots.spawn(async move { executor.slot(stop).await });
         }
+        let executor = self.clone();
+        let stop = shutdown.clone();
+        slots.spawn(async move { executor.endings(stop).await });
         loop {
             if *shutdown.borrow() {
                 break;
@@ -400,6 +505,93 @@ impl Executor {
                 _ = stop.changed() => { return Ok(()); }
             }
         }
+    }
+    /// Tells owners about their jobs that ended without finishing, one
+    /// transaction per job. Level-triggered: a cancelled or discarded job of a
+    /// worker with an [`Ending`] is due until told, so a crash between ending
+    /// and telling only delays it. Several processes skip each other's rows.
+    async fn endings(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> Result<()> {
+        let workers: Vec<String> = self.endings.keys().map(|id| (*id).to_owned()).collect();
+        loop {
+            if *stop.borrow() {
+                return Ok(());
+            }
+            if !workers.is_empty() {
+                match store::due_endings(&self.db, &workers, ENDING_BATCH).await {
+                    Ok(due) => {
+                        for (id, tenant, worker) in due {
+                            if *stop.borrow() {
+                                return Ok(());
+                            }
+                            // Its own task and deadline: an owner's panic or
+                            // stall fails this ending, never the executor.
+                            let executor = self.clone();
+                            let told = tokio::spawn(async move {
+                                tokio::time::timeout(
+                                    executor.config.max_runtime,
+                                    executor.tell(id, tenant, &worker),
+                                )
+                                .await
+                            })
+                            .await;
+                            if !matches!(told, Ok(Ok(Ok(()))))
+                                && store::ending_failed(&self.db, id).await.is_err()
+                            {
+                                eprintln!("queue ending infrastructure unavailable");
+                            }
+                        }
+                    }
+                    Err(_) => eprintln!("queue ending infrastructure unavailable"),
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(self.config.poll_interval) => {}
+                _ = stop.changed() => { return Ok(()); }
+            }
+        }
+    }
+    /// One ended job: the principal's scope, its capability, the owner's
+    /// hook and the told mark, in one audited transaction attributed to the
+    /// principal. A job already told, retried or taken by another process
+    /// is left alone.
+    async fn tell(&self, id: i64, tenant: i64, worker_id: &str) -> Result<()> {
+        let bound = self.endings.get(worker_id).ok_or(Error::Invalid)?;
+        let worker = self.queue.workers().get(worker_id)?;
+        let mut client = self.db.get().await?;
+        let system = SystemScope::rehydrate(&**client, tenant, Some(bound.principal)).await?;
+        if system.principal() != Some(bound.principal) {
+            return Err(Error::Unauthorized);
+        }
+        let scope = self.authentication.for_system(&**client, &system).await?;
+        let mut tx = self
+            .boundary
+            .begin(&mut client, scope.mutation_context("queue.job.ended"))
+            .await?;
+        let Some(row) = tx.sql().query_opt("SELECT worker_module,state,failure_code,args FROM base_queue_jobs WHERE id=$1 AND tenant_id=$2 AND worker_id=$3 AND state IN ('cancelled','discarded') AND ending IS NULL FOR UPDATE SKIP LOCKED", &[&id,&tenant,&worker.id]).await? else {
+            return tx.rollback().await;
+        };
+        if row.get::<_, &str>(0) != worker.module {
+            return Err(Error::Invalid);
+        }
+        bilibi_authz::authorize_system(tx.sql(), &system, bound.capability).await?;
+        let args: Value = row.get(3);
+        arguments::validate(&args)?;
+        let args = (worker.definition.validate)(args)?;
+        arguments::validate(&args)?;
+        let state: String = row.get(1);
+        let ended = Ended {
+            job_id: id,
+            worker_id: worker.id.to_owned(),
+            state: store::State::parse(&state)?,
+            failure_code: row.get(2),
+            args,
+        };
+        bound.service.0.ended(&mut tx, &scope, &ended).await?;
+        tx.mutate(move |sql| Box::pin(async move {
+            sql.execute("UPDATE base_queue_jobs SET ending='told',updated_at=clock_timestamp() WHERE id=$1 AND tenant_id=$2", &[&id,&tenant]).await?;
+            Ok(((), vec![bilibi_database::Change {kind:"base/queue.job".into(),id,old:serde_json::json!({"state":state,"ending":null}),new:serde_json::json!({"state":state,"ending":"told"})}]))
+        })).await?;
+        tx.commit().await
     }
     async fn prepare(
         &self,
