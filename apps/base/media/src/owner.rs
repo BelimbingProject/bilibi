@@ -34,8 +34,12 @@ pub trait SubjectOwner: Send + Sync {
     /// ID (a case about a person), belongs to `person` in `scope`'s tenant, so
     /// an approved request about that person reaches its files for export and
     /// erasure. Answer from your own record on `client`, the caller's
-    /// connection (inside the erasure's transaction for `erase_attachments`),
-    /// and keep answering yes after your erasure until the bytes are removed.
+    /// connection (inside the erasure's transaction for `erase_attachments`).
+    /// A yes vouches for the whole subject, not one attachment: answer yes only
+    /// when every file under it belongs to this person. Use separate subjects
+    /// (for example, notes) if one record holds different people's files.
+    /// Keep the subject linked to the person after erasure until no hold keeps
+    /// any of its files and their bytes are removed; held erasures resume later.
     /// It is never an authorization: Media asks it only under a grant.
     /// Default: no.
     fn person_subject<'a>(
