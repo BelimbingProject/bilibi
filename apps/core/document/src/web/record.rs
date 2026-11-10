@@ -698,7 +698,10 @@ impl Detail {
             // A retired code the document keeps.
             options.push(Choice::new(current.1, current.0));
         }
-        let field = self.inline(d, key, current.0, editable);
+        let mut field = self.inline(d, key, current.0, editable);
+        if empty {
+            field = field.allow_empty();
+        }
         let editor = render(
             Field::named(key)
                 .id(format!("document-{}-editor", key.replace('_', "-")))
@@ -916,12 +919,14 @@ impl Detail {
             "Integration sync ID",
             "sync-id",
             render(InlineEdit {
-                field: self.inline(
-                    d,
-                    "sync_id",
-                    d.sync_id.clone().unwrap_or_default(),
-                    editable,
-                ),
+                field: self
+                    .inline(
+                        d,
+                        "sync_id",
+                        d.sync_id.clone().unwrap_or_default(),
+                        editable,
+                    )
+                    .allow_empty(),
             })?,
         ));
         let related_id = d
@@ -940,6 +945,7 @@ impl Detail {
         let mut related = render(InlineEdit {
             field: self
                 .inline(d, "related_document_id", related_id, editable)
+                .allow_empty()
                 .input_type("number"),
         })?;
         if related_visible {
