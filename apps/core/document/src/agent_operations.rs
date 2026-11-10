@@ -147,6 +147,10 @@ fn draft(input: &Value) -> bilibi_agent_api::Result<Draft> {
         status: reader.text("status"),
         expires_on: reader.date("expires_on").flatten(),
         custom: custom_input(&input["custom"]),
+        sync_id: reader.text("sync_id"),
+        related_document_id: input["related_document_id"].as_i64(),
+        relation: reader.text("relation"),
+        revision_label: reader.text("revision_label"),
         change_log: reader.text("change_log"),
         related,
     };
@@ -164,6 +168,9 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
         status: reader.text("status"),
         expires_on: reader.date("expires_on"),
         custom: custom_input(&input["patch"]["custom"]),
+        sync_id: reader.clearable_text("sync_id"),
+        related_document_id: reader.at().get("related_document_id").map(Value::as_i64),
+        relation: reader.clearable_text("relation"),
     };
     if reader
         .text("publish_date")
@@ -182,6 +189,8 @@ fn revision_input(input: &Value) -> RevisionInput {
             .as_i64()
             .and_then(|r| i32::try_from(r).ok()),
         change_log: bilibi_agent_api::text_field(input, "change_log"),
+        label: input["label"].as_str().map(str::to_owned),
+        replaces_revision_id: input["replaces_revision_id"].as_i64(),
     }
 }
 
@@ -256,6 +265,9 @@ pub(crate) fn record(d: &Document) -> Value {
         "document_type": d.document_type,
         "status": d.status,
         "expires_on": d.expires_on.map(|d| d.to_string()),
+        "sync_id": d.sync_id,
+        "related_document_id": d.related_document_id,
+        "relation": d.relation,
         "revision": d.revision,
         "last_revision_at": d.last_revision_at.to_string(),
         "company_id": d.company_id,
@@ -285,6 +297,7 @@ fn duplicate_record(duplicate: &Duplicate) -> Value {
 }
 fn revision_record(document: i64, r: &Revision) -> Value {
     json!({
+        "id": r.id,
         "revision": r.revision,
         "name": r.name,
         "file_name": r.file_name,
@@ -293,6 +306,8 @@ fn revision_record(document: i64, r: &Revision) -> Value {
         "sha256": r.sha256,
         "external_url": r.external_url,
         "change_log": r.change_log,
+        "label": r.label,
+        "replaces_revision_id": r.replaces_revision_id,
         "scan_status": r.scan_status.code(),
         "created_by": r.created_by,
         "created_at": r.created_at.to_string(),
@@ -310,6 +325,10 @@ fn draft_record(d: &Draft) -> Value {
         "sub_category": d.sub_category,
         "document_type": d.document_type,
         "status": d.status.as_ref().map_or(json!("the list's default"), |s| json!(s)),
+        "sync_id": d.sync_id,
+        "related_document_id": d.related_document_id,
+        "relation": d.relation,
+        "revision_label": d.revision_label,
         "change_log": d.change_log,
         "related": d.related.iter().map(|r| reference(r, None)).collect::<Vec<_>>(),
     })
@@ -317,6 +336,8 @@ fn draft_record(d: &Draft) -> Value {
 fn planned_record(p: &PlannedRevision) -> Value {
     json!({
         "revision": p.revision,
+        "label": p.label,
+        "replaces_revision_id": p.replaces_revision_id,
         "file_name": p.file_name,
         "external_url": p.external_url,
         "change_log": p.change_log,
@@ -979,6 +1000,10 @@ fn create_schema() -> Value {
         "status":{"type":"string","maxLength":64,"description":"A code of core.document.status; the list's default when omitted."},
         "expires_on":{"type":"string","format":"date","description":"When the document expires. A reminder task is created for you, due the tenant's lead time before."},
         "custom":custom_schema(),
+        "sync_id":{"type":"string","maxLength":255,"description":"Optional external integration identifier, unique within this tenant."},
+        "related_document_id":{"type":"integer","minimum":1,"description":"A document you may view."},
+        "relation":{"type":"string","enum":["supersedes","replaces"],"description":"How this document relates to related_document_id."},
+        "revision_label":{"type":"string","maxLength":100,"description":"Optional label for revision 1."},
         "change_log":{"type":"string","maxLength":2000,"description":"Revision 1's change log; \"Document created\" when omitted."},
         "related":{"type":"array","description":"Records the document relates to, from base.records.search.","items":reference_schema("A record: its kind and id.")}
     }})
@@ -995,7 +1020,10 @@ fn update_schema() -> Value {
             "document_type":{"type":"string","maxLength":64},
             "status":{"type":"string","maxLength":64},
             "expires_on":{"type":"string","maxLength":10,"description":"A date such as 2026-12-31. An empty string clears the expiry date and removes the reminder."},
-            "custom":custom_schema()
+            "custom":custom_schema(),
+            "sync_id":{"type":"string","maxLength":255,"description":"Empty clears it; unique within this tenant."},
+            "related_document_id":{"type":"integer","minimum":1,"nullable":true,"description":"Null clears it."},
+            "relation":{"type":"string","enum":["","supersedes","replaces"],"description":"Empty clears it."}
         }}
     }})
 }
@@ -1012,7 +1040,9 @@ fn revision_schema() -> Value {
         "artifact_id":{"type":"string","maxLength":64,"description":"An internal document's new file, stored by you through the documents pages."},
         "external_url":{"type":"string","maxLength":2000,"description":"An external document's new https link."},
         "revision":{"type":"integer","minimum":1,"description":"Above the latest; the latest plus one when omitted."},
-        "change_log":{"type":"string","maxLength":2000,"description":"What changed, 1–2,000 characters."}
+        "change_log":{"type":"string","maxLength":2000,"description":"What changed, 1–2,000 characters."},
+        "label":{"type":"string","maxLength":100,"description":"Optional revision label."},
+        "replaces_revision_id":{"type":"integer","minimum":1,"description":"An earlier revision ID of this document."}
     }})
 }
 fn link_schema() -> Value {

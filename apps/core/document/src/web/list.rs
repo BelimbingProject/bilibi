@@ -58,6 +58,8 @@ fn columns() -> Result<ListColumns> {
         "documents",
         vec![
             BuiltinColumn::new("name", "Name").sortable("name"),
+            BuiltinColumn::new("sync_id", "Sync ID"),
+            BuiltinColumn::new("related_document", "Related document"),
             BuiltinColumn::new("file", "Latest file"),
             BuiltinColumn::new("category", "Category"),
             BuiltinColumn::new("type", "Type"),
@@ -268,6 +270,15 @@ impl Index {
                     class: "font-medium text-ink-strong hover:underline",
                     body: Html::text(&d.name),
                 })?,
+            )
+            .slot("sync_id", Html::text(d.sync_id.as_deref().unwrap_or("")))
+            .slot(
+                "related_document",
+                Html::text(
+                    &d.related_document_id
+                        .map(|id| format!("{} #{id}", d.relation.as_deref().unwrap_or("Related")))
+                        .unwrap_or_default(),
+                ),
             )
             .slot("file", file)
             .slot(

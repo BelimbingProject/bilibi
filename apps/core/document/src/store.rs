@@ -29,8 +29,8 @@ use serde_json::{json, Value};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row, Transaction};
 
-pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on::text AS expires_on,d.expiry_activity_id,d.expiry_user_id,d.custom_fields,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
-pub(crate) const REVISION_COLUMNS: &str = "r.id,r.document_id,r.revision,r.name,r.artifact_id,r.file_name,r.content_type,r.byte_size,r.sha256,r.external_url,r.change_log,r.scan_status,r.created_by,r.created_at";
+pub(crate) const COLUMNS: &str = "d.id,d.company_id,d.name,d.publish_date::text AS publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on::text AS expires_on,d.expiry_activity_id,d.expiry_user_id,d.custom_fields,d.sync_id,d.related_document_id,d.relation,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.deleting_at,d.version";
+pub(crate) const REVISION_COLUMNS: &str = "r.id,r.document_id,r.revision,r.name,r.artifact_id,r.file_name,r.content_type,r.byte_size,r.sha256,r.external_url,r.change_log,r.label,r.replaces_revision_id,r.scan_status,r.created_by,r.created_at";
 pub(crate) const LINK_COLUMNS: &str = "l.id,l.record_kind,l.record_id,l.linked_by,l.linked_at";
 
 fn time(value: SystemTime) -> Result<Timestamp> {
@@ -62,6 +62,9 @@ pub(crate) fn from_row(row: &Row) -> Result<Document> {
             .as_object()
             .cloned()
             .ok_or(Error::Internal)?,
+        sync_id: row.get("sync_id"),
+        related_document_id: row.get("related_document_id"),
+        relation: row.get("relation"),
         revision: row.get("revision"),
         last_revision_at: time(row.get("last_revision_at"))?,
         created_by: row.get("created_by"),
@@ -87,6 +90,8 @@ pub(crate) fn revision_from_row(row: &Row) -> Result<Revision> {
         sha256: row.get("sha256"),
         external_url: row.get("external_url"),
         change_log: row.get("change_log"),
+        label: row.get("label"),
+        replaces_revision_id: row.get("replaces_revision_id"),
         scan_status: ScanStatus::parse(row.get("scan_status")).ok_or(Error::Internal)?,
         created_by: row.get("created_by"),
         created_at: time(row.get("created_at"))?,
@@ -131,6 +136,9 @@ pub(crate) fn audit_values(d: &Document) -> Value {
         "expiry_activity_id": d.expiry_activity_id,
         "expiry_user_id": d.expiry_user_id,
         "custom_fields": d.custom,
+        "sync_id": d.sync_id,
+        "related_document_id": d.related_document_id,
+        "relation": d.relation,
         "revision": d.revision,
         "deleting": d.deleting_at.is_some(),
         "version": d.version,
@@ -148,6 +156,8 @@ pub(crate) fn revision_values(r: &Revision) -> Value {
         "sha256": r.sha256,
         "external_url": r.external_url,
         "change_log": r.change_log,
+        "label": r.label,
+        "replaces_revision_id": r.replaces_revision_id,
         "scan_status": r.scan_status.code(),
     })
 }
@@ -323,6 +333,7 @@ pub(crate) struct CreatePlan {
     pub change_log: String,
     pub file: Option<TakenFile>,
     pub related: Vec<Reference>,
+    pub revision_label: Option<String>,
 }
 impl CreatePlan {
     /// The checked draft: defaults filled in, references in their one
@@ -340,6 +351,10 @@ impl CreatePlan {
             status: Some(self.values.status.clone()).filter(|s| !s.is_empty()),
             expires_on: self.values.expires_on,
             custom: self.values.custom.clone(),
+            sync_id: self.values.sync_id.clone(),
+            related_document_id: self.values.related_document_id,
+            relation: self.values.relation.clone(),
+            revision_label: self.revision_label.clone(),
             change_log: Some(self.change_log.clone()),
             related: self.related.clone(),
         }
@@ -353,6 +368,8 @@ pub(crate) struct RevisionPlan {
     pub change_log: String,
     pub external_url: Option<String>,
     pub file: Option<TakenFile>,
+    pub label: Option<String>,
+    pub replaces_revision_id: Option<i64>,
 }
 
 /// The values a write stores, checked.
@@ -366,6 +383,9 @@ struct Values {
     expires_on: Option<Date>,
     /// The custom values the document will hold after the write.
     custom: Custom,
+    sync_id: Option<String>,
+    related_document_id: Option<i64>,
+    relation: Option<String>,
 }
 
 /// What a write checks against the database: records, pick-lists, people
@@ -857,6 +877,42 @@ impl Store<'_> {
             )
             .await?;
         }
+        if let Some(sync_id) = &values.sync_id {
+            let duplicate = on.client().query_opt(
+                "SELECT id FROM core_documents WHERE tenant_id=$1 AND sync_id=$2 AND ($3::bigint IS NULL OR id<>$3)",
+                &[&scope.tenant(), sync_id, &before.map(|d| d.id)],
+            ).await?;
+            if duplicate.is_some() {
+                errors.push(FieldError::new(
+                    "sync_id",
+                    "is already used by another document",
+                ));
+            }
+        }
+        match (values.related_document_id, values.relation.as_deref()) {
+            (None, None) => {}
+            (Some(target), Some("supersedes" | "replaces")) => {
+                if before.is_some_and(|d| d.id == target) {
+                    errors.push(FieldError::new(
+                        "related_document_id",
+                        "cannot refer to this document",
+                    ));
+                } else if before.is_none_or(|d| d.related_document_id != Some(target)) {
+                    match self.get(on.client(), scope, target).await {
+                        Ok(_) => {}
+                        Err(Error::NotFound | Error::Forbidden) => errors.push(FieldError::new(
+                            "related_document_id",
+                            "must name a document you may view",
+                        )),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            _ => errors.push(FieldError::new(
+                "relation",
+                "needs a related document and a relation of supersedes or replaces",
+            )),
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -950,6 +1006,19 @@ impl Store<'_> {
             draft.status.as_deref(),
             model::CODE_MAX,
         );
+        let sync_id = model::text(
+            &mut errors,
+            "sync_id",
+            draft.sync_id.as_deref(),
+            model::SYNC_ID_MAX,
+        );
+        let relation = model::text(&mut errors, "relation", draft.relation.as_deref(), 10);
+        let revision_label = model::text(
+            &mut errors,
+            "revision_label",
+            draft.revision_label.as_deref(),
+            model::REVISION_LABEL_MAX,
+        );
         let change_log = model::long_text(
             &mut errors,
             "change_log",
@@ -1018,6 +1087,9 @@ impl Store<'_> {
                 Ok(stored) => custom::merge(&Custom::new(), stored),
                 Err(_) => Custom::new(),
             },
+            sync_id,
+            related_document_id: draft.related_document_id,
+            relation,
         };
         if let Err(WriteError::Invalid(mut refused)) = stored {
             errors.append(&mut refused);
@@ -1041,6 +1113,7 @@ impl Store<'_> {
             change_log,
             file,
             related,
+            revision_label,
         })
     }
 
@@ -1056,14 +1129,14 @@ impl Store<'_> {
         let (tenant, user) = (scope.tenant(), scope.user());
         let document = tx.mutate(move |sql| {
             Box::pin(async move {
-                let CreatePlan { company, values, source, external_url, change_log, file, related, .. } = plan;
+                let CreatePlan { company, values, source, external_url, change_log, file, related, revision_label, .. } = plan;
                 let row = sql
                     .query_one(
-                        &format!("INSERT INTO core_documents AS d (tenant_id,company_id,name,publish_date,source,external_url,category,sub_category,document_type,status,expires_on,custom_fields,revision,last_revision_at,created_by)
-                                  VALUES ($1,$2,$3,$4::text::date,$5,$6,$7,$8,$9,$10,$12::text::date,$13,1,now(),$11) RETURNING {COLUMNS}"),
+                        &format!("INSERT INTO core_documents AS d (tenant_id,company_id,name,publish_date,source,external_url,category,sub_category,document_type,status,expires_on,custom_fields,sync_id,related_document_id,relation,revision,last_revision_at,created_by)
+                                  VALUES ($1,$2,$3,$4::text::date,$5,$6,$7,$8,$9,$10,$12::text::date,$13,$14,$15,$16,1,now(),$11) RETURNING {COLUMNS}"),
                         &[&tenant, &company, &values.name, &values.publish_date.to_string(), &source.code(), &external_url,
                           &values.category, &values.sub_category, &values.document_type, &values.status, &user,
-                          &values.expires_on.map(|d| d.to_string()), &Value::Object(values.custom.clone())],
+                          &values.expires_on.map(|d| d.to_string()), &Value::Object(values.custom.clone()), &values.sync_id, &values.related_document_id, &values.relation],
                     )
                     .await?;
                 let document = from_row(&row)?;
@@ -1075,7 +1148,7 @@ impl Store<'_> {
                     )
                     .await?;
                 changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: access.get(0), old: json!({}), new: json!({"document_id":document.id,"user_id":user,"view":true,"download":true,"manage":true,"share":true}) });
-                let revision = insert_revision(sql, tenant, user, &document, 1, file.as_ref(), external_url.as_deref(), &change_log).await?;
+                let revision = insert_revision(sql, tenant, user, &document, 1, file.as_ref(), external_url.as_deref(), &change_log, revision_label.as_deref(), None).await?;
                 changes.push(Change { kind: REVISION_RECORD.into(), id: revision.id, old: json!({}), new: revision_values(&revision) });
                 if let Some(file) = &file {
                     changes.push(file.attach(sql, tenant).await?);
@@ -1177,6 +1250,17 @@ impl Store<'_> {
                 Ok(stored) => custom::merge(&before.custom, stored),
                 Err(_) => before.custom.clone(),
             },
+            sync_id: match &patch.sync_id {
+                None => before.sync_id.clone(),
+                Some(v) => model::text(&mut errors, "sync_id", v.as_deref(), model::SYNC_ID_MAX),
+            },
+            related_document_id: patch
+                .related_document_id
+                .unwrap_or(before.related_document_id),
+            relation: match &patch.relation {
+                None => before.relation.clone(),
+                Some(v) => model::text(&mut errors, "relation", v.as_deref(), 10),
+            },
         };
         if let Err(WriteError::Invalid(mut refused)) = stored {
             errors.append(&mut refused);
@@ -1194,6 +1278,9 @@ impl Store<'_> {
             status: values.status,
             expires_on: values.expires_on,
             custom: values.custom,
+            sync_id: values.sync_id,
+            related_document_id: values.related_document_id,
+            relation: values.relation,
             ..before.clone()
         };
         Ok((before, after))
@@ -1223,11 +1310,11 @@ impl Store<'_> {
             Box::pin(async move {
                 let row = sql
                     .query_opt(
-                        &format!("UPDATE core_documents d SET name=$4,publish_date=$5::text::date,category=$6,sub_category=$7,document_type=$8,status=$9,expires_on=$10::text::date,custom_fields=$11,version=d.version+1,updated_at=now()
+                        &format!("UPDATE core_documents d SET name=$4,publish_date=$5::text::date,category=$6,sub_category=$7,document_type=$8,status=$9,expires_on=$10::text::date,custom_fields=$11,sync_id=$12,related_document_id=$13,relation=$14,version=d.version+1,updated_at=now()
                                   WHERE d.tenant_id=$1 AND d.id=$2 AND d.version=$3 RETURNING {COLUMNS}"),
                         &[&tenant, &before.id, &before.version, &after.name, &after.publish_date.to_string(), &after.category,
                           &after.sub_category, &after.document_type, &after.status,
-                          &after.expires_on.map(|d| d.to_string()), &Value::Object(after.custom.clone())],
+                          &after.expires_on.map(|d| d.to_string()), &Value::Object(after.custom.clone()), &after.sync_id, &after.related_document_id, &after.relation],
                     )
                     .await?
                     .ok_or(Error::Conflict)?;
@@ -1311,6 +1398,24 @@ impl Store<'_> {
                 }
             }
         }
+        let label = model::text(
+            &mut errors,
+            "label",
+            input.label.as_deref(),
+            model::REVISION_LABEL_MAX,
+        );
+        if let Some(replaces) = input.replaces_revision_id {
+            let found = on.client().query_opt(
+                "SELECT 1 FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND id=$3",
+                &[&scope.tenant(), &id, &replaces],
+            ).await?;
+            if found.is_none() {
+                errors.push(FieldError::new(
+                    "replaces_revision_id",
+                    "must name an earlier revision of this document",
+                ));
+            }
+        }
         if !errors.is_empty() {
             return Err(WriteError::Invalid(errors));
         }
@@ -1320,6 +1425,8 @@ impl Store<'_> {
             change_log: change_log.unwrap_or_default(),
             external_url,
             file,
+            label,
+            replaces_revision_id: input.replaces_revision_id,
         })
     }
 
@@ -1337,7 +1444,7 @@ impl Store<'_> {
         let (tenant, user) = (scope.tenant(), scope.user());
         let revision = tx.mutate(move |sql| {
             Box::pin(async move {
-                let RevisionPlan { document: before, revision: number, change_log, external_url, file } = plan;
+                let RevisionPlan { document: before, revision: number, change_log, external_url, file, label, replaces_revision_id } = plan;
                 let row = sql
                     .query_opt(
                         &format!("UPDATE core_documents d SET revision=$4,last_revision_at=now(),external_url=COALESCE($5,d.external_url),version=d.version+1,updated_at=now()
@@ -1347,7 +1454,7 @@ impl Store<'_> {
                     .await?
                     .ok_or(Error::Conflict)?;
                 let document = from_row(&row)?;
-                let revision = insert_revision(sql, tenant, user, &document, number, file.as_ref(), external_url.as_deref(), &change_log).await?;
+                let revision = insert_revision(sql, tenant, user, &document, number, file.as_ref(), external_url.as_deref(), &change_log, label.as_deref(), replaces_revision_id).await?;
                 let mut changes = vec![
                     Change { kind: RECORD.into(), id: document.id, old: audit_values(&before), new: audit_values(&document) },
                     Change { kind: REVISION_RECORD.into(), id: revision.id, old: json!({}), new: revision_values(&revision) },
@@ -1529,14 +1636,16 @@ async fn insert_revision(
     file: Option<&TakenFile>,
     external_url: Option<&str>,
     change_log: &str,
+    label: Option<&str>,
+    replaces_revision_id: Option<i64>,
 ) -> Result<Revision> {
     let row = sql
         .query_one(
-            &format!("INSERT INTO core_document_revisions AS r (tenant_id,document_id,source,revision,name,artifact_id,file_name,content_type,byte_size,sha256,external_url,change_log,scan_status,created_by)
-                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING {REVISION_COLUMNS}"),
+            &format!("INSERT INTO core_document_revisions AS r (tenant_id,document_id,source,revision,name,artifact_id,file_name,content_type,byte_size,sha256,external_url,change_log,label,replaces_revision_id,scan_status,created_by)
+                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING {REVISION_COLUMNS}"),
             &[&tenant, &document.id, &document.source.code(), &number, &document.name,
               &file.map(TakenFile::artifact_id), &file.map(TakenFile::file_name), &file.map(TakenFile::content_type),
-              &file.map(TakenFile::byte_size), &file.map(TakenFile::sha256), &external_url, &change_log,
+              &file.map(TakenFile::byte_size), &file.map(TakenFile::sha256), &external_url, &change_log, &label, &replaces_revision_id,
               &if file.is_some() { "clean" } else { "not_scanned" }, &user],
         )
         .await?;

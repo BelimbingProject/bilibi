@@ -12,7 +12,7 @@ Use `core.document.get` for one document, its revisions and its related records.
 
 Use `core.document.create` for an internal file already stored through the Documents page, or for an external HTTPS link. Add later versions with `core.document.add_revision` and explain the change in `change_log`.
 
-Use `core.document.update` for the document's name, publication date, category, subcategory, type or status. Link and unlink work records with `core.document.link` and `core.document.unlink`.
+Use `core.document.update` for the document's name, publication date, category, subcategory, type, status, integration sync ID or document relation. The sync ID is unique within the tenant. A relation needs a document ID you can view and a kind (supersedes or replaces); clear both fields together. `core.document.add_revision` accepts an optional label and an earlier revision ID from the same document in replaces_revision_id. The revision IDs are returned by `core.document.get`. Link and unlink work records with `core.document.link` and `core.document.unlink`.
 
 ## Favourites, duplicates, copy and merge
 

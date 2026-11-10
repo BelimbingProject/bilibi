@@ -103,6 +103,10 @@ pub struct Draft {
     pub expires_on: Option<Date>,
     /// Values of the tenant's custom fields (`base/custom_fields`).
     pub custom: Custom,
+    pub sync_id: Option<String>,
+    pub related_document_id: Option<i64>,
+    pub relation: Option<String>,
+    pub revision_label: Option<String>,
     /// The first revision's change log; "Document created" when omitted.
     pub change_log: Option<String>,
     /// Records the document relates to from the start.
@@ -124,6 +128,9 @@ pub struct Patch {
     pub expires_on: Option<Option<Date>>,
     /// Custom values to set; an empty or null value clears a key.
     pub custom: Custom,
+    pub sync_id: Option<Option<String>>,
+    pub related_document_id: Option<Option<i64>>,
+    pub relation: Option<Option<String>>,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
@@ -135,6 +142,9 @@ impl Patch {
             && self.status.is_none()
             && self.expires_on.is_none()
             && self.custom.is_empty()
+            && self.sync_id.is_none()
+            && self.related_document_id.is_none()
+            && self.relation.is_none()
     }
 }
 
@@ -146,6 +156,8 @@ pub struct RevisionInput {
     pub external_url: Option<String>,
     pub revision: Option<i32>,
     pub change_log: String,
+    pub label: Option<String>,
+    pub replaces_revision_id: Option<i64>,
 }
 
 /// Bytes to keep as a document file, before any document exists.
@@ -158,6 +170,8 @@ pub struct Upload<'a> {
 pub const NAME_MAX: usize = 255;
 pub const CODE_MAX: usize = 64;
 pub const CHANGE_LOG_MAX: usize = 2_000;
+pub const SYNC_ID_MAX: usize = 255;
+pub const REVISION_LABEL_MAX: usize = 100;
 pub const URL_MAX: usize = 2_000;
 /// The change log of a document's first revision when none is given.
 pub const FIRST_CHANGE_LOG: &str = "Document created";
