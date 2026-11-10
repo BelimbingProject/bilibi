@@ -45,9 +45,9 @@ python3 /path/to/bilibi/scripts/provision-language-model.py /opt/bilibi/<instanc
 
 The helper needs Python 3.11 or newer and its standard library. Run as the deployment account with write access to the chosen directory, then ensure the application can read it. The [installed instance layout](../../../docs/server-install.md) uses the instance as working directory, with persistent `data/` across releases. The default path therefore survives upgrades and works inside the existing service sandbox. For another directory, set the absolute `model_path` through System Settings and ensure service read access. Offline deployments can copy the verified binary, `model.json` and `NOTICE.md` to that directory; the application independently checks the asset at load.
 
-[`model.json`](model.json) pins the authoritative HTTPS download URL, exact size (**131266198 bytes**) and SHA-256 (**`7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e`**). This digest was computed from the download linked by the [fastText authors](https://fasttext.cc/docs/en/language-identification.html); upstream does not publish a signed checksum. It also matches the [original Hugging Face import's immutable LFS pointer](https://huggingface.co/julien-c/fasttext-language-id/blob/0266da4549434de56667387618bc67dc6d2670ef/lid.176.bin). The helper fails on size/hash mismatch, publishes only a verified complete file atomically, refuses to overwrite a mismatching existing file, and installs attribution beside it. A future asset update needs a new version and reviewed checksum; arbitrary replacement models and the compressed `.ftz` asset are not accepted.
+[`model.json`](model.json) pins the authoritative HTTPS download URL, exact size and SHA-256. This digest was computed from the download linked by the [fastText authors](https://fasttext.cc/docs/en/language-identification.html); upstream does not publish a signed checksum. It also matches the [original Hugging Face import's immutable LFS pointer](https://huggingface.co/julien-c/fasttext-language-id/blob/0266da4549434de56667387618bc67dc6d2670ef/lid.176.bin). The helper fails on size/hash mismatch, publishes only a verified complete file atomically, refuses to overwrite a mismatching existing file, and installs attribution beside it. A future asset update needs a new version and reviewed checksum; arbitrary replacement models and the compressed `.ftz` asset are not accepted.
 
-The model is unchanged and licensed **CC-BY-SA-3.0**, separately from the MIT application code. Preserve [`NOTICE.md`](NOTICE.md), the model authors' attribution, license link and requested paper citations with redistributed assets; identify modifications and honor ShareAlike when distributing adaptations.
+See [`NOTICE.md`](NOTICE.md) for the model's separate license, attribution and redistribution requirements; preserve it with redistributed assets.
 
 ## Process and CPU behavior
 
@@ -57,7 +57,7 @@ Inference uses `fasttext = 0.8.1`, a maintained [pure Rust implementation](https
 
 ## Executable walkthrough
 
-Use a fresh disposable database with the [runtime evidence convention](../../../docs/runtime-parity.md). This walkthrough links the real registry, Settings, mutation/audit boundary and versioned walkthrough fixture; it writes only detector settings in the disposable database and never prints input text. It has no unit-test harness, mocks or assertions.
+Use a fresh disposable database with the [runtime evidence convention](../../../docs/runtime-parity.md). This walkthrough links the real registry, Settings, mutation/audit boundary and versioned walkthrough fixture; it migrates the disposable database, installs the walkthrough fixture and writes detector settings. It never prints input text. It has no unit-test harness, mocks or assertions.
 
 ```sh
 export BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes
