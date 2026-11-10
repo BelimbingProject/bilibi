@@ -59,6 +59,49 @@ impl AttachmentState {
     }
 }
 
+/// Who stored an attachment: an account in person, or a declared system
+/// principal (a module's mailbox import or connector job) sealed into its
+/// scope by `SystemAuthentication::for_system`. Either way the subject owner
+/// decided the upload; a principal's file is scanned and served exactly like
+/// a person's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Uploader {
+    User(i64),
+    System(String),
+}
+impl Uploader {
+    /// The account, `None` for a system principal.
+    pub fn user(&self) -> Option<i64> {
+        match self {
+            Self::User(id) => Some(*id),
+            Self::System(_) => None,
+        }
+    }
+    /// The principal's name, `None` for an account.
+    pub fn principal(&self) -> Option<&str> {
+        match self {
+            Self::User(_) => None,
+            Self::System(name) => Some(name),
+        }
+    }
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::User(_) => "user",
+            Self::System(_) => "system",
+        }
+    }
+    fn from_row(row: &Row) -> Result<Self> {
+        match (
+            row.get::<_, Option<i64>>("uploaded_by_id"),
+            row.get::<_, Option<String>>("uploaded_by_principal"),
+        ) {
+            (Some(id), None) => Ok(Self::User(id)),
+            (None, Some(name)) => Ok(Self::System(name)),
+            _ => Err(Error::InvalidAsset),
+        }
+    }
+}
+
 /// What an owner may see: no disk, key or asset id. `public_id` is the ULID the
 /// owner stores and later submits or downloads by.
 #[derive(Clone, Debug)]
@@ -67,7 +110,7 @@ pub struct Attachment {
     pub subject_type: String,
     pub subject_id: String,
     pub state: AttachmentState,
-    pub uploaded_by_id: i64,
+    pub uploaded_by: Uploader,
     pub original_filename: Option<String>,
     pub mime_type: Option<String>,
     pub file_size: Option<i64>,
@@ -92,7 +135,7 @@ struct Bound {
     asset_id: i64,
     summary: Attachment,
 }
-const SELECT: &str = "SELECT a.id,a.media_asset_id,a.public_id,a.subject_type,a.subject_id,a.state,a.uploaded_by_id,s.original_filename,s.mime_type,s.file_size,s.scan_state,floor(extract(epoch FROM a.submitted_at))::bigint AS submitted_at,floor(extract(epoch FROM a.retained_at))::bigint AS retained_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at FROM base_media_attachments a JOIN base_media_assets s ON s.id=a.media_asset_id AND s.tenant_id=a.tenant_id";
+const SELECT: &str = "SELECT a.id,a.media_asset_id,a.public_id,a.subject_type,a.subject_id,a.state,a.uploaded_by_id,a.uploaded_by_principal,s.original_filename,s.mime_type,s.file_size,s.scan_state,floor(extract(epoch FROM a.submitted_at))::bigint AS submitted_at,floor(extract(epoch FROM a.retained_at))::bigint AS retained_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at FROM base_media_attachments a JOIN base_media_assets s ON s.id=a.media_asset_id AND s.tenant_id=a.tenant_id";
 fn bound(row: &Row) -> Result<Bound> {
     Ok(Bound {
         id: row.get("id"),
@@ -102,7 +145,7 @@ fn bound(row: &Row) -> Result<Bound> {
             subject_type: row.get("subject_type"),
             subject_id: row.get("subject_id"),
             state: AttachmentState::parse(row.get("state"))?,
-            uploaded_by_id: row.get("uploaded_by_id"),
+            uploaded_by: Uploader::from_row(row)?,
             original_filename: row.get("original_filename"),
             mime_type: row.get("mime_type"),
             file_size: row.get("file_size"),
@@ -115,7 +158,7 @@ fn bound(row: &Row) -> Result<Bound> {
 }
 /// Audit facts name the binding, never the bytes, key or filename.
 fn facts(summary: &Attachment) -> Value {
-    json!({"public_id":summary.public_id,"subject_type":summary.subject_type,"subject_id":summary.subject_id,"state":summary.state.as_str(),"uploaded_by_id":summary.uploaded_by_id,"submitted_at":summary.submitted_at,"retained_at":summary.retained_at})
+    json!({"public_id":summary.public_id,"subject_type":summary.subject_type,"subject_id":summary.subject_id,"state":summary.state.as_str(),"uploaded_by_id":summary.uploaded_by.user(),"uploaded_by_principal":summary.uploaded_by.principal(),"submitted_at":summary.submitted_at,"retained_at":summary.retained_at})
 }
 /// The only accepted spelling: 26 uppercase Crockford base32 characters.
 fn valid_public_id(id: &str) -> bool {
@@ -129,21 +172,19 @@ enum Bind {
 }
 
 impl Media {
-    /// Bytes are only ever bound through the caller's own transaction context.
-    /// An impersonated session is refused: the row cannot name the operator.
-    fn acting_user(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
-        if tx.context().tenant != scope.tenant()
-            || tx.context().actor.kind != "user"
-            || tx.context().actor.id != scope.user().to_string()
-            || tx.context().impersonator.is_some()
-        {
+    /// Bytes are only ever bound through the caller's own transaction context:
+    /// the scope's account in person, or its sealed, declared system principal
+    /// (`Media::acting`). An impersonated session is refused: the row cannot
+    /// name the operator.
+    fn acting_uploader(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<Uploader> {
+        if tx.context().impersonator.is_some() {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        Ok(())
+        Self::acting(tx, scope)
     }
 
     /// Validate, authorize `Upload`, store the bytes privately and create a
-    /// draft naming the sealed user. `rules` may narrow the operator's size and
+    /// draft naming the sealed user or declared system principal. `rules` may narrow the operator's size and
     /// type limits for this subject, never widen them. The owner is asked again
     /// inside the registering transaction, after the bytes were read.
     pub async fn upload_attachment(
@@ -155,6 +196,8 @@ impl Media {
         rules: Rules,
     ) -> Result<Attachment> {
         let AttachmentSubject { kind, id } = subject;
+        // An undeclared principal stores no bytes at all; registration asks again.
+        let uploader = Self::uploader(&scope.mutation_context("media.attachment.upload"), scope)?;
         self.subjects
             .authorize(&*client, scope, kind, SubjectAction::Upload, id)
             .await?;
@@ -209,9 +252,8 @@ impl Media {
                     },
                 )
                 .await?;
-            let (tenant, user, subject_type, subject_id, public_id) = (
+            let (tenant, subject_type, subject_id, public_id) = (
                 scope.tenant(),
-                scope.user(),
                 kind.to_owned(),
                 id.to_owned(),
                 ulid::Ulid::generate().to_string(),
@@ -221,8 +263,8 @@ impl Media {
                     Box::pin(async move {
                         let row = sql
                             .query_one(
-                                "INSERT INTO base_media_attachments(public_id,tenant_id,media_asset_id,subject_type,subject_id,state,uploaded_by_type,uploaded_by_id) VALUES($1,$2,$3,$4,$5,'draft','user',$6) RETURNING id",
-                                &[&public_id, &tenant, &asset.id, &subject_type, &subject_id, &user],
+                                "INSERT INTO base_media_attachments(public_id,tenant_id,media_asset_id,subject_type,subject_id,state,uploaded_by_type,uploaded_by_id,uploaded_by_principal) VALUES($1,$2,$3,$4,$5,'draft',$6,$7,$8) RETURNING id",
+                                &[&public_id, &tenant, &asset.id, &subject_type, &subject_id, &uploader.kind(), &uploader.user(), &uploader.principal()],
                             )
                             .await?;
                         let row_id: i64 = row.get("id");
@@ -231,7 +273,7 @@ impl Media {
                             subject_type,
                             subject_id,
                             state: AttachmentState::Draft,
-                            uploaded_by_id: user,
+                            uploaded_by: uploader,
                             original_filename: asset.original_filename,
                             mime_type: asset.mime_type,
                             file_size: asset.file_size,
@@ -293,7 +335,7 @@ impl Media {
         public_ids: &[&str],
         operation: Bind,
     ) -> Result<Vec<Attachment>> {
-        Self::acting_user(tx, scope)?;
+        Self::acting_uploader(tx, scope)?;
         let mut ids = public_ids.to_vec();
         ids.sort_unstable();
         ids.dedup();
@@ -433,8 +475,9 @@ impl Media {
         })
     }
 
-    /// Remove a draft its uploader no longer wants. Only the uploader may, only
-    /// while the owner still allows `Discard`, and never submitted evidence.
+    /// Remove a draft its uploader no longer wants. Only the uploader may (the
+    /// same account, or the same system principal), only while the owner still
+    /// allows `Discard`, and never submitted evidence.
     pub async fn discard_draft(
         &self,
         client: &mut Client,
@@ -448,6 +491,7 @@ impl Media {
             .boundary
             .begin(client, scope.mutation_context("media.attachment.discard"))
             .await?;
+        let uploader = Self::acting(&tx, scope)?;
         let row = tx
             .sql()
             .query_opt(
@@ -460,7 +504,7 @@ impl Media {
         if row.summary.state != AttachmentState::Draft {
             return Err(Error::ImmutableAttachment);
         }
-        if row.summary.uploaded_by_id != scope.user() {
+        if row.summary.uploaded_by != uploader {
             return Err(Error::NotUploader);
         }
         self.subjects

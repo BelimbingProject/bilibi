@@ -26,7 +26,7 @@ mod web;
 
 pub use attachments::{
     Attachment, AttachmentErasure, AttachmentState, AttachmentSubject, Cleanup, ErasedAttachment,
-    Removal, ASSET_KIND, ATTACHMENT_KIND,
+    Removal, Uploader, ASSET_KIND, ATTACHMENT_KIND,
 };
 pub use owner::{Subject, SubjectAction, SubjectOwner, Subjects, SUBJECTS};
 pub use quarantine::{
@@ -40,7 +40,7 @@ pub use staging::{StagedUpload, Staging, StagingRequest};
 pub use storage::EXTERNAL;
 pub use upload::{Rules, Upload};
 
-use bilibi_database::{Change, Db, MutationBoundary, MutationTransaction};
+use bilibi_database::{Change, Context, Db, MutationBoundary, MutationTransaction};
 use bilibi_module_registry::{Catalog, Service};
 use bilibi_notifications::NotificationBoundary;
 use bilibi_queue::{HandlerBinding, HandlerService, Queue, Worker, HANDLERS, WORKERS};
@@ -367,14 +367,41 @@ impl Media {
         }
         Ok(())
     }
-    fn matches(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
-        if tx.context().tenant != scope.tenant()
-            || tx.context().actor.kind != "user"
-            || tx.context().actor.id != scope.user().to_string()
-        {
-            return Err(bilibi_database::Error::Forbidden.into());
+    /// Who `context` writes as, when that is exactly the scope's sealed actor:
+    /// its account, or its named system principal when Authz declares that
+    /// principal (a scope sealed for an undeclared name is refused here too).
+    /// Anything else, such as a context naming another user, is `Forbidden`.
+    fn uploader(context: &Context, scope: &Scope) -> Result<Uploader> {
+        let forbidden = || Error::from(bilibi_database::Error::Forbidden);
+        if context.tenant != scope.tenant() {
+            return Err(forbidden());
         }
-        Ok(())
+        match scope.principal() {
+            Some(principal) => {
+                let declared = bilibi_authz::vocabulary()
+                    .map_err(|_| forbidden())?
+                    .system_principals
+                    .contains_key(principal);
+                if !declared
+                    || context.actor.kind != "system"
+                    || context.actor.id != principal
+                    || context.impersonator.is_some()
+                {
+                    return Err(forbidden());
+                }
+                Ok(Uploader::System(principal.to_owned()))
+            }
+            None if scope.user() > 0
+                && context.actor.kind == "user"
+                && context.actor.id == scope.user().to_string() =>
+            {
+                Ok(Uploader::User(scope.user()))
+            }
+            None => Err(forbidden()),
+        }
+    }
+    fn acting(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<Uploader> {
+        Self::uploader(tx.context(), scope)
     }
 
     /// Record an original whose bytes an authorized owner already placed on
@@ -429,7 +456,13 @@ impl Media {
         new: NewAsset,
     ) -> Result<Asset> {
         let Placement { disk, key } = place;
-        Self::matches(tx, scope)?;
+        let creator = Self::acting(tx, scope)?;
+        // A system principal stores only a private original: the attachment
+        // path, where a subject owner decided it. Public files and derivatives
+        // stay a person's.
+        if creator.principal().is_some() && (!new.private || parent.is_some()) {
+            return Err(bilibi_database::Error::Forbidden.into());
+        }
         Self::check_attributes(&new)?;
         self.place(tx.sql(), disk, key).await?;
         let taken = tx
@@ -443,9 +476,10 @@ impl Media {
             return Err(Error::StorageKeyExists);
         }
         let state = self.initial_state(tx.sql(), disk).await?;
-        let (tenant, user, disk, key, kind, state_text) = (
+        let (tenant, user, principal, disk, key, kind, state_text) = (
             scope.tenant(),
-            scope.user(),
+            creator.user(),
+            creator.principal().map(str::to_owned),
             disk.to_owned(),
             key.to_owned(),
             kind.to_owned(),
@@ -456,8 +490,8 @@ impl Media {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("INSERT INTO base_media_assets(tenant_id,parent_id,disk,storage_key,original_filename,mime_type,file_size,kind,private,metadata,scan_state,created_by_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {COLUMNS}"),
-                            &[&tenant, &parent, &disk, &key, &new.original_filename, &new.mime_type, &new.file_size, &kind, &new.private, &new.metadata, &state_text, &user],
+                            &format!("INSERT INTO base_media_assets(tenant_id,parent_id,disk,storage_key,original_filename,mime_type,file_size,kind,private,metadata,scan_state,created_by_id,created_by_principal) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING {COLUMNS}"),
+                            &[&tenant, &parent, &disk, &key, &new.original_filename, &new.mime_type, &new.file_size, &kind, &new.private, &new.metadata, &state_text, &user, &principal],
                         )
                         .await?;
                     let row = stored(&row);
@@ -918,6 +952,7 @@ inventory::submit! {
             ("base-media-002", include_str!("../migrations/002-attachments.sql")),
             ("base-media-003", include_str!("../migrations/003-scan.sql")),
             ("base-media-004-erasure", include_str!("../migrations/004-erasure.sql")),
+            ("base-media-005-system-uploader", include_str!("../migrations/005-system-uploader.sql")),
         ],
         services: &[
             Service { id: "base/media.install-policy", factory: |_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy)))) },

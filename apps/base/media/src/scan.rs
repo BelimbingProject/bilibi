@@ -434,8 +434,9 @@ impl Media {
     }
 
     /// Tell the uploader and the tenant's quarantine managers, in the
-    /// verdict's transaction. Only live accounts are told; nobody live is
-    /// nobody told, never a failed verdict.
+    /// verdict's transaction. A system principal's upload has no account to
+    /// tell, so only the managers hear of it. Only live accounts are told;
+    /// nobody live is nobody told, never a failed verdict.
     async fn notify_quarantined(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -451,7 +452,8 @@ impl Media {
             )
             .await?
         {
-            Some(attachment) => Some(attachment.get::<_, i64>(0)),
+            // A system principal's attachment names no account to tell.
+            Some(attachment) => attachment.get::<_, Option<i64>>(0),
             None => row.created_by,
         };
         let mut live = Vec::new();

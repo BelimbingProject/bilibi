@@ -30,7 +30,7 @@ pub(crate) const HANDLER: &str = "base/media.purge";
 pub(crate) const MAX_ATTEMPTS: i32 = 12;
 /// Most rows one read returns, newest first.
 pub const MAX_LISTED: i64 = 1_000;
-const LISTED: &str = "a.id,a.original_filename,a.mime_type,a.file_size,a.scan_state,a.scanner,a.scanner_version,a.scan_signature,a.scan_reason,floor(extract(epoch FROM a.scanned_at))::bigint AS scanned_at,floor(extract(epoch FROM a.purge_requested_at))::bigint AS purge_requested_at,floor(extract(epoch FROM a.bytes_purged_at))::bigint AS purged_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at,coalesce(t.uploaded_by_id,a.created_by_id) AS uploaded_by_id,t.subject_type,t.subject_id";
+const LISTED: &str = "a.id,a.original_filename,a.mime_type,a.file_size,a.scan_state,a.scanner,a.scanner_version,a.scan_signature,a.scan_reason,floor(extract(epoch FROM a.scanned_at))::bigint AS scanned_at,floor(extract(epoch FROM a.purge_requested_at))::bigint AS purge_requested_at,floor(extract(epoch FROM a.bytes_purged_at))::bigint AS purged_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at,coalesce(t.uploaded_by_id,a.created_by_id) AS uploaded_by_id,coalesce(t.uploaded_by_principal,a.created_by_principal) AS uploaded_by_principal,t.subject_type,t.subject_id";
 const FROM: &str = "FROM base_media_assets a LEFT JOIN base_media_attachments t ON t.media_asset_id=a.id AND t.tenant_id=a.tenant_id WHERE a.tenant_id=$1 AND a.disk<>'external'";
 const MATCHING: &str =
     " AND a.scan_state=ANY($2) AND ($3::text IS NULL OR a.original_filename ILIKE $3)";
@@ -58,6 +58,9 @@ pub struct QuarantinedFile {
     pub created_at: i64,
     /// The account that stored it, when known.
     pub uploaded_by_id: Option<i64>,
+    /// The system principal that stored it, when one did (`uploaded_by_id`
+    /// is then `None`).
+    pub uploaded_by_principal: Option<String>,
     /// The record a private attachment belongs to (`subject type`, `id`).
     pub subject: Option<(String, String)>,
 }
@@ -70,6 +73,7 @@ impl QuarantinedFile {
             "scanned_at": self.scanned_at, "purge_requested_at": self.purge_requested_at,
             "purged_at": self.purged_at, "created_at": self.created_at,
             "uploaded_by_id": self.uploaded_by_id,
+            "uploaded_by_principal": self.uploaded_by_principal,
             "subject": self.subject.as_ref().map(|(kind, id)| json!({"type": kind, "id": id})),
         })
     }
@@ -108,6 +112,7 @@ fn listed(row: &tokio_postgres::Row) -> QuarantinedFile {
         purged_at: row.get("purged_at"),
         created_at: row.get("created_at"),
         uploaded_by_id: row.get("uploaded_by_id"),
+        uploaded_by_principal: row.get("uploaded_by_principal"),
         subject: row
             .get::<_, Option<String>>("subject_type")
             .zip(row.get::<_, Option<String>>("subject_id")),
