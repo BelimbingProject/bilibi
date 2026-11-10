@@ -288,7 +288,8 @@ fn create_schema() -> Value {
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
         "search":{"type":"string","maxLength":255},"kind":{"type":"string","enum":["human","agent"]},
-        "sort":{"type":"string","enum":["name","code","kind","state","created_at"]},"descending":{"type":"boolean"},
+        "sort":{"type":"string","maxLength":43,"description":"name, code, kind, state or created_at, or cf_<key> to sort by an active custom field (number as a number, date as a date; empty last)."},"descending":{"type":"boolean"},
+        "custom":{"type":"array","description":"Conditions on custom field values, all of which hold: op contains (text), eq (text or choice code), gte or lte (number or date). A key that is not an active field, or a value the field cannot hold, is refused.","items":{"type":"object","required":["key","op","value"],"properties":{"key":{"type":"string","maxLength":40},"op":{"type":"string","enum":["contains","eq","gte","lte"]},"value":{"type":"string","maxLength":256}}}},
         "include_retired":{"type":"boolean"},"page":{"type":"integer","minimum":1,"maximum":1000000},"page_size":{"type":"integer","minimum":1,"maximum":300}
     }})
 }

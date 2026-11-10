@@ -105,6 +105,50 @@ pub(crate) async fn listed(
     ))
 }
 
+/// A custom field's stored value as the SQL type its sort and comparisons
+/// need, read from `persons.custom_fields` with the key as bound parameter
+/// `$index` (never part of the statement text).
+pub(crate) fn expression(index: usize, kind: bilibi_custom_fields::Kind) -> String {
+    let cast = match kind {
+        bilibi_custom_fields::Kind::Number => "::numeric",
+        bilibi_custom_fields::Kind::Date => "::date",
+        _ => "",
+    };
+    format!("(custom_fields ->> ${index}::text){cast}")
+}
+
+/// The SQL comparison a condition makes on `expression`, with its value as
+/// bound parameter `$index`; `None` when the operator does not suit the
+/// field or the value is not one the field can hold.
+pub(crate) fn condition(
+    definition: &bilibi_custom_fields::Definition,
+    filter: &crate::model::CustomFilter,
+    expression: &str,
+    index: usize,
+) -> Option<String> {
+    use bilibi_custom_fields::Kind;
+    let value = filter.value.trim();
+    match (definition.kind, filter.op.as_str()) {
+        (Kind::Text, "contains") if !value.is_empty() && value.chars().count() <= 256 => Some(
+            format!("position(lower(${index}::text) in lower({expression}))>0"),
+        ),
+        (Kind::Text | Kind::Choice, "eq") if !value.is_empty() && value.chars().count() <= 256 => {
+            Some(format!("{expression}=${index}::text"))
+        }
+        (Kind::Number, "gte" | "lte") if bilibi_custom_fields::valid_number(value) => {
+            Some(format!(
+                "{expression}{}${index}::text::numeric",
+                if filter.op == "gte" { ">=" } else { "<=" }
+            ))
+        }
+        (Kind::Date, "gte" | "lte") if bilibi_custom_fields::valid_date(value) => Some(format!(
+            "{expression}{}${index}::text::date",
+            if filter.op == "gte" { ">=" } else { "<=" }
+        )),
+        _ => None,
+    }
+}
+
 /// A `custom` input of `[{key, value}]` pairs (the agent dialect has no
 /// free-form object) as a patch. A value is text, or null to clear.
 pub(crate) fn patch(input: &Value) -> Result<Custom> {

@@ -2,7 +2,9 @@
 //! migrated database: an administrator defines text, number, date and
 //! pick-list fields for contacts (`base/custom_fields`), and Core Person keeps
 //! the values on the person, checked in its own writes. Each line is `ok` or
-//! `FAIL`; the run fails if any check does. With `serve` (or on a database it
+//! `FAIL`; the run fails if any check does. The list part searches, filters
+//! and sorts by custom values through Core Person's search and
+//! `core.person.list`. With `serve` (or on a database it
 //! already prepared) it only serves the app for the browser.
 //!
 //! ```text
@@ -18,7 +20,7 @@ use bilibi_agent_api::{
 };
 use bilibi_custom_fields::{CustomFields, NewField};
 use bilibi_database::{pool, Error, MutationBoundary};
-use bilibi_person::{PersonService, Update, SERVICE};
+use bilibi_person::{CustomFilter, PersonService, Search, Update, SERVICE};
 use bilibi_tenancy::{ProofFuture, Scope};
 use serde_json::{json, Value};
 use tokio_postgres::Transaction;
@@ -415,6 +417,227 @@ async fn main() -> Result<(), Failure> {
     if read.to_string().contains("\"nickname\"") {
         println!("     {read}");
     }
+
+    println!("-- list: filters and sorts");
+    // A text field for the list, and three more contacts with values.
+    let mut tx = boundary
+        .begin(&mut client, admin.mutation_context("person.custom.define"))
+        .await?;
+    fields
+        .define(
+            &mut tx,
+            admin,
+            &NewField {
+                record_type: "person".into(),
+                key: "region".into(),
+                label: "Region".into(),
+                kind: "text".into(),
+                ..NewField::default()
+            },
+        )
+        .await?
+        .map_err(|e| format!("{e:?}"))?;
+    tx.commit().await?;
+    for (name, custom) in [
+        (
+            "Lim Ah Kow",
+            json!([{"key": "credit_limit", "value": "500"}, {"key": "anniversary", "value": "2023-01-15"}, {"key": "tier", "value": second.code}, {"key": "region", "value": "Klang Valley"}]),
+        ),
+        (
+            "Siti Aminah",
+            json!([{"key": "credit_limit", "value": "2500.75"}, {"key": "anniversary", "value": "2025-06-01"}, {"key": "tier", "value": second.code}]),
+        ),
+        (
+            "Raj Kumar",
+            json!([{"key": "credit_limit", "value": "10000"}, {"key": "region", "value": "Penang"}]),
+        ),
+    ] {
+        let ops = [PlannedOperation {
+            key: "core.person.create".into(),
+            input: json!({"name": name, "kind": "human", "custom": custom}),
+        }];
+        let made = plans.commit(manager, &browser, &ops).await?;
+        if made["results"][0]["result"]["result"]["id"].is_null() {
+            println!("     {name}: {made}");
+        }
+    }
+    let find = |custom: Vec<(&str, &str, &str)>, sort: &str, descending: bool| Search {
+        custom: custom
+            .into_iter()
+            .map(|(key, op, value)| CustomFilter {
+                key: key.into(),
+                op: op.into(),
+                value: value.into(),
+            })
+            .collect(),
+        sort: sort.into(),
+        descending,
+        page_size: 50,
+        ..Search::default()
+    };
+    let names = |page: &bilibi_person::Page| -> Vec<String> {
+        page.entries.iter().map(|p| p.name.clone()).collect()
+    };
+    let at_least = people
+        .search(
+            manager,
+            &find(vec![("credit_limit", "gte", "1000")], "name", false),
+        )
+        .await?;
+    let at_most = people
+        .search(
+            manager,
+            &find(vec![("credit_limit", "lte", "1000")], "name", false),
+        )
+        .await?;
+    proof.check(
+        "a number filter compares as a number, and a contact without a value matches neither bound",
+        names(&at_least) == ["Raj Kumar", "Siti Aminah"] && names(&at_most) == ["Lim Ah Kow"],
+    );
+    let dated = people
+        .search(
+            manager,
+            &find(
+                vec![
+                    ("anniversary", "gte", "2024-01-01"),
+                    ("anniversary", "lte", "2025-12-31"),
+                ],
+                "name",
+                false,
+            ),
+        )
+        .await?;
+    let tiered = people
+        .search(
+            manager,
+            &find(vec![("tier", "eq", &second.code)], "name", false),
+        )
+        .await?;
+    let region = people
+        .search(
+            manager,
+            &find(vec![("region", "contains", "KLANG")], "name", false),
+        )
+        .await?;
+    proof.check(
+        "a date range, a choice and a text contains (any case) each find their contacts",
+        names(&dated) == ["Nadia Rahman", "Siti Aminah"]
+            && names(&tiered) == ["Lim Ah Kow", "Siti Aminah"]
+            && names(&region) == ["Lim Ah Kow"],
+    );
+    let ascending = people
+        .search(manager, &find(vec![], "cf_credit_limit", false))
+        .await?;
+    let descending = people
+        .search(manager, &find(vec![], "cf_credit_limit", true))
+        .await?;
+    let ordered = |page: &bilibi_person::Page| -> Vec<String> {
+        names(page)
+            .into_iter()
+            .filter(|n| {
+                ["Lim Ah Kow", "Siti Aminah", "Raj Kumar", "Nadia Rahman"].contains(&n.as_str())
+            })
+            .collect()
+    };
+    proof.check(
+        "sorting by a number field is numeric both ways, with contacts lacking a value last",
+        ordered(&ascending) == ["Lim Ah Kow", "Siti Aminah", "Raj Kumar", "Nadia Rahman"]
+            && ordered(&descending) == ["Raj Kumar", "Siti Aminah", "Lim Ah Kow", "Nadia Rahman"],
+    );
+    if ordered(&ascending) != ["Lim Ah Kow", "Siti Aminah", "Raj Kumar", "Nadia Rahman"] {
+        println!("     {:?} / {:?}", names(&ascending), names(&descending));
+    }
+    let mut refusals = Vec::new();
+    for (label, query) in [
+        (
+            "unknown field",
+            find(vec![("shoe_size", "eq", "9")], "name", false),
+        ),
+        (
+            "archived field",
+            find(vec![("nickname", "contains", "Na")], "name", false),
+        ),
+        (
+            "wrong operator",
+            find(vec![("credit_limit", "contains", "5")], "name", false),
+        ),
+        (
+            "bad number",
+            find(vec![("credit_limit", "gte", "lots")], "name", false),
+        ),
+        (
+            "bad date",
+            find(vec![("anniversary", "gte", "2026-13-01")], "name", false),
+        ),
+        (
+            "quoted key",
+            find(vec![("x') OR 1=1 --", "eq", "1")], "name", false),
+        ),
+        ("unknown sort", find(vec![], "cf_shoe_size", false)),
+        ("archived sort", find(vec![], "cf_nickname", false)),
+    ] {
+        if !matches!(people.search(manager, &query).await, Err(Error::Invalid)) {
+            refusals.push(label);
+        }
+    }
+    proof.check(
+        "an unknown or archived field, a wrong operator, a bad number or date, a quoted key and an unknown sort are refused",
+        refusals.is_empty(),
+    );
+    if !refusals.is_empty() {
+        println!("     not refused: {refusals:?}");
+    }
+    let listed = registry
+        .call(
+            &**client,
+            manager,
+            "core.person.list",
+            &json!({"custom": [{"key": "tier", "op": "eq", "value": second.code}], "sort": "cf_credit_limit", "descending": true}),
+        )
+        .await?;
+    let listed = serde_json::to_value(&listed)?;
+    let listed_names: Vec<&str> = listed["result"]
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r["name"].as_str()).collect())
+        .unwrap_or_default();
+    proof.check(
+        "core.person.list takes the same conditions and custom sort",
+        listed_names == ["Siti Aminah", "Lim Ah Kow"],
+    );
+    if listed_names != ["Siti Aminah", "Lim Ah Kow"] {
+        println!("     {listed}");
+    }
+    let started = std::time::Instant::now();
+    let searches: Vec<_> = (0..40)
+        .map(|_| {
+            let (people, manager, query) = (
+                people.clone(),
+                manager.clone(),
+                find(
+                    vec![("credit_limit", "gte", "100"), ("tier", "eq", &second.code)],
+                    "cf_anniversary",
+                    true,
+                ),
+            );
+            tokio::spawn(async move {
+                tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+                    people.search(&manager, &query).await
+                })
+                .await
+            })
+        })
+        .collect();
+    let mut searched = 0;
+    for task in searches {
+        if matches!(task.await?, Ok(Ok(ref page)) if page.total == 2) {
+            searched += 1;
+        }
+    }
+    proof.check(
+        "40 concurrent filtered, custom-sorted searches all answer",
+        searched == 40,
+    );
+    println!("     40 searches in {} ms", started.elapsed().as_millis());
 
     println!("-- concurrency");
     // Each plan has its own session: plans sharing one wait on its row and
