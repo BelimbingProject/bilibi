@@ -436,6 +436,7 @@ inventory::submit! {
             ("base-privacy-005-erasure-authority", include_str!("../migrations/005-erasure-authority.sql")),
             ("base-privacy-006-erasure-approval", include_str!("../migrations/006-erasure-approval.sql")),
             ("base-privacy-007-request-failed", include_str!("../migrations/007-request-failed.sql")),
+            ("base-privacy-008-request-jobs", include_str!("../migrations/008-request-jobs.sql")),
         ],
         services: &[
             Service { id: SERVICE, factory: |services| Ok(Arc::new(build(services)?)) },

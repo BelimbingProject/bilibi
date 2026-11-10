@@ -1002,7 +1002,8 @@ impl Privacy {
                 })
             })
             .await?;
-            self.queue
+            let job = self
+                .queue
                 .enqueue_for(
                     tx,
                     scope,
@@ -1010,9 +1011,11 @@ impl Privacy {
                     json!({"request_id": id, "store": key}),
                 )
                 .await?;
+            track_store_job(tx, tenant, id, key, job.id()).await?;
         }
         if self.stores.is_empty() {
-            self.queue
+            let job = self
+                .queue
                 .enqueue_for(
                     tx,
                     scope,
@@ -1020,6 +1023,7 @@ impl Privacy {
                     json!({"request_id": id}),
                 )
                 .await?;
+            track_finish_job(tx, tenant, id, job.id()).await?;
         }
         Ok(())
     }
@@ -1084,7 +1088,8 @@ impl Privacy {
             .map(|row| row.get(0))
             .collect();
         for store in &open {
-            self.queue
+            let job = self
+                .queue
                 .enqueue_for(
                     tx,
                     scope,
@@ -1092,9 +1097,11 @@ impl Privacy {
                     json!({"request_id": id, "store": store}),
                 )
                 .await?;
+            track_store_job(tx, tenant, id, store, job.id()).await?;
         }
         if open.is_empty() {
-            self.queue
+            let job = self
+                .queue
                 .enqueue_for(
                     tx,
                     scope,
@@ -1102,6 +1109,7 @@ impl Privacy {
                     json!({"request_id": id}),
                 )
                 .await?;
+            track_finish_job(tx, tenant, id, job.id()).await?;
         }
         load(tx.sql(), tenant, id, false).await
     }
@@ -1109,13 +1117,15 @@ impl Privacy {
     /// a store or finish job of a running request ended without finishing,
     /// so the request moves to `failed` with the job's code, and the store
     /// (if any) shows it. Nothing happens once the request is no longer
-    /// running, is gone, or the store had already answered and finished.
+    /// running, is gone, the store had already answered and finished, or `job` is
+    /// not the job the store (or the finish step) currently waits on.
     pub(crate) async fn job_ended_in(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         id: i64,
         store: Option<&str>,
+        job: i64,
         failure: &str,
     ) -> Result<()> {
         if scope.principal() != Some(MONITOR) || !failure_code(failure) {
@@ -1130,15 +1140,28 @@ impl Privacy {
         if request.status != "running" {
             return Ok(());
         }
+        if store.is_none()
+            && tx
+                .sql()
+                .query_opt(
+                    "SELECT 1 FROM base_privacy_requests WHERE tenant_id=$1 AND id=$2 AND finish_job_id=$3",
+                    &[&tenant, &id, &job],
+                )
+                .await?
+                .is_none()
+        {
+            return Ok(());
+        }
         if let Some(store) = store {
-            // A store that answered and finished owes nothing: whatever
+            // A store that answered and finished owes nothing, and a job of
+            // an earlier run is not the one the store waits on: whatever
             // ended, the request waits on another job, not this one.
             let Some(row) = tx
                 .sql()
                 .query_opt(
                     "SELECT id FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND store=$3 \
-                     AND (state='pending' OR NOT finished) FOR UPDATE",
-                    &[&tenant, &id, &store],
+                     AND job_id=$4 AND (state='pending' OR NOT finished) FOR UPDATE",
+                    &[&tenant, &id, &store, &job],
                 )
                 .await?
             else {
@@ -1449,4 +1472,60 @@ pub(crate) async fn forget_person(
         }
     }
     Ok(changes)
+}
+
+/// Records the job a store row now waits on.
+pub(crate) async fn track_store_job(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    request: i64,
+    store: &str,
+    job: i64,
+) -> Result<()> {
+    let store = store.to_owned();
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            let row: i64 = sql
+                .query_one(
+                    "UPDATE base_privacy_request_stores SET job_id=$4 WHERE tenant_id=$1 AND request_id=$2 AND store=$3 RETURNING id",
+                    &[&tenant, &request, &store, &job],
+                )
+                .await?
+                .get(0);
+            let change = Change {
+                kind: STORE_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": request, "store": store, "job": job}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
+}
+
+/// Records the finish job a request now waits on.
+pub(crate) async fn track_finish_job(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    request: i64,
+    job: i64,
+) -> Result<()> {
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            sql.query_one(
+                "UPDATE base_privacy_requests SET finish_job_id=$3 WHERE tenant_id=$1 AND id=$2 RETURNING id",
+                &[&tenant, &request, &job],
+            )
+            .await?;
+            let change = Change {
+                kind: REQUEST_KIND.into(),
+                id: request,
+                old: json!({}),
+                new: json!({"finish_job": job}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
 }

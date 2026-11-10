@@ -529,10 +529,11 @@ async fn finish_when_done(
         .await?
         .get(0);
     if open == 0 {
-        privacy
+        let job = privacy
             .queue
             .enqueue_for(tx, scope, FINISH_WORKER, json!({"request_id": id}))
             .await?;
+        requests::track_finish_job(tx, scope.tenant(), id, job.id()).await?;
     }
     Ok(())
 }
@@ -568,7 +569,7 @@ impl Ending for JobEnded {
             let mut failure = format!("{state}_{}", job.failure_code.as_deref().unwrap_or("ended"));
             failure.truncate(64);
             self.privacy
-                .job_ended_in(tx, scope, id, store, &failure)
+                .job_ended_in(tx, scope, id, store, job.job_id, &failure)
                 .await
         })
     }
@@ -870,7 +871,7 @@ async fn restart_export(
     })
     .await?;
     for (key, _, _) in privacy.stores.iter() {
-        privacy
+        let job = privacy
             .queue
             .enqueue_for(
                 &mut tx,
@@ -879,6 +880,7 @@ async fn restart_export(
                 json!({"request_id": id, "store": key}),
             )
             .await?;
+        requests::track_store_job(&mut tx, tenant, id, key, job.id()).await?;
     }
     tx.commit().await
 }

@@ -358,6 +358,32 @@ async fn main() -> Result<()> {
         "approved by user {} with no worker running",
         admin.scope.user()
     );
+    let cy = new_person(&client, "Cy Stale", "cy-stale@example.test").await?;
+    let stale = received(
+        &privacy,
+        &mut client,
+        &second.scope,
+        RequestKind::Access,
+        cy,
+        "cy-stale@example.test",
+    )
+    .await?;
+    let stale = privacy
+        .approve(&mut client, &admin.scope, stale.id, stale.version)
+        .await?;
+    // Hold back the last store job's ending (disposable database only): it is
+    // told only after the request has failed and run again.
+    let held: i64 = client
+        .query_one(
+            &format!("UPDATE base_queue_jobs SET ending_after=clock_timestamp()+interval '1 hour' WHERE id=(SELECT max(id) FROM base_queue_jobs WHERE worker_id='base/privacy-request-store' AND args->>'request_id'='{}') RETURNING id", stale.id),
+            &[],
+        )
+        .await?
+        .get(0);
+    println!(
+        "request {} approved; the ending of job {held} is held back",
+        stale.id
+    );
     grants
         .set_direct(
             &second.scope,
@@ -447,6 +473,42 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("user {} deny removed", admin.scope.user());
+
+    println!("== C: an ending told late for a job of an earlier run");
+    summary(&privacy.request(&**client, &second.scope, stale.id).await?);
+    jobs(&client, stale.id).await?;
+    let current = privacy.request(&**client, &second.scope, stale.id).await?;
+    println!(
+        "user {} runs it again: {}",
+        second.scope.user(),
+        write(
+            &app,
+            &second,
+            "base.privacy.request.run_again",
+            json!({"id": stale.id, "version": current.version}),
+        )
+        .await
+    );
+    client
+        .execute(
+            "UPDATE base_queue_jobs SET ending_after=clock_timestamp() WHERE id=$1",
+            &[&held],
+        )
+        .await?;
+    println!("the held ending of job {held} is released; waiting 20 s");
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    jobs(&client, stale.id).await?;
+    let after = settle(&privacy, &client, &second.scope, stale.id, 60).await?;
+    summary(&after);
+    println!(
+        "the new run was {} by the old ending",
+        if after.status == "failed" {
+            "failed"
+        } else {
+            "not failed"
+        }
+    );
+    history(&client, stale.id).await?;
 
     println!("== B: an erasure's store fails until its job runs out of attempts");
     let bea = new_person(&client, "Bea Stuck", "bea-stuck@example.test").await?;
