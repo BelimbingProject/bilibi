@@ -4,19 +4,21 @@
 //! the record page: `core.document.delete` per document, and the download's
 //! own route for the bytes.
 use super::Index;
-use crate::web::{file_path, preview_path, previewable, render};
+use crate::web::{file_path, preview_path, render};
 use crate::{Document, Filter};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview, Html, Modal, ModalWidth,
-    StatusKind,
+    download::FileBody, Alert, Button, ButtonVariant, ConfirmDialog, Fact, Facts, FilePreview,
+    Html, Modal, ModalWidth, StatusKind,
 };
 use serde_json::{json, Value};
 
 /// The most documents one delete takes: each is its own reviewed write, so a
 /// bound keeps one click from holding the page for minutes.
 pub(super) const MAX_DELETE: usize = 100;
+/// The most rows `Documents::list` returns in one page.
+const LIST_PAGE: usize = 300;
 
 /// What the delete confirmation is about.
 pub(super) enum Deletion {
@@ -75,7 +77,10 @@ impl Index {
         };
         self.preview = match (document, latest) {
             (Some(document), Some(revision))
-                if revision.content_type.as_deref().is_some_and(previewable) =>
+                if revision
+                    .content_type
+                    .as_deref()
+                    .is_some_and(FileBody::previewable) =>
             {
                 Some(Previewing {
                     name: document.name,
@@ -136,14 +141,24 @@ impl Index {
         let ids: Vec<i64> = match what {
             Deletion::One(id) => vec![*id],
             Deletion::Selected if selection.all_matching => {
+                // Every match is read on one page (the list reads at most
+                // `LIST_PAGE` rows), then the unticked ones are left out, so
+                // rows unticked since "select all" count before the refusal.
                 let filter = Filter {
                     page: 1,
-                    page_size: MAX_DELETE as i64 + 1,
+                    page_size: (MAX_DELETE + selection.excluded.len() + 1).min(LIST_PAGE) as i64,
                     ..self.filter()
                 };
                 let page = self.pages.documents.list(scope, &filter).await?;
-                if page.total.max(0) as usize > MAX_DELETE {
-                    return Ok(Err(too_many(page.total.max(0) as u64)));
+                let total = page.total.max(0) as usize;
+                if total > LIST_PAGE {
+                    return Ok(Err(format!(
+                        "More than {LIST_PAGE} documents match, so the selection cannot be listed. Narrow the filters or tick fewer rows."
+                    )));
+                }
+                let ticked = total.saturating_sub(selection.excluded.len());
+                if ticked > MAX_DELETE {
+                    return Ok(Err(too_many(ticked as u64)));
                 }
                 page.entries
                     .iter()
@@ -197,9 +212,20 @@ impl Index {
                     ));
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
+                    return Err(error)
+                }
+                // A database error on one document is that document's result;
+                // the rest still go and the person sees what happened.
+                Err(_) => {
+                    outcome.refused.push((
+                        format!("Document {id}"),
+                        "It could not be read just now. Reload and try again.".into(),
+                    ));
+                    continue;
+                }
             };
-            match self
+            let result = self
                 .pages
                 .submit(
                     scope,
@@ -209,10 +235,18 @@ impl Index {
                     json!({"id": id, "version": document.version}),
                     "The document was not deleted. Try again.",
                 )
-                .await?
-            {
-                Ok(_) => outcome.removed += 1,
-                Err(refusal) => outcome.refused.push((document.name, refusal.text())),
+                .await;
+            match result {
+                Ok(Ok(_)) => outcome.removed += 1,
+                Ok(Err(refusal)) => outcome.refused.push((document.name, refusal.text())),
+                Err(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
+                    return Err(error)
+                }
+                Err(_) => outcome.refused.push((
+                    document.name,
+                    "A database error stopped this one; reload to see whether it was deleted."
+                        .into(),
+                )),
             }
         }
         self.selection.clear();

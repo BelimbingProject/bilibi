@@ -199,7 +199,7 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 **Show a file in place with `FilePreview { id, src, title }`** (an image, PDF or plain text in a same-origin frame), never a hand-written `<iframe>`, `<img>` or `<embed>` of your own.
 
-- `src` is a route the owner contributes under `DOWNLOADS` and answers with `FileBody::inline`, behind the same authorization and audit as its download. It chooses which media types it will show and refuses the rest; `FileBody`'s inline policy forbids scripts and framing by another origin. Never an SVG or HTML upload.
+- `src` is a route the owner contributes under `DOWNLOADS` and answers with `FileBody::preview(bytes, content_type, filename)`, behind the same authorization and audit as its download. `preview` returns `None` for anything but PNG, JPEG, GIF, WebP, PDF and plain text (`FileBody::PREVIEW_TYPES`, `FileBody::previewable` for deciding whether to offer one), and the route answers not found: the shared contract refuses an SVG or HTML upload, not each owner's own list. The inline policy forbids scripts and framing by another origin.
 - The frame adds no write path and no second way to the bytes. Put it in a `Modal` with a Download link beside it; Close and Escape are the modal's.
 - Give it a stable `id` (the live patcher keys an iframe by it). The component specimen's File preview card is the running example; Documents' list preview is its first owner.
 
