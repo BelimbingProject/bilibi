@@ -570,8 +570,10 @@ impl Documents {
     /// Removes the document with its revisions, links and marks in the
     /// caller's transaction, fenced on `version`. Its files remain attached
     /// and readable until `base/artifacts` deletes them as one protected
-    /// batch once it commits. A retained or held revision refuses the whole
-    /// batch, leaving every file and all metadata available for a retry.
+    /// batch once it commits. A retained or held revision refuses the delete
+    /// before anything is marked (`WriteError::Retained` or `LegalHold`, in
+    /// `preview_delete` too), so the document stays readable with its full
+    /// history; the later batch check is the same fence under its own locks.
     pub async fn delete(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -660,6 +662,18 @@ impl Documents {
         let scope = self.fresh(&**client, scope).await?;
         let ids: Vec<i64> = documents.iter().map(|d| d.id).collect();
         store::latest_revisions(&**client, &scope, &ids).await
+    }
+    /// Which of `ids` the reader holds `permission` (`"manage"` or
+    /// `"download"`) on, in one read, for the pages that draw a control per row.
+    pub(crate) async fn granted(
+        &self,
+        scope: &Scope,
+        ids: &[i64],
+        permission: &str,
+    ) -> Result<std::collections::HashSet<i64>> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        library::granted(&**client, &scope, ids, permission).await
     }
     /// The records the document relates to, oldest link first.
     pub async fn links(&self, scope: &Scope, id: i64) -> Result<Vec<Link>> {

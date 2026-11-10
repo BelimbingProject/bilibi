@@ -893,6 +893,8 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
  "inventory",
  "jiff",
  "serde_json",

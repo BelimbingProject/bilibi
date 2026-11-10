@@ -5,7 +5,6 @@
 //! page exercises both the macro and the Rust paths.
 use crate::inline_specimen::InlineSamples;
 use crate::section::sections;
-use crate::MailFrame;
 use crate::{
     choices, error_sentence, ActionLink, AddMore, BadgeKind, Button, ButtonVariant, Card, Choice,
     Chrome, ClientEntry, CodeInput, Combobox, DayKind, DayMonth, DayTile, ErrorSummary, Field,
@@ -13,6 +12,7 @@ use crate::{
     PageVariant, RadioGroup, Restricted, RestrictedField, SecretInput, StatItem, UploadSpec,
     Uploads,
 };
+use crate::{FilePreview, MailFrame};
 use askama::Template;
 
 /// Mostly sanitiser output, plus what the frame must refuse by itself.
@@ -76,6 +76,8 @@ pub struct ComponentsSpecimen {
     /// remote image and an inline style that the sanitiser would remove, to
     /// show that the frame refuses them on its own as well.
     mail_frame: Html,
+    /// A file preview in its frame (the sample is a served stylesheet).
+    file_preview: Html,
 }
 
 sections! {
@@ -666,6 +668,11 @@ impl ComponentsSpecimen {
                 "Received mail: Broken part, photo attached",
                 MAIL_SAMPLE,
             ))?,
+            file_preview: Html::render(&FilePreview {
+                id: "specimen-file-preview",
+                src: "/assets/mail-frame.css",
+                title: "Preview of mail-frame.css",
+            })?,
         })
     }
 

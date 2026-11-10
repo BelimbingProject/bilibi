@@ -121,6 +121,7 @@ bilibi_picklists::declare!(
             Start::new("other", "Other"),
         ]
     )
+    .default("other")
 );
 bilibi_picklists::declare!(
     "core/document",
@@ -152,6 +153,7 @@ bilibi_picklists::declare!(
             Start::new("other", "Other"),
         ]
     )
+    .default("other")
 );
 inventory::submit! { Contribution::new(SEEDS, "core/document.picklists", provenance!(), &Seed {
     version: "core-document-picklists-v1", mode: SeedMode::Production,
@@ -341,6 +343,10 @@ inventory::submit! { Contribution::new(DOWNLOADS, "core/document.file", provenan
     path: "/documents/{id}/revisions/{revision}/file", service: crate::web::FILES, operation: "file",
     access: Access::Capability(DOWNLOAD),
 }) }
+inventory::submit! { Contribution::new(DOWNLOADS, "core/document.preview", provenance!(), &Download {
+    path: "/documents/{id}/revisions/{revision}/preview", service: crate::web::FILES, operation: "preview",
+    access: Access::Capability(DOWNLOAD),
+}) }
 inventory::submit! { Contribution::new(DOWNLOADS, "core/document.export", provenance!(), &Download {
     path: "/documents/export.csv", service: crate::web::FILES, operation: "export",
     access: Access::Capability(VIEW),
@@ -374,5 +380,5 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("copy", "core.document.copy"),
         ("merge", "core.document.merge"),
     ],
-    pending: Pending::Events { events: &["upload", "copy_file"], reason: "Receiving a file, or copying a revision's file, stores it as a private artifact: Artifacts takes bytes outside a contract, whose input is bounded at 1 MiB. Agent-supplied files come later (issue 133)." },
+    pending: Pending::Events { events: &["upload", "copy_file", "quick_create"], reason: "Storing an uploaded or copied file (also Quick add, which then calls create) takes bytes outside a contract; Artifacts bounds contract input at 1 MiB. Agent-supplied files: issue 133." },
 }) }

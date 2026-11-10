@@ -44,6 +44,19 @@ pub fn path(id: i64) -> String {
 pub fn file_path(id: i64, revision: i32) -> String {
     format!("{INDEX}/{id}/revisions/{revision}/file")
 }
+/// Where a revision's file shows in place, behind the download's authority.
+pub fn preview_path(id: i64, revision: i32) -> String {
+    format!("{INDEX}/{id}/revisions/{revision}/preview")
+}
+/// The media types a preview shows in place: pictures the browser draws, PDF
+/// and plain text. Never markup or SVG, which can carry script, and never an
+/// Office file, which a browser cannot show.
+pub(crate) fn previewable(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf" | "text/plain"
+    )
+}
 
 pub struct Pages {
     pub documents: Arc<Documents>,
@@ -398,8 +411,10 @@ fn csv_row(cells: &[String]) -> String {
 }
 
 /// The downloads: a revision's file (`/documents/{id}/revisions/{revision}/file`)
-/// read through `base/artifacts` every time, and the list's metadata as CSV
-/// (`/documents/export.csv`), never a file's content.
+/// read through `base/artifacts` every time, the same file shown in place when
+/// its type is one a browser shows safely (`.../preview`, the same read and
+/// the same authority, not a second path to the bytes), and the list's
+/// metadata as CSV (`/documents/export.csv`), never a file's content.
 pub struct Files(pub Arc<Documents>);
 impl Files {
     async fn export(&self, scope: &Scope, query: &HashMap<String, String>) -> Result<FileBody> {
@@ -474,6 +489,17 @@ impl Download<Scope, Error> for Files {
             let id = number("id")?;
             let revision = i32::try_from(number("revision")?).map_err(|_| Error::NotFound)?;
             match self.0.read_file(request.scope, id, revision).await {
+                Ok(file) if request.operation == "preview" => {
+                    if previewable(&file.content_type) {
+                        Ok(FileBody::inline(
+                            file.bytes,
+                            &file.content_type,
+                            &file.file_name,
+                        ))
+                    } else {
+                        Err(Error::NotFound)
+                    }
+                }
                 Ok(file) => Ok(FileBody::attachment(
                     file.bytes,
                     &file.content_type,

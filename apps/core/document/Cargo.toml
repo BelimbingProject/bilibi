@@ -42,3 +42,7 @@ tokio.workspace = true
 tokio-postgres.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+bilibi-web = { path = "../../web" }

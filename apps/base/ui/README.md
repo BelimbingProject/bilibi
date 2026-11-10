@@ -195,6 +195,14 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 `RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md).
 
+## File preview
+
+**Show a file in place with `FilePreview { id, src, title }`** (an image, PDF or plain text in a same-origin frame), never a hand-written `<iframe>`, `<img>` or `<embed>` of your own.
+
+- `src` is a route the owner contributes under `DOWNLOADS` and answers with `FileBody::inline`, behind the same authorization and audit as its download. It chooses which media types it will show and refuses the rest; `FileBody`'s inline policy forbids scripts and framing by another origin. Never an SVG or HTML upload.
+- The frame adds no write path and no second way to the bytes. Put it in a `Modal` with a Download link beside it; Close and Escape are the modal's.
+- Give it a stable `id` (the live patcher keys an iframe by it). The component specimen's File preview card is the running example; Documents' list preview is its first owner.
+
 ## Received mail
 
 **Show received mail HTML with `MailFrame::new(id, title, html)`**, never `Html::raw`. `html` is `bilibi_mail::sanitise_html` output, with `cid:` images rewritten by `bilibi_mail::inline_images` (see [Mail](../mail/README.md#received-html)).
