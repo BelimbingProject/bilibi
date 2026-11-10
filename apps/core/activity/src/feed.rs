@@ -199,8 +199,7 @@ impl Activities {
                 "SELECT 1 FROM core_activity_feed_keys WHERE tenant_id=$1 AND user_id=$2",
                 &[&scope.tenant(), &target],
             )
-            .await
-            .map_err(Error::from)?;
+            .await?;
         found.map(|_| target).ok_or(WriteError::NotFound)
     }
 
