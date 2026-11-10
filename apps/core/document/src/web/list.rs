@@ -3,8 +3,7 @@
 //! document dialog, and Export CSV of the filtered metadata.
 use super::{
     dialog::{self, NewDocument, QuickDocument},
-    event, file_path, filter_of, path, previewable, related_of, render, Clock, Pages, Region,
-    INDEX,
+    event, file_path, filter_of, path, related_of, render, Clock, Pages, Region, INDEX,
 };
 use crate::{
     Document, Filter, Marks, Reference, Sort, Source, LIST_CATEGORY, LIST_STATUS, LIST_TYPE,
@@ -13,6 +12,7 @@ use bilibi_database::{Error, Result};
 use bilibi_records::Resolved;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
+    download::FileBody,
     list_state::{InvalidPageSize, FILTERS_FORM},
     lists::RecordLink,
     page::*,
@@ -486,7 +486,7 @@ impl Index {
                         && latest
                             .get(&d.id)
                             .and_then(|r| r.content_type.as_deref())
-                            .is_some_and(previewable),
+                            .is_some_and(FileBody::previewable),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
