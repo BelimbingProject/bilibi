@@ -38,8 +38,10 @@ pub struct PersonalData {
     /// declared by a [`RecordKind`]; holds name records by these kinds.
     pub kinds: &'static [&'static str],
     /// File subject kinds (a Media attachment subject, an Artifacts owner)
-    /// whose subject ID is the person ID. A grant reaches files only of these
-    /// kinds, and only the grant's own person's.
+    /// whose subject ID is the person ID: a grant reaches them only for its
+    /// own person's ID. Any other subject is reached only when its owner
+    /// vouches it is that person's (Media `SubjectOwner::person_subject`,
+    /// Artifacts `Owner::erasure_subject`).
     pub person_subjects: &'static [&'static str],
     pub handler: &'static dyn Handler,
 }
