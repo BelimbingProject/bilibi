@@ -587,9 +587,23 @@ impl PortalTwoFactor {
 }
 
 /// A return address a customer may be sent to: a portal page. Anything else
-/// would only meet the staff sign-in.
+/// would only meet the staff sign-in. A dot segment (`/portal/../settings`,
+/// also written `%2e`) and an encoded slash or backslash (`%2f`, `%5c`) are
+/// refused: the browser or a proxy may resolve them before the request, so
+/// the address would leave the portal.
 fn portal_path(path: &str) -> bool {
-    path == "/portal" || path.starts_with("/portal/")
+    let address = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (address == "/portal" || address.starts_with("/portal/"))
+        && !address.contains("%2f")
+        && !address.contains("%5c")
+        && !address.split('/').any(|segment| {
+            let segment = segment.replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
 }
 
 /// A customer's step-up prompt on the portal
