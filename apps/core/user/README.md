@@ -296,6 +296,7 @@ Pages (signed in only, live, `Cache-Control: no-store` like every page):
 
 - `/settings/two-factor?method=core.user.authenticator`: set up (password, QR code, setup key, first code), or move to a new phone (a code from the old phone, a new QR code, the new phone's first code). There is no turn-off: Bilibi asks everyone for 2FA. The description is two bullets; the second says to ask an admin to reset 2FA after a lost phone.
 - `/settings/two-factor/confirm?method=core.user.authenticator&return=<path>`: the authenticator step-up prompt. Success returns to `return`, which must be a local path (`safe_return`).
+- A customer has the same two pages on the portal, mounted by Core Portal: `/portal/account/two-factor` (`PortalTwoFactor`) and `/portal/account/two-factor/confirm` (`PortalConfirm`). The authenticator's `prompt` and `setup` answer these paths for a customer account (`PORTAL_CONFIRM_PATH`, `PORTAL_TWO_FACTOR_PATH`), so Base Step-up sends a customer who owes a check to the portal, never to a staff page. Both keep `return` only when it is a portal address.
 
 Authenticator entry uses the shared six-digit `CodeInput`: one native field, numeric keypad, OTP autocomplete and whole-code paste. This method’s entries take an authenticator code. With multiple registered methods, the settings and confirm routes first show a neutral choice; each method supplies its own setup and prompt destinations.
 

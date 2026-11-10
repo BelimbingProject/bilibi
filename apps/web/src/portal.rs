@@ -48,19 +48,28 @@ pub fn token(headers: &HeaderMap) -> Result<String> {
         .ok_or(Error::Unauthorized)
 }
 
+/// What the portal concluded about a request, as `routes::Admission` does
+/// for staff.
+enum Admission {
+    /// Through, with the customer's proof.
+    Admitted(PortalScope),
+    /// The route asks a step-up this session has not confirmed within the
+    /// window: a page GET goes to the portal's prompt first.
+    StepUp(PortalScope),
+}
+
 /// The portal session, then the route's portal capability, then its
 /// step-up, as `routes::admit` does for staff. A staff session, a missing
 /// one and a customer of a closed account are all `Unauthorized`; a
 /// non-portal access (a staff embed named from a portal page) is refused.
-/// The portal has no step-up prompt of its own yet, so a step-up still owed
-/// is refused. `target` names the HTTP navigation being admitted, whose
-/// check extends the window; the live socket's recheck only reads it.
+/// `target` names the HTTP navigation being admitted, whose check extends
+/// the window; the live socket's recheck only reads it.
 async fn admit(
     app: &App,
     access: Access,
     credential: Option<&str>,
     target: Option<&str>,
-) -> Result<PortalScope> {
+) -> Result<Admission> {
     let Access::Portal(key) = access.base() else {
         return Err(Error::Forbidden);
     };
@@ -86,15 +95,31 @@ async fn admit(
             None => app.step_up.holds(portal.scope(), operation).await?,
         };
         if !holds {
-            return Err(Error::Forbidden);
+            return Ok(Admission::StepUp(portal));
         }
     }
-    Ok(portal)
+    Ok(Admission::Admitted(portal))
+}
+
+/// Sends a customer who owes a step-up to the portal's prompt (or to the
+/// authenticator's setup), carrying the address asked for so the browser
+/// comes back there. Core User answers a customer's proof with its portal
+/// pages; a method with none leaves the customer refused.
+async fn step_up_redirect(app: &App, portal: &PortalScope, uri: &Uri) -> Result<Response> {
+    let back = uri
+        .path_and_query()
+        .map_or(uri.path(), |address| address.as_str());
+    let destination = app.step_up.prompt(portal.scope(), back).await?;
+    if !destination.starts_with("/portal/") {
+        return Err(Error::Forbidden);
+    }
+    Ok(Redirect::to(&destination).into_response())
 }
 
 /// The portal's live side (ADR 16): `/portal/live` with the customer's
 /// session, portal routes and panels only, and the portal layout around each
-/// reply. No shell panels and no step-up prompt.
+/// reply. No shell panels; a step-up a page's facade asks for is confirmed on
+/// the portal's own prompt.
 pub struct Portal;
 impl live::Side for Portal {
     type Context = PortalScope;
@@ -108,9 +133,10 @@ impl live::Side for Portal {
         })
     }
     async fn admit(app: &App, access: Access, token: &str) -> Result<live::Gate<PortalScope>> {
-        Ok(live::Gate::Open(Some(
-            admit(app, access, Some(token), None).await?,
-        )))
+        Ok(match admit(app, access, Some(token), None).await? {
+            Admission::Admitted(portal) => live::Gate::Open(Some(portal)),
+            Admission::StepUp(_) => live::Gate::StepUp,
+        })
     }
     async fn activity(app: &App, token: &str) -> Result<PortalScope> {
         let client = app.db.get().await.map_err(Error::from)?;
@@ -134,8 +160,12 @@ impl live::Side for Portal {
         let (site, logo) = site_brand(app, context).await?;
         layout(app, context, &site, logo.as_deref(), path, true, html).await
     }
-    async fn prompt(_app: &App, _context: &PortalScope, _back: &str) -> Option<String> {
-        None
+    async fn prompt(app: &App, context: &PortalScope, back: &str) -> Option<String> {
+        app.step_up
+            .prompt(context.scope(), back)
+            .await
+            .ok()
+            .filter(|destination| destination.starts_with("/portal/"))
     }
 }
 
@@ -197,7 +227,11 @@ pub async fn dispatch(
     .await
     {
         Err(Error::Unauthorized) if get => return Ok(sign_in()),
-        Ok(portal) => portal,
+        Ok(Admission::Admitted(portal)) => portal,
+        Ok(Admission::StepUp(portal)) if get => {
+            return Ok(step_up_redirect(&app, &portal, &uri).await?)
+        }
+        Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Err(error) => return Err(error.into()),
     };
     if !get
@@ -213,7 +247,7 @@ pub async fn dispatch(
     ) {
         return Err(Error::Forbidden.into());
     }
-    let page = bound
+    let rendered = bound
         .page
         .0
         .render(PageRequest {
@@ -224,7 +258,14 @@ pub async fn dispatch(
             body: &body,
             framed: false,
         })
-        .await?;
+        .await;
+    let page = match rendered {
+        // The page's own facade asked for step-up while rendering.
+        Err(Error::StepUpRequired { .. }) if get => {
+            return Ok(step_up_redirect(&app, &portal, &uri).await?);
+        }
+        page => page?,
+    };
     if let Some(destination) = bound.page.0.redirect(bound.route.operation) {
         return Ok(Redirect::to(destination).into_response());
     }
@@ -409,7 +450,10 @@ pub async fn download(
     .await
     {
         Err(Error::Unauthorized) => return Ok(sign_in()),
-        Ok(portal) => portal,
+        Ok(Admission::Admitted(portal)) => portal,
+        // A file has no page to come back to: the customer confirms on the
+        // page that links to it.
+        Ok(Admission::StepUp(_)) => return Err(Error::Forbidden.into()),
         Err(error) => return Err(error.into()),
     };
     let credential = credential.ok_or(Error::Forbidden)?;

@@ -1,7 +1,8 @@
 //! The portal's own pages (ADR 16), served to a signed-in customer with its
-//! `PortalScope`: the home (`/portal`) and the customer's account
-//! (`/portal/account`). Both ask for `PORTAL_ACCOUNT` again and read only what
-//! the scope names. The pages are built from
+//! `PortalScope`: the home (`/portal`), the customer's account
+//! (`/portal/account`), and Core User's authenticator page and step-up
+//! prompt drawn for a customer. All ask for `PORTAL_ACCOUNT` again and read
+//! only what the scope names. The pages are built from
 //! the shared header, card and facts models.
 use crate::{facade::PortalService, ACCOUNT_PATH, PORTAL_ACCOUNT, TWO_FACTOR_PATH};
 use bilibi_database::{Db, Error, Result};
@@ -25,6 +26,25 @@ fn render(template: &impl askama::Template) -> Result<Html> {
 }
 
 impl Pages {
+    /// Core User's live page for a customer: the authenticator's setup, or
+    /// the step-up prompt a protected portal page sent the customer to. Both
+    /// take the address to return to from the query.
+    async fn two_factor(
+        &self,
+        request: &PageRequest<'_, PortalScope>,
+        portal: &PortalScope,
+    ) -> Result<Option<Box<dyn LiveState<PortalScope, Error>>>> {
+        Ok(match request.operation {
+            "two_factor" => Some(Box::new(
+                bilibi_user::PortalTwoFactor::new(self.users.clone(), portal, request.query)
+                    .await?,
+            )),
+            "confirm" => Some(Box::new(
+                bilibi_user::PortalConfirm::new(self.users.clone(), portal, request.query).await?,
+            )),
+            _ => None,
+        })
+    }
     async fn authorize(&self, portal: &PortalScope) -> Result<()> {
         let client = self.db.get().await?;
         bilibi_authz::authorize_portal(&**client, portal, PORTAL_ACCOUNT).await
@@ -140,6 +160,7 @@ impl Page<PortalScope, Error> for Pages {
             "home" => Some("Home"),
             "account" => Some("My account"),
             "two_factor" => Some("Authenticator app"),
+            "confirm" => Some("Confirm it is you"),
             _ => None,
         }
     }
@@ -147,9 +168,7 @@ impl Page<PortalScope, Error> for Pages {
         Box::pin(async move {
             let portal = request.scope.ok_or(Error::Unauthorized)?;
             self.authorize(portal).await?;
-            if request.operation == "two_factor" {
-                let mut state =
-                    bilibi_user::PortalTwoFactor::new(self.users.clone(), portal).await?;
+            if let Some(mut state) = self.two_factor(&request, portal).await? {
                 let body = state
                     .update(LiveRequest {
                         scope: portal,
@@ -186,14 +205,12 @@ impl Page<PortalScope, Error> for Pages {
         request: PageRequest<'a, PortalScope>,
     ) -> MountFuture<'a, PortalScope, Error> {
         Box::pin(async move {
-            if request.operation != "two_factor" {
+            if !matches!(request.operation, "two_factor" | "confirm") {
                 return Ok(None);
             }
             let portal = request.scope.ok_or(Error::Unauthorized)?;
             self.authorize(portal).await?;
-            let state: Box<dyn LiveState<PortalScope, Error>> =
-                Box::new(bilibi_user::PortalTwoFactor::new(self.users.clone(), portal).await?);
-            Ok(Some(state))
+            self.two_factor(&request, portal).await
         })
     }
 }

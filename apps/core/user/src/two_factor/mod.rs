@@ -36,6 +36,12 @@ use tokio_postgres::GenericClient;
 pub const SETTINGS_PATH: &str = "/settings/two-factor";
 /// The step-up prompt a browser is sent to (Base Step-up's web proof).
 pub const CONFIRM_PATH: &str = "/settings/two-factor/confirm";
+/// A customer's authenticator page on the portal. Core Portal mounts it; the
+/// path is named here because the provider sends a customer who owes a
+/// step-up and has no authenticator to it.
+pub const PORTAL_SETTINGS_PATH: &str = "/portal/account/two-factor";
+/// A customer's step-up prompt on the portal, mounted by Core Portal.
+pub const PORTAL_CONFIRM_PATH: &str = "/portal/account/two-factor/confirm";
 /// An admin resets another person's 2FA. Declared `.always()`: their own
 /// current authenticator code, every time.
 pub(crate) const RESET_KEY: &str = "core.user.two_factor.reset";
@@ -145,11 +151,12 @@ pub fn safe_return(path: &str) -> Option<String> {
         && path.len() <= MAX_RETURN
         && !path.contains('\\')
         && !path.chars().any(char::is_control)
-        && !path.starts_with(SETTINGS_PATH))
+        && !path.starts_with(SETTINGS_PATH)
+        && !path.starts_with(PORTAL_SETTINGS_PATH))
     .then(|| path.to_owned())
 }
 
-fn with_return(base: &str, return_to: Option<&str>) -> String {
+pub(crate) fn with_return(base: &str, return_to: Option<&str>) -> String {
     match return_to.and_then(safe_return) {
         Some(path) => format!(
             "{base}?return={}",

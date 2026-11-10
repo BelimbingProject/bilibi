@@ -3,7 +3,9 @@
 //! `/settings/two-factor/confirm` (the step-up prompt). Both are live: the
 //! setup key and QR code exist only in the socket's state after the request
 //! that produced them and are dropped with it, so a reload never shows them
-//! again. Typed values are never echoed back.
+//! again. Typed values are never echoed back. A customer has the same two
+//! pages on the portal ([`PortalTwoFactor`], [`PortalConfirm`]), drawn
+//! without the settings shell; Core Portal mounts them.
 use crate::{
     two_factor::{Enrollment, TwoFactorError, TwoFactorStatus},
     UserService,
@@ -406,6 +408,9 @@ pub struct ConfirmPage {
     return_to: Option<String>,
     errors: Vec<String>,
     notice: String,
+    /// Drawn for a customer on the portal: plain words, the portal's setup
+    /// page, and back to the portal.
+    portal: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -426,6 +431,7 @@ struct ConfirmView<'a> {
     minutes: i64,
     hours: i64,
     step_up: Html,
+    portal: bool,
 }
 
 impl ConfirmPage {
@@ -448,10 +454,27 @@ impl ConfirmPage {
             } else {
                 String::new()
             },
+            portal: false,
         })
     }
 
-    fn render(&self) -> Result<String, Error> {
+    /// The prompt's own part of the form. A customer with no authenticator
+    /// yet gets the portal's setup page, which comes back to the same
+    /// address; the shared component's link is the staff settings page.
+    fn step(&self) -> Result<Html, Error> {
+        if self.portal && !self.enabled {
+            return fragment(Html::render(&bilibi_ui::ActionLink {
+                id: "confirm-access-setup",
+                icon: "shield-check",
+                title: "Set up your authenticator app",
+                href: &crate::two_factor::with_return(
+                    crate::two_factor::PORTAL_SETTINGS_PATH,
+                    self.return_to.as_deref(),
+                ),
+                body: Html::text("Set up your authenticator app"),
+                ..bilibi_ui::ActionLink::default()
+            }));
+        }
         let mut step =
             bilibi_ui::StepUp::new(self.enabled, self.return_to.as_deref().unwrap_or_default());
         step.code = code_field("two_factor_code", &self.errors)?;
@@ -463,13 +486,22 @@ impl ConfirmPage {
             body: Html::text("Verify"),
             ..Button::default()
         }))?;
+        fragment(Html::render(&step))
+    }
+
+    fn render(&self) -> Result<String, Error> {
         ConfirmView {
             header: fragment(Html::render(&Header {
-                title: Html::text("Confirm access"),
-                subtitle: if self.enabled {
-                    "Enter your 2FA code to continue."
+                title: Html::text(if self.portal {
+                    "Confirm it is you"
                 } else {
-                    ""
+                    "Confirm access"
+                }),
+                subtitle: match (self.enabled, self.portal) {
+                    (true, true) => "Enter the code from your authenticator app to continue.",
+                    (true, false) => "Enter your 2FA code to continue.",
+                    (false, true) => "This page needs a code from an authenticator app, and you have not set one up yet.",
+                    (false, false) => "",
                 },
                 title_actions: Html::EMPTY,
                 actions: Html::EMPTY,
@@ -478,7 +510,8 @@ impl ConfirmPage {
             enabled: self.enabled,
             minutes: self.minutes,
             hours: self.hours,
-            step_up: fragment(Html::render(&step))?,
+            step_up: self.step()?,
+            portal: self.portal,
         }
         .render()
         .map_err(|_| Error::Internal)
@@ -505,11 +538,9 @@ impl LiveState<Scope, Error> for ConfirmPage {
                                         return Ok(LiveBody {
                                             html: self.render()?,
                                             rows: 1,
-                                            redirect: Some(
-                                                self.return_to
-                                                    .clone()
-                                                    .unwrap_or_else(|| "/".into()),
-                                            ),
+                                            redirect: Some(self.return_to.clone().unwrap_or_else(
+                                                || if self.portal { "/portal" } else { "/" }.into(),
+                                            )),
                                             flash: Some((
                                                 StatusKind::Success,
                                                 "Access confirmed.".into(),
@@ -541,13 +572,58 @@ impl LiveState<Scope, Error> for ConfirmPage {
 /// for a second sign-in step admit the customer.
 pub struct PortalTwoFactor(TwoFactorPage);
 impl PortalTwoFactor {
+    /// `query` carries the portal address a step-up sent the customer from
+    /// (`return`); a finished setup goes back there.
     pub async fn new(
         users: Arc<UserService>,
         portal: &bilibi_tenancy::PortalScope,
+        query: &HashMap<String, String>,
     ) -> Result<Self, Error> {
-        let mut page = TwoFactorPage::new(users, portal.scope(), &HashMap::new()).await?;
+        let mut page = TwoFactorPage::new(users, portal.scope(), query).await?;
+        page.return_to = page.return_to.filter(|path| portal_path(path));
         page.portal = true;
         Ok(Self(page))
+    }
+}
+
+/// A return address a customer may be sent to: a portal page. Anything else
+/// would only meet the staff sign-in.
+fn portal_path(path: &str) -> bool {
+    path == "/portal" || path.starts_with("/portal/")
+}
+
+/// A customer's step-up prompt on the portal
+/// (`/portal/account/two-factor/confirm`): the staff prompt over the
+/// customer's own sealed scope, in the portal's words. A current code opens
+/// the portal session's window and returns to `return`, a portal address.
+pub struct PortalConfirm(ConfirmPage);
+impl PortalConfirm {
+    pub async fn new(
+        users: Arc<UserService>,
+        portal: &bilibi_tenancy::PortalScope,
+        query: &HashMap<String, String>,
+    ) -> Result<Self, Error> {
+        let mut page = ConfirmPage::new(users, portal.scope(), query).await?;
+        page.return_to = page.return_to.filter(|path| portal_path(path));
+        page.portal = true;
+        Ok(Self(page))
+    }
+}
+impl LiveState<bilibi_tenancy::PortalScope, Error> for PortalConfirm {
+    fn update<'a>(
+        &'a mut self,
+        request: LiveRequest<'a, bilibi_tenancy::PortalScope>,
+    ) -> LiveFuture<'a, Error> {
+        let LiveRequest {
+            scope,
+            credential,
+            input,
+        } = request;
+        self.0.update(LiveRequest {
+            scope: scope.scope(),
+            credential,
+            input,
+        })
     }
 }
 impl LiveState<bilibi_tenancy::PortalScope, Error> for PortalTwoFactor {
