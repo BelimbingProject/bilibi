@@ -10,7 +10,9 @@ mod feed;
 mod guest_person;
 mod guest_reminders;
 mod ics;
+mod imminent;
 mod invitations;
+mod lists;
 mod model;
 mod reminder_defaults;
 mod reminders;
@@ -28,8 +30,12 @@ use std::sync::{Arc, OnceLock};
 
 pub use bilibi_records::Reference;
 pub use contributions::{MANAGE, MANAGE_ALL, VIEW, VIEW_ALL};
-pub use feed::{FeedKey, FEED_PATH, FEED_RECORD, STEP_UP_FEED_KEY};
+pub use feed::{
+    FeedKey, FeedKeyPage, FeedKeyQuery, FeedKeySort, FEED_PATH, FEED_RECORD, STEP_UP_FEED_KEY,
+};
+pub use imminent::IMMINENT_HOURS;
 pub use invitations::{GateFuture, InvitationGate, Invitee, INVITATION_GATES};
+pub use lists::DayCount;
 pub use model::{
     CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
     NoteInput, Patch, Priority, Response, Status, TaskInput, MAX_GUESTS, MAX_REMINDERS,
@@ -51,6 +57,9 @@ pub const SERIES_RECORD: &str = "core.activity.series";
 /// Activities one calendar read returns at most: the calendar draws 500 and
 /// says so past that.
 pub const CALENDAR_LIMIT: i64 = 501;
+/// How long a task is drawn from the time it is due, on the calendar and in
+/// the feed.
+pub(crate) const TASK_MINUTES: i64 = 30;
 /// The event a shared activity that has happened records (README, Events).
 pub const HAPPENED: &str = "core/activity.happened";
 /// Revoke anyone's calendar feed key and see who has one (an administrator;
@@ -182,6 +191,8 @@ pub enum Mine {
 pub enum Sort {
     #[default]
     When,
+    /// Nearest to this instant first, before or after it (the calendar feed).
+    Nearest(jiff::Timestamp),
     Title,
     Status,
     Created,
@@ -378,55 +389,6 @@ impl Activities {
         let scope = self.fresh(&**client, scope).await?;
         let activity = store::get(&**client, &scope, id).await?;
         store::follow_up(&**client, &scope, &activity).await
-    }
-    /// A page of the activities the reader may see. With `related`, shared
-    /// activities on that record count when the reader may view it.
-    pub async fn list(&self, scope: &Scope, filter: &Filter) -> Result<Page> {
-        let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        let mut filter = filter.clone();
-        let mut readable = false;
-        if let Some(related) = &filter.related {
-            if let Ok(reference) = self
-                .records
-                .check(&**client, &scope, &related.kind, &related.id)
-                .await?
-            {
-                filter.related = Some(reference);
-                readable = true;
-            }
-        }
-        store::list(&**client, &scope, &filter, readable).await
-    }
-    /// The activities on one record the reader may see: related to it, and
-    /// for a person also those they are a guest of. The record itself must
-    /// be one the reader may view (`base/records.check`).
-    pub async fn for_record(
-        &self,
-        scope: &Scope,
-        record: &Reference,
-        state: State,
-        page_size: i64,
-    ) -> Result<Page> {
-        let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        let record = match self
-            .records
-            .check(&**client, &scope, &record.kind, &record.id)
-            .await?
-        {
-            Ok(record) => record,
-            Err(bilibi_records::Refusal::Forbidden) => return Err(Error::Forbidden),
-            Err(_) => return Err(Error::NotFound),
-        };
-        let filter = Filter {
-            state,
-            related: Some(record),
-            descending: state == State::Closed,
-            page_size,
-            ..Filter::default()
-        };
-        store::list(&**client, &scope, &filter, true).await
     }
     /// Whether the reader may create activities.
     pub async fn may_create(&self, scope: &Scope) -> Result<bool> {

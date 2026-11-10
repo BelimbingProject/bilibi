@@ -3,7 +3,6 @@
 //! call `core.activity.delete_series` (or, for one occurrence, the plain
 //! `core.activity.delete`) with the same refusals.
 use super::{record::dialog_errors, render};
-use crate::Activity;
 use bilibi_database::Result;
 use bilibi_ui::{choices, Button, ButtonVariant, Field, Form, Html, InputKind, Modal, ModalWidth};
 
@@ -15,9 +14,31 @@ pub(crate) fn deleted(count: usize) -> String {
     }
 }
 
+/// The occurrence a Delete series dialog is open for, as it was when the
+/// dialog opened: the delete names that `version`, so the contract refuses
+/// it when someone changed the occurrence while the dialog was up.
+pub(crate) struct Open {
+    pub id: i64,
+    pub title: String,
+    pub version: i64,
+    /// The last refusal.
+    pub errors: Vec<String>,
+}
+
+/// A refusal as the dialog says it: a stale version means the occurrence
+/// changed while the dialog was open, and opening it again reads the new one.
+pub(crate) fn refused(message: String) -> String {
+    if message == super::STALE {
+        "The activity changed while this dialog was open. Close it and open it again to delete."
+            .into()
+    } else {
+        message
+    }
+}
+
 /// Delete on an occurrence of a series: which ones. `offer_one` adds "Only
 /// this occurrence" (the record page; a list row has its own Delete).
-pub(crate) fn dialog(a: &Activity, errors: &[String], offer_one: bool) -> Result<Html> {
+pub(crate) fn dialog(title: &str, errors: &[String], offer_one: bool) -> Result<Html> {
     let mut body = dialog_errors("activity-delete-errors", errors)?;
     let mut options = Vec::new();
     if offer_one {
@@ -58,7 +79,7 @@ pub(crate) fn dialog(a: &Activity, errors: &[String], offer_one: bool) -> Result
     })?;
     render(Modal {
         id: "activity-delete-dialog",
-        title: &format!("Delete “{}”", a.title),
+        title: &format!("Delete “{title}”"),
         cancel_event: "cancel_delete_series",
         width: ModalWidth::Narrow,
         description: "This is one occurrence of a repeating series. Deleted occurrences disappear from every list and record page.",

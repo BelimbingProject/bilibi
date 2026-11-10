@@ -136,6 +136,12 @@ impl Dialog {
         }
         self
     }
+    /// Starts the dialog assigned to another account (a slot chosen on
+    /// their lane of the shared calendar); `None` leaves it the reader's.
+    pub fn assigned(mut self, assignee: Option<(i64, String)>) -> Self {
+        self.assignee = assignee;
+        self
+    }
     /// What the page says after a save.
     pub fn created_message(&self) -> String {
         let noun = self.kind.label();

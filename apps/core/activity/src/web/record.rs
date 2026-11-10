@@ -149,7 +149,9 @@ pub(crate) struct Detail {
     person_dialog: Option<PersonDialog>,
     /// The Delete dialog of an occurrence (which ones to delete), when
     /// open, with what the last attempt refused.
-    delete_dialog: Option<Vec<String>>,
+    /// The Delete dialog of an occurrence of a series: the version the
+    /// occurrence had when it opened, and the last refusal.
+    delete_dialog: Option<(i64, Vec<String>)>,
     flash: Option<(StatusKind, String)>,
 }
 
@@ -243,12 +245,12 @@ impl Detail {
         credential: &str,
         value: &Value,
     ) -> Result<Option<LiveBody>> {
-        if self.delete_dialog.is_none() {
+        // The version the dialog opened with: an edit made since is refused.
+        let Some((version, _)) = self.delete_dialog else {
             return Ok(None);
-        }
+        };
         let form = params::form_values_checked(value, "delete", params::FIELD_LIMIT)
             .map_err(Error::refused)?;
-        let a = self.pages.activities.get(scope, self.id).await?;
         let apply = form.get("apply").map_or("one", String::as_str);
         let outcome = match apply {
             "following" | "all" => self
@@ -257,7 +259,7 @@ impl Detail {
                     credential,
                     "delete_series",
                     "core.activity.delete_series",
-                    json!({"id": self.id, "version": a.version, "apply": apply}),
+                    json!({"id": self.id, "version": version, "apply": apply}),
                 )
                 .await?
                 .map(|result| result["result"]["deleted"].as_array().map_or(0, Vec::len)),
@@ -267,7 +269,7 @@ impl Detail {
                     credential,
                     "delete_series",
                     "core.activity.delete",
-                    json!({"id": self.id, "version": a.version}),
+                    json!({"id": self.id, "version": version}),
                 )
                 .await?
                 .map(|_| 1),
@@ -279,7 +281,8 @@ impl Detail {
                 ..LiveBody::default()
             })),
             Err(refusal) => {
-                self.delete_dialog = Some(vec![Self::refused(refusal)]);
+                let message = series_delete::refused(Self::refused(refusal));
+                self.delete_dialog = Some((version, vec![message]));
                 Ok(None)
             }
         }
@@ -700,7 +703,7 @@ impl Detail {
             "request_delete" => {
                 let a = self.pages.activities.get(scope, self.id).await?;
                 if a.series_id.is_some() {
-                    self.delete_dialog = Some(Vec::new());
+                    self.delete_dialog = Some((a.version, Vec::new()));
                 } else {
                     self.confirm = Some(Confirm::Delete);
                 }
@@ -884,6 +887,7 @@ impl Detail {
             .names(scope, &[a.assignee_user_id, a.created_by])
             .await?;
         let name = |id: i64| names.get(&id).cloned().unwrap_or_default();
+        let soon = self.pages.activities.imminent_window(scope).await?;
         let mut items: Vec<(&str, String, Html)> = Vec::new();
         items.push((
             "Subject",
@@ -920,7 +924,7 @@ impl Detail {
                 "status".into(),
                 render(InlineChoice {
                     field,
-                    display: status_badge(a)?,
+                    display: status_badge(a, soon)?,
                     editor,
                 })?,
             ));
@@ -1754,8 +1758,8 @@ impl Detail {
         if let (Some(form), true) = (&self.series_form, editable) {
             body.push(&series_dialog(&a, form)?);
         }
-        if let (Some(errors), true) = (&self.delete_dialog, editable) {
-            body.push(&series_delete::dialog(&a, errors, true)?);
+        if let (Some((_, errors)), true) = (&self.delete_dialog, editable) {
+            body.push(&series_delete::dialog(&a.title, errors, true)?);
         }
         if let (Some(dialog), true) = (&self.person_dialog, editable) {
             body.push(&guest_person::dialog(dialog)?);

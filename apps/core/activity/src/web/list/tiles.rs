@@ -25,6 +25,15 @@ const BOARD_CLOSED: i64 = 100;
 /// lasts an hour.
 const SLOT_HOUR: i64 = 9;
 
+/// A free calendar slot waiting for its kind: its start and end, and whose
+/// lane of the shared view it was chosen on (their account and name), when
+/// that is not the reader's own.
+pub(super) struct Slot {
+    pub start: jiff::Timestamp,
+    pub end: jiff::Timestamp,
+    pub assignee: Option<(i64, String)>,
+}
+
 /// The tiles' columns: a task's statuses, each with how many of `tasks` hold it.
 pub(super) fn board_columns(tasks: &[Activity]) -> Vec<BoardColumn> {
     Kind::Task
@@ -55,6 +64,26 @@ pub(super) fn slot_times(slot: &CalendarSlot, clock: &Clock) -> (jiff::Timestamp
 }
 
 impl Index {
+    /// Whose lane a slot was chosen on, when it is another person's: the New
+    /// dialog then starts assigned to them. The create contract still checks
+    /// the account, as for any assignee the reader picks.
+    pub(super) async fn slot_assignee(
+        &self,
+        scope: &Scope,
+        slot: &CalendarSlot,
+    ) -> Result<Option<(i64, String)>> {
+        let Some(user) = slot
+            .lane
+            .as_deref()
+            .and_then(|lane| lane.parse::<i64>().ok())
+            .filter(|user| *user > 0 && *user != scope.user())
+        else {
+            return Ok(None);
+        };
+        let name = self.pages.names(scope, &[user]).await?.remove(&user);
+        Ok(name.map(|name| (user, name)))
+    }
+
     /// A tile dropped on another column, or the Move dialog: the task's
     /// status through the change contract, with the version the tile was
     /// drawn with. `Err` is the sentence the page shows.
@@ -156,6 +185,7 @@ impl Index {
             .map(|status| status.code())
             .collect();
         let now = jiff::Timestamp::now();
+        let soon = self.pages.activities.imminent_window(scope).await?;
         let mut drawn = Board::new("activities-board", "/activities", state.clone(), columns);
         drawn.query = self.address();
         drawn.query.insert("display".into(), "board".into());
@@ -163,7 +193,7 @@ impl Index {
             let Some(status) = a.status else { continue };
             let mut card = BoardCard::new(a.id.to_string(), status.code(), a.title.clone())
                 .href(format!("/activities/{}", a.id))
-                .urgency(urgency(a, now));
+                .urgency(urgency(a, now, soon));
             if let Some(due) = a.due_at {
                 card = card.fact(format!("Due {}", clock.text(due)));
             }
@@ -203,12 +233,12 @@ impl Index {
     }
 
     /// The Add dialog a free calendar slot opens: which kind to add there.
-    pub(super) fn slot_dialog(
-        &self,
-        clock: &Clock,
-        start: jiff::Timestamp,
-        end: jiff::Timestamp,
-    ) -> Result<Html> {
+    pub(super) fn slot_dialog(&self, clock: &Clock, slot: &Slot) -> Result<Html> {
+        let when = format!("{} to {}", clock.text(slot.start), clock.text(slot.end));
+        let description = match &slot.assignee {
+            Some((_, name)) => format!("{when}, assigned to {name}."),
+            None => format!("{when}."),
+        };
         let body = render(
             Field::in_form("slot", "kind")
                 .id("activities-slot-kind")
@@ -248,7 +278,7 @@ impl Index {
             title: "Add at this time",
             cancel_event: "cancel_slot",
             width: ModalWidth::Compact,
-            description: &format!("{} to {}.", clock.text(start), clock.text(end)),
+            description: &description,
             body: form,
             ..Modal::default()
         })

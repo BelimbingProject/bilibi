@@ -2,11 +2,9 @@
 //! meeting and dated task, with only what a calendar app needs (subject,
 //! time, location and join link). The internal notes, the description, the
 //! guests and the related record never leave Bilibi through a feed.
-use crate::{Activity, Kind};
+use crate::{Activity, Kind, TASK_MINUTES};
 use jiff::{tz::TimeZone, SignedDuration, Timestamp};
 
-/// How long a task is drawn from its due time, as on the Calendar tab.
-const TASK_MINUTES: i64 = 30;
 /// Longest content line, in octets, before it is folded (RFC 5545 3.1).
 const FOLD: usize = 75;
 
@@ -48,8 +46,10 @@ fn line(out: &mut String, content: &str) {
 }
 
 /// The feed for `activities`, as the reader's own view of them. A note, or a
-/// task with no due time, has no time to show and is left out.
-pub(crate) fn render(activities: &[Activity]) -> String {
+/// task with no due time, has no time to show and is left out. `left_out` is
+/// how many more the range holds than the feed carries; the calendar's
+/// description says so, since a calendar app shows nothing else of a feed.
+pub(crate) fn render(activities: &[Activity], left_out: usize) -> String {
     let mut out = String::new();
     line(&mut out, "BEGIN:VCALENDAR");
     line(&mut out, "VERSION:2.0");
@@ -57,6 +57,13 @@ pub(crate) fn render(activities: &[Activity]) -> String {
     line(&mut out, "CALSCALE:GREGORIAN");
     line(&mut out, "METHOD:PUBLISH");
     line(&mut out, "X-WR-CALNAME:Bilibi activities");
+    if left_out > 0 {
+        let note = format!(
+            "Showing the {} activities nearest to today. {left_out} more, further in the past or ahead, are left out; open Bilibi to see them.",
+            activities.len()
+        );
+        line(&mut out, &format!("X-WR-CALDESC:{}", text(&note)));
+    }
     for a in activities {
         let (start, end, prefix) = match (a.kind, a.starts_at, a.ends_at, a.due_at) {
             (Kind::Call | Kind::Meeting, Some(start), Some(end), _) => (start, end, ""),

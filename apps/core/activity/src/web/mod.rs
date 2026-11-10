@@ -235,15 +235,15 @@ pub(crate) fn icon(kind: Kind) -> &'static str {
     }
 }
 
-/// How long before it starts or falls due an open activity counts as
-/// imminent. Fixed for now; a tenant setting is the follow-up
-/// (`core/activity` README, Calendar).
-pub(crate) const IMMINENT_HOURS: i64 = 24;
-
 /// An open activity's timing: overdue once its start or due time has
-/// passed, imminent inside [`IMMINENT_HOURS`]. A closed one, a note and one
-/// with no time are neither.
-pub(crate) fn urgency(activity: &Activity, now: Timestamp) -> Option<bilibi_ui::calendar::Urgency> {
+/// passed, imminent inside `window` (the tenant's
+/// `Activities::imminent_window`). A closed one, a note and one with no time
+/// are neither.
+pub(crate) fn urgency(
+    activity: &Activity,
+    now: Timestamp,
+    window: jiff::SignedDuration,
+) -> Option<bilibi_ui::calendar::Urgency> {
     use bilibi_ui::calendar::Urgency;
     if activity.is_closed() {
         return None;
@@ -251,7 +251,7 @@ pub(crate) fn urgency(activity: &Activity, now: Timestamp) -> Option<bilibi_ui::
     let when = activity.starts_at.or(activity.due_at)?;
     if when < now {
         Some(Urgency::Overdue)
-    } else if when < now + jiff::SignedDuration::from_hours(IMMINENT_HOURS) {
+    } else if when < now + window {
         Some(Urgency::Imminent)
     } else {
         None
@@ -259,8 +259,8 @@ pub(crate) fn urgency(activity: &Activity, now: Timestamp) -> Option<bilibi_ui::
 }
 
 /// The status as a badge: closed ones neutral or green, open ones overdue in
-/// red and imminent (within a day) in amber.
-pub(crate) fn status_badge(activity: &Activity) -> Result<Html> {
+/// red and imminent (inside the tenant's `window`) in amber.
+pub(crate) fn status_badge(activity: &Activity, window: jiff::SignedDuration) -> Result<Html> {
     use bilibi_ui::calendar::Urgency;
     let Some(status) = activity.status else {
         return render(Badge::status(BadgeKind::Plain, "Note"));
@@ -271,7 +271,7 @@ pub(crate) fn status_badge(activity: &Activity) -> Result<Html> {
             _ => BadgeKind::Neutral,
         }
     } else {
-        match urgency(activity, Timestamp::now()) {
+        match urgency(activity, Timestamp::now(), window) {
             Some(Urgency::Overdue) => BadgeKind::Danger,
             Some(Urgency::Imminent) => BadgeKind::Warning,
             None => BadgeKind::Neutral,
@@ -336,6 +336,10 @@ pub(crate) fn sentences(fields: &std::collections::BTreeMap<String, Vec<String>>
         .join(" ")
 }
 
+/// What a stale version says on a page.
+pub(crate) const STALE: &str =
+    "The activity changed since this page loaded. Reload before trying again.";
+
 /// What a refused contract call says on the page. `Unauthorized` and a
 /// step-up request go back to the host unchanged.
 pub(crate) enum Refusal {
@@ -353,9 +357,7 @@ pub(crate) fn refusal(
             return Err(error)
         }
         E::Forbidden | E::Backend(Error::Forbidden) => Refusal::Message(forbidden.into()),
-        E::Backend(Error::Conflict) | E::PlanRejected(_) => Refusal::Message(
-            "The activity changed since this page loaded. Reload before trying again.".into(),
-        ),
+        E::Backend(Error::Conflict) | E::PlanRejected(_) => Refusal::Message(STALE.into()),
         E::NotFound => Refusal::Message("The activity could not be found.".into()),
         E::InvalidInput(fields) => match fields.get("already_closed") {
             Some(_) => Refusal::Message("This activity is already closed.".into()),
@@ -423,7 +425,7 @@ impl Pages {
                 record::Detail::new(self.shared(), scope, record_id(request)?, request.framed)
                     .await?,
             ),
-            "feed" => Box::new(feed::Feed::new(self.shared())?),
+            "feed" => Box::new(feed::Feed::new(self.shared(), request.query)?),
             "company" | "person" | "record" => Box::new(panel::Panel::new(self.shared(), request)?),
             _ => return Err(Error::NotFound),
         })
