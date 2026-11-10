@@ -44,6 +44,8 @@ pub(crate) struct Panels {
     pub db: Db,
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
+    /// Other modules' kinds that extend a record kind (`HISTORY_KINDS`).
+    pub extensions: Arc<std::collections::BTreeMap<&'static str, Vec<&'static str>>>,
 }
 
 struct Panel {
@@ -81,11 +83,24 @@ impl Page<Scope, Error> for Panels {
             if request.operation != "record" {
                 return Err(Error::NotFound);
             }
-            let kinds: Vec<String> = request
+            let mut kinds: Vec<String> = request
                 .path
                 .get("kinds")
                 .map(|kinds| kinds.split(',').map(str::trim).map(str::to_owned).collect())
                 .unwrap_or_default();
+            // The kinds other modules write beside these records, under the
+            // same id, join the trail.
+            let extra: Vec<String> = kinds
+                .iter()
+                .filter_map(|kind| self.extensions.get(kind.as_str()))
+                .flatten()
+                .map(|kind| (*kind).to_owned())
+                .collect();
+            for kind in extra {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+            }
             if kinds.is_empty()
                 || kinds.len() > MAX_KINDS
                 || kinds.iter().any(|kind| kind.is_empty() || kind.len() > 255)
@@ -120,6 +135,7 @@ impl Page<Scope, Error> for Panels {
                     db: self.db.clone(),
                     display: self.display.clone(),
                     locales: self.locales.clone(),
+                    extensions: self.extensions.clone(),
                 },
                 id,
                 kinds,

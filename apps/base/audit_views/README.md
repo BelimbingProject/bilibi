@@ -91,6 +91,21 @@ wrapper's `data-live-expanded`; the server re-reads the trail on every click and
 update, so an open panel follows an in-page edit. The Company detail page
 hosts it (`apps/core/company/src/web.rs`).
 
+### Kinds other modules add (`HISTORY_KINDS`)
+
+**A module that keeps its own row beside another module's record, keyed by the same id, adds its audit kind to that record's History; the record's page does not change.** A CRM profile beside a Core company is the case: its changes then show in the company's History beside the company's own.
+
+```rust
+inventory::submit! { Contribution::new(bilibi_audit_views::HISTORY_KINDS, "cx.profiles.company", provenance, &bilibi_audit_views::HistoryKind {
+    record: "company", kind: "cx.profiles.company",
+}) }
+```
+
+- `record` is a kind a host page passes in `kinds` (`company`, `person`); `kind` is the contributor's own, written under that record's id. When the embed mounts it adds every kind contributed for the kinds it was given, so a page never lists another module's kinds.
+- Checked at boot: both are audit kinds of at most 255 characters without `,`, they differ, a pair is declared once, and one record takes at most `HISTORY_KINDS_PER_RECORD` (6) added kinds, so with its own and a legacy one it stays within the embed's limit of 8.
+- The reader's withheld fields apply per kind, as for the record's own (the contributor's Grid table names its record type).
+- `examples/history-kinds.rs` declares one, writes two changes through the mutation boundary and serves the app: company 1's History lists them.
+
 ## Recent Activity (dashboard)
 
 `bilibi_dashboard` entry `base-dashboard-recent-audit` (medium, order 30, offered
