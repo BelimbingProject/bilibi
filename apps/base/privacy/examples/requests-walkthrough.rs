@@ -452,11 +452,11 @@ async fn main() -> Result<()> {
     println!("== case files: attachments on a record about a person (#478)");
     case_files::install(&client, media.clone()).await?;
     client
-        .batch_execute("INSERT INTO walkthrough_cases(tenant_id,id,person_id) VALUES(1,1,1),(1,2,2) ON CONFLICT DO NOTHING")
+        .batch_execute("INSERT INTO walkthrough_cases(tenant_id,id,person_id) VALUES(1,101,1),(1,202,2) ON CONFLICT DO NOTHING")
         .await?;
     for (case, filename, text) in [
-        ("1", "ada-case-note.txt", "Ada case note\n"),
-        ("2", "kim-case-note.txt", "Kim case note\n"),
+        ("101", "ada-case-note.txt", "Ada case note\n"),
+        ("202", "kim-case-note.txt", "Kim case note\n"),
     ] {
         let subject = AttachmentSubject {
             kind: case_files::CASE,
@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
         tx.commit().await?;
         println!(
             "case {case} ({}): attachment {} submitted on subject {}",
-            if case == "1" { "Ada" } else { "Kim" },
+            if case == "101" { "Ada" } else { "Kim" },
             file.public_id,
             case_files::CASE
         );
