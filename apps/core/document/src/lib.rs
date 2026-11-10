@@ -1092,6 +1092,7 @@ inventory::submit! { Module {
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
         ("core-document-003-expiry-sharing-custom", include_str!("../migrations/003-expiry-sharing-custom.sql")),
         ("core-document-004-email-outbox", include_str!("../migrations/004-email-outbox.sql")),
+        ("core-document-006-email-job", include_str!("../migrations/006-email-job.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
@@ -1120,6 +1121,8 @@ inventory::submit! { Module {
             authentication: s.get("base/tenancy.authentication")?,
             origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
         }))))
+    }}, Service { id: email::ENDED, factory: |_| {
+        Ok(Arc::new(bilibi_queue::EndingService(Arc::new(email::EmailEnded))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
     }}, Service { id: web::FILES, factory: |s| {

@@ -5,14 +5,17 @@
 //! bell when ready.
 //! Only the requester reads it, and only while what they may see of the
 //! report is what it was when the file was made. A job Queue ends without
-//! running (the requester lost the right first) shows as failed. Each export
-//! is audited like a download.
+//! finishing it (the requester lost the right first, or it ran out of
+//! attempts) moves its export to `failed` through Queue's ending hook, as the
+//! `reports-monitor` principal. Each export is audited like a download.
 use crate::{authorize, contributions, export::Format, store, ReportError, Reports, EXPORT};
 use bilibi_artifacts::{Metadata, Operation, Owner, Reference};
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_notifications::Notice;
 use bilibi_party_ids::OrganisationId;
-use bilibi_queue::{self as jobs, Execution, Handler, HandlerFuture, Outcome as JobOutcome};
+use bilibi_queue::{
+    Ended, Ending, EndingFuture, Execution, Handler, HandlerFuture, Outcome as JobOutcome,
+};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -20,6 +23,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 /// The queue worker that prepares one export.
 pub const WORKER: &str = "base/reports-export";
+/// The system principal Queue's ending hook runs as to fail an export whose
+/// job ended without finishing (`System · reports-monitor`).
+pub const MONITOR: &str = "reports-monitor";
 const KIND: &str = "base_report_export";
 /// Exports one person's list shows at most.
 const LISTED: i64 = 20;
@@ -50,9 +56,8 @@ pub fn path(id: i64) -> String {
 /// export finishing it.
 const STOPPED: &str = "This export stopped before it was prepared. Prepare it again.";
 
-/// One row as its requester sees it; `stopped` when its job has ended
-/// while the row still waits.
-fn prepared(row: &tokio_postgres::Row, stopped: bool) -> Prepared {
+/// One row as its requester sees it.
+fn prepared(row: &tokio_postgres::Row) -> Prepared {
     let id: i64 = row.get(0);
     let state: String = row.get(4);
     let expired: bool = row.get(10);
@@ -60,7 +65,6 @@ fn prepared(row: &tokio_postgres::Row, stopped: bool) -> Prepared {
         ("ready", true) => "expired",
         ("ready", false) => "ready",
         ("failed", _) => "failed",
-        _ if stopped => "failed",
         _ => "queued",
     };
     let message: Option<String> = row.get(7);
@@ -73,17 +77,13 @@ fn prepared(row: &tokio_postgres::Row, stopped: bool) -> Prepared {
         state,
         filename: row.get(5),
         rows: row.get(6),
-        message: if stopped && message.is_none() {
-            Some(STOPPED.into())
-        } else {
-            message
-        },
+        message,
         created_at: row.get(8),
         expires_at: row.get(9),
         path: (state == "ready").then(|| path(id)),
     }
 }
-const COLUMNS: &str = "id, report_id, report_name, format, state, filename, rows, message, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), COALESCE(expires_at <= now(), false), job_id";
+const COLUMNS: &str = "id, report_id, report_name, format, state, filename, rows, message, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), COALESCE(expires_at <= now(), false)";
 
 /// The artifact owner: an export's bytes belong to its requester, in the
 /// company the export was asked in.
@@ -226,30 +226,7 @@ impl Reports {
             )
             .await
             .map_err(Error::from)?;
-        // A request still waiting whose job has ended (Queue refused the
-        // requester before it ran, or gave up) is failed, not preparing.
-        let waiting: Vec<i64> = rows
-            .iter()
-            .filter(|row| row.get::<_, String>(4) == "queued")
-            .filter_map(|row| row.get::<_, Option<i64>>(11))
-            .collect();
-        let ended: Vec<i64> = if waiting.is_empty() {
-            Vec::new()
-        } else {
-            jobs::states(&**client, scope.tenant(), &waiting)
-                .await?
-                .into_iter()
-                .filter(|job| job.state.terminal())
-                .map(|job| job.id)
-                .collect()
-        };
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let job: Option<i64> = row.get(11);
-                prepared(row, job.is_some_and(|job| ended.contains(&job)))
-            })
-            .collect())
+        Ok(rows.iter().map(prepared).collect())
     }
 
     /// A ready export's file, for its requester only, until it expires, and
@@ -579,6 +556,69 @@ impl Handler for Preparer {
                 }
                 _ => JobOutcome::Cancel("invalid_arguments"),
             }
+        })
+    }
+}
+
+/// Queue's ending hook for [`WORKER`] (`bilibi_queue::ENDINGS`): an export
+/// job that ended without finishing (its requester was refused before it ran,
+/// or it ran out of attempts) fails its export, as the monitor principal, so
+/// the request never waits in `queued` for a job that is gone. The requester
+/// prepares it again from the report.
+pub(crate) struct ExportEnded(pub Arc<Reports>);
+impl Ending for ExportEnded {
+    fn ended<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        job: &'a Ended,
+    ) -> EndingFuture<'a> {
+        Box::pin(async move {
+            if scope.principal() != Some(MONITOR) {
+                return Err(Error::Forbidden);
+            }
+            let Some(export) = job.args["export"].as_i64() else {
+                return Ok(());
+            };
+            let (tenant, job_id) = (scope.tenant(), job.job_id);
+            // Fenced by the job the export waits on: an ending told late for
+            // an earlier job changes nothing, and a settled export owes nothing.
+            let Some(row) = tx
+                .sql()
+                .query_opt(
+                    "SELECT report_name, requester_id FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND job_id=$3 AND state='queued' FOR UPDATE",
+                    &[&tenant, &export, &job_id],
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            let (name, requester): (String, i64) = (row.get(0), row.get(1));
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE base_report_exports SET state='failed', message=$4, finished_at=now() WHERE tenant_id=$1 AND id=$2 AND job_id=$3 AND state='queued'",
+                        &[&tenant, &export, &job_id, &STOPPED],
+                    )
+                    .await?;
+                    let change = Change {
+                        kind: KIND.into(),
+                        id: export,
+                        old: json!({"state": "queued"}),
+                        new: json!({"state": "failed"}),
+                    };
+                    Ok(((), vec![change]))
+                })
+            })
+            .await?;
+            let notice = Notice::new("Your export could not be prepared")
+                .body(format!("{name}: {STOPPED}"))
+                .url("/reports")
+                .icon("error");
+            self.0
+                .notifications
+                .notify(tx, scope, &[requester], &notice)
+                .await
         })
     }
 }

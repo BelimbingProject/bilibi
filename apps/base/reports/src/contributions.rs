@@ -1,6 +1,9 @@
 //! What Reports declares to the platform: its capabilities and the bounds an
 //! operator sets for the installation, and overrides per company.
-use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{
+    CapabilityDefinition, StandingGrant, SystemPrincipalDefinition, VocabularyContribution,
+    STANDING_GRANTS, VOCABULARY,
+};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use serde_json::json;
@@ -13,6 +16,9 @@ pub const AUTHOR: &str = "reports.author";
 pub const SHARE: &str = "reports.share";
 /// Download a report's result as a file.
 pub const EXPORT: &str = "reports.export";
+/// Move a queued export to `failed` once its job ended without finishing.
+/// Only the monitor principal holds it (a standing grant).
+pub const EXPORT_FAIL: &str = "reports.export.fail";
 /// Set the report bounds.
 pub const MANAGE: &str = "reports.manage";
 /// Have a report delivered on a schedule.
@@ -31,11 +37,15 @@ pub const QUEUED_MAX_COST_KEY: &str = "reports.queued_max_cost";
 
 inventory::submit! { Contribution::new(VOCABULARY, "base/reports", Provenance { module: "base/reports", source: file!(), line: line!() }, &VocabularyContribution {
     domains: &["reports"],
-    verbs: &["view", "author", "share", "export", "manage", "schedule"],
-    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(AUTHOR), CapabilityDefinition::tenant(SHARE), CapabilityDefinition::tenant(EXPORT), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(SCHEDULE)],
+    verbs: &["view", "author", "share", "export", "manage", "schedule", "fail"],
+    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(AUTHOR), CapabilityDefinition::tenant(SHARE), CapabilityDefinition::tenant(EXPORT), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(SCHEDULE), CapabilityDefinition::tenant(EXPORT_FAIL)],
     roles: &[],
-    system_principals: &[],
+    system_principals: &[SystemPrincipalDefinition { name: crate::exports::MONITOR, capabilities: &[EXPORT_FAIL] }],
 }) }
+// Recording that an export's job is gone is the way out of `queued`: no tenant
+// should have to switch it on. A tenant that denies it keeps such an export
+// `queued`, as before.
+inventory::submit! { Contribution::new(STANDING_GRANTS, crate::exports::MONITOR, Provenance { module: "base/reports", source: file!(), line: line!() }, &StandingGrant { principal: crate::exports::MONITOR, capabilities: &[EXPORT_FAIL] }) }
 
 macro_rules! bound {
     ($key:expr, $default:expr, $min:expr, $max:expr, $label:expr, $help:expr) => {

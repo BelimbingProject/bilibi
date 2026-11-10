@@ -151,7 +151,7 @@ write nothing.
 
 `base_schedule_runs` is best-effort operational evidence (running, succeeded,
 failed, skipped; trigger and who asked for a manual run); recording failure is
-logged and never changes the owner's outcome. `Schedule::runs` reads it
+logged and never changes the owner's outcome. An attempt whose process died or whose end could not be written would stay `running` for ever, so every reconcile pass (`occurrence::reconcile`, each poll) turns an attempt row that nothing runs any more into `failed` with the excerpt `abandoned`: a later attempt of the same job exists, or its occurrence (a tenant's run: that tenant's run row) is already settled. `Schedule::runs` reads it
 redacted with `admin.system.schedule.view`.
 
 ## Review and suppression

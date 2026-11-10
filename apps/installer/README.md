@@ -97,6 +97,8 @@ After a reboot, systemd starts `bilibi-installer@<instance>` before `bilibi@<ins
 
 A step that was running when the restart came says so in its detail: "(the installer restarted during this step and continued)".
 
+**An installer that never comes back.** While it works on a job the installer writes `heartbeat_at` every 30 seconds, on a connection of its own, beside the step it is in. If it is gone for good (the service was removed or renamed), the server ends the running job as `interrupted` after `software.installer_silence_minutes` (20), but only before the pause began (`paused_at` empty): nothing was changed, so the owner starts the install again. After the pause the job stays running for the installer's own recovery, which alone knows how far the switch got. If that installer later returns and finds its job ended, it does nothing more with it.
+
 ## How it talks to the page
 
 The installer never goes through the app. It follows the worker contract in `apps/base/software/README.md` ("How a worker plugs in"): it `LISTEN`s on the `bilibi_software_jobs` channel, claims the oldest waiting `install` or `undo` job, marks each step `running`, `done`, `failed` or `skipped` with a plain `detail`, and writes the job's final `state` and `result`. The page and the `base.software.status` contract read those rows.
