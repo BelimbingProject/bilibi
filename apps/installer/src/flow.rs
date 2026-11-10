@@ -185,7 +185,6 @@ impl<'a> Run<'a> {
         plugins: Option<&[Value]>,
     ) -> Db<()> {
         self.forget_history();
-        jobs::skip_pending(&*self.client, &self.job).await?;
         jobs::finish_with_plugins(&mut *self.client, &self.job, state, &result, plugins).await?;
         self.log(&format!(
             "{state}: {}",
@@ -222,7 +221,7 @@ impl<'a> Run<'a> {
     }
     async fn settle_clean_failure(&mut self) -> Db<()> {
         let mut message = format!("Nothing changed. {}.", self.failure_reason());
-        if self.state("backup") != "pending" && self.service.state() != "active" {
+        if self.job.paused && self.service.state() != "active" {
             let started = match self.service.start() {
                 Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                 Err(why) => Err(why),
@@ -273,7 +272,7 @@ impl<'a> Run<'a> {
     /// ended the job; false when the flow carries on from the first step not
     /// yet done.
     pub async fn resume(&mut self) -> Db<bool> {
-        let paused = self.state("backup") != "pending";
+        let paused = self.job.paused;
         if paused {
             // From the first moment: nothing may be entered while the
             // database is being decided on.
@@ -412,6 +411,7 @@ impl<'a> Run<'a> {
                 self.log("stopped before the pause, as asked");
                 return Ok(());
             }
+            self.job.paused = true;
             match self.backup().await {
                 Ok(detail) => self.done("backup", detail).await?,
                 Err(reason) => {
@@ -1047,6 +1047,7 @@ impl<'a> Run<'a> {
             if !jobs::begin_pause(&mut *self.client, &self.job, "backup", &detail).await? {
                 return Ok(());
             }
+            self.job.paused = true;
             match self.backup().await {
                 Ok(detail) => self.done("backup", detail).await?,
                 Err(reason) => {

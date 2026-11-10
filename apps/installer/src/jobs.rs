@@ -7,7 +7,7 @@ use tokio_postgres::{Client, GenericClient};
 /// The channel `base/software` notifies on; the payload is the job id.
 pub const CHANNEL: &str = "bilibi_software_jobs";
 const TIME: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
-const JOB_COLUMNS: &str = "id, tenant_id, kind, request, undo_of, result";
+const JOB_COLUMNS: &str = "id, tenant_id, kind, request, undo_of, result, paused_at IS NOT NULL";
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -17,6 +17,8 @@ pub struct Job {
     pub request: Value,
     pub undo_of: Option<i64>,
     pub result: Option<Value>,
+    /// The pause began: recorded with the pausing step by `begin_pause`.
+    pub paused: bool,
 }
 impl Job {
     fn from_row(row: &tokio_postgres::Row) -> Self {
@@ -27,6 +29,7 @@ impl Job {
             request: row.get(3),
             undo_of: row.get(4),
             result: row.get(5),
+            paused: row.get(6),
         }
     }
 }
@@ -212,9 +215,10 @@ pub async fn finish(
         .await?;
     Ok(())
 }
-/// The job's final state and result, with the add-on list the release
-/// switches on put in `base_software_plugins` in the same transaction: the
-/// list and the outcome are recorded together or not at all.
+/// The job's final state and result, with the steps not reached skipped and
+/// the add-on list the release switches on put in `base_software_plugins` in
+/// the same transaction: they are recorded together or not at all, so a
+/// restart never finds a running job whose steps are already skipped.
 pub async fn finish_with_plugins(
     client: &mut Client,
     job: &Job,
@@ -226,6 +230,7 @@ pub async fn finish_with_plugins(
     if let Some(plugins) = plugins {
         set_plugins(&tx, job, plugins).await?;
     }
+    skip_pending(&tx, job).await?;
     finish(&tx, job, state, result).await?;
     tx.commit().await
 }
@@ -310,6 +315,11 @@ pub async fn begin_pause(
         finish(&tx, job, "cancelled", &result).await?;
     } else {
         step_set(&tx, job, key, "running", detail).await?;
+        tx.execute(
+            "UPDATE base_software_jobs SET paused_at=now() WHERE tenant_id=$1 AND id=$2",
+            &[&job.tenant, &job.id],
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(!cancelled)
