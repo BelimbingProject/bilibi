@@ -23,7 +23,7 @@ inventory::submit! { Contribution::new(PERSONAL_DATA, "core/person.people", prov
 | `RecordKind.fields` are the top-level keys of the kind's `Change` values that are personal | Audit erasure clears exactly these, never a business field |
 | A kind is declared once, by its owner | One answer per kind |
 | A kind with personal fields also gets a `base_personal_data_kinds` row from its owner's migration (same fields and `subject_identifier`); `*` names every top-level field, for a kind whose values have no fixed keys (a SCIM document) | The database refuses audit erasure of anything else; a mismatch is `Internal`. The table changes only alongside a recorded migration: a guard against mistakes, not against code running as the application's database role, which can also write the ledger |
-| `person_subjects` names the file subject kinds (Media attachment subject, Artifacts owner) whose subject ID is the person ID | Media and Artifacts accept a grant for those subjects only with the grant's own person's ID; any other subject needs its owner to vouch it is that person's (`SubjectOwner::person_subject`, `Owner::erasure_subject`) |
+| `person_subjects` names the file subject kinds (Media attachment subject, Artifacts owner) whose subject ID is the person ID | Direct grants require the grant's person ID; Media also accepts either grant when `SubjectOwner::person_subject` vouches for a record subject, and Artifacts accepts `Owner::erasure_subject` for erasure only |
 | Report in `Erased.records` only records changed in that transaction | The database clears evidence only of records the erasing transaction changed |
 
 ## Handler

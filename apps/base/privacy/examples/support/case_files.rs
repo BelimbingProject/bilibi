@@ -55,10 +55,18 @@ pub async fn install(client: &Client, media: Arc<Media>) -> std::result::Result<
 pub fn refused() -> Vec<String> {
     REFUSED.lock().map(|r| r.clone()).unwrap_or_default()
 }
-fn refuse(step: &str, case: i64, result: String) {
-    if let Ok(mut refused) = REFUSED.lock() {
-        refused.push(format!("{step} case {case}: {result}"));
+fn refuse<T>(
+    step: &str,
+    case: i64,
+    result: std::result::Result<T, bilibi_base::media::Error>,
+) -> Result<()> {
+    if !matches!(result, Err(bilibi_base::media::Error::Database(Error::Forbidden))) {
+        return Err(Error::Internal);
     }
+    if let Ok(mut refused) = REFUSED.lock() {
+        refused.push(format!("{step} case {case}: Forbidden"));
+    }
+    Ok(())
 }
 fn media() -> Result<&'static Media> {
     MEDIA.get().map(|m| &**m).ok_or(Error::Internal)
@@ -187,7 +195,21 @@ impl Handler for Cases {
                 let result = media()?
                     .disclosed_attachments(client, scope, grant, self::subject(&id))
                     .await;
-                refuse("export", other, format!("{:?}", result.map(|a| a.len())));
+                refuse("export list", other, result)?;
+                let public_id: String = client
+                    .query_one(
+                        "SELECT public_id FROM base_media_attachments WHERE tenant_id=$1 AND subject_type=$2 AND subject_id=$3 ORDER BY id LIMIT 1",
+                        &[&scope.tenant(), &CASE, &id],
+                    )
+                    .await?
+                    .get(0);
+                refuse(
+                    "export file",
+                    other,
+                    media()?
+                        .disclosed_attachment(client, scope, grant, self::subject(&id), &public_id)
+                        .await,
+                )?;
             }
             let (mut records, mut files) = (Vec::new(), Vec::new());
             for case in own {
@@ -250,11 +272,7 @@ impl Handler for Cases {
                 let result = media()?
                     .erase_attachments(tx, scope, grant, self::subject(&id), holds)
                     .await;
-                refuse(
-                    "erase",
-                    other,
-                    format!("{:?}", result.map(|e| e.erased.len())),
-                );
+                refuse("erase", other, result)?;
             }
             let mut erased = Erased::default();
             for case in own {
@@ -299,11 +317,7 @@ impl Handler for Cases {
                 let result = media()?
                     .remove_erased_bytes(client, scope, grant, self::subject(&id))
                     .await;
-                refuse(
-                    "remove bytes",
-                    other,
-                    format!("{:?}", result.map(|r| r.removed)),
-                );
+                refuse("remove bytes", other, result)?;
             }
             for case in own {
                 let id = case.to_string();
