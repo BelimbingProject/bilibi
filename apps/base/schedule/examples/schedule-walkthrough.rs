@@ -621,7 +621,9 @@ async fn walkthrough_tenant(db: &Db, name: &str, status: &str) -> Result<i64> {
     {
         client
             .execute(
-                "UPDATE tenants SET status=$2 WHERE name=$1",
+                "UPDATE tenants SET status=$2, \
+                 suspended_at=CASE WHEN $2='suspended' THEN now() END, \
+                 suspension_reason=CASE WHEN $2='suspended' THEN 'walkthrough' END WHERE name=$1",
                 &[&name, &status],
             )
             .await?;
@@ -630,7 +632,9 @@ async fn walkthrough_tenant(db: &Db, name: &str, status: &str) -> Result<i64> {
     let tenant = bilibi_tenancy::provision_tenant(&**client, name).await?;
     client
         .execute(
-            "UPDATE tenants SET status=$2 WHERE id=$1",
+            "UPDATE tenants SET status=$2, \
+             suspended_at=CASE WHEN $2='suspended' THEN now() END, \
+             suspension_reason=CASE WHEN $2='suspended' THEN 'walkthrough' END WHERE id=$1",
             &[&tenant.id, &status],
         )
         .await?;

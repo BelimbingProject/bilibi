@@ -5,8 +5,9 @@ mod oversight;
 mod party_identity;
 pub use admin::{
     platform_operator, provision_platform_operator, provision_tenant, CreateOutcome, CreatedTenant,
-    NewTenant, TenantErrors, TenantIdentity, TenantPage, TenantStatus, Tenants, CREATE, LIST,
-    NAME_MAX, PRINCIPAL_PAGE_MAX,
+    Move, MovePlan, MoveRefusal, NewTenant, Suspension, TenantErrors, TenantIdentity, TenantPage,
+    TenantStatus, Tenants, CREATE, LIST, NAME_MAX, PRINCIPAL_PAGE_MAX, REACTIVATE, REASON_MAX,
+    SUSPEND,
 };
 use bilibi_database::{Context, Error, Result};
 use bilibi_party_ids::{AffiliationId, OrganisationId, PersonId};
@@ -1295,6 +1296,7 @@ inventory::submit! {
             ("005-tenancy-operator", include_str!("../migrations/005-operator.sql")),
             ("009-tenancy-hierarchy", include_str!("../migrations/009-hierarchy.sql")),
             ("base-tenancy-010-oversight", include_str!("../migrations/010-oversight.sql")),
+            ("base-tenancy-011-status", include_str!("../migrations/011-status.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/tenancy.authentication", factory: |_| Ok(Arc::new(Authentication::default())) },
