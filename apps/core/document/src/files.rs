@@ -608,16 +608,29 @@ pub(crate) async fn finalize_document_delete(
             changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"user_id":row.get::<_,i64>(1),"view":row.get::<_,bool>(2),"download":row.get::<_,bool>(3),"manage":row.get::<_,bool>(4),"share":row.get::<_,bool>(5)}), new: json!({}) });
         }
         for row in sql.query(
-            "DELETE FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 RETURNING id,revision,change_log",
+            &format!("DELETE FROM core_document_revisions AS r WHERE r.tenant_id=$1 AND r.document_id=$2 RETURNING {}", crate::store::REVISION_COLUMNS),
             &[&tenant, &document],
         ).await? {
-            changes.push(Change { kind: crate::REVISION_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"revision":row.get::<_,i32>(1),"change_log":row.get::<_,String>(2)}), new: json!({}) });
+            let revision = crate::store::revision_from_row(&row)?;
+            changes.push(Change { kind: crate::REVISION_RECORD.into(), id: revision.id, old: crate::store::revision_values(&revision), new: json!({}) });
         }
         for row in sql.query(
             &format!("DELETE FROM core_document_files WHERE tenant_id=$1 AND artifact_id = ANY($2) RETURNING {COLUMNS}"),
             &[&tenant, &artifact_ids],
         ).await?.iter().map(from_row) {
             changes.push(Change { kind: FILE_RECORD.into(), id: row.id, old: audit_values(&row), new: json!({}) });
+        }
+        for row in sql.query(
+            &format!("SELECT {} FROM core_documents d WHERE d.tenant_id=$1 AND d.related_document_id=$2 FOR UPDATE", crate::store::COLUMNS),
+            &[&tenant, &document],
+        ).await? {
+            let old = crate::store::from_row(&row)?;
+            let row = sql.query_one(
+                &format!("UPDATE core_documents d SET related_document_id=NULL,relation=NULL,version=d.version+1,updated_at=now() WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {}", crate::store::COLUMNS),
+                &[&tenant, &old.id],
+            ).await?;
+            let new = crate::store::from_row(&row)?;
+            changes.push(Change { kind: crate::RECORD.into(), id: old.id, old: crate::store::audit_values(&old), new: crate::store::audit_values(&new) });
         }
         sql.execute("DELETE FROM core_documents WHERE tenant_id=$1 AND id=$2", &[&tenant, &document]).await?;
         changes.push(Change { kind: crate::RECORD.into(), id: document, old: json!({"name":row.get::<_,String>(0),"version":row.get::<_,i64>(1),"deleting":true}), new: json!({}) });

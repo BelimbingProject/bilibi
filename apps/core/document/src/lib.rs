@@ -80,6 +80,9 @@ pub struct Document {
     pub expiry_user_id: Option<i64>,
     /// The tenant's custom field values (`base/custom_fields`).
     pub custom: Custom,
+    pub sync_id: Option<String>,
+    pub related_document_id: Option<i64>,
+    pub relation: Option<String>,
     /// The latest revision's number.
     pub revision: i32,
     pub last_revision_at: Timestamp,
@@ -106,6 +109,8 @@ pub struct Revision {
     pub sha256: Option<String>,
     pub external_url: Option<String>,
     pub change_log: String,
+    pub label: Option<String>,
+    pub replaces_revision_id: Option<i64>,
     pub scan_status: ScanStatus,
     pub created_by: i64,
     pub created_at: Timestamp,
@@ -194,6 +199,8 @@ pub struct File {
 #[derive(Clone, Debug)]
 pub struct PlannedRevision {
     pub revision: i32,
+    pub label: Option<String>,
+    pub replaces_revision_id: Option<i64>,
     pub file_name: Option<String>,
     pub external_url: Option<String>,
     pub change_log: String,
@@ -769,6 +776,8 @@ impl Documents {
             .await?;
         let planned = PlannedRevision {
             revision: plan.revision,
+            label: plan.label,
+            replaces_revision_id: plan.replaces_revision_id,
             file_name: plan.file.as_ref().map(|f| f.file_name().to_owned()),
             external_url: plan.external_url,
             change_log: plan.change_log,
@@ -1092,6 +1101,7 @@ inventory::submit! { Module {
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
         ("core-document-003-expiry-sharing-custom", include_str!("../migrations/003-expiry-sharing-custom.sql")),
         ("core-document-004-email-outbox", include_str!("../migrations/004-email-outbox.sql")),
+        ("core-document-005-governance-references", include_str!("../migrations/005-governance-references.sql")),
         ("core-document-006-email-job", include_str!("../migrations/006-email-job.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {

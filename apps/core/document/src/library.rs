@@ -412,6 +412,10 @@ impl Store<'_> {
             status: None,
             expires_on: None,
             custom: source.custom,
+            sync_id: None,
+            related_document_id: None,
+            relation: None,
+            revision_label: None,
             change_log: None,
             related: Vec::new(),
         })
@@ -532,6 +536,11 @@ impl Store<'_> {
             }
             Err(bilibi_artifacts::Error::Database(error)) => return Err(error.into()),
             Err(_) => return Err(Error::Internal.into()),
+        }
+        if documents.iter().any(|d| d.sync_id.is_some()) {
+            return Err(WriteError::MergeRefused(
+                "clear each source's integration sync ID before merging",
+            ));
         }
         Ok(MergeCheck {
             survivor: survivor_document,
@@ -670,7 +679,7 @@ impl Store<'_> {
                             &[&tenant, &before.id, &before.version, &next, &latest_link],
                         )
                         .await?;
-                    let document = from_row(&row)?;
+                    let mut document = from_row(&row)?;
                     changes.push(Change {
                         kind: RECORD.into(),
                         id: document.id,
@@ -795,15 +804,33 @@ impl Store<'_> {
                                 });
                             }
                         }
-                        sql.execute(
-                            "DELETE FROM core_documents WHERE tenant_id=$1 AND id=$2",
+                        // Keep incoming document lineage pointed at the survivor.
+                        // A survivor that pointed at this source cannot point to itself.
+                        for row in sql.query(
+                            &format!("SELECT {COLUMNS} FROM core_documents d WHERE d.tenant_id=$1 AND d.related_document_id=$2 FOR UPDATE"),
                             &[&tenant, &source.id],
-                        )
-                        .await?;
+                        ).await? {
+                            let old = store::from_row(&row)?;
+                            let target = (old.id != before.id).then_some(before.id);
+                            let updated = sql.query_one(
+                                &format!("UPDATE core_documents d SET related_document_id=$3,relation=CASE WHEN $3::bigint IS NULL THEN NULL ELSE relation END,version=d.version+1,updated_at=now() WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {COLUMNS}"),
+                                &[&tenant, &old.id, &target],
+                            ).await?;
+                            let new = store::from_row(&updated)?;
+                            if old.id == before.id {
+                                document = new.clone();
+                            }
+                            changes.push(Change { kind: RECORD.into(), id: old.id, old: audit_values(&old), new: audit_values(&new) });
+                        }
+                        let row = sql.query_one(
+                            &format!("DELETE FROM core_documents AS d WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {COLUMNS}"),
+                            &[&tenant, &source.id],
+                        ).await?;
+                        let removed = from_row(&row)?;
                         changes.push(Change {
                             kind: RECORD.into(),
-                            id: source.id,
-                            old: audit_values(source),
+                            id: removed.id,
+                            old: audit_values(&removed),
                             new: json!({}),
                         });
                     }

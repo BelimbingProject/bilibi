@@ -5,7 +5,7 @@
 //! passes it in.
 use super::{refusal, render, size, store_refusal, Pages, Refusal};
 use crate::{
-    Reference, Source, StoredFile, Upload, FILE_TYPES, LIST_CATEGORY, LIST_STATUS,
+    Reference, Revision, Source, StoredFile, Upload, FILE_TYPES, LIST_CATEGORY, LIST_STATUS,
     LIST_SUB_CATEGORY, LIST_TYPE, RECORD,
 };
 use askama::Template;
@@ -71,6 +71,11 @@ fn label_of(field: &str) -> &'static str {
         "sub_category" => "Sub-category",
         "document_type" => "Type",
         "status" => "Status",
+        "sync_id" => "Integration sync ID",
+        "related_document_id" => "Related document",
+        "relation" => "Relation",
+        "revision_label" | "label" => "Revision label",
+        "replaces_revision_id" => "Replaces revision",
         "related" => "Related to",
         "file" => "File",
         "revision" => "Revision",
@@ -383,6 +388,10 @@ impl NewDocument {
                 "sub_category",
                 "document_type",
                 "status",
+                "sync_id",
+                "related_document_id",
+                "relation",
+                "revision_label",
             ],
         )?;
         // A new category clears the sub-category and offers its own.
@@ -441,8 +450,21 @@ impl NewDocument {
             "sub_category",
             "document_type",
             "status",
+            "sync_id",
+            "revision_label",
         ] {
             put(key);
+        }
+        if !self.state.value("related_document_id").trim().is_empty() {
+            if let Ok(id) = self
+                .state
+                .value("related_document_id")
+                .trim()
+                .parse::<i64>()
+            {
+                input["related_document_id"] = json!(id);
+            }
+            input["relation"] = json!(self.state.value("relation"));
         }
         match self.source() {
             Source::Internal => {
@@ -474,6 +496,14 @@ impl NewDocument {
             self.state
                 .errors
                 .insert("file".into(), vec!["needs to be uploaded first".into()]);
+            return Ok(None);
+        }
+        let related = self.state.value("related_document_id").trim();
+        if !related.is_empty() && related.parse::<i64>().ok().is_none_or(|id| id <= 0) {
+            self.state.errors.insert(
+                "related_document_id".into(),
+                vec!["needs a positive document ID".into()],
+            );
             return Ok(None);
         }
         let call = pages.call(scope, credential, "create", "core.document.create");
@@ -545,6 +575,26 @@ impl NewDocument {
                 self.options.statuses.clone(),
                 "",
             ),
+            state
+                .field(prefix, "sync_id", "Integration sync ID")
+                .attr("maxlength", "255")
+                .hint("Unique within this workspace when set."),
+            state
+                .field(prefix, "related_document_id", "Related document ID")
+                .kind(InputKind::Number)
+                .hint("Optional document you can view."),
+            select(
+                state.field(prefix, "relation", "Relation"),
+                choices(&[
+                    ("None", ""),
+                    ("Supersedes", "supersedes"),
+                    ("Replaces", "replaces"),
+                ]),
+                "",
+            ),
+            state
+                .field(prefix, "revision_label", "First revision label")
+                .attr("maxlength", "100"),
         ]);
         let mut details = Html::EMPTY;
         for field in fields {
@@ -637,9 +687,10 @@ pub(crate) struct NewRevision {
     state: State,
     source: Source,
     latest: i32,
+    prior: Vec<Choice>,
 }
 impl NewRevision {
-    pub fn new(source: Source, latest: i32) -> Self {
+    pub fn new(source: Source, latest: i32, revisions: &[Revision]) -> Self {
         let mut state = State::default();
         state
             .values
@@ -648,6 +699,22 @@ impl NewRevision {
             state,
             source,
             latest,
+            prior: revisions
+                .iter()
+                .map(|r| {
+                    Choice::new(
+                        format!(
+                            "{}{}",
+                            r.revision,
+                            r.label
+                                .as_ref()
+                                .map(|label| format!(" - {label}"))
+                                .unwrap_or_default()
+                        ),
+                        r.id.to_string(),
+                    )
+                })
+                .collect(),
         }
     }
     /// The dialog's own events; `false` for an event it does not own.
@@ -660,9 +727,16 @@ impl NewRevision {
         uploads: &mut Uploads,
     ) -> Result<bool> {
         match name {
-            "document_change" => self
-                .state
-                .read(value, &["revision", "change_log", "external_url"])?,
+            "document_change" => self.state.read(
+                value,
+                &[
+                    "revision",
+                    "change_log",
+                    "external_url",
+                    "label",
+                    "replaces_revision_id",
+                ],
+            )?,
             "upload" => self.state.receive(pages, scope, uploads).await?,
             _ => return Ok(false),
         }
@@ -678,8 +752,16 @@ impl NewRevision {
         version: i64,
         value: &Value,
     ) -> Result<bool> {
-        self.state
-            .read(value, &["revision", "change_log", "external_url"])?;
+        self.state.read(
+            value,
+            &[
+                "revision",
+                "change_log",
+                "external_url",
+                "label",
+                "replaces_revision_id",
+            ],
+        )?;
         self.state.submitted = true;
         self.state.errors.clear();
         self.state.notice.clear();
@@ -692,6 +774,26 @@ impl NewRevision {
                     .errors
                     .insert("revision".into(), vec!["must be a whole number".into()]);
                 return Ok(false);
+            }
+        }
+        if !self.state.value("label").trim().is_empty() {
+            input["label"] = json!(self.state.value("label"));
+        }
+        if !self.state.value("replaces_revision_id").trim().is_empty() {
+            match self
+                .state
+                .value("replaces_revision_id")
+                .trim()
+                .parse::<i64>()
+            {
+                Ok(id) if id > 0 => input["replaces_revision_id"] = json!(id),
+                _ => {
+                    self.state.errors.insert(
+                        "replaces_revision_id".into(),
+                        vec!["needs an earlier revision".into()],
+                    );
+                    return Ok(false);
+                }
             }
         }
         match self.source {
@@ -748,6 +850,18 @@ impl NewRevision {
                     self.latest
                 )),
         )?);
+        details.push(&render(
+            state
+                .field(prefix, "label", "Revision label")
+                .attr("maxlength", "100"),
+        )?);
+        let mut prior = vec![Choice::new("None", "")];
+        prior.extend(self.prior.clone());
+        details.push(&render(select(
+            state.field(prefix, "replaces_revision_id", "Replaces revision"),
+            prior,
+            "",
+        ))?);
         details.push(&render(
             state
                 .field(prefix, "change_log", "Change log")

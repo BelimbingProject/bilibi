@@ -47,6 +47,9 @@ const FIELDS: &[(&str, &str)] = &[
     ("document_type", "Type"),
     ("status", "Status"),
     ("expires_on", "Expires"),
+    ("sync_id", "Integration sync ID"),
+    ("related_document_id", "Related document"),
+    ("relation", "Relation"),
 ];
 fn label(field: &str) -> &'static str {
     FIELDS
@@ -85,6 +88,8 @@ impl Detail {
                 "document-revisions",
                 vec![
                     BuiltinColumn::new("revision", "Revision"),
+                    BuiltinColumn::new("label", "Label"),
+                    BuiltinColumn::new("replaces", "Replaces"),
                     BuiltinColumn::new("file", "File"),
                     BuiltinColumn::new("size", "Size"),
                     BuiltinColumn::new("change_log", "Change log"),
@@ -113,7 +118,35 @@ impl Detail {
             .and_then(|v| v.parse::<i64>().ok())
             .ok_or(Error::Invalid)?;
         let mut patch = json!({});
-        patch[field] = json!(submitted);
+        patch[field] = if field == "related_document_id" && !submitted.trim().is_empty() {
+            match submitted.trim().parse::<i64>() {
+                Ok(id) if id > 0 => json!(id),
+                _ => {
+                    self.statuses.put(
+                        field,
+                        CommitStatus::Error(
+                            "Related document needs a positive document ID.".into(),
+                        ),
+                    );
+                    return Ok(());
+                }
+            }
+        } else if field == "related_document_id" && submitted.trim().is_empty() {
+            Value::Null
+        } else {
+            json!(submitted)
+        };
+        if field == "related_document_id" {
+            let current = self.pages.documents.get(scope, self.id).await?;
+            patch["relation"] = if submitted.trim().is_empty() {
+                json!("")
+            } else {
+                json!(current.relation.as_deref().unwrap_or("supersedes"))
+            };
+        }
+        if field == "relation" && submitted.trim().is_empty() {
+            patch["related_document_id"] = Value::Null;
+        }
         let status = match self
             .pages
             .submit(
@@ -518,7 +551,12 @@ impl Detail {
             "new_revision" => {
                 let document = self.pages.documents.get(scope, self.id).await?;
                 if self.pages.documents.may_change(scope, &document).await? {
-                    self.dialog = Some(NewRevision::new(document.source, document.revision));
+                    let revisions = self.pages.documents.revisions(scope, self.id).await?;
+                    self.dialog = Some(NewRevision::new(
+                        document.source,
+                        document.revision,
+                        &revisions,
+                    ));
                 }
             }
             "close_modal" => self.dialog = None,
@@ -660,7 +698,10 @@ impl Detail {
             // A retired code the document keeps.
             options.push(Choice::new(current.1, current.0));
         }
-        let field = self.inline(d, key, current.0, editable);
+        let mut field = self.inline(d, key, current.0, editable);
+        if empty {
+            field = field.allow_empty();
+        }
         let editor = render(
             Field::named(key)
                 .id(format!("document-{}-editor", key.replace('_', "-")))
@@ -875,6 +916,66 @@ impl Detail {
             items.push((title.as_str(), key.as_str(), html.clone()));
         }
         items.push((
+            "Integration sync ID",
+            "sync-id",
+            render(InlineEdit {
+                field: self
+                    .inline(
+                        d,
+                        "sync_id",
+                        d.sync_id.clone().unwrap_or_default(),
+                        editable,
+                    )
+                    .allow_empty(),
+            })?,
+        ));
+        let related_id = d
+            .related_document_id
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let related_visible = if let Some(id) = d.related_document_id {
+            match pages.documents.get(scope, id).await {
+                Ok(_) => true,
+                Err(Error::NotFound | Error::Forbidden) => false,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        let mut related = render(InlineEdit {
+            field: self
+                .inline(d, "related_document_id", related_id, editable)
+                .allow_empty()
+                .input_type("number"),
+        })?;
+        if related_visible {
+            related.push(&render(ActionLink {
+                id: "document-related-document-link",
+                href: &super::path(d.related_document_id.unwrap_or_default()),
+                body: Html::text("Open"),
+                ..ActionLink::default()
+            })?);
+        }
+        items.push(("Related document", "related-document", related));
+        items.push((
+            "Relation",
+            "relation",
+            self.choice(
+                d,
+                "relation",
+                (
+                    d.relation.as_deref().unwrap_or_default(),
+                    d.relation.as_deref().unwrap_or_default(),
+                ),
+                vec![
+                    Choice::new("Supersedes", "supersedes"),
+                    Choice::new("Replaces", "replaces"),
+                ],
+                true,
+                editable && d.related_document_id.is_some(),
+            )?,
+        ));
+        items.push((
             "Revision",
             "revision",
             Html::text(&format!(
@@ -931,6 +1032,8 @@ impl Detail {
         let names = self.pages.names(scope, &users).await?;
         let _ = self.revisions.load(revisions, |r| r.revision.to_string());
         let mut rows = Vec::with_capacity(revisions.len());
+        let numbers: std::collections::HashMap<i64, i32> =
+            revisions.iter().map(|r| (r.id, r.revision)).collect();
         for r in revisions {
             let number = r.revision.to_string();
             let file = match (&r.file_name, &r.external_url) {
@@ -954,6 +1057,16 @@ impl Detail {
             };
             let mut row = FlexRow::new(&number)
                 .slot("revision", Html::text(&number))
+                .slot("label", Html::text(r.label.as_deref().unwrap_or("")))
+                .slot(
+                    "replaces",
+                    Html::text(
+                        &r.replaces_revision_id
+                            .and_then(|id| numbers.get(&id).copied())
+                            .map(|n| n.to_string())
+                            .unwrap_or_default(),
+                    ),
+                )
                 .slot("file", file)
                 .slot(
                     "size",

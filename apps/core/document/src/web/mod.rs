@@ -427,6 +427,9 @@ impl Files {
                 "sub_category",
                 "type",
                 "status",
+                "sync_id",
+                "related_document_id",
+                "relation",
                 "revision",
                 "last_revision_at",
                 "filing_company_id",
@@ -456,6 +459,11 @@ fn row(d: &Document, text: impl Fn(&Option<String>) -> String) -> Vec<String> {
         text(&d.sub_category),
         text(&d.document_type),
         d.status.clone(),
+        text(&d.sync_id),
+        d.related_document_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        text(&d.relation),
         d.revision.to_string(),
         d.last_revision_at.to_string(),
         d.company_id.to_string(),
