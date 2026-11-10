@@ -319,6 +319,7 @@ pub(crate) async fn list(
         Mine::Any => "any",
         Mine::Assignee => "assignee",
         Mine::Guest => "guest",
+        Mine::TakingPart => "part",
     };
     let (related_kind, related_id) = filter.related.as_ref().map_or((None, None), |r| {
         (Some(r.kind.as_str()), Some(r.id.as_str()))
@@ -343,7 +344,8 @@ pub(crate) async fn list(
          AND ($8 = 'all' OR ($8 = 'open') = (a.closed_at IS NULL AND a.kind <> 'note'))
          AND ($9 = 'any'
               OR ($9 = 'assignee' AND a.assignee_user_id = $2)
-              OR ($9 = 'guest' AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.role IN ('related','invited'))))
+              OR ($9 = 'guest' AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.role IN ('related','invited')))
+              OR ($9 = 'part' AND (a.created_by=$2 OR a.assignee_user_id=$2 OR EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_user_id=$2 AND g.response<>'declined'))))
          AND ($10::text IS NULL
               OR (a.related_kind = $10 AND a.related_id = $11)
               OR ($12::bigint IS NOT NULL AND EXISTS (SELECT 1 FROM core_activity_guests g WHERE g.tenant_id=a.tenant_id AND g.activity_id=a.id AND g.guest_person_id=$12)))

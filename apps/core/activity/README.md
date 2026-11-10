@@ -6,12 +6,13 @@
 
 - Activities and their guests (`core_activities`, `core_activity_guests`).
 - Repeating series: the rule (`core_activity_series`) and one activity per occurrence.
-- One Activities list (`/activities`), shown as a table or as a calendar, one record page (`/activities/{id}`) and the Activities panel on record pages.
+- One Activities list (`/activities`), shown as a table, a calendar or as the tasks in tiles by status, one record page (`/activities/{id}`) and the Activities panel on record pages.
 - Reminders: a per-tenant scheduled sweep, each activity's own reminder offsets (else the creator's default, else the tenant's), the bell's To do rows and the optional reminder email to the assignee and to guests without an account.
 - Invitations: Send invites, the bell notice to colleagues, the invitation email worker, and the `core/activity.invitation_gates` registry a Domain contributes its contact rules to.
+- The calendar feed: one read-only iCalendar link per person, and its key ([Calendar feed](#calendar-feed)).
 - The `core/activity.happened` event, record kind `core.activity.activity` and the agent operations.
 
-Not here: syncing with outside calendars (Google, Outlook, iCalendar feeds), customer roll-ups, the customer timeline, lead conversion, sales cadences, telephony and routing stay in the Domain that owns them. Related records belong to their owners (`base/records`); people and accounts to `core/person` and `core/user`; delivery to `base/mail` and `base/notifications`.
+Not here: pulling in outside calendars (Google, Outlook, iCalendar subscriptions); the feed below only publishes. Customer roll-ups, the customer timeline, lead conversion, sales cadences, telephony and routing stay in the Domain that owns them. Related records belong to their owners (`base/records`); people and accounts to `core/person` and `core/user`; delivery to `base/mail` and `base/notifications`.
 
 ## Who sees an activity
 
@@ -79,7 +80,8 @@ Every write runs in the caller's `MutationTransaction` with its sealed scope and
 | `add_guest`, `remove_guest` | Invites an active account, a person the actor may view or an email address (at most 50 guests); removes anyone but the assignee (`AssigneeNotRemovable`). No version; the activity is locked |
 | `respond` | Records `accepted`, `declined`, `tentative` or `none`. An account guest answers for themselves with `core.activity.view`; anyone else's answer needs the right to change the activity |
 | `send_invites` | For an open call or meeting still ahead: stamps every guest but the sender `invited_at`, tells account guests in the bell, and queues the invitation email to the others (Invitations) |
-| `conflicts(starts_at, ends_at, users, except)` | Other open calls and meetings those accounts take part in at that time (as assignee, or a guest who has not declined); another activity's title only for a reader who takes part in it |
+| `conflicts(starts_at, ends_at, users, except)` | Other open calls and meetings those accounts take part in at that time (as assignee, or a guest who has not declined); another activity's title only for a reader who takes part in it. The record page draws it as **Free** or **Busy** beside each account guest (the title only when the reader may see it), before any invitation goes out |
+| `feed_key`, `feed_keys`, `create_feed_key`, `revoke_feed_key`, `feed(token)` | The calendar feed key and its read ([Calendar feed](#calendar-feed)) |
 | `repoint(from, to)` | Moves every live activity related to `from` onto `to`, after `base/records.check` of both; used when a record is converted into another (a lead into a person) |
 | `get`, `guests`, `guest_emails`, `list(Filter)`, `for_record`, `follow_up`, `may_create`, `may_edit`, `may_edit_all` | Reads under the rule above. `Filter::between` reads calls and meetings that overlap a range and tasks due in it (up to `CALENDAR_LIMIT`, 501); `Filter::series` one series' occurrences in order |
 | `work_days(first, last)` | The dates as the reader's company's default work calendar resolves them; empty without one |
@@ -99,18 +101,36 @@ Errors: `Invalid` with field errors, `Stale`, `NotFound`, `Forbidden`, `AlreadyC
 - Only a planned call or meeting and an open task with a due date repeat; a note and a held call do not. The guests, related record, assignee and sharing are the same on every occurrence.
 - **One occurrence.** Every write on one occurrence (Update, Close, Delete, guests, Send invites) touches only it: that is how a series gets an exception. Send invites invites to that occurrence.
 - **Change series** (`update_series`) copies the fields a patch names to one occurrence and the later ones, or to all. A new start, end or due time moves each open occurrence by the same wall-clock amount and gives it the same length; held and completed ones keep the times they happened at. Status changes one occurrence at a time. Each occurrence is checked first, so one refusal changes none.
-- **Delete series** (`delete_series`) removes one occurrence and the later ones, or all of them, held and completed ones included.
+- **Delete series** (`delete_series`) removes one occurrence and the later ones, or all of them, held and completed ones included. A repeating row on the Activities list has a **Delete series** action (following or all) that opens the record page's dialog and calls the same contract with the same refusals; "only this one" stays the row's own Delete on the record page.
 - The rule itself never changes: to repeat differently, delete the later occurrences and create a new series.
 
 ## Calendar
 
-**The Activities list shows as a calendar too** (`/activities?display=calendar`, the List and Calendar tabs): day, week, month and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
+**The Activities list shows as a calendar too** (`/activities?display=calendar`, the List, Calendar and Status tiles tabs): day, week, month, year and shared views of the activities the reader may see, through base/ui `Calendar`. It is the same list: search, kind, open or closed and "whose" filter both.
 
 - Calls and meetings are drawn from start to end; a task at its due time, 30 minutes long. Notes and tasks without a due date are not on it. Colour is the kind (call, meeting, task), never a status.
+- **Year.** Twelve small months; each day shows how many items it holds (`!` and red when one is overdue) and links to its day view. It reads the whole year, so a busy year asks for a narrower filter past 500 items.
+- **Create from a free slot.** Click a free time (or drag down it; a tap on touch) and Add at this time asks for a meeting, a call or a task, then opens the same New dialog (`core.activity.create_*`) with the start and end filled in (a task falls due at the start; a call in the future is planned). A click, tap or Enter on an empty day uses 09:00 for an hour. A reader who may not create activities gets no slot events.
+- **Overdue and soon.** An open call, meeting or task whose start or due time has passed is marked **Overdue** (red tint and the word); one starting or due inside the next 24 hours is **Due soon** (amber). The same marks show on the status tiles and the Status badge. The 24 hours is fixed (`IMMINENT_HOURS` in `web/mod.rs`); a tenant setting is the follow-up.
 - The shared view puts each assignee of the activities shown in a column, the reader first; nobody else's private activities appear.
 - Non-working days of the reader's company's default work calendar are marked (rest, off, holiday and its name).
 - Dragging, resizing and the Move dialog call `core.activity.update` with the version drawn, so a stale or refused move leaves the item where it was and says why. Only open activities the reader may change can be moved; moving one to another person's column is refused (change Assigned to on its page). Moving a task moves its start by the same amount.
 - It reads at most 501 activities for the range and asks for a narrower filter past 500.
+
+### Status tiles
+
+`/activities?display=board`: the tasks the reader may see as tiles in a column for each status (not started, in progress, pending input, completed, deferred), through base/ui `Board`. Search and "whose" filter it; the kind and open-or-closed filters are hidden, because the tiles are tasks and closed ones have their own columns. A tile shows its subject, an Overdue or Due soon mark, the due time and the assignee. Dragging a tile (or Move…) calls `core.activity.update` with the status and the tile's version, after checking the task is still in the column it was drawn in; a stale or refused move says why and leaves the tile. It reads the first 300 open tasks (by due time) and the latest 100 closed ones, and says when there are more.
+
+## Calendar feed
+
+**A person can publish their own calendar as a read-only iCalendar link** and subscribe to it from Google Calendar, Outlook or Apple Calendar. The feed is one more key to the same door, not a second set of rules.
+
+- **Address.** `GET /feeds/activities/{key}` (a `PUBLIC_ENDPOINTS` contribution, so Web redacts the key from logs, sends no referrer and rate-limits each sender per minute: Base Integration setting `public_endpoints.sender_per_minute`). The key is the only credential.
+- **Key.** 256 random bits as 64 hex characters, one per person and tenant. Only its SHA-256 is stored (`core_activity_feed_keys`); the key is shown once, when it is made, on **My settings › Calendar feed** (`/settings/calendar-feed`) and in the result of `core.activity.create_feed_key`.
+- **Same rule as the page and the agent API.** Each read acts as the key's owner: it proves the account live, then reads `Activities::list` for calls and meetings between 30 days ago and a year ahead, and tasks due in that range (at most 501), the activities the owner takes part in (creator, assignee, or an account guest who has not declined; [Who sees an activity](#who-sees-an-activity)): theirs, never another person's, whoever holds the link. A holder of `core.activity.all.view` gets their own calendar too, not the tenant's. If the owner loses `core.activity.view` or is deactivated, the feed answers as for an unknown key.
+- **What it shows.** Subject (tasks start with "Task: "), start and end, location, and the join link of a meeting. Never the description, internal notes, guests, related record, status or reminders.
+- **Make, replace, revoke.** The person makes a key, replaces it (the old link stops working at once) or revokes it on that page, which also shows when it was made and last read (a usage stamp, at most once a minute). **Making or replacing a key asks for the operator's current two-factor code every time**, on every channel and in development too (Base Step-up operation `core.activity.feed_key.create`, `.always()`): the page asks in a dialog, an agent presents it as `step_up_code` on its commit and is refused with a step-up refusal without it. Revoking needs no code, so a leaked link can be stopped at once. The key is returned once, in that commit's result; it is never stored or audited, and the operation's output is marked `x-one-time-secret`, which keeps it out of `review_entries` (a review card would report it into model context and a stored review outcome). The operations are `core.activity.feed_key` (read), `.create_feed_key` and `.revoke_feed_key`; creating, replacing and revoking are audited (`core.activity.feed_key`, no key or hash in the audit). A holder of `core.activity.feed.manage` (granted on purpose; no contributed role has it) also sees everyone's keys on that page and revokes any (`user_id`). Revoking deletes the row, so the link answers `404` from the next request.
+- **One refusal.** An unknown, revoked, replaced or unusable key, and a request framed in an iframe, get the same bare `404`. Replies are never cached.
 
 ## Reminders
 
@@ -181,10 +201,12 @@ The subject is `core.activity.activity:<id>` and the key `<id>:<version>`. The p
 
 ## Contributions
 
-- Capabilities: `core.activity.view`, `core.activity.manage`, `core.activity.all.view`, `core.activity.all.manage`. The `tenant_owner` role gets `view` and `manage` only.
+- Step-up: `core.activity.feed_key.create`.
+- Capabilities: `core.activity.view`, `core.activity.manage`, `core.activity.all.view`, `core.activity.all.manage`, `core.activity.feed.manage` (revoke anyone's feed key). The `tenant_owner` role gets `view` and `manage` only.
 - Settings (Settings › Activities, tenant): `core.activity.reminder_minutes`, `core.activity.reminder_email`. Personal (user scope, set with Reminder defaults on the Activities list): `core.activity.default_reminder_minutes`, `core.activity.default_reminder_email`.
 - Schedule `core/activity.reminders` and its Queue worker `core/activity-reminders`; Queue workers `core/activity-invites` and `core/activity-guest-reminders`.
 - Registry `core/activity.invitation_gates` (declared here; Domains contribute).
+- Public endpoint and credential path `/feeds/activities/{token}` (service `core/activity.feed`); page `/settings/calendar-feed`, a tab of My settings.
 - Uses `core/work_calendar` (default calendar and resolved days) for "working days only" and the calendar's day marks.
 - Record kind `core.activity.activity` (page `/activities/{id}`); holder table `activities`.
 - Menu item Activities under Core.
@@ -200,11 +222,11 @@ Any record page shows the generic panel by placing `core/activity.record` with i
 
 ## Agent operations
 
-Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, with `series_id` one series) and `core.activity.get` (with guests and their ids, and the series rule). Reviewed writes `core.activity.create_task`, `.log_call`, `.create_meeting` (each with an optional `repeat`), `.create_note`, `.update`, `.close`, `.add_guest`, `.create_person_guest`, `.remove_guest`, `.respond` (declares `view`: a guest answers for themselves), `.send_invites`, `.delete`, `.update_series` and `.delete_series` (`apply`: `following` or `all`), `.set_reminder_defaults`; and the read `core.activity.reminder_defaults`. Guide `core.activity`. References are `{kind, id}`; reads add `label` and `path`. Pages and panels call the same write contracts.
+Reads `core.activity.list` (with `from` and `to` a calendar range of up to 500, with `series_id` one series) and `core.activity.get` (with guests and their ids, and the series rule). Reviewed writes `core.activity.create_task`, `.log_call`, `.create_meeting` (each with an optional `repeat`), `.create_note`, `.update`, `.close`, `.add_guest`, `.create_person_guest`, `.remove_guest`, `.respond` (declares `view`: a guest answers for themselves), `.send_invites`, `.delete`, `.update_series` and `.delete_series` (`apply`: `following` or `all`), `.set_reminder_defaults`, `.create_feed_key` and `.revoke_feed_key`; and the reads `core.activity.reminder_defaults` and `core.activity.feed_key`. Guide `core.activity`. References are `{kind, id}`; reads add `label` and `path`. Pages and panels call the same write contracts.
 
 ## Migrations
 
-`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`), `core-activity-004-reminders` (`reminder_minutes`, `reminder_email` and `reminders_sent` on activities, `core_activity_guest_reminders`).
+`core-activity-001-activities`, `core-activity-002-invitations` (`invite_sent_at` on guests), `core-activity-003-series` (`core_activity_series`, `series_id` and `series_index`), `core-activity-004-reminders` (`reminder_minutes`, `reminder_email` and `reminders_sent` on activities, `core_activity_guest_reminders`), `core-activity-005-calendar-feeds` (`core_activity_feed_keys`, one row per person, removed with the account).
 
 ## How to try it
 

@@ -1223,6 +1223,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
             .movable("2"),
         CalendarItem::timed("m3", "Design review", at(25, 11, 0), at(25, 12, 30))
             .kind("Meeting", 1)
+            .urgency(Some(crate::calendar::Urgency::Overdue))
             .href("#review")
             .lane("amira"),
         CalendarItem::all_day("a1", "Stocktake", date(2026, 3, 26), date(2026, 3, 27))
@@ -1241,6 +1242,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         .resizable(),
         CalendarItem::timed("d2", "Weekly planning", at(29, 14, 0), at(29, 15, 0))
             .kind("Meeting", 1)
+            .urgency(Some(crate::calendar::Urgency::Imminent))
             .lane("chen")
             .movable("1")
             .resizable(),
@@ -1268,6 +1270,7 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         calendar.lanes = lanes.clone();
         calendar.items = items.clone();
         calendar.day_marks = marks.clone();
+        calendar.creatable = true;
         calendar
     };
     let mut refused = make(
@@ -1313,6 +1316,11 @@ fn specimen_calendars() -> askama::Result<Vec<Html>> {
         make(
             "specimen-calendar-month",
             CalendarView::Month,
+            date(2026, 3, 25),
+        ),
+        make(
+            "specimen-calendar-year",
+            CalendarView::Year,
             date(2026, 3, 25),
         ),
         make(

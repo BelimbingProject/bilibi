@@ -1,21 +1,26 @@
 //! `/activities`: every activity the reader may see, with search, kind,
 //! open or closed, and "mine" filters in the address, and the New call, New
-//! task and New note dialog. The same list shows as a table or as a
-//! calendar (`display=calendar`, base/ui `Calendar`): the filters apply to
-//! both, and dragging on the calendar calls the same change contract.
+//! task and New note dialog. The same list shows as a table, as a
+//! calendar (`display=calendar`, base/ui `Calendar`) or as the tasks in
+//! tiles by status (`display=board`, base/ui `Board`): the search and
+//! "whose" filters apply to all, and dragging on the calendar or a tile
+//! calls the same change contract.
 use super::{
     event,
     form::Dialog,
     icon, refusal,
     reminder_defaults::{self, DefaultsDialog},
-    render, sentences, status_badge, BrowserZone, Clock, Pages, Refusal, Region,
+    render, sentences, series_delete, status_badge, urgency, BrowserZone, Clock, Pages, Refusal,
+    Region,
 };
 use crate::{Activity, Filter, Kind, Mine, Reference, Sort, State};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
+    board::{self, BoardMove, BoardState},
     calendar::{
-        self, Calendar, CalendarItem, CalendarLane, CalendarMove, CalendarState, CalendarWhen,
+        self, Calendar, CalendarItem, CalendarLane, CalendarMove, CalendarSlot, CalendarState,
+        CalendarWhen,
     },
     choices,
     list_state::{InvalidPageSize, FILTERS_FORM},
@@ -23,14 +28,17 @@ use bilibi_ui::{
     page::*,
     params, BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome, ConfirmDialog, EmptyState,
     Filter as ListFilter, FilterToolbar, FlashGroup, FlexRow, FlexTable, Header, Html, Icon,
-    IconButton, ListColumns, ListSpec, ListState, PageCounts, Pagination, SortDir, StatusKind, Tab,
-    TableEmpty, Tabs, ToolbarControl, NO_FLASH,
+    IconButton, IconKind, ListColumns, ListSpec, ListState, PageCounts, Pagination, SortDir,
+    StatusKind, Tab, TableEmpty, Tabs, ToolbarControl, NO_FLASH,
 };
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, LazyLock},
 };
+
+mod tiles;
+use tiles::{board_columns, slot_times};
 
 const SIZES: [u64; 3] = [25, 50, 100];
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
@@ -90,8 +98,26 @@ fn series(query: &HashMap<String, String>) -> Option<i64> {
         .filter(|id| *id > 0)
 }
 
-/// The query keys the calendar keeps in the address.
-const CALENDAR_KEYS: [&str; 3] = ["view", "date", "lanes"];
+/// How the list is shown: the address's `display`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Display {
+    Table,
+    Calendar,
+    /// The tasks as tiles in a column for each status.
+    Board,
+}
+impl Display {
+    fn parse(query: &HashMap<String, String>) -> Self {
+        match query.get("display").map(String::as_str) {
+            Some("calendar") => Self::Calendar,
+            Some("board") => Self::Board,
+            _ => Self::Table,
+        }
+    }
+}
+
+/// The query keys the calendar and the status tiles keep in the address.
+const CALENDAR_KEYS: [&str; 4] = ["view", "date", "lanes", "column"];
 fn calendar_query(query: &HashMap<String, String>) -> HashMap<String, String> {
     query
         .iter()
@@ -125,10 +151,22 @@ pub(crate) struct Index {
     columns: ListColumns,
     related: Option<Reference>,
     series: Option<i64>,
-    /// Shown as a calendar rather than a table.
-    calendar: bool,
-    /// The calendar's view, date and lanes from the address.
+    display: Display,
+    /// The calendar's view, date and lanes (and the tiles' phone column)
+    /// from the address.
     calendar_query: HashMap<String, String>,
+    /// How far each status column of the tiles is shown, and the phone's
+    /// column.
+    board: BoardState,
+    /// The tile whose Move dialog is open, and its errors.
+    board_moving: Option<String>,
+    board_errors: Vec<String>,
+    board_notice: Option<(StatusKind, String)>,
+    /// A free calendar slot waiting for its kind: start and end.
+    slot: Option<(jiff::Timestamp, jiff::Timestamp)>,
+    /// The repeating row whose Delete series dialog is open, and the
+    /// last refusal.
+    series_delete: Option<(i64, Vec<String>)>,
     /// The calendar item whose Move dialog is open, and its errors.
     moving: Option<String>,
     move_errors: Vec<String>,
@@ -151,8 +189,14 @@ impl Index {
             columns: columns()?,
             related: related(query),
             series: series(query),
-            calendar: query.get("display").map(String::as_str) == Some("calendar"),
+            display: Display::parse(query),
             calendar_query: calendar_query(query),
+            board: BoardState::parse(query, &board_columns(&[])),
+            board_moving: None,
+            board_errors: Vec::new(),
+            board_notice: None,
+            slot: None,
+            series_delete: None,
             moving: None,
             move_errors: Vec::new(),
             notice: None,
@@ -213,9 +257,147 @@ impl Index {
                 self.list.apply_filters(&filters);
             }
             "display" => {
-                self.calendar = value["tab"].as_str() == Some("calendar");
+                self.display = match value["tab"].as_str() {
+                    Some("calendar") => Display::Calendar,
+                    Some("board") => Display::Board,
+                    _ => Display::Table,
+                };
                 self.moving = None;
                 self.move_errors.clear();
+                self.board_moving = None;
+                self.board_errors.clear();
+                self.slot = None;
+            }
+            calendar::SLOT => {
+                let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                if !self.pages.activities.may_create(scope).await? {
+                    self.notice = Some((
+                        StatusKind::Error,
+                        "You do not have permission to create activities.".into(),
+                    ));
+                } else {
+                    match CalendarSlot::from_event(value, &clock.zone) {
+                        Ok(slot) => {
+                            self.slot = Some(slot_times(&slot, &clock));
+                            self.notice = None;
+                        }
+                        Err(sentence) => self.notice = Some((StatusKind::Error, sentence)),
+                    }
+                }
+            }
+            "cancel_slot" => self.slot = None,
+            "slot_continue" => {
+                let form = params::form_values_checked(value, "slot", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let kind = match form.get("kind").map(String::as_str) {
+                    Some("call") => Kind::Call,
+                    Some("task") => Kind::Task,
+                    _ => Kind::Meeting,
+                };
+                if let Some((start, end)) = self.slot.take() {
+                    if self.pages.activities.may_create(scope).await? {
+                        let clock =
+                            Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
+                        self.dialog = Some(Dialog::new(kind, None).at(start, end, &clock));
+                    }
+                }
+            }
+            board::MOVE_OPEN => {
+                self.board_moving = board::card_id(value).map(str::to_owned);
+                self.board_errors.clear();
+                self.board_notice = None;
+            }
+            board::MOVE_CANCEL => {
+                self.board_moving = None;
+                self.board_errors.clear();
+            }
+            board::MORE => {
+                if let Some(column) = board::column_key(value) {
+                    self.board.show_more(column);
+                }
+            }
+            board::MOVE | board::MOVE_SUBMIT => {
+                let outcome = match BoardMove::from_event(value) {
+                    Ok(change) => self.set_status(scope, credential, name, &change).await?,
+                    Err(sentence) => Err(sentence),
+                };
+                match outcome {
+                    Ok(message) => {
+                        self.board_notice = Some((StatusKind::Success, message));
+                        self.board_moving = None;
+                        self.board_errors.clear();
+                    }
+                    Err(message) if name == board::MOVE_SUBMIT => {
+                        self.board_errors = vec![message];
+                    }
+                    Err(message) => self.board_notice = Some((StatusKind::Error, message)),
+                }
+            }
+            "request_delete_series" => {
+                let id = value["id"]
+                    .as_str()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or(Error::Invalid)?;
+                let activity = self.pages.activities.get(scope, id).await?;
+                if activity.series_id.is_some()
+                    && self.pages.activities.may_edit(scope, &activity).await?
+                {
+                    self.series_delete = Some((id, Vec::new()));
+                }
+            }
+            "cancel_delete_series" => self.series_delete = None,
+            "delete_series" => {
+                let Some((id, _)) = self.series_delete else {
+                    return Ok(None);
+                };
+                let form = params::form_values_checked(value, "delete", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                let apply = match form.get("apply").map(String::as_str) {
+                    Some("all") => "all",
+                    _ => "following",
+                };
+                let activity = match self.pages.activities.get(scope, id).await {
+                    Ok(activity) => activity,
+                    Err(Error::NotFound | Error::Forbidden) => {
+                        self.series_delete = None;
+                        self.flash =
+                            Some((StatusKind::Error, "The activity could not be found.".into()));
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let call = self.pages.call(
+                    scope,
+                    credential,
+                    "delete_series",
+                    "core.activity.delete_series",
+                );
+                match self
+                    .pages
+                    .contracts
+                    .submit(
+                        &call,
+                        serde_json::json!({"id": id, "version": activity.version, "apply": apply}),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let count = result["result"]["deleted"].as_array().map_or(0, Vec::len);
+                        self.series_delete = None;
+                        self.flash = Some((StatusKind::Success, series_delete::deleted(count)));
+                    }
+                    Err(error) => {
+                        let message = match refusal(
+                            error,
+                            "You do not have permission to change this activity.",
+                            "The series was not deleted. Try again.",
+                        )? {
+                            Refusal::Message(message) => message,
+                            Refusal::Fields(fields) => sentences(&fields),
+                        };
+                        self.series_delete = Some((id, vec![message]));
+                    }
+                }
             }
             calendar::MOVE_OPEN => {
                 self.moving = calendar::item_id(value).map(str::to_owned);
@@ -289,6 +471,7 @@ impl Index {
                             .filter(|r| r.label.is_some()),
                         None => None,
                     };
+                    self.slot = None;
                     self.dialog = Some(Dialog::new(kind, related));
                 } else {
                     self.flash = Some((
@@ -467,6 +650,17 @@ impl Index {
                 ..IconButton::new("check-circle", "Close")
             })?);
         }
+        if activity.series_id.is_some() && self.pages.activities.may_edit(scope, activity).await? {
+            row.actions.push(&render(IconButton {
+                id: &format!("activities-delete-series-{id}"),
+                event: "request_delete_series",
+                name: "id",
+                value: &id,
+                kind: IconKind::Danger,
+                title: "Delete series",
+                ..IconButton::new("delete", "Delete series")
+            })?);
+        }
         row.dom_id = Some(format!("activities-{id}"));
         Ok(row)
     }
@@ -600,6 +794,7 @@ impl Index {
             .collect();
         let may_create = self.pages.activities.may_create(scope).await?;
         let edit_all = may_create && self.pages.activities.may_edit_all(scope).await?;
+        let now = jiff::Timestamp::now();
         let mut items = Vec::new();
         for a in &page.entries {
             let lane = a.assignee_user_id.to_string();
@@ -620,6 +815,7 @@ impl Index {
             }
             .kind(a.kind.label(), tone(a.kind))
             .href(format!("/activities/{}", a.id))
+            .urgency(urgency(a, now))
             .lane(lane);
             let own = a.created_by == me || a.assignee_user_id == me;
             let item = if may_create && (own || edit_all) && !a.is_closed() {
@@ -677,6 +873,7 @@ impl Index {
         drawn.items = items;
         drawn.day_marks = marks;
         drawn.follows_browser_zone = clock.display.mode == bilibi_datetime::Mode::Local;
+        drawn.creatable = may_create;
         drawn.moving = self.moving.clone();
         drawn.notice = self.notice.clone().or_else(|| {
             (page.total > page.entries.len() as i64).then(|| {
@@ -763,73 +960,111 @@ impl Index {
             tabs: vec![
                 Tab {
                     id: "activities-display-list",
-                    ..Tab::button("display", "list", "List", !self.calendar)
+                    ..Tab::button("display", "list", "List", self.display == Display::Table)
                 },
                 Tab {
                     id: "activities-display-calendar",
-                    ..Tab::button("display", "calendar", "Calendar", self.calendar)
+                    ..Tab::button(
+                        "display",
+                        "calendar",
+                        "Calendar",
+                        self.display == Display::Calendar,
+                    )
+                },
+                Tab {
+                    id: "activities-display-board",
+                    ..Tab::button(
+                        "display",
+                        "board",
+                        "Status tiles",
+                        self.display == Display::Board,
+                    )
                 },
             ],
         })?);
         let form = self.list.filters_form();
-        body.push(&render(FilterToolbar::new(
-            "activities-filters",
-            vec![
-                ToolbarControl::search(
-                    "activities-search",
-                    "search",
-                    "Search activities",
-                    &form["search"],
-                    "Search by subject...",
-                ),
-                ToolbarControl::select(
-                    "activities-kind",
-                    "kind",
-                    "Kind",
-                    &form["kind"],
-                    choices(&[
-                        ("All kinds", "all"),
-                        ("Calls", "call"),
-                        ("Meetings", "meeting"),
-                        ("Tasks", "task"),
-                        ("Notes", "note"),
-                    ]),
-                ),
-                ToolbarControl::select(
-                    "activities-state",
-                    "state",
-                    "Open or closed",
-                    &form["state"],
-                    choices(&[
-                        ("Open", "open"),
-                        ("Closed", "closed"),
-                        ("Open and closed", "all"),
-                    ]),
-                ),
-                ToolbarControl::select(
-                    "activities-mine",
-                    "mine",
-                    "Whose",
-                    &form["mine"],
-                    choices(&[
-                        ("Everyone's I may see", "any"),
-                        ("Assigned to me", "assignee"),
-                        ("I am a guest", "guest"),
-                    ]),
-                ),
-            ],
-        ))?);
+        let mut controls = vec![
+            ToolbarControl::search(
+                "activities-search",
+                "search",
+                "Search activities",
+                &form["search"],
+                "Search by subject...",
+            ),
+            ToolbarControl::select(
+                "activities-kind",
+                "kind",
+                "Kind",
+                &form["kind"],
+                choices(&[
+                    ("All kinds", "all"),
+                    ("Calls", "call"),
+                    ("Meetings", "meeting"),
+                    ("Tasks", "task"),
+                    ("Notes", "note"),
+                ]),
+            ),
+            ToolbarControl::select(
+                "activities-state",
+                "state",
+                "Open or closed",
+                &form["state"],
+                choices(&[
+                    ("Open", "open"),
+                    ("Closed", "closed"),
+                    ("Open and closed", "all"),
+                ]),
+            ),
+            ToolbarControl::select(
+                "activities-mine",
+                "mine",
+                "Whose",
+                &form["mine"],
+                choices(&[
+                    ("Everyone's I may see", "any"),
+                    ("Assigned to me", "assignee"),
+                    ("I am a guest", "guest"),
+                ]),
+            ),
+        ];
+        if self.display == Display::Board {
+            // The tiles are the tasks, closed ones in their own columns.
+            controls.retain(|control| {
+                !matches!(control.id.as_str(), "activities-kind" | "activities-state")
+            });
+        }
+        body.push(&render(FilterToolbar::new("activities-filters", controls))?);
         let mut query = HashMap::new();
-        let rows = if self.calendar {
-            let (html, shown, count) = self.calendar_view(scope, &clock, self.address()).await?;
-            body.push(&html);
-            query = shown;
-            count
-        } else {
-            let (card, count) = self.table_view(scope, &clock).await?;
-            body.push(&card);
-            count
+        let rows = match self.display {
+            Display::Calendar => {
+                let (html, shown, count) =
+                    self.calendar_view(scope, &clock, self.address()).await?;
+                body.push(&html);
+                query = shown;
+                count
+            }
+            Display::Board => {
+                let (html, shown, count) = self.board_view(scope, &clock).await?;
+                body.push(&html);
+                query = shown;
+                count
+            }
+            Display::Table => {
+                let (card, count) = self.table_view(scope, &clock).await?;
+                body.push(&card);
+                count
+            }
         };
+        if let Some((start, end)) = self.slot {
+            body.push(&self.slot_dialog(&clock, start, end)?);
+        }
+        if let Some((id, errors)) = &self.series_delete {
+            match self.pages.activities.get(scope, *id).await {
+                Ok(activity) => body.push(&series_delete::dialog(&activity, errors, false)?),
+                Err(Error::NotFound | Error::Forbidden) => self.series_delete = None,
+                Err(error) => return Err(error),
+            }
+        }
         if let Some((_, title, _)) = &self.confirm {
             body.push(&render(ConfirmDialog {
                 id: "activities-confirm",
@@ -865,7 +1100,7 @@ impl Index {
             ..bilibi_ui::Page::default()
         })?
         .to_string();
-        if !self.calendar {
+        if self.display == Display::Table {
             query = self.address();
         }
         Ok(LiveBody {
@@ -967,7 +1202,7 @@ impl LiveState<Scope, Error> for Index {
                         ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?;
                     self.related = related(query);
                     self.series = series(query);
-                    self.calendar = query.get("display").map(String::as_str) == Some("calendar");
+                    self.display = Display::parse(query);
                     self.calendar_query = calendar_query(query);
                     self.notice = None;
                 }

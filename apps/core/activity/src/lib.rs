@@ -2,11 +2,14 @@
 //! their reminders. See `README.md` and ADR 24. Bilimbi has no counterpart;
 //! the pages follow the Platform's list, record and record-panel patterns
 //! (Core Person), and the related record is a `base/records` reference.
+mod agent_feed;
 mod agent_operations;
 mod agent_reminders;
 mod contributions;
+mod feed;
 mod guest_person;
 mod guest_reminders;
+mod ics;
 mod invitations;
 mod model;
 mod reminder_defaults;
@@ -25,6 +28,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use bilibi_records::Reference;
 pub use contributions::{MANAGE, MANAGE_ALL, VIEW, VIEW_ALL};
+pub use feed::{FeedKey, FEED_PATH, FEED_RECORD, STEP_UP_FEED_KEY};
 pub use invitations::{GateFuture, InvitationGate, Invitee, INVITATION_GATES};
 pub use model::{
     CallInput, CallStatus, Common, Direction, Draft, FieldError, Guest, Kind, MeetingInput,
@@ -49,6 +53,11 @@ pub const SERIES_RECORD: &str = "core.activity.series";
 pub const CALENDAR_LIMIT: i64 = 501;
 /// The event a shared activity that has happened records (README, Events).
 pub const HAPPENED: &str = "core/activity.happened";
+/// Revoke anyone's calendar feed key and see who has one (an administrator;
+/// no contributed role holds it).
+pub const MANAGE_FEEDS: &str = "core.activity.feed.manage";
+/// The feed's endpoint service (`core/activity.feed`).
+pub const FEED_SERVICE: &str = "core/activity.feed";
 /// Named background principal permission to create a task for an originating account.
 pub const SYSTEM_CREATE: &str = "core.activity.system.create";
 
@@ -164,6 +173,9 @@ pub enum Mine {
     Assignee,
     /// The reader is a guest.
     Guest,
+    /// The reader takes part: creator, assignee or account guest. Never the
+    /// oversight set of `core.activity.all.view` (the calendar feed).
+    TakingPart,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -290,6 +302,7 @@ pub struct Activities {
     queue: Arc<bilibi_queue::Queue>,
     calendars: Arc<bilibi_work_calendar::WorkCalendars>,
     settings: Arc<bilibi_settings::Settings>,
+    step_up: Arc<bilibi_step_up::StepUp>,
     people: Arc<bilibi_person::PersonService>,
 }
 impl Activities {
@@ -932,12 +945,13 @@ impl Activities {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
         ("core-activity-003-series", include_str!("../migrations/003-series.sql")),
         ("core-activity-004-reminders", include_str!("../migrations/004-reminders.sql")),
+        ("core-activity-005-calendar-feeds", include_str!("../migrations/005-calendar-feeds.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;
@@ -953,6 +967,7 @@ inventory::submit! { Module {
             queue: s.get("base/queue.store")?,
             calendars: s.get(bilibi_work_calendar::SERVICE)?,
             settings: s.get("base/settings.store")?,
+            step_up: s.get(bilibi_step_up::SERVICE)?,
             people: s.get(bilibi_person::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;
@@ -991,6 +1006,8 @@ inventory::submit! { Module {
             directory: s.get("base/principal_directory.directory")?,
             authentication: s.get("base/tenancy.authentication")?,
         }))))
+    }}, Service { id: FEED_SERVICE, factory: |s| {
+        Ok(Arc::new(bilibi_ui::endpoint::EndpointService::<Error>(Arc::new(feed::FeedEndpoint(s.get(SERVICE)?)))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages {
             activities: s.get(SERVICE)?,
@@ -999,6 +1016,7 @@ inventory::submit! { Module {
             directory: s.get("base/principal_directory.directory")?,
             display: s.get("base/datetime.display")?,
             locales: s.get("base/locale.locales")?,
+            step_up: s.get(bilibi_step_up::SERVICE)?,
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
         }))))
     }}],

@@ -15,13 +15,13 @@
     when the item has no page); the Move action is reachable by keyboard and
     shown on focus, and only a movable item has it or a drag handle. -#}
 {% macro item(it, id_suffix="", class="", resize=false) %}
-<div id="{{ it.dom_id }}" data-cal-item data-item-id="{{ it.id }}" data-version="{{ it.version }}" data-start-date="{{ it.start_date }}" data-start-minute="{{ it.start_minute }}" data-length="{{ it.length }}" data-lane="{{ it.lane }}"{% if it.all_day %} data-all-day{% endif %}{% if it.movable && it.leads %} data-movable draggable="true"{% endif %} class="group relative min-w-0 overflow-hidden rounded-sm border border-l-4 border-line {{ it.tone }} bg-surface-sunken px-1 py-0.5 text-xs text-ink focus-within:ring-2 focus-within:ring-brand-strong/40{% if it.movable && it.leads %} cursor-grab{% endif %}{% if !class.is_empty() %} {{ class }}{% endif %}">
+<div id="{{ it.dom_id }}" data-cal-item data-item-id="{{ it.id }}" data-version="{{ it.version }}" data-start-date="{{ it.start_date }}" data-start-minute="{{ it.start_minute }}" data-length="{{ it.length }}" data-lane="{{ it.lane }}"{% if it.all_day %} data-all-day{% endif %}{% if it.movable && it.leads %} data-movable draggable="true"{% endif %} class="group relative min-w-0 overflow-hidden rounded-sm border border-l-4 {{ it.surface }} {{ it.tone }} px-1 py-0.5 text-xs text-ink focus-within:ring-2 focus-within:ring-brand-strong/40{% if it.movable && it.leads %} cursor-grab{% endif %}{% if !class.is_empty() %} {{ class }}{% endif %}">
 {%- if it.href.is_empty() -%}
 <span class="block truncate font-medium text-ink-strong" title="{{ it.name }}"><span class="sr-only">{{ it.name }}</span><span aria-hidden="true">{{ it.title }}</span></span>
 {%- else -%}
 <a href="{{ it.href }}" aria-label="{{ it.name }}" title="{{ it.name }}" class="block truncate font-medium text-ink-strong hover:underline focus-visible:outline-none">{{ it.title }}</a>
 {%- endif -%}
-<span aria-hidden="true" class="block truncate text-ink-muted">{{ it.time }}{% if !it.kind.is_empty() %} · {{ it.kind }}{% endif %}</span>
+<span aria-hidden="true" class="block truncate text-ink-muted">{{ it.time }}{% if !it.kind.is_empty() %} · {{ it.kind }}{% endif %}{% if !it.urgency.is_empty() %} · <span class="font-medium">{{ it.urgency }}</span>{% endif %}</span>
 {%- if it.movable && it.leads -%}
 {% call c::button(button_type="button", event="calendar_move_open", name="id", value=it.id, class="sr-only focus:not-sr-only focus:absolute focus:right-0 focus:top-0 focus:z-10", aria_label="Move {}"|format(it.title)) %}Move…{% endcall %}
 {%- endif -%}
@@ -33,14 +33,14 @@
 
 {#- One agenda entry: the phone form of an item, with a visible Move. -#}
 {% macro agenda_item(it) %}
-<li id="{{ it.dom_id }}" data-cal-item data-item-id="{{ it.id }}" class="flex items-center gap-2 border-l-4 {{ it.tone }} px-2 py-1.5">
+<li id="{{ it.dom_id }}" data-cal-item data-item-id="{{ it.id }}" class="flex items-center gap-2 border-l-4 {{ it.tone }} px-2 py-1.5{% if !it.urgency.is_empty() %} {{ it.surface }}{% endif %}">
 <div class="min-w-0 flex-1">
 {%- if it.href.is_empty() -%}
 <span class="block truncate font-medium text-ink-strong">{{ it.title }}</span>
 {%- else -%}
 <a href="{{ it.href }}" aria-label="{{ it.name }}" class="block truncate font-medium text-ink-strong hover:underline">{{ it.title }}</a>
 {%- endif -%}
-<span class="block truncate text-xs text-ink-muted">{{ it.time }}{% if !it.kind.is_empty() %} · {{ it.kind }}{% endif %}</span>
+<span class="block truncate text-xs text-ink-muted">{{ it.time }}{% if !it.kind.is_empty() %} · {{ it.kind }}{% endif %}{% if !it.urgency.is_empty() %} · <span class="font-medium">{{ it.urgency }}</span>{% endif %}</span>
 </div>
 {%- if it.movable -%}
 {% call c::button(button_type="button", event="calendar_move_open", name="id", value=it.id, aria_label="Move {}"|format(it.title)) %}Move…{% endcall %}
@@ -48,7 +48,7 @@
 </li>
 {% endmacro %}
 
-<section id="{{ id }}" data-hook="Calendar" data-view="{{ view }}" data-snap="{{ snap }}" aria-label="Calendar, {{ title }}" class="space-y-2">
+<section id="{{ id }}" data-hook="Calendar" data-view="{{ view }}" data-snap="{{ snap }}"{% if creatable %} data-creatable{% endif %} aria-label="Calendar, {{ title }}" class="space-y-2">
 <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
 <div class="flex items-center gap-1">
 <a id="{{ id }}-previous" href="{{ previous.href }}" data-patch aria-label="{{ previous.label }}" title="{{ previous.label }}" class="ui-icon-button grid size-7 place-items-center rounded-md text-ink-muted hover:bg-surface-sunken hover:text-ink">{% call c::icon(name="chevron-left", class="size-4") %}{% endcall %}</a>
@@ -64,7 +64,7 @@
 </nav>
 </div>
 </div>
-<p class="text-xs text-ink-muted">{{ zone_note }}</p>
+<p class="text-xs text-ink-muted">{{ zone_note }}{% if creatable && view != "year" %} Click or drag a free time, or tap one, to add something there.{% endif %}</p>
 {%- if follows_browser_zone -%}
 <span id="{{ id }}-zone" data-hook="BrowserTimeZone" hidden></span>
 {%- endif -%}
@@ -80,7 +80,34 @@
 {%- else if shared_empty -%}
 <div id="{{ id }}-no-lanes" class="rounded-md border border-line bg-surface px-3 py-6 text-center text-sm text-ink-muted">No people or resources to show side by side.</div>
 {%- else -%}
-{%- if view == "month" -%}
+{%- if view == "year" -%}
+<div id="{{ id }}-year" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+{%- for month in months -%}
+<section id="{{ month.dom_id }}" aria-label="{{ month.title }}" class="rounded-md border border-line bg-surface p-2">
+<h3 class="pb-1 text-sm font-semibold text-ink-strong"><a href="{{ month.href }}" data-patch class="hover:underline">{{ month.title }}</a></h3>
+<table role="grid" aria-label="{{ month.title }}" class="w-full table-fixed border-separate border-spacing-0.5">
+<thead><tr role="row">{% for name in weekdays %}<th role="columnheader" scope="col" class="text-center text-[10px] font-medium text-ink-muted">{{ name }}</th>{% endfor %}</tr></thead>
+<tbody>
+{%- for week in month.weeks -%}
+<tr role="row">
+{%- for slot in week -%}
+{%- match slot -%}
+{%- when Some with (day) -%}
+<td id="{{ day.dom_id }}" role="gridcell" data-cal-year-day data-date="{{ day.date }}"{% if day.today %} aria-current="date"{% endif %} class="p-0">
+<a href="{{ day.href }}" data-patch aria-label="{{ day.label }}" title="{{ day.label }}" class="grid h-9 place-items-center rounded-sm text-xs tabular-nums hover:bg-surface-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-strong/40 {{ day.mark_class }}{% if day.today %} font-semibold ring-1 ring-brand-strong{% endif %}"><span>{{ day.day }}</span>{% if day.count > 0 %}<span aria-hidden="true" class="-mt-1 text-[10px] font-medium leading-none {% if day.late > 0 %}text-danger-ink{% else %}text-ink-muted{% endif %}">{{ day.count }}{% if day.late > 0 %}!{% endif %}</span>{% endif %}</a>
+</td>
+{%- when None -%}
+<td role="gridcell" aria-hidden="true"></td>
+{%- endmatch -%}
+{%- endfor -%}
+</tr>
+{%- endfor -%}
+</tbody>
+</table>
+</section>
+{%- endfor -%}
+</div>
+{%- else if view == "month" -%}
 <div class="max-md:hidden">
 <table id="{{ id }}-grid" role="grid" aria-label="{{ title }}" class="w-full table-fixed border-separate border-spacing-1">
 <thead><tr role="row">{% for name in weekdays %}<th role="columnheader" scope="col" class="px-1 text-left text-xs font-medium text-ink-muted">{{ name }}</th>{% endfor %}</tr></thead>
