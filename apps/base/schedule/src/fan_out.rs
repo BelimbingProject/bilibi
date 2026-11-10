@@ -153,7 +153,7 @@ impl Schedule {
         if self.tenant_run_exists(occurrence, target.id).await? {
             return Ok(());
         }
-        if target.status != "active" {
+        if target.status != bilibi_tenancy::TenantStatus::Active {
             return self
                 .record_skipped_tenant(
                     execution,

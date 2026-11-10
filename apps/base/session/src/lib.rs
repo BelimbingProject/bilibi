@@ -581,6 +581,59 @@ impl Sessions {
             None => Ok(Termination::NotFound),
         }
     }
+    /// Ends every session of one tenant inside the caller's write: what
+    /// suspending the tenant does, so nobody stays signed in to it. The caller
+    /// decided and authorized that (`core/tenant` holds the platform
+    /// capability); the tenant is a request argument only for that composed
+    /// operation, never an id taken from a session holder. Each ended session
+    /// is a separate audited change that records where it ran and never the
+    /// token, and every live page of it is told after the commit, so a rolled
+    /// back suspension signs nobody out. Returns the count.
+    pub async fn end_tenant(&self, tx: &mut MutationTransaction<'_>, tenant: i64) -> Result<usize> {
+        if tenant <= 0 {
+            return Err(Error::Invalid);
+        }
+        let ended = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let rows = sql
+                        .query(
+                            "DELETE FROM sessions WHERE tenant_id=$1 RETURNING id,user_id,impersonator_id,ip_address,user_agent,signed_in_at::text,last_activity::text",
+                            &[&tenant],
+                        )
+                        .await?;
+                    let mut ids = Vec::with_capacity(rows.len());
+                    let mut changes = Vec::with_capacity(rows.len());
+                    for row in &rows {
+                        let user: i64 = row.get(1);
+                        ids.push(row.get::<_, String>(0));
+                        changes.push(Change {
+                            kind: "session".into(),
+                            id: user,
+                            old: json!({
+                                "tenant_id": tenant, "user_id": user,
+                                "impersonator_id": row.get::<_, Option<i64>>(2),
+                                "ip_address": row.get::<_, Option<String>>(3),
+                                "user_agent": row.get::<_, Option<String>>(4),
+                                "signed_in_at": row.get::<_, Option<String>>(5),
+                                "last_activity": row.get::<_, String>(6), "payload": "[redacted]",
+                            }),
+                            new: json!({"ended_by_tenant_suspension": true}),
+                        });
+                    }
+                    Ok((ids, changes))
+                })
+            })
+            .await?;
+        let count = ended.len();
+        let sessions = self.terminations.clone();
+        tx.after_commit(move || {
+            for id in ended {
+                let _ = sessions.send(Terminated { id, redirect: None });
+            }
+        });
+        Ok(count)
+    }
     /// The account holder ends one of their own other sessions. Ownership is
     /// part of the locked read and delete, not trusted from mounted page state.
     async fn terminate_own(
