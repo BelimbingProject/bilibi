@@ -4,7 +4,7 @@ Use Documents to keep one business document with every revision and link it to t
 
 ## Find a document
 
-Use `core.document.list` to search by name or filter by category, type, status or related record. The results include only documents explicitly shared with you. A record link never gives you document access.
+Use `core.document.list` to search by name or exact integration sync ID or filter by category, type, status or related record. The results include only documents explicitly shared with you. A record link never gives you document access.
 
 Use `core.document.get` for one document, its revisions and its related records. Use the revision's `download_path` only when you have download permission.
 

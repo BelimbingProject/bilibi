@@ -648,7 +648,7 @@ impl Store<'_> {
         let conditions = "d.tenant_id=$1 AND d.deleting_at IS NULL
              AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$2)
              AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$4))
-             AND ($5 = '' OR d.name ILIKE $6)
+             AND ($5 = '' OR d.name ILIKE $6 OR d.sync_id = $5)
              AND ($7::text IS NULL OR d.category = $7)
              AND ($8::text IS NULL OR d.document_type = $8)
              AND ($9::text IS NULL OR d.status = $9)
