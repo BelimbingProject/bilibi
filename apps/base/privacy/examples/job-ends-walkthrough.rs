@@ -371,11 +371,11 @@ async fn main() -> Result<()> {
     let stale = privacy
         .approve(&mut client, &admin.scope, stale.id, stale.version)
         .await?;
-    // Hold back the last store job's ending (disposable database only): it is
-    // told only after the request has failed and run again.
+    // Hold back the address store job's ending (disposable database only): it
+    // is told only after the request has failed and run again.
     let held: i64 = client
         .query_one(
-            &format!("UPDATE base_queue_jobs SET ending_after=clock_timestamp()+interval '1 hour' WHERE id=(SELECT max(id) FROM base_queue_jobs WHERE worker_id='base/privacy-request-store' AND args->>'request_id'='{}') RETURNING id", stale.id),
+            &format!("UPDATE base_queue_jobs SET ending_after=clock_timestamp()+interval '1 hour' WHERE worker_id='base/privacy-request-store' AND args->>'store'='core/address.addresses' AND args->>'request_id'='{}' RETURNING id", stale.id),
             &[],
         )
         .await?
@@ -477,6 +477,10 @@ async fn main() -> Result<()> {
     println!("== C: an ending told late for a job of an earlier run");
     summary(&privacy.request(&**client, &second.scope, stale.id).await?);
     jobs(&client, stale.id).await?;
+    client
+        .batch_execute("ALTER TABLE addresses RENAME COLUMN raw_input TO raw_input_broken")
+        .await?;
+    println!("the address store's export is broken, so its new job cannot finish");
     let current = privacy.request(&**client, &second.scope, stale.id).await?;
     println!(
         "user {} runs it again: {}",
@@ -489,6 +493,22 @@ async fn main() -> Result<()> {
         )
         .await
     );
+    for attempt in 0..60 {
+        let failing: i64 = client
+            .query_one(
+                &format!("SELECT count(*) FROM base_queue_jobs WHERE id>$1 AND worker_id='base/privacy-request-store' AND args->>'store'='core/address.addresses' AND args->>'request_id'='{}' AND state='retryable'", stale.id),
+                &[&held],
+            )
+            .await?
+            .get(0);
+        if failing > 0 {
+            break;
+        }
+        if attempt == 59 {
+            return Err("the new address job did not fail".into());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     client
         .execute(
             "UPDATE base_queue_jobs SET ending_after=clock_timestamp() WHERE id=$1",
@@ -497,17 +517,30 @@ async fn main() -> Result<()> {
         .await?;
     println!("the held ending of job {held} is released; waiting 20 s");
     tokio::time::sleep(Duration::from_secs(20)).await;
+    let during = privacy.request(&**client, &second.scope, stale.id).await?;
+    summary(&during);
     jobs(&client, stale.id).await?;
-    let after = settle(&privacy, &client, &second.scope, stale.id, 60).await?;
-    summary(&after);
     println!(
-        "the new run was {} by the old ending",
-        if after.status == "failed" {
-            "failed"
+        "the new run is {} after the old ending was told",
+        if during.status == "running" {
+            "still running"
         } else {
-            "not failed"
+            "not running"
         }
     );
+    client
+        .batch_execute("ALTER TABLE addresses RENAME COLUMN raw_input_broken TO raw_input")
+        .await?;
+    client
+        .execute(
+            &format!("UPDATE base_queue_jobs SET available_at=clock_timestamp() WHERE id>$1 AND args->>'request_id'='{}' AND state='retryable'", stale.id),
+            &[&held],
+        )
+        .await?;
+    println!("the address store is fixed");
+    let after = settle(&privacy, &client, &second.scope, stale.id, 90).await?;
+    summary(&after);
+    println!("the new run ended {}", after.status);
     history(&client, stale.id).await?;
 
     println!("== B: an erasure's store fails until its job runs out of attempts");
