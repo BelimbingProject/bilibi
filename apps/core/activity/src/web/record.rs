@@ -9,8 +9,8 @@ use super::{
     event, field_of,
     form::Dialog,
     guest_person::{self, PersonDialog},
-    icon, label, refusal, reminder_choices, render, sentences, status_badge, BrowserZone, Clock,
-    Pages, Refusal, Region, FIELDS,
+    icon, label, refusal, reminder_choices, render, sentences, series_delete, status_badge,
+    BrowserZone, Clock, Pages, Refusal, Region, FIELDS,
 };
 use crate::{Activity, Direction, GuestRow, Kind, Priority, Reference, Response, RECORD};
 use askama::Template;
@@ -275,13 +275,7 @@ impl Detail {
         match outcome {
             Ok(count) => Ok(Some(LiveBody {
                 redirect: Some("/activities".into()),
-                flash: Some((
-                    StatusKind::Success,
-                    match count {
-                        1 => "Activity deleted.".to_owned(),
-                        n => format!("{n} occurrences deleted."),
-                    },
-                )),
+                flash: Some((StatusKind::Success, series_delete::deleted(count))),
                 ..LiveBody::default()
             })),
             Err(refusal) => {
@@ -1222,6 +1216,7 @@ impl Detail {
     ) -> Result<Html> {
         let users: Vec<i64> = guests.iter().filter_map(|g| g.user_id).collect();
         let names = self.pages.names(scope, &users).await?;
+        let busy = self.availability(scope, a, guests).await?;
         let people: Vec<Reference> = guests
             .iter()
             .filter_map(|g| {
@@ -1292,6 +1287,21 @@ impl Detail {
             } else {
                 Html::EMPTY
             };
+            if let (Some(user), Some(busy)) = (guest.user_id, &busy) {
+                if guest.response != Response::Declined.code() {
+                    who.push(&Html::text(" "));
+                    who.push(&match busy.get(&user) {
+                        Some(with) => render(Badge::status(
+                            BadgeKind::Warning,
+                            &match with {
+                                Some(title) => format!("Busy: {title}"),
+                                None => "Busy".to_owned(),
+                            },
+                        ))?,
+                        None => render(Badge::status(BadgeKind::Success, "Free"))?,
+                    });
+                }
+            }
             if a.kind.timed() && guest.user_id.is_none() && !emails.contains_key(&guest.id) {
                 who.push(&Html::text(" "));
                 who.push(&render(Badge::status(
@@ -1362,7 +1372,7 @@ impl Detail {
             id: "activity-guests-heading",
             title: "Guests",
             description: if a.kind.timed() {
-                "Send invites tells colleagues in the bell and emails the others."
+                "Free or Busy shows whether a colleague has another call or meeting at this time. Send invites tells colleagues in the bell and emails the others."
             } else {
                 ""
             },
@@ -1421,6 +1431,42 @@ impl Detail {
             body,
             ..Card::default()
         })
+    }
+
+    /// Which account guests are busy for this slot, before anyone is told:
+    /// each busy account maps to the title of the other call or meeting only
+    /// when the reader may see it (`Activities::conflicts` decides), else to
+    /// `None`. `None` overall when the slot has no times or the activity is
+    /// closed, so no badge is drawn.
+    async fn availability(
+        &self,
+        scope: &Scope,
+        a: &Activity,
+        guests: &[GuestRow],
+    ) -> Result<Option<HashMap<i64, Option<String>>>> {
+        let (Some(starts), Some(ends)) = (a.starts_at, a.ends_at) else {
+            return Ok(None);
+        };
+        if !a.kind.timed() || a.is_closed() {
+            return Ok(None);
+        }
+        let users: Vec<i64> = guests.iter().filter_map(|g| g.user_id).collect();
+        if users.is_empty() {
+            return Ok(None);
+        }
+        let conflicts = self
+            .pages
+            .activities
+            .conflicts(scope, starts, ends, &users, Some(a.id))
+            .await?;
+        let mut busy = HashMap::new();
+        for c in conflicts {
+            let entry: &mut Option<String> = busy.entry(c.user).or_insert(None);
+            if entry.is_none() {
+                *entry = c.title;
+            }
+        }
+        Ok(Some(busy))
     }
 
     /// Other open calls and meetings at the same time for the assignee or
@@ -1709,7 +1755,7 @@ impl Detail {
             body.push(&series_dialog(&a, form)?);
         }
         if let (Some(errors), true) = (&self.delete_dialog, editable) {
-            body.push(&delete_dialog(&a, errors)?);
+            body.push(&series_delete::dialog(&a, errors, true)?);
         }
         if let (Some(dialog), true) = (&self.person_dialog, editable) {
             body.push(&guest_person::dialog(dialog)?);
@@ -1756,7 +1802,7 @@ impl LiveState<Scope, Error> for Detail {
 }
 
 /// An error list above a dialog's fields.
-fn dialog_errors(id: &str, errors: &[String]) -> Result<Html> {
+pub(super) fn dialog_errors(id: &str, errors: &[String]) -> Result<Html> {
     if errors.is_empty() {
         return Ok(Html::EMPTY);
     }
@@ -1836,55 +1882,6 @@ fn series_dialog(a: &Activity, form: &SeriesForm) -> Result<Html> {
         cancel_event: "cancel_series",
         width: ModalWidth::Wide,
         description: "Only the values you change are copied. A new time moves each open occurrence by the same amount; held and completed ones keep theirs. Status changes one occurrence at a time.",
-        body: form,
-        ..Modal::default()
-    })
-}
-
-/// Delete on an occurrence of a series: which ones.
-fn delete_dialog(a: &Activity, errors: &[String]) -> Result<Html> {
-    let mut body = dialog_errors("activity-delete-errors", errors)?;
-    body.push(&render(
-        Field::in_form("delete", "apply")
-            .id("activity-delete-apply")
-            .label("Delete")
-            .kind(InputKind::Select)
-            .value("one")
-            .options(choices(&[
-                ("Only this occurrence", "one"),
-                ("This occurrence and the later ones", "following"),
-                ("Every occurrence, held and completed ones too", "all"),
-            ])),
-    )?);
-    let mut actions = render(Button {
-        id: "activity-delete-cancel",
-        button_type: "button",
-        event: "cancel_delete_series",
-        body: Html::text("Cancel"),
-        ..Button::default()
-    })?;
-    actions.push(&render(Button {
-        id: "activity-delete-confirm",
-        button_type: "submit",
-        variant: ButtonVariant::Danger,
-        working: "Deleting…",
-        body: Html::text("Delete"),
-        ..Button::default()
-    })?);
-    let form = render(Form {
-        id: "activity-delete-form",
-        event: "delete_series",
-        change: false,
-        body,
-        actions,
-        ..Form::default()
-    })?;
-    render(Modal {
-        id: "activity-delete-dialog",
-        title: &format!("Delete “{}”", a.title),
-        cancel_event: "cancel_delete_series",
-        width: ModalWidth::Narrow,
-        description: "This is one occurrence of a repeating series. Deleted occurrences disappear from every list and record page.",
         body: form,
         ..Modal::default()
     })

@@ -3,6 +3,7 @@
 //! every write calls an operation contract through `PageContracts`
 //! (declared in `PageWrites`). No Bilimbi counterpart; the shapes follow
 //! Core Person's list and record pages and Core Company's record panels.
+mod feed;
 mod form;
 mod guest_person;
 mod list;
@@ -10,6 +11,7 @@ mod panel;
 mod record;
 mod reminder_choices;
 mod reminder_defaults;
+mod series_delete;
 
 use crate::{Activities, Activity, Kind, Status};
 use askama::Template;
@@ -231,9 +233,33 @@ pub(crate) fn icon(kind: Kind) -> &'static str {
     }
 }
 
+/// How long before it starts or falls due an open activity counts as
+/// imminent. Fixed for now; a tenant setting is the follow-up
+/// (`core/activity` README, Calendar).
+pub(crate) const IMMINENT_HOURS: i64 = 24;
+
+/// An open activity's timing: overdue once its start or due time has
+/// passed, imminent inside [`IMMINENT_HOURS`]. A closed one, a note and one
+/// with no time are neither.
+pub(crate) fn urgency(activity: &Activity, now: Timestamp) -> Option<bilibi_ui::calendar::Urgency> {
+    use bilibi_ui::calendar::Urgency;
+    if activity.is_closed() {
+        return None;
+    }
+    let when = activity.starts_at.or(activity.due_at)?;
+    if when < now {
+        Some(Urgency::Overdue)
+    } else if when < now + jiff::SignedDuration::from_hours(IMMINENT_HOURS) {
+        Some(Urgency::Imminent)
+    } else {
+        None
+    }
+}
+
 /// The status as a badge: closed ones neutral or green, open ones overdue in
 /// red and imminent (within a day) in amber.
 pub(crate) fn status_badge(activity: &Activity) -> Result<Html> {
+    use bilibi_ui::calendar::Urgency;
     let Some(status) = activity.status else {
         return render(Badge::status(BadgeKind::Plain, "Note"));
     };
@@ -243,11 +269,10 @@ pub(crate) fn status_badge(activity: &Activity) -> Result<Html> {
             _ => BadgeKind::Neutral,
         }
     } else {
-        let now = Timestamp::now();
-        match activity.starts_at.or(activity.due_at) {
-            Some(when) if when < now => BadgeKind::Danger,
-            Some(when) if when < now + jiff::SignedDuration::from_hours(24) => BadgeKind::Warning,
-            _ => BadgeKind::Neutral,
+        match urgency(activity, Timestamp::now()) {
+            Some(Urgency::Overdue) => BadgeKind::Danger,
+            Some(Urgency::Imminent) => BadgeKind::Warning,
+            None => BadgeKind::Neutral,
         }
     };
     render(Badge::status(kind, status.label()))
@@ -351,6 +376,7 @@ impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         match operation {
             "list" | "detail" => Some("Activities"),
+            "feed" => Some("Calendar feed"),
             _ => None,
         }
     }
@@ -395,6 +421,7 @@ impl Pages {
                 record::Detail::new(self.shared(), scope, record_id(request)?, request.framed)
                     .await?,
             ),
+            "feed" => Box::new(feed::Feed::new(self.shared())?),
             "company" | "person" | "record" => Box::new(panel::Panel::new(self.shared(), request)?),
             _ => return Err(Error::NotFound),
         })

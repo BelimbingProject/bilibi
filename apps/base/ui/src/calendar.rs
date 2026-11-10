@@ -45,8 +45,13 @@ pub const MOVE_SUBMIT: &str = "calendar_move_submit";
 pub const MOVE_OPEN: &str = "calendar_move_open";
 /// The dialog's Cancel and Escape.
 pub const MOVE_CANCEL: &str = "calendar_move_cancel";
+/// The page event a click or drag on a free slot raises: `date` and, for a
+/// time column, `minute` and `length`; a day cell sends `all_day` (see
+/// [`CalendarSlot::from_event`]). Only a calendar with
+/// [`Calendar::creatable`] raises it.
+pub const SLOT: &str = "calendar_slot";
 /// The names of the events above, for an owner's `match`.
-pub const EVENTS: [&str; 4] = [MOVE, MOVE_SUBMIT, MOVE_OPEN, MOVE_CANCEL];
+pub const EVENTS: [&str; 5] = [MOVE, MOVE_SUBMIT, MOVE_OPEN, MOVE_CANCEL, SLOT];
 
 /// The years offered, as the work calendar's pages do.
 const YEARS: std::ops::RangeInclusive<i16> = 1900..=2999;
@@ -67,18 +72,22 @@ pub enum CalendarView {
     #[default]
     Week,
     Month,
+    /// Twelve small months; a day links to its own day view.
+    Year,
     /// One day, a column for each lane.
     Shared,
 }
 
 impl CalendarView {
-    pub const ALL: [CalendarView; 4] = [Self::Day, Self::Week, Self::Month, Self::Shared];
+    pub const ALL: [CalendarView; 5] =
+        [Self::Day, Self::Week, Self::Month, Self::Year, Self::Shared];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Day => "day",
             Self::Week => "week",
             Self::Month => "month",
+            Self::Year => "year",
             Self::Shared => "shared",
         }
     }
@@ -88,6 +97,7 @@ impl CalendarView {
             Self::Day => "Day",
             Self::Week => "Week",
             Self::Month => "Month",
+            Self::Year => "Year",
             Self::Shared => "Shared",
         }
     }
@@ -174,10 +184,14 @@ impl CalendarState {
             .collect()
     }
 
-    /// Every date the view draws: the day, its Monday-first week, or the
-    /// whole weeks that hold its month.
+    /// Every date the view draws: the day, its Monday-first week, the
+    /// whole weeks that hold its month, or every day of its year.
     pub fn dates(&self) -> Vec<Date> {
         let (first, count) = match self.view {
+            CalendarView::Year => (
+                Date::constant(self.date.year(), 1, 1),
+                if self.date.in_leap_year() { 366 } else { 365 },
+            ),
             CalendarView::Day | CalendarView::Shared => (self.date, 1),
             CalendarView::Week => (monday(self.date), 7),
             CalendarView::Month => {
@@ -210,6 +224,7 @@ impl CalendarState {
             CalendarView::Day | CalendarView::Shared => self.date.checked_add((sign).days()),
             CalendarView::Week => self.date.checked_add((7 * sign).days()),
             CalendarView::Month => self.date.checked_add((sign).months()),
+            CalendarView::Year => self.date.checked_add((sign).years()),
         };
         moved
             .ok()
@@ -239,6 +254,35 @@ pub enum CalendarWhen {
     AllDay { first: Date, last: Date },
 }
 
+/// An open item's timing, drawn beside its kind colour (never instead of
+/// it, and always with a word): the owner decides which items are late and
+/// which start soon.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Urgency {
+    /// It was due or began before now and is still open.
+    Overdue,
+    /// It starts or falls due inside the owner's imminent window.
+    Imminent,
+}
+
+impl Urgency {
+    /// The word drawn and read out with the item.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overdue => "Overdue",
+            Self::Imminent => "Due soon",
+        }
+    }
+
+    /// The border and background of the item's box.
+    pub(crate) fn surface(self) -> &'static str {
+        match self {
+            Self::Overdue => "border-danger-line bg-danger-surface",
+            Self::Imminent => "border-warning-line bg-warning-surface",
+        }
+    }
+}
+
 /// One record on the calendar. `version` is the owner's own version token for
 /// the record; it comes back with every move.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,6 +301,7 @@ pub struct CalendarItem {
     pub movable: bool,
     pub resizable: bool,
     pub version: String,
+    pub urgency: Option<Urgency>,
 }
 
 impl CalendarItem {
@@ -290,7 +335,14 @@ impl CalendarItem {
             movable: false,
             resizable: false,
             version: String::new(),
+            urgency: None,
         }
+    }
+
+    /// Marks an open item as overdue or starting soon.
+    pub fn urgency(mut self, urgency: Option<Urgency>) -> Self {
+        self.urgency = urgency;
+        self
     }
 
     pub fn kind(mut self, kind: impl Into<String>, tone: u8) -> Self {
@@ -363,6 +415,10 @@ pub struct Calendar {
     /// calendar then reports it as the `browser_timezone` event, which the
     /// owner reads (`bilibi_datetime::Clock::resolve`) to pick `zone`.
     pub follows_browser_zone: bool,
+    /// The viewer may create records: a click or a drag on a free slot, and
+    /// a click on an empty day, raises [`SLOT`]. Set it only when they hold
+    /// the create capability.
+    pub creatable: bool,
 }
 
 impl Calendar {
@@ -388,6 +444,7 @@ impl Calendar {
             moving: None,
             move_errors: Vec::new(),
             follows_browser_zone: false,
+            creatable: false,
         }
     }
 
@@ -542,6 +599,74 @@ pub fn item_id(payload: &serde_json::Value) -> Option<&str> {
         .filter(|id| !id.is_empty() && id.len() <= 128)
 }
 
+/// A free slot the viewer chose to create a record in: a click or a drag on
+/// a time column, or a click on an empty day. The owner opens its own create
+/// dialog with `when` filled in and writes through its own operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CalendarSlot {
+    /// `Timed` for a time column, `AllDay` for a day cell (one date).
+    pub when: CalendarWhen,
+    pub lane: Option<String>,
+}
+
+impl CalendarSlot {
+    /// Decodes [`SLOT`] (`date`, `minute`, `length`, optional `lane`; a day
+    /// cell sends `all_day` instead of the minute and length) in `zone`. A
+    /// wall clock time in a daylight-saving gap becomes the first valid
+    /// instant. The `Err` is a sentence for the person.
+    pub fn from_event(payload: &serde_json::Value, zone: &str) -> Result<Self, String> {
+        let invalid = || "Choose a valid date and time.".to_owned();
+        let zone = TimeZone::get(zone).map_err(|_| invalid())?;
+        let text = |key: &str| payload.get(key).and_then(|value| value.as_str());
+        let number = |key: &str| {
+            payload.get(key).and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            })
+        };
+        let date: Date = text("date")
+            .and_then(|date| date.parse().ok())
+            .filter(|date: &Date| YEARS.contains(&date.year()))
+            .ok_or_else(invalid)?;
+        let lane = text("lane")
+            .filter(|lane| !lane.is_empty() && lane.len() <= 128)
+            .map(str::to_owned);
+        if text("all_day") == Some("true") {
+            return Ok(Self {
+                when: CalendarWhen::AllDay {
+                    first: date,
+                    last: date,
+                },
+                lane,
+            });
+        }
+        let minute = number("minute").filter(|minute| (0..1440).contains(minute));
+        let length = number("length").filter(|length| (1..=1440).contains(length));
+        let (minute, length) = minute.zip(length).ok_or_else(invalid)?;
+        let start = date
+            .at(0, 0, 0, 0)
+            .checked_add(SignedDuration::from_mins(minute))
+            .map_err(|_| invalid())?;
+        let end = start
+            .checked_add(SignedDuration::from_mins(length))
+            .map_err(|_| invalid())?;
+        let instant = |civil: DateTime| {
+            zone.to_ambiguous_zoned(civil)
+                .compatible()
+                .map(|zoned| zoned.timestamp())
+                .map_err(|_| invalid())
+        };
+        Ok(Self {
+            when: CalendarWhen::Timed {
+                start: instant(start)?,
+                end: instant(end)?,
+            },
+            lane,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -585,6 +710,30 @@ struct ItemView {
     place: String,
     /// The segment keeps going into the next day.
     runs_on: bool,
+    /// The box's border and background: the neutral one, or the urgency's.
+    surface: &'static str,
+    /// "Overdue" or "Due soon", empty for neither.
+    urgency: &'static str,
+}
+
+/// One small month of the year view.
+struct YearMonthView {
+    dom_id: String,
+    title: String,
+    href: String,
+    weeks: Vec<Vec<Option<YearDayView>>>,
+}
+
+struct YearDayView {
+    dom_id: String,
+    date: String,
+    day: String,
+    href: String,
+    today: bool,
+    mark_class: &'static str,
+    count: usize,
+    late: usize,
+    label: String,
 }
 
 struct ColumnView {
@@ -650,6 +799,8 @@ struct View {
     columns: Vec<ColumnView>,
     weekdays: [&'static str; 7],
     cells: Vec<CellView>,
+    months: Vec<YearMonthView>,
+    creatable: bool,
     agenda: Vec<AgendaGroup>,
     empty: bool,
     shared_empty: bool,
@@ -765,6 +916,7 @@ impl View {
                 CalendarView::Day | CalendarView::Shared => "Previous day",
                 CalendarView::Week => "Previous week",
                 CalendarView::Month => "Previous month",
+                CalendarView::Year => "Previous year",
             },
         };
         let next = NavLink {
@@ -773,6 +925,7 @@ impl View {
                 CalendarView::Day | CalendarView::Shared => "Next day",
                 CalendarView::Week => "Next week",
                 CalendarView::Month => "Next month",
+                CalendarView::Year => "Next year",
             },
         };
         let today = NavLink {
@@ -799,6 +952,7 @@ impl View {
         };
         let mut columns = Vec::new();
         let mut cells = Vec::new();
+        let mut months = Vec::new();
         match state.view {
             CalendarView::Day | CalendarView::Week | CalendarView::Shared => {
                 let headings: Vec<(Date, Option<&CalendarLane>)> =
@@ -889,6 +1043,65 @@ impl View {
                     columns.push(column);
                 }
             }
+            CalendarView::Year => {
+                let year = state.date.year();
+                for month in 1..=12i8 {
+                    let first = Date::constant(year, month, 1);
+                    let lead = first.weekday().to_monday_zero_offset() as usize;
+                    let mut weeks: Vec<Vec<Option<YearDayView>>> = Vec::new();
+                    let mut week: Vec<Option<YearDayView>> = (0..lead).map(|_| None).collect();
+                    for day in 1..=first.days_in_month() {
+                        let date = Date::constant(year, month, day);
+                        let on: Vec<&(&CalendarItem, Civil)> =
+                            items.iter().filter(|(_, civil)| civil.on(date)).collect();
+                        let count = on.len();
+                        let late = on
+                            .iter()
+                            .filter(|(item, _)| item.urgency == Some(Urgency::Overdue))
+                            .count();
+                        let (mark_class, mark_text) = mark(date);
+                        let mut label = date.strftime("%A %-d %B %Y").to_string();
+                        if date == calendar.today {
+                            label.push_str(", today");
+                        }
+                        if !mark_text.is_empty() {
+                            label.push_str(&format!(", {mark_text}"));
+                        }
+                        label.push_str(&match (count, late) {
+                            (0, _) => ", nothing scheduled".to_owned(),
+                            (1, 0) => ", 1 item".to_owned(),
+                            (n, 0) => format!(", {n} items"),
+                            (n, l) => format!(", {n} items, {l} overdue"),
+                        });
+                        week.push(Some(YearDayView {
+                            dom_id: format!("{}-day-{}", calendar.id, date),
+                            date: date.to_string(),
+                            day: day.to_string(),
+                            href: address(CalendarView::Day, date),
+                            today: date == calendar.today,
+                            mark_class,
+                            count,
+                            late,
+                            label,
+                        }));
+                        if week.len() == 7 {
+                            weeks.push(std::mem::take(&mut week));
+                        }
+                    }
+                    if !week.is_empty() {
+                        while week.len() < 7 {
+                            week.push(None);
+                        }
+                        weeks.push(week);
+                    }
+                    months.push(YearMonthView {
+                        dom_id: format!("{}-month-{:04}-{:02}", calendar.id, year, month),
+                        title: first.strftime("%B").to_string(),
+                        href: address(CalendarView::Month, first),
+                        weeks,
+                    });
+                }
+            }
             CalendarView::Month => {
                 for (index, date) in dates.iter().enumerate() {
                     let outside = date.month() != state.date.month();
@@ -938,7 +1151,9 @@ impl View {
         // The agenda a phone shows in place of the grid: the same items, by
         // day (by lane when shared), each with its Move action.
         let mut agenda = Vec::new();
-        if state.view == CalendarView::Shared {
+        if state.view == CalendarView::Year {
+            // The twelve small months already fit a phone.
+        } else if state.view == CalendarView::Shared {
             for lane in &shown_lanes {
                 let listed: Vec<ItemView> = items
                     .iter()
@@ -972,6 +1187,7 @@ impl View {
                 state.date.strftime("%A %-d %B %Y").to_string()
             }
             CalendarView::Month => state.date.strftime("%B %Y").to_string(),
+            CalendarView::Year => state.date.strftime("%Y").to_string(),
             CalendarView::Week => {
                 let (first, last) = (dates[0], dates[dates.len() - 1]);
                 if first.month() == last.month() {
@@ -1018,6 +1234,8 @@ impl View {
             columns,
             weekdays: WEEKDAYS,
             cells,
+            months,
+            creatable: calendar.creatable,
             agenda,
             empty,
             shared_empty,
@@ -1067,6 +1285,9 @@ impl View {
         if !item.kind.is_empty() {
             name.push_str(&format!(", {}", item.kind));
         }
+        if let Some(urgency) = item.urgency {
+            name.push_str(&format!(", {}", urgency.label().to_lowercase()));
+        }
         ItemView {
             dom_id: format!(
                 "{}-item-{}{}-{}",
@@ -1096,6 +1317,10 @@ impl View {
             },
             place: String::new(),
             runs_on: false,
+            surface: item
+                .urgency
+                .map_or("border-line bg-surface-sunken", Urgency::surface),
+            urgency: item.urgency.map_or("", Urgency::label),
         }
     }
 
