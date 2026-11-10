@@ -89,7 +89,7 @@ Every stored file carries a scan state; only a readable one is ever served. Deci
 - Each job carries the file's scan generation, which a rescan raises. A verdict is recorded only while the file still awaits that generation, so an older scan still running cannot decide a rescanned file.
 - A file larger than the scanner's `max_bytes`, measured from the stored bytes and never from the size an owner declared, is never sent: `failed` under `required`, `unscanned` under `when_available`, with reason `too_large`.
 - Each verdict is an audited `Change` on the asset by `media-scanner`: state, scanner, version, signature and reason, never filename, key or bytes.
-- An infected file notifies its uploader and the tenant's accounts holding `admin.media.quarantine.manage` (live accounts only, at most 500).
+- An infected file notifies its uploader (a person; a system principal has none) and the tenant's accounts holding `admin.media.quarantine.manage` (live accounts only, at most 500).
 - An impersonated session cannot store files while a scanner is bound: Queue refuses to enqueue for an impersonator.
 
 ### Policy (`media.scan.policy`, global)
