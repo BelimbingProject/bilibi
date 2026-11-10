@@ -12,3 +12,4 @@ ALTER TABLE core_document_revisions ADD COLUMN label text CHECK (label IS NULL O
 ALTER TABLE core_document_revisions ADD COLUMN replaces_revision_id bigint;
 ALTER TABLE core_document_revisions ADD CONSTRAINT core_document_revisions_replaces_not_self CHECK (replaces_revision_id IS NULL OR replaces_revision_id <> id);
 ALTER TABLE core_document_revisions ADD CONSTRAINT core_document_revisions_replaces_fk FOREIGN KEY (tenant_id, replaces_revision_id) REFERENCES core_document_revisions(tenant_id, id);
+CREATE INDEX core_document_revisions_replaces_idx ON core_document_revisions(tenant_id, replaces_revision_id) WHERE replaces_revision_id IS NOT NULL;
