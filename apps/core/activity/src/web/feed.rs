@@ -2,20 +2,50 @@
 //! (`feed.rs`). They see whether they have one, when it was made and last
 //! read; make, replace or revoke it; and see a new link once. An
 //! administrator who holds `core.activity.feed.manage` also sees every
-//! person's link and revokes any. Every write calls the operation contract
-//! agents use (`core.activity.create_feed_key`, `.revoke_feed_key`).
+//! person's link, as a list with search, sort and pages in the address, and
+//! revokes any. Every write calls the operation contract agents use
+//! (`core.activity.create_feed_key`, `.revoke_feed_key`).
 use super::{event, refusal, render, sentences, BrowserZone, Clock, Pages, Refusal};
-use crate::{FeedKey, FEED_PATH};
+use crate::{FeedKeyPage, FeedKeyQuery, FeedKeySort, FEED_PATH};
 use askama::Template;
 use bilibi_agent_api::Error as ContractError;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    page::*, params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ConfirmDialog,
-    Fact, Facts, FlashGroup, FlexRow, FlexTable, Form, Header, Html, IconButton, IconKind,
-    ListColumns, Modal, ModalWidth, ProofInput, SectionHeading, StatusKind, NO_FLASH,
+    list_state::{InvalidPageSize, FILTERS_FORM},
+    page::*,
+    params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome,
+    ConfirmDialog, EmptyState, Fact, Facts, FilterToolbar, FlashGroup, FlexRow, FlexTable, Form,
+    Header, Html, IconButton, IconKind, ListColumns, ListSpec, ListState, Modal, ModalWidth,
+    PageCounts, Pagination, ProofInput, SectionHeading, SortDir, StatusKind, TableEmpty,
+    ToolbarControl, NO_FLASH,
 };
 use serde_json::{json, Value};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, LazyLock},
+};
+
+/// Everyone's links: newest first, sortable by when each was made or last
+/// read, searched by the person's name or account email.
+const SIZES: [u64; 3] = [25, 50, 100];
+static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
+    ListSpec {
+        sortable: BTreeMap::from([
+            ("made".into(), SortDir::Desc),
+            ("used".into(), SortDir::Desc),
+        ]),
+        default_sort: Some("made".into()),
+        page_sizes: SIZES.to_vec(),
+        default_page_size: 25,
+        page_size_param: "per_page".into(),
+        invalid_page_size: InvalidPageSize::Default,
+        omit_blank: vec!["search".into()],
+        ..ListSpec::default()
+    }
+    .shared()
+    .expect("feed key list spec")
+});
 
 #[derive(Template)]
 #[template(path = "feed_settings.html")]
@@ -51,6 +81,8 @@ enum Confirm {
 pub(crate) struct Feed {
     pages: Pages,
     zone: BrowserZone,
+    /// Everyone's links: the search, sort and page in the address.
+    list: ListState,
     columns: ListColumns,
     /// The link made by this visit, shown until the page is left.
     link: Option<String>,
@@ -61,16 +93,17 @@ pub(crate) struct Feed {
 }
 
 impl Feed {
-    pub fn new(pages: Pages) -> Result<Self> {
+    pub fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
         Ok(Self {
             pages,
             zone: BrowserZone::new(),
+            list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: ListColumns::mount(
                 "feed-keys",
                 vec![
                     BuiltinColumn::new("person", "Person"),
-                    BuiltinColumn::new("made", "Made"),
-                    BuiltinColumn::new("used", "Last read"),
+                    BuiltinColumn::new("made", "Made").sortable("made"),
+                    BuiltinColumn::new("used", "Last read").sortable("used"),
                 ],
             )
             .map_err(|_| Error::Internal)?,
@@ -236,10 +269,26 @@ impl Feed {
                     ));
                 }
             }
+            "filters" => {
+                let filters = params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                self.list.apply_filters(&filters);
+            }
+            "clear" => self
+                .list
+                .apply_filters(&HashMap::from([("search".into(), String::new())])),
+            "page" => self
+                .list
+                .put_page(value.get("page").and_then(Value::as_str)),
+            "sort" => {
+                self.list.next_sort(value["sort"].as_str().unwrap_or(""));
+            }
             "grid" => {
                 let values = params::string_values_checked(value, params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
-                let _ = self.columns.handle(&values);
+                if let ColumnsOutcome::Sort(key) = self.columns.handle(&values) {
+                    self.list.next_sort(&key);
+                }
             }
             "clear-flash" => self.flash = None,
             _ => return Err(Error::Invalid),
@@ -330,7 +379,10 @@ impl Feed {
             }
             None => Html::EMPTY,
         };
-        let everyone = self.everyone(scope, &clock).await?;
+        let (everyone, administrator) = match self.everyone(scope, &clock).await? {
+            Some(everyone) => (everyone, true),
+            None => (Html::EMPTY, false),
+        };
         let dialog = match &self.confirm {
             None => Html::EMPTY,
             Some(Confirm::Make) => self.code_dialog(scope, "make_link", "Make your calendar link", "The link shows what you take part in, read only. Anyone who has it can read that until you revoke it. Enter your current authenticator code to make it.", "Make link").await?,
@@ -383,6 +435,13 @@ impl Feed {
         })?;
         Ok(LiveBody {
             html: region.to_string(),
+            // The list's search, sort and page belong to the address only
+            // for the administrator who sees the list.
+            query: if administrator {
+                self.list.to_params()
+            } else {
+                HashMap::new()
+            },
             ..LiveBody::default()
         })
     }
@@ -451,18 +510,51 @@ impl Feed {
         })
     }
 
-    /// Every person's link, for an administrator; nothing for anyone else.
-    async fn everyone(&mut self, scope: &Scope, clock: &Clock) -> Result<Html> {
-        let keys: Vec<FeedKey> = match self.pages.activities.feed_keys(scope).await {
-            Ok(keys) => keys,
-            Err(Error::Forbidden) => return Ok(Html::EMPTY),
-            Err(error) => return Err(error),
+    fn query(&self) -> FeedKeyQuery {
+        FeedKeyQuery {
+            search: self.list.search.trim().chars().take(200).collect(),
+            sort: match self.list.sort_by.as_deref() {
+                Some("used") => FeedKeySort::Used,
+                _ => FeedKeySort::Made,
+            },
+            descending: self.list.sort_dir != Some(SortDir::Asc),
+            page: self.list.page as i64,
+            page_size: self.list.page_size as i64,
+        }
+    }
+
+    async fn read(&self, scope: &Scope) -> Result<Option<FeedKeyPage>> {
+        match self.pages.activities.feed_keys(scope, &self.query()).await {
+            Ok(page) => Ok(Some(page)),
+            Err(Error::Forbidden) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One page of the links, or `None` for a reader who may not see them.
+    async fn keys(&mut self, scope: &Scope) -> Result<Option<FeedKeyPage>> {
+        let Some(page) = self.read(scope).await? else {
+            return Ok(None);
         };
+        let total_pages = (page.total.max(0) as u64).div_ceil(self.list.page_size);
+        if self.list.clamp_to_last_page(total_pages, true) {
+            return self.read(scope).await;
+        }
+        Ok(Some(page))
+    }
+
+    /// Every person's link, for an administrator: a list with search, sort
+    /// and pages. `None` for anyone else.
+    async fn everyone(&mut self, scope: &Scope, clock: &Clock) -> Result<Option<Html>> {
+        let Some(page) = self.keys(scope).await? else {
+            return Ok(None);
+        };
+        let keys = &page.entries;
         let users: Vec<i64> = keys.iter().map(|key| key.user).collect();
         let names = self.pages.names(scope, &users).await?;
-        let _ = self.columns.load(&keys, |key| key.user.to_string());
+        let _ = self.columns.load(keys, |key| key.user.to_string());
         let mut rows = Vec::with_capacity(keys.len());
-        for key in &keys {
+        for key in keys {
             let id = key.user.to_string();
             let mut row = FlexRow::new(&id).slot(
                 "person",
@@ -491,14 +583,33 @@ impl Feed {
             row.dom_id = Some(format!("feed-key-{id}"));
             rows.push(row);
         }
-        let mut table = FlexTable::new("feed-keys", self.columns.flex_columns(), rows);
+        let mut table = FlexTable::new("feed-keys", self.columns.flex_columns(), rows)
+            .sorted(self.list.sort_by.as_deref(), self.list.sort_dir);
         table.event = "grid";
+        table.sort_event = "sort";
         table.zoom = self.columns.zoom;
         table.suggestions = self.columns.flex_suggestions();
         table.add_query = &self.columns.add_query;
         table.caption = "Calendar feed links";
         table.actions = true;
         table.framed = false;
+        let searching = !self.list.search.trim().is_empty();
+        if keys.is_empty() && searching && !page.unsearchable {
+            let clear = render(Button {
+                id: "feed-keys-clear",
+                button_type: "button",
+                event: "clear",
+                body: Html::text("Clear search"),
+                ..Button::default()
+            })?;
+            table.empty = Some(TableEmpty::State(
+                EmptyState::missing(
+                    "No links match",
+                    "Nobody with a link has that name or email address.",
+                )
+                .action(clear),
+            ));
+        }
         let mut body = render(SectionHeading {
             id: "feed-everyone-heading",
             title: "Everyone's links",
@@ -506,22 +617,58 @@ impl Feed {
                 "Revoke a link that should no longer work, such as one that was shared by mistake.",
             ..SectionHeading::default()
         })?;
-        body.push(&render(table)?);
-        render(Card {
+        let form = self.list.filters_form();
+        body.push(&render(FilterToolbar::new(
+            "feed-keys-filters",
+            vec![ToolbarControl::search(
+                "feed-keys-search",
+                "search",
+                "Search links by person",
+                &form["search"],
+                "Search by name or email...",
+            )],
+        ))?);
+        if page.unsearchable {
+            body.push(&render(Alert {
+                kind: StatusKind::Warning,
+                id: "feed-keys-unsearchable",
+                class: "mb-3",
+                body: Html::text("Too many people have a link to search them by name here. Clear the search and sort by Made or Last read instead."),
+            })?);
+        }
+        let mut card = render(table)?;
+        card.push(&render(Pagination::new(
+            "feed-keys-pagination",
+            PageCounts::new(
+                self.list.page,
+                self.list.page_size,
+                page.total.max(0) as u64,
+            ),
+            &SIZES,
+        ))?);
+        body.push(&render(Card {
             id: "feed-everyone",
             inner_class: "p-0",
-            body,
+            body: card,
             ..Card::default()
-        })
+        })?);
+        Ok(Some(body))
     }
 }
 
 impl LiveState<Scope, Error> for Feed {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            if let LiveInput::Event(value) = request.input {
-                self.handle(request.scope, request.credential, value)
-                    .await?;
+            match request.input {
+                LiveInput::Refresh => {}
+                LiveInput::Params(query) => {
+                    self.list =
+                        ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?;
+                }
+                LiveInput::Event(value) => {
+                    self.handle(request.scope, request.credential, value)
+                        .await?;
+                }
             }
             self.view(request.scope).await
         })

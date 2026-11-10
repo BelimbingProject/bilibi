@@ -37,8 +37,10 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+mod series;
 mod tiles;
-use tiles::{board_columns, slot_times};
+mod year;
+use tiles::{board_columns, slot_times, Slot};
 
 const SIZES: [u64; 3] = [25, 50, 100];
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
@@ -135,8 +137,6 @@ fn tone(kind: Kind) -> u8 {
         Kind::Note => 4,
     }
 }
-/// How long a task shows on the calendar from the time it is due.
-const TASK_MINUTES: i64 = 30;
 
 /// `related=<kind>:<id>` narrows the list to one record's activities.
 fn related(query: &HashMap<String, String>) -> Option<Reference> {
@@ -162,11 +162,10 @@ pub(crate) struct Index {
     board_moving: Option<String>,
     board_errors: Vec<String>,
     board_notice: Option<(StatusKind, String)>,
-    /// A free calendar slot waiting for its kind: start and end.
-    slot: Option<(jiff::Timestamp, jiff::Timestamp)>,
-    /// The repeating row whose Delete series dialog is open, and the
-    /// last refusal.
-    series_delete: Option<(i64, Vec<String>)>,
+    /// A free calendar slot waiting for its kind.
+    slot: Option<Slot>,
+    /// The repeating row whose Delete series dialog is open.
+    series_delete: Option<series_delete::Open>,
     /// The calendar item whose Move dialog is open, and its errors.
     moving: Option<String>,
     move_errors: Vec<String>,
@@ -278,7 +277,13 @@ impl Index {
                 } else {
                     match CalendarSlot::from_event(value, &clock.zone) {
                         Ok(slot) => {
-                            self.slot = Some(slot_times(&slot, &clock));
+                            let (start, end) = slot_times(&slot, &clock);
+                            let assignee = self.slot_assignee(scope, &slot).await?;
+                            self.slot = Some(Slot {
+                                start,
+                                end,
+                                assignee,
+                            });
                             self.notice = None;
                         }
                         Err(sentence) => self.notice = Some((StatusKind::Error, sentence)),
@@ -294,11 +299,15 @@ impl Index {
                     Some("task") => Kind::Task,
                     _ => Kind::Meeting,
                 };
-                if let Some((start, end)) = self.slot.take() {
+                if let Some(slot) = self.slot.take() {
                     if self.pages.activities.may_create(scope).await? {
                         let clock =
                             Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
-                        self.dialog = Some(Dialog::new(kind, None).at(start, end, &clock));
+                        self.dialog = Some(
+                            Dialog::new(kind, None)
+                                .at(slot.start, slot.end, &clock)
+                                .assigned(slot.assignee),
+                        );
                     }
                 }
             }
@@ -333,72 +342,9 @@ impl Index {
                     Err(message) => self.board_notice = Some((StatusKind::Error, message)),
                 }
             }
-            "request_delete_series" => {
-                let id = value["id"]
-                    .as_str()
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .ok_or(Error::Invalid)?;
-                let activity = self.pages.activities.get(scope, id).await?;
-                if activity.series_id.is_some()
-                    && self.pages.activities.may_edit(scope, &activity).await?
-                {
-                    self.series_delete = Some((id, Vec::new()));
-                }
-            }
+            "request_delete_series" => self.open_series_delete(scope, value).await?,
             "cancel_delete_series" => self.series_delete = None,
-            "delete_series" => {
-                let Some((id, _)) = self.series_delete else {
-                    return Ok(None);
-                };
-                let form = params::form_values_checked(value, "delete", params::FIELD_LIMIT)
-                    .map_err(Error::refused)?;
-                let apply = match form.get("apply").map(String::as_str) {
-                    Some("all") => "all",
-                    _ => "following",
-                };
-                let activity = match self.pages.activities.get(scope, id).await {
-                    Ok(activity) => activity,
-                    Err(Error::NotFound | Error::Forbidden) => {
-                        self.series_delete = None;
-                        self.flash =
-                            Some((StatusKind::Error, "The activity could not be found.".into()));
-                        return Ok(None);
-                    }
-                    Err(error) => return Err(error),
-                };
-                let call = self.pages.call(
-                    scope,
-                    credential,
-                    "delete_series",
-                    "core.activity.delete_series",
-                );
-                match self
-                    .pages
-                    .contracts
-                    .submit(
-                        &call,
-                        serde_json::json!({"id": id, "version": activity.version, "apply": apply}),
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        let count = result["result"]["deleted"].as_array().map_or(0, Vec::len);
-                        self.series_delete = None;
-                        self.flash = Some((StatusKind::Success, series_delete::deleted(count)));
-                    }
-                    Err(error) => {
-                        let message = match refusal(
-                            error,
-                            "You do not have permission to change this activity.",
-                            "The series was not deleted. Try again.",
-                        )? {
-                            Refusal::Message(message) => message,
-                            Refusal::Fields(fields) => sentences(&fields),
-                        };
-                        self.series_delete = Some((id, vec![message]));
-                    }
-                }
-            }
+            "delete_series" => self.delete_series(scope, credential, value).await?,
             calendar::MOVE_OPEN => {
                 self.moving = calendar::item_id(value).map(str::to_owned);
                 self.move_errors.clear();
@@ -596,6 +542,7 @@ impl Index {
         activity: &Activity,
         related: Option<&bilibi_records::Resolved>,
         names: &HashMap<i64, String>,
+        soon: jiff::SignedDuration,
     ) -> Result<FlexRow> {
         let id = activity.id.to_string();
         let mut kind = render(Icon {
@@ -616,7 +563,7 @@ impl Index {
                 })?,
             )
             .slot("kind", kind)
-            .slot("status", status_badge(activity)?)
+            .slot("status", status_badge(activity, soon)?)
             .slot(
                 "related",
                 match related {
@@ -759,6 +706,10 @@ impl Index {
         // The view and date decide the range; the lanes come from what it holds.
         let probe = CalendarState::parse(&self.calendar_query, today, &[]);
         let (from, to) = probe.range(&clock.zone).ok_or(Error::Internal)?;
+        if probe.view == calendar::CalendarView::Year {
+            // A year is drawn from a count of each day, not from the items.
+            return self.year_view(scope, clock, query, today, to).await;
+        }
         let mut filter = self.filter();
         filter.between = Some((from, to));
         filter.sort = Sort::When;
@@ -795,6 +746,7 @@ impl Index {
         let may_create = self.pages.activities.may_create(scope).await?;
         let edit_all = may_create && self.pages.activities.may_edit_all(scope).await?;
         let now = jiff::Timestamp::now();
+        let soon = self.pages.activities.imminent_window(scope).await?;
         let mut items = Vec::new();
         for a in &page.entries {
             let lane = a.assignee_user_id.to_string();
@@ -809,13 +761,13 @@ impl Index {
                     a.id.to_string(),
                     a.title.clone(),
                     due,
-                    due + jiff::SignedDuration::from_mins(TASK_MINUTES),
+                    due + jiff::SignedDuration::from_mins(crate::TASK_MINUTES),
                 ),
                 _ => continue,
             }
             .kind(a.kind.label(), tone(a.kind))
             .href(format!("/activities/{}", a.id))
-            .urgency(urgency(a, now))
+            .urgency(urgency(a, now, soon))
             .lane(lane);
             let own = a.created_by == me || a.assignee_user_id == me;
             let item = if may_create && (own || edit_all) && !a.is_closed() {
@@ -830,35 +782,7 @@ impl Index {
             };
             items.push(item);
         }
-        let dates = state.dates();
-        let mut marks = Vec::new();
-        if let (Some(first), Some(last)) = (dates.first(), dates.last()) {
-            for day in self
-                .pages
-                .activities
-                .work_days(scope, *first, *last)
-                .await?
-            {
-                use bilibi_work_calendar::{DayType, Reason};
-                let kind = match day.day_type {
-                    DayType::Working => continue,
-                    DayType::Rest => bilibi_ui::DayKind::Rest,
-                    DayType::Off => bilibi_ui::DayKind::Off,
-                    DayType::Holiday => bilibi_ui::DayKind::Holiday,
-                };
-                let label = match &day.reason {
-                    Reason::Holiday { name, .. }
-                    | Reason::Substitute { name, .. }
-                    | Reason::Exception { name } => name.clone(),
-                    Reason::Week => String::new(),
-                };
-                marks.push(calendar::DayMark {
-                    date: day.date,
-                    kind,
-                    label,
-                });
-            }
-        }
+        let marks = self.day_marks(scope, &state.dates()).await?;
         query.insert("display".into(), "calendar".into());
         let count = items.len();
         let mut drawn = Calendar::new(
@@ -1055,15 +979,11 @@ impl Index {
                 count
             }
         };
-        if let Some((start, end)) = self.slot {
-            body.push(&self.slot_dialog(&clock, start, end)?);
+        if let Some(slot) = &self.slot {
+            body.push(&self.slot_dialog(&clock, slot)?);
         }
-        if let Some((id, errors)) = &self.series_delete {
-            match self.pages.activities.get(scope, *id).await {
-                Ok(activity) => body.push(&series_delete::dialog(&activity, errors, false)?),
-                Err(Error::NotFound | Error::Forbidden) => self.series_delete = None,
-                Err(error) => return Err(error),
-            }
+        if let Some(open) = &self.series_delete {
+            body.push(&series_delete::dialog(&open.title, &open.errors, false)?);
         }
         if let Some((_, title, _)) = &self.confirm {
             body.push(&render(ConfirmDialog {
@@ -1141,10 +1061,14 @@ impl Index {
         let users: Vec<i64> = page.entries.iter().map(|a| a.assignee_user_id).collect();
         let names = self.pages.names(scope, &users).await?;
         let _ = self.columns.load(&page.entries, |a| a.id.to_string());
+        let soon = self.pages.activities.imminent_window(scope).await?;
         let mut rows = Vec::with_capacity(page.entries.len());
         for activity in &page.entries {
             let related = activity.related.as_ref().and_then(|_| named.next());
-            rows.push(self.row(scope, clock, activity, related, &names).await?);
+            rows.push(
+                self.row(scope, clock, activity, related, &names, soon)
+                    .await?,
+            );
         }
 
         let mut table = FlexTable::new("activities", self.columns.flex_columns(), rows)

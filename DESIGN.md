@@ -214,7 +214,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Create from a free slot.** A calendar the viewer may create in (`Calendar::creatable`) reports `calendar_slot` for a click or a drag down a free time (a tap on touch) and for a click, a tap or Enter on an empty day; the owner opens its own create dialog with the time filled in. A viewer who may not create gets no such events, and the page says what to do beside the title.
 - **Hidden, not refused.** Someone who may not update a record sees no drag handle and no Move action on it.
 - **Keyboard, touch and small screens.** Every movable item has a Move action that opens a dialog with date and time fields; the month is a grid with arrow keys. On a phone the grids become an agenda list, drag is off on coarse pointers, and Move is the path.
-- **Bounded.** At most 500 items are drawn; past that the calendar asks for a narrower filter.
+- **Bounded.** At most 500 items are drawn; past that the calendar asks for a narrower filter. The year is the exception: its numbers come from the owner's count of each day, so it is right however many items the year holds.
 
 ## Board
 

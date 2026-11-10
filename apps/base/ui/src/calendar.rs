@@ -386,6 +386,16 @@ pub struct DayMark {
     pub label: String,
 }
 
+/// How many items one day holds, for the year view: the owner's own count,
+/// so the year is right however many items it holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DayTotal {
+    pub date: Date,
+    pub count: usize,
+    /// Those of them that are overdue.
+    pub late: usize,
+}
+
 /// The calendar to draw.
 #[derive(Clone, Debug)]
 pub struct Calendar {
@@ -402,6 +412,11 @@ pub struct Calendar {
     /// [`CalendarState::shown_lanes`] of them.
     pub lanes: Vec<CalendarLane>,
     pub items: Vec<CalendarItem>,
+    /// The year view's count for each day. `Some` draws the year from these
+    /// and ignores `items` (a day left out holds nothing); `None` counts
+    /// `items`. Pass it whenever a year may hold more items than the owner
+    /// reads for one view.
+    pub day_totals: Option<Vec<DayTotal>>,
     /// What a drag snaps to, in minutes: 5, 10, 15, 30 or 60 (15 default).
     pub snap_minutes: u32,
     pub day_marks: Vec<DayMark>,
@@ -438,6 +453,7 @@ impl Calendar {
             today,
             lanes: Vec::new(),
             items: Vec::new(),
+            day_totals: None,
             snap_minutes: 15,
             day_marks: Vec::new(),
             notice: None,
@@ -1045,6 +1061,13 @@ impl View {
             }
             CalendarView::Year => {
                 let year = state.date.year();
+                let totals: Option<HashMap<Date, (usize, usize)>> =
+                    calendar.day_totals.as_ref().map(|totals| {
+                        totals
+                            .iter()
+                            .map(|total| (total.date, (total.count, total.late)))
+                            .collect()
+                    });
                 for month in 1..=12i8 {
                     let first = Date::constant(year, month, 1);
                     let lead = first.weekday().to_monday_zero_offset() as usize;
@@ -1052,13 +1075,18 @@ impl View {
                     let mut week: Vec<Option<YearDayView>> = (0..lead).map(|_| None).collect();
                     for day in 1..=first.days_in_month() {
                         let date = Date::constant(year, month, day);
-                        let on: Vec<&(&CalendarItem, Civil)> =
-                            items.iter().filter(|(_, civil)| civil.on(date)).collect();
-                        let count = on.len();
-                        let late = on
-                            .iter()
-                            .filter(|(item, _)| item.urgency == Some(Urgency::Overdue))
-                            .count();
+                        let (count, late) = match &totals {
+                            Some(totals) => totals.get(&date).copied().unwrap_or_default(),
+                            None => {
+                                let on: Vec<&(&CalendarItem, Civil)> =
+                                    items.iter().filter(|(_, civil)| civil.on(date)).collect();
+                                let late = on
+                                    .iter()
+                                    .filter(|(item, _)| item.urgency == Some(Urgency::Overdue))
+                                    .count();
+                                (on.len(), late)
+                            }
+                        };
                         let (mark_class, mark_text) = mark(date);
                         let mut label = date.strftime("%A %-d %B %Y").to_string();
                         if date == calendar.today {
@@ -1216,7 +1244,10 @@ impl View {
                 .transpose()?,
             None => None,
         };
-        let empty = !too_many && items.is_empty();
+        let empty = match (&calendar.day_totals, state.view) {
+            (Some(totals), CalendarView::Year) => totals.iter().all(|total| total.count == 0),
+            _ => !too_many && items.is_empty(),
+        };
         let shared_empty = state.view == CalendarView::Shared && shown_lanes.is_empty();
         Ok(Self {
             id: calendar.id.clone(),

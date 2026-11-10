@@ -8,11 +8,11 @@
 //! gets the one refusal. Only the SHA-256 of the key is stored; the key is
 //! shown once, when it is made. README, Calendar feed.
 use crate::{
-    ics, Activities, Filter, Mine, Sort, State, WriteError, WriteResult, CALENDAR_LIMIT,
-    MANAGE_FEEDS, VIEW,
+    ics, Activities, Filter, Mine, Sort, State, WriteError, WriteResult, MANAGE_FEEDS, VIEW,
 };
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
+use bilibi_principal_directory::{DirectoryError, PrincipalKind, PrincipalRef, Query, MAX_CEILING};
 use bilibi_tenancy::{ReadClient, Scope};
 use bilibi_ui::endpoint::{Cache, Endpoint, EndpointFuture, EndpointRequest, Reply};
 use jiff::{SignedDuration, Timestamp};
@@ -36,8 +36,13 @@ pub const FEED_PATH: &str = "/feeds/activities/{token}";
 /// How far back the feed reaches, and how far ahead.
 const PAST_DAYS: i64 = 30;
 const AHEAD_DAYS: i64 = 365;
-/// Admin list size.
-const KEY_LIMIT: i64 = 200;
+/// Events one feed carries at most, the nearest to the moment it is read
+/// first (README, Calendar feed).
+pub(crate) const FEED_LIMIT: usize = 2_000;
+/// Activities one read of the list asks for while the feed pages through it.
+const FEED_PAGE: i64 = 500;
+/// Rows the administrator's list shows on one page at most.
+const KEY_PAGE: i64 = 100;
 
 /// A person's key as it is shown: when it was made and last read. Never the
 /// key itself.
@@ -46,6 +51,48 @@ pub struct FeedKey {
     pub user: i64,
     pub created_at: Timestamp,
     pub last_used_at: Option<Timestamp>,
+}
+
+/// What the administrator's list of feed keys is sorted by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FeedKeySort {
+    /// When the key was made.
+    #[default]
+    Made,
+    /// When the link was last read; never-read keys last.
+    Used,
+}
+
+/// One page of the tenant's feed keys. `page` counts from 1.
+#[derive(Clone, Debug)]
+pub struct FeedKeyQuery {
+    /// Words in the person's name, or their account's email address.
+    pub search: String,
+    pub sort: FeedKeySort,
+    pub descending: bool,
+    pub page: i64,
+    pub page_size: i64,
+}
+impl Default for FeedKeyQuery {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            sort: FeedKeySort::Made,
+            descending: true,
+            page: 1,
+            page_size: 25,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FeedKeyPage {
+    pub entries: Vec<FeedKey>,
+    /// How many keys match, on every page.
+    pub total: i64,
+    /// The tenant has more key holders than a name search can rank
+    /// (`base/principal_directory`'s ceiling), so the search was not run.
+    pub unsearchable: bool,
 }
 
 fn timestamp(at: SystemTime) -> Result<Timestamp> {
@@ -102,16 +149,71 @@ impl Activities {
         .transpose()
     }
 
-    /// Every feed key of the tenant, newest first, for an administrator who
-    /// holds `core.activity.feed.manage`.
-    pub async fn feed_keys(&self, scope: &Scope) -> Result<Vec<FeedKey>> {
+    /// A page of the tenant's feed keys, for an administrator who holds
+    /// `core.activity.feed.manage`. A search matches the holders' names (and
+    /// what their provider adds, an account's email address) through
+    /// `base/principal_directory`, then pages in the database.
+    pub async fn feed_keys(&self, scope: &Scope, query: &FeedKeyQuery) -> Result<FeedKeyPage> {
         let client = self.db.get().await?;
         let scope = self.fresh(&**client, scope).await?;
         authorize_proof(&**client, &scope, MANAGE_FEEDS).await?;
-        client
+        let search: String = query.search.trim().chars().take(200).collect();
+        // `None` is every holder; a search narrows to the holders it names.
+        let mut holders: Option<Vec<i64>> = None;
+        if !search.is_empty() {
+            let all: Vec<i64> = client
+                .query(
+                    "SELECT user_id FROM core_activity_feed_keys WHERE tenant_id=$1 ORDER BY user_id LIMIT $2",
+                    &[&scope.tenant(), &(MAX_CEILING as i64 + 1)],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let candidates: Vec<PrincipalRef> = all
+                .iter()
+                .filter_map(|id| PrincipalRef::new(PrincipalKind::User, *id).ok())
+                .collect();
+            let ranked = match self
+                .directory
+                .rank(
+                    &**client,
+                    &scope,
+                    &candidates,
+                    &Query::default().search(search).ceiling(MAX_CEILING),
+                )
+                .await
+            {
+                Ok(ranked) => ranked,
+                Err(DirectoryError::TooManyCandidates { .. }) => {
+                    return Ok(FeedKeyPage {
+                        unsearchable: true,
+                        ..FeedKeyPage::default()
+                    })
+                }
+                Err(DirectoryError::InvalidSearch) => return Err(Error::Invalid),
+                Err(_) => return Err(Error::Internal),
+            };
+            holders = Some(ranked.named.iter().map(|n| n.principal.id()).collect());
+        }
+        let total: i64 = client
+            .query_one(
+                "SELECT count(*) FROM core_activity_feed_keys WHERE tenant_id=$1 AND ($2::bigint[] IS NULL OR user_id = ANY($2))",
+                &[&scope.tenant(), &holders],
+            )
+            .await?
+            .get(0);
+        let page_size = query.page_size.clamp(1, KEY_PAGE);
+        let offset = (query.page.max(1) - 1).saturating_mul(page_size);
+        let direction = if query.descending { "DESC" } else { "ASC" };
+        let order = match query.sort {
+            FeedKeySort::Made => format!("created_at {direction}"),
+            FeedKeySort::Used => format!("last_used_at {direction} NULLS LAST"),
+        };
+        let entries = client
             .query(
-                "SELECT user_id,created_at,last_used_at FROM core_activity_feed_keys WHERE tenant_id=$1 ORDER BY created_at DESC,user_id LIMIT $2",
-                &[&scope.tenant(), &KEY_LIMIT],
+                &format!("SELECT user_id,created_at,last_used_at FROM core_activity_feed_keys WHERE tenant_id=$1 AND ($2::bigint[] IS NULL OR user_id = ANY($2)) ORDER BY {order},user_id LIMIT $3 OFFSET $4"),
+                &[&scope.tenant(), &holders, &page_size, &offset],
             )
             .await?
             .iter()
@@ -122,7 +224,12 @@ impl Activities {
                     last_used_at: row.get::<_, Option<SystemTime>>(2).map(timestamp).transpose()?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(FeedKeyPage {
+            entries,
+            total,
+            unsearchable: false,
+        })
     }
 
     /// The checks `create_feed_key` makes, with no write.
@@ -291,24 +398,38 @@ impl Activities {
         let now = Timestamp::now();
         // The owner's own calendar: what they take part in, never the
         // tenant-wide oversight set, which would put every private activity
-        // on a third-party calendar server and crowd out their own at 501.
-        let filter = Filter {
+        // on a third-party calendar server and crowd out their own. It pages
+        // through the list nearest to now first, so a calendar past the cap
+        // drops what is furthest away, in the past or ahead.
+        let mut filter = Filter {
             state: State::All,
             mine: Mine::TakingPart,
             between: Some((
                 now - SignedDuration::from_hours(24 * PAST_DAYS),
                 now + SignedDuration::from_hours(24 * AHEAD_DAYS),
             )),
-            sort: Sort::When,
+            sort: Sort::Nearest(now),
             page: 1,
-            page_size: CALENDAR_LIMIT,
+            page_size: FEED_PAGE,
             ..Filter::default()
         };
-        let page = match self.list(&scope, &filter).await {
-            Ok(page) => page,
-            Err(Error::Unauthorized | Error::Forbidden | Error::NotFound) => return Ok(None),
-            Err(error) => return Err(error),
+        let mut entries = Vec::new();
+        let total = loop {
+            let page = match self.list(&scope, &filter).await {
+                Ok(page) => page,
+                Err(Error::Unauthorized | Error::Forbidden | Error::NotFound) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let read = page.entries.len();
+            entries.extend(page.entries);
+            if read < FEED_PAGE as usize || entries.len() >= FEED_LIMIT {
+                break page.total.max(0) as usize;
+            }
+            filter.page += 1;
         };
+        entries.truncate(FEED_LIMIT);
+        let left_out = total.saturating_sub(entries.len());
+        entries.sort_by_key(|a| (a.when(), a.id));
         // When it was last read: a usage stamp on the key, at most once a
         // minute, not a business change.
         let client = self.db.get().await?;
@@ -318,7 +439,7 @@ impl Activities {
                 &[&hash],
             )
             .await?;
-        Ok(Some(ics::render(&page.entries)))
+        Ok(Some(ics::render(&entries, left_out)))
     }
 }
 
