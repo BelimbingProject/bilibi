@@ -68,7 +68,11 @@ pub const REGISTRATION_DAYS_KEY: &str = "customer_portal.registration_days";
 pub const STAFF_PATH: &str = "/customer-access";
 pub const HOME_PATH: &str = "/portal";
 pub const ACCOUNT_PATH: &str = "/portal/account";
-pub const TWO_FACTOR_PATH: &str = "/portal/account/two-factor";
+/// The customer's authenticator page and step-up prompt. Core User names
+/// the paths, because its authenticator sends a customer who owes a step-up
+/// to them.
+pub const TWO_FACTOR_PATH: &str = bilibi_user::PORTAL_TWO_FACTOR_PATH;
+pub const CONFIRM_PATH: &str = bilibi_user::PORTAL_CONFIRM_PATH;
 
 pub const MIGRATION: (&str, &str) = (
     "core-customer_access-001-portal",
@@ -223,6 +227,10 @@ inventory::submit! { Contribution::new(ROUTES, "core/portal.home", provenance!()
 }) }
 inventory::submit! { Contribution::new(ROUTES, "core/portal.two-factor", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: TWO_FACTOR_PATH, service: PORTAL_PAGES, operation: "two_factor",
+    access: Access::Portal(PORTAL_ACCOUNT), framed: false,
+}) }
+inventory::submit! { Contribution::new(ROUTES, "core/portal.two-factor-confirm", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+    method: Method::Get, path: CONFIRM_PATH, service: PORTAL_PAGES, operation: "confirm",
     access: Access::Portal(PORTAL_ACCOUNT), framed: false,
 }) }
 inventory::submit! { Contribution::new(ROUTES, "core/portal.account", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,

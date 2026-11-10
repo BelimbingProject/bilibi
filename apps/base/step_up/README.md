@@ -65,6 +65,7 @@ Tenants decide per operation on **Administration › Authorization › Step-up 2
 | Web (browser session) | A check on the confirm page (the chosen method’s `Provider::prompt`) | On the session row. Ends on sign-out, termination, expiry or an impersonation switch |
 | Agent (`/api/v1`, `/mcp`) | `step_up_code`: the holder's current code, sent with the commit | Per agent connection and holder. Not shared with browsers or other agents |
 
+- **Customers.** A customer's portal session proves the same way: the window is on its session row, and the prompt and setup are the portal's pages (`apps/core/portal/README.md`, "Second sign-in step"). An owner writes nothing different for a customer: declare the operation and call `require` with the customer's scope.
 - **Window:** sliding. Each protected action inside it restarts it. The cap counts from the check and wins.
 - **Ask every time:** each action needs its own check. On the web, one check made within 5 minutes covers one such action. For an agent, a code per action.
 - **Codes:** a presented code is verified and used in one step, for the operation and target of the first check that meets it. It then covers the rest of that one request, for example a role change that also gives full access, or every operation in one committed plan. In any later request the same code is refused.

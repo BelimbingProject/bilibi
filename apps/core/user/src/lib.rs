@@ -49,7 +49,7 @@ pub use sso::{
 mod two_factor;
 mod two_factor_ui;
 pub use tenant_context::{TenantChoice, TenantChoiceRefusal, TenantEntry};
-pub use two_factor_ui::PortalTwoFactor;
+pub use two_factor_ui::{PortalConfirm, PortalTwoFactor};
 mod verification;
 mod web;
 
@@ -78,7 +78,8 @@ pub use preferences::{
 };
 pub use two_factor::{
     safe_return, Enrollment, TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError,
-    TwoFactorStatus, CONFIRM_PATH, SETTINGS_PATH as TWO_FACTOR_PATH,
+    TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
+    PORTAL_SETTINGS_PATH as PORTAL_TWO_FACTOR_PATH, SETTINGS_PATH as TWO_FACTOR_PATH,
 };
 pub use verification::{Signer, Verification};
 
