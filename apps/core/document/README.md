@@ -157,6 +157,23 @@ WHERE tenant_id = 1 AND event = 'core.document.download_refused' AND payload ->>
 ORDER BY id;
 ```
 
+One person's document trail, newest first, is a page of each table by actor (here user 7):
+
+```sql
+SELECT id, occurred_at, auditable_type, auditable_id, event
+FROM base_audit_mutations
+WHERE tenant_id = 1 AND actor_type = 'user' AND actor_id = 7 AND auditable_type LIKE 'core.document.%'
+ORDER BY occurred_at DESC, id DESC
+LIMIT 100;
+
+SELECT id, occurred_at, event, payload
+FROM base_audit_actions
+WHERE tenant_id = 1 AND actor_type = 'user' AND actor_id = 7
+  AND (event LIKE 'core.document.%' OR (event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'core.document'))
+ORDER BY occurred_at DESC, id DESC
+LIMIT 100;
+```
+
 The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable database that is migrated, holds the walkthrough fixture and is seeded (`bilibi-web migrate`, `bilibi-walkthrough-fixture`, then `bilibi-web seed-production`, which gives the fixture's tenants their pick-lists) it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
 
 ```sh
@@ -164,6 +181,20 @@ BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder car
 ```
 
 A new document action belongs in that example in the same change.
+
+## List and audit latency
+
+`apps/core/document/examples/list-latency.rs` seeds a large library through the facade and times the list, its filters and the audit queries above.
+
+- **Fixture.** 50,000 link documents filed by the administrator, each related to one walkthrough company. The viewer holds view and download on 40%, view without download on 10% and an ended grant on 10%, and favourites 1,000 of them. The contractor sees 1% and the manager and staff a third and a fifth. Every twentieth document has expired.
+- **Run.** On a migrated database that holds the walkthrough fixture and is seeded (as for the coverage check). Seeding takes about ten minutes once; a rerun only measures. `BILIBI_DOCUMENT_LATENCY_DOCUMENTS` and `BILIBI_DOCUMENT_LATENCY_RUNS` (50) change the size and repetitions.
+
+```sh
+BILIBI_DOCUMENT_LATENCY=disposable cargo run -p bilibi-document --example list-latency --release --locked
+```
+
+- **Output.** One Markdown row per case and reader: rows on the page and in total, median, p95 and maximum in milliseconds, timed around `Documents::list` (authorization and both statements) or the audit statement.
+- **Shape of the reads.** A record or mark filter is a top-level `EXISTS`, so the planner starts from the record's links or the reader's marks; the default order has an index (`core_documents_last_revision_idx`) so a page walks documents newest first and checks each grant. The total still counts every document the reader may see, and name search scans names. The per-document audit queries filter on JSON values and scan the audit tables; the per-actor queries use Base Audit's actor index.
 
 ## Public facade
 
