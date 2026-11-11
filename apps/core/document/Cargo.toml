@@ -10,6 +10,7 @@ askama.workspace = true
 bilibi-activity.workspace = true
 bilibi-agent-api.workspace = true
 bilibi-artifacts.workspace = true
+bilibi-audit.workspace = true
 bilibi-authz.workspace = true
 # Documents reference companies and users (foreign keys and descriptor
 # dependencies), so an application with Documents links both.

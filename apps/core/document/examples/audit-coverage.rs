@@ -12,8 +12,9 @@
 //! that calls everything clean (it exists only in this executable) and runs
 //! Queue's executor in process, as a deployed host would.
 //!
-//! On a migrated database that `bilibi-web seed-production` has seeded (the
-//! pick-lists a document is filed under):
+//! On a migrated database that holds the walkthrough fixture and that
+//! `bilibi-web seed-production` then seeded (the pick-lists a document is filed
+//! under):
 //!
 //! `BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder
 //! DATABASE_URL=… cargo run -p bilibi-document --example audit-coverage --locked`
@@ -86,10 +87,11 @@ impl Trail<'_> {
                 &[&self.tenant, &self.mark.0],
             )
             .await?;
+        let ids: Vec<String> = documents.iter().map(i64::to_string).collect();
         let actions: i64 = client
             .query_one(
-                "SELECT count(*) FROM base_audit_actions WHERE tenant_id = $1 AND id > $2 AND event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'core.document'",
-                &[&self.tenant, &self.mark.1],
+                "SELECT count(*) FROM base_audit_actions WHERE tenant_id = $1 AND id > $2 AND ((event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'core.document') OR (event = 'core.document.download_refused' AND payload ->> 'document_id' = ANY($3)))",
+                &[&self.tenant, &self.mark.1, &ids],
             )
             .await?
             .get(0);
@@ -403,6 +405,16 @@ async fn main() -> Result<()> {
     trail.start().await?;
     documents.read_file(&scope, filed.id, 1).await?;
     trail.finish("download / preview", &[filed.id]).await?;
+    let outsider = app
+        .user
+        .login("viewer@example.test", bilibi_walkthrough_fixture::PASSWORD)
+        .await?;
+    let outsider: Scope = app.security.guard(&outsider.token).await?;
+    trail.start().await?;
+    if documents.read_file(&outsider, filed.id, 1).await.is_ok() {
+        return Err("a reader with no grant got the file".into());
+    }
+    trail.finish("refused download", &[filed.id]).await?;
 
     for (action, id) in [("delete (link)", copy.id), ("delete (file)", filed.id)] {
         let document = documents.get(&scope, id).await?;
