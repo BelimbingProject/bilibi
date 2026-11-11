@@ -22,6 +22,7 @@ bilibi-design-library = { path = "design_library" }
 bilibi-events = { path = "events" }
 bilibi-grid = { path = "grid" }
 bilibi-integration = { path = "integration" }
+bilibi-language-detection = { path = "language_detection" }
 bilibi-locale = { path = "locale" }
 bilibi-mail = { path = "mail" }
 bilibi-media = { path = "media" }

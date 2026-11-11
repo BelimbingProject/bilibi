@@ -1,0 +1,25 @@
+[package]
+name = "bilibi-language-detection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bilibi-module-registry.workspace = true
+bilibi-settings.workspace = true
+bilibi-tenancy.workspace = true
+fasttext.workspace = true
+inventory.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bilibi-base.workspace = true
+bilibi-core.workspace = true
+bilibi-database.workspace = true
+bilibi-web.workspace = true
+bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+tokio-postgres.workspace = true
