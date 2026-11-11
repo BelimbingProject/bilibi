@@ -116,13 +116,17 @@ macro_rules! provenance {
         }
     };
 }
+/// Recorded when staff approve a request for an account; see the README's
+/// Events.
+pub const REGISTRATION_APPROVED: &str = "core/portal.registration_approved";
+inventory::submit! { Contribution::new(bilibi_events::EVENTS, REGISTRATION_APPROVED, provenance!(), &bilibi_events::EventType { version: 1 }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.accept-invitation", provenance!(), &CredentialPath { path: "/portal/accept/{site}/{token}" }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/portal.verify-registration", provenance!(), &CredentialPath { path: "/portal/verify/{site}/{token}" }) }
 
 inventory::submit! {
     Module {
         id: "core/portal", layer: Layer::Core,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
+        dependencies: &["base/module_registry", "base/database", "base/events", "base/tenancy", "base/authz", "base/settings", "base/mail", "base/media", "base/notifications", "base/ui", "base/agent_api", "base/menu", "base/party_ids", "base/datetime", "base/locale", "base/records", "base/personal_data", "base/privacy", "core/company", "core/person", "core/affiliation", "core/user"],
         migrations: &[MIGRATION, SITE_ENABLED_MIGRATION, REGISTRATION_MIGRATION, LOGO_MIGRATION, DELIVERY_MIGRATION, PERSONAL_DATA_MIGRATION, REGISTRATION_LIMITS_MIGRATION, INVITATION_PERSONAL_DATA_MIGRATION],
         services: &[
             Service { id: SERVICE, factory: |services| {
@@ -143,6 +147,7 @@ inventory::submit! {
                     mailer: services.get("base/mail.mailer")?,
                     media: services.get(bilibi_media::SERVICE)?,
                     settings: services.get("base/settings.store")?,
+                    events: services.get(bilibi_events::SERVICE)?,
                     origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
                 });
                 operations::bind(access.clone())?;

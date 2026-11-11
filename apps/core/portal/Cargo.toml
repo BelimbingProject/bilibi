@@ -21,6 +21,7 @@ bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-party-ids.workspace = true
 bilibi-personal-data.workspace = true
+bilibi-events.workspace = true
 bilibi-person.workspace = true
 bilibi-privacy.workspace = true
 bilibi-records.workspace = true

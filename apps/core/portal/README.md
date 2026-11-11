@@ -11,6 +11,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
 | Portal role | `portal_customer`, given to every customer an invitation admits |
 | Settings | `customer_portal.invitation_days` (tenant, default 7), the installation-wide `customer_portal.registration_*` lifetime and abuse limits, and the company retention classes `core/portal.registration_requests` and `core/portal.invitations` |
+| Events | `core/portal.registration_approved` (see Events) |
 | Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`, `customer_registration_limits`; customer accounts stay in Core User's `users` |
 
 ## Portal site
@@ -77,6 +78,20 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 
 - The staff page lists the tenant's customer accounts (`bilibi_user::customer_accounts`, the one read of `users` that lists customers; staff reads never do).
 - **Revoke access** suspends the account through Core User (`set_customer_active_in`): it cannot sign in, fails its standing, and every session it holds ends at once. **Restore** lets it sign in again; no session comes back.
+
+## Events
+
+`core/portal.registration_approved`, version 1, recorded in the approval's transaction when staff approve a request for an account. It is the one fact other modules get about self-registration: a CRM, say, marks the Person as a contact who came in through the portal. A rejected or expired request records nothing.
+
+| Payload | Meaning |
+| --- | --- |
+| `registration` | The request's id |
+| `person` | The Person staff chose, who is now invited |
+| `organisation` | The company of the chosen affiliation, or `null` for an individual customer |
+| `approved_by` | The user id of the staff member who approved it |
+
+- **Subject and key:** subject `portal.registration:<id>`, key `<id>`; a request is approved once.
+- **No personal values:** the payload carries only ids, never the request's name, email or company name, so it declares no personal fields to Base Privacy and erasure has nothing in it to clear.
 
 ## Agent operations
 
