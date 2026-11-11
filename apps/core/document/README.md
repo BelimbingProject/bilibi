@@ -78,6 +78,16 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 
 A declared `document-scanner` Queue job rechecks a pending attachment under the owner-scoped Media inspection grant. Only a clean verdict copies bytes to an Artifact and makes the revision downloadable; an infected, failed or unscanned verdict settles its status without publishing bytes. Queue's ending hook marks any still-pending revision failed if the job is cancelled or discarded. The uploader and current document managers receive notices when a file is held and when its verdict settles. List, record, agent and CSV views show the status; file links, preview and download work only for clean internal revisions. A direct download rechecks this state. Copying a file document requires a clean latest revision. Merge preserves each moved revision's file/status and its queued job continues to target the revision ID. Deletion waits for pending scans to settle, then removes held ledger rows after Base checks every published Artifact; Media's draft cleanup owns remaining staged bytes.
 
+### Upload progress and resume
+
+The New document, New revision and Quick add dialogs take the file through one resumable input (`UploadSpec::resumable`), so a large upload shows its progress and survives a dropped connection; the contract is `docs/live-pages.md` (Resumable uploads) and `apps/base/media/README.md` (Resumable uploads).
+
+- **Progress:** the chosen file's row shows the percentage received while it arrives; Upload (Add document in Quick add) waits until every byte is there.
+- **Resume:** the bytes wait on Media's staging disk (`media.upload.staging_disk`). While the New document dialog is open the list's address carries `new=1`, so the remount after a dropped connection opens it again and the file carries on from the bytes already there. After a reload, or in a dialog the remount does not reopen (New revision, Quick add), choosing the same file again continues it, until `media.upload.staging_hours` passes.
+- **Limit:** the largest file is Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB); `store_file` still applies `core.document.max_upload_bytes` and `artifacts.max_bytes`. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
+- **Scan:** a resumed file is stored like any other: `store_file` stages it through Media, and it stays held, unreadable, until the scan calls it clean.
+- **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold.
+
 Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
 ## Tenant retention and due documents

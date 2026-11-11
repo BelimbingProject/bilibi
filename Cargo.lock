@@ -887,6 +887,7 @@ name = "bilibi-document"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "axum",
  "bilibi-activity",
  "bilibi-agent-api",
  "bilibi-artifacts",
