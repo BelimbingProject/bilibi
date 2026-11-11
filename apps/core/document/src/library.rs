@@ -525,6 +525,19 @@ impl Store<'_> {
         // A retained or legally held revision keeps its document, number,
         // change log and file (ADR 23): merging would move and rewrite it.
         let source_ids: Vec<i64> = documents.iter().map(|d| d.id).collect();
+        let merge_ids: Vec<i64> = std::iter::once(survivor.id)
+            .chain(source_ids.iter().copied())
+            .collect();
+        if client
+            .query_opt(
+                "SELECT 1 FROM core_document_revisions WHERE tenant_id=$1 AND document_id = ANY($2) AND scan_status='pending' LIMIT 1",
+                &[&scope.tenant(), &merge_ids],
+            )
+            .await?
+            .is_some()
+        {
+            return Err(WriteError::ScanPending);
+        }
         let artifacts: Vec<String> = client
             .query(
                 "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id = ANY($2) AND artifact_id IS NOT NULL ORDER BY artifact_id",
