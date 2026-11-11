@@ -145,6 +145,16 @@ documents.release_hold(&mut client, &id, None).await?;
 let events = documents.retention_history(&client, &id).await?; // oldest first
 ```
 
+An owner that attaches an ordinary Artifact to its own record inside a
+`MutationTransaction` may call `retain_in(tx, id, until, reason)` **after** the
+attachment row is written, so the owner record and Base retention commit or
+roll back together. It applies the same `Retain` authorization, future-time and
+extend-only guard, audit action and append-only retention event as `retain`;
+it does not open another transaction. `retention_statuses(client, ids)` returns
+at most 1000 owned, attached artifacts' retain-until, hold and due state without
+reading bytes or paths, after checking the owner's `Retain` grant on each. A
+missing or unauthorized artifact refuses the batch.
+
 A records-grade document has `expires_at: None`; reads keep working before and
 after retain-until, and `purge_expired` never selects it. `delete` answers
 `Error::LegalHold` while a hold stands and `Error::Retained` before retain-until

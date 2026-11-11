@@ -223,7 +223,23 @@ impl Owner for DocumentFiles {
                 }
                 Operation::Retain => {
                     authorize_proof(client, scope, MANAGE).await?;
-                    row.state == "attached"
+                    if row.state != "attached" {
+                        false
+                    } else {
+                        let document = client
+                            .query_opt(
+                                "SELECT r.document_id FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id WHERE r.tenant_id=$1 AND r.artifact_id=$2 AND d.deleting_at IS NULL",
+                                &[&scope.tenant(), &row.artifact_id],
+                            )
+                            .await?
+                            .map(|record| record.get::<_, i64>(0));
+                        match document {
+                            Some(document) => {
+                                store::permission(client, scope, document, "manage").await?
+                            }
+                            None => false,
+                        }
+                    }
                 }
                 Operation::Purge => false,
             };
@@ -238,7 +254,7 @@ impl Owner for DocumentFiles {
 
 /// Maps a refusal from `base/artifacts` to the facade's errors. Storage
 /// faults are logged by code only, never with a path or content.
-fn artifact_error(error: bilibi_artifacts::Error) -> WriteError {
+pub(crate) fn artifact_error(error: bilibi_artifacts::Error) -> WriteError {
     use bilibi_artifacts::Error as A;
     match error {
         A::Database(Error::NotFound) | A::NotFound => WriteError::NotFound,
