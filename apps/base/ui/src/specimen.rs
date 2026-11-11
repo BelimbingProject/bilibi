@@ -68,6 +68,8 @@ pub struct ComponentsSpecimen {
     /// The board: cards that can move, a column with more cards than it
     /// shows, a refused move, a viewer who may not move, and an empty board.
     boards: Vec<Html>,
+    /// Shared call states and unavailable controls.
+    softphones: Vec<Html>,
     /// The browser location action in both button variants and disabled.
     location_secondary: LocationAction,
     location_primary: LocationAction,
@@ -90,6 +92,7 @@ sections! {
         day_tiles: "ui_components_specimen/day_tiles.html",
         calendars: "ui_components_specimen/calendars.html",
         boards: "ui_components_specimen/boards.html",
+        softphones: "ui_components_specimen/softphones.html",
         code_input: "ui_components_specimen/code_input.html",
         text_inputs: "ui_components_specimen/text_inputs.html",
         text_inputs_basic: "ui_components_specimen/text_inputs_basic.html",
@@ -646,6 +649,16 @@ impl ComponentsSpecimen {
             day_month: specimen_day_month()?,
             calendars: specimen_calendars()?,
             boards: specimen_boards()?,
+            softphones: [crate::CallPhase::Ringing, crate::CallPhase::Held, crate::CallPhase::Ended].into_iter().map(|phase| {
+                Html::render(&crate::Softphone {
+                    id: format!("specimen-phone-{}", phase.label().replace(' ', "-")),
+                    phase, health: crate::PhoneHealth::Unavailable("Connection lost.".into()),
+                    caller: "Example caller".into(),
+                    actions: vec![crate::SoftphoneAction::disabled(crate::CallAction::Answer, "Reconnect first.")],
+                    event: "softphone_action".into(), version: "1".into(), notice: None,
+                    screen_pop: Html::text("Example customer"),
+                })
+            }).collect::<askama::Result<Vec<_>>>()?,
             uploads: specimen_uploads(),
             location_secondary: LocationAction::new(
                 "specimen-location",
