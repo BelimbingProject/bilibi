@@ -242,7 +242,7 @@ pub(crate) fn refusal(error: bilibi_agent_api::Error, failed: &str) -> Result<Re
     use bilibi_agent_api::Error as E;
     Ok(match error {
         E::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-            return Err(error)
+            return Err(error);
         }
         E::Forbidden | E::Backend(Error::Forbidden) => {
             Refusal::Message("You do not have permission to change this document.".into())
@@ -269,7 +269,7 @@ pub(crate) fn store_refusal(error: crate::WriteError) -> Result<String> {
             "You do not have permission to upload documents.".into()
         }
         W::Access(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-            return Err(error)
+            return Err(error);
         }
         W::Access(Error::Refused(message)) => message,
         W::Access(error) => return Err(error),
@@ -417,6 +417,7 @@ impl Files {
             ..filter_of(query)
         };
         let page = self.0.list(scope, &filter).await?;
+        let latest = self.0.latest_revisions(scope, &page.entries).await?;
         let mut csv = csv_row(
             &[
                 "id",
@@ -432,6 +433,7 @@ impl Files {
                 "related_document_id",
                 "relation",
                 "revision",
+                "latest_scan_status",
                 "last_revision_at",
                 "retention_due_at",
                 "filing_company_id",
@@ -441,7 +443,12 @@ impl Files {
         );
         let text = |v: &Option<String>| v.clone().unwrap_or_default();
         for d in &page.entries {
-            csv.push_str(&csv_row(&row(d, text, page.retention_due_at.get(&d.id))));
+            csv.push_str(&csv_row(&row(
+                d,
+                text,
+                latest.get(&d.id),
+                page.retention_due_at.get(&d.id),
+            )));
         }
         Ok(FileBody::attachment(
             csv.into_bytes(),
@@ -453,6 +460,7 @@ impl Files {
 fn row(
     d: &Document,
     text: impl Fn(&Option<String>) -> String,
+    latest: Option<&crate::Revision>,
     due: Option<&std::time::SystemTime>,
 ) -> Vec<String> {
     vec![
@@ -471,6 +479,9 @@ fn row(
             .unwrap_or_default(),
         text(&d.relation),
         d.revision.to_string(),
+        latest
+            .map(|r| r.scan_status.code().to_owned())
+            .unwrap_or_default(),
         d.last_revision_at.to_string(),
         due.and_then(|at| jiff::Timestamp::try_from(*at).ok())
             .map(|at| at.to_string())

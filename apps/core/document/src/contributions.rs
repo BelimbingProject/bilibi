@@ -30,6 +30,8 @@ pub const MERGE: &str = "core.document.merge";
 /// finishing. Only the document monitor principal holds it (a standing grant),
 /// and it belongs to no role.
 pub const EMAIL_FAIL: &str = "core.document.email.fail";
+/// Narrow system authority to settle one held revision after Media's verdict.
+pub const SCAN_SETTLE: &str = "core.document.scan.settle";
 const CAPABILITIES: &[&str] = &[VIEW, DOWNLOAD, MANAGE, MERGE];
 
 pub const LIST_CATEGORY: &str = "core.document.category";
@@ -60,15 +62,19 @@ inventory::submit! { Contribution::new(MEDIA_SUBJECTS, crate::files::MEDIA_SUBJE
 
 // `view` and `manage` are the Platform's verbs; the other three are ours.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
-    domains: &["core"], verbs: &["download", "merge", "fail"],
-    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL)],
+    domains: &["core"], verbs: &["download", "merge", "fail", "settle"],
+    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL), C::tenant(SCAN_SETTLE)],
     roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: CAPABILITIES }],
-    system_principals: &[SystemPrincipalDefinition { name: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] }],
+    system_principals: &[
+        SystemPrincipalDefinition { name: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] },
+        SystemPrincipalDefinition { name: crate::scan::PRINCIPAL, capabilities: &[SCAN_SETTLE] },
+    ],
 }) }
 // Recording that an email request's job is gone is the way out of `queued`: no
 // tenant should have to switch it on. A tenant that denies it keeps such a
 // request `queued`, as before.
 inventory::submit! { Contribution::new(STANDING_GRANTS, crate::email::MONITOR, provenance!(), &StandingGrant { principal: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] }) }
+inventory::submit! { Contribution::new(STANDING_GRANTS, crate::scan::PRINCIPAL, provenance!(), &StandingGrant { principal: crate::scan::PRINCIPAL, capabilities: &[SCAN_SETTLE] }) }
 
 // The Documents panel on record pages. Core company and Core person discover
 // their panel by record kind and pass `company_id` or `person_id`; neither

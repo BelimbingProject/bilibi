@@ -74,9 +74,11 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 
 ## Files and scanning
 
-`store_file` validates the configured size and file types, stages the upload through `base/media`, and waits for a clean malware result before copying it into private `base/artifacts`. Pending, infected, failed or unscanned content is refused and never becomes a readable revision.
+`store_file` validates the configured size and file types and stages the upload through `base/media`. A quick clean verdict copies bytes into private `base/artifacts`; a pending verdict may become an internal revision while its bytes remain in Media and unreadable. Infected, failed and unscanned verdicts also become held revisions. The owner-issued `artifact_id` input is opaque: for a held file it is an `upload:` token, and no placeholder Artifact is stored. The ledger retains Media's public attachment ID for a held revision, never its bytes or disk path.
 
-Internal revisions store one Artifact ID in `core_document_revisions`; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
+A declared `document-scanner` Queue job rechecks a pending attachment under the owner-scoped Media inspection grant. Only a clean verdict copies bytes to an Artifact and makes the revision downloadable; an infected, failed or unscanned verdict settles its status without publishing bytes. Queue's ending hook marks any still-pending revision failed if the job is cancelled or discarded. The uploader and current document managers receive notices when a file is held and when its verdict settles. List, record, agent and CSV views show the status; file links, preview and download work only for clean internal revisions. A direct download rechecks this state. Copying a file document requires a clean latest revision. Merge preserves each moved revision's file/status and its queued job continues to target the revision ID. Deletion waits for pending scans to settle, then removes held ledger rows after Base checks every published Artifact; Media's draft cleanup owns remaining staged bytes.
+
+Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
 ## Tenant retention and due documents
 
@@ -84,17 +86,18 @@ Settings › Documents offers **Keep new document files for (days)**
 (`core.document.retention_days`, 0 by default). Zero leaves ordinary Artifact
 expiry and explicit deletion as before. When a tenant chooses a positive period
 (1–36500 days), every newly attached **private file revision** receives an
-irreversible Base retain-until from its attachment time. The owner calls
-`Artifacts::retain_in` inside the same mutation as the revision and file ledger
-attachment; a failed retention rejects the whole document write. Changing the
+irreversible Base retain-until when a clean Artifact is attached or a pending
+revision is promoted. The owner calls `Artifacts::retain_in` inside the same
+mutation as the revision attachment or scan settlement; a failed retention
+rejects that write. Changing the
 setting affects future revisions only and cannot shorten an existing retain-until.
 External HTTPS links have no bytes in Base Artifacts, so this file-retention
 rule does not claim to retain a remote file.
 
 The Documents list's **Show › Retention due** view is for a person with
 `core.document.manage` and an explicit manage grant on each document. It shows
-private documents only when *every* file revision's Base retain-until has passed
-and no revision is under legal hold; the latest retain-until appears in the list
+private documents only when *every* file revision is clean, its Base
+retain-until has passed and no revision is under legal hold; the latest retain-until appears in the list
 and filtered CSV/agent list output. The record page shows each revision's Base
 retention and hold state to its manager. Due means the document may be considered
 for an explicit reviewed deletion; nothing is deleted automatically. Base still
@@ -162,7 +165,7 @@ A new document action belongs in that example in the same change.
 
 | Call | Result |
 | --- | --- |
-| `store_file` | A scanned private file ready for a revision |
+| `store_file` | A private file token and scan status ready for a revision; held files stay unreadable |
 | `preview_create`, `create` | A checked draft, then a document with revision 1 |
 | `preview_update`, `update` | A checked field patch, then the updated document |
 | `preview_revision`, `add_revision` | A checked revision, then the stored revision |
