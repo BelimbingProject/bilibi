@@ -83,7 +83,10 @@ impl SubjectOwner for DocumentFiles {
                 && scope.current_company().map(|company| company.get()) == Some(row.company_id)
                 && matches!(
                     action,
-                    SubjectAction::Upload | SubjectAction::Download | SubjectAction::Discard
+                    SubjectAction::Upload
+                        | SubjectAction::Download
+                        | SubjectAction::Inspect
+                        | SubjectAction::Discard
                 );
             if allowed {
                 Ok(())

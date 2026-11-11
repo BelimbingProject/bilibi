@@ -103,7 +103,7 @@ Every stored file carries a scan state; only a readable one is ever served. Deci
 
 - `stream_url`, `display_url`, `read_signed_asset`, `put_derivative_bytes`, `register_derivative` and `download_attachment` refuse a file that is not readable: `ScanPending`, `Quarantined`, `ScanFailed` or `NotScanned`. `download_attachment` asks the owner first, so a refused reader learns nothing more.
 - The Web host answers those with `423 Locked` ("File not available").
-- `Asset.scan_state` and `Attachment.scan_state` say where a file is; show "Checking file…" while `Pending`. `Media::scanning()` says whether a scanner is bound.
+- `Asset.scan_state` and `Attachment.scan_state` say where a file is; show "Checking file…" while `Pending`. `inspect_attachment(client, scope, public_id)` returns the current private attachment metadata and verdict after the subject owner allows `Inspect`, without opening bytes or granting a tenant-wide quarantine view. `Media::scanning()` says whether a scanner is bound.
 - A `pending` draft may be submitted and stays unreadable until clean; an `infected` draft cannot be submitted (`Quarantined`). Discard and draft cleanup work as before.
 - Linked (`external`) assets are never stored here, so they are never scanned.
 

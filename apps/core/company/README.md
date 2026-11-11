@@ -159,7 +159,7 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
   scoped foreign key behind Authz's `roles.company_id`.
 - `files` (K15) is the private-file owner: the Media attachment subject
   `core.company` and the Artifacts owner `core.company` (`bilibi_company::FILES`).
-  Reads need `admin.company.view` and a live company of the tenant; writes
+  Attachment metadata inspection and downloads need `admin.company.view` and a live company of the tenant; writes
   need `.update` (purge `.delete`), the actor's reach and an unarchived
   company; a document's reference must name the company it is filed under.
   Use these, not a hand-rolled check, for any file attached to a company.

@@ -103,7 +103,7 @@ Tenancy's `PartyProofs::person` uses this owner to prove live scoped Person IDs;
 that proof conveys existence, not a capability or account binding. `files`
 (K15) is the private-file owner: the Media attachment subject `core.person`
 and the Artifacts owner `core.person` (`bilibi_person::FILES`), deciding on the sealed
-proof connection with `admin.person.view` for reads, `.update` for writes and
+proof connection with `admin.person.view` for attachment metadata and downloads, `.update` for writes and
 `.retire` for purge, a person of the actor's tenant (unretired for a write),
 and the filing company reproved through `PartyProofs`. Use these, not a
 hand-rolled check, for any file attached to a person. Principal
