@@ -415,9 +415,7 @@ pub enum WriteError {
     TooLarge { max_bytes: u64 },
     #[error("This file is quarantined and cannot be downloaded.")]
     Quarantined,
-    #[error(
-        "This document has a file still being scanned; try deleting it after the check settles."
-    )]
+    #[error("This document has a file still being scanned; try again after the check settles.")]
     ScanPending,
     #[error("The documents cannot be merged: {0}.")]
     MergeRefused(&'static str),
