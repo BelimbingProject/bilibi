@@ -235,6 +235,7 @@ pub struct PortalService {
     pub(crate) delivery: crate::delivery::Desk,
     pub(crate) media: Arc<bilibi_media::Media>,
     pub(crate) settings: Arc<Settings>,
+    pub(crate) events: Arc<bilibi_events::Events>,
     /// Public origin that emailed links point at (`APP_ORIGIN`).
     pub(crate) origin: String,
 }

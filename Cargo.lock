@@ -1293,6 +1293,7 @@ dependencies = [
  "bilibi-company",
  "bilibi-database",
  "bilibi-datetime",
+ "bilibi-events",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-media",

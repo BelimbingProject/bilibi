@@ -518,6 +518,24 @@ impl PortalService {
             })
         })
         .await?;
+        // A fact for other modules (a CRM's contact source, say): which
+        // Person, and which company if any, came in through this request.
+        self.events
+            .record(
+                tx,
+                bilibi_events::NewEvent {
+                    name: crate::REGISTRATION_APPROVED,
+                    subject: &format!("portal.registration:{id}"),
+                    key: &id.to_string(),
+                    payload: json!({
+                        "registration": id,
+                        "person": invitation.person.get(),
+                        "organisation": invitation.organisation,
+                        "approved_by": decider,
+                    }),
+                },
+            )
+            .await?;
         Ok(Ok(invitation))
     }
     /// The request as it stands before a rejection: `MANAGE`, no write.
