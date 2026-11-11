@@ -102,7 +102,9 @@
       const text = this.el.querySelector('[data-role="text"]');
       if (text) {
         const value = this.el.dataset.displayValue ?? this.el.dataset.value;
-        const placeholder = this.el.querySelector('input[data-role="input"]')?.placeholder || '—';
+        // The field's own empty text, never the editor's hint: a date box's
+        // placeholder is its format ("d mmm yyyy"), not the fact's value.
+        const placeholder = this.el.dataset.placeholder || '—';
         // The source HEEx wraps a long value in line breaks inside its
         // pre-wrap span; a fact shows the value where its field's text sits.
         const displayed = value || placeholder;
