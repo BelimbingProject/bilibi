@@ -18,7 +18,7 @@ Base owns private bytes, malware scanning, retention and legal holds. Domains ow
 
 ## Access
 
-Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
+Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission; the record page links a revision's file only for a reader who holds both. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
 
 Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants. The creator's own grant cannot be removed through `unshare`.
 
@@ -69,7 +69,7 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 ## Preview
 
 - A row's **Preview** icon (with `core.document.download`) opens the document's latest file in place, in a dialog with a Download link beside it, for a revision whose type is a PNG, JPEG, GIF or WebP picture, a PDF or plain text. Other types (Office files, CSV, a link) show no icon: the browser cannot show them in place.
-- The icon shows only for a document the reader holds an unended download grant on. The dialog frames `/documents/{id}/revisions/{revision}/preview`, a download route with the same `core.document.download` capability that calls `Documents::read_file`: the same read, the same grant check and the same `artifacts.read` audit as the file download, never a second path to the bytes. It answers through `FileBody::preview` (`base/ui`), which shows only those types (anything else is not found), with the download's response policy: no scripts, framing by this origin only, `nosniff` and `no-store`.
+- The icon shows only for a document the reader holds an unended download grant on. The dialog frames `/documents/{id}/revisions/{revision}/preview`, a download route like the file download that calls `Documents::read_file`: the same read, the same `core.document.download` and grant checks and the same audit as the file download, never a second path to the bytes. It answers through `FileBody::preview` (`base/ui`), which shows only those types (anything else is not found), with the download's response policy: no scripts, framing by this origin only, `nosniff` and `no-store`.
 - The page reads nothing itself, so a grant ended or a file quarantined after the list drew shows the frame the same refusal a download gets.
 
 ## Files and scanning
@@ -118,7 +118,7 @@ Otherwise `delete` marks the document as deleting while preserving the document,
 
 ## Audit trail
 
-Every action that changes or reads a document leaves audited evidence, so there is no unrecorded way in. A change is a `base/audit` mutation written in the action's own transaction; a file read is an Artifacts action. Refused and failed actions write nothing to the document.
+Every action that changes or reads a document leaves audited evidence, so there is no unrecorded way in. A change is a `base/audit` mutation written in the action's own transaction; a file read is an Artifacts action. Refused and failed actions write nothing to the document; a refused download or preview also leaves one audit action.
 
 | Action | Evidence |
 | --- | --- |
@@ -133,6 +133,7 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | Delete, one or from the list | `core.document.document` updated (marked as deleting), then every row of the document deleted once the files are gone |
 | Upload, discard a stored file | `core.document.file` ledger changes |
 | Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
+| Refused download or preview | a `core.document.download_refused` action with the actor, `document_id`, `revision` and `reason`: `no_grant`, `grant_ended`, `no_download_permission`, `no_download_capability` or `no_file_access` |
 
 Every row of a document's parts carries its `document_id`, so one query finds the whole trail. Run it on **Administration › System › Database Queries** with the tenant and document IDs; **Audit Log › Data Mutations** lists the same mutations tenant-wide (search `core.document`).
 
@@ -149,9 +150,14 @@ FROM base_audit_actions
 WHERE tenant_id = 1 AND event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'core.document'
   AND payload ->> 'artifact_id' IN (SELECT artifact_id FROM core_document_revisions WHERE tenant_id = 1 AND document_id = 42)
 ORDER BY id;
+
+SELECT id, occurred_at, actor_type, actor_id, payload ->> 'revision' AS revision, payload ->> 'reason' AS reason
+FROM base_audit_actions
+WHERE tenant_id = 1 AND event = 'core.document.download_refused' AND payload ->> 'document_id' = '42'
+ORDER BY id;
 ```
 
-The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable database that is migrated and seeded (`bilibi-web migrate`, then `bilibi-web seed-production`, which carries the pick-lists) it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
+The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable database that is migrated, holds the walkthrough fixture and is seeded (`bilibi-web migrate`, `bilibi-walkthrough-fixture`, then `bilibi-web seed-production`, which gives the fixture's tenants their pick-lists) it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
 
 ```sh
 BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder cargo run -p bilibi-document --example audit-coverage --locked
@@ -187,7 +193,7 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 - Settings: `core.document.max_upload_bytes`, `core.document.allowed_types`, `core.document.expiry_reminder_days` and `core.document.retention_days`.
 - Custom field record type `document`.
 - Record kind: `core.document.document`; holder table `document_links`.
-- Routes: `/documents`, `/documents/{id}`, revision downloads and previews, and `/documents/export.csv`.
+- Routes: `/documents`, `/documents/{id}`, revision downloads and previews, and `/documents/export.csv`. Downloads and previews open on `core.document.view`, so the facade decides and audits a refusal; it requires `core.document.download` itself.
 - Menu item: `Documents`, under Core.
 - Media subject: `core.document.upload`.
 - Record panels (embeds), the one Documents panel of each record kind:

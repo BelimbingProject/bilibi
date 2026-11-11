@@ -1030,7 +1030,13 @@ impl Detail {
         retention: &HashMap<i32, bilibi_artifacts::RetentionStatus>,
         editable: bool,
     ) -> Result<Html> {
-        let may_download = self.pages.documents.may_download(scope).await?;
+        let may_download = self.pages.documents.may_download(scope).await?
+            && self
+                .pages
+                .documents
+                .granted(scope, &[d.id], "download")
+                .await?
+                .contains(&d.id);
         let users: Vec<i64> = revisions.iter().map(|r| r.created_by).collect();
         let names = self.pages.names(scope, &users).await?;
         let _ = self.revisions.load(revisions, |r| r.revision.to_string());

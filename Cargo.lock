@@ -890,6 +890,7 @@ dependencies = [
  "bilibi-activity",
  "bilibi-agent-api",
  "bilibi-artifacts",
+ "bilibi-audit",
  "bilibi-authz",
  "bilibi-company",
  "bilibi-custom-fields",

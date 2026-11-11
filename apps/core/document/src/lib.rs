@@ -793,8 +793,19 @@ impl Documents {
     pub async fn read_file(&self, scope: &Scope, id: i64, revision: i32) -> WriteResult<File> {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let scope = self.fresh(&**client, scope).await?;
-        let document = self.store().get(&**client, &scope, id).await?;
-        files::read(&mut client, &scope, &self.artifacts, &document, revision).await
+        let read = match self.store().get(&**client, &scope, id).await {
+            Ok(document) => {
+                files::read(&mut client, &scope, &self.artifacts, &document, revision).await
+            }
+            Err(error) => Err(error.into()),
+        };
+        if matches!(
+            read,
+            Err(WriteError::Forbidden | WriteError::Access(Error::Forbidden))
+        ) {
+            files::record_refused(&client, &scope, id, revision).await?;
+        }
+        read
     }
     /// What `create` would store, with no write, on the client a plan hands
     /// its preview: the draft with its defaults filled in and its records
@@ -1160,7 +1171,7 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),

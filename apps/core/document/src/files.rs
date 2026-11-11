@@ -25,7 +25,8 @@ use crate::{
     MANAGE, MAX_UPLOAD_BYTES, VIEW,
 };
 use bilibi_artifacts::{Artifacts, Operation, Owner, Reference};
-use bilibi_authz::authorize_proof;
+use bilibi_audit::{record_action, Attribution};
+use bilibi_authz::{authorize_proof, holds_proof};
 use bilibi_database::{Change, Error, MutationBoundary, Result};
 use bilibi_media::{
     AttachmentSubject, Media, Rules as MediaRules, ScanState as MediaScanState, SubjectAction,
@@ -43,6 +44,8 @@ use tokio_postgres::{Client, Row};
 pub const ARTIFACT_OWNER: &str = "core.document";
 /// The artifact kind of every document file.
 pub const FILE_KIND: &str = "document-file";
+/// The audit event of a refused download or preview.
+const DOWNLOAD_REFUSED: &str = "core.document.download_refused";
 /// Media's private staging subject. A staging file is never a document grant.
 pub const MEDIA_SUBJECT: &str = "core.document.upload";
 
@@ -885,6 +888,47 @@ async fn discard_one(
 }
 
 /// One revision's file of a document the reader may see.
+/// Records a refused download on the reader's own connection, after the
+/// refused read has rolled back. Ids and a reason code only, so the trail
+/// says why without naming the document to anyone reading the log.
+pub(crate) async fn record_refused(
+    client: &Client,
+    scope: &Scope,
+    document: i64,
+    revision: i32,
+) -> WriteResult<()> {
+    let grant = client
+        .query_opt(
+            "SELECT can_download, expires_at IS NOT NULL AND expires_at <= now() FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3",
+            &[&scope.tenant(), &document, &scope.user()],
+        )
+        .await
+        .map_err(Error::from)?
+        .map(|row| (row.get::<_, bool>(0), row.get::<_, bool>(1)));
+    let reason = match grant {
+        None => "no_grant",
+        Some((_, true)) => "grant_ended",
+        Some((false, false)) => "no_download_permission",
+        Some((true, false)) => {
+            if holds_proof(client, scope, DOWNLOAD).await? {
+                "no_file_access"
+            } else {
+                "no_download_capability"
+            }
+        }
+    };
+    record_action(
+        client,
+        &Attribution::from_scope(scope),
+        None,
+        DOWNLOAD_REFUSED,
+        json!({"document_id": document, "revision": revision, "reason": reason}),
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn read(
     client: &mut Client,
     scope: &Scope,

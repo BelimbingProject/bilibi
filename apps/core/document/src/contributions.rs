@@ -376,13 +376,15 @@ inventory::submit! { Contribution::new(ROUTES, "core/document.detail", provenanc
 
 // Downloads: a revision's file, read through base/artifacts on every
 // request, and the list's metadata as CSV.
+// The routes open on view so that `Documents::read_file` decides and audits a
+// refused download; it requires `core.document.download` itself.
 inventory::submit! { Contribution::new(DOWNLOADS, "core/document.file", provenance!(), &Download {
     path: "/documents/{id}/revisions/{revision}/file", service: crate::web::FILES, operation: "file",
-    access: Access::Capability(DOWNLOAD),
+    access: Access::Capability(VIEW),
 }) }
 inventory::submit! { Contribution::new(DOWNLOADS, "core/document.preview", provenance!(), &Download {
     path: "/documents/{id}/revisions/{revision}/preview", service: crate::web::FILES, operation: "preview",
-    access: Access::Capability(DOWNLOAD),
+    access: Access::Capability(VIEW),
 }) }
 inventory::submit! { Contribution::new(DOWNLOADS, "core/document.export", provenance!(), &Download {
     path: "/documents/export.csv", service: crate::web::FILES, operation: "export",
