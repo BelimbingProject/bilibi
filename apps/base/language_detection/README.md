@@ -1,5 +1,9 @@
 # Language detection
 
+**Use it for:** local language detection with confidence, conservative unknown outcomes, and one shared fastText model per process.
+
+**Not for:** choosing UI locales (use `base/locale`), translation, message persistence, or overriding an explicit user language choice.
+
 `base/language_detection` provides one shared local fastText detector for applications and modules; it does not integrate conversations or choose a person's UI locale.
 
 ## Call the facade
