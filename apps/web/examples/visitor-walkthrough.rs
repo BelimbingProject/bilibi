@@ -17,8 +17,10 @@
 //! and what answered; a line starting `FAIL` makes the run exit non-zero.
 //!
 //! `serve` runs the host for a real browser on BIND_ADDR (APP_ORIGIN must be
-//! its address) and a staff control address on CONTROL_ADDR (default
-//! 127.0.0.1:3991): `/reply?subject=…&text=…`, `/revoke?subject=…`,
+//! its address), a customer's page on another origin on PAGE_ADDR (default
+//! 127.0.0.1:3992, which embeds the client under a strict Content-Security-
+//! Policy: `/?site=other-desk` embeds the other tenant's site) and a staff
+//! control address on CONTROL_ADDR (default 127.0.0.1:3991): `/reply?subject=…&text=…`, `/revoke?subject=…`,
 //! `/origins?site=…&list=…` (comma-separated; empty closes the site) and
 //! `/state`. VISITOR_ORIGINS (comma-separated) lists the origins the sites
 //! allow; the sites are `front-desk` (tenant 1) and `other-desk` (tenant 2).
@@ -421,6 +423,7 @@ async fn serve(db: Db) -> Result<()> {
         .filter(|origin| !origin.is_empty())
         .map(str::to_owned)
         .collect();
+    let page = std::env::var("PAGE_ADDR").unwrap_or_else(|_| "127.0.0.1:3992".into());
     open_sites(&pages, &pages);
     let app = bilibi_web::App::new(db.clone(), &origin)?;
     let setup = prepare_host(&db, app.services.clone()).await?;
@@ -431,10 +434,11 @@ async fn serve(db: Db) -> Result<()> {
         db.clone(),
         control.clone(),
     ));
+    tokio::spawn(page_server(page.clone(), origin.clone()));
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(internal)?;
-    println!("Bilibi at {origin}; staff control at http://{control}; sites allow {pages:?}");
+    println!("Bilibi at {origin}; customer page at http://{page}; staff control at http://{control}; sites allow {pages:?}");
     let served = axum::serve(
         listener,
         bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -453,6 +457,34 @@ fn executor(services: &Services) -> Result<Arc<Executor>> {
             ..Config::default()
         },
     )
+}
+/// A customer's page on its own origin: nothing but the embed, under a
+/// policy that allows scripts and connections to the Bilibi host only (no
+/// inline script, no inline style, no frames, no images).
+async fn page_server(address: String, host: String) {
+    use axum::{extract::Query, http::header, response::IntoResponse, routing::get, Router};
+    let socket = host.replacen("http", "ws", 1);
+    let policy = format!(
+        "default-src 'none'; script-src {host}; connect-src {host} {socket}; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    let router = Router::new().route(
+        "/",
+        get(move |Query(q): Query<HashMap<String, String>>| {
+            let policy = policy.clone();
+            let host = host.clone();
+            async move {
+                let site = q.get("site").map_or("front-desk", String::as_str);
+                let site: String = site.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+                let body = format!(
+                    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>A customer's website</title></head><body><h1>A customer's website</h1><p>This page is served from another origin than Bilibi. It embeds the visitor chat with one script tag.</p><script src=\"{host}/visitor/v1/client.js\" data-channel=\"{CHANNEL}\" data-site=\"{site}\" data-title=\"Chat with us\" async></script></body></html>"
+                );
+                ([(header::CONTENT_SECURITY_POLICY, policy), (header::CONTENT_TYPE, "text/html; charset=utf-8".into())], body).into_response()
+            }
+        }),
+    );
+    if let Ok(listener) = tokio::net::TcpListener::bind(&address).await {
+        let _ = axum::serve(listener, router).await;
+    }
 }
 /// The staff side for a browser proof, on its own local address.
 async fn control_server(services: Arc<Services>, db: Db, address: String) {
@@ -661,7 +693,10 @@ async fn next(ws: &mut Socket, seconds: u64) -> Option<Value> {
         match tokio::time::timeout(Duration::from_secs(seconds), ws.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => return serde_json::from_str(&text).ok(),
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
-            _ => return None,
+            other => {
+                eprintln!("  (socket gave nothing more: {other:?})");
+                return None;
+            }
         }
     }
 }
@@ -849,6 +884,24 @@ async fn prepare(db: Db) -> Result<()> {
         "a preflight is never answered with permission",
         preflight.header("access-control-allow-origin").is_none(),
         format!("{}", preflight.status),
+    );
+
+    let script = http(&addr, "GET", "/visitor/v1/client.js", &[], "").await;
+    run.expect(
+        "the embeddable script is served as JavaScript any page may load, with no cookie",
+        script.status == 200
+            && script
+                .header("content-type")
+                .is_some_and(|t| t.starts_with("text/javascript"))
+            && script.header("cross-origin-resource-policy") == Some("cross-origin")
+            && script.header("set-cookie").is_none()
+            && script.body.contains("Bilibi visitor chat client v1"),
+        format!(
+            "{} {:?} {} bytes",
+            script.status,
+            script.header("content-type"),
+            script.body.len()
+        ),
     );
 
     println!("== chatting over the socket");

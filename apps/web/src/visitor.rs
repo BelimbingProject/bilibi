@@ -38,6 +38,7 @@ pub const SESSIONS: &str = "/visitor/v1/sessions";
 pub const RENEW: &str = "/visitor/v1/session/renew";
 pub const END: &str = "/visitor/v1/session/end";
 pub const LIVE: &str = "/visitor/v1/live";
+pub const CLIENT: &str = "/visitor/v1/client.js";
 /// Whether `path` is the visitor edge's: no page or download may claim it.
 pub fn reserved(path: &str) -> bool {
     path == "/visitor" || path.starts_with("/visitor/")
@@ -166,6 +167,27 @@ pub fn router() -> Router<App> {
         .route(RENEW, post(renew))
         .route(END, post(end))
         .route(LIVE, get(upgrade))
+        .route(CLIENT, get(client))
+}
+
+/// The embeddable script, versioned by its path (`v1`). A page on another
+/// origin loads it with a script tag, so it is marked cross-origin readable.
+async fn client() -> Response {
+    let mut response = (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        bilibi_base::visitor::CLIENT_V1,
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("cross-origin"),
+    );
+    response
 }
 
 /// How a request is refused. Every refusal of a credential or a site is the

@@ -77,6 +77,26 @@ All HTTP calls are `POST` with `Content-Type: text/plain` and a JSON body, so a 
 
 Before any frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A socket also rechecks every 10 seconds, and a staff revocation closes it at once.
 
+## The browser client
+
+One script, `GET /visitor/v1/client.js` (`CLIENT_V1`, `assets/client-v1.js`). A breaking change is a new major path (`/v2/`), so a page that embeds this one keeps working. It has no dependencies and no build step.
+
+```html
+<script src="https://bilibi.example/visitor/v1/client.js" data-channel="cx/chat" data-site="front-desk" async></script>
+```
+
+| Attribute | Meaning |
+| --- | --- |
+| `data-channel`, `data-site` | Required: the Domain's channel key and the site key its `site` lookup knows |
+| `data-details` | JSON sent as `hello.details` when a session opens (at most 4 KiB) |
+| `data-title` | The window's title, default "Chat with us" |
+
+- **Strict Content-Security-Policy.** The page needs `script-src` and `connect-src` for the Bilibi host (and its `wss://` address) and nothing else. The client sets no inline style or script, uses no `eval`, loads no font, image or stylesheet, and styles its shadow DOM with a constructed stylesheet. It uses a system font, so a customer's page makes no font request.
+- **A session starts when the visitor opens the window**, not on page load. The token lives in `sessionStorage` (a blocked store only means the chat lasts for the page); it is renewed on the next open and by use. A refusal on renewal starts a new session; the Domain decides whether that is the same conversation.
+- **Items.** The client renders each item `{from: "visitor" | "agent" | "system", text?, attachment?: {name}, seq?}` as a message and shows "Typing…" for `{from: "agent", typing: true}` until a message or `typing: false`. `seq` de-duplicates. Anything else is ignored; the transport carries any JSON.
+- **It sends** `{text}` messages (at most 4,000 characters), throttled typing signals and files in 64 KiB chunks.
+- **It reconnects** with backoff while the window is open, and on `closed` with `ended` or `refused` says the chat has ended and offers a new one.
+
 ## Operator settings
 
 Platform capability `admin.system.visitor.manage`; group Visitor in the settings editor.
