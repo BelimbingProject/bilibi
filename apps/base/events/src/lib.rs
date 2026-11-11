@@ -11,6 +11,12 @@
 //! subject, and each subscriber's effects commit with its receipt and audit
 //! in one transaction. Nothing is broadcast in process: the outbox rows are
 //! the source of truth.
+//!
+//! An event type may opt in to a bound producer (`PRODUCERS`, ADR 27): it is
+//! then recorded only by its named system principal under the tenant's durable
+//! grant (`Events::record_as`), and subscribers read the recorded principal
+//! from `Event::producer`. Mounted code is trusted; the binding adds the
+//! tenant's grant, not isolation between crates.
 mod agent;
 mod catalog;
 mod delivery;
@@ -21,8 +27,8 @@ mod web;
 pub use operator::{Delivered, DeliveryState, Replay, ReplayFrom, SubscriberState};
 
 use bilibi_authz::{
-    CapabilityDefinition, SystemPrincipalDefinition, SystemScope, VocabularyContribution,
-    VOCABULARY,
+    authorize_system, CapabilityDefinition, SystemPrincipalDefinition, SystemScope,
+    VocabularyContribution, VOCABULARY,
 };
 use bilibi_database::{Change, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_module_registry::{
@@ -42,6 +48,9 @@ pub const EVENTS: &str = "base/events.events";
 /// The catalog subscribers contribute to:
 /// `Contribution::new(SUBSCRIBERS, "<module>.<snake_case name>", provenance, &Subscriber { .. })`.
 pub const SUBSCRIBERS: &str = "base/events.subscribers";
+/// The catalog a publisher binds one of its event types to its producer in:
+/// `Contribution::new(PRODUCERS, "<event name>", provenance, &Producer { .. })`.
+pub const PRODUCERS: &str = "base/events.producers";
 /// The `Events` service publishers and operators resolve, after declaring `base/events`.
 pub const SERVICE: &str = "base/events.outbox";
 /// The system principal deliveries run as. Grant it [`DELIVER`] in each tenant
@@ -64,6 +73,18 @@ const DELIVERY: &str = "base/events.delivery";
 /// read, and boot refuses one that does not read the mounted publisher's.
 pub struct EventType {
     pub version: u16,
+}
+
+/// Opt-in binding of one event type to the system principal that records it
+/// (ADR 27). The contribution ID is the event name. A bound type is recorded
+/// only through [`Events::record_as`], and its subscribers read the recorded
+/// principal from [`Event::producer`]. Boot requires the event type, the
+/// principal and the capability to be the contributing module's own, the
+/// capability to be inside the principal's declaration, and not a standing
+/// grant: a tenant administrator grants it (`Grants::set_system`).
+pub struct Producer {
+    pub principal: &'static str,
+    pub capability: &'static str,
 }
 
 /// One event name a subscriber reads, and the versions of it it understands.
@@ -95,7 +116,8 @@ pub trait Subscribe: Send + Sync {
 
 /// A recorded event as a subscriber receives it. The publisher's actor is not
 /// carried: the event is a fact, not authority. `scope` in [`Subscribe`] is the
-/// `domain-events` principal in `tenant`.
+/// `domain-events` principal in `tenant`. Only this module builds one, so a
+/// handler never receives an `Event` a caller assembled.
 #[derive(Clone, Debug)]
 pub struct Event {
     pub id: i64,
@@ -109,6 +131,19 @@ pub struct Event {
     pub recorded_at: String,
     /// This subscriber's attempt at this event, from 1.
     pub attempt: i32,
+    producer: Option<String>,
+}
+impl Event {
+    /// The system principal that recorded this event through
+    /// [`Events::record_as`], as stored with it; `None` for an event type with
+    /// no [`Producer`] binding. It names the principal the tenant had granted
+    /// the bound capability when the event was recorded. It identifies neither
+    /// the calling crate nor anything outside Bilibi, and it is not the
+    /// delivery scope: decide what this producer may do against your own
+    /// records, in the delivery transaction.
+    pub fn producer(&self) -> Option<&str> {
+        self.producer.as_deref()
+    }
 }
 /// What a publisher records. `subject` is the record the event is about
 /// (`goods_receipt:42`); delivery keeps one subject's events in recording
@@ -145,29 +180,95 @@ pub struct Events {
     /// Event name → (publisher module, current version).
     types: BTreeMap<&'static str, (&'static str, u16)>,
     subscribers: BTreeMap<&'static str, &'static Subscriber>,
+    /// Event name → its bound producer, for the types that opted in.
+    producers: BTreeMap<&'static str, &'static Producer>,
 }
 impl Events {
     /// Records `event` in the owner's transaction. The name must be an event
-    /// type a mounted module declares; the audit row carries no payload.
+    /// type a mounted module declares; the audit row carries no payload. A
+    /// producer-bound type is `Forbidden` here and the transaction can no
+    /// longer commit: record it with [`Events::record_as`].
     pub async fn record(
         &self,
         tx: &mut MutationTransaction<'_>,
         event: NewEvent<'_>,
     ) -> Result<Recorded> {
+        let (name, publisher, version) = self.declared(&event)?;
+        if self.producers.contains_key(name) {
+            tx.poison();
+            return Err(Error::Forbidden);
+        }
+        self.write(tx, event, (name, publisher, version), None)
+            .await
+    }
+    /// Records an event of a producer-bound type as its bound system
+    /// principal, and stores that principal with the event. `producer` must be
+    /// the bound principal in the transaction's tenant, the transaction must
+    /// be that principal's own (`SystemScope::mutation_context`: a system
+    /// actor of that name, no impersonator), and Authz must allow the bound
+    /// capability for it in that tenant now, decided and logged inside this
+    /// transaction. Any of these failing is `Forbidden` and the transaction
+    /// can no longer commit. The transaction's actor is attribution and is
+    /// checked only so audit and the stored producer agree; the authority is
+    /// the tenant's grant. An unbound type is `Invalid`. Recording a key again
+    /// answers the event already recorded only when the stored producer is
+    /// the same; otherwise it is `Conflict`.
+    ///
+    /// This does not authenticate the caller's own source: a connector checks
+    /// its provider before calling.
+    pub async fn record_as(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        producer: &SystemScope,
+        event: NewEvent<'_>,
+    ) -> Result<Recorded> {
+        let (name, publisher, version) = self.declared(&event)?;
+        let bound = *self.producers.get(name).ok_or(Error::Invalid)?;
+        let context = tx.context();
+        let named = producer.principal() == Some(bound.principal)
+            && context.tenant == producer.tenant()
+            && context.impersonator.is_none()
+            && context.actor.kind == "system"
+            && context.actor.id == bound.principal;
+        // Before the key lookup: without the grant nothing is disclosed.
+        let allowed = if named {
+            authorize_system(tx.sql(), producer, bound.capability).await
+        } else {
+            Err(Error::Forbidden)
+        };
+        if let Err(error) = allowed {
+            tx.poison();
+            return Err(error);
+        }
+        self.write(tx, event, (name, publisher, version), Some(bound.principal))
+            .await
+    }
+    /// The declared `(name, publisher module, version)` of a well-formed event.
+    fn declared(&self, event: &NewEvent<'_>) -> Result<(&'static str, &'static str, u16)> {
         let (&name, &(publisher, version)) =
             self.types.get_key_value(event.name).ok_or(Error::Invalid)?;
         if !text(event.subject) || !text(event.key) {
             return Err(Error::Invalid);
         }
+        Ok((name, publisher, version))
+    }
+    async fn write(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        event: NewEvent<'_>,
+        (name, publisher, version): (&'static str, &'static str, u16),
+        producer: Option<&'static str>,
+    ) -> Result<Recorded> {
         bilibi_queue::validate_arguments(&event.payload)?;
         let tenant = tx.context().tenant;
         if let Some(row) = tx.sql().query_opt(
-            "SELECT id,name,subject,payload FROM base_events WHERE tenant_id=$1 AND publisher=$2 AND event_key=$3",
+            "SELECT id,name,subject,payload,producer FROM base_events WHERE tenant_id=$1 AND publisher=$2 AND event_key=$3",
             &[&tenant, &publisher, &event.key],
         ).await? {
             let same = row.get::<_, &str>(1) == event.name
                 && row.get::<_, &str>(2) == event.subject
-                && row.get::<_, Value>(3) == event.payload;
+                && row.get::<_, Value>(3) == event.payload
+                && row.get::<_, Option<&str>>(4) == producer;
             return if same { Ok(Recorded::Existing(row.get(0))) } else { Err(Error::Conflict) };
         }
         let subscribers: Vec<&'static str> = self.subscribers_of(name).collect();
@@ -180,15 +281,15 @@ impl Events {
         let listed = subscribers.clone();
         let id = tx.mutate(move |sql| Box::pin(async move {
             let id: i64 = sql.query_one(
-                "INSERT INTO base_events(tenant_id,publisher,name,version,subject,event_key,payload,trace_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
-                &[&tenant, &publisher, &name, &i32::from(version), &subject, &key, &payload, &trace],
+                "INSERT INTO base_events(tenant_id,publisher,name,version,subject,event_key,payload,trace_id,producer) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+                &[&tenant, &publisher, &name, &i32::from(version), &subject, &key, &payload, &trace, &producer],
             ).await?.get(0);
             sql.execute(
                 "INSERT INTO base_events_deliveries(event_id,subscriber) SELECT $1,unnest($2::text[])",
                 &[&id, &listed],
             ).await?;
             let change = Change { kind: "base/events.event".into(), id, old: Value::Null,
-                new: json!({"name": name, "version": version, "subject": subject, "key": key, "subscribers": listed}) };
+                new: json!({"name": name, "version": version, "subject": subject, "key": key, "subscribers": listed, "producer": producer}) };
             Ok((id, vec![change]))
         })).await?;
         if !subscribers.is_empty() {
@@ -264,7 +365,11 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/events.vocabulary", pro
 fn build(services: &bilibi_module_registry::Services) -> RegistryResult<Events> {
     let modules = bilibi_module_registry::discover()?;
     let catalog = Catalog::discover(&modules)?;
-    let (types, subscribers) = catalog::routes(&catalog, &modules)?;
+    // The vocabulary is read here, not in a validator (see `bilibi_authz::vocabulary`).
+    let vocabulary = bilibi_authz::vocabulary().map_err(|_| {
+        RegistryError::Service("base/events needs the authorization vocabulary".into())
+    })?;
+    let (types, subscribers, producers) = catalog::routes(&catalog, &modules, vocabulary)?;
     Ok(Events {
         db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
         boundary: services.get("base/database.mutations")?,
@@ -272,6 +377,7 @@ fn build(services: &bilibi_module_registry::Services) -> RegistryResult<Events> 
         step_up: services.get(bilibi_step_up::SERVICE)?,
         types,
         subscribers,
+        producers,
     })
 }
 bilibi_step_up::declare!(
@@ -306,6 +412,7 @@ inventory::submit! {
         migrations: &[
             ("base-events-001", include_str!("../migrations/001-events.sql")),
             ("base-events-002-erased", include_str!("../migrations/002-erased.sql")),
+            ("base-events-003-producer", include_str!("../migrations/003-producer.sql")),
         ],
         services: &[
             Service { id: SERVICE, factory: |services| Ok(Arc::new(build(services)?)) },

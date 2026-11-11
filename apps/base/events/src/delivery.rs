@@ -84,7 +84,7 @@ enum Step {
     Done,
     Refused(i64, &'static str),
 }
-const PENDING: &str = "SELECT e.id,e.name,e.version,e.event_key,e.payload,e.recorded_at::text,d.attempts FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.subscriber=$1 AND d.delivered_at IS NULL AND e.tenant_id=$2 AND e.publisher=$3 AND e.subject=$4 ORDER BY e.id LIMIT 1";
+const PENDING: &str = "SELECT e.id,e.name,e.version,e.event_key,e.payload,e.recorded_at::text,d.attempts,e.producer FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.subscriber=$1 AND d.delivered_at IS NULL AND e.tenant_id=$2 AND e.publisher=$3 AND e.subject=$4 ORDER BY e.id LIMIT 1";
 
 async fn walk(
     events: &Arc<Events>,
@@ -186,6 +186,8 @@ async fn next(
         recorded_at: row.get(5),
         subject: subject.to_owned(),
         attempt: row.get::<_, i32>(6) + 1,
+        // As stored when recorded, so every attempt and replay reads the same.
+        producer: row.get(7),
     };
     let reads = subscriber
         .events

@@ -2,12 +2,16 @@
 //! snake_case name (`supply_chain/receiving.goods_received`); its container is
 //! the module ID's first segment. A subscriber reads only events of other
 //! containers: within one container a module calls its neighbour directly.
-use crate::{EventType, Subscriber, EVENTS, SUBSCRIBERS};
+//! A producer binding names an event type, a system principal and a capability
+//! of its own module only (ADR 27).
+use crate::{EventType, Producer, Subscriber, EVENTS, PRODUCERS, SUBSCRIBERS};
+use bilibi_authz::vocabulary::Vocabulary;
 use bilibi_module_registry::{Catalog, Consumer, Entry, Module, RegistryError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type Types = BTreeMap<&'static str, (&'static str, u16)>;
 pub(crate) type Subscribers = BTreeMap<&'static str, &'static Subscriber>;
+pub(crate) type Producers = BTreeMap<&'static str, &'static Producer>;
 
 fn snake(segment: &str) -> bool {
     !segment.is_empty()
@@ -89,14 +93,41 @@ fn validate_subscribers(entries: &[Entry]) -> Result<()> {
     }
     Ok(())
 }
+fn validate_producers(entries: &[Entry]) -> Result<()> {
+    for entry in entries {
+        let producer = entry.get::<Producer>()?;
+        let own = entry.provenance.module;
+        if named(entry.id).map(|(module, _)| module) != Some(own) {
+            return Err(refuse(
+                entry,
+                format!("must bind an event type named {own}.<snake_case name>"),
+            ));
+        }
+        if producer.principal.is_empty() || producer.capability.is_empty() {
+            return Err(refuse(
+                entry,
+                "must name a system principal and a capability".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 inventory::submit! { Consumer::new::<EventType>(EVENTS, "base/events", validate_events) }
+inventory::submit! { Consumer::new::<Producer>(PRODUCERS, "base/events", validate_producers) }
 inventory::submit! { Consumer::new::<Subscriber>(SUBSCRIBERS, "base/events", validate_subscribers) }
 
 /// The mounted routing table. Publishers and subscribers must depend on
 /// `base/events`; a subscriber to a mounted publisher must name an event type
 /// it declares and read its current version. An unmounted publisher is not an
-/// error: its subscribers simply receive nothing.
-pub(crate) fn routes(catalog: &Catalog, modules: &[&Module]) -> Result<(Types, Subscribers)> {
+/// error: its subscribers simply receive nothing. A producer binding must
+/// name an event type, a system principal and a capability its own module
+/// declares, with the capability inside the principal's declaration and not
+/// held as a standing grant, so only a tenant's stored grant admits a producer.
+pub(crate) fn routes(
+    catalog: &Catalog,
+    modules: &[&Module],
+    vocabulary: &Vocabulary,
+) -> Result<(Types, Subscribers, Producers)> {
     let depends = |entry: &Entry| {
         let ok = modules.iter().any(|module| {
             module.id == entry.provenance.module && module.dependencies.contains(&"base/events")
@@ -117,6 +148,49 @@ pub(crate) fn routes(catalog: &Catalog, modules: &[&Module]) -> Result<(Types, S
             entry.id,
             (entry.provenance.module, entry.get::<EventType>()?.version),
         );
+    }
+    let mut producers = Producers::new();
+    for entry in catalog.entries::<Producer>(PRODUCERS)? {
+        depends(entry)?;
+        let producer = entry.get::<Producer>()?;
+        let own = entry.provenance.module;
+        let (principal, capability) = (producer.principal, producer.capability);
+        if types.get(entry.id).map(|(publisher, _)| *publisher) != Some(own) {
+            return Err(refuse(
+                entry,
+                format!("binds an event type {own} does not declare"),
+            ));
+        }
+        let declared = vocabulary
+            .system_principals
+            .get(principal)
+            .filter(|_| vocabulary.principal_module(principal) == Some(own));
+        let Some(declared) = declared else {
+            return Err(refuse(
+                entry,
+                format!("names system principal {principal}, which {own} does not declare"),
+            ));
+        };
+        if !declared.capabilities.contains(&capability)
+            || vocabulary
+                .capabilities
+                .get(capability)
+                .is_none_or(|owned| owned.provenance.module != own)
+        {
+            return Err(refuse(
+                entry,
+                format!(
+                    "names capability {capability}, which {own} does not declare for {principal}"
+                ),
+            ));
+        }
+        if vocabulary.standing(principal, capability) {
+            return Err(refuse(
+                entry,
+                format!("names capability {capability}, which {principal} holds as a standing grant; a producer is admitted only by a tenant's own grant"),
+            ));
+        }
+        producers.insert(entry.id, producer);
     }
     let mut subscribers = Subscribers::new();
     for entry in catalog.entries::<Subscriber>(SUBSCRIBERS)? {
@@ -151,5 +225,5 @@ pub(crate) fn routes(catalog: &Catalog, modules: &[&Module]) -> Result<(Types, S
         }
         subscribers.insert(entry.id, subscriber);
     }
-    Ok((types, subscribers))
+    Ok((types, subscribers, producers))
 }

@@ -133,7 +133,7 @@ Write only in that transaction, and return every `Change`. Your effects, the rec
 
 To refuse an event, return an error. Your effects roll back, and we try the delivery again later.
 
-You might be wondering why the handler doesn't get the publisher's user. **An event is a fact, not authority**, so the publisher's actor isn't carried across.
+You might be wondering why the handler doesn't get the publisher's user. **An event is a fact, not authority**, so the publisher's actor isn't carried across. The one exception is opt-in: an event type [bound to its producer](#binding-an-event-type-to-its-producer) carries that system principal's name as `Event::producer()`.
 
 > [!WARNING]
 > A handler must never open or commit another transaction, and must never do network or file IO. If you need either, put the work in your own outbox and key it by `Event::key`.
@@ -142,13 +142,73 @@ You might be wondering why the handler doesn't get the publisher's user. **An ev
 
 Boot refuses to start when:
 
-- a subscriber or event type has a key outside the contributing module;
+- a subscriber, event type or producer binding has a key outside the contributing module;
+- a producer binding names an event type, principal or capability its own module doesn't declare, a capability outside the principal's declaration, or one the principal holds as a standing grant;
 - an event name isn't `<name>/<module>.<snake_case name>` (`<name>` is the publisher's Domain or Extension, or `base` or `core`);
 - a module subscribes to an event from its own Domain or Extension;
 - a contributor doesn't depend on `base/events`;
 - a subscriber reads from a mounted publisher that doesn't declare that event, or doesn't record a version the subscriber reads.
 
 An unmounted publisher is not an error. Its subscribers simply receive nothing.
+
+## Binding an event type to its producer
+
+**Bind an event type when a subscriber must act only on events one named system principal recorded, under a grant the tenant gave it.** Unbound event types, which is every type unless you opt in, work exactly as described above. The decision and its limits are in [ADR 27](../../../docs/architecture/decisions/27-producer-bound-events.md).
+
+A typical case is an Extension that connects an outside system and hands what it observed to a Domain. A source ID in the payload can't show who recorded the event, since the recorder wrote the payload.
+
+### Declaring the binding
+
+Declare a system principal and a capability in your own vocabulary, then bind the event type to them beside its `EventType`:
+
+```rust,ignore
+inventory::submit! { Contribution::new(EVENTS, "connector/phone.call_observed", provenance!(), &EventType { version: 1 }) }
+inventory::submit! { Contribution::new(PRODUCERS, "connector/phone.call_observed", provenance!(),
+    &Producer { principal: "connector-phone", capability: "connector.phone.publish" }) }
+```
+
+The event type, the principal and the capability must all be your module's own. Declaring them grants nothing: a tenant administrator grants the capability to the principal on **Automation access**, as for any system principal.
+
+### Recording as the producer
+
+Open the transaction as the principal and pass its scope:
+
+```rust,ignore
+let mut tx = boundary.begin(&mut client, scope.mutation_context("connector.phone.ingest")).await?;
+events.record_as(&mut tx, &scope, NewEvent { name: "connector/phone.call_observed", subject, key, payload }).await?;
+tx.commit().await?;
+```
+
+`record_as` records only when all of these hold, checked inside your transaction:
+
+- the scope is the bound principal, in the transaction's tenant;
+- the transaction's actor is that same system principal, with no impersonator;
+- Authz allows the bound capability for the principal in that tenant now (`authorize_system`: a live tenant, the declaration, the stored grant, a denying grant winning).
+
+| Call | Answer |
+| --- | --- |
+| `record` on a bound type | `Forbidden`; the transaction can no longer commit |
+| `record_as` that fails a check above | `Forbidden`; the transaction can no longer commit |
+| `record_as` on an unbound type | `Invalid` |
+| `record_as`, same key and same event | `Recorded::Existing` |
+| `record_as`, same key, different payload or different stored producer | `Conflict` |
+
+The grant is checked before the key is looked up, so a principal without it learns nothing about recorded keys.
+
+### Reading the producer
+
+The event row stores the principal's name, and every delivery of it, first try or retry, hands the same value to the subscriber:
+
+```rust,ignore
+let Some(producer) = event.producer() else { return Err(Error::Forbidden) };
+```
+
+`producer()` is `None` for an unbound event type. The delivery scope is still `domain-events`. Only `base/events` can build an `Event`, so a handler never receives one a caller assembled.
+
+The subscriber decides what that producer may do. Match the delivery tenant, the producer and your own configured, active source inside the delivery transaction, and let a payload field only select which source to check. A grant withdrawn after an event was recorded doesn't unrecord it; if you must stop accepting a source, check your own source row at delivery.
+
+> [!WARNING]
+> The producer says which Bilibi principal recorded the event under a tenant's grant. It doesn't say which mounted crate called: code linked into the application is trusted, and any of it can present a declared principal. It says nothing about the outside system either: an Extension still authenticates its provider (signature, credential, connection) before it calls `record_as`. Delivery stays at-least-once.
 
 ## How delivery works
 
@@ -265,7 +325,7 @@ inventory::submit! { Contribution::new(PERSONAL_EVENTS, "supply_chain/receiving.
 
 ## Tables
 
-This module owns `base_events` and `base_events_deliveries`.
+This module owns `base_events` and `base_events_deliveries`. `base_events.producer` is the bound principal's name, and null for an unbound event type.
 
 ## Seeing it work
 
@@ -289,6 +349,8 @@ The remount case also runs on the real Domains:
 2. Send an order while Finance is unmounted.
 3. Remount Finance. The Events page shows `finance/payables.purchase_orders` with a gap.
 4. Replay it. A bill naming that order line is now accepted and posts.
+
+Producer binding has its own example, `apps/web/examples/events-producer-reference.rs`, which declares a connector and an intake module in the example itself and runs once on a fresh disposable database. It shows each refusal in the table above, the tenant's grant being denied and withdrawn, the stored producer reaching the subscriber on a retry, and a subscriber refusing a source that is inactive, bound to another principal or owned by another tenant.
 
 ## Where to go next
 
