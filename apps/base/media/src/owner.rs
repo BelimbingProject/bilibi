@@ -17,6 +17,8 @@ pub enum SubjectAction {
     Submit,
     Retain,
     Download,
+    /// Read attachment metadata and scan verdict without opening bytes.
+    Inspect,
     Discard,
 }
 /// Implement on the owner's own type. Return `Ok` only for a live subject this

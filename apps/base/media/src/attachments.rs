@@ -428,6 +428,39 @@ impl Media {
         .map_err(Into::into)
     }
 
+    /// Metadata and current scan verdict for one private attachment. The
+    /// registered subject owner authorizes `Inspect` on the caller's own
+    /// connection before any metadata is returned; this never opens bytes or
+    /// grants the quarantine manager's tenant-wide view.
+    pub async fn inspect_attachment(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        public_id: &str,
+    ) -> Result<Attachment> {
+        if !valid_public_id(public_id) {
+            return Err(Error::NotFound);
+        }
+        let row = client
+            .query_opt(
+                &format!("{SELECT} WHERE a.tenant_id=$1 AND a.public_id=$2"),
+                &[&scope.tenant(), &public_id],
+            )
+            .await?
+            .ok_or(Error::NotFound)?;
+        let summary = bound(&row)?.summary;
+        self.subjects
+            .authorize(
+                client,
+                scope,
+                &summary.subject_type,
+                SubjectAction::Inspect,
+                &summary.subject_id,
+            )
+            .await?;
+        Ok(summary)
+    }
+
     /// Bytes for one attachment, after the subject's owner allows `Download` for
     /// this scope *now*. A public id from another tenant is `NotFound`. Send the
     /// result with `StreamFile::delivery(true)`: private files always download.

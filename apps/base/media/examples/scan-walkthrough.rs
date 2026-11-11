@@ -1,6 +1,6 @@
 //! Manual walkthrough of malware scanning and quarantine (issue 141) against an
-//! explicitly supplied disposable DB. No test harness or assertions; it prints
-//! outcomes to inspect. The fixture scanner lives only in this executable:
+//! explicitly supplied disposable DB. The owner-scoped inspection seam has
+//! explicit assertions; the rest of the walkthrough prints outcomes to inspect. The fixture scanner lives only in this executable:
 //! production builds carry none.
 //!
 //! The fixture scanner calls a file holding the EICAR test string infected,
@@ -563,6 +563,18 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         infected.scan_state.as_str(),
         logo.scan_state.as_str()
     );
+    let pending = media
+        .inspect_attachment(&**client, &manager, &infected.public_id)
+        .await
+        .map_err(internal)?;
+    assert_eq!(pending.scan_state, ScanState::Pending);
+    assert!(media
+        .inspect_attachment(&**client, &other, &infected.public_id)
+        .await
+        .is_err());
+    println!(
+        "owner-scoped inspection sees pending without a quarantine grant; other tenant refused"
+    );
     show(
         "download receipt.txt while pending",
         media
@@ -586,6 +598,39 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         settled(&client, infected_id, 30).await?,
         settled(&client, logo.id, 30).await?
     );
+    assert_eq!(
+        media
+            .inspect_attachment(&**client, &manager, &clean.public_id)
+            .await
+            .map_err(internal)?
+            .scan_state,
+        ScanState::Clean
+    );
+    assert_eq!(
+        media
+            .inspect_attachment(&**client, &manager, &infected.public_id)
+            .await
+            .map_err(internal)?
+            .scan_state,
+        ScanState::Infected
+    );
+    client
+        .execute(
+            "UPDATE walkthrough_tickets SET denied=array_append(denied,'inspect') WHERE tenant_id=1 AND id='1'",
+            &[],
+        )
+        .await?;
+    assert!(media
+        .inspect_attachment(&**client, &manager, &infected.public_id)
+        .await
+        .is_err());
+    client
+        .execute(
+            "UPDATE walkthrough_tickets SET denied=array_remove(denied,'inspect') WHERE tenant_id=1 AND id='1'",
+            &[],
+        )
+        .await?;
+    println!("owner-scoped inspection follows clean/infected verdicts and live owner refusal");
     show(
         "download receipt.txt",
         media
