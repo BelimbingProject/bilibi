@@ -100,6 +100,7 @@ fn with_all(label: &str, mut options: Vec<Choice>) -> Vec<Choice> {
 struct RowState {
     marks: Marks,
     can_delete: bool,
+    can_download: bool,
     can_preview: bool,
     retention_due_at: Option<SystemTime>,
 }
@@ -356,6 +357,7 @@ impl Index {
         let RowState {
             marks,
             can_delete,
+            can_download,
             can_preview,
             retention_due_at,
         } = state;
@@ -370,13 +372,21 @@ impl Index {
                 })?,
                 None => Html::text("—"),
             },
+            (Source::Internal, Some(r)) if r.scan_status != crate::ScanStatus::Clean => {
+                Html::text(&format!(
+                    "{} ({})",
+                    r.file_name.as_deref().unwrap_or("File"),
+                    r.scan_status.label()
+                ))
+            }
             (Source::Internal, Some(r)) => match &r.file_name {
-                Some(name) => render(ActionLink {
+                Some(name) if can_download => render(ActionLink {
                     id: &format!("documents-{id}-file"),
                     href: &file_path(d.id, r.revision),
                     body: Html::text(name),
                     ..ActionLink::default()
                 })?,
+                Some(name) => Html::text(name),
                 None => Html::text("—"),
             },
             _ => Html::text("—"),
@@ -470,14 +480,11 @@ impl Index {
             page = self.pages.documents.list(scope, &self.filter()).await?;
         }
         let _ = self.columns.load(&page.entries, |d| d.id.to_string());
-        let latest = if self.pages.documents.may_download(scope).await? {
-            self.pages
-                .documents
-                .latest_revisions(scope, &page.entries)
-                .await?
-        } else {
-            HashMap::new()
-        };
+        let latest = self
+            .pages
+            .documents
+            .latest_revisions(scope, &page.entries)
+            .await?;
         let ids: Vec<i64> = page.entries.iter().map(|d| d.id).collect();
         let marks = self.pages.documents.marks(scope, &ids).await?;
         let may_manage = self.pages.documents.may_manage(scope).await?;
@@ -506,9 +513,11 @@ impl Index {
                     RowState {
                         marks: marks.get(&d.id).copied().unwrap_or_default(),
                         can_delete: changeable.contains(&d.id),
+                        can_download: downloadable.contains(&d.id),
                         can_preview: downloadable.contains(&d.id)
                             && latest
                                 .get(&d.id)
+                                .filter(|r| r.scan_status == crate::ScanStatus::Clean)
                                 .and_then(|r| r.content_type.as_deref())
                                 .is_some_and(FileBody::previewable),
                         retention_due_at: page.retention_due_at.get(&d.id).copied(),
@@ -668,7 +677,10 @@ impl Index {
                 .get("show")
                 .is_some_and(|v| v == "retention_due")
             {
-                ("No documents due", "A private document is due only after every file revision's retention date passes and no legal hold remains.")
+                (
+                    "No documents due",
+                    "A private document is due only after every file revision's retention date passes and no legal hold remains.",
+                )
             } else {
                 (
                     "No documents match",

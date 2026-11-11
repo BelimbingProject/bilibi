@@ -11,6 +11,7 @@ mod files;
 mod library;
 mod model;
 mod reminders;
+mod scan;
 mod store;
 mod web;
 
@@ -180,7 +181,11 @@ pub struct Link {
 /// A file `store_file` kept, ready to become a revision.
 #[derive(Clone, Debug)]
 pub struct StoredFile {
+    /// The owner-issued file token passed to create/add_revision. For a held
+    /// upload it has the form `upload:<uuid>`; it is never stored as an
+    /// Artifact id. Clean files retain their existing Artifact UUID token.
     pub artifact_id: String,
+    pub scan_status: ScanStatus,
     pub file_name: String,
     pub content_type: String,
     pub byte_size: i64,
@@ -410,6 +415,10 @@ pub enum WriteError {
     TooLarge { max_bytes: u64 },
     #[error("This file is quarantined and cannot be downloaded.")]
     Quarantined,
+    #[error(
+        "This document has a file still being scanned; try deleting it after the check settles."
+    )]
+    ScanPending,
     #[error("The documents cannot be merged: {0}.")]
     MergeRefused(&'static str),
     #[error("This file is retained until its retain-until date and cannot be deleted yet.")]
@@ -1159,6 +1168,7 @@ inventory::submit! { Module {
         ("core-document-004-email-outbox", include_str!("../migrations/004-email-outbox.sql")),
         ("core-document-005-governance-references", include_str!("../migrations/005-governance-references.sql")),
         ("core-document-006-email-job", include_str!("../migrations/006-email-job.sql")),
+        ("core-document-007-scan-held-revisions", include_str!("../migrations/007-scan-held-revisions.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
@@ -1189,6 +1199,15 @@ inventory::submit! { Module {
         }))))
     }}, Service { id: email::ENDED, factory: |_| {
         Ok(Arc::new(bilibi_queue::EndingService(Arc::new(email::EmailEnded))))
+    }}, Service { id: scan::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(scan::ScanJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            documents: s.get(SERVICE)?,
+        }))))
+    }}, Service { id: scan::ENDED, factory: |s| {
+        Ok(Arc::new(bilibi_queue::EndingService(Arc::new(scan::ScanEnded {
+            documents: s.get(SERVICE)?,
+        }))))
     }}, Service { id: web::SERVICE, factory: |s| {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
     }}, Service { id: web::FILES, factory: |s| {

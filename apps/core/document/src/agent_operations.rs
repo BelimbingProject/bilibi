@@ -228,6 +228,7 @@ pub(crate) fn invalid(error: WriteError, prefix: &str, field: &str) -> bilibi_ag
         }
         error @ (WriteError::TooLarge { .. }
         | WriteError::Quarantined
+        | WriteError::ScanPending
         | WriteError::Retained
         | WriteError::LegalHold) => bilibi_agent_api::invalid("file", error.to_string()),
         WriteError::Invalid(errors) => {
@@ -311,7 +312,7 @@ fn revision_record(document: i64, r: &Revision) -> Value {
         "scan_status": r.scan_status.code(),
         "created_by": r.created_by,
         "created_at": r.created_at.to_string(),
-        "download_path": r.file_name.as_ref().map(|_| crate::web::file_path(document, r.revision)),
+        "download_path": (r.scan_status == crate::ScanStatus::Clean && r.file_name.is_some()).then(|| crate::web::file_path(document, r.revision)),
     })
 }
 fn draft_record(d: &Draft) -> Value {
@@ -399,12 +400,16 @@ impl ReadHandler for List {
             let page = owner.list(scope, &filter).await?;
             let ids: Vec<i64> = page.entries.iter().map(|d| d.id).collect();
             let marks = owner.marks(scope, &ids).await?;
+            let latest = owner.latest_revisions(scope, &page.entries).await?;
             let documents: Vec<Value> = page
                 .entries
                 .iter()
                 .map(|d| {
                     let mut value =
                         with_marks(record(d), marks.get(&d.id).copied().unwrap_or_default());
+                    if let Some(revision) = latest.get(&d.id) {
+                        value["latest_scan_status"] = json!(revision.scan_status.code());
+                    }
                     if let (Some(at), Some(object)) =
                         (page.retention_due_at.get(&d.id), value.as_object_mut())
                     {
@@ -1150,10 +1155,10 @@ fn list_schema() -> Value {
     }})
 }
 fn document_output() -> Value {
-    json!({"type":"object","description":"A document: id, name, publish_date, source, external_url, category, sub_category, document_type, status, revision, last_revision_at, company_id, created_by, created_at, updated_at, version and path. get adds revisions (newest first, each with its download_path and manager-visible Base retention state) and related records {kind, id, label, path}."})
+    json!({"type":"object","description":"A document: id, name, publish_date, source, external_url, category, sub_category, document_type, status, revision, last_revision_at, company_id, created_by, created_at, updated_at, version and path. get adds revisions (newest first, each with scan_status; download_path only for clean files, and manager-visible Base retention state) and related records {kind, id, label, path}."})
 }
 fn list_output() -> Value {
-    json!({"type":"object","description":"documents (each as core.document.get without revisions and related), total, page and page_size."})
+    json!({"type":"object","description":"documents (each with latest_scan_status and, when due, retention_due_at), total, page and page_size."})
 }
 fn review_output() -> Value {
     json!({"type":"object","description":"The review shows what will change; the commit returns the result."})

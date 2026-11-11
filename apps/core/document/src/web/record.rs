@@ -472,7 +472,7 @@ impl Detail {
                             redirect: Some(INDEX.into()),
                             flash: Some((StatusKind::Success, "Document deleted.".into())),
                             ..LiveBody::default()
-                        }))
+                        }));
                     }
                     Err(refusal) => self.flash = Some((StatusKind::Error, refusal.text())),
                 }
@@ -1040,8 +1040,8 @@ impl Detail {
         for r in revisions {
             let number = r.revision.to_string();
             let file = match (&r.file_name, &r.external_url) {
-                (Some(name), _) if r.scan_status == crate::ScanStatus::Quarantined => {
-                    Html::text(&format!("{name} (quarantined)"))
+                (Some(name), _) if r.scan_status != crate::ScanStatus::Clean => {
+                    Html::text(&format!("{name} ({})", r.scan_status.label()))
                 }
                 (Some(name), _) if may_download => render(ActionLink {
                     id: &format!("document-revision-{number}-file"),
@@ -1485,7 +1485,11 @@ impl Detail {
                     "merge",
                 ),
                 Confirm::Delete => (
-                    format!("“{}” will be deleted with all {} revisions.", d.name, revisions.len()),
+                    format!(
+                        "“{}” will be deleted with all {} revisions.",
+                        d.name,
+                        revisions.len()
+                    ),
                     "Every revision's file is deleted too, and the document leaves every record it relates to.",
                     "Delete",
                     "Deleting…",

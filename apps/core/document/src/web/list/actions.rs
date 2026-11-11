@@ -77,10 +77,11 @@ impl Index {
         };
         self.preview = match (document, latest) {
             (Some(document), Some(revision))
-                if revision
-                    .content_type
-                    .as_deref()
-                    .is_some_and(FileBody::previewable) =>
+                if revision.scan_status == crate::ScanStatus::Clean
+                    && revision
+                        .content_type
+                        .as_deref()
+                        .is_some_and(FileBody::previewable) =>
             {
                 Some(Previewing {
                     name: document.name,
@@ -213,7 +214,7 @@ impl Index {
                     continue;
                 }
                 Err(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-                    return Err(error)
+                    return Err(error);
                 }
                 // A database error on one document is that document's result;
                 // the rest still go and the person sees what happened.
@@ -240,7 +241,7 @@ impl Index {
                 Ok(Ok(_)) => outcome.removed += 1,
                 Ok(Err(refusal)) => outcome.refused.push((document.name, refusal.text())),
                 Err(error @ (Error::Unauthorized | Error::StepUpRequired { .. })) => {
-                    return Err(error)
+                    return Err(error);
                 }
                 Err(_) => outcome.refused.push((
                     document.name,
@@ -400,5 +401,7 @@ impl Index {
 }
 
 fn too_many(count: u64) -> String {
-    format!("At most {MAX_DELETE} documents can be deleted at once, and {count} are selected. Narrow the filters or tick fewer rows.")
+    format!(
+        "At most {MAX_DELETE} documents can be deleted at once, and {count} are selected. Narrow the filters or tick fewer rows."
+    )
 }

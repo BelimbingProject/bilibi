@@ -146,6 +146,12 @@ impl Store<'_> {
         document: &Document,
     ) -> WriteResult<()> {
         let client = on.client();
+        if client.query_opt(
+            "SELECT 1 FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND scan_status='pending' LIMIT 1",
+            &[&scope.tenant(), &document.id],
+        ).await?.is_some() {
+            return Err(WriteError::ScanPending);
+        }
         let artifact_ids: Vec<String> = client
             .query(
                 "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY artifact_id",
@@ -384,6 +390,16 @@ impl Store<'_> {
         if document.source != Source::Internal {
             return Err(WriteError::field("file", "a link has no file to copy"));
         }
+        let state: Option<String> = client.query_opt(
+            "SELECT scan_status FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND revision=$3",
+            &[&scope.tenant(), &id, &document.revision],
+        ).await?.map(|row| row.get(0));
+        if state.as_deref() != Some("clean") {
+            return Err(WriteError::field(
+                "file",
+                "the latest file must pass its scan before copying",
+            ));
+        }
         Ok(document)
     }
 
@@ -396,6 +412,9 @@ impl Store<'_> {
     ) -> WriteResult<Draft> {
         authorize_proof(client, scope, MANAGE).await?;
         let source = self.get(client, scope, id).await?;
+        if source.source == Source::Internal {
+            self.copyable(client, scope, id).await?;
+        }
         let name: String = format!("Copy of {}", source.name)
             .chars()
             .take(model::NAME_MAX)
@@ -527,12 +546,12 @@ impl Store<'_> {
             Err(bilibi_artifacts::Error::Retained) => {
                 return Err(WriteError::MergeRefused(
                     "a revision is retained and cannot be moved or changed yet",
-                ))
+                ));
             }
             Err(bilibi_artifacts::Error::LegalHold) => {
                 return Err(WriteError::MergeRefused(
                     "a revision is under legal hold and cannot be moved or changed",
-                ))
+                ));
             }
             Err(bilibi_artifacts::Error::Database(error)) => return Err(error.into()),
             Err(_) => return Err(Error::Internal.into()),

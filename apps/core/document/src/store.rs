@@ -347,7 +347,7 @@ impl CreatePlan {
             name: Some(self.values.name.clone()),
             publish_date: self.publish_date,
             source: self.source,
-            artifact_id: self.file.as_ref().map(|f| f.artifact_id().to_owned()),
+            artifact_id: self.file.as_ref().map(TakenFile::token),
             external_url: self.external_url.clone(),
             category: self.values.category.clone(),
             sub_category: self.values.sub_category.clone(),
@@ -409,7 +409,7 @@ pub(crate) struct Store<'s> {
 impl Store<'_> {
     /// The tenant rule is captured when each private revision is attached.
     /// Base owns the irreversible protection and its audit history.
-    async fn retain_new_file(
+    pub(crate) async fn retain_new_file(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
@@ -527,7 +527,7 @@ impl Store<'_> {
                 return Err(WriteError::field(
                     "until",
                     "cannot end your own access to a document",
-                ))
+                ));
             }
             Some(day) => {
                 let end = day
@@ -671,7 +671,9 @@ impl Store<'_> {
     ) -> Result<HashMap<i64, SystemTime>> {
         authorize_proof(client, scope, MANAGE).await?;
         let rows = client.query(
-            "SELECT d.id,d.company_id,r.artifact_id FROM core_documents d JOIN core_document_access a ON a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND a.can_manage AND (a.expires_at IS NULL OR a.expires_at > now()) JOIN core_document_revisions r ON r.tenant_id=d.tenant_id AND r.document_id=d.id WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND d.source='internal' AND r.artifact_id IS NOT NULL ORDER BY d.id,r.revision",
+            "SELECT d.id,d.company_id,r.artifact_id FROM core_documents d JOIN core_document_access a ON a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND a.can_manage AND (a.expires_at IS NULL OR a.expires_at > now()) JOIN core_document_revisions r ON r.tenant_id=d.tenant_id AND r.document_id=d.id WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND d.source='internal' AND r.artifact_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM core_document_revisions held WHERE held.tenant_id=d.tenant_id AND held.document_id=d.id AND held.scan_status<>'clean')
+              ORDER BY d.id,r.revision",
             &[&scope.tenant(), &scope.user()],
         ).await?;
         let mut by_company: BTreeMap<i64, Vec<String>> = BTreeMap::new();
@@ -1258,9 +1260,12 @@ impl Store<'_> {
             .prepare_create(On::Commit(tx.sql()), scope, draft)
             .await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let attached = plan.file.as_ref().map(|file| file.artifact_id().to_owned());
+        let attached = plan
+            .file
+            .as_ref()
+            .and_then(|file| file.artifact_id().map(str::to_owned));
         let company = plan.company;
-        let document = tx.mutate(move |sql| {
+        let (document, revision) = tx.mutate(move |sql| {
             Box::pin(async move {
                 let CreatePlan { company, values, source, external_url, change_log, file, related, revision_label, .. } = plan;
                 let row = sql
@@ -1290,13 +1295,14 @@ impl Store<'_> {
                     let link = insert_link(sql, tenant, user, document.id, record).await?.ok_or(Error::Conflict)?;
                     changes.push(Change { kind: LINK_RECORD.into(), id: link.id, old: json!({}), new: link_values(document.id, &link) });
                 }
-                Ok((document, changes))
+                Ok(((document, revision), changes))
             })
         })
         .await
         .map_err(write_error)?;
         self.retain_new_file(tx, scope, company, attached.as_deref())
             .await?;
+        self.scan_attached(tx, scope, &revision).await?;
         let document = if document.expires_on.is_some() {
             self.refresh_reminder(tx, scope, &document, None).await?
         } else {
@@ -1577,7 +1583,10 @@ impl Store<'_> {
             .prepare_revision(On::Commit(tx.sql()), scope, id, version, input)
             .await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let attached = plan.file.as_ref().map(|file| file.artifact_id().to_owned());
+        let attached = plan
+            .file
+            .as_ref()
+            .and_then(|file| file.artifact_id().map(str::to_owned));
         let company = plan.document.company_id;
         let revision = tx.mutate(move |sql| {
             Box::pin(async move {
@@ -1606,6 +1615,7 @@ impl Store<'_> {
         .map_err(write_error)?;
         self.retain_new_file(tx, scope, company, attached.as_deref())
             .await?;
+        self.scan_attached(tx, scope, &revision).await?;
         self.notify_followers(tx, scope, &revision).await?;
         Ok(revision)
     }
@@ -1787,12 +1797,12 @@ async fn insert_revision(
 ) -> Result<Revision> {
     let row = sql
         .query_one(
-            &format!("INSERT INTO core_document_revisions AS r (tenant_id,document_id,source,revision,name,artifact_id,file_name,content_type,byte_size,sha256,external_url,change_log,label,replaces_revision_id,scan_status,created_by)
-                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING {REVISION_COLUMNS}"),
+            &format!("INSERT INTO core_document_revisions AS r (tenant_id,document_id,source,revision,name,file_id,artifact_id,file_name,content_type,byte_size,sha256,external_url,change_log,label,replaces_revision_id,scan_status,created_by)
+                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING {REVISION_COLUMNS}"),
             &[&tenant, &document.id, &document.source.code(), &number, &document.name,
-              &file.map(TakenFile::artifact_id), &file.map(TakenFile::file_name), &file.map(TakenFile::content_type),
+              &file.map(TakenFile::id), &file.and_then(TakenFile::artifact_id), &file.map(TakenFile::file_name), &file.map(TakenFile::content_type),
               &file.map(TakenFile::byte_size), &file.map(TakenFile::sha256), &external_url, &change_log, &label, &replaces_revision_id,
-              &if file.is_some() { "clean" } else { "not_scanned" }, &user],
+              &file.map(|f| f.scan_status().code()).unwrap_or("not_scanned"), &user],
         )
         .await?;
     revision_from_row(&row)

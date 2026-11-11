@@ -17,7 +17,7 @@
 //! - `Retain`: `core.document.manage`, a revision's file;
 //! - `Purge`: `core.document.manage` maintenance.
 use crate::{
-    model::{self, Upload},
+    model::{self, ScanStatus, Upload},
     store,
 };
 use crate::{
@@ -66,7 +66,17 @@ impl SubjectOwner for DocumentFiles {
         subject_id: &'a str,
     ) -> ProofFuture<'a, ()> {
         Box::pin(async move {
-            authorize_proof(client, scope, MANAGE).await?;
+            let scanner = scope.principal() == Some(crate::scan::PRINCIPAL);
+            authorize_proof(
+                client,
+                scope,
+                if scanner {
+                    crate::contributions::SCAN_SETTLE
+                } else {
+                    MANAGE
+                },
+            )
+            .await?;
             let subject = uuid::Uuid::parse_str(subject_id)
                 .map_err(|_| Error::NotFound)?
                 .to_string();
@@ -88,7 +98,12 @@ impl SubjectOwner for DocumentFiles {
                         | SubjectAction::Inspect
                         | SubjectAction::Discard
                 );
-            if allowed {
+            let scanner_allowed = scanner
+                && row.state == "attached"
+                && row.artifact_id.is_none()
+                && row.media_public_id.is_some()
+                && matches!(action, SubjectAction::Download | SubjectAction::Inspect);
+            if allowed || scanner_allowed {
                 Ok(())
             } else {
                 Err(Error::Forbidden)
@@ -97,18 +112,20 @@ impl SubjectOwner for DocumentFiles {
     }
 }
 
-const COLUMNS: &str =
-    "id,company_id,artifact_id,file_name,content_type,byte_size,sha256,state,stored_by";
+const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
 
 /// One ledger row.
 struct Ledger {
     id: i64,
     company_id: i64,
+    subject: String,
     artifact_id: Option<String>,
+    media_public_id: Option<String>,
     file_name: String,
     content_type: String,
     byte_size: i64,
     sha256: String,
+    scan_status: String,
     state: String,
     stored_by: i64,
 }
@@ -116,11 +133,14 @@ fn from_row(row: &Row) -> Ledger {
     Ledger {
         id: row.get("id"),
         company_id: row.get("company_id"),
+        subject: row.get("subject"),
         artifact_id: row.get("artifact_id"),
+        media_public_id: row.get("media_public_id"),
         file_name: row.get("file_name"),
         content_type: row.get("content_type"),
         byte_size: row.get("byte_size"),
         sha256: row.get("sha256"),
+        scan_status: row.get("scan_status"),
         state: row.get("state"),
         stored_by: row.get("stored_by"),
     }
@@ -129,10 +149,12 @@ fn from_row(row: &Row) -> Ledger {
 fn audit_values(row: &Ledger) -> Value {
     json!({
         "artifact_id": row.artifact_id,
+        "media_public_id": row.media_public_id,
         "file_name": row.file_name,
         "content_type": row.content_type,
         "byte_size": row.byte_size,
         "sha256": row.sha256,
+        "scan_status": row.scan_status,
         "state": row.state,
         "stored_by": row.stored_by,
     })
@@ -153,6 +175,14 @@ impl Owner for DocumentFiles {
         Box::pin(async move {
             let parties = PARTIES.get().ok_or(Error::Forbidden)?;
             match operation {
+                Operation::Create | Operation::Retain
+                    if scope.principal() == Some(crate::scan::PRINCIPAL) =>
+                {
+                    parties
+                        .organisation_name(client, scope, company)
+                        .await?
+                        .ok_or(Error::NotFound)?;
+                }
                 Operation::Create | Operation::Delete | Operation::Retain => {
                     parties.organisation(client, scope, company).await?;
                 }
@@ -184,30 +214,49 @@ impl Owner for DocumentFiles {
             let own = row.stored_by == scope.user();
             let allowed = match operation {
                 Operation::Create => {
-                    authorize_proof(client, scope, MANAGE).await?;
-                    row.state == "reserved" && own
+                    if scope.principal() == Some(crate::scan::PRINCIPAL)
+                        && row.state == "attached"
+                        && row.artifact_id.is_none()
+                        && row.media_public_id.is_some()
+                    {
+                        authorize_proof(client, scope, crate::contributions::SCAN_SETTLE).await?;
+                        true
+                    } else {
+                        authorize_proof(client, scope, MANAGE).await?;
+                        row.state == "reserved" && own
+                    }
                 }
                 Operation::Read => {
-                    authorize_proof(client, scope, DOWNLOAD).await?;
-                    match row.state.as_str() {
-                        "stored" => own,
-                        "attached" => {
-                            authorize_proof(client, scope, VIEW).await?;
-                            let document = client
+                    if scope.principal() == Some(crate::scan::PRINCIPAL)
+                        && row.state == "attached"
+                        && row.artifact_id.is_none()
+                        && row.media_public_id.is_some()
+                    {
+                        authorize_proof(client, scope, crate::contributions::SCAN_SETTLE).await?;
+                        true
+                    } else {
+                        authorize_proof(client, scope, DOWNLOAD).await?;
+                        match row.state.as_str() {
+                            "stored" => own,
+                            "attached" => {
+                                authorize_proof(client, scope, VIEW).await?;
+                                let document = client
                                 .query_opt(
                                     "SELECT r.document_id FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id WHERE r.tenant_id=$1 AND r.artifact_id=$2 AND d.deleting_at IS NULL",
                                     &[&scope.tenant(), &row.artifact_id],
                                 )
                                 .await?
                                 .map(|record| record.get::<_, i64>(0));
-                            match document {
-                                Some(document) => {
-                                    store::permission(client, scope, document, "download").await?
+                                match document {
+                                    Some(document) => {
+                                        store::permission(client, scope, document, "download")
+                                            .await?
+                                    }
+                                    None => false,
                                 }
-                                None => false,
                             }
+                            _ => false,
                         }
-                        _ => false,
                     }
                 }
                 Operation::Delete => {
@@ -225,22 +274,31 @@ impl Owner for DocumentFiles {
                     }
                 }
                 Operation::Retain => {
-                    authorize_proof(client, scope, MANAGE).await?;
-                    if row.state != "attached" {
-                        false
+                    if scope.principal() == Some(crate::scan::PRINCIPAL)
+                        && row.state == "attached"
+                        && row.artifact_id.is_none()
+                        && row.media_public_id.is_some()
+                    {
+                        authorize_proof(client, scope, crate::contributions::SCAN_SETTLE).await?;
+                        true
                     } else {
-                        let document = client
+                        authorize_proof(client, scope, MANAGE).await?;
+                        if row.state != "attached" {
+                            false
+                        } else {
+                            let document = client
                             .query_opt(
                                 "SELECT r.document_id FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id WHERE r.tenant_id=$1 AND r.artifact_id=$2 AND d.deleting_at IS NULL",
                                 &[&scope.tenant(), &row.artifact_id],
                             )
                             .await?
                             .map(|record| record.get::<_, i64>(0));
-                        match document {
-                            Some(document) => {
-                                store::permission(client, scope, document, "manage").await?
+                            match document {
+                                Some(document) => {
+                                    store::permission(client, scope, document, "manage").await?
+                                }
+                                None => false,
                             }
-                            None => false,
                         }
                     }
                 }
@@ -274,6 +332,16 @@ pub(crate) fn artifact_error(error: bilibi_artifacts::Error) -> WriteError {
                 "Files cannot be kept or read: private documents are not available on this server. Ask your administrator.".into(),
             ))
         }
+    }
+}
+
+fn scan_status(state: MediaScanState) -> ScanStatus {
+    match state {
+        MediaScanState::Pending => ScanStatus::Pending,
+        MediaScanState::Clean => ScanStatus::Clean,
+        MediaScanState::Infected => ScanStatus::Quarantined,
+        MediaScanState::Failed => ScanStatus::Failed,
+        MediaScanState::Unscanned => ScanStatus::Unscanned,
     }
 }
 
@@ -414,64 +482,67 @@ pub(crate) async fn store(
         )
         .await
         .map_err(media_error)?;
-    if staged.scan_state == MediaScanState::Unscanned {
-        return Err(media_error(bilibi_media::Error::NotScanned));
-    }
-    if matches!(staged.scan_state, MediaScanState::Infected) {
-        return Err(media_error(bilibi_media::Error::Quarantined));
-    }
-    if matches!(staged.scan_state, MediaScanState::Failed) {
-        return Err(media_error(bilibi_media::Error::ScanFailed));
-    }
-    let mut clean = None;
+    let mut verdict = staged.scan_state;
+    // A quick verdict keeps the existing clean upload path. Slow scans still
+    // produce a document: the later Queue settlement promotes only clean bytes.
     for _ in 0..120 {
-        match media
+        if verdict != MediaScanState::Pending {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        verdict = media
+            .inspect_attachment(client, scope, &staged.public_id)
+            .await
+            .map_err(media_error)?
+            .scan_state;
+    }
+    let metadata = if verdict == MediaScanState::Clean {
+        let clean = media
             .download_attachment(client, scope, &staged.public_id)
             .await
-        {
-            Ok(file) => {
-                clean = Some(file);
-                break;
-            }
-            Err(bilibi_media::Error::ScanPending) => {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            }
-            Err(error) => return Err(media_error(error)),
+            .map_err(media_error)?;
+        let metadata = artifacts
+            .for_owner(scope, company, &FILES)
+            .put(
+                client,
+                Reference {
+                    subject: subject.clone(),
+                    kind: FILE_KIND.into(),
+                },
+                &clean.bytes,
+                content_type,
+            )
+            .await
+            .map_err(|error| match error {
+                bilibi_artifacts::Error::Invalid => WriteError::TooLarge { max_bytes },
+                error => artifact_error(error),
+            })?;
+        if let Err(error) = media.discard_draft(client, scope, &staged.public_id).await {
+            eprintln!("warning: a scanned document staging file awaits Media cleanup: {error}");
         }
-    }
-    let clean = clean.ok_or_else(|| media_error(bilibi_media::Error::ScanPending))?;
-    let metadata = artifacts
-        .for_owner(scope, company, &FILES)
-        .put(
-            client,
-            Reference {
-                subject,
-                kind: FILE_KIND.into(),
-            },
-            &clean.bytes,
-            content_type,
-        )
-        .await
-        .map_err(|error| match error {
-            // Base's own limit, should the operator lower it meanwhile.
-            bilibi_artifacts::Error::Invalid => WriteError::TooLarge { max_bytes },
-            error => artifact_error(error),
-        })?;
-    if let Err(error) = media.discard_draft(client, scope, &staged.public_id).await {
-        eprintln!("warning: a scanned document staging file awaits Media cleanup: {error}");
-    }
+        Some(metadata)
+    } else {
+        None
+    };
+    let scan_status = scan_status(verdict);
+    let file_token = metadata
+        .as_ref()
+        .map(|metadata| metadata.id.clone())
+        .unwrap_or_else(|| format!("upload:{subject}"));
+    let media_public_id = metadata.is_none().then(|| staged.public_id.clone());
 
     let mut tx = boundary
         .begin(client, scope.mutation_context("core.document.store_file"))
         .await?;
-    let artifact_id = metadata.id.clone();
+    let artifact_id = metadata.as_ref().map(|metadata| metadata.id.clone());
     let id = reserved.id;
+    let status = scan_status.code();
     tx.mutate(move |sql| {
         Box::pin(async move {
             let row = sql
                 .query_one(
-                    &format!("UPDATE core_document_files SET artifact_id=$3,state='stored' WHERE tenant_id=$1 AND id=$2 AND state='reserved' RETURNING {COLUMNS}"),
-                    &[&tenant, &id, &artifact_id],
+                    &format!("UPDATE core_document_files SET artifact_id=$3,media_public_id=$4,scan_status=$5,state='stored' WHERE tenant_id=$1 AND id=$2 AND state='reserved' RETURNING {COLUMNS}"),
+                    &[&tenant, &id, &artifact_id, &media_public_id, &status],
                 )
                 .await?;
             let row = from_row(&row);
@@ -482,7 +553,8 @@ pub(crate) async fn store(
     .await?;
     tx.commit().await?;
     Ok(StoredFile {
-        artifact_id: metadata.id,
+        artifact_id: file_token,
+        scan_status,
         file_name,
         content_type: content_type.to_owned(),
         byte_size,
@@ -500,16 +572,31 @@ pub(crate) async fn take(
     field: &'static str,
     lock: bool,
 ) -> WriteResult<TakenFile> {
-    let row = client
-        .query_opt(
-            &format!(
-                "SELECT {COLUMNS} FROM core_document_files WHERE tenant_id=$1 AND artifact_id=$2{}",
-                if lock { " FOR UPDATE" } else { "" }
-            ),
-            &[&scope.tenant(), &artifact_id],
-        )
-        .await?
-        .map(|row| from_row(&row));
+    let row = if let Some(upload) = artifact_id.strip_prefix("upload:") {
+        let subject = uuid::Uuid::parse_str(upload)
+            .map_err(|_| WriteError::field(field, "is not a file you stored"))?
+            .to_string();
+        client
+            .query_opt(
+                &format!(
+                    "SELECT {COLUMNS} FROM core_document_files WHERE tenant_id=$1 AND subject=$2::text::uuid{}",
+                    if lock { " FOR UPDATE" } else { "" }
+                ),
+                &[&scope.tenant(), &subject],
+            )
+            .await?
+    } else {
+        client
+            .query_opt(
+                &format!(
+                    "SELECT {COLUMNS} FROM core_document_files WHERE tenant_id=$1 AND artifact_id=$2{}",
+                    if lock { " FOR UPDATE" } else { "" }
+                ),
+                &[&scope.tenant(), &artifact_id],
+            )
+            .await?
+    }
+    .map(|row| from_row(&row));
     match row {
         Some(row)
             if row.state == "stored"
@@ -527,8 +614,20 @@ pub(crate) async fn take(
 /// A locked, stored file a write attaches in its `mutate`.
 pub(crate) struct TakenFile(Ledger);
 impl TakenFile {
-    pub(crate) fn artifact_id(&self) -> &str {
-        self.0.artifact_id.as_deref().unwrap_or_default()
+    pub(crate) fn id(&self) -> i64 {
+        self.0.id
+    }
+    pub(crate) fn artifact_id(&self) -> Option<&str> {
+        self.0.artifact_id.as_deref()
+    }
+    pub(crate) fn token(&self) -> String {
+        self.0
+            .artifact_id
+            .clone()
+            .unwrap_or_else(|| format!("upload:{}", self.0.subject))
+    }
+    pub(crate) fn scan_status(&self) -> ScanStatus {
+        ScanStatus::parse(&self.0.scan_status).unwrap_or(ScanStatus::Failed)
     }
     pub(crate) fn file_name(&self) -> &str {
         &self.0.file_name
@@ -569,13 +668,23 @@ pub(crate) async fn attached_document(
     scope: &Scope,
     artifact_id: &str,
 ) -> Result<Option<i64>> {
-    Ok(tx
-        .query_opt(
-            "SELECT r.document_id FROM core_document_files f JOIN core_document_revisions r ON r.tenant_id=f.tenant_id AND r.artifact_id=f.artifact_id WHERE f.tenant_id=$1 AND f.artifact_id=$2 AND f.state='attached'",
+    let row = if let Some(upload) = artifact_id.strip_prefix("upload:") {
+        let subject = uuid::Uuid::parse_str(upload)
+            .map_err(|_| Error::NotFound)?
+            .to_string();
+        tx.query_opt(
+            "SELECT r.document_id FROM core_document_files f JOIN core_document_revisions r ON r.tenant_id=f.tenant_id AND r.file_id=f.id WHERE f.tenant_id=$1 AND f.subject=$2::text::uuid AND f.state='attached'",
+            &[&scope.tenant(), &subject],
+        )
+        .await?
+    } else {
+        tx.query_opt(
+            "SELECT r.document_id FROM core_document_files f JOIN core_document_revisions r ON r.tenant_id=f.tenant_id AND r.file_id=f.id WHERE f.tenant_id=$1 AND f.artifact_id=$2 AND f.state='attached'",
             &[&scope.tenant(), &artifact_id],
         )
         .await?
-        .map(|row| row.get(0)))
+    };
+    Ok(row.map(|row| row.get(0)))
 }
 
 /// Removes metadata only after every Artifact has accepted deletion. Until
@@ -604,10 +713,6 @@ pub(crate) async fn finalize_document_delete(
             &[&tenant, &document],
         ).await?.ok_or(Error::NotFound)?;
         let mut changes = Vec::new();
-        let artifact_ids: Vec<String> = sql.query(
-            "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY revision",
-            &[&tenant, &document],
-        ).await?.into_iter().map(|row| row.get(0)).collect();
         for row in sql.query(
             "DELETE FROM core_document_marks WHERE tenant_id=$1 AND document_id=$2 RETURNING id,user_id,favourite,following",
             &[&tenant, &document],
@@ -626,6 +731,10 @@ pub(crate) async fn finalize_document_delete(
         ).await? {
             changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"user_id":row.get::<_,i64>(1),"view":row.get::<_,bool>(2),"download":row.get::<_,bool>(3),"manage":row.get::<_,bool>(4),"share":row.get::<_,bool>(5)}), new: json!({}) });
         }
+        let file_ids: Vec<i64> = sql.query(
+            "SELECT file_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND file_id IS NOT NULL",
+            &[&tenant, &document],
+        ).await?.into_iter().map(|row| row.get(0)).collect();
         for row in sql.query(
             &format!("DELETE FROM core_document_revisions AS r WHERE r.tenant_id=$1 AND r.document_id=$2 RETURNING {}", crate::store::REVISION_COLUMNS),
             &[&tenant, &document],
@@ -634,8 +743,8 @@ pub(crate) async fn finalize_document_delete(
             changes.push(Change { kind: crate::REVISION_RECORD.into(), id: revision.id, old: crate::store::revision_values(&revision), new: json!({}) });
         }
         for row in sql.query(
-            &format!("DELETE FROM core_document_files WHERE tenant_id=$1 AND artifact_id = ANY($2) RETURNING {COLUMNS}"),
-            &[&tenant, &artifact_ids],
+            &format!("DELETE FROM core_document_files WHERE tenant_id=$1 AND id = ANY($2) RETURNING {COLUMNS}"),
+            &[&tenant, &file_ids],
         ).await?.iter().map(from_row) {
             changes.push(Change { kind: FILE_RECORD.into(), id: row.id, old: audit_values(&row), new: json!({}) });
         }
@@ -718,26 +827,38 @@ async fn discard_one(
     artifacts: &Artifacts,
     artifact_id: &str,
 ) -> WriteResult<()> {
-    let row = client
-        .query_opt(
-            &format!(
-                "SELECT {COLUMNS} FROM core_document_files WHERE tenant_id=$1 AND artifact_id=$2"
-            ),
-            &[&scope.tenant(), &artifact_id],
-        )
-        .await
-        .map_err(Error::from)?
-        .map(|row| from_row(&row))
-        .ok_or(WriteError::NotFound)?;
+    let row = if let Some(upload) = artifact_id.strip_prefix("upload:") {
+        let subject = uuid::Uuid::parse_str(upload)
+            .map_err(|_| WriteError::NotFound)?
+            .to_string();
+        client
+            .query_opt(
+                &format!("SELECT {COLUMNS} FROM core_document_files WHERE tenant_id=$1 AND subject=$2::text::uuid"),
+                &[&scope.tenant(), &subject],
+            )
+            .await
+    } else {
+        client
+            .query_opt(
+                &format!("SELECT {COLUMNS} FROM core_document_files WHERE tenant_id=$1 AND artifact_id=$2"),
+                &[&scope.tenant(), &artifact_id],
+            )
+            .await
+    }
+    .map_err(Error::from)?
+    .map(|row| from_row(&row))
+    .ok_or(WriteError::NotFound)?;
     if !matches!(row.state.as_str(), "reserved" | "stored") {
         return Err(WriteError::Forbidden);
     }
     let company = OrganisationId::new(row.company_id).map_err(|_| Error::Internal)?;
-    artifacts
-        .for_owner(scope, company, &FILES)
-        .delete(client, artifact_id)
-        .await
-        .map_err(artifact_error)?;
+    if let Some(artifact_id) = &row.artifact_id {
+        artifacts
+            .for_owner(scope, company, &FILES)
+            .delete(client, artifact_id)
+            .await
+            .map_err(artifact_error)?;
+    }
     let mut tx = boundary
         .begin(client, scope.mutation_context("core.document.discard_file"))
         .await?;
@@ -785,13 +906,13 @@ pub(crate) async fn read(
         .ok_or(WriteError::NotFound)?;
     let (artifact_id, file_name, scan_status): (Option<String>, Option<String>, String) =
         (row.get(0), row.get(1), row.get(2));
+    if file_name.is_some() && scan_status != "clean" {
+        return Err(WriteError::Quarantined);
+    }
     // An external revision is a link, not a file.
     let (Some(artifact_id), Some(file_name)) = (artifact_id, file_name) else {
         return Err(WriteError::NotFound);
     };
-    if scan_status == "quarantined" {
-        return Err(WriteError::Quarantined);
-    }
     let company = OrganisationId::new(document.company_id).map_err(|_| Error::Internal)?;
     let file = artifacts
         .for_owner(scope, company, &FILES)

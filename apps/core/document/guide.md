@@ -6,7 +6,7 @@ Use Documents to keep one business document with every revision and link it to t
 
 Use `core.document.list` to search by name or exact integration sync ID or filter by category, type, status or related record. The results include only documents explicitly shared with you. A record link never gives you document access.
 
-Use `core.document.get` for one document, its revisions and its related records. Use the revision's `download_path` only when you have download permission.
+Use `core.document.get` for one document, its revisions and its related records. Use the revision's `download_path` only when you have download permission. A held internal revision has `scan_status` pending, quarantined, failed or unscanned and no download path; its file cannot be previewed or downloaded. The uploader and current managers receive notices when a scan holds or settles a file.
 
 ## Create and revise
 
@@ -16,7 +16,7 @@ Use `core.document.update` for the document's name, publication date, category, 
 
 ## Favourites, duplicates, copy and merge
 
-Use `core.document.mark` to favourite or follow a document: marks are yours alone, `core.document.list` takes `mark` (`favourites` or `following`), and followers are notified of new revisions. Use `core.document.duplicates` to find documents you may see with the same file, link or name. Use `core.document.copy` for a new document with only the latest revision: a link copies directly; a file needs the Documents page's Copy action to store the file first. Use `core.document.merge` to fold duplicates into a survivor with each document's stored `version`: it needs merge, manage and share permission on every document, moves each duplicate's revisions after the survivor's latest, combines links, marks and access, and removes the duplicates.
+Use `core.document.mark` to favourite or follow a document: marks are yours alone, `core.document.list` takes `mark` (`favourites` or `following`), and followers are notified of new revisions. Use `core.document.duplicates` to find documents you may see with the same file, link or name. Use `core.document.copy` for a new document with only the latest revision: a link copies directly; a file needs a clean latest revision and the Documents page's Copy action to store the file first. Use `core.document.merge` to fold duplicates into a survivor with each document's stored `version`: it needs merge, manage and share permission on every document, moves each duplicate's revisions after the survivor's latest, combines links, marks and access, and removes the duplicates.
 
 ## Share safely
 

@@ -35,28 +35,47 @@ impl Source {
     }
 }
 
-/// Whether a revision's file was scanned. Every revision is `NotScanned`
-/// until upload scanning reaches artifacts (slice 2).
+/// The last durable scan verdict for an internal revision. Held states never
+/// expose bytes; an external link has no scan and stays `NotScanned`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScanStatus {
     #[default]
     NotScanned,
+    Pending,
     Clean,
     Quarantined,
+    Failed,
+    Unscanned,
 }
 impl ScanStatus {
     pub fn code(self) -> &'static str {
         match self {
             Self::NotScanned => "not_scanned",
+            Self::Pending => "pending",
             Self::Clean => "clean",
             Self::Quarantined => "quarantined",
+            Self::Failed => "failed",
+            Self::Unscanned => "unscanned",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotScanned => "not scanned",
+            Self::Pending => "scan pending",
+            Self::Clean => "clean",
+            Self::Quarantined => "quarantined",
+            Self::Failed => "scan failed",
+            Self::Unscanned => "scanner unavailable",
         }
     }
     pub fn parse(code: &str) -> Option<Self> {
         match code {
             "not_scanned" => Some(Self::NotScanned),
+            "pending" => Some(Self::Pending),
             "clean" => Some(Self::Clean),
             "quarantined" => Some(Self::Quarantined),
+            "failed" => Some(Self::Failed),
+            "unscanned" => Some(Self::Unscanned),
             _ => None,
         }
     }
