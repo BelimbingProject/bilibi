@@ -45,6 +45,9 @@ sha1 = "0.11"
 data-encoding = "2.11"
 percent-encoding = "2.3"
 url = "2.5.8"
+# The visitor walkthrough plays a browser: a WebSocket client over the same crate axum serves with.
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
 # Received mail (base/mail): MIME parsing with every charset, and one HTML allow-list.
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 ammonia = "4.2.4"
@@ -105,6 +108,7 @@ bilibi-tenancy = { path = "apps/base/tenancy" }
 bilibi-tiling = { path = "apps/base/tiling" }
 bilibi-personal-data = { path = "apps/base/personal_data" }
 bilibi-privacy = { path = "apps/base/privacy" }
+bilibi-visitor = { path = "apps/base/visitor" }
 bilibi-workflow = { path = "apps/base/workflow" }
 bilibi-activity = { path = "apps/core/activity" }
 bilibi-address = { path = "apps/core/address" }

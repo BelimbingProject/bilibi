@@ -51,4 +51,5 @@ bilibi-system = { path = "system" }
 bilibi-tenancy = { path = "tenancy" }
 bilibi-tiling = { path = "tiling" }
 bilibi-ui = { path = "ui" }
+bilibi-visitor = { path = "visitor" }
 bilibi-workflow = { path = "workflow" }

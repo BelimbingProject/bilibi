@@ -56,6 +56,7 @@ pub fn reserved(path: &str) -> bool {
         || path.starts_with("/scim/")
         || path == "/webhooks"
         || path.starts_with("/webhooks/")
+        || crate::visitor::reserved(path)
         || [
             "/oauth/device_authorization",
             "/oauth/token",
