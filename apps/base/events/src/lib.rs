@@ -206,13 +206,17 @@ impl Events {
     /// the bound principal in the transaction's tenant, the transaction must
     /// be that principal's own (`SystemScope::mutation_context`: a system
     /// actor of that name, no impersonator), and Authz must allow the bound
-    /// capability for it in that tenant now, decided and logged inside this
-    /// transaction. Any of these failing is `Forbidden` and the transaction
-    /// can no longer commit. The transaction's actor is attribution and is
-    /// checked only so audit and the stored producer agree; the authority is
-    /// the tenant's grant. An unbound type is `Invalid`. Recording a key again
-    /// answers the event already recorded only when the stored producer is
-    /// the same; otherwise it is `Conflict`.
+    /// capability for it in that tenant now, decided inside this transaction.
+    /// Any of these failing is `Forbidden` and the transaction can no longer
+    /// commit. Authz writes its decision row in this same transaction, so an
+    /// allowed recording keeps it and a denial's row rolls back with the
+    /// poisoned transaction; a refusal on the principal, tenant or actor is
+    /// decided before Authz and writes none. A refusal therefore leaves no
+    /// durable record here: the caller reports it. The transaction's actor is
+    /// attribution and is checked only so audit and the stored producer agree;
+    /// the authority is the tenant's grant. An unbound type is `Invalid`.
+    /// Recording a key again answers the event already recorded only when the
+    /// stored producer is the same; otherwise it is `Conflict`.
     ///
     /// This does not authenticate the caller's own source: a connector checks
     /// its provider before calling.

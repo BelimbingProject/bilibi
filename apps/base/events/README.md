@@ -191,9 +191,14 @@ tx.commit().await?;
 | `record_as` that fails a check above | `Forbidden`; the transaction can no longer commit |
 | `record_as` on an unbound type | `Invalid` |
 | `record_as`, same key and same event | `Recorded::Existing` |
+| `record_as` of an already recorded key after the grant was denied or withdrawn | `Forbidden`; the transaction can no longer commit |
 | `record_as`, same key, different payload or different stored producer | `Conflict` |
 
-The grant is checked before the key is looked up, so a principal without it learns nothing about recorded keys.
+The grant is checked before the key is looked up, so a principal without it learns nothing about recorded keys. A connector that retries a provider message after its grant was withdrawn is refused too, and must not treat that as "already recorded".
+
+A refusal leaves no durable record in Base. Authz writes its decision in your transaction, so a denial's row rolls back with it, and a refusal on the principal, tenant or actor never reaches Authz. Report the refusal from your own code.
+
+**Binding a type that already has events.** Events recorded before the binding keep a null producer; Base never fills one in. Recording one of their keys again through `record_as` is `Conflict`, and a subscriber that requires a producer refuses their pending deliveries (the subject waits, as for any refusal). An operator decides what happens to them; nothing is converted.
 
 ### Reading the producer
 
@@ -208,7 +213,7 @@ let Some(producer) = event.producer() else { return Err(Error::Forbidden) };
 The subscriber decides what that producer may do. Match the delivery tenant, the producer and your own configured, active source inside the delivery transaction, and let a payload field only select which source to check. A grant withdrawn after an event was recorded doesn't unrecord it; if you must stop accepting a source, check your own source row at delivery.
 
 > [!WARNING]
-> The producer says which Bilibi principal recorded the event under a tenant's grant. It doesn't say which mounted crate called: code linked into the application is trusted, and any of it can present a declared principal. It says nothing about the outside system either: an Extension still authenticates its provider (signature, credential, connection) before it calls `record_as`. Delivery stays at-least-once.
+> The producer says which Bilibi principal recorded the event under a tenant's grant. It doesn't say which mounted crate called: code linked into the application is trusted, and any of it can present a declared principal. It says nothing about the outside system either: the outside provider is untrusted, and authenticating it (signature, credential, connection) stays the Extension's job before it calls `record_as`. Delivery stays at-least-once.
 
 ## How delivery works
 
