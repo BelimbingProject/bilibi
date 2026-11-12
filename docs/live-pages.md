@@ -258,12 +258,20 @@ An embedded list can override `LiveState::query_prefix` with its `ListSpec.param
 
 Return `Subscription`s from the mounted state's `subscriptions` method. Publish
 `Change` only after a business transaction commits, with its tenant and optional
-recipient account. Web forwards wakes through a bounded 64-entry channel,
-rechecks scope/access, discards other tenants/recipients and stale mount
-generations, then refreshes only the target. Broadcast lag causes a guarded
+recipient account. Web drops a `Change` for another tenant or another
+recipient where the socket hears it, before it costs anything: only a change
+for the socket's own tenant and account becomes a wake. Wakes travel through a
+bounded 64-entry channel; the wakes waiting there are merged into one per
+target, so a burst refreshes a panel once per round, not once per change. For
+each wake Web rechecks scope/access, discards stale mount generations, then
+refreshes only the target. Broadcast lag causes a guarded
 refresh rather than treating a lost message as current data. Dropping the mount
 aborts subscription tasks and releases receivers. Modules that own additional
 tasks/resources must release them when their state drops.
+
+Because the tenant and recipient decide who pays for a change, always name the
+recipient when a change is one person's; a tenant-wide `Change` (`user: None`)
+runs a session guard on every open socket of that tenant that subscribes.
 
 A notification is such a `Change` with its recipient: it wakes that account's
 bell panel and `/notifications` state only, never the page underneath. The
@@ -296,6 +304,12 @@ text, caret and focus stay; scroll the box and the scroll position stays through
 the same patches; increment inside the island iframe (`/live-reference/island`,
 its own live page) and its count survives every parent patch because the frame
 is keyed by id and never replaced.
+
+`apps/web/examples/live-wake-walkthrough.rs` is the running proof of who a `Change` wakes. With a disposable, migrated `DATABASE_URL` and `BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes`:
+
+    cargo run -p bilibi-web --example live-wake-walkthrough   # every case, exits non-zero on a FAIL
+
+It opens three sockets (two accounts of one tenant, one of another) on a fixture page that counts its refreshes, then announces one person's change, a tenant-wide one, another tenant's, 100 at once and 4,000 in a burst, and last a change for a person whose session has expired (the guard still runs and sends the page back through sign-in).
 
 F5 runtime evidence lives outside the repository in the task evidence directory.
 Company list/filter/Back/save, targeted panel identity, subscription wakes,
