@@ -888,6 +888,13 @@ impl Index {
                     Err(AccountError::OwnAccount) => {
                         self.flash.error("You cannot delete your own account.")
                     }
+                    Err(AccountError::Outranked) => self.flash.error(format!(
+                        "You cannot delete {}: they have permissions you do not have.",
+                        entry.name
+                    )),
+                    Err(AccountError::Impersonating) => self
+                        .flash
+                        .error("Accounts cannot be changed while viewing as someone else."),
                     Err(AccountError::Archived) => self.flash.error(format!(
                         "{} was not deleted because their company is archived.",
                         entry.name

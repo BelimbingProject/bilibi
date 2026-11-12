@@ -32,6 +32,8 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 const FORBIDDEN: &str = "You do not have permission to edit users.";
+const OUTRANKED: &str = "You cannot change this account: it has permissions you do not have.";
+const IMPERSONATING: &str = "Accounts cannot be changed while viewing as someone else.";
 const MANAGE_ROLES_FORBIDDEN: &str = "You do not have permission to manage roles.";
 const MANAGE_CAPS_FORBIDDEN: &str = "You do not have permission to manage capabilities.";
 
@@ -1341,10 +1343,22 @@ impl Detail {
                 CommitStatus::refusal(label, submitted, &["is not in this workspace"])
             }
             Err(AccountError::Access(Error::Unauthorized)) => return Err(Error::Unauthorized),
+            // The host sends the browser to confirm with a code and back.
+            Err(AccountError::Access(error @ Error::StepUpRequired { .. })) => return Err(error),
             Err(AccountError::Access(Error::Forbidden)) => {
                 self.statuses.clear_saved();
                 self.flash.error(FORBIDDEN);
                 CommitStatus::Error(FORBIDDEN.into())
+            }
+            Err(AccountError::Outranked) => {
+                self.statuses.clear_saved();
+                self.flash.error(OUTRANKED);
+                CommitStatus::Error(OUTRANKED.into())
+            }
+            Err(AccountError::Impersonating) => {
+                self.statuses.clear_saved();
+                self.flash.error(IMPERSONATING);
+                CommitStatus::Error(IMPERSONATING.into())
             }
             Err(AccountError::Access(Error::Conflict)) => CommitStatus::refusal(
                 label,
@@ -1467,9 +1481,15 @@ impl Detail {
                 self.flash.error("Invalid password.");
             }
             Err(AccountError::Access(Error::Unauthorized)) => return Err(Error::Unauthorized),
+            // The host sends the browser to confirm with a code and back.
+            Err(AccountError::Access(error @ Error::StepUpRequired { .. })) => return Err(error),
             Err(AccountError::Access(Error::Forbidden)) => self
                 .flash
                 .error("You do not have permission to change passwords."),
+            Err(AccountError::Outranked) => self.flash.error(
+                "You cannot change this password: the account has permissions you do not have.",
+            ),
+            Err(AccountError::Impersonating) => self.flash.error(IMPERSONATING),
             Err(_) => self.flash.error("Failed to update password."),
         }
         Ok(())
@@ -1674,6 +1694,10 @@ impl Detail {
                         Err(AccountError::OwnAccount) => {
                             self.flash.error("You cannot delete your own account.")
                         }
+                        Err(AccountError::Outranked) => self.flash.error(format!(
+                            "You cannot delete {name}: they have permissions you do not have."
+                        )),
+                        Err(AccountError::Impersonating) => self.flash.error(IMPERSONATING),
                         Err(_) => self.flash.error(format!(
                             "{name} was not deleted. Reload the page and try again."
                         )),

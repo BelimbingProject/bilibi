@@ -259,6 +259,9 @@ impl LiveState<Scope, Error> for Invite {
                         Err(InvitationError::Access(error @ Error::StepUpRequired { .. })) => {
                             return Err(error)
                         }
+                        Err(InvitationError::Access(Error::Refused(reason))) => {
+                            self.notice = reason
+                        }
                         Err(_) => self.notice = "The invitation was not sent. Try again.".into(),
                     }
                 } else {

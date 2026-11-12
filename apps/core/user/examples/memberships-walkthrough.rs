@@ -408,10 +408,18 @@ async fn main() -> Result<()> {
     let first = session_in(&users, &app, &password, 1).await?;
     let second = session_in(&users, &app, &password, 2).await?;
     let agent = connection(&client, 2, joined).await?;
+    // Setting another person's password asks for step-up, which this
+    // fixture's administrator has no authenticator to pass on a migrate-only
+    // (Production) database; the identity walkthrough proves that refusal.
+    let step_up = app
+        .services
+        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
+    step_up.set_enforced(false);
     users
         .set_password(&admin, home, bilibi_walkthrough_fixture::PASSWORD)
         .await
         .map_err(|_| Error::Internal)?;
+    step_up.set_enforced(true);
     let after = standing(&app, &[&first, &second, &admin_login]).await;
     let agent_end = ended(&client, agent).await?;
     println!("Administrator set in tenant 1: [tenant 1, tenant 2, administrator] sessions={after:?} tenant 2 connection ended={agent_end:?}");

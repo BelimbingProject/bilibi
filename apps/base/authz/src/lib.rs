@@ -18,7 +18,8 @@ use bilibi_database::{Error, Result};
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, Scope};
 pub use effective::{
     effective_capabilities, effective_capabilities_in_company, effective_capabilities_of,
-    effective_system, has_effective_role, holder_page, holders, role_page, Effective, RoleChoice,
+    effective_system, has_effective_role, holder_page, holders, holds_everything_of, role_page,
+    Effective, RoleChoice,
 };
 use std::{
     collections::HashSet,

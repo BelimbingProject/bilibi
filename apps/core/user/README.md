@@ -115,7 +115,7 @@ Web adapters (`apps/web/src/shell.rs`): `POST /preferences` (`{kind,value}`), `G
 
 ## Impersonation (K14; `src/impersonation.rs`)
 
-`UserService::impersonate` and `leave_impersonation` are behind the host's `POST /admin/impersonate/{id}` and `/admin/impersonate/leave` (`apps/web/src/impersonation.rs`). Entering needs `admin.user.impersonate`, a session that is not already impersonating, another account, and a target whose `bilibi_user::standing` is live. A disabled account or retired Person is refused; an archived workplace stays a read-only desk. Each switch is one transaction through `Sessions::switch`: the session must still hold the identity the request came from, its CSRF secret rotates, and the retained `impersonation.started`/`impersonation.stopped` action (operator as actor, target as subject) commits with it, so a trail that cannot be written refuses the switch. A return that cannot be made ends the session instead of trapping the operator. Every authentication re-proves both accounts, so removing or freezing either ends the borrowed session. The viewed account starts at its remembered or first live desk. Its desks remain the reach boundary. The operator's already authenticated live session satisfies the workplace sign-in check during this authorized impersonation; no target-provider session is required. The start action audits entry into the view, and each later desk change records `user.company.switched` with both identities.
+`UserService::impersonate` and `leave_impersonation` are behind the host's `POST /admin/impersonate/{id}` and `/admin/impersonate/leave` (`apps/web/src/impersonation.rs`). Entering needs `admin.user.impersonate`, a session that is not already impersonating, another account, a target whose `bilibi_user::standing` is live, and a target that holds nothing the operator lacks (`bilibi_authz::holds_everything_of`; otherwise `Refusal::Outranked`), so viewing as an administrator needs an administrator. The impersonated session creates, changes and deletes no account ("Who may change whose account"). A disabled account or retired Person is refused; an archived workplace stays a read-only desk. Each switch is one transaction through `Sessions::switch`: the session must still hold the identity the request came from, its CSRF secret rotates, and the retained `impersonation.started`/`impersonation.stopped` action (operator as actor, target as subject) commits with it, so a trail that cannot be written refuses the switch. A return that cannot be made ends the session instead of trapping the operator. Every authentication re-proves both accounts, so removing or freezing either ends the borrowed session. The viewed account starts at its remembered or first live desk. Its desks remain the reach boundary. The operator's already authenticated live session satisfies the workplace sign-in check during this authorized impersonation; no target-provider session is required. The start action audits entry into the view, and each later desk change records `user.company.switched` with both identities.
 
 ## Current company
 
@@ -206,6 +206,21 @@ The same page uploads or removes the account's own `ui.profile_image_asset_id`. 
   session of the sign-in in every tenant and audits a marker, never a hash.
 - Delete (`admin.user.delete`, `delete_account`) confirms through the shared dialog and never deletes the actor's own account. Deleting an outside membership retires only that tenant's account. Deleting the home account also closes the shared sign-in, so every membership stops authenticating. The page returns to `/users`.
 
+### Who may change whose account
+
+A password or sign-in email hands over the account, so a capability alone is not enough to change another person's.
+
+| Write | Also needs | Refusal |
+|---|---|---|
+| `set_password`, `update_account` of the email | The actor holds everything the account holds, then step-up `core.user.account.credentials.set` (on by default) | `AccountError::Outranked`; `Error::StepUpRequired` sends the browser to confirm and back |
+| `delete_account` | The actor holds everything the account holds | `AccountError::Outranked` |
+| `create_account`, `update_account`, `set_password`, `delete_account`, `invite_member` | A session that is not impersonating | `AccountError::Impersonating`; an invitation answers `InvitationError::Access(Error::Refused(..))` |
+
+- "Holds everything" is `bilibi_authz::holds_everything_of`: every capability the account holds tenant-wide, in the actor's current company and in each company where it has a company role, and a full-access role only for an actor with one. It is the rule Authz already applies to giving a role (`apps/base/authz/README.md`).
+- A User Editor therefore manages ordinary accounts but cannot set an administrator's password or address, or delete one.
+- Renaming another account needs only `admin.user.update`.
+- Proof: `identity-walkthrough` (`BILIBI_IDENTITY_DEMO=disposable`, on a freshly migrated database) runs every refusal above, the step-up refusal, and the covered writes once step-up passes.
+
 
 The header carries the record-history panel (`audit.record-history`, kind
 `user`) and the pin control. Every command re-proves the actor, authorizes
@@ -227,7 +242,7 @@ The built-in columns are Name, Email, Desks, Roles and Created. Normal-height ro
 
 The toolbar contains search, Membership and the first 100 roles by name. Create (`admin.user.create`) opens `/users/new`; Invite (`admin.user.invite`) opens `/users/invite`; and the pin control pins `nav-admin-user`.
 
-Each row can offer impersonation, invitation revocation or deletion. Impersonation needs `admin.user.impersonate` and posts to `/admin/impersonate/{id}`; the current account is disabled with an explanation. Delete needs `admin.user.delete`, confirms the listed account and calls `delete_account`, which repeats authorization, refuses the current account, retires the row and ends its sessions. An invitation instead offers Revoke under `admin.user.invite`; the page passes its held invitation ID to `revoke_member_invitation`. Someone who may take none of these actions sees no actions column.
+Each row can offer impersonation, invitation revocation or deletion. Impersonation needs `admin.user.impersonate` and posts to `/admin/impersonate/{id}`; the current account is disabled with an explanation, and an account holding more than the operator is refused with a flash. Delete needs `admin.user.delete`, confirms the listed account and calls `delete_account`, which repeats authorization, refuses the current account and one holding more than the actor, retires the row and ends its sessions. An invitation instead offers Revoke under `admin.user.invite`; the page passes its held invitation ID to `revoke_member_invitation`. Someone who may take none of these actions sees no actions column.
 
 ## Account panels (K13; `src/panels/`)
 
