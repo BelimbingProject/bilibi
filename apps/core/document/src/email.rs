@@ -191,7 +191,9 @@ impl Store<'_> {
                     .await?
                     .id();
                 // The job the row waits on, so an ending told late for an
-                // earlier job changes nothing.
+                // earlier job changes nothing. Like every change of a
+                // document's parts it carries `document_id`, which is how the
+                // per-document audit query finds it.
                 tx.mutate(move |sql| {
                     Box::pin(async move {
                         sql.execute(
@@ -203,7 +205,7 @@ impl Store<'_> {
                             kind: EMAIL_RECORD.into(),
                             id: request,
                             old: json!({"job_id": null}),
-                            new: json!({"job_id": job}),
+                            new: json!({"document_id": id, "job_id": job}),
                         };
                         Ok(((), vec![change]))
                     })

@@ -91,12 +91,13 @@ Platform capability `admin.system.visitor.manage`; group Visitor in the settings
 | `visitor.sessions_per_site_per_minute` | 120 | New sessions per site, per server |
 | `visitor.messages_per_minute` | 60 | Frames per session; the 100th refusal in a row closes the socket |
 | `visitor.sockets_per_session` | 3 | Open sockets per session, per server |
+| `visitor.sockets_per_sender` | 20 | Open sockets per network address, per server, whatever the session, so one address cannot hold every place of `visitor.sockets_total`; an upgrade over it is refused `429` |
 | `visitor.sockets_total` | 2,000 | Open visitor sockets per server; staff and portal sockets have their own places |
 | `visitor.upload_max_bytes` | 5 MiB | A file's size; Media's own limit can only be smaller |
 | `visitor.uploads_per_minute` | 6 | Files per session |
 | `visitor.upload_buffer_bytes` | 256 MiB | Memory each server holds for visitor files still arriving, whatever the number of sockets; keep it at or above the file size limit |
 
-Counts are per server, as the HTTP throttles' are. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session counters grow with `visitor.sockets_total`. A changed setting applies within two seconds.
+Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address, or the /64 network of its IPv6 address, which one subscriber usually holds whole. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session and per-sender socket counters grow with `visitor.sockets_total`. A changed setting applies within two seconds.
 
 ## Staff side
 
@@ -109,4 +110,4 @@ Counts are per server, as the HTTP throttles' are. A server counts at most 65,53
     cargo run -p bilibi-web --example visitor-walkthrough           # prepare: every case, exits non-zero on a FAIL
     cargo run -p bilibi-web --example visitor-walkthrough -- serve  # the host for a browser, with a staff control address
 
-`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget and a stalled file, rate limits, renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.
+`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget and a stalled file, rate limits, open sockets per sender (an IPv6 /64 counts as one), renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.

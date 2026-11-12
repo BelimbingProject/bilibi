@@ -96,6 +96,9 @@ pub struct Boundary {
 struct Sockets {
     total: u32,
     per_session: HashMap<String, u32>,
+    /// Open sockets by [`sender`] key, so one address cannot hold every
+    /// place of `visitor.sockets_total`.
+    per_sender: HashMap<String, u32>,
 }
 impl Boundary {
     pub fn bind(services: &Services) -> bilibi_database::Result<Self> {
@@ -152,24 +155,29 @@ impl Drop for Reserved {
         *held = held.saturating_sub(self.bytes);
     }
 }
-/// One open socket's place; dropping it frees it.
+/// One open socket's place, counted against the server and its sender;
+/// dropping it frees both.
 struct Slot {
     app: App,
+    sender: String,
     session: Option<String>,
 }
 impl Slot {
-    fn admit(app: &App, total: u32) -> Option<Self> {
+    fn admit(app: &App, sender: String, policy: &Policy) -> Option<Self> {
         let mut sockets = app
             .visitor
             .sockets
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if sockets.total >= total {
+        let held = sockets.per_sender.get(&sender).copied().unwrap_or(0);
+        if sockets.total >= policy.sockets_total || held >= policy.sockets_per_sender {
             return None;
         }
         sockets.total += 1;
+        sockets.per_sender.insert(sender.clone(), held + 1);
         Some(Self {
             app: app.clone(),
+            sender,
             session: None,
         })
     }
@@ -202,6 +210,12 @@ impl Drop for Slot {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         sockets.total -= 1;
+        if let Some(held) = sockets.per_sender.get_mut(&self.sender) {
+            *held -= 1;
+            if *held == 0 {
+                sockets.per_sender.remove(&self.sender);
+            }
+        }
         if let Some(session) = &self.session {
             if let Some(held) = sockets.per_session.get_mut(session) {
                 *held -= 1;
@@ -285,9 +299,12 @@ fn refused(refusal: Refusal) -> Response {
 fn origin_of(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
 }
+/// The key a sender is counted under on this edge ([`api::sender_key`]).
 fn sender(peer: &Option<Extension<ConnectInfo<SocketAddr>>>, headers: &HeaderMap) -> String {
-    api::client_address(peer.as_ref().map(|Extension(ConnectInfo(p))| *p), headers)
-        .map_or_else(|| "unknown".into(), |ip| ip.to_string())
+    api::sender_key(api::client_address(
+        peer.as_ref().map(|Extension(ConnectInfo(p))| *p),
+        headers,
+    ))
 }
 async fn policy(app: &App) -> Result<Policy, Refusal> {
     let client = app.db.get().await.map_err(Error::from)?;
@@ -462,14 +479,15 @@ async fn upgrade(
         Ok(policy) => policy,
         Err(refusal) => return refused(refusal),
     };
+    let sender = sender(&peer, &headers);
     if !app.visitor.senders.allow_among(
-        &format!("live:{}", sender(&peer, &headers)),
+        &format!("live:{sender}"),
         policy.sessions_per_sender.saturating_mul(RECONNECTS),
         SENDER_KEYS,
     ) {
         return refused(Refusal::LIMITED);
     }
-    let Some(slot) = Slot::admit(&app, policy.sockets_total) else {
+    let Some(slot) = Slot::admit(&app, sender, &policy) else {
         return refused(Refusal::LIMITED);
     };
     // The socket admits the larger of a text frame and an upload chunk; a

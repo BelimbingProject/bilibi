@@ -2,8 +2,10 @@
 //! the bearer `AgentAuth` boundary and the `/api/v1` operation and plan
 //! endpoints; `/mcp` (`mcp.rs`) shares this boundary and its recorder. Answers
 //! are JSON only, errors included. Every request here is one incoming
-//! Integration exchange, recorded after dispatch. Bodies, query strings,
-//! authorization headers and token values never reach the recorder.
+//! Integration exchange, recorded after dispatch, except a refusal that proved
+//! no credential: `api_gate.rs` budgets those per sender and counts them
+//! instead. Bodies, query strings, authorization headers and token values
+//! never reach the recorder.
 //!
 //! A bearer token is a claim, never a grant: each request reproves the grant,
 //! the account and its party facets (`AgentAccess::seal`), then seals a fresh
@@ -77,6 +79,8 @@ pub struct Edge {
     integration: Arc<Integration>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) throttle: Throttle,
+    /// The per-sender budget and refusal counts of unauthenticated traffic.
+    pub(crate) gate: crate::api_gate::Gate,
 }
 impl Edge {
     pub fn new(services: &bilibi_module_registry::Services) -> bilibi_database::Result<Self> {
@@ -89,6 +93,7 @@ impl Edge {
             integration: services.get(bilibi_base::integration::SERVICE)?,
             settings: services.get("base/settings.store")?,
             throttle: Throttle::default(),
+            gate: crate::api_gate::Gate::default(),
         })
     }
 }
@@ -191,6 +196,26 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
     let run_id = label(request.headers(), RUN_ID_HEADER);
     let reported = Reported::from_headers(request.headers());
     let client_identity = client_identity(request.headers(), endpoint == "/mcp");
+    // Before anything else is read: a sender out of budget costs no lookup,
+    // no handler and no row.
+    let gate = &app.api.gate;
+    let bearer = bearer(request.headers()).is_some();
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| *peer);
+    let sender = sender_key(client_address(peer, request.headers()));
+    if let Err(error) = gate.open(&app).await {
+        return unavailable(&error).into_response();
+    }
+    if !gate.admit(&sender, bearer) {
+        gate.absorb(&endpoint, StatusCode::TOO_MANY_REQUESTS);
+        let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited").into_response();
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        return response;
+    }
     request.extensions_mut().insert(Trace {
         id: trace.clone(),
         reported: reported.clone(),
@@ -201,6 +226,14 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
         .extensions_mut()
         .remove::<Exchange>()
         .unwrap_or_default();
+    let status = response.status();
+    if exchange.scope.is_none() && crate::api_gate::absorbed(status) {
+        if bearer && status == StatusCode::UNAUTHORIZED {
+            gate.spend(&sender);
+        }
+        gate.absorb(&endpoint, status);
+        return response;
+    }
     let reported = exchange.reported.unwrap_or(reported);
     let incoming = Incoming {
         method: Some(method),
@@ -213,7 +246,7 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
                 .collect(),
         ),
         endpoint: Some(endpoint),
-        response_status: i16::try_from(response.status().as_u16()).ok(),
+        response_status: i16::try_from(status.as_u16()).ok(),
         duration_ms: Some(i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX)),
         connection_id: exchange
             .scope
@@ -503,6 +536,20 @@ pub(crate) fn client_address(peer: Option<SocketAddr>, headers: &HeaderMap) -> O
         }
     }
     Some(peer)
+}
+
+/// The key a public edge budgets a sender under: its IPv4 address, or the
+/// /64 network of its IPv6 address, since one subscriber is usually handed a
+/// whole /64 and could otherwise take a fresh key per request.
+pub(crate) fn sender_key(address: Option<IpAddr>) -> String {
+    match address.map(|ip| ip.to_canonical()) {
+        Some(IpAddr::V6(ip)) => {
+            let [a, b, c, d, ..] = ip.segments();
+            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+        }
+        Some(ip) => ip.to_string(),
+        None => "unknown".into(),
+    }
 }
 
 pub(crate) async fn allowed(app: &App, kind: &str, sender: &str) -> Result<bool, Error> {

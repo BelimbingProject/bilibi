@@ -290,8 +290,9 @@ fn absorb(window: &mut Window, handler: &str, outcome: Outcome) {
         .entry((handler.to_owned(), outcome.reason()))
         .or_insert(0) += 1;
 }
-/// Deliveries are unauthenticated at the host: a guest, no tenant.
-fn guest() -> Attribution {
+/// Deliveries are unauthenticated at the host: a guest, no tenant. The agent
+/// edge's aggregated refusals (`api_gate.rs`) are recorded as the same guest.
+pub(crate) fn guest() -> Attribution {
     Attribution {
         tenant: None,
         actor_type: "guest",
