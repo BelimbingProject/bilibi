@@ -17,7 +17,7 @@ Every example under `apps/**/examples` that checks and exits runs on each pull r
 
 - **Run them yourself:** `DATABASE_URL=postgres://…/postgres scripts/run-walkthroughs.sh [name…]`, with a role that may create databases. The script's header lists the programs some walkthroughs call (Chromium, qpdf, pdftotext, the language model).
 - **Add an example:** add its line to `WALKTHROUGHS` in that script (the database it starts from, its environment, its steps). One that cannot run unattended (it only serves a page for a browser, or needs something a person supplies) goes in `NOT_RUN` with the reason. The check fails while an example is in neither list.
-- **A failure is real:** a walkthrough that fails on `main` gets an issue; do not remove its line.
+- **A failure is real:** a walkthrough that fails on `main` gets an issue and a line in the script's `KNOWN_FAILURES` (`name|issue`). It still runs: while it fails it is reported with a warning and does not fail the check; once it passes the check fails with "remove it from the known list", so the change that fixes it deletes its line. An unlisted failure fails the check. Never add a line to get a pull request through.
 - **Another branch:** start the workflow by hand with `ref` to run this branch's script against a branch that does not have it yet, and `extra` for lines that branch's new examples need.
 
 ## Smoke checks

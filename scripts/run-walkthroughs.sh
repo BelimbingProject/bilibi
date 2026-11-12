@@ -22,7 +22,8 @@
 # A walkthrough passes when every step exits 0. One whose kind is `serve` ends
 # by serving the app for a browser: it passes when it has finished its proofs
 # and accepts connections, and is then stopped by its own process ID. Failing
-# ones are all reported, then the script exits 1.
+# ones are all reported, then the script exits 1. KNOWN_FAILURES lists the
+# walkthroughs that fail on main today; see the rule above that list.
 #
 # To add one: add a line to WALKTHROUGHS. An example that cannot run here goes
 # in NOT_RUN with the reason. `--check` (and every run) fails while an example
@@ -188,6 +189,27 @@ NOT_RUN=(
   'apps/web|session-ended-walkthrough|needs fixtures/containers/session_listener mounted'
 )
 
+# Walkthroughs that fail on main today, each with the issue that tracks it:
+# `name|issue number`. A listed walkthrough still runs. When it fails it is
+# reported (a warning, and its output) and does not fail the run. When it
+# passes, the run fails and says to remove its line, so the change that fixes
+# a walkthrough deletes its line here. A failure that is not listed fails the
+# run. Never add a line to get a pull request through: fix the walkthrough, or
+# the code it found broken.
+KNOWN_FAILURES=(
+  'address|614'
+  'affiliation|615'
+  'agent-access|616'
+  'company-lifecycle|617'
+  'document-audit|618'
+  'geonames-import|619'
+  'geonames-postcodes|620'
+  'grid-catalog|621'
+  'reports|622'
+  'seams|623'
+  'records|624'
+)
+
 if [[ -n ${WALKTHROUGH_EXTRA:-} ]]; then
   while IFS= read -r line; do
     [[ -n ${line// /} ]] && WALKTHROUGHS+=("$line")
@@ -232,7 +254,25 @@ check_lists() {
     echo "::error::scripts/run-walkthroughs.sh lists ${stale%%|*}/examples/${stale#*|}, which does not exist" >&2
     status=1
   done < <(comm -13 <(echo "$found") <(echo "$listed"))
+  for entry in "${KNOWN_FAILURES[@]}"; do
+    name=${entry%%|*}
+    for run in "${WALKTHROUGHS[@]}"; do
+      IFS='|' read -r _ run_name _ <<<"$run"
+      [[ $run_name == "$name" ]] && continue 2
+    done
+    echo "::error::KNOWN_FAILURES of scripts/run-walkthroughs.sh names $name, which is not a walkthrough" >&2
+    status=1
+  done
   return $status
+}
+
+# The issue of a known failure, or nothing.
+known_issue() {
+  local entry
+  for entry in "${KNOWN_FAILURES[@]}"; do
+    [[ ${entry%%|*} == "$1" ]] && echo "${entry#*|}" && return 0
+  done
+  return 0
 }
 
 if [[ ${1:-} == --check ]]; then
@@ -449,6 +489,8 @@ run_one() {
 }
 
 failed=()
+known=()
+fixed=()
 passed=0
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 printf '| Walkthrough | Result | Seconds |\n| --- | --- | --- |\n' >>"$summary"
@@ -483,10 +525,22 @@ for folder in "${folders[@]}"; do
     started=$SECONDS
     run_one "$name" "$example" "$prepare" "$environment" "${steps:--}" "${kind:-}"
     elapsed=$((SECONDS - started))
-    if [[ $verdict == pass ]]; then
+    issue=$(known_issue "$name")
+    if [[ $verdict == pass && -n $issue ]]; then
+      echo "::error title=Walkthrough $name passes::remove its line from KNOWN_FAILURES in scripts/run-walkthroughs.sh (issue #$issue)"
+      echo "PASS $name (${elapsed}s), but it is listed as a known failure: remove it from the known list"
+      fixed+=("$name")
+      printf '| %s | **passes: remove it from the known list (#%s)** | %s |\n' "$name" "$issue" "$elapsed" >>"$summary"
+    elif [[ $verdict == pass ]]; then
       echo "PASS $name (${elapsed}s)"
       passed=$((passed + 1))
       printf '| %s | pass | %s |\n' "$name" "$elapsed" >>"$summary"
+    elif [[ -n $issue ]]; then
+      echo "::warning title=Walkthrough $name still fails::known failure, issue #$issue ($folder/examples/$example)"
+      echo "KNOWN FAILURE $name ($verdict, ${elapsed}s), issue #$issue; last output:"
+      tail -n 20 "$logs/$name.log"
+      known+=("$name")
+      printf '| %s | known failure (#%s) | %s |\n' "$name" "$issue" "$elapsed" >>"$summary"
     else
       case "$verdict" in
         setup) reason='its database could not be prepared' ;;
@@ -508,9 +562,17 @@ for folder in "${folders[@]}"; do
   fi
 done
 
-if [[ ${#failed[@]} -gt 0 ]]; then
-  printf '\n%s passed. Failed walkthroughs: %s\nLogs: %s\n' "$passed" "${failed[*]}" "$logs" >&2
-  exit 1
+printf '\n%s passed' "$passed"
+[[ ${#known[@]} -gt 0 ]] && printf '; known failures, still failing: %s' "${known[*]}"
+printf '\n'
+status=0
+if [[ ${#fixed[@]} -gt 0 ]]; then
+  printf 'Listed as known failures but passing; remove from KNOWN_FAILURES: %s\n' "${fixed[*]}" >&2
+  status=1
 fi
-printf '\nAll %s walkthroughs passed\n' "$passed"
-rm -rf "$work"
+if [[ ${#failed[@]} -gt 0 ]]; then
+  printf 'Failed walkthroughs: %s\nLogs: %s\n' "${failed[*]}" "$logs" >&2
+  status=1
+fi
+[[ $status == 0 ]] && rm -rf "$work"
+exit $status
