@@ -1,6 +1,6 @@
 2988507	Paris	Paris	Lutece,Paname,Parigi	48.85341	2.3488	P	PPLC	FR		11	75			2138551		42	Europe/Paris	2023-07-10
 1642911	Jakarta	Jakarta	Batavia,DKI Jakarta	-6.21462	106.84513	P	PPLC	ID		04				8540121		8	Asia/Jakarta	2023-01-04
-1853909	Osaka	Osaka	Ōsaka-shi	34.69374	135.50218	P	PPLA	JP		27				2592413		12	Asia/Tokyo	2023-02-30
+1853909	Osaka	Osaka	Ōsaka-shi	34.69374	135.50218	P	PPLA	JP		32				2592413		12	Asia/Tokyo	2023-02-30
 1850147	Tokyo	Tokyo	Edo,Tōkyō	35.6895	139.69171	P	PPLC	JP		40				8336599		44	Asia/Tokyo	2023-01-16
 1735161	Kuala Lumpur	Kuala Lumpur	KL,Kolam	3.1412	101.68653	P	PPLC	MY		14				1453975		62	Asia/Kuala_Lumpur	2024-01-10
 1732903	Shah Alam	Shah Alam		3.08507	101.53281	P	PPLA	MY		12				740750		24	Asia/Kuala_Lumpur	2023-08-17

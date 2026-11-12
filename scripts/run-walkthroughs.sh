@@ -204,9 +204,6 @@ NOT_RUN=(
 # run. Never add a line to get a pull request through: fix the walkthrough, or
 # the code it found broken.
 KNOWN_FAILURES=(
-  'address|614'
-  'geonames-import|619'
-  'geonames-postcodes|620'
 )
 
 if [[ -n ${WALKTHROUGH_EXTRA:-} ]]; then
