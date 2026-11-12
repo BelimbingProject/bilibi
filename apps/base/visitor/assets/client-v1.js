@@ -6,7 +6,7 @@
  * Contract: apps/base/visitor/README.md. */
 (function () {
   "use strict";
-  var VERSION = "1.0.0";
+  var VERSION = "1.0.1";
   if (window.BilibiVisitor) return;
   var script = document.currentScript;
   if (!script) return;
@@ -32,29 +32,33 @@
     cursor: null,
     socket: null,
     online: false,
+    connecting: false,
     ended: false,
     open: false,
     attempts: 0,
     next: 1,
     uploading: null,
+    uploadMax: 0,
     lastTyping: 0,
     reconnect: 0,
     seen: {},
   };
 
+  var pending = null; // the announced file, until the server is ready for it
+  var sent = {}; // message id -> text, until the server confirms it
+
   // Storage can be blocked or full: the chat then lasts for this page only.
+  // Only the token is kept. The cursor lasts for the page, so the first
+  // hello of a new page asks for the whole conversation and shows it again.
   function load() {
     try {
       var saved = JSON.parse(sessionStorage.getItem(storeKey) || "null");
-      if (saved && typeof saved.token === "string") {
-        state.token = saved.token;
-        state.cursor = typeof saved.cursor === "string" ? saved.cursor : null;
-      }
+      if (saved && typeof saved.token === "string") state.token = saved.token;
     } catch (e) {}
   }
   function save() {
     try {
-      if (state.token) sessionStorage.setItem(storeKey, JSON.stringify({ token: state.token, cursor: state.cursor }));
+      if (state.token) sessionStorage.setItem(storeKey, JSON.stringify({ token: state.token }));
       else sessionStorage.removeItem(storeKey);
     } catch (e) {}
   }
@@ -181,9 +185,13 @@
   function say(text) {
     status.textContent = text;
   }
-  function warn(text) {
+  // `link` marks a note about the connection itself, which a new connection
+  // clears. A note about a lost message or file stays until the next send.
+  var linkNote = false;
+  function warn(text, link) {
     note.textContent = text || "";
     note.hidden = !text;
+    linkNote = !!text && !!link;
   }
   function scroll() {
     log.scrollTop = log.scrollHeight;
@@ -208,18 +216,23 @@
     if (from === "agent") typing.textContent = "";
     scroll();
   }
+  // The message box stays usable while the chat connects: a disabled box
+  // would drop the focus, and Escape would no longer reach the window.
   function enable(on) {
     send.disabled = !on;
     attach.disabled = !on;
-    input.disabled = !on;
   }
   function end(message) {
     state.ended = true;
     state.online = false;
     state.token = null;
     state.cursor = null;
+    state.uploading = null;
+    pending = null;
+    sent = {};
     save();
     enable(false);
+    input.disabled = true;
     say("Ended");
     warn(message);
     if (!panel.querySelector(".again")) {
@@ -230,10 +243,13 @@
         state.ended = false;
         state.seen = {};
         log.textContent = "";
+        input.disabled = false;
         warn("");
+        if (state.open) input.focus();
         connect();
       });
       panel.insertBefore(again, compose);
+      if (state.open) again.focus();
     }
   }
 
@@ -242,7 +258,9 @@
     if (state.token) {
       return call("/visitor/v1/session/renew", { token: state.token }).then(
         function (reply) {
-          if (reply.status === 200) return state.token;
+          // Only a refusal ends the session. A busy or unavailable answer
+          // (429, 503) keeps it: the socket proves the token next.
+          if (reply.status !== 403) return state.token;
           state.token = null;
           state.cursor = null;
           return open();
@@ -266,11 +284,13 @@
     });
   }
   function connect() {
-    if (state.socket || state.ended) return;
+    if (state.socket || state.connecting || state.ended) return;
+    state.connecting = true;
     say("Connecting…");
     enable(false);
     session().then(
       function () {
+        state.connecting = false;
         var ws = new WebSocket(socketUrl);
         ws.binaryType = "arraybuffer";
         state.socket = ws;
@@ -287,19 +307,23 @@
           receive(frame);
         };
         ws.onclose = function () {
-          if (state.socket === ws) state.socket = null;
+          if (state.socket !== ws) return;
+          state.socket = null;
           state.online = false;
           if (state.ended) return;
           enable(false);
           say("Offline");
+          dropped();
           retry();
         };
       },
       function (error) {
+        state.connecting = false;
         warn(
           error.message === "busy"
             ? "The chat is busy. Please try again in a minute."
-            : "The chat is not available from this page."
+            : "The chat is not available from this page.",
+          true
         );
         say("Unavailable");
         retry();
@@ -312,26 +336,59 @@
     var wait = Math.min(30000, 1000 * Math.pow(2, state.attempts++));
     state.reconnect = setTimeout(connect, wait);
   }
+  // The socket closed with work in flight: nothing more will answer it, so
+  // the file is given up and unconfirmed messages go back to the box.
+  function dropped() {
+    var lost = [];
+    Object.keys(sent).forEach(function (id) {
+      lost.push(sent[id]);
+    });
+    sent = {};
+    if (state.uploading) {
+      state.uploading = null;
+      pending = null;
+      warn("The connection dropped, so the file was not sent. Attach it again once the chat is back.");
+    }
+    if (lost.length) {
+      restore(lost.join("\n"));
+      warn("The connection dropped before your message was confirmed. It is back in the box: check the chat before you send it again.");
+    }
+  }
+  function restore(text) {
+    input.value = input.value ? text + "\n" + input.value : text;
+  }
   function receive(frame) {
     if (frame.type === "ready") {
       state.online = true;
       state.attempts = 0;
-      warn("");
+      state.uploadMax = typeof frame.upload_max_bytes === "number" ? frame.upload_max_bytes : 0;
+      if (linkNote) warn("");
       enable(true);
       say("Online");
     } else if (frame.type === "items") {
       (frame.items || []).forEach(append);
-      if (typeof frame.cursor === "string") {
-        state.cursor = frame.cursor;
-        save();
-      }
+      if (typeof frame.cursor === "string") state.cursor = frame.cursor;
     } else if (frame.type === "error") {
-      if (frame.code === "rate_limited") warn("You are sending too fast. Please wait a moment.");
-      else if (frame.code === "invalid") warn("That could not be sent.");
+      var file = state.uploading && frame.id === state.uploading;
+      var what = file ? "The file" : "That";
+      if (frame.code === "rate_limited") warn("You are sending too fast. Please wait a moment and try again.");
+      else if (frame.code === "invalid") warn(what + " could not be sent.");
       else warn("Something went wrong. Please try again.");
-      if (state.uploading && frame.id === state.uploading) state.uploading = null;
+      if (file) {
+        state.uploading = null;
+        pending = null;
+        say("Online");
+      } else if (sent[frame.id] !== undefined) {
+        // A refused message goes back to the box instead of being lost.
+        restore(sent[frame.id]);
+        delete sent[frame.id];
+      }
     } else if (frame.type === "ack") {
-      if (state.uploading && frame.id === state.uploading) state.uploading = null;
+      if (state.uploading && frame.id === state.uploading) {
+        state.uploading = null;
+        say("Online");
+      }
+      delete sent[frame.id];
       warn("");
     } else if (frame.type === "upload_ready") {
       stream();
@@ -350,9 +407,12 @@
   // ---- sending ----
   compose.addEventListener("submit", function (event) {
     event.preventDefault();
-    var text = input.value.trim();
+    var text = input.value.trim().slice(0, TEXT_MAX);
     if (!text) return;
-    if (transmit({ type: "message", id: state.next++, body: { text: text.slice(0, TEXT_MAX) } })) {
+    var id = state.next++;
+    if (transmit({ type: "message", id: id, body: { text: text } })) {
+      // Kept until the server confirms it; a refusal puts it back.
+      sent[id] = text;
       input.value = "";
       transmit({ type: "typing", body: { typing: false } });
     } else {
@@ -375,16 +435,24 @@
   attach.addEventListener("click", function () {
     picker.click();
   });
-  var pending = null;
+  function size(bytes) {
+    return bytes >= 1048576 ? Math.floor(bytes / 104857.6) / 10 + " MB" : Math.max(1, Math.floor(bytes / 1024)) + " KB";
+  }
   picker.addEventListener("change", function () {
     var file = picker.files && picker.files[0];
     picker.value = "";
-    if (!file || state.uploading) return;
+    if (!file) return;
+    if (state.uploading) return warn("One file at a time. Wait for the first file to finish.");
+    if (!file.size) return warn("That file is empty, so it was not sent.");
+    if (state.uploadMax && file.size > state.uploadMax) {
+      return warn("That file is too large. The limit is " + size(state.uploadMax) + ".");
+    }
     var id = state.next++;
     state.uploading = id;
     pending = { id: id, file: file };
     if (!transmit({ type: "upload", id: id, name: file.name.slice(0, 255), size: file.size })) {
       state.uploading = null;
+      pending = null;
       warn("Not connected yet. Try again in a moment.");
     } else {
       warn("");
@@ -395,7 +463,17 @@
     if (!pending) return;
     var job = pending;
     pending = null;
+    function failed() {
+      if (state.uploading !== job.id) return;
+      state.uploading = null;
+      transmit({ type: "upload_cancel" });
+      say("Online");
+      warn("The file could not be read, so it was not sent.");
+    }
     job.file.arrayBuffer().then(function (buffer) {
+      // The socket may have closed, or the chat ended, while the file was read.
+      if (state.uploading !== job.id) return;
+      if (buffer.byteLength !== job.file.size) return failed();
       var offset = 0;
       while (offset < buffer.byteLength) {
         var part = buffer.slice(offset, offset + CHUNK);
@@ -408,8 +486,8 @@
         state.socket.send(frame.buffer);
         offset += part.byteLength;
       }
-      say("Online");
-    });
+      // The status stays "Sending …" until the server confirms or refuses.
+    }, failed);
   }
 
   // ---- opening and closing ----
@@ -417,7 +495,9 @@
     state.open = true;
     launcher.hidden = true;
     panel.hidden = false;
-    input.focus();
+    // An ended chat has a disabled box: focus stays inside the window, so
+    // Escape still closes it.
+    (input.disabled ? panel.querySelector(".again") || close : input).focus();
     connect();
   }
   function hide() {
