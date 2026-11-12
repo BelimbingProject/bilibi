@@ -1019,6 +1019,16 @@ async fn main() -> Outcome {
     let staff = authentication
         .authenticate(&**client, 1, 3, "records".into())
         .await?;
+    // An agent connection is tied to the browser session that approved it and
+    // works only while that session is live, so give the two stand-in
+    // sign-ins that approve one (admin, manager) the session row a real
+    // sign-in writes. The scopes above carry the same CSRF value.
+    client
+        .execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) SELECT 'records-'||u,1,u,'records',now()+interval '24 hours' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
+            &[],
+        )
+        .await?;
     drop(client);
 
     // The owner merges company 61 into company 1, in its own transaction.

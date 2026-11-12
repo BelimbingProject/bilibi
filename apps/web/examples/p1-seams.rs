@@ -193,14 +193,14 @@ async fn main() -> Result {
     flatten(&visible(menu, client, &nocaps).await, &mut ids);
     expect(
         ids.is_empty(),
-        "a user with no capability sees no empty Administration heading",
+        "a user with no capability sees no empty section heading",
     )?;
     ids.clear();
     flatten(&visible(menu, client, &manager).await, &mut ids);
     expect(
-        ids.starts_with(&["admin", "admin.company"])
+        ids.starts_with(&["core", "admin.company"])
             && ids[2..].iter().all(|id| id.starts_with("admin.company.")),
-        "a manager sees Administration > Companies and its catalogs only",
+        "a manager sees Core > Companies and its catalogs only",
     )?;
 
     println!("== Menu: contributor defects");
