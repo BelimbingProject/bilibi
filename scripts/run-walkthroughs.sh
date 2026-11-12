@@ -201,11 +201,8 @@ KNOWN_FAILURES=(
   'affiliation|615'
   'agent-access|616'
   'company-lifecycle|617'
-  'document-audit|618'
   'geonames-import|619'
   'geonames-postcodes|620'
-  'grid-catalog|621'
-  'reports|622'
   'seams|623'
   'records|624'
 )
