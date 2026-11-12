@@ -73,7 +73,7 @@ integration.record_incoming_system(&Incoming { method: Some("POST".into()),
     endpoint: Some("/api/v1/operations".into()), response_status: Some(401), ..Incoming::default() }).await?;
 ```
 
-Call once after dispatch, including refused and failed requests. The tenant and
+Call once after dispatch, including refused and failed requests. An edge open to callers with no credential must not write a row for each refusal that proved nothing: rows are never deleted, so count those instead, as the agent edge does (`apps/web/README.md`). The tenant and
 user come only from the sealed scope; a system row asserts neither, and only the
 platform operator can see it. Connection, agent and run ids are observations,
 never authority. `agent_self_report` is the agent's shape-checked

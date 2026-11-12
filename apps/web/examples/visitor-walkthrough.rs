@@ -637,6 +637,14 @@ async fn post(addr: &str, path: &str, origin: Option<&str>, body: Value) -> Repl
 type StaffCase<'a> = (&'a str, &'a str, Vec<(&'a str, &'a str)>);
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 async fn socket(addr: &str, origin: Option<&str>) -> std::result::Result<Socket, String> {
+    socket_from(addr, origin, None).await
+}
+/// A socket as a loopback proxy would forward it for `sender`.
+async fn socket_from(
+    addr: &str,
+    origin: Option<&str>,
+    sender: Option<&str>,
+) -> std::result::Result<Socket, String> {
     let mut request = format!("ws://{addr}/visitor/v1/live")
         .into_client_request()
         .map_err(|e| e.to_string())?;
@@ -644,6 +652,11 @@ async fn socket(addr: &str, origin: Option<&str>) -> std::result::Result<Socket,
         request
             .headers_mut()
             .insert("Origin", origin.parse().map_err(|_| "origin")?);
+    }
+    if let Some(sender) = sender {
+        request
+            .headers_mut()
+            .insert("X-Forwarded-For", sender.parse().map_err(|_| "sender")?);
     }
     tokio_tungstenite::connect_async(request)
         .await
@@ -1429,6 +1442,50 @@ async fn prepare(db: Db) -> Result<()> {
         "closed rate_limited",
     );
     setting(&setup, &mut client, "visitor.sockets_per_session", json!(3)).await?;
+
+    println!("== open sockets per sender");
+    // Sockets that never say hello hold their place for the hello wait, as a
+    // script holding places would.
+    setting(&setup, &mut client, "visitor.sockets_per_sender", json!(2)).await?;
+    let mut held = Vec::new();
+    for sender in ["2001:db8:1::1", "2001:db8:1::2"] {
+        held.push(socket_from(&addr, Some(PAGE), Some(sender)).await);
+    }
+    let third = socket_from(&addr, Some(PAGE), Some("2001:db8:1::ffff")).await;
+    run.expect(
+        "a sender's open sockets stop at the per-sender limit, counted over its IPv6 /64",
+        held.iter().all(std::result::Result::is_ok)
+            && third.as_ref().is_err_and(|error| error.contains("429")),
+        format!(
+            "{} held, third: {}",
+            held.iter().filter(|s| s.is_ok()).count(),
+            third.as_ref().err().map_or("opened", String::as_str)
+        ),
+    );
+    let elsewhere = socket_from(&addr, Some(PAGE), Some("2001:db8:2::1")).await;
+    run.expect(
+        "another network still opens a socket",
+        elsewhere.is_ok(),
+        elsewhere.as_ref().err().map_or("opened", String::as_str),
+    );
+    if let Some(Ok(mut closing)) = held.pop() {
+        let _ = closing.close(None).await;
+    }
+    let mut again = Err("not tried".to_owned());
+    for _ in 0..30 {
+        again = socket_from(&addr, Some(PAGE), Some("2001:db8:1::3")).await;
+        if again.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    run.expect(
+        "a closed socket gives its place back to its sender",
+        again.is_ok(),
+        again.as_ref().err().map_or("opened", String::as_str),
+    );
+    drop((held, elsewhere, again));
+    setting(&setup, &mut client, "visitor.sockets_per_sender", json!(20)).await?;
 
     println!("== a visitor token against every staff route");
     let t = token.as_str();

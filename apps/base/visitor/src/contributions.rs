@@ -13,6 +13,7 @@ pub const SESSIONS_PER_SENDER_KEY: &str = "visitor.sessions_per_sender_per_minut
 pub const SESSIONS_PER_SITE_KEY: &str = "visitor.sessions_per_site_per_minute";
 pub const MESSAGES_PER_MINUTE_KEY: &str = "visitor.messages_per_minute";
 pub const SOCKETS_PER_SESSION_KEY: &str = "visitor.sockets_per_session";
+pub const SOCKETS_PER_SENDER_KEY: &str = "visitor.sockets_per_sender";
 pub const SOCKETS_TOTAL_KEY: &str = "visitor.sockets_total";
 pub const UPLOAD_MAX_BYTES_KEY: &str = "visitor.upload_max_bytes";
 pub const UPLOADS_PER_MINUTE_KEY: &str = "visitor.uploads_per_minute";
@@ -88,6 +89,14 @@ setting!(
     100,
     "Open connections per visitor session",
     "Most live connections (browser tabs) one visitor session may keep open on each server."
+);
+setting!(
+    SOCKETS_PER_SENDER_KEY,
+    20,
+    1,
+    1_000_000,
+    "Open visitor connections per sender",
+    "Most visitor connections one network address may keep open at once on each server. An IPv6 address counts with the rest of its /64 network."
 );
 setting!(
     SOCKETS_TOTAL_KEY,

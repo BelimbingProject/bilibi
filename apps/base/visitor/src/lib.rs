@@ -26,8 +26,8 @@ pub use channel::{
 };
 pub use contributions::{
     MANAGE, MESSAGES_PER_MINUTE_KEY, SESSIONS_PER_SENDER_KEY, SESSIONS_PER_SITE_KEY,
-    SESSION_MAX_HOURS_KEY, SESSION_MINUTES_KEY, SOCKETS_PER_SESSION_KEY, SOCKETS_TOTAL_KEY,
-    UPLOADS_PER_MINUTE_KEY, UPLOAD_BUFFER_BYTES_KEY, UPLOAD_MAX_BYTES_KEY,
+    SESSION_MAX_HOURS_KEY, SESSION_MINUTES_KEY, SOCKETS_PER_SENDER_KEY, SOCKETS_PER_SESSION_KEY,
+    SOCKETS_TOTAL_KEY, UPLOADS_PER_MINUTE_KEY, UPLOAD_BUFFER_BYTES_KEY, UPLOAD_MAX_BYTES_KEY,
 };
 pub use origin::{parse as parse_origin, MAX_ORIGINS};
 
@@ -56,6 +56,7 @@ pub struct Policy {
     pub sessions_per_site: u32,
     pub messages_per_minute: u32,
     pub sockets_per_session: u32,
+    pub sockets_per_sender: u32,
     pub sockets_total: u32,
     pub upload_max_bytes: u64,
     pub uploads_per_minute: u32,
@@ -121,6 +122,7 @@ impl Visitors {
             sessions_per_site: narrow(read(SESSIONS_PER_SITE_KEY).await?)?,
             messages_per_minute: narrow(read(MESSAGES_PER_MINUTE_KEY).await?)?,
             sockets_per_session: narrow(read(SOCKETS_PER_SESSION_KEY).await?)?,
+            sockets_per_sender: narrow(read(SOCKETS_PER_SENDER_KEY).await?)?,
             sockets_total: narrow(read(SOCKETS_TOTAL_KEY).await?)?,
             upload_max_bytes: read(UPLOAD_MAX_BYTES_KEY).await?,
             uploads_per_minute: narrow(read(UPLOADS_PER_MINUTE_KEY).await?)?,
