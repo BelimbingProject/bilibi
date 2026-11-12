@@ -48,3 +48,6 @@ uuid.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
 axum.workspace = true
+
+[lints]
+workspace = true

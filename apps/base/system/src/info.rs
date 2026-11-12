@@ -54,6 +54,10 @@ struct Disk {
     free: i64,
     total: i64,
 }
+#[allow(
+    unsafe_code,
+    reason = "the standard library has no filesystem capacity call"
+)]
 fn root_filesystem() -> Option<Disk> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: the path is a NUL-terminated literal and `stat` is only read after
