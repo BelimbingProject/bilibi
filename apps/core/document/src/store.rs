@@ -772,16 +772,31 @@ impl Store<'_> {
         let due_ids: Option<Vec<i64>> = filter
             .retention_due
             .then(|| retention_due_at.keys().copied().collect());
-        let conditions = "d.tenant_id=$1 AND d.deleting_at IS NULL
+        // A set record or mark filter is its own top-level condition, so the
+        // planner can start from the record's links or the reader's marks
+        // (a semi-join) instead of probing every granted document; inside
+        // `$n IS NULL OR EXISTS (…)` it cannot. An unset one only types its
+        // parameters.
+        let related_condition = if related.is_some() {
+            "EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$4)"
+        } else {
+            "$3::text IS NULL AND $4::text IS NULL"
+        };
+        let marked_condition = if filter.marked.is_some() {
+            "EXISTS (SELECT 1 FROM core_document_marks m WHERE m.tenant_id=d.tenant_id AND m.document_id=d.id AND m.user_id=$2 AND CASE WHEN $10::text = 'favourites' THEN m.favourite ELSE m.following END)"
+        } else {
+            "$10::text IS NULL"
+        };
+        let conditions = format!("d.tenant_id=$1 AND d.deleting_at IS NULL
              AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()) AND a.user_id=$2)
-             AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM core_document_links l WHERE l.tenant_id=d.tenant_id AND l.document_id=d.id AND l.record_kind=$3 AND l.record_id=$4))
+             AND {related_condition}
              AND ($5 = '' OR d.name ILIKE $6 OR d.sync_id = $5)
              AND ($7::text IS NULL OR d.category = $7)
              AND ($8::text IS NULL OR d.document_type = $8)
              AND ($9::text IS NULL OR d.status = $9)
              AND ($11::text IS NULL OR ($11 = 'expired' AND d.expires_on < $12::text::date) OR ($11 = 'soon' AND d.expires_on >= $12::text::date AND d.expires_on <= $12::text::date + 30))
-             AND ($10::text IS NULL OR EXISTS (SELECT 1 FROM core_document_marks m WHERE m.tenant_id=d.tenant_id AND m.document_id=d.id AND m.user_id=$2 AND CASE WHEN $10 = 'favourites' THEN m.favourite ELSE m.following END))
-             AND ($13::bigint[] IS NULL OR d.id=ANY($13))";
+             AND {marked_condition}
+             AND ($13::bigint[] IS NULL OR d.id=ANY($13))");
         let marked = filter.marked.map(|m| m.code());
         let expiry = filter.expiry.map(|e| e.code());
         let today = today.to_string();
