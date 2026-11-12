@@ -4,7 +4,6 @@ use crate::{mcp::Session, plans::Plans, App, AppSource, Error, Registry, Result,
 use bilibi_database::Db;
 use bilibi_module_registry::{Contribution, Provenance};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -12,6 +11,19 @@ const MAX_REVIEW_ENTRIES: usize = 1_000;
 
 const DIGEST_ENTRIES: usize = 20;
 const DIGEST_FIELDS: usize = 4;
+
+/// The review fingerprint of a stored session id: the id is the cookie
+/// token's SHA-256 in hex, the same bytes Tenancy seals as the browser
+/// session. Anything else matches no review.
+fn fingerprint(session: &str) -> Vec<u8> {
+    if session.len() != 64 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Vec::new();
+    }
+    (0..64)
+        .step_by(2)
+        .filter_map(|at| u8::from_str_radix(&session[at..at + 2], 16).ok())
+        .collect()
+}
 
 fn digest_line(index: usize, key: Option<&str>, input: &Value) -> String {
     let fields: Vec<String> = input.as_object().map_or_else(Vec::new, |object| {
@@ -212,8 +224,9 @@ impl Reviews {
     }
 
     /// End reviews when the connection switch moves away from the session
-    /// that created them. The raw session id is hashed immediately and never
-    /// retained in Agent API storage.
+    /// that created them. `session` is the stored session id
+    /// (`bilibi_session::session_id`, the token's SHA-256 in hex), so its
+    /// bytes are the fingerprint a review keeps.
     pub async fn cancel_connection_session(
         &self,
         tenant: i64,
@@ -222,7 +235,7 @@ impl Reviews {
         session: &str,
         reason: &str,
     ) -> Result<()> {
-        let fingerprint = Sha256::digest(session.as_bytes()).to_vec();
+        let fingerprint = fingerprint(session);
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let rows = client.query(
             "UPDATE base_agent_api_reviews SET status='cancelled',outcome=jsonb_build_object('reason',$5::text),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE tenant_id=$1 AND user_id=$2 AND connection_id=$3 AND browser_session_hash=$4 AND status IN ('open','refused') RETURNING id",
@@ -234,10 +247,11 @@ impl Reviews {
         Ok(())
     }
 
-    /// Session termination may arrive without an account scope. Its
-    /// unguessable id is reduced to the same one-way fingerprint before use.
+    /// Session termination may arrive without an account scope. `session` is
+    /// the ended stored id (`bilibi_session::Terminated::id`), whose bytes are
+    /// the review's fingerprint.
     pub async fn cancel_session(&self, session: &str) -> Result<()> {
-        let fingerprint = Sha256::digest(session.as_bytes()).to_vec();
+        let fingerprint = fingerprint(session);
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let rows = client.query(
             "UPDATE base_agent_api_reviews SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE browser_session_hash=$1 AND status IN ('open','refused') RETURNING id",
@@ -257,7 +271,7 @@ impl Reviews {
     async fn end_orphaned(&self, tenant: i64, user: i64) -> Result<()> {
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let rows = client.query(
-            "UPDATE base_agent_api_reviews r SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.status IN ('open','refused') AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.tenant_id=r.tenant_id AND s.user_id=r.user_id AND s.expires_at>now() AND sha256(convert_to(s.id,'UTF8'))=r.browser_session_hash) RETURNING r.id",
+            "UPDATE base_agent_api_reviews r SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.status IN ('open','refused') AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.tenant_id=r.tenant_id AND s.user_id=r.user_id AND s.expires_at>now() AND decode(s.id,'hex')=r.browser_session_hash) RETURNING r.id",
             &[&tenant, &user],
         ).await.map_err(bilibi_database::Error::from)?;
         for row in rows {

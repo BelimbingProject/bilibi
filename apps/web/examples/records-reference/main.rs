@@ -198,14 +198,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
@@ -1022,10 +1016,11 @@ async fn main() -> Outcome {
     // An agent connection is tied to the browser session that approved it and
     // works only while that session is live, so give the two stand-in
     // sign-ins that approve one (admin, manager) the session row a real
-    // sign-in writes. The scopes above carry the same CSRF value.
+    // sign-in writes: its id a token's digest, as `bilibi_session::session_id`
+    // stores. The scopes above carry the same CSRF value.
     client
         .execute(
-            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) SELECT 'records-'||u,1,u,'records',now()+interval '24 hours' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) SELECT encode(sha256(convert_to('records-'||u,'UTF8')),'hex'),1,u,'records',now()+interval '24 hours' FROM unnest(ARRAY[4,1]::bigint[]) u ON CONFLICT (id) DO NOTHING",
             &[],
         )
         .await?;

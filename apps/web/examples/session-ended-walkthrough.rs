@@ -22,7 +22,7 @@
 use bilibi_authz::grants::Grants;
 use bilibi_base::events::{DELIVER, PRINCIPAL};
 use bilibi_base::queue::{Config, Executor};
-use bilibi_base::session::Sessions;
+use bilibi_base::session::{session_id, Sessions};
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{verify_composition, Services};
 use bilibi_tenancy::{Authentication, Scope};
@@ -45,6 +45,8 @@ struct Proof {
 }
 struct Signed {
     token: String,
+    /// The stored row id: the token's digest.
+    id: String,
     scope: Scope,
 }
 impl Proof {
@@ -61,20 +63,21 @@ impl Proof {
     ) -> Result<Signed> {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let csrf = uuid::Uuid::new_v4().simple().to_string();
+        let id = session_id(&token);
         let client = self.db.get().await?;
         client.execute(
             "INSERT INTO sessions(id,tenant_id,user_id,csrf,impersonator_id,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours')",
-            &[&token, &tenant, &user, &csrf, &impersonator],
+            &[&id, &tenant, &user, &csrf, &impersonator],
         ).await?;
         let scope = self.sessions.check(&**client, &token).await?;
-        let digest = Sha256::digest(token.as_bytes());
+        // The token, its stored digest, the row key the lists render.
+        let key = Sha256::digest(id.as_bytes());
         self.secrets.push(token.clone());
+        self.secrets.push(id.clone());
         self.secrets
-            .push(digest.iter().map(|b| format!("{b:02x}")).collect());
-        self.secrets
-            .push(digest.iter().take(12).map(|b| format!("{b:02x}")).collect());
+            .push(key.iter().take(12).map(|b| format!("{b:02x}")).collect());
         self.secrets.push(csrf);
-        Ok(Signed { token, scope })
+        Ok(Signed { token, id, scope })
     }
     async fn show(&self, label: &str, signed: &Signed, proof: &Scope, account: i64) -> Result<()> {
         let client = self.db.get().await?;
@@ -116,7 +119,7 @@ impl Proof {
             .await?;
         let outcome = self
             .sessions
-            .terminate(&mut tx, &target.token, &operator.token)
+            .terminate(&mut tx, &target.id, &operator.id)
             .await?;
         tx.commit().await?;
         println!("   operator termination: {outcome:?}");
@@ -214,7 +217,7 @@ async fn end(mut proof: Proof, services: &Services, grants: &Grants) -> Result<(
         .await?
         .execute(
             "UPDATE sessions SET last_activity=now()-interval '1 day' WHERE id=$1",
-            &[&second.token],
+            &[&second.id],
         )
         .await?;
     proof

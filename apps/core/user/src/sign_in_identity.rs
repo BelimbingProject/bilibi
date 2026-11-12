@@ -80,7 +80,7 @@ pub(crate) async fn identity_and_home(
 }
 
 /// Ends what the sign-in's shared password let in, in every tenant: the
-/// account's own sessions except `except`, and the sign-in's accounts in other
+/// account's own sessions except the one the cookie token `keep` opens, and the sign-in's accounts in other
 /// tenants with their pending sign-ins, sessions and AI connections. Called in
 /// the password change, reset and administrator set transactions; the caller
 /// announces the returned session ids after its commit.
@@ -89,7 +89,7 @@ pub(crate) async fn end_everywhere(
     tx: &mut MutationTransaction<'_>,
     identity: i64,
     user: i64,
-    except: Option<&str>,
+    keep: Option<&str>,
 ) -> Result<Vec<String>> {
     let tenant = tx.context().tenant;
     let elsewhere: Vec<(i64, i64)> = tx
@@ -120,5 +120,5 @@ pub(crate) async fn end_everywhere(
         })
         .await?;
     }
-    sessions.revoke_sign_in(tx, user, &elsewhere, except).await
+    sessions.revoke_sign_in(tx, user, &elsewhere, keep).await
 }

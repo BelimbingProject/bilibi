@@ -109,12 +109,14 @@ async fn connect(
         .get(0);
     Ok((id, tokens))
 }
-/// The session row a browser sign-in writes; a credential reset ends it.
+/// The session row a browser sign-in writes (its id the token's digest); a
+/// credential reset ends it.
 async fn sign_in_session(client: &Client, tenant: i64, user: i64) -> Result<()> {
+    let id = bilibi_base::session::session_id(&format!("walkthrough-{tenant}-{user}"));
     client
         .execute(
             "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours') ON CONFLICT (id) DO NOTHING",
-            &[&format!("walkthrough-{tenant}-{user}"), &tenant, &user],
+            &[&id, &tenant, &user],
         )
         .await?;
     Ok(())
@@ -343,7 +345,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?
         .get(0);
     let provider_connection: i64 = client
-        .query_one("INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,client_id,expires_at,provider_public,provider_version,provider_link,provider_token_hash,enabled_session_id) VALUES(1,6,3,'Company identity provider','company-provider',now()+interval '1 hour','walkthrough-provider',1,$1,sha256(convert_to('walkthrough-provider-token','UTF8')),'walkthrough-1-6') RETURNING id", &[&link])
+        .query_one("INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,client_id,expires_at,provider_public,provider_version,provider_link,provider_token_hash,enabled_session_id) VALUES(1,6,3,'Company identity provider','company-provider',now()+interval '1 hour','walkthrough-provider',1,$1,sha256(convert_to('walkthrough-provider-token','UTF8')),encode(sha256(convert_to('walkthrough-1-6','UTF8')),'hex')) RETURNING id", &[&link])
         .await?
         .get(0);
     let provider_claims = AgentClaims {
@@ -352,7 +354,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         user: remembered_provider_actor.user(),
         organisation: remembered_provider_actor.actor().organisation(),
         person: remembered_provider_actor.actor().person(),
-        enabled_session: Some("walkthrough-1-6".into()),
+        enabled_session: Some(bilibi_base::session::session_id("walkthrough-1-6")),
     };
     let provider_company = users
         .prove_provider_access(

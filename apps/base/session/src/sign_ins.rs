@@ -158,10 +158,11 @@ impl Sessions {
             })
             .filter(|agent| !agent.is_empty());
         let device = client_name(agent.as_deref());
+        let id = crate::session_id(token);
         client
             .execute(
                 "UPDATE sessions SET ip_address=$2,user_agent=$3 WHERE id=$1",
-                &[&token, &ip, &agent],
+                &[&id, &ip, &agent],
             )
             .await?;
         // The history reads share the statement's snapshot, so they see only
@@ -174,7 +175,7 @@ impl Sessions {
                  EXISTS(SELECT 1 FROM session_sign_ins h JOIN s ON h.tenant_id=s.tenant_id AND h.user_id=s.user_id), \
                  EXISTS(SELECT 1 FROM session_sign_ins h JOIN s ON h.tenant_id=s.tenant_id AND h.user_id=s.user_id AND h.device=$4) \
                  FROM added",
-                &[&token, &ip, &agent, &device],
+                &[&id, &ip, &agent, &device],
             )
             .await?
         else {

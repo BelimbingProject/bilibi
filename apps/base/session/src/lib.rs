@@ -78,8 +78,9 @@ impl Default for Policy {
 }
 
 /// A session ended on purpose: logout, an operator's termination or a user's
-/// other sessions ending after a credential change. Carries the durable id so
-/// the host can match the sockets it holds for it; never a display value.
+/// other sessions ending after a credential change. Carries the stored id
+/// ([`session_id`] of the cookie) so the host can match the sockets it holds
+/// for it; never a display value.
 #[derive(Clone, Debug)]
 pub struct Terminated {
     pub id: String,
@@ -101,8 +102,8 @@ pub struct SessionClient {
     pub name: String,
 }
 
-/// One active session owned by the signed-in account. Its bearer stays in the
-/// mounted page state; [`OwnSummary::key`] is the only row identity rendered.
+/// One active session owned by the signed-in account. Its stored id stays in
+/// the mounted page state; [`OwnSummary::key`] is the only row identity rendered.
 #[derive(Clone, Debug)]
 struct OwnSummary {
     id: String,
@@ -142,6 +143,19 @@ impl Summary {
     pub fn key(&self) -> String {
         session_key(&self.id)
     }
+}
+
+/// The stored id of the session a cookie token opens: the token's SHA-256,
+/// in hex. Only this digest is kept, so whoever reads the `sessions` table (a
+/// console, a backup, a replica) learns no bearer token. Every facade method
+/// that takes a `token` hashes it here; methods that take an `id` take this
+/// digest, as listed rows and [`Terminated`] carry it. A module that writes
+/// a session row itself (sign-in) stores this, never the token.
+pub fn session_id(token: &str) -> String {
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn session_key(id: &str) -> String {
@@ -297,15 +311,20 @@ impl Sessions {
             .collect())
     }
     /// Revoke pending challenges, delegated credentials and all holder
-    /// sessions in the owner's audited transaction. Tenant comes from its
-    /// trusted context. A credential the sign-in's other tenant accounts share
-    /// uses [`Self::revoke_sign_in`].
+    /// sessions in the owner's audited transaction, except the session the
+    /// cookie token `keep` opens. Tenant comes from its trusted context. A
+    /// credential the sign-in's other tenant accounts share uses
+    /// [`Self::revoke_sign_in`].
     pub async fn revoke(
         &self,
         tx: &mut MutationTransaction<'_>,
         user: i64,
-        except: Option<&str>,
+        keep: Option<&str>,
     ) -> Result<Vec<String>> {
+        if keep.is_some_and(str::is_empty) {
+            return Err(Error::Invalid);
+        }
+        let except = keep.map(session_id);
         self.factors
             .as_ref()
             .ok_or(Error::Internal)?
@@ -337,7 +356,7 @@ impl Sessions {
             CredentialRevocationReason::SignedOut => Ending::SignedOut,
             _ => Ending::Terminated,
         };
-        self.end_user_sessions(tx, account.tenant, user, except, ending)
+        self.end_user_sessions(tx, account.tenant, user, except.as_deref(), ending)
             .await
     }
     /// The current operator policy. Read on every check, so a changed lifetime
@@ -378,7 +397,7 @@ impl Sessions {
         client
             .query_opt(
                 "SELECT id FROM sessions WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND expires_at>clock_timestamp() FOR KEY SHARE",
-                &[&token, &scope.tenant(), &scope.user()],
+                &[&session_id(token), &scope.tenant(), &scope.user()],
             )
             .await?
             .ok_or(Error::Unauthorized)?;
@@ -402,16 +421,17 @@ impl Sessions {
         self.resolve(client, token, true, AccountKind::Customer)
             .await
     }
-    /// Whether this exact session is still live. Agent calls use this read-only
-    /// check and therefore never renew browser activity.
+    /// Whether the session stored as `id` (a [`session_id`], as an AI
+    /// connection remembers it) is still live for this account. Agent calls
+    /// use this read-only check and therefore never renew browser activity.
     pub async fn is_live(
         &self,
         client: &(impl GenericClient + Sync),
         tenant: i64,
         user: i64,
-        session: &str,
+        id: &str,
     ) -> Result<bool> {
-        match self.check(client, session).await {
+        match self.resolve_id(client, id, false, AccountKind::Staff).await {
             Ok(scope) => Ok(scope.tenant() == tenant && scope.user() == user),
             Err(Error::Unauthorized | Error::Forbidden | Error::NotFound) => Ok(false),
             Err(error) => Err(error),
@@ -580,7 +600,7 @@ impl Sessions {
         let moved = sql
             .query_opt(
                 "UPDATE sessions SET held_company_id=CASE WHEN $6::bigint IS NULL THEN NULL WHEN $4::bigint IS NULL THEN company_id ELSE held_company_id END,company_id=CASE WHEN $6::bigint IS NULL THEN held_company_id ELSE $9 END,user_id=$5,impersonator_id=$6,csrf=$7,last_activity=now(),stepped_up_at=NULL,step_up_used_at=NULL,step_up_spent_at=NULL WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND impersonator_id IS NOT DISTINCT FROM $4 AND expires_at>now() AND last_activity>now()-make_interval(secs => $8::double precision) RETURNING id",
-                &[&token, &tenant, &from.user, &from.impersonator, &to.user, &to.impersonator, &csrf, &(policy.idle_seconds as f64), &company],
+                &[&session_id(token), &tenant, &from.user, &from.impersonator, &to.user, &to.impersonator, &csrf, &(policy.idle_seconds as f64), &company],
             )
             .await?;
         moved.map(|_| csrf).ok_or(Error::Conflict)
@@ -691,11 +711,12 @@ impl Sessions {
             let _ = self.terminations.send(Terminated { id, redirect: None });
         }
     }
-    /// Closes live pages of a session whose bearer was rotated while moving
-    /// tenants. They must never reload their record address in the new tenant.
-    pub fn announce_tenant_switch(&self, id: String) {
+    /// Closes live pages of the session `token` opened, whose bearer was
+    /// rotated while moving tenants. They must never reload their record
+    /// address in the new tenant.
+    pub fn announce_tenant_switch(&self, token: &str) {
         let _ = self.terminations.send(Terminated {
-            id,
+            id: session_id(token),
             redirect: Some("/session/tenant-changed"),
         });
     }
@@ -715,10 +736,25 @@ impl Sessions {
         if token.is_empty() || token.len() > 256 {
             return Err(Error::Unauthorized);
         }
+        self.resolve_id(client, &session_id(token), activity, kind)
+            .await
+    }
+    /// [`Self::resolve`] for a stored id. The session hash Tenancy seals is
+    /// the token's SHA-256, which is the id's bytes.
+    async fn resolve_id(
+        &self,
+        client: &(impl GenericClient + Sync),
+        id: &str,
+        activity: bool,
+        kind: AccountKind,
+    ) -> Result<Scope> {
+        if id.len() != 64 {
+            return Err(Error::Unauthorized);
+        }
         let policy = self.policy(client).await?;
-        let row = client.query_opt("SELECT tenant_id,user_id,csrf,impersonator_id,company_id FROM sessions WHERE id=$1 AND expires_at>now() AND last_activity>now()-make_interval(secs => $2::double precision)", &[&token, &(policy.idle_seconds as f64)]).await?.ok_or(Error::Unauthorized)?;
+        let row = client.query_opt("SELECT tenant_id,user_id,csrf,impersonator_id,company_id,decode(id,'hex') FROM sessions WHERE id=$1 AND expires_at>now() AND last_activity>now()-make_interval(secs => $2::double precision)", &[&id, &(policy.idle_seconds as f64)]).await?.ok_or(Error::Unauthorized)?;
         let chosen: Option<i64> = row.get(4);
-        let session_hash = Sha256::digest(token.as_bytes());
+        let session_hash: Vec<u8> = row.get(5);
         let scope = self
             .authentication
             .authenticate_browser_session(
@@ -744,13 +780,13 @@ impl Sessions {
                 client
                     .execute(
                         "UPDATE sessions SET company_id=NULL WHERE id=$1 AND company_id=$2",
-                        &[&token, &chosen],
+                        &[&id, &chosen],
                     )
                     .await?;
             }
             // Lock the valid row, even when renewal is throttled. The UPDATE
             // executes only when due; a revoked/expired row cannot be revived.
-            let touched = client.query_opt("WITH valid AS MATERIALIZED (SELECT id,last_activity FROM sessions WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND expires_at>now() AND last_activity>now()-make_interval(secs => $4::double precision) FOR UPDATE), touched AS (UPDATE sessions s SET last_activity=now() FROM valid v WHERE s.id=v.id AND v.last_activity<now()-make_interval(secs => $5::double precision) RETURNING s.id) SELECT id FROM valid", &[&token,&scope.tenant(),&scope.user(),&(policy.idle_seconds as f64),&(policy.touch_seconds as f64)]).await?;
+            let touched = client.query_opt("WITH valid AS MATERIALIZED (SELECT id,last_activity FROM sessions WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND expires_at>now() AND last_activity>now()-make_interval(secs => $4::double precision) FOR UPDATE), touched AS (UPDATE sessions s SET last_activity=now() FROM valid v WHERE s.id=v.id AND v.last_activity<now()-make_interval(secs => $5::double precision) RETURNING s.id) SELECT id FROM valid", &[&id,&scope.tenant(),&scope.user(),&(policy.idle_seconds as f64),&(policy.touch_seconds as f64)]).await?;
             if touched.is_none() {
                 return Err(Error::Unauthorized);
             }
@@ -781,6 +817,7 @@ inventory::submit! {
             ("base-session-006-sign-in-history", include_str!("../migrations/006-sign-in-history.sql")),
             ("base-session-007-sign-in-devices", include_str!("../migrations/007-sign-in-devices.sql")),
             ("base-session-008-ended-reason", include_str!("../migrations/008-ended-reason.sql")),
+            ("base-session-009-token-digest", include_str!("../migrations/009-token-digest.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },

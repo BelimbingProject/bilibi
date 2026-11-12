@@ -492,13 +492,15 @@ impl Sessions {
     /// the credential owner in this transaction. Their delegated credentials
     /// and agent step-up windows end here as well. Their sessions are marked
     /// ended, since this transaction records notices only in its own tenant;
-    /// the sweep records each tenant's notice. Returns every ended id.
+    /// the sweep records each tenant's notice. `keep` is the cookie token of
+    /// the session to leave open, as for [`Sessions::revoke`]. Returns every
+    /// ended id.
     pub async fn revoke_sign_in(
         &self,
         tx: &mut MutationTransaction<'_>,
         user: i64,
         elsewhere: &[(i64, i64)],
-        except: Option<&str>,
+        keep: Option<&str>,
     ) -> Result<Vec<String>> {
         let current = tx.context().tenant;
         if elsewhere
@@ -507,7 +509,7 @@ impl Sessions {
         {
             return Err(Error::Invalid);
         }
-        let mut ended = self.revoke(tx, user, except).await?;
+        let mut ended = self.revoke(tx, user, keep).await?;
         if elsewhere.is_empty() {
             return Ok(ended);
         }
@@ -602,16 +604,18 @@ impl Sessions {
     /// transaction: nobody decided about someone else, so no session audit
     /// row; the notice is recorded and every other live page of that session
     /// is told after the commit. An impersonated session is marked ended and
-    /// its operator's notice recorded by the expiry sweep.
+    /// its operator's notice recorded by the expiry sweep. `token` is the
+    /// holder's cookie.
     pub async fn delete(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
-        id: &str,
+        token: &str,
     ) -> Result<()> {
-        if id.is_empty() || tx.context().tenant != scope.tenant() {
+        if token.is_empty() || tx.context().tenant != scope.tenant() {
             return Err(Error::Invalid);
         }
+        let id = crate::session_id(token);
         let ended = if Self::records_now(tx, scope.tenant()) {
             let row = tx.sql().query_opt(
                 "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 RETURNING COALESCE(impersonator_id,user_id)",
@@ -631,7 +635,7 @@ impl Sessions {
             ).await? > 0
         };
         if ended {
-            self.announce_after(tx, vec![id.to_owned()]);
+            self.announce_after(tx, vec![id]);
         }
         Ok(())
     }

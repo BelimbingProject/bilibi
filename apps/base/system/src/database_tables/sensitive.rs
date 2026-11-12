@@ -18,8 +18,9 @@ pub(super) enum Mask {
     WhenTrue(&'static str),
 }
 
-/// Secrets Bilibi keeps under neutral names: the session id is the bearer
-/// token itself, and a setting's value is ciphertext when it is encrypted.
+/// Secrets Bilibi keeps under neutral names: the session id is the digest of
+/// a live bearer token and the CSRF secret travels with it, and a setting's
+/// value is ciphertext when it is encrypted.
 const KNOWN: [(&str, &str, Mask); 3] = [
     ("sessions", "id", Mask::Always),
     ("sessions", "csrf", Mask::Always),

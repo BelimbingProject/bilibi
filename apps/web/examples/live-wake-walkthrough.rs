@@ -199,7 +199,7 @@ async fn open(
     let csrf = uuid::Uuid::new_v4().simple().to_string();
     db.get().await?.execute(
         "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,$4,now()+interval '24 hours')",
-        &[&token, &tenant, &user, &csrf],
+        &[&bilibi_base::session::session_id(&token), &tenant, &user, &csrf],
     ).await?;
     let mut request = format!("ws://{addr}/live?framed=true")
         .into_client_request()
@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
         .await?
         .execute(
             "UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1",
-            &[&ada.token],
+            &[&bilibi_base::session::session_id(&ada.token)],
         )
         .await?;
     channel.announce(1, Some(1));
