@@ -219,3 +219,9 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 ## Where to go next
 
 See [`base/system`](../system/README.md) for Banner colour on Instance settings.
+
+## Softphone
+
+`Softphone` renders a Domain-owned call projection: its last confirmed `CallPhase`, separate `PhoneHealth`, caller, action availability and an escaped `Html` screen-pop. Omit actions the actor cannot use; supply an unavailable reason for a temporarily disabled supported action. The shared control sends the enclosing page or panel its event with `action` and an opaque `version`. The owner binds the call in mounted state, checks the actor, current version and action again, and renders only an authoritative response. It owns transfer and conference inputs, provider I/O and the refusal text. Phone unavailability disables controls while preserving the last call phase and the rest of the page. On reconnect the owner reloads a scoped projection; event wakes are hints and must not be treated as ordered state.
+
+The disposable `softphone-walkthrough` web example is a fake source for manual browser verification; it is not registered by the production application. Its state and action controls exercise the live transport without a phone system.

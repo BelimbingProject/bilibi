@@ -58,8 +58,10 @@ pub use search_multi::{SearchMultiOption, SearchMultiSelect};
 mod section;
 mod settings;
 mod shell;
+mod softphone;
 mod specimen;
 mod statusbar;
+pub use softphone::{CallAction, CallPhase, PhoneHealth, Softphone, SoftphoneAction};
 pub mod upload;
 pub mod workspace;
 pub use portal::{
