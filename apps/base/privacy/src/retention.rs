@@ -135,6 +135,21 @@ pub trait Sweeper: Send + Sync {
         after: i64,
         limit: i64,
     ) -> HandlerFuture<'a, Swept>;
+    /// Work that cannot share the sweep's transaction, after each batch
+    /// commits and its hold guard is released, under the same grant: for
+    /// example removing the bytes of files the batch erased
+    /// (`Media::remove_swept_bytes`). It runs after every batch, so work an
+    /// earlier run left (a file that would not go) is retried by the next.
+    /// An error fails the run, which then retries; the batch stays done.
+    /// Default: nothing.
+    fn after_sweep<'a>(
+        &'a self,
+        _client: &'a mut Client,
+        _scope: &'a Scope,
+        _grant: &'a Erasure,
+    ) -> HandlerFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// The keys of a class's company settings.
@@ -538,6 +553,7 @@ impl Privacy {
             runner::clear_evidence(&tx, &grant, &mut step, minimums).await?;
             tx.commit().await?;
             holds.release().await?;
+            class.sweeper.after_sweep(client, scope, &grant).await?;
             acted += swept.acted;
             kept += swept.kept;
             batches += 1;

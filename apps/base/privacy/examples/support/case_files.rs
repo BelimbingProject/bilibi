@@ -30,7 +30,7 @@ const PROVENANCE: Provenance = Provenance {
 
 inventory::submit! { Module {
     id: MODULE, layer: bilibi_module_registry::Layer::Domains,
-    dependencies: &["base/media", "base/personal_data"], migrations: &[], services: &[],
+    dependencies: &["base/media", "base/personal_data", "base/privacy", "base/settings"], migrations: &[], services: &[],
 } }
 inventory::submit! { Contribution::new(SUBJECTS, CASE, PROVENANCE, &MediaSubject { owner: &CASES }) }
 inventory::submit! { Contribution::new(PERSONAL_DATA, "wt_cases/cases.files", PROVENANCE,
@@ -46,7 +46,10 @@ pub async fn install(client: &Client, media: Arc<Media>) -> std::result::Result<
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS walkthrough_cases (tenant_id bigint NOT NULL, id bigint NOT NULL, \
-             person_id bigint NOT NULL, PRIMARY KEY (tenant_id, id))",
+             person_id bigint NOT NULL, PRIMARY KEY (tenant_id, id)); \
+             ALTER TABLE walkthrough_cases ADD COLUMN IF NOT EXISTS closed_at timestamptz, \
+             ADD COLUMN IF NOT EXISTS swept_at timestamptz, \
+             ADD COLUMN IF NOT EXISTS files_held boolean NOT NULL DEFAULT false",
         )
         .await?;
     let _ = MEDIA.set(media);
@@ -153,6 +156,31 @@ impl SubjectOwner for Cases {
                 .await?
                 .is_some())
         })
+    }
+    fn swept_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        subject_id: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move { Cases::swept(client, scope, subject_id).await })
+    }
+}
+
+impl Cases {
+    /// A case its retention sweep erased: marked before its files are, and
+    /// kept marked, so Media's later byte removal still finds it vouched for.
+    async fn swept(client: &dyn ProofClient, scope: &Scope, subject_id: &str) -> Result<bool> {
+        let Ok(id) = subject_id.parse::<i64>() else {
+            return Ok(false);
+        };
+        Ok(client
+            .query_opt(
+                "SELECT 1 FROM walkthrough_cases WHERE tenant_id=$1 AND id=$2 AND swept_at IS NOT NULL",
+                &[&scope.tenant(), &id],
+            )
+            .await?
+            .is_some())
     }
 }
 
@@ -340,4 +368,163 @@ impl Handler for Cases {
             Ok(())
         })
     }
+}
+
+/// Closed cases past the company's period: the retention sweep marks each
+/// case swept and erases its files in the sweep's transaction (a hold on a
+/// file keeps it), and its `after_sweep` removes the erased files' bytes.
+/// To show the sweep grant reaches no other case, the first batch also
+/// asks to erase the files of the lowest case it did not sweep.
+struct ClosedCases;
+static CLOSED_CASES: ClosedCases = ClosedCases;
+
+impl bilibi_privacy::Sweeper for ClosedCases {
+    fn sweep<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        grant: &'a Erasure,
+        companies: &'a bilibi_privacy::Companies,
+        cutoff: &'a str,
+        holds: &'a Holds,
+        after: i64,
+        limit: i64,
+    ) -> HandlerFuture<'a, bilibi_privacy::Swept> {
+        Box::pin(async move {
+            grant.check(scope)?;
+            let tenant = scope.tenant();
+            let (company, primary, listed) = companies.parameters();
+            let rows = tx
+                .sql()
+                .query(
+                    &format!(
+                        "SELECT id,person_id,swept_at IS NOT NULL,files_held FROM walkthrough_cases WHERE tenant_id=$1 AND id>$2 \
+                         AND (swept_at IS NULL OR files_held) AND closed_at<$3::text::timestamptz AND {} ORDER BY id LIMIT $4 FOR UPDATE",
+                        bilibi_privacy::Companies::predicate("NULL::bigint", 5)
+                    ),
+                    &[&tenant, &after, &cutoff, &limit, &company, &primary, &listed],
+                )
+                .await?;
+            let next = (rows.len() as i64 == limit)
+                .then(|| rows.last().map(|row| row.get(0)))
+                .flatten();
+            if after == 0 {
+                let open: Option<i64> = tx
+                    .sql()
+                    .query_opt(
+                        "SELECT id FROM walkthrough_cases WHERE tenant_id=$1 AND swept_at IS NULL AND (closed_at IS NULL OR closed_at>=$2::text::timestamptz) ORDER BY id LIMIT 1",
+                        &[&tenant, &cutoff],
+                    )
+                    .await?
+                    .map(|row| row.get(0));
+                if let Some(open) = open {
+                    let id = open.to_string();
+                    let result = media()?
+                        .erase_attachments(tx, scope, grant, self::subject(&id), holds)
+                        .await;
+                    refuse("sweep erase", open, result)?;
+                }
+            }
+            let mut swept = bilibi_privacy::Swept {
+                next,
+                ..Default::default()
+            };
+            for row in &rows {
+                let (case, person, marked, was_held): (i64, i64, bool, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3));
+                // Marked before its files are erased, so Media finds it
+                // vouched for; a case a hold kept files of is already marked.
+                if !marked {
+                    tx.mutate(move |sql| {
+                    Box::pin(async move {
+                        sql.execute(
+                            "UPDATE walkthrough_cases SET swept_at=now() WHERE tenant_id=$1 AND id=$2",
+                            &[&tenant, &case],
+                        )
+                        .await?;
+                        Ok((
+                            (),
+                            vec![bilibi_database::Change {
+                                kind: CASE.into(),
+                                id: case,
+                                old: json!({"swept": false}),
+                                new: json!({"swept": true}),
+                            }],
+                        ))
+                    })
+                })
+                .await?;
+                }
+                let id = case.to_string();
+                let files = media()?
+                    .erase_attachments(tx, scope, grant, self::subject(&id), holds)
+                    .await
+                    .map_err(media_error)?;
+                let held = !files.held.is_empty();
+                if held {
+                    swept.kept += 1;
+                } else {
+                    swept.acted += 1;
+                }
+                // A case a hold kept files of is swept again until none is kept.
+                if held != was_held {
+                    tx.mutate(move |sql| {
+                        Box::pin(async move {
+                            sql.execute(
+                                "UPDATE walkthrough_cases SET files_held=$3 WHERE tenant_id=$1 AND id=$2",
+                                &[&tenant, &case, &held],
+                            )
+                            .await?;
+                            Ok((
+                                (),
+                                vec![bilibi_database::Change {
+                                    kind: CASE.into(),
+                                    id: case,
+                                    old: json!({"files_held": was_held}),
+                                    new: json!({"files_held": held}),
+                                }],
+                            ))
+                        })
+                    })
+                    .await?;
+                }
+                for file in files.erased {
+                    swept.records.push(ErasedRecord {
+                        kind: ATTACHMENT_KIND.into(),
+                        id: file.id,
+                        person: Some(person),
+                    });
+                    swept.records.push(ErasedRecord {
+                        kind: ASSET_KIND.into(),
+                        id: file.asset_id,
+                        person: Some(person),
+                    });
+                }
+            }
+            Ok(swept)
+        })
+    }
+    fn after_sweep<'a>(
+        &'a self,
+        client: &'a mut Client,
+        scope: &'a Scope,
+        grant: &'a Erasure,
+    ) -> HandlerFuture<'a, ()> {
+        Box::pin(async move {
+            loop {
+                let removal = media()?
+                    .remove_swept_bytes(client, scope, grant, CASE)
+                    .await
+                    .map_err(media_error)?;
+                if !removal.more {
+                    return Ok(());
+                }
+            }
+        })
+    }
+}
+bilibi_privacy::record_class! {
+    module: "wt_cases/cases", key: "wt_cases/cases.closed_cases", label: "Closed cases (walkthrough)",
+    clock_start: "when the case was closed", action: Anonymise,
+    business_value: true, floor_days: None, sweeper: &CLOSED_CASES,
 }
