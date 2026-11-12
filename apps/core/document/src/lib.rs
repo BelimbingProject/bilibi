@@ -6,6 +6,8 @@
 mod agent_operations;
 mod contributions;
 mod custom;
+mod customer;
+mod customer_operations;
 mod email;
 mod files;
 mod library;
@@ -25,7 +27,7 @@ use bilibi_picklists::PickLists;
 use bilibi_principal_directory::PrincipalDirectory;
 use bilibi_records::Records;
 use bilibi_settings::Settings;
-use bilibi_tenancy::{Authentication, ReadClient, Scope};
+use bilibi_tenancy::{Authentication, PortalScope, ReadClient, Scope};
 use jiff::{civil::Date, Timestamp};
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
 use store::On;
@@ -34,6 +36,10 @@ pub use bilibi_records::Reference;
 pub use contributions::{
     ALLOWED_TYPES, DOWNLOAD, LIST_CATEGORY, LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE, MANAGE,
     MAX_UPLOAD_BYTES, MERGE, RETENTION_DAYS, VIEW,
+};
+pub use customer::{
+    CustomerShare, CustomerShareInput, PortalFilter, Recipient, SharedDocument, SharedPage,
+    CUSTOMER_SHARE_RECORD, PORTAL_INDEX, PORTAL_VIEW,
 };
 pub use email::{ACTOR_PER_HOUR, EMAIL_RECORD, RECIPIENT_PER_DAY, TENANT_PER_HOUR};
 pub use model::{
@@ -1165,11 +1171,97 @@ impl Documents {
     ) -> WriteResult<AccessGrant> {
         self.store().preview_unshare(client, scope, id, grant).await
     }
+
+    /// Every share of the document with a portal customer, ended ones too.
+    /// Visible only to someone allowed to share the document.
+    pub async fn customer_shares(&self, scope: &Scope, id: i64) -> WriteResult<Vec<CustomerShare>> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        let scope = self.fresh(&**client, scope).await?;
+        self.store().customer_shares(&**client, &scope, id).await
+    }
+
+    /// Shares a document that keeps a file with a portal customer: one
+    /// Person, or every business customer who signs in for one Company.
+    /// Sharing again with the same customer replaces the end. Needs
+    /// `core.document.manage` and the share permission, as `share` does; the
+    /// recipient must be a record the actor may see (`base/records`).
+    pub async fn share_customer(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        input: &CustomerShareInput,
+    ) -> WriteResult<CustomerShare> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().share_customer(tx, &scope, id, input).await
+    }
+
+    /// The share `share_customer` would add or replace, without writing it.
+    pub async fn preview_share_customer(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        input: &CustomerShareInput,
+    ) -> WriteResult<CustomerShare> {
+        self.store()
+            .preview_share_customer(client, scope, id, input)
+            .await
+    }
+
+    /// Revokes one customer share: the customer stops seeing the document
+    /// on their next read.
+    pub async fn unshare_customer(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        share: i64,
+    ) -> WriteResult<()> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store().unshare_customer(tx, &scope, id, share).await
+    }
+
+    /// The customer share `unshare_customer` would revoke, without writing.
+    pub async fn preview_unshare_customer(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        id: i64,
+        share: i64,
+    ) -> WriteResult<CustomerShare> {
+        self.store()
+            .customer_share(On::Preview(client), scope, id, share)
+            .await
+    }
+
+    /// A page of the documents shared with the signed-in portal customer
+    /// (`portal.document.view`): shared with their own Person, or with the
+    /// Company they sign in for, unended, in their tenant, keeping a file and
+    /// not past its expiry date. Nothing else is ever listed or counted.
+    pub async fn shared_with_me(
+        &self,
+        portal: &PortalScope,
+        filter: &PortalFilter,
+    ) -> Result<SharedPage> {
+        let client = self.db.get().await?;
+        bilibi_authz::authorize_portal(&**client, portal, PORTAL_VIEW).await?;
+        customer::list(&client, portal, filter).await
+    }
+
+    /// The latest file of a document shared with the signed-in portal
+    /// customer, read through `base/artifacts` every time and audited as the
+    /// customer. A refusal (not shared, ended, revoked, expired, no file, a
+    /// file still being scanned or not clean) is audited too.
+    pub async fn read_shared_file(&self, portal: &PortalScope, id: i64) -> WriteResult<File> {
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        customer::read(&mut client, &self.artifacts, portal, id).await
+    }
 }
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
@@ -1179,6 +1271,7 @@ inventory::submit! { Module {
         ("core-document-006-email-job", include_str!("../migrations/006-email-job.sql")),
         ("core-document-007-scan-held-revisions", include_str!("../migrations/007-scan-held-revisions.sql")),
         ("core-document-008-list-order", include_str!("../migrations/008-list-order.sql")),
+        ("core-document-009-customer-shares", include_str!("../migrations/009-customer-shares.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
@@ -1222,5 +1315,9 @@ inventory::submit! { Module {
         Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(web::Pages::new(s)?))))
     }}, Service { id: web::FILES, factory: |s| {
         Ok(Arc::new(bilibi_ui::download::DownloadService::<Scope, Error>(Arc::new(web::Files(s.get(SERVICE)?)))))
+    }}, Service { id: web::PORTAL, factory: |s| {
+        Ok(Arc::new(bilibi_ui::page::PageService::<PortalScope, Error>(Arc::new(web::PortalPages(s.get(SERVICE)?)))))
+    }}, Service { id: web::PORTAL_FILES, factory: |s| {
+        Ok(Arc::new(bilibi_ui::download::DownloadService::<PortalScope, Error>(Arc::new(web::PortalFiles(s.get(SERVICE)?)))))
     }}],
 } }

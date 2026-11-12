@@ -49,7 +49,8 @@ pub(crate) const RESET_KEY: &str = "core.user.two_factor.reset";
 pub(crate) const RESET_EVENT: &str = "reset-two-factor";
 /// The page service that owns [`RESET_EVENT`].
 pub(crate) const PAGES: &str = "core/user.pages";
-/// The record the sealed secret is bound to (`Settings::seal_owned`).
+/// The owner the sealed secret is bound to (`Settings::seal_owned`), with
+/// the sign-in's home tenant and identity id ([`SignIn`]).
 const OWNER: &str = "core/user.two_factor";
 const KIND: &str = "user_two_factor";
 /// The two-factor counter: five failed checks within fifteen minutes lock
@@ -217,13 +218,17 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT i.password_hash,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
+                "SELECT i.password_hash,i.email,i.home_tenant_id,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND u.deleted_at IS NULL",
                 &[&tenant, &user],
             )
             .await
             .map_err(Error::from)?
             .ok_or(Error::Unauthorized)?;
         let (stored, email): (String, String) = (row.get(0), row.get(1));
+        let sign_in = SignIn {
+            home_tenant: row.get(2),
+            identity: row.get(3),
+        };
         let matched = current.len() <= password::MAX_LENGTH
             && password::verify(current, Some(&stored)).await?;
         if !matched {
@@ -234,9 +239,12 @@ impl UserService {
         drop(client);
         let secret = totp::generate_secret()?;
         let encoded = totp::encode_secret(&secret);
-        let sealed = self
-            .settings
-            .seal_owned(OWNER, tenant, user, &json!(encoded))?;
+        let sealed = self.settings.seal_owned(
+            OWNER,
+            sign_in.home_tenant,
+            sign_in.identity,
+            &json!(encoded),
+        )?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -284,7 +292,7 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT secret,confirmed_at IS NOT NULL,last_step FROM user_two_factor WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
+                "SELECT f.secret,f.confirmed_at IS NOT NULL,f.last_step,i.home_tenant_id,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2)",
                 &[&tenant, &user],
             )
             .await
@@ -293,7 +301,7 @@ impl UserService {
         if row.get::<_, bool>(1) {
             return Err(TwoFactorError::AlreadyEnabled);
         }
-        let secret = self.open_secret(tenant, user, &row.get(0))?;
+        let secret = self.open_secret(SignIn::of(&row, 3), &row.get(0))?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, row.get(2))?;
         drop(client);
         let Some(step) = step else {
@@ -399,14 +407,26 @@ impl UserService {
             .map_err(|_| Error::Internal)?;
         let client = self.db.get().await.map_err(Error::from)?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, None)?;
+        let sign_in = client
+            .query_opt(
+                "SELECT i.home_tenant_id,i.id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2",
+                &[&tenant, &user],
+            )
+            .await
+            .map_err(Error::from)?
+            .map(|row| SignIn::of(&row, 0))
+            .ok_or(Error::Unauthorized)?;
         drop(client);
         let Some(step) = step else {
             self.failed(scope, "authenticator").await?;
             return Err(TwoFactorError::InvalidCode);
         };
-        let sealed = self
-            .settings
-            .seal_owned(OWNER, tenant, user, &json!(to.secret))?;
+        let sealed = self.settings.seal_owned(
+            OWNER,
+            sign_in.home_tenant,
+            sign_in.identity,
+            &json!(to.secret),
+        )?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -469,13 +489,13 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT secret,last_step FROM user_two_factor WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND confirmed_at IS NOT NULL",
+                "SELECT f.secret,f.last_step,i.home_tenant_id,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND f.confirmed_at IS NOT NULL",
                 &[&tenant, &user],
             )
             .await
             .map_err(Error::from)?
             .ok_or(TwoFactorError::NotEnabled)?;
-        let secret = self.open_secret(tenant, user, &row.get(0))?;
+        let secret = self.open_secret(SignIn::of(&row, 2), &row.get(0))?;
         let step = totp::verify(&secret, code, now_unix(&**client).await?, row.get(1))?;
         drop(client);
         match step {
@@ -615,8 +635,9 @@ impl UserService {
             .await?;
         tx.mutate(move |sql| {
             Box::pin(async move {
-                let (until, _) =
-                    credential_attempts::lock(sql, tenant, user, STEP_UP, LIMITS).await?;
+                let until = credential_attempts::lock(sql, tenant, user, STEP_UP, LIMITS)
+                    .await?
+                    .until;
                 Ok((
                     (),
                     vec![credential_attempts::change(
@@ -632,15 +653,35 @@ impl UserService {
         tx.commit().await
     }
 
-    fn open_secret(&self, tenant: i64, user: i64, sealed: &serde_json::Value) -> Outcome<Vec<u8>> {
+    fn open_secret(&self, sign_in: SignIn, sealed: &serde_json::Value) -> Outcome<Vec<u8>> {
         if !self.settings.encryption_available() {
             return Err(TwoFactorError::Unavailable);
         }
-        let opened = self.settings.open_owned(OWNER, tenant, user, sealed)?;
+        let opened =
+            self.settings
+                .open_owned(OWNER, sign_in.home_tenant, sign_in.identity, sealed)?;
         let encoded = opened.as_str().ok_or(Error::Internal)?;
         Ok(data_encoding::BASE32_NOPAD
             .decode(encoded.as_bytes())
             .map_err(|_| Error::Internal)?)
+    }
+}
+
+/// What the sealed secret is bound to: the person's sign-in, not the tenant
+/// account that enrolled, so one authenticator opens in each of their
+/// tenants. The home tenant never changes for a sign-in.
+#[derive(Clone, Copy)]
+struct SignIn {
+    home_tenant: i64,
+    identity: i64,
+}
+impl SignIn {
+    /// Reads `home_tenant_id,id` from `row` starting at column `at`.
+    fn of(row: &tokio_postgres::Row, at: usize) -> Self {
+        Self {
+            home_tenant: row.get(at),
+            identity: row.get(at + 1),
+        }
     }
 }
 
