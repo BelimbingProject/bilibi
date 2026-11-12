@@ -21,8 +21,12 @@ pub const PORTAL: &str = "core.person.portal.manage";
 /// The contact facts a customer may change on the portal: `name`, `phone`
 /// and `cf_<key>` for a custom field. Empty by default; email never.
 pub const PORTAL_EDITABLE_KEY: &str = "person.portal_editable";
-/// The most entries the editable list takes.
-const EDITABLE_MAX: usize = 64;
+/// The contact custom fields a customer sees on the portal, as `cf_<key>`.
+/// Empty by default: a tenant's internal field (a risk note, a rating) never
+/// reaches the customer unless listed. An editable field is always shown.
+pub const PORTAL_VISIBLE_KEY: &str = "person.portal_visible";
+/// The most entries either list takes.
+const LIST_MAX: usize = 64;
 
 /// The signed-in customer's own contact details, as a portal page shows them.
 #[derive(Clone, Debug, Serialize)]
@@ -35,8 +39,10 @@ pub struct PortalPerson {
     pub phone: Option<String>,
     /// The version a `PortalUpdate` must name.
     pub version: i64,
-    /// The tenant's active contact custom fields with this person's values,
-    /// in the fields' order. An archived field is left out.
+    /// The active contact custom fields the tenant shows customers
+    /// (`person.portal_visible`, and every editable one) with this person's
+    /// values, in the fields' order. Any other field, and an archived one, is
+    /// left out.
     pub custom: Vec<PortalField>,
     /// What the customer may change now: `name`, `phone` and `cf_<key>` of
     /// active custom fields, as the tenant's `person.portal_editable` lists.
@@ -87,7 +93,8 @@ pub struct PortalChoice {
 
 /// A customer's change to its own contact details. A fact left out is kept;
 /// a fact the tenant does not let customers change is refused unless it
-/// equals what is stored. There is no email: it is the address the customer
+/// equals what is stored (a number by its value, so `1.50` equals `1.5`), and
+/// a custom field the customer is not shown is refused whatever its value. There is no email: it is the address the customer
 /// signs in with and the duplicate key, so an `email` key is refused.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -108,14 +115,21 @@ const NOT_EDITABLE: &str = "cannot be changed on the portal";
 
 /// The tenant's editable list, as stored: only known shapes count.
 fn editable_valid(value: &Value) -> bool {
+    listed(value, true)
+}
+/// The tenant's visible list: custom fields only.
+fn visible_valid(value: &Value) -> bool {
+    listed(value, false)
+}
+fn listed(value: &Value, contacts: bool) -> bool {
     let Some(items) = value.as_array() else {
         return false;
     };
     let mut seen = std::collections::HashSet::new();
-    items.len() <= EDITABLE_MAX
+    items.len() <= LIST_MAX
         && items.iter().all(|item| {
             item.as_str().is_some_and(|text| {
-                (matches!(text, "name" | "phone")
+                ((contacts && matches!(text, "name" | "phone"))
                     || text.strip_prefix("cf_").is_some_and(|key| {
                         let mut bytes = key.bytes();
                         key.len() <= 40
@@ -135,6 +149,30 @@ inventory::submit! { Contribution::new(DEFINITIONS, PORTAL_EDITABLE_KEY, Provena
     editor: Some(Editor { group: "Contacts", label: "What customers may change on the portal", help: "The contact facts a signed-in customer may change: name, phone, or cf_ and a custom field's key, for example [\"name\", \"phone\", \"cf_segment\"]. Email is never one of them: it is the address they sign in with. Empty: none.", capability: Some(crate::UPDATE), reveal_duration_ms: 5_000 }),
 })) }
 
+inventory::submit! { Contribution::new(DEFINITIONS, PORTAL_VISIBLE_KEY, Provenance { module: "core/person", source: file!(), line: line!() }, &Setting::Definition(Definition {
+    value_type: ValueType::Array, scopes: &[ScopeKind::Tenant], default: || json!([]), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(Validator { accepts: visible_valid, message: "must list cf_ and a custom field key, each once, such as [\"cf_segment\"]" }),
+    editor: Some(Editor { group: "Contacts", label: "Custom fields customers see on the portal", help: "The contact custom fields a signed-in customer sees, as cf_ and the field's key, for example [\"cf_segment\"]. A field customers may change is always shown. Empty: only those.", capability: Some(crate::UPDATE), reveal_duration_ms: 5_000 }),
+})) }
+
+/// What the tenant shows customers and lets them change.
+struct Policy {
+    editable: Vec<String>,
+    visible: Vec<String>,
+}
+impl Policy {
+    /// Whether the customer may change `field` (`name`, `phone`, `cf_<key>`).
+    fn may(&self, field: &str) -> bool {
+        self.editable.iter().any(|item| item == field)
+    }
+    /// Whether the customer sees the custom field `key`.
+    fn shows(&self, key: &str) -> bool {
+        let field = crate::custom::name(key);
+        self.may(&field) || self.visible.contains(&field)
+    }
+}
+
 /// The re-proved portal scope: the customer still stands and still signs in
 /// as the same Person, and holds `PORTAL`.
 async fn live(
@@ -150,27 +188,35 @@ async fn live(
     Ok(live)
 }
 
-/// What the tenant lets customers change, as stored.
-async fn editable(
-    service: &PersonService,
-    client: &dyn ReadClient,
-    scope: &Scope,
-) -> Result<Vec<String>> {
-    let value = service
+/// The tenant's two lists, as stored.
+async fn policy(service: &PersonService, client: &dyn ReadClient, scope: &Scope) -> Result<Policy> {
+    let mut lists = service
         .settings
-        .get(client, scope, Target::Tenant, PORTAL_EDITABLE_KEY)
-        .await?
-        .value;
-    Ok(value
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default())
+        .resolve_many(
+            client,
+            scope,
+            Target::Tenant,
+            &[PORTAL_EDITABLE_KEY, PORTAL_VISIBLE_KEY],
+        )
+        .await?;
+    let mut list = |key: &str| -> Vec<String> {
+        lists
+            .remove(key)
+            .and_then(|resolved| {
+                resolved.value.as_array().map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    };
+    Ok(Policy {
+        editable: list(PORTAL_EDITABLE_KEY),
+        visible: list(PORTAL_VISIBLE_KEY),
+    })
 }
 
 /// The portal read model of `person`, already redacted for the customer.
@@ -179,19 +225,19 @@ async fn view(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
     person: Person,
-    allowed: &[String],
+    policy: &Policy,
 ) -> Result<PortalPerson> {
     let active = crate::custom::fields()?
         .active(client, scope, crate::custom::RECORD_TYPE)
         .await?;
     let mut custom = Vec::with_capacity(active.len());
-    for definition in &active {
+    for definition in active.iter().filter(|d| policy.shows(&d.key)) {
         let value = person
             .custom
             .get(&definition.key)
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let editable = allowed.contains(&crate::custom::name(&definition.key));
+        let editable = policy.may(&crate::custom::name(&definition.key));
         let (mut text, mut retired, mut choices) = (None, false, Vec::new());
         if let Some(list) = definition.picklist.as_deref() {
             if let Some(code) = &value {
@@ -226,7 +272,8 @@ async fn view(
     }
     // Only what can be changed now: an editable contact the customer's role
     // does not withhold, and active custom fields.
-    let editable = allowed
+    let editable = policy
+        .editable
         .iter()
         .filter(|item| match item.as_str() {
             "name" => true,
@@ -254,6 +301,45 @@ async fn view(
     })
 }
 
+/// Whether a submitted value equals the stored one: as text, and a number
+/// field's decimals by value (`1.50` and a JSON `1.5` are the same).
+fn same(
+    kind: Option<bilibi_custom_fields::Kind>,
+    submitted: &Option<String>,
+    stored: &Option<String>,
+) -> bool {
+    match (kind, submitted, stored) {
+        (Some(bilibi_custom_fields::Kind::Number), Some(a), Some(b))
+            if bilibi_custom_fields::valid_number(a) && bilibi_custom_fields::valid_number(b) =>
+        {
+            decimal(a) == decimal(b)
+        }
+        _ => submitted == stored,
+    }
+}
+/// A valid decimal string in one spelling: no leading zeros, no trailing
+/// fraction zeros, no sign on zero.
+fn decimal(text: &str) -> String {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let whole = whole.trim_start_matches('0');
+    let fraction = fraction.trim_end_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    let mut out = String::new();
+    if negative && !(whole == "0" && fraction.is_empty()) {
+        out.push('-');
+    }
+    out.push_str(whole);
+    if !fraction.is_empty() {
+        out.push('.');
+        out.push_str(fraction);
+    }
+    out
+}
+
 /// A submitted custom value as it would be stored: trimmed text, a number as
 /// written; `None` clears. `Err` for anything else (Custom Fields names it).
 fn submitted(value: &Value) -> std::result::Result<Option<String>, ()> {
@@ -266,8 +352,8 @@ fn submitted(value: &Value) -> std::result::Result<Option<String>, ()> {
 }
 
 impl PersonService {
-    /// The signed-in customer's own name, phone, email and active custom
-    /// fields, for a Domain's portal page. Re-proves the customer, asks for
+    /// The signed-in customer's own name, phone, email and the active custom
+    /// fields the tenant shows customers, for a Domain's portal page. Re-proves the customer, asks for
     /// `core.person.portal.manage` and applies the field restrictions of the
     /// customer's role. The Person is the proof's.
     pub async fn portal_read(&self, portal: &PortalScope) -> Result<PortalPerson> {
@@ -283,8 +369,8 @@ impl PersonService {
             .ok_or(Error::NotFound)?;
         let restrictions = identity::read_fields(&**client, scope).await?;
         let person = Person::from_row(&row)?.redact(&restrictions);
-        let allowed = editable(self, &**client, scope).await?;
-        view(self, &**client, scope, person, &allowed).await
+        let policy = policy(self, &**client, scope).await?;
+        view(self, &**client, scope, person, &policy).await
     }
 
     /// Changes the signed-in customer's own contact details in the caller's
@@ -314,8 +400,8 @@ impl PersonService {
         if old.system_key.is_some() || old.kind != PersonKind::Human {
             return Err(WriteError::SystemIdentity);
         }
-        let allowed = editable(self, tx.sql(), &scope).await?;
-        let may = |field: &str| allowed.iter().any(|item| item == field);
+        let policy = policy(self, tx.sql(), &scope).await?;
+        let may = |field: &str| policy.may(field);
         let restrictions = identity::read_fields(tx.sql(), &scope).await?;
         // A withheld or masked phone is neither shown nor changed.
         if update.phone.is_some() && restrictions.contains("phone") {
@@ -341,15 +427,28 @@ impl PersonService {
         if !refused.is_empty() {
             return Err(WriteError::Validation(refused));
         }
+        let active = crate::custom::fields()?
+            .active(tx.sql(), &scope, crate::custom::RECORD_TYPE)
+            .await?;
         let mut patch = Custom::new();
         let mut custom_refused = Vec::new();
         for (key, value) in &update.custom {
+            // A field the customer is not shown is refused whatever the value,
+            // so a guess cannot learn what is stored.
+            if !policy.shows(key) {
+                custom_refused.push(CustomFieldError {
+                    field: crate::custom::name(key),
+                    message: NOT_EDITABLE.into(),
+                });
+                continue;
+            }
             let stored = old
                 .custom
                 .get(key)
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            if submitted(value).is_ok_and(|value| value == stored) {
+            let kind = active.iter().find(|d| &d.key == key).map(|d| d.kind);
+            if submitted(value).is_ok_and(|value| same(kind, &value, &stored)) {
                 continue;
             }
             if !may(&crate::custom::name(key)) {
@@ -370,7 +469,7 @@ impl PersonService {
         let merged = crate::custom::merge(&old.custom, &checked);
         if input.name == old.name && input.phone == old.phone && merged == old.custom {
             let person = old.redact(&restrictions);
-            return Ok(view(self, tx.sql(), &scope, person, &allowed).await?);
+            return Ok(view(self, tx.sql(), &scope, person, &policy).await?);
         }
         let tenant = scope.tenant();
         let custom = Value::Object(merged);
@@ -386,7 +485,7 @@ impl PersonService {
             tx.sql(),
             &scope,
             person.redact(&restrictions),
-            &allowed,
+            &policy,
         )
         .await?)
     }

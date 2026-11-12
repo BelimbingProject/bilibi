@@ -34,6 +34,7 @@ pub use model::{
 };
 pub use portal::{
     PortalChoice, PortalField, PortalPerson, PortalUpdate, PORTAL, PORTAL_EDITABLE_KEY,
+    PORTAL_VISIBLE_KEY,
 };
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;

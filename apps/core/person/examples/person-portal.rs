@@ -14,7 +14,7 @@ use bilibi_custom_fields::{CustomFields, NewField};
 use bilibi_database::{pool, Error, MutationBoundary};
 use bilibi_person::{
     Custom, PersonInput, PersonKind, PersonService, PortalUpdate, Update, WriteError, PORTAL,
-    PORTAL_EDITABLE_KEY, SERVICE,
+    PORTAL_EDITABLE_KEY, PORTAL_VISIBLE_KEY, SERVICE,
 };
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{Authentication, PortalScope};
@@ -119,6 +119,8 @@ async fn main() -> Result<(), Failure> {
     for (key, label, kind, picklist) in [
         ("segment", "Segment", "text", None),
         ("tier", "Tier", "choice", Some(list)),
+        ("credit_limit", "Credit limit", "number", None),
+        ("risk_note", "Risk note", "text", None),
     ] {
         let mut tx = boundary
             .begin(&mut client, admin.mutation_context("person.custom.define"))
@@ -145,8 +147,12 @@ async fn main() -> Result<(), Failure> {
     let mine = people
         .create(&manager, &human("Siti Customer", "siti@example.test"))
         .await?;
+    // Staff facts: a choice, a number stored as 1.50, and an internal note
+    // the customer must never see.
     let mut tier = Custom::new();
     tier.insert("tier".into(), json!(first));
+    tier.insert("credit_limit".into(), json!("1.50"));
+    tier.insert("risk_note".into(), json!("Late payer"));
     let mine = people
         .update(
             &manager,
@@ -225,29 +231,73 @@ async fn main() -> Result<(), Failure> {
 
     println!("-- read");
     let read = people.portal_read(&portal).await?;
-    let tier_field = read.custom.iter().find(|field| field.key == "tier");
     proof.check(
-        "the portal read is the proof's Person: name, email, phone and the active custom fields",
+        "the portal read is the proof's Person: name, email and phone",
         read.id == mine.id
             && read.name == "Siti Customer"
             && read.email.as_deref() == Some("siti@example.test")
             && read.phone.as_deref() == Some("+60 12 345 6789")
-            && read.version == mine.version
-            && read.custom.len() == 2
+            && read.version == mine.version,
+    );
+    proof.check(
+        "by default no custom field reaches the customer and nothing is editable",
+        read.custom.is_empty() && read.editable.is_empty(),
+    );
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            admin.mutation_context("walkthrough.portal.setting"),
+        )
+        .await?;
+    let name_visible = settings
+        .put(
+            &mut tx,
+            &admin,
+            Target::Tenant,
+            PORTAL_VISIBLE_KEY,
+            json!(["name"]),
+        )
+        .await;
+    tx.rollback().await?;
+    proof.check(
+        "the visible list takes custom fields only",
+        name_visible.is_err(),
+    );
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            admin.mutation_context("walkthrough.portal.setting"),
+        )
+        .await?;
+    settings
+        .put(
+            &mut tx,
+            &admin,
+            Target::Tenant,
+            PORTAL_VISIBLE_KEY,
+            json!(["cf_tier", "cf_credit_limit"]),
+        )
+        .await?;
+    tx.commit().await?;
+    let read = people.portal_read(&portal).await?;
+    let keys: Vec<&str> = read.custom.iter().map(|field| field.key.as_str()).collect();
+    let tier_field = read.custom.iter().find(|field| field.key == "tier");
+    proof.check(
+        "the read shows only the listed fields, in order; the risk note stays internal",
+        keys == ["tier", "credit_limit"]
             && tier_field.is_some_and(|field| {
                 field.kind == "choice"
                     && field.value.as_deref() == Some(first.as_str())
                     && field.text.is_some()
+                    && !field.editable
             }),
-    );
-    proof.check(
-        "by default the tenant lets a customer change nothing",
-        read.editable.is_empty() && read.custom.iter().all(|field| !field.editable),
     );
     let json = serde_json::to_value(&read)?;
     proof.check(
         "custom fields read as {key, label, type, value}",
-        json["custom"][0]["type"] == "text" && json["custom"][0]["label"] == "Segment",
+        json["custom"][0]["type"] == "choice"
+            && json["custom"][0]["label"] == "Tier"
+            && json["custom"][1]["value"] == "1.50",
     );
 
     println!("-- nothing editable");
@@ -297,6 +347,72 @@ async fn main() -> Result<(), Failure> {
         "posting the facts as they stand is accepted and writes nothing",
         unchanged.version == read.version && changes(&client, mine.id.get()).await? == before,
     );
+    let mut number = Custom::new();
+    number.insert("credit_limit".into(), json!(1.5));
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            portal.mutation_context("walkthrough.portal.profile"),
+        )
+        .await?;
+    let same_number = people
+        .portal_update_in(
+            &mut tx,
+            &portal,
+            &PortalUpdate {
+                version: read.version,
+                custom: number,
+                ..PortalUpdate::default()
+            },
+        )
+        .await;
+    tx.commit().await?;
+    proof.check(
+        "an unchanged number sent as the JSON number 1.5 against a stored 1.50 is accepted and writes nothing",
+        same_number.is_ok_and(|person| person.version == read.version)
+            && changes(&client, mine.id.get()).await? == before,
+    );
+    let mut number = Custom::new();
+    number.insert("credit_limit".into(), json!("2"));
+    let mut hidden = Custom::new();
+    hidden.insert("risk_note".into(), json!("Late payer"));
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            portal.mutation_context("walkthrough.portal.profile"),
+        )
+        .await?;
+    let other_number = people
+        .portal_update_in(
+            &mut tx,
+            &portal,
+            &PortalUpdate {
+                version: read.version,
+                custom: number,
+                ..PortalUpdate::default()
+            },
+        )
+        .await;
+    let guess = people
+        .portal_update_in(
+            &mut tx,
+            &portal,
+            &PortalUpdate {
+                version: read.version,
+                custom: hidden,
+                ..PortalUpdate::default()
+            },
+        )
+        .await;
+    tx.rollback().await?;
+    proof.check(
+        "a different number on a field the customer may only see is refused on cf_credit_limit",
+        matches!(&other_number, Err(WriteError::CustomFields(errors)) if errors.iter().any(|e| e.field == "cf_credit_limit")),
+    );
+    proof.check(
+        "a hidden field is refused even when the guess equals what is stored",
+        matches!(&guess, Err(WriteError::CustomFields(errors)) if errors.iter().any(|e| e.field == "cf_risk_note")),
+    );
     proof.check(
         "an email key is refused: email is the sign-in address and never editable",
         serde_json::from_value::<PortalUpdate>(
@@ -340,12 +456,14 @@ async fn main() -> Result<(), Failure> {
         .await?;
     tx.commit().await?;
     let read = people.portal_read(&portal).await?;
+    let keys: Vec<&str> = read.custom.iter().map(|field| field.key.as_str()).collect();
     proof.check(
-        "the read names what may change: name, phone and segment, not tier",
+        "the read names what may change: name, phone and segment, not tier; an editable field is shown",
         read.can_edit("name")
             && read.can_edit("phone")
             && read.can_edit("cf_segment")
             && !read.can_edit("cf_tier")
+            && keys == ["segment", "tier", "credit_limit"]
             && read
                 .custom
                 .iter()
