@@ -20,13 +20,20 @@ Base owns private bytes, malware scanning, retention and legal holds. Domains ow
 
 Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission; the record page links a revision's file only for a reader who holds both. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
 
-Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants. The creator's own grant cannot be removed through `unshare`.
+Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants.
+
+**A sharer gives at most what their own grant holds.** Share refuses:
+
+- your own account: nobody changes their own grant, so a sharer cannot lift their own end date or add download;
+- download or manage when your own grant lacks it;
+- no end date, or a later one, when your own access ends (**Access until** must be no later than your own last day);
+- the creator's account, unless you are the creator; `unshare` likewise removes the creator's grant only for the creator, and nobody removes their own.
 
 Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant.
 
 ## Sharing by email, and when access ends
 
-- **Share** gives one active account an explicit grant. With **Access until** (`until`, the last day, UTC) the grant stops working after that day: every read, download and edit rechecks it, so an ended grant hides the document like no grant at all. Your own access never ends this way.
+- **Share** gives one active account an explicit grant. With **Access until** (`until`, the last day, UTC) the grant stops working after that day: every read, download and edit rechecks it, so an ended grant hides the document like no grant at all.
 - **Email them a link** (`email`) mails the grantee a link to `/documents/{id}`. The link carries no token and no file: it opens only for that account, only while the grant lasts, and the sharer needs the share permission as before. Emailing a name out is a disclosure, so it is durable, limited and audited:
   - The request is one audited `core_document_emails` row (`core.document.email` changes, ids and a reason code only, never an address, name or link), written in the share's own transaction, with a durable Queue job (`core/document-email`) for a queued one.
   - Limits, counted under a lock: `core.document.email_actor_per_hour` (20), `core.document.email_recipient_per_day` for one person and one document (3) and `core.document.email_tenant_per_hour` (200). Over a limit the grant is still saved and the request is recorded `rate_limited`; the page and `core.document.share` say so.
@@ -190,7 +197,7 @@ The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disp
 BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder cargo run -p bilibi-document --example audit-coverage --locked
 ```
 
-A new document action belongs in that example in the same change.
+A new document action belongs in that example in the same change. It also fails if a delegated sharer can change their own grant, give download, manage or a later end than their own grant holds, or change or remove the creator's grant, in the preview or the commit.
 
 ## List and audit latency
 

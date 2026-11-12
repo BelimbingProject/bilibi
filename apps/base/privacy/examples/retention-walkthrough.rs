@@ -400,6 +400,58 @@ async fn main() -> Result<()> {
              VALUES (1,2,'viewer-invited@example.test','\\x03'::bytea,1,now()-interval '60 days',now()-interval '59 days');",
         )
         .await?;
+    // #566: a closed account whose accepted invitation is held, and a lapsed
+    // invitation whose prepared account is held. Each hold keeps the pair.
+    let held_pair = client
+        .query_one(
+            "WITH n AS (SELECT nextval(pg_get_serial_sequence('users','id'))::bigint AS user_id), \
+             i AS (INSERT INTO user_identities(kind,email,password_hash,home_tenant_id,home_user_id,last_tenant_id) SELECT 'staff','held-closed@example.test','walkthrough',1,user_id,1 FROM n RETURNING id,home_user_id), \
+             closed AS (INSERT INTO users(id,tenant_id,identity_id,name,status,deleted_at) SELECT home_user_id,1,id,'Held Closed','deleted',now()-interval '40 days' FROM i RETURNING id), \
+             accepted AS (INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at,accepted_at) SELECT 1,id,'held-accepted@example.test','\\x04'::bytea,1,now()-interval '60 days',now()-interval '59 days' FROM closed RETURNING id), \
+             prepared AS (INSERT INTO users(tenant_id,name,status) VALUES (1,'Held Invitee','invited') RETURNING id), \
+             lapsed AS (INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at) SELECT 1,id,'held-lapsed@example.test','\\x05'::bytea,1,now()-interval '40 days' FROM prepared RETURNING id) \
+             SELECT (SELECT id FROM closed),(SELECT id FROM accepted),(SELECT id FROM prepared),(SELECT id FROM lapsed)",
+            &[],
+        )
+        .await?;
+    let (held_closed, held_accepted, held_prepared, held_lapsed): (i64, i64, i64, i64) = (
+        held_pair.get(0),
+        held_pair.get(1),
+        held_pair.get(2),
+        held_pair.get(3),
+    );
+    let accepted_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "user.invitation".into(),
+                id: held_accepted,
+            },
+            "Accepted invitation evidence",
+        )
+        .await?;
+    let prepared_hold = privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "user".into(),
+                id: held_prepared,
+            },
+            "Prepared account evidence",
+        )
+        .await?;
+    // A held pair, as one query: `held` is whether both are untouched.
+    const PAIRS: &str = "SELECT \
+        (SELECT name='Held Closed' AND anonymised_at IS NULL FROM users WHERE tenant_id=1 AND id=$1) \
+        AND (SELECT email='held-accepted@example.test' FROM user_invitations WHERE tenant_id=1 AND id=$2) \
+        AND (SELECT name='Held Invitee' AND status='invited' FROM users WHERE tenant_id=1 AND id=$3) \
+        AND (SELECT email='held-lapsed@example.test' AND revoked_at IS NULL FROM user_invitations WHERE tenant_id=1 AND id=$4), \
+        (SELECT name<>'Held Closed' AND anonymised_at IS NOT NULL FROM users WHERE tenant_id=1 AND id=$1) \
+        AND (SELECT email LIKE 'erased-inv-%' FROM user_invitations WHERE tenant_id=1 AND id=$2) \
+        AND (SELECT name<>'Held Invitee' AND status='deleted' FROM users WHERE tenant_id=1 AND id=$3) \
+        AND (SELECT email LIKE 'erased-inv-%' AND revoked_at IS NOT NULL FROM user_invitations WHERE tenant_id=1 AND id=$4)";
     // Audit evidence of user 2: one row inside a 30-day legal minimum, one older.
     client
         .batch_execute(
@@ -584,6 +636,27 @@ async fn main() -> Result<()> {
         );
     }
     println!("portal retention: 208 anonymised across batches; live/recent/held/other-company/other-tenant preserved");
+    let pairs = client
+        .query_one(
+            PAIRS,
+            &[&held_closed, &held_accepted, &held_prepared, &held_lapsed],
+        )
+        .await?;
+    let lapsed_kept: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM base_privacy_sweeps WHERE tenant_id=1 AND class='core/user.lapsed_invitations' AND kept=1) \
+             AND EXISTS(SELECT 1 FROM user_invitations WHERE tenant_id=1 AND email LIKE 'erased-inv-%' AND accepted_at IS NULL)",
+            &[],
+        )
+        .await?
+        .get(0);
+    if !pairs.get::<_, bool>(0) || !lapsed_kept {
+        return Err(
+            "a held invitation or prepared account was anonymised, or the hold was not counted"
+                .into(),
+        );
+    }
+    println!("invitation holds: the held accepted invitation kept its closed account, the held prepared account kept its lapsed invitation; the unheld ones were swept");
     rows(&client, "invitation", "SELECT v.email||' '||u.name||' '||u.status||' accepted='||(v.accepted_at IS NOT NULL)||' closed='||(v.revoked_at IS NOT NULL) FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id WHERE v.tenant_id=1 AND (v.email LIKE '%invitee%' OR v.email LIKE '%invited%' OR v.email LIKE 'erased-inv-%') ORDER BY v.id").await?;
     rows(&client, "user", "SELECT u.id||' '||u.name||' '||i.email||' '||u.status||' anonymised='||(u.anonymised_at IS NOT NULL) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND u.id IN (2,3,7) ORDER BY u.id").await?;
     rows(
@@ -619,6 +692,14 @@ async fn main() -> Result<()> {
     privacy
         .release_hold(&mut client, &admin, hold.id, "Tribunal closed")
         .await?;
+    for (id, reason) in [
+        (accepted_hold.id, "Accepted invitation evidence released"),
+        (prepared_hold.id, "Prepared account evidence released"),
+    ] {
+        privacy
+            .release_hold(&mut client, &admin, id, reason)
+            .await?;
+    }
     privacy
         .release_hold(
             &mut client,
@@ -632,6 +713,18 @@ async fn main() -> Result<()> {
     if released != 2 {
         return Err("released invitation holds did not resume retention".into());
     }
+    let pairs = client
+        .query_one(
+            PAIRS,
+            &[&held_closed, &held_accepted, &held_prepared, &held_lapsed],
+        )
+        .await?;
+    if !pairs.get::<_, bool>(1) {
+        return Err(
+            "released invitation and account holds did not let the sweep finish both".into(),
+        );
+    }
+    println!("invitation holds released: the closed account, its invitation, the lapsed invitation and its prepared account are anonymised");
     rows(&client, "user", "SELECT u.id||' '||u.name||' '||i.email||' anonymised='||(u.anonymised_at IS NOT NULL) FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=1 AND u.id IN (2,3,7) ORDER BY u.id").await?;
     rows(&client, "sweep", "SELECT id||' '||class||' acted='||acted||' kept='||kept FROM base_privacy_sweeps ORDER BY id DESC LIMIT 2").await?;
 

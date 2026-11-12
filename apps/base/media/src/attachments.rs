@@ -136,6 +136,42 @@ struct Bound {
     summary: Attachment,
 }
 const SELECT: &str = "SELECT a.id,a.media_asset_id,a.public_id,a.subject_type,a.subject_id,a.state,a.uploaded_by_id,a.uploaded_by_principal,s.original_filename,s.mime_type,s.file_size,s.scan_state,floor(extract(epoch FROM a.submitted_at))::bigint AS submitted_at,floor(extract(epoch FROM a.retained_at))::bigint AS retained_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at FROM base_media_attachments a JOIN base_media_assets s ON s.id=a.media_asset_id AND s.tenant_id=a.tenant_id";
+/// The audit action of a delivered private attachment.
+const DOWNLOADED: &str = "media.attachment.downloaded";
+/// The audit action of a download its subject's owner refused.
+const DOWNLOAD_REFUSED: &str = "media.attachment.download_refused";
+
+/// A reason code for an owner's refusal: the trail says why without naming
+/// anything the reader was refused.
+fn refusal_reason(error: &Error) -> &'static str {
+    match error {
+        Error::Database(bilibi_database::Error::Forbidden) => "forbidden",
+        Error::Database(bilibi_database::Error::NotFound) | Error::NotFound => "not_found",
+        Error::Database(bilibi_database::Error::Unauthorized) => "unauthorized",
+        _ => "unavailable",
+    }
+}
+
+/// Records a download action on the reader's connection, attributed to the
+/// scope's actor and impersonator.
+async fn audit_download(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    event: &str,
+    payload: Value,
+) -> Result<()> {
+    bilibi_audit::record_action(
+        client,
+        &bilibi_audit::Attribution::from_scope(scope),
+        None,
+        event,
+        payload,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
 fn bound(row: &Row) -> Result<Bound> {
     Ok(Bound {
         id: row.get("id"),
@@ -464,6 +500,11 @@ impl Media {
     /// Bytes for one attachment, after the subject's owner allows `Download` for
     /// this scope *now*. A public id from another tenant is `NotFound`. Send the
     /// result with `StreamFile::delivery(true)`: private files always download.
+    /// Each delivery and each refusal by the owner is an audit action
+    /// (`media.attachment.downloaded`, `media.attachment.download_refused`)
+    /// naming the attachment, its subject, the actor and any impersonator,
+    /// never the file name or storage key; bytes are returned only once the
+    /// action is recorded.
     pub async fn download_attachment(
         &self,
         client: &(impl GenericClient + Sync),
@@ -482,7 +523,13 @@ impl Media {
             .ok_or(Error::NotFound)?;
         let row = bound(&row)?;
         let summary = &row.summary;
-        self.subjects
+        let trail = json!({
+            "attachment": summary.public_id,
+            "subject_type": summary.subject_type,
+            "subject_id": summary.subject_id,
+        });
+        if let Err(error) = self
+            .subjects
             .authorize(
                 client,
                 scope,
@@ -490,7 +537,13 @@ impl Media {
                 SubjectAction::Download,
                 &summary.subject_id,
             )
-            .await?;
+            .await
+        {
+            let mut refused = trail;
+            refused["reason"] = json!(refusal_reason(&error));
+            audit_download(client, scope, DOWNLOAD_REFUSED, refused).await?;
+            return Err(error);
+        }
         let asset = self.fetch(client, scope.tenant(), row.asset_id).await?;
         if !asset.private {
             return Err(Error::InvalidAsset);
@@ -498,6 +551,7 @@ impl Media {
         // After the owner's answer, so a refused reader learns nothing more.
         self.readable(client, &asset).await?;
         let bytes = storage::read(&self.disks(client).await?, &asset.disk, &asset.key).await?;
+        audit_download(client, scope, DOWNLOADED, trail).await?;
         Ok(StreamFile {
             bytes,
             filename: asset

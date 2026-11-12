@@ -25,6 +25,12 @@ use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use tokio_postgres::Client;
 
+pub(crate) mod invitations;
+use invitations::{
+    anonymise_accepted_invitations, anonymise_invitations, held_accepted_invitations,
+    held_prepared_accounts,
+};
+
 const USER_KIND: &str = "user";
 pub(crate) const IDENTITY_KIND: &str = "user_identity";
 const NOTIFICATION_KIND: &str = "notification";
@@ -248,6 +254,17 @@ impl Handler for Accounts {
                 }
                 if let Some(hold) = held_identities.get(&identity).filter(|_| home) {
                     erased.kept.push(Kept::held(IDENTITY_KIND, identity, *hold));
+                    erased.kept.push(Kept::held(USER_KIND, user, *hold));
+                    continue;
+                }
+                let held_accepted =
+                    held_accepted_invitations(tx.sql(), holds, grant, tenant, &[user]).await?;
+                if let Some((_, _, hold)) = held_accepted.first() {
+                    for (invitation, _, hold) in &held_accepted {
+                        erased
+                            .kept
+                            .push(Kept::held(INVITATION_KIND, invitation, *hold));
+                    }
                     erased.kept.push(Kept::held(USER_KIND, user, *hold));
                     continue;
                 }
@@ -580,9 +597,21 @@ impl Handler for Accounts {
             for (id, hold) in &held_invitations {
                 erased.kept.push(Kept::held(INVITATION_KIND, id, *hold));
             }
-            let due: Vec<i64> = invitations
+            let open: Vec<i64> = invitations
                 .into_iter()
                 .filter(|id| !held_invitations.contains_key(id))
+                .collect();
+            let held_accounts =
+                held_prepared_accounts(tx.sql(), holds, grant, tenant, &open).await?;
+            for (invitation, account, hold) in &held_accounts {
+                erased.kept.push(Kept::held(USER_KIND, account, *hold));
+                erased
+                    .kept
+                    .push(Kept::held(INVITATION_KIND, invitation, *hold));
+            }
+            let due: Vec<i64> = open
+                .into_iter()
+                .filter(|id| !held_accounts.iter().any(|(held, _, _)| held == id))
                 .collect();
             if !due.is_empty() {
                 let records = tx
@@ -613,71 +642,6 @@ impl Handler for Accounts {
             Ok(erased)
         })
     }
-}
-
-/// Anonymises the accepted invitation(s) of an account being closed.
-pub(crate) async fn anonymise_accepted_invitations(
-    sql: &tokio_postgres::Transaction<'_>,
-    tenant: i64,
-    user: i64,
-) -> bilibi_database::Result<(Vec<Change>, Vec<(&'static str, i64)>)> {
-    let ids: Vec<i64> = sql
-        .query(
-            "SELECT id FROM user_invitations WHERE tenant_id=$1 AND user_id=$2 AND accepted_at IS NOT NULL AND email NOT LIKE 'erased-inv-%@erased.invalid' ORDER BY id FOR UPDATE",
-            &[&tenant, &user],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    anonymise_invitations(sql, tenant, &ids).await
-}
-
-/// Anonymises invitations (the caller holds their rows locked): the address
-/// goes, an unaccepted one is closed, and the account prepared for it, which
-/// has no sign-in, is closed and loses its name. Returns the changes and the
-/// records they touched.
-pub(crate) async fn anonymise_invitations(
-    sql: &tokio_postgres::Transaction<'_>,
-    tenant: i64,
-    ids: &[i64],
-) -> bilibi_database::Result<(Vec<Change>, Vec<(&'static str, i64)>)> {
-    let mut changes = Vec::new();
-    let mut records = Vec::new();
-    for row in sql
-        .query(
-            "UPDATE user_invitations v SET email='erased-inv-'||v.id||'@erased.invalid',revoked_at=CASE WHEN v.accepted_at IS NULL THEN coalesce(v.revoked_at,now()) END \
-             FROM (SELECT id,email,user_id FROM user_invitations WHERE tenant_id=$1 AND id=ANY($2)) o WHERE v.id=o.id RETURNING v.id,o.email,o.user_id",
-            &[&tenant, &ids],
-        )
-        .await?
-    {
-        let (id, email, user): (i64, String, i64) = (row.get(0), row.get(1), row.get(2));
-        changes.push(Change {
-            kind: INVITATION_KIND.into(),
-            id,
-            old: json!({"email": email}),
-            new: json!({"email": ERASED}),
-        });
-        records.push((INVITATION_KIND, id));
-        if let Some(row) = sql
-            .query_opt(
-                "UPDATE users u SET name=$3,status='deleted',deleted_at=coalesce(u.deleted_at,now()),anonymised_at=now(),version=u.version+1,updated_at=now() \
-                 FROM (SELECT id,name FROM users WHERE tenant_id=$1 AND id=$2) o WHERE u.tenant_id=$1 AND u.id=o.id AND u.identity_id IS NULL RETURNING o.name",
-                &[&tenant, &user, &ERASED],
-            )
-            .await?
-        {
-            changes.push(Change {
-                kind: USER_KIND.into(),
-                id: user,
-                old: json!({"name": row.get::<_, String>(0)}),
-                new: json!({"name": ERASED, "status": "deleted"}),
-            });
-            records.push((USER_KIND, user));
-        }
-    }
-    Ok((changes, records))
 }
 
 inventory::submit! { Contribution::new(PERSONAL_DATA, "core/user.accounts",

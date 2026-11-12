@@ -79,6 +79,15 @@ be written returns no answer. Database error details are returned to the operato
 but the recorded failure/refusal message is generic: PostgreSQL messages may
 quote parameter values or data raised by a function.
 
+Each command runs on a connection taken out of the pool and closed when it
+ends. A read-only transaction still allows functions with session effects (a
+session advisory lock such as `pg_advisory_lock`, a session setting through
+`set_config`); closing the connection ends them, so one command cannot hold the
+audit chain's commit lock or change the session of the next pooled caller.
+Known gap: the console still runs as the application's database role, so
+functions such as `pg_terminate_backend` are not refused; a SELECT-only role
+for the console is a later change.
+
 `execute_readonly_with_options` also accepts named parameters and output sorting.
 Its lexical binder skips strings, quoted identifiers, dollar quotes, casts and
 nested comments; values use PostgreSQL's text bind format for the inferred type,

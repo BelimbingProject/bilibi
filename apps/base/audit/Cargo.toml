@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bilibi-database.workspace = true
+deadpool-postgres.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-personal-data.workspace = true
 bilibi-tenancy = { path = "../tenancy" }
