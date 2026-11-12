@@ -5,10 +5,14 @@
 //! receiving a file, which stores it with `store_file` (a listed page-write
 //! gap, as Bulk data's receive). No Bilimbi counterpart; the shapes follow
 //! `cx/activities` and Core Person's list and record pages.
+mod customers;
 mod dialog;
 mod list;
 mod panel;
+mod portal;
 mod record;
+
+pub use portal::{PortalFiles, PortalPages, PORTAL, PORTAL_FILES};
 
 use crate::{Document, Documents, Filter, Sort};
 use askama::Template;

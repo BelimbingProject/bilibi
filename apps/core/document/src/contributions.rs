@@ -63,8 +63,13 @@ inventory::submit! { Contribution::new(MEDIA_SUBJECTS, crate::files::MEDIA_SUBJE
 // `view` and `manage` are the Platform's verbs; the other three are ours.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
     domains: &["core"], verbs: &["download", "merge", "fail", "settle"],
-    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL), C::tenant(SCAN_SETTLE)],
-    roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: CAPABILITIES }],
+    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL), C::tenant(SCAN_SETTLE), C::portal(crate::PORTAL_VIEW)],
+    roles: &[
+        RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: CAPABILITIES },
+        // Every invited customer may read what staff shared with them; the
+        // share, never the role, decides which documents that is.
+        RoleDefinition { code: bilibi_portal::PORTAL_ROLE, name: "Portal customer", description: "Every customer an invitation admits: the documents shared with them", grant_all: false, capabilities: &[crate::PORTAL_VIEW] },
+    ],
     system_principals: &[
         SystemPrincipalDefinition { name: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] },
         SystemPrincipalDefinition { name: crate::scan::PRINCIPAL, capabilities: &[SCAN_SETTLE] },
@@ -391,6 +396,35 @@ inventory::submit! { Contribution::new(DOWNLOADS, "core/document.export", proven
     access: Access::Capability(VIEW),
 }) }
 
+// The portal: a customer's list of the documents shared with them, the
+// latest file of each, and the same list for a Domain's portal page (the
+// `portal.documents` slot, narrowed to the record in its path). The download
+// opens on the portal account capability every customer holds, so that
+// `Documents::read_shared_file` decides and audits a refusal, as the staff
+// download does.
+inventory::submit! { Contribution::new(ROUTES, "core/document.portal", provenance!(), &Route {
+    company_scope: CompanyScope::Tenant,
+    method: Method::Get, path: crate::PORTAL_INDEX, service: crate::web::PORTAL, operation: "portal_list",
+    access: Access::Portal(crate::PORTAL_VIEW), framed: false,
+}) }
+inventory::submit! { Contribution::new(DOWNLOADS, "core/document.portal-file", provenance!(), &Download {
+    path: "/portal/documents/{id}/file", service: crate::web::PORTAL_FILES, operation: "portal_file",
+    access: Access::Portal(bilibi_portal::PORTAL_ACCOUNT),
+}) }
+inventory::submit! { Contribution::new(EMBEDS, "document.portal-documents", provenance!(), &Embed {
+    slot: "portal.documents", context: EmbedContext::Portal,
+    service: crate::web::PORTAL, operation: "portal_panel",
+    access: Access::Portal(crate::PORTAL_VIEW),
+}) }
+bilibi_menu::contribute!(
+    "core/document",
+    bilibi_menu::MenuItem::page("portal.documents", "Documents", crate::PORTAL_INDEX)
+        .under(bilibi_menu::PORTAL_ROOT)
+        .icon("document-text")
+        .requires(bilibi_menu::Requirement::Capability(crate::PORTAL_VIEW))
+        .order(50)
+);
+
 bilibi_menu::contribute!(
     "core/document",
     bilibi_menu::MenuItem::page("core.document", "Documents", "/documents")
@@ -415,6 +449,8 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("delete", "core.document.delete"),
         ("share", "core.document.share"),
         ("unshare", "core.document.unshare"),
+        ("customer_share", "core.document.customer_share"),
+        ("customer_unshare", "core.document.customer_unshare"),
         ("mark", "core.document.mark"),
         ("copy", "core.document.copy"),
         ("merge", "core.document.merge"),
