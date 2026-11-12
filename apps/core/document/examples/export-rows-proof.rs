@@ -20,7 +20,7 @@
 use bilibi_database::{pool, Error};
 use bilibi_document::{Documents, Draft, Filter, Source, SERVICE};
 use bilibi_tenancy::Scope;
-use bilibi_ui::download::{Download, DownloadRequest, DownloadService};
+use bilibi_ui::download::{DownloadRequest, DownloadService};
 use std::collections::{HashMap, HashSet};
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
