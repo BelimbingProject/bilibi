@@ -205,11 +205,8 @@ NOT_RUN=(
 # the code it found broken.
 KNOWN_FAILURES=(
   'address|614'
-  'document-audit|618'
   'geonames-import|619'
   'geonames-postcodes|620'
-  'grid-catalog|621'
-  'reports|622'
 )
 
 if [[ -n ${WALKTHROUGH_EXTRA:-} ]]; then
