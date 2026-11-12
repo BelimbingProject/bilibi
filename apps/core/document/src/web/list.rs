@@ -139,7 +139,7 @@ impl Index {
         let categories = pages.choices(scope, LIST_CATEGORY, None).await?;
         let types = pages.choices(scope, LIST_TYPE, None).await?;
         let statuses = pages.choices(scope, LIST_STATUS, None).await?;
-        Ok(Self {
+        let mut index = Self {
             pages,
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: columns()?,
@@ -161,7 +161,22 @@ impl Index {
             categories,
             types,
             statuses,
-        })
+        };
+        index.reopen(scope, query).await?;
+        Ok(index)
+    }
+    /// Opens the New document dialog the address names (`new=1`), so a
+    /// remount after a dropped connection or a reload shows it again and a
+    /// resumable upload in it carries on.
+    async fn reopen(&mut self, scope: &Scope, query: &HashMap<String, String>) -> Result<()> {
+        if query.get("new").map(String::as_str) == Some("1")
+            && self.dialog.is_none()
+            && self.pages.documents.may_manage(scope).await?
+        {
+            let fixed = self.related_record(scope).await?;
+            self.dialog = Some(NewDocument::new(&self.pages, scope, fixed).await?);
+        }
+        Ok(())
     }
     /// The filters in the address form `filter_of` reads.
     fn query(&self) -> HashMap<String, String> {
@@ -736,9 +751,13 @@ impl Index {
             ..bilibi_ui::Page::default()
         })?
         .to_string();
+        let mut query = self.query();
+        if self.dialog.is_some() {
+            query.insert("new".into(), "1".into());
+        }
         Ok(LiveBody {
             html,
-            query: self.query(),
+            query,
             rows: page.entries.len(),
             ..LiveBody::default()
         })
@@ -786,6 +805,7 @@ impl LiveState<Scope, Error> for Index {
                     self.list =
                         ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?;
                     self.related = related_of(query);
+                    self.reopen(request.scope, query).await?;
                 }
                 LiveInput::Event(value) => {
                     if let Some(body) = self
