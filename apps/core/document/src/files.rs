@@ -11,7 +11,8 @@
 //! - `Create`: `core.document.manage`, a row this actor reserved;
 //! - `Read`: `core.document.download`, and a revision's file the reader may
 //!   see (`core.document.view`), or a file this actor stored and has not
-//!   attached yet;
+//!   attached yet; for a portal customer, `portal.document.view` and the
+//!   clean latest file of a document shared with them (`customer.rs`);
 //! - `Delete`: `core.document.manage`, either a file this actor stored and
 //!   never attached or an attached file whose document is being deleted;
 //! - `Retain`: `core.document.manage`, a revision's file;
@@ -34,7 +35,7 @@ use bilibi_media::{
 };
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::{Settings, Target};
-use bilibi_tenancy::{PartyProofs, ProofClient, ProofFuture, ReadClient, Scope};
+use bilibi_tenancy::{AccountKind, PartyProofs, ProofClient, ProofFuture, ReadClient, Scope};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, OnceLock};
@@ -45,7 +46,7 @@ pub const ARTIFACT_OWNER: &str = "core.document";
 /// The artifact kind of every document file.
 pub const FILE_KIND: &str = "document-file";
 /// The audit event of a refused download or preview.
-const DOWNLOAD_REFUSED: &str = "core.document.download_refused";
+pub(crate) const DOWNLOAD_REFUSED: &str = "core.document.download_refused";
 /// Media's private staging subject. A staging file is never a document grant.
 pub const MEDIA_SUBJECT: &str = "core.document.upload";
 
@@ -228,6 +229,13 @@ impl Owner for DocumentFiles {
                         authorize_proof(client, scope, MANAGE).await?;
                         row.state == "reserved" && own
                     }
+                }
+                // A portal customer (`Artifacts::for_portal`): a clean latest
+                // file of a document shared with the customer now.
+                Operation::Read if scope.actor().kind() == AccountKind::Customer => {
+                    row.state == "attached"
+                        && crate::customer::serves_file(client, scope, row.artifact_id.as_deref())
+                            .await?
                 }
                 Operation::Read => {
                     if scope.principal() == Some(crate::scan::PRINCIPAL)
@@ -734,6 +742,7 @@ pub(crate) async fn finalize_document_delete(
         ).await? {
             changes.push(Change { kind: crate::ACCESS_RECORD.into(), id: row.get(0), old: json!({"document_id":document,"user_id":row.get::<_,i64>(1),"view":row.get::<_,bool>(2),"download":row.get::<_,bool>(3),"manage":row.get::<_,bool>(4),"share":row.get::<_,bool>(5)}), new: json!({}) });
         }
+        changes.extend(crate::customer::remove_all(sql, tenant, document).await?);
         let file_ids: Vec<i64> = sql.query(
             "SELECT file_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND file_id IS NOT NULL",
             &[&tenant, &document],

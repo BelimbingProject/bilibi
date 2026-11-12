@@ -1,13 +1,17 @@
 //! Manual proof of issue 147's invitation and acceptance service against a
 //! migrated disposable database. It follows emailed links from the dev mailbox.
-//! It also proves issue 532: a password change, reset or administrator set
-//! ends the sign-in's sessions and AI connections in every tenant.
+//! It also proves, for a person with accounts in two tenants, that one
+//! authenticator works in both (#534), that a password change, reset or
+//! administrator set ends the sign-in's sessions and AI connections in every
+//! tenant (#532), and that "Forgot your password?" still mails a working link
+//! after the last-used tenant account is removed (#535), with the reset
+//! token's issue audited (#536).
 use bilibi_audit::RequestInfo;
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
 use bilibi_user::{
     AccountError, CredentialError, InvitationError, InvitationInput, Login, TenantEntry,
-    UserService,
+    TwoFactorError, UserService,
 };
 use std::{path::PathBuf, time::Duration};
 
@@ -133,6 +137,64 @@ async fn invitation_token(mailbox: &Mailbox, before: usize) -> Result<String> {
     Err(Error::Internal)
 }
 
+/// The reset token in the newest mail after `before`.
+async fn reset_token(mailbox: &Mailbox, before: usize) -> Result<String> {
+    for _ in 0..50 {
+        if count(mailbox) > before {
+            let newest = mailbox
+                .entries()
+                .map_err(|_| Error::Internal)?
+                .into_iter()
+                .next()
+                .ok_or(Error::Internal)?;
+            let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
+            return message
+                .lines()
+                .find_map(|line| line.split("/reset-password/").nth(1))
+                .and_then(|rest| rest.split('?').next())
+                .map(str::to_owned)
+                .ok_or(Error::Internal);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(Error::Internal)
+}
+
+fn now_step() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64 / 30)
+        .unwrap_or_default()
+}
+
+/// The authenticator code for `key` (base32, as the setup page shows it) at
+/// 30-second `step`.
+fn code(key: &str, step: i64) -> Result<String> {
+    use hmac::{Hmac, KeyInit, Mac};
+    let secret = data_encoding::BASE32_NOPAD
+        .decode(key.replace(' ', "").to_ascii_uppercase().as_bytes())
+        .map_err(|_| Error::Internal)?;
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&secret).map_err(|_| Error::Internal)?;
+    mac.update(&(step as u64).to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let at = usize::from(digest[digest.len() - 1] & 0x0f);
+    let binary = u32::from_be_bytes([
+        digest[at] & 0x7f,
+        digest[at + 1],
+        digest[at + 2],
+        digest[at + 3],
+    ]);
+    Ok(format!("{:06}", binary % 1_000_000))
+}
+
+/// The next 30-second step after `used`, waiting for it.
+async fn next_step(used: i64) -> i64 {
+    while now_step() <= used {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    now_step()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("BILIBI_MEMBERSHIPS_DEMO").as_deref() != Ok("disposable") {
@@ -208,6 +270,43 @@ async fn main() -> Result<()> {
         identity_count == 1
     );
     if invitation.email != "manager@example.test" || identity_count != 1 {
+        return Err(Error::Internal);
+    }
+
+    // #534: the authenticator is set up in the home tenant...
+    let enrollment = users
+        .begin_two_factor(&existing, bilibi_walkthrough_fixture::PASSWORD)
+        .await
+        .map_err(|_| Error::Invalid)?;
+    let mut used = now_step();
+    users
+        .confirm_two_factor(&existing, &code(&enrollment.key, used)?)
+        .await
+        .map_err(|_| Error::Invalid)?;
+    // ...and the person then signs in to the other tenant, used last.
+    client
+        .execute(
+            "UPDATE user_identities SET last_tenant_id=2 WHERE id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=$1)",
+            &[&existing.user()],
+        )
+        .await?;
+    let other_login = users
+        .login("manager@example.test", bilibi_walkthrough_fixture::PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let in_other = app.security.guard(&other_login.token).await?;
+    if other_login.pending || in_other.tenant() != 2 || in_other.user() != joined {
+        return Err(Error::Internal);
+    }
+    used = next_step(used).await;
+    let right = code(&enrollment.key, used)?;
+    let wrong = format!("{:06}", (right.parse::<u32>().unwrap_or(0) + 1) % 1_000_000);
+    let refused = users.step_up(&in_other, &wrong).await;
+    let accepted = users.step_up(&in_other, &right).await;
+    println!(
+        "Authenticator from tenant 1 in tenant 2: wrong code {refused:?}, right code {accepted:?}"
+    );
+    if !matches!(refused, Err(TwoFactorError::InvalidCode)) || accepted.is_err() {
         return Err(Error::Internal);
     }
 
@@ -323,6 +422,57 @@ async fn main() -> Result<()> {
         .delete_account(&inviter, joined)
         .await
         .map_err(|_| Error::Invalid)?;
+
+    // #535: the last-used tenant account is gone; the reset still reaches the
+    // home account, and its link works once.
+    let before = count(&mailbox);
+    users
+        .request_password_reset("manager@example.test")
+        .await
+        .map_err(|_| Error::Invalid)?;
+    let token = reset_token(&mailbox, before).await?;
+    let wrong_token = users
+        .reset_password(
+            "manager@example.test",
+            &"A".repeat(43),
+            bilibi_walkthrough_fixture::PASSWORD,
+        )
+        .await;
+    users
+        .reset_password(
+            "manager@example.test",
+            &token,
+            bilibi_walkthrough_fixture::PASSWORD,
+        )
+        .await
+        .map_err(|_| Error::Invalid)?;
+    let reused = users
+        .reset_password(
+            "manager@example.test",
+            &token,
+            bilibi_walkthrough_fixture::PASSWORD,
+        )
+        .await;
+    // #536: the issued token left a change row attributed to the `sign-in`
+    // principal, without it. The action name is on the transaction's action
+    // row; the change row's own event is `created`.
+    let issued: Vec<String> = client
+        .query(
+            "SELECT m.new_values::text FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id AND a.tenant_id=m.tenant_id WHERE m.tenant_id=1 AND a.event='user.reset_requested' AND m.auditable_type='user_identity' AND m.actor_type='system' AND m.system_principal='sign-in'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    println!("Reset after the last-used account was removed: link mailed and redeemed once; audited {issued:?}");
+    if !matches!(wrong_token, Err(CredentialError::InvalidOrExpiredToken))
+        || !matches!(reused, Err(CredentialError::InvalidOrExpiredToken))
+        || issued.is_empty()
+        || issued.iter().any(|values| values.contains(&token))
+    {
+        return Err(Error::Internal);
+    }
     users
         .login(EMAIL, bilibi_walkthrough_fixture::PASSWORD)
         .await

@@ -367,7 +367,7 @@ impl UserService {
 
     /// Opens the administrative write on one tenant-owned account: checks the
     /// capability, locks the row and verifies its optional version.
-    async fn open_account_write(
+    pub(crate) async fn open_account_write(
         &self,
         tx: &MutationTransaction<'_>,
         scope: &Scope,

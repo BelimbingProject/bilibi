@@ -46,7 +46,10 @@ async fn main() -> Result<(), Failure> {
     let password = bilibi_walkthrough_fixture::PASSWORD;
     let manager_login = app.user.login("manager@example.test", password).await?;
     let viewer_login = app.user.login("viewer@example.test", password).await?;
-    let staff_login = app.user.login("staff@example.test", password).await?;
+    // Two staff accounts: Sam has no desk, so reaches no company; Kim's desk
+    // is at Company 002, where the affiliation they edit below lives.
+    let deskless_login = app.user.login("staff@example.test", password).await?;
+    let staff_login = app.user.login("contractor@example.test", password).await?;
     let other_login = app
         .user
         .login("manager@other.example.test", password)
@@ -54,6 +57,7 @@ async fn main() -> Result<(), Failure> {
     let manager = app.security.guard(&manager_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
     let staff = app.security.guard(&staff_login.token).await?;
+    let deskless = app.security.guard(&deskless_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
     let client = db.get().await?;
     let client: &tokio_postgres::Client = &client;
@@ -355,6 +359,25 @@ async fn main() -> Result<(), Failure> {
             )
             .await,
     );
+    // The capability alone is not enough: a write is authorized against the
+    // affiliation's company, which the actor must be working in (or hold the
+    // tenant-wide reach). This edit sends no masked contact, so only the
+    // company refuses it.
+    let unreached = affiliations
+        .update(
+            &deskless,
+            second.id,
+            &Update {
+                version: current.version,
+                affiliation: AffiliationInput {
+                    work_email: None,
+                    work_phone: None,
+                    ..input(person.id, 2, "Out of reach")?
+                },
+            },
+        )
+        .await;
+    show("staff without a desk at the company cannot edit", unreached);
     let visible = affiliations
         .update(
             &staff,

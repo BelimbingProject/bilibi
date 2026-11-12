@@ -7,11 +7,49 @@ use bilibi_company::{CompanyService, SERVICE as COMPANIES};
 use bilibi_database::pool;
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::{Authentication, OrganisationDirectory};
-use bilibi_user::UserService;
+use bilibi_user::{AccountError, UserService};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Barrier;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+
+/// A wrong password is counted after the sign-in answers (#536): waits until
+/// the account's sign-in counter reads `failures` failures and `locks` locks.
+async fn counted(
+    client: &tokio_postgres::Client,
+    tenant: i64,
+    user: i64,
+    failures: i32,
+    locks: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for _ in 0..100 {
+        let row = client
+            .query_opt(
+                "SELECT a.failures,a.locks FROM user_credential_attempts a JOIN users u ON u.identity_id=a.identity_id WHERE u.tenant_id=$1 AND u.id=$2 AND a.kind='sign_in'",
+                &[&tenant, &user],
+            )
+            .await?;
+        if row.is_some_and(|row| row.get::<_, i32>(0) == failures && row.get::<_, i32>(1) == locks)
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(format!("account {user}: counter never reached {failures} failures, {locks} locks").into())
+}
+
+/// The lock notices mailed to `address` so far.
+fn lock_notices(mailbox: &bilibi_mail::Mailbox, address: &str) -> usize {
+    mailbox
+        .entries()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| mailbox.read(&entry.id).ok())
+        .filter(|message| {
+            message.contains("Your Bilibi sign-in is locked") && message.contains(address)
+        })
+        .count()
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_IDENTITY_DEMO").as_deref() != Ok("disposable") {
@@ -65,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .portal_login(1, "identity-customer@example.test", "incorrect-password")
             .await
             .is_err());
+        counted(&client, 1, customer, 1, 0).await?;
         let customer_login = users
             .portal_login(
                 1,
@@ -166,6 +205,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .is_ok());
         println!("PASS: customer suspension and restoration preserve identity and isolate access");
+
+        // #536: one lock notice per run of locks. Two locks in a row for the
+        // viewer (the first lock is made to expire) mail one notice.
+        let mailbox = bilibi_mail::Mailbox::new(
+            std::env::var("BILIBI_MAIL_DIR")
+                .unwrap_or_else(|_| ".local/mailbox".into())
+                .into(),
+            100,
+        );
+        let viewer = "viewer@example.test";
+        let before = lock_notices(&mailbox, viewer);
+        for run in 1..=2 {
+            for attempt in 1..=5 {
+                assert!(users.login(viewer, "incorrect-password").await.is_err());
+                let (failures, locks) = if attempt == 5 {
+                    (0, run)
+                } else {
+                    (attempt, run - 1)
+                };
+                counted(&client, 1, 2, failures, locks).await?;
+            }
+            if run == 1 {
+                for _ in 0..50 {
+                    if lock_notices(&mailbox, viewer) > before {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                client
+                    .execute(
+                        "UPDATE user_credential_attempts SET locked_until=now()-interval '1 second' WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=2) AND kind='sign_in'",
+                        &[],
+                    )
+                    .await?;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let notices = lock_notices(&mailbox, viewer) - before;
+        println!("Two sign-in locks in a row mailed {notices} notice(s)");
+        assert_eq!(notices, 1);
+
+        // #536: an administrator reads and lifts the lock of a staff account
+        // only; a customer account of the same tenant is not one.
+        for _ in 1..=5 {
+            assert!(users
+                .portal_login(1, "identity-customer@example.test", "incorrect-password")
+                .await
+                .is_err());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        counted(&client, 1, customer, 0, 1).await?;
+        let admin_login = users
+            .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
+            .await?;
+        let admin = app.security.guard(&admin_login.token).await?;
+        assert!(users
+            .sign_in_locked_until(&admin, customer)
+            .await?
+            .is_none());
+        assert!(matches!(
+            users.unlock_sign_in(&admin, customer).await,
+            Err(AccountError::NotFound)
+        ));
+        counted(&client, 1, customer, 0, 1).await?;
+        assert!(users.sign_in_locked_until(&admin, 2).await?.is_some());
+        users
+            .unlock_sign_in(&admin, 2)
+            .await
+            .map_err(|error| format!("unlock the viewer: {error}"))?;
+        assert!(users.sign_in_locked_until(&admin, 2).await?.is_none());
+        println!("PASS: lock notices once per run; Unlock reaches staff accounts only");
     }
     let login = users
         .login(

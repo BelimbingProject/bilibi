@@ -31,7 +31,7 @@ pub(crate) fn bind(owner: Arc<Documents>) -> bilibi_module_registry::Result<()> 
         )
     })
 }
-fn owner() -> bilibi_agent_api::Result<&'static Documents> {
+pub(crate) fn owner() -> bilibi_agent_api::Result<&'static Documents> {
     OWNER.get().map(Arc::as_ref).ok_or(Error::Internal.into())
 }
 

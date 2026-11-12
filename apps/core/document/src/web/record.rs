@@ -3,6 +3,7 @@
 //! (link with the picker, Unlink). Unlink and Delete ask first; every write
 //! calls its contract through `PageContracts`.
 use super::{
+    customers::{self, Sharing},
     dialog::{self, NewRevision},
     event, file_path, path, render, size, store_refusal, Clock, Pages, Refusal, Region, INDEX,
 };
@@ -71,6 +72,7 @@ pub(crate) struct Detail {
     query: String,
     hits: Vec<Hit>,
     flash: Option<(StatusKind, String)>,
+    customers: Sharing,
 }
 
 impl Detail {
@@ -103,6 +105,7 @@ impl Detail {
             query: String::new(),
             hits: Vec::new(),
             flash: None,
+            customers: Sharing::default(),
         })
     }
 
@@ -262,6 +265,16 @@ impl Detail {
             {
                 return Ok(None);
             }
+        }
+        if let customers::Outcome::Handled(flash) = self
+            .customers
+            .handle(&self.pages, scope, credential, self.id, name, value)
+            .await?
+        {
+            if flash.is_some() {
+                self.flash = flash;
+            }
+            return Ok(None);
         }
         match name {
             "save_field" => self.save_field(scope, credential, value).await?,
@@ -1466,6 +1479,13 @@ impl Detail {
         }
         if let Ok(grants) = self.pages.documents.access(scope, self.id).await {
             body.push(&self.sharing(scope, &clock, &grants).await?);
+        }
+        if let Some(card) = self
+            .customers
+            .render(&self.pages, scope, &clock, &d, self.framed)
+            .await?
+        {
+            body.push(&card);
         }
         let merge_name = match &self.confirm {
             Some(Confirm::Merge(id)) => self
