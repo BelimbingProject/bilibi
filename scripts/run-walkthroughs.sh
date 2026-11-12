@@ -197,13 +197,10 @@ NOT_RUN=(
 # run. Never add a line to get a pull request through: fix the walkthrough, or
 # the code it found broken.
 KNOWN_FAILURES=(
-  'address|614'
   'affiliation|615'
   'agent-access|616'
   'company-lifecycle|617'
   'document-audit|618'
-  'geonames-import|619'
-  'geonames-postcodes|620'
   'grid-catalog|621'
   'reports|622'
   'seams|623'
