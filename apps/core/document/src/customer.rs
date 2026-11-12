@@ -556,7 +556,10 @@ pub(crate) async fn read(
     let (company_id, revision): (i64, i32) = (row.get(0), row.get(1));
     let (artifact_id, file_name, scan_status): (Option<String>, Option<String>, Option<String>) =
         (row.get(2), row.get(3), row.get(4));
-    let (Some(artifact_id), Some(file_name)) = (artifact_id, file_name) else {
+    // A file's revision gets its artifact only once its scan settles,
+    // so the scan state is checked before the artifact: a pending or held
+    // file has a name but no artifact yet.
+    let Some(file_name) = file_name else {
         refused(client, portal, id, Some(revision), "no_file").await?;
         return Err(WriteError::NotFound);
     };
@@ -571,6 +574,10 @@ pub(crate) async fn read(
             return Err(WriteError::Quarantined);
         }
     }
+    let Some(artifact_id) = artifact_id else {
+        refused(client, portal, id, Some(revision), "no_file").await?;
+        return Err(WriteError::NotFound);
+    };
     let company = OrganisationId::new(company_id).map_err(|_| Error::Internal)?;
     match artifacts
         .for_portal(portal, company, &FILES)
