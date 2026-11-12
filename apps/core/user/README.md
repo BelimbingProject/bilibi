@@ -395,6 +395,7 @@ Two limits, both operator settings (Settings › Session), with these defaults:
 - The `user.bootstrap.completed` action carries no email: an action payload is never erased.
 - Accounts that only share an email are counted, never touched.
 - Membership invitations are found by their address, with no sign-in needed. Erasure closes an unaccepted one, replaces its address, and closes and anonymises the account prepared for it.
+- **A hold on an invitation or on the account prepared for it keeps both.** Anonymising an account anonymises its accepted invitations, and anonymising an invitation anonymises its prepared account, so a hold on either one (or on the prepared account's person) keeps the pair through erasure and both sweeps below. The certificate lists both as kept, a sweep counts its own record (the account or the invitation) as kept, and the first run after release finishes both.
 - `NotificationBoundary::eligible` answers which recipients are active accounts.
 
 Record classes (`src/retention.rs`, `bilibi_privacy::record_class!`), off until a company turns them on and sets a period:
@@ -405,7 +406,7 @@ Record classes (`src/retention.rs`, `bilibi_privacy::record_class!`), off until 
 | `core/user.notifications` | When the notification was sent | Purge (no business value) |
 | `core/user.lapsed_invitations` | When an unaccepted invitation expired or was revoked | Anonymise: address replaced, invitation marked closed, the prepared account closed and its name erased |
 
-Each account follows its company's settings, and a notification its recipient's; accounts of no company follow the primary company. Both keep a held record and everything of a held person.
+Each account follows its company's settings, and a notification its recipient's; accounts of no company follow the primary company. Every class keeps a held record and everything of a held person, so a held accepted invitation keeps its closed account and a held prepared account keeps its lapsed invitation.
 
 ## Known gaps
 
@@ -475,8 +476,9 @@ Run `cargo run -p bilibi-user --example database-queries-walkthrough` against a
 **disposable** migrated database with `DATABASE_URL` and
 `BILIBI_DISPOSABLE_QUERY_DEMO=yes`. This opt-in manual fixture prints CRUD,
 concurrent slug creation, stale refusal, owner/tenant isolation, parameters,
-column preservation, pagination, SQL/DB refusals, timeout, audit rollback and
-private-result exclusion; it is not a unit-test suite. It explicitly makes
+column preservation, pagination, SQL/DB refusals, timeout, audit rollback,
+private-result exclusion and a session advisory lock released when the command
+ends (it fails otherwise); it is not a unit-test suite. It explicitly makes
 fixture tenant 1 the operator, grants fixture capabilities and installs private
 fixture functions/triggers. Never run it against normal data.
 

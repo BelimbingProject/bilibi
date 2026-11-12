@@ -218,6 +218,23 @@ pub(crate) async fn permission(
         .await
 }
 
+/// The actor's own live grant on a document, which bounds what they can share.
+async fn own_grant(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    document: i64,
+) -> Result<Option<AccessGrant>> {
+    reader(client, scope).await?;
+    client
+        .query_opt(
+            "SELECT id,user_id,can_view,can_download,can_manage,can_share,expires_at FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3 AND (expires_at IS NULL OR expires_at > now())",
+            &[&scope.tenant(), &document, &scope.user()],
+        )
+        .await?
+        .map(|row| grant(&row))
+        .transpose()
+}
+
 /// The document, whoever may see it; `lock` holds it for a write.
 pub(crate) async fn select(
     client: &dyn ProofClient,
@@ -502,7 +519,9 @@ impl Store<'_> {
     }
 
     /// Checks a share and returns when the grant ends (the end of `until`,
-    /// UTC) and the document it is on.
+    /// UTC) and the document it is on. A sharer never changes their own
+    /// grant, never gives more than their own grant holds (download, manage,
+    /// or a later end), and changes the creator's grant only as the creator.
     async fn check_share(
         &self,
         on: On<'_>,
@@ -512,23 +531,42 @@ impl Store<'_> {
     ) -> WriteResult<(Document, Option<Timestamp>)> {
         let document = self.editable(on, scope, id, None, MANAGE).await?;
         let client = on.client();
-        if !permission(client, scope, id, "share").await? {
-            return Err(WriteError::Forbidden);
-        }
+        let own = match own_grant(client, scope, id).await? {
+            Some(own) if own.can_share => own,
+            _ => return Err(WriteError::Forbidden),
+        };
         if !(input.user_id > 0 && self.active_account(client, scope, input.user_id).await?) {
             return Err(WriteError::field(
                 "user_id",
                 "is not an active account you can share with",
             ));
         }
+        if input.user_id == scope.user() {
+            return Err(WriteError::field(
+                "user_id",
+                "is you: ask another person who can share to change your own access",
+            ));
+        }
+        if input.user_id == document.created_by && scope.user() != document.created_by {
+            return Err(WriteError::field(
+                "user_id",
+                "created this document: only they can change their own access",
+            ));
+        }
+        if input.can_download && !own.can_download {
+            return Err(WriteError::field(
+                "can_download",
+                "cannot be given: your own access does not include downloading",
+            ));
+        }
+        if input.can_manage && !own.can_manage {
+            return Err(WriteError::field(
+                "can_manage",
+                "cannot be given: your own access does not include managing",
+            ));
+        }
         let expires_at = match input.until {
             None => None,
-            Some(_) if input.user_id == scope.user() => {
-                return Err(WriteError::field(
-                    "until",
-                    "cannot end your own access to a document",
-                ));
-            }
             Some(day) => {
                 let end = day
                     .checked_add(jiff::Span::new().days(1))
@@ -541,6 +579,14 @@ impl Store<'_> {
                 Some(end)
             }
         };
+        if let Some(own_end) = own.expires_at {
+            if expires_at.is_none_or(|end| end > own_end) {
+                return Err(WriteError::field(
+                    "until",
+                    "must be no later than the day your own access ends",
+                ));
+            }
+        }
         Ok((document, expires_at))
     }
 
@@ -619,6 +665,10 @@ impl Store<'_> {
             .map_err(Error::from)?
             .ok_or(WriteError::NotFound)?
             .get(0);
+        // Only the creator removes the creator's access.
+        if grantee == document.created_by && scope.user() != document.created_by {
+            return Err(WriteError::Forbidden);
+        }
         if grantee != scope.user() {
             self.drop_reminder_of(tx, scope, &document, grantee).await?;
         }
@@ -645,7 +695,8 @@ impl Store<'_> {
         id: i64,
         grant: i64,
     ) -> WriteResult<AccessGrant> {
-        self.editable(On::Preview(client), scope, id, None, MANAGE)
+        let document = self
+            .editable(On::Preview(client), scope, id, None, MANAGE)
             .await?;
         if !permission(client, scope, id, "share").await? {
             return Err(WriteError::Forbidden);
@@ -655,7 +706,10 @@ impl Store<'_> {
             &[&scope.tenant(),&id,&grant],
         ).await?.ok_or(WriteError::NotFound)?;
         let result = self::grant(&row)?;
-        if result.user_id == scope.user() {
+        // Nobody removes their own access; only the creator removes theirs.
+        if result.user_id == scope.user()
+            || (result.user_id == document.created_by && scope.user() != document.created_by)
+        {
             return Err(WriteError::Forbidden);
         }
         Ok(result)

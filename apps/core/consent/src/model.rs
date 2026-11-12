@@ -201,8 +201,11 @@ pub(crate) fn field(field: &'static str, message: impl Into<String>) -> FieldErr
 /// The address as stored and matched: an email in lower case, a phone
 /// number in international form (`+`, country code and number, 6 to 15
 /// digits), any other handle trimmed. Email needs an email address and SMS
-/// and voice a phone number.
+/// and voice a phone number. Every channel refuses a value that is only
+/// digits and phone punctuation but not an international number: stored as
+/// typed, it would be a key that no later check asks about.
 pub fn normalise(channel: Channel, raw: &str) -> Result<String, &'static str> {
+    const PHONE: &str = "must be a phone number with its country code, starting with +";
     let value = raw.trim();
     if value.is_empty() {
         return Err("can't be blank");
@@ -211,10 +214,12 @@ pub fn normalise(channel: Channel, raw: &str) -> Result<String, &'static str> {
     let phone = phone(value);
     let normalised = match channel {
         Channel::Email => email.ok_or("must be an email address")?,
-        Channel::Sms | Channel::Voice => {
-            phone.ok_or("must be a phone number with its country code")?
-        }
-        _ => email.or(phone).unwrap_or_else(|| value.to_owned()),
+        Channel::Sms | Channel::Voice => phone.ok_or(PHONE)?,
+        _ => match email.or(phone) {
+            Some(address) => address,
+            None if numeric(value) => return Err(PHONE),
+            None => value.to_owned(),
+        },
     };
     if normalised.chars().any(char::is_control) {
         return Err("must not contain control characters");
@@ -234,26 +239,32 @@ fn email(value: &str) -> Option<String> {
         && !value.chars().any(char::is_whitespace);
     shaped.then(|| value.to_lowercase())
 }
-/// `+60 12-345 6789`, `0060123456789` and `60123456789` are all
-/// `+60123456789`. A national number (a leading single `0`) has no country
-/// code, so it is not a phone number here.
+/// The characters ignored inside a phone number.
+fn punctuation(c: char) -> bool {
+    matches!(c, ' ' | '-' | '(' | ')' | '.')
+}
+/// `+60 12-345 6789` and `0060123456789` are both `+60123456789`. A number
+/// without `+` or `00` is not a phone number here, as in Core Person: no
+/// country is inferred, so `012-345 6789` and `(212) 555-1234` are refused
+/// instead of being filed under a number nobody dials.
 fn phone(value: &str) -> Option<String> {
-    let compact: String = value
-        .chars()
-        .filter(|c| !matches!(c, ' ' | '-' | '(' | ')' | '.'))
-        .collect();
-    let digits = match compact.strip_prefix('+') {
-        Some(digits) => digits,
-        None => match compact.strip_prefix("00") {
-            Some(digits) => digits,
-            None if compact.starts_with('0') => return None,
-            None => &compact,
-        },
-    };
+    let compact: String = value.chars().filter(|c| !punctuation(*c)).collect();
+    let digits = compact
+        .strip_prefix('+')
+        .or_else(|| compact.strip_prefix("00"))?;
     let shaped = (6..=15).contains(&digits.len())
         && digits.bytes().all(|b| b.is_ascii_digit())
         && !digits.starts_with('0');
     shaped.then(|| format!("+{digits}"))
+}
+/// Whether a value is written like a phone number: digits, with nothing
+/// else but a `+` and phone punctuation.
+fn numeric(value: &str) -> bool {
+    let mut rest = value
+        .chars()
+        .filter(|c| !punctuation(*c) && *c != '+')
+        .peekable();
+    rest.peek().is_some() && rest.all(|c| c.is_ascii_digit())
 }
 
 /// Trims evidence and turns blank into `None`.
