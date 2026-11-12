@@ -191,7 +191,7 @@ Attachments are files a user, or a module's background job, adds to *someone els
 | `upload_attachment(&mut client, scope, subject, Upload, Rules)` | plain connection | Owner `Upload` check, size/libmagic/allowlist checks (`Rules` may only narrow `media.max_bytes` and `media.attachment_allowed_types`), private write to `media.attachment_disk`, owner `Upload` check again inside the registering transaction, then a draft with a fresh ULID. A failed registration deletes the file. |
 | `submit_attachments(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Locks the rows in id order, requires every id to exist in this tenant and belong to this subject, asks the owner for `Submit`, then marks drafts submitted. Repeating it changes nothing and adds no audit row. |
 | `retain_drafts(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Same checks with `Retain`; sets `retained_at` so cleanup spares the draft. Submitted rows pass through. |
-| `download_attachment(&client, scope, public_id)` | any client | Tenant-scoped lookup, owner `Download` check, then the bytes. Send them with `StreamFile::delivery(true)`: private files always download as `application/octet-stream`. |
+| `download_attachment(&client, scope, public_id)` | any client | Tenant-scoped lookup, owner `Download` check, then the bytes. Each delivery records the audit action `media.attachment.downloaded` and each owner refusal `media.attachment.download_refused` (with a reason code): attachment public id, subject, actor and any impersonator, never the file name or storage key. Bytes are returned only after the action is recorded, so a download that cannot be audited is refused. Send them with `StreamFile::delivery(true)`: private files always download as `application/octet-stream`. |
 | `discard_draft(&mut client, scope, public_id)` | plain connection | Uploader only (the same account, or the same system principal), drafts only, owner `Discard` check; commits the row deletions, then removes the file (`CleanupFailed` if it cannot). |
 | `cleanup_drafts(&mut client, tenant, older_than)` | plain connection | Trusted callers only. Removes that tenant's unretained drafts older than the age, re-locking and rechecking each. Attributed to system principal `media.attachments.cleanup`. |
 
@@ -255,7 +255,7 @@ owner is the `walkthrough.ticket` rows in a `walkthrough_tickets` table the
 example creates in the disposable database. Run it like `media-walkthrough`
 below (adding `media.attachment_disk` is done for you); it prints outcomes for
 uploads, ULIDs, rejected files, tenant and owner rechecks, submit, retain,
-discard, immutability and audit, and finishes by printing ids. Then
+discard, immutability and audit, checks that a delivery (also one made while impersonating) and an owner refusal each record their download action without naming the file, and finishes by printing ids. Then
 `-- serve` (with `APP_ORIGIN` and `BIND_ADDR`) runs the real host with the
 fixture owner registered: sign in with the walkthrough fixture accounts and fetch
 `/media/attachments/{id}`, or change the ticket row with `psql` and watch the

@@ -6,6 +6,7 @@
 use super::{render, Pages};
 use bilibi_custom_fields::{Definition, Kind};
 use bilibi_database::Result;
+use bilibi_datetime::DisplayContext;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{Field, Html, InlineChoice, InlineEdit, InlineField, InputKind};
 use serde_json::Value;
@@ -24,10 +25,13 @@ pub(super) fn text(value: Option<&Value>) -> String {
 }
 
 /// How a value reads: a choice by its label (marked when retired), a date in
-/// the reader's format, anything else as stored; `—` when empty.
+/// the reader's format, anything else as stored; `—` when empty. The caller
+/// resolves `display` once for the page (`Pages::display` reads the locale
+/// and display settings on a pooled connection each call).
 pub(super) async fn shown(
     pages: &Pages,
     scope: &Scope,
+    display: &DisplayContext,
     definition: &Definition,
     value: &str,
 ) -> Result<String> {
@@ -44,7 +48,7 @@ pub(super) async fn shown(
             }
         }
         (Kind::Date, _) => match value.parse::<jiff::civil::Date>() {
-            Ok(date) => pages.display(scope).await?.render_date(date),
+            Ok(date) => display.render_date(date),
             Err(_) => value.to_owned(),
         },
         _ => value.to_owned(),
@@ -81,6 +85,7 @@ async fn options(
 pub(super) async fn fact(
     pages: &Pages,
     scope: &Scope,
+    display: &DisplayContext,
     definition: &Definition,
     value: &str,
     mut field: InlineField,
@@ -88,7 +93,7 @@ pub(super) async fn fact(
     if let Some(help) = &definition.help {
         field = field.hint(help.clone());
     }
-    let display = shown(pages, scope, definition, value).await?;
+    let display = shown(pages, scope, display, definition, value).await?;
     match (definition.kind, definition.picklist.as_deref()) {
         (Kind::Choice, Some(list)) => {
             let editor = Field::named(&field.name)
@@ -275,11 +280,13 @@ async fn options_of(pages: &Pages, scope: &Scope, list: &str) -> Result<Vec<bili
 
 /// Each field's value as the list shows it, per person on the page: a
 /// choice by its label (marked when retired), a date in the reader's format.
-/// One label read per distinct choice code on the page.
+/// One label read per distinct choice code on the page. `definitions` are
+/// the fields whose column is on screen.
 pub(super) async fn cells(
     pages: &Pages,
     scope: &Scope,
-    definitions: &[Definition],
+    display: &DisplayContext,
+    definitions: &[&Definition],
     people: &[crate::Person],
 ) -> Result<std::collections::BTreeMap<(i64, String), String>> {
     let mut labels: std::collections::BTreeMap<(String, String), String> = Default::default();
@@ -295,7 +302,7 @@ pub(super) async fn cells(
             let shown = match labels.get(&label_key) {
                 Some(shown) => shown.clone(),
                 None => {
-                    let shown = shown(pages, scope, definition, &value).await?;
+                    let shown = shown(pages, scope, display, definition, &value).await?;
                     labels.insert(label_key, shown.clone());
                     shown
                 }

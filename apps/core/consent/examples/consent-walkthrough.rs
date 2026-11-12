@@ -8,8 +8,8 @@
 //! only; fails the executable when the observed state breaks the contract.
 use bilibi_authz::grants::Grants;
 use bilibi_consent::{
-    Answer, Capture, Channel, Consent, Contact, DecisionInput, Question, Reason, Refusal, Source,
-    SuppressionInput, SERVICE as CONSENT,
+    normalise, Answer, Capture, Channel, Consent, Contact, DecisionInput, Question, Reason,
+    Refusal, Source, SuppressionInput, SERVICE as CONSENT,
 };
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_party_ids::{OrganisationId, PersonId};
@@ -54,6 +54,38 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
     } else {
         Err(format!("contract violated: {message}").into())
     }
+}
+
+/// Issue 588: a stop and the later check must meet on one key. A number
+/// typed without its country code is refused on every channel, never stored
+/// as typed or under a guessed country.
+fn addresses() -> Result<()> {
+    println!("== address keys: one spelling per phone number, on every channel");
+    use Channel::{Any, Chat, Messaging, Sms, Voice};
+    for channel in [Sms, Voice, Messaging, Chat, Any] {
+        for typed in ["+60 12-345 6789", "0060123456789", PHONE] {
+            ensure(
+                normalise(channel, typed).as_deref() == Ok(PHONE),
+                &format!("{} files {typed:?} under {PHONE}", channel.code()),
+            )?;
+        }
+        for typed in ["012-345 6789", "(212) 555-1234", "60123456789", "+60 12"] {
+            ensure(
+                normalise(channel, typed).is_err(),
+                &format!("{} refuses {typed:?}", channel.code()),
+            )?;
+        }
+    }
+    for (typed, key) in [
+        ("Ada.Private@Example.NET", EMAIL),
+        (" @ada_lim ", "@ada_lim"),
+    ] {
+        ensure(
+            normalise(Messaging, typed).as_deref() == Ok(key),
+            &format!("messaging files {typed:?} under {key:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// The authenticator code for `key` (base32) at `offset` 30-second steps.
@@ -324,6 +356,7 @@ async fn main() -> Result<()> {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let workers = tokio::spawn(executor.run(stopped));
 
+    addresses()?;
     println!(
         "== consent for person 1, their two addresses, another person's address, and tenant 2"
     );
