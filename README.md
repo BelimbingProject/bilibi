@@ -154,6 +154,8 @@ The launcher sets `BILIBI_ENV=development` unless you already set it, so the ins
 | `DATABASE_URL` | PostgreSQL 18. Unset: this checkout's private instance under `.local/postgres18`, on a port chosen once (5438 when free) and remembered in `.local/postgres18/port` |
 | `APP_ORIGIN` | The exact browser origin, no trailing slash. Staging and Production refuse to start unless it is HTTPS; see [HTTPS for OAuth](docs/server-install.md#https-for-oauth) |
 | `BIND_ADDR` | Listen address, default `127.0.0.1:3000` |
+| `DATABASE_POOL_SIZE` | Database connections one app process may hold, 1 to 1000, default 16. System Info shows it as Pool Size. Keep the total of every process under PostgreSQL's `max_connections` |
+| `DATABASE_POOL_WAIT_SECONDS` | How long a request or job waits for a free connection before it is refused (a page answers 503, a job retries), 1 to 300, default 5 |
 | `MAIL_HOST` | SMTP relay. Unset: write mail to `.local/mailbox/` |
 | `BILIBI_USER_SIGNING_KEY` | 64 hex characters, for email verification links. Unset: `./bilibi start` supplies one |
 | `BILIBI_SETTINGS_KEY` | 64 hex characters. Encrypts secret settings and authenticator keys. 2FA setup refuses without it. Unset: `./bilibi start` supplies one |

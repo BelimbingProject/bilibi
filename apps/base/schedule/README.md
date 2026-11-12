@@ -265,6 +265,12 @@ task (03:37 UTC, forbid overlap) deletes finished occurrences and finished run
 rows older than that; unfinished claims and each key's latest scheduled claim
 (the watermark) are never deleted. The same daily task prunes both.
 
+`base/schedule.queue-retention` (03:47 UTC, forbid overlap) deletes finished
+Queue jobs older than the global setting `queue.jobs.keep_days` (default 30,
+0–3650, zero keeps everything, changed on System Settings). Schedule
+contributes it because Queue is upstream of Schedule; what is deleted and kept
+is Queue's rule (`Queue::prune`, `apps/base/queue/README.md`).
+
 Base Session contributes `base/session-expiry` (every five minutes), which
 deletes sessions past their absolute or idle expiry (`Sessions::prune_expired`).
 Both tasks follow the scheduled-worker contract above (`worker::validate`,

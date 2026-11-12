@@ -59,6 +59,15 @@ cancellation. Shutdown drops in-flight futures and leaves their leases for
 recovery. Handler/validator panics, timeouts and invalid results retry within
 the captured attempt budget; infrastructure errors preserve durable recovery.
 Only bounded safe failure codes are stored, never error payloads or arguments.
+One failed heartbeat (a busy pool or database) does not end the attempt: the
+handler keeps running while the next beat still falls inside its lease, and is
+dropped before the lease can run out.
+
+Every slot polls once a second, so a poll reads only what it can act on: the
+expired leases (`base_queue_expired_leases`) and the due jobs
+(`base_queue_claim`), never the finished ones. Both searches compare with
+`now()`, the claim transaction's start, because a volatile `clock_timestamp()`
+cannot bound an index scan. Keep it that way when you change `store::claim`.
 
 Each attempt reconstructs a current `Scope` through Tenancy Authentication and
 requires the same captured identity and the exact captured desk (`work_company_id`). Every attempt and `Execution::begin` re-proves access to that desk. A removed desk refuses execution; a browser switch never changes queued work. Inactive,
@@ -132,6 +141,27 @@ caller-supplied audit attribution cannot create execution authority.
 
 - Each executor runs one endings loop beside its slots, every poll, up to 100 jobs; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
 - Move the waiting record to a named state through the owner's normal path (a Workflow edge for a business status), and give people a permission-gated way to run it again. `base/privacy` is the first user: a request job that ends moves the request `running → failed`, as `privacy-monitor`.
+
+## Retention and the status line
+
+**Finished jobs are deleted after `queue.jobs.keep_days` days (default 30) by the daily `base/schedule.queue-retention` task.**
+
+| Part | Rule |
+| --- | --- |
+| Setting | `queue.jobs.keep_days`, global, 0 to 3650, on System Settings under Schedule; 0 keeps every job |
+| Task | `base/schedule.queue-retention`, 03:47 UTC, forbid overlap. Schedule contributes it because Queue is upstream of Schedule (`apps/base/schedule/src/queue_retention.rs`). Like every definition it runs only after an operator enables it on the Schedule board |
+| Deleted | `completed`, `cancelled` and `discarded` jobs last touched before the cutoff, 10,000 per statement (`Queue::prune`) |
+| Kept | Jobs that are not finished, and a cancelled or discarded job of a worker with an `EndingBinding` until its owner was told (untold and `failed` endings stay) |
+| Audit | None per deleted job: housekeeping over transport state. The audit rows of the enqueue and of owner commands stay |
+| Owners | `lookup` answers `NotFound` and `states` leaves out a deleted job. Record what you need from a job when it ends; do not read a job older than the retention as proof |
+
+System Info's Queue line (`health_status`) counts waiting, retryable, discarded and unrecorded jobs from partial indexes (`base_queue_claim`, `base_queue_jobs_discarded`, `base_queue_jobs_ending_failed`), so it never reads the finished jobs. With retention on, the discarded count covers the retention period.
+
+```sh
+BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example retention-walkthrough
+```
+
+On a fresh disposable database it migrates, then prints the setting's default, that 0 keeps every job, the refusal of a number of days out of range, the status line equal to a full count, which of ten seeded jobs a 30-day pass deletes and keeps, a 25,000-job pass over several batches, and the indexes.
 
 ## Running proof (no unit tests)
 
