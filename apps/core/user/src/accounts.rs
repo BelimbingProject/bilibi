@@ -346,7 +346,7 @@ impl UserService {
 
     /// Opens the administrative write on one tenant-owned account: checks the
     /// capability, locks the row and verifies its optional version.
-    async fn open_account_write(
+    pub(crate) async fn open_account_write(
         &self,
         tx: &MutationTransaction<'_>,
         scope: &Scope,
@@ -514,7 +514,9 @@ impl UserService {
                 })
             })
             .await?;
-        let ended = self.sessions.revoke(&mut tx, user, None).await?;
+        let ended =
+            crate::sign_in_identity::end_everywhere(&self.sessions, &mut tx, identity, user, None)
+                .await?;
         let sessions = self.sessions.clone();
         tx.after_commit(move || sessions.announce(ended));
         tx.commit().await?;

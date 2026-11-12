@@ -27,6 +27,8 @@ bilibi-module-registry.workspace = true
 bilibi-notifications.workspace = true
 bilibi-party-ids.workspace = true
 bilibi-picklists.workspace = true
+# The portal customer role a customer share is read through.
+bilibi-portal.workspace = true
 bilibi-principal-directory.workspace = true
 bilibi-queue.workspace = true
 bilibi-records.workspace = true
@@ -48,3 +50,6 @@ uuid.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
 axum.workspace = true
+
+[lints]
+workspace = true

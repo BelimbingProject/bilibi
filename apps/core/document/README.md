@@ -8,6 +8,7 @@
 - Numbered revisions with their own date, change log, optional label, optional reference to an earlier revision of that document, and internal file or external HTTPS link.
 - Links to registered records. A link helps people find an already-authorized document; it never grants access.
 - Explicit user grants for view, download, manage and share permissions.
+- Shares with portal customers: one customer Person, or a Company for every business customer who signs in for it, and the portal's own read of them (`/portal/documents` and the `portal.documents` panel).
 - Personal favourite and follow marks: a person's own flags, never shared. A follower is notified of a new revision while they can still see the document.
 - Library actions: quick add, find duplicates, copy, merge and delete one or many.
 - The file ledger and the `core.document` Artifact owner.
@@ -20,13 +21,20 @@ Base owns private bytes, malware scanning, retention and legal holds. Domains ow
 
 Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission; the record page links a revision's file only for a reader who holds both. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
 
-Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants. The creator's own grant cannot be removed through `unshare`.
+Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants.
+
+**A sharer gives at most what their own grant holds.** Share refuses:
+
+- your own account: nobody changes their own grant, so a sharer cannot lift their own end date or add download;
+- download or manage when your own grant lacks it;
+- no end date, or a later one, when your own access ends (**Access until** must be no later than your own last day);
+- the creator's account, unless you are the creator; `unshare` likewise removes the creator's grant only for the creator, and nobody removes their own.
 
 Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant.
 
 ## Sharing by email, and when access ends
 
-- **Share** gives one active account an explicit grant. With **Access until** (`until`, the last day, UTC) the grant stops working after that day: every read, download and edit rechecks it, so an ended grant hides the document like no grant at all. Your own access never ends this way.
+- **Share** gives one active account an explicit grant. With **Access until** (`until`, the last day, UTC) the grant stops working after that day: every read, download and edit rechecks it, so an ended grant hides the document like no grant at all.
 - **Email them a link** (`email`) mails the grantee a link to `/documents/{id}`. The link carries no token and no file: it opens only for that account, only while the grant lasts, and the sharer needs the share permission as before. Emailing a name out is a disclosure, so it is durable, limited and audited:
   - The request is one audited `core_document_emails` row (`core.document.email` changes, ids and a reason code only, never an address, name or link), written in the share's own transaction, with a durable Queue job (`core/document-email`) for a queued one.
   - Limits, counted under a lock: `core.document.email_actor_per_hour` (20), `core.document.email_recipient_per_day` for one person and one document (3) and `core.document.email_tenant_per_hour` (200). Over a limit the grant is still saved and the request is recorded `rate_limited`; the page and `core.document.share` say so.
@@ -34,6 +42,25 @@ Links, filing-company membership and access to a linked record do not expose a d
   - Outcomes `sent`, `failed` (after five attempts) and `suppressed` are audited. A crash between sending and recording sends once more.
   - A job Queue ends without settling the row (the sender lost the right to share first, or it ran out of attempts) is told to the owner by Queue's ending hook, as `document-monitor` (standing grant of `core.document.email.fail`): the row settles `failed` with `cancelled_email_refused` or `discarded_…` as its reason, fenced by the row's `job_id`, so it never waits in `queued` or counts against the limits for ever. Share again with **Email them a link** to send it once more; a failed row counts for no limit.
 - Still named people only: an email address gives no access by itself, there are no public links, and merge carries a source's live grants (an ended one is dropped; a grant with no end beats one with an end).
+
+## Shared with portal customers
+
+A customer signed in to the portal (ADR 16) sees only the documents staff shared with their own record, and downloads their latest file.
+
+- **Who shares:** someone with `core.document.manage` and the document's share permission, as for an account grant, on the record page's **Customer sharing** card or with `core.document.customer_share`. The recipient is a contact (`person`, one customer) or a company (`company`, every business customer who signs in for it); it must be a record the sharer may see (`base/records`). Only a document that keeps a file can be shared: a link is refused.
+- **Available until** (`until`, the last day, UTC) ends the share after that day. Sharing again with the same customer replaces the end. **Stop sharing** (`core.document.customer_unshare`) revokes it at once.
+- **What the customer sees** (`Documents::shared_with_me`, `portal.document.view`, which every invited customer holds through `portal_customer`): documents with an unended share to their Person, or to the Company they sign in for (a private individual has none), in their tenant, not being deleted and not past their expiry date. Name, publish date, last update, the latest revision's file name and size, and when the share ends; never the filing company, grants, links, other revisions or change logs. Nothing else is listed or counted.
+- **Download** (`/portal/documents/{id}/file`, `Documents::read_shared_file`): the latest revision's file, only when its scan is clean (a pending file says "Being checked"), read through `Artifacts::for_portal` so Base audits the read as the customer and the Artifacts owner rechecks the share, the scan and the document inside that read. The route opens on `portal.account.view`, so the facade decides and audits every refusal.
+- **Legal hold and retention** keep a file; they never hide or show it. A held document stays shared until a share ends or is revoked, and cannot be deleted while held. Deleting a document removes its customer shares with it; a merge moves a duplicate's live shares the survivor lacks; a copy has none.
+- **A Domain's portal page** (a live page) mounts the panel: a `PanelSpec` whose `embed` is `document.portal-documents` (slot `portal.documents`, `EmbedContext::Portal`) and whose path holds `panel` (its anchor) and, to narrow to its own record, `kind` and `id`, as staff record pages pass them to `record.documents`. The panel lists at most 10 shared documents related to that record, newest first, and **View all** opens `/portal/documents?related=<kind>:<id>`. The record filter only narrows what is shared with the customer; it never shows more.
+- **Dates** on the portal show in UTC: a customer has no company zone.
+- **Proof:** `apps/core/document/examples/customer-share-walkthrough.rs` (below).
+
+```sh
+BILIBI_DOCUMENT_CUSTOMER=disposable BILIBI_DOCUMENT_CUSTOMER_ROOT=/an/empty/folder cargo run -p bilibi-document --example customer-share-walkthrough --locked
+```
+
+On a migrated, fixture-holding, seeded disposable database (as for the audit coverage check), it shares files with an individual customer, a business customer's company and nobody, then checks that each customer lists and downloads only their own, a pending and an infected file are refused, a revoked or ended share disappears, another customer, another tenant's customer and a customer without the capability are refused, and every download and refusal is audited as the customer.
 
 ## Expiry and its reminder
 
@@ -137,6 +164,7 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | New revision | `core.document.revision` created, `core.document.document` updated |
 | Link, Unlink | `core.document.link` created or deleted |
 | Share, Unshare, Access until | `core.document.access` created, updated or deleted |
+| Share with a customer, Stop sharing | `core.document.customer_share` created, updated or deleted (ids and the end, never a name) |
 | Email them a link | `core.document.email` created, then updated when it is sent, failed, suppressed or rate limited |
 | Favourite, Follow | `core.document.mark` created or updated (the reader's own flags) |
 | Merge | the survivor's revisions, links, access and marks created or updated; every source's rows deleted |
@@ -144,6 +172,8 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | Upload, discard a stored file | `core.document.file` ledger changes |
 | Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
 | Refused download or preview | a `core.document.download_refused` action with the actor, `document_id`, `revision` and `reason`: `no_grant`, `grant_ended`, `no_download_permission`, `no_download_capability` or `no_file_access` |
+| Portal download | an `artifacts.read` action as above, its actor the customer (`actor_role` `customer`) |
+| Refused portal download | a `core.document.download_refused` action as the customer with `"portal": true` and `reason` `not_shared` (no share to them, another tenant's or no such document), `share_ended`, `document_expired`, `no_file`, `scan_pending`, `not_clean` or `no_portal_capability` |
 
 Every row of a document's parts carries its `document_id`, so one query finds the whole trail. Run it on **Administration › System › Database Queries** with the tenant and document IDs; **Audit Log › Data Mutations** lists the same mutations tenant-wide (search `core.document`).
 
@@ -190,7 +220,7 @@ The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disp
 BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder cargo run -p bilibi-document --example audit-coverage --locked
 ```
 
-A new document action belongs in that example in the same change.
+A new document action belongs in that example in the same change. It also fails if a delegated sharer can change their own grant, give download, manage or a later end than their own grant holds, or change or remove the creator's grant, in the preview or the commit.
 
 ## List and audit latency
 
@@ -224,18 +254,21 @@ BILIBI_DOCUMENT_LATENCY=disposable cargo run -p bilibi-document --example list-l
 | `copy_file`, `preview_copy`, `copy` | A copy with its latest revision only |
 | `preview_merge`, `merge`, `may_merge` | Fold duplicates into a survivor |
 | `get`, `list`, `revisions`, `links`, `file` | Permission-checked reads |
+| `customer_shares`, `preview_share_customer`, `share_customer`, `preview_unshare_customer`, `unshare_customer` | Read and change shares with portal customers |
+| `shared_with_me`, `read_shared_file` | A portal customer's own read, with their `PortalScope` |
 
-All writes use the caller's `MutationTransaction`, return audited changes and recheck authority inside the transaction. Inputs take a sealed `Scope`; callers never supply tenant or actor IDs.
+All writes use the caller's `MutationTransaction`, return audited changes and recheck authority inside the transaction. Inputs take a sealed `Scope` (a `PortalScope` for the customer's reads); callers never supply tenant, actor, Person or Company IDs for a read.
 
 ## Contributions
 
-- Capabilities: `core.document.view`, `core.document.download`, `core.document.manage` and `core.document.merge`.
+- Capabilities: `core.document.view`, `core.document.download`, `core.document.manage` and `core.document.merge`; the portal capability `portal.document.view`, added to Core Portal's `portal_customer` role.
 - Pick-lists: `core.document.category`, `core.document.sub_category`, `core.document.type`, and `core.document.status`; category, type and status each start with a default (`other`, `other`, `active`).
 - Settings: `core.document.max_upload_bytes`, `core.document.allowed_types`, `core.document.expiry_reminder_days` and `core.document.retention_days`.
 - Custom field record type `document`.
 - Record kind: `core.document.document`; holder table `document_links`.
 - Routes: `/documents`, `/documents/{id}`, revision downloads and previews, and `/documents/export.csv`. Downloads and previews open on `core.document.view`, so the facade decides and audits a refusal; it requires `core.document.download` itself.
-- Menu item: `Documents`, under Core.
+- Portal routes: `/portal/documents` (`portal.document.view`) and `/portal/documents/{id}/file` (opens on `portal.account.view`; the facade requires `portal.document.view` and audits a refusal). Portal embed `document.portal-documents` (slot `portal.documents`, `EmbedContext::Portal`).
+- Menu items: `Documents`, under Core, and `Documents` in the portal menu.
 - Media subject: `core.document.upload`.
 - Record panels (embeds), the one Documents panel of each record kind:
 
@@ -247,10 +280,12 @@ All writes use the caller's `MutationTransaction`, return audited changes and re
 
 Core company and Core person discover their panel by kind and pass `company_id` or `person_id`. A Domain record page (a case, an opportunity) renders the `record.documents` slot with `kind` and `id` in the panel path; it never registers a Documents panel of its own. The panel shows at most 10 documents linked to the record, newest first (name, category, revision, publish date), and **View all** opens `/documents?related=<kind>:<id>`. **Quick add** (with `core.document.manage`) files a document related to the record without leaving the page, and **Add document** opens the same filtered list, where New document files and relates it; the panel writes nothing else. The panel reads through `Documents::list`: a document with no explicit grant for the reader is absent, with no hidden count.
 
-Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share` (with `until` and `email`), `.unshare`, `.mark`, `.copy`, `.merge` and `.delete` through the agent API. Pages call the same reviewed write operations; uploading bytes (and the `copy_file` step of Copy, which then calls `core.document.copy`) is the declared page-write exception because operation input is bounded; an agent copies a file document by naming a file the page stored.
+Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`, `.add_revision`, `.link`, `.unlink`, `.share` (with `until` and `email`), `.unshare`, `.customer_shares`, `.customer_share`, `.customer_unshare`, `.mark`, `.copy`, `.merge` and `.delete` through the agent API. Customers have no agents (ADR 16): their read is the portal only. Pages call the same reviewed write operations; uploading bytes (and the `copy_file` step of Copy, which then calls `core.document.copy`) is the declared page-write exception because operation input is bounded; an agent copies a file document by naming a file the page stored.
 
 ## Database records
 
 A sync ID is exact-match unique within the tenant when set. The Documents search matches it exactly as well as matching name text. Creating or updating a relation requires view access to the target; a related document's grant is still needed to open it. A revision may replace only an earlier revision of its own document. The metadata CSV includes the sync ID and document relation, while revision fields appear in get and on the record page.
 
-The module owns `core_documents`, `core_document_revisions`, `core_document_links`, `core_document_access`, `core_document_marks`, `core_document_files` and `core_document_emails`; documents also hold `expires_on`, the reminder task id and `custom_fields`, and a grant its `expires_at`. Every query binds `tenant_id`. Applied migrations are immutable.
+The CSV export writes every document that matches the list's search and filters, by name, up to 5,000. When more match, the file is saved as `documents-not-complete.csv` and its last line says how many were written and how many match, so a partial file is never mistaken for the whole list. Narrow the filters and export again for the rest. `examples/export-rows-proof.rs` checks this with more documents than one list page holds.
+
+The module owns `core_documents`, `core_document_revisions`, `core_document_links`, `core_document_access`, `core_document_customer_shares`, `core_document_marks`, `core_document_files` and `core_document_emails`; documents also hold `expires_on`, the reminder task id and `custom_fields`, and a grant its `expires_at`. Every query binds `tenant_id`. Applied migrations are immutable.

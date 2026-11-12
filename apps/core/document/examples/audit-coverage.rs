@@ -20,8 +20,8 @@
 //! DATABASE_URL=… cargo run -p bilibi-document --example audit-coverage --locked`
 use bilibi_database::{pool, Db};
 use bilibi_document::{
-    Documents, Draft, MarkPatch, MergeSource, Patch, Reference, RevisionInput, ShareInput, Source,
-    Upload, SERVICE,
+    CustomerShareInput, Documents, Draft, MarkPatch, MergeSource, Patch, Recipient, Reference,
+    RevisionInput, ShareInput, Source, Upload, SERVICE,
 };
 use bilibi_media::{Media, ScanFacts, ScanFuture, Scanner, Verdict};
 use bilibi_queue::{Config, Executor};
@@ -333,6 +333,162 @@ async fn main() -> Result<()> {
         .await?);
     trail.finish("unshare", &[a.id]).await?;
 
+    // #584: a delegated sharer gives at most what their own grant holds,
+    // never changes their own grant, and leaves the creator's grant alone.
+    // The manager gets the document capabilities and, from the creator,
+    // view, manage and share until a last day, without download.
+    let manager = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT u.id FROM users u JOIN user_identities i ON i.id = u.identity_id WHERE u.tenant_id = $1 AND i.email = 'manager@example.test'",
+            &[&scope.tenant()],
+        )
+        .await?
+        .get::<_, i64>(0);
+    let capabilities = vec!["core.document.view", "core.document.manage"];
+    db.get()
+        .await?
+        .execute(
+            "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) SELECT $1,$2,c,true FROM unnest($3::text[]) c ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
+            &[&scope.tenant(), &manager, &capabilities],
+        )
+        .await?;
+    let today = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let last_day = today.checked_add(jiff::Span::new().days(3))?;
+    let later = today.checked_add(jiff::Span::new().days(30))?;
+    let bounded = |user_id: i64, can_download: bool, until: Option<jiff::civil::Date>| ShareInput {
+        user_id,
+        can_download,
+        can_manage: false,
+        can_share: true,
+        until,
+        email: false,
+    };
+    write!(app, scope, "core.document.share", |tx| documents
+        .share(
+            &mut tx,
+            &scope,
+            a.id,
+            &ShareInput {
+                can_manage: true,
+                ..bounded(manager, false, Some(last_day))
+            },
+        )
+        .await?);
+    let delegate = app
+        .user
+        .login("manager@example.test", bilibi_walkthrough_fixture::PASSWORD)
+        .await?;
+    let delegate: Scope = app.security.guard(&delegate.token).await?;
+    let refusals = [
+        (
+            "their own grant, made permanent with download",
+            bounded(manager, true, None),
+        ),
+        (
+            "their own grant, even within its bounds",
+            bounded(manager, false, Some(last_day)),
+        ),
+        (
+            "the creator's grant",
+            bounded(scope.user(), false, Some(last_day)),
+        ),
+        (
+            "download they do not hold",
+            bounded(viewer, true, Some(last_day)),
+        ),
+        (
+            "no end date while theirs ends",
+            bounded(viewer, false, None),
+        ),
+        ("an end after theirs", bounded(viewer, false, Some(later))),
+        (
+            "manage they hold, with download they do not",
+            ShareInput {
+                can_manage: true,
+                ..bounded(viewer, true, Some(last_day))
+            },
+        ),
+    ];
+    for (label, input) in &refusals {
+        let client = db.get().await?;
+        if let Ok(grant) = documents
+            .preview_share(&**client, &delegate, a.id, input)
+            .await
+        {
+            return Err(format!("a delegated sharer could give {label}: {grant:?}").into());
+        }
+        // The commit path checks the same rules under its locks.
+        let mut client = db.get().await?;
+        let mut tx = app
+            .mutations
+            .begin(
+                &mut client,
+                delegate.mutation_context("core.document.share"),
+            )
+            .await?;
+        let committed = documents.share(&mut tx, &delegate, a.id, input).await;
+        tx.rollback().await?;
+        match committed {
+            Ok(_) => return Err(format!("a delegated sharer committed {label}").into()),
+            Err(error) => println!("delegated share refused, {label}: {error}"),
+        }
+    }
+    write!(app, delegate, "core.document.share", |tx| documents
+        .share(
+            &mut tx,
+            &delegate,
+            a.id,
+            &bounded(viewer, false, Some(last_day))
+        )
+        .await?);
+    let grants = documents.access(&delegate, a.id).await?;
+    let creator = grants
+        .iter()
+        .find(|grant| grant.user_id == scope.user())
+        .ok_or("the creator's grant is gone")?;
+    let client = db.get().await?;
+    if documents
+        .preview_unshare(&**client, &delegate, a.id, creator.id)
+        .await
+        .is_ok()
+    {
+        return Err("a delegated sharer could remove the creator's grant".into());
+    }
+    let mut owned = db.get().await?;
+    let mut tx = app
+        .mutations
+        .begin(
+            &mut owned,
+            delegate.mutation_context("core.document.unshare"),
+        )
+        .await?;
+    let removed = documents
+        .unshare(&mut tx, &delegate, a.id, creator.id)
+        .await;
+    tx.rollback().await?;
+    if removed.is_ok() {
+        return Err("a delegated sharer committed removing the creator's grant".into());
+    }
+    let bounds_kept: bool = client
+        .query_one(
+            "SELECT (SELECT can_download AND can_manage AND can_share AND expires_at IS NULL FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3) \
+             AND (SELECT NOT can_download AND can_manage AND can_share AND expires_at IS NOT NULL FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$4) \
+             AND (SELECT NOT can_download AND NOT can_manage AND can_share AND expires_at = (SELECT expires_at FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$4) FROM core_document_access WHERE tenant_id=$1 AND document_id=$2 AND user_id=$5)",
+            &[&scope.tenant(), &a.id, &scope.user(), &manager, &viewer],
+        )
+        .await?
+        .get(0);
+    if !bounds_kept {
+        return Err("a grant outgrew its sharer's or the creator's grant changed".into());
+    }
+    println!(
+        "delegated share: within the sharer's own bounds only; own and creator's grants unchanged"
+    );
+
     trail.start().await?;
     write!(app, scope, "core.document.mark", |tx| documents
         .mark(
@@ -415,6 +571,27 @@ async fn main() -> Result<()> {
         return Err("a reader with no grant got the file".into());
     }
     trail.finish("refused download", &[filed.id]).await?;
+
+    // Sharing with a portal customer (a company's business customers). The
+    // customer's own download and refusals are proved, with their audit, by
+    // `customer-share-walkthrough`; the share kept here goes with the delete.
+    let company = CustomerShareInput {
+        recipient: Recipient::Company(2),
+        until: None,
+    };
+    trail.start().await?;
+    let shared = write!(app, scope, "core.document.customer_share", |tx| documents
+        .share_customer(&mut tx, &scope, filed.id, &company)
+        .await?);
+    trail.finish("share with a customer", &[filed.id]).await?;
+    trail.start().await?;
+    write!(app, scope, "core.document.customer_unshare", |tx| documents
+        .unshare_customer(&mut tx, &scope, filed.id, shared.id)
+        .await?);
+    trail.finish("stop sharing", &[filed.id]).await?;
+    write!(app, scope, "core.document.customer_share", |tx| documents
+        .share_customer(&mut tx, &scope, filed.id, &company)
+        .await?);
 
     for (action, id) in [("delete (link)", copy.id), ("delete (file)", filed.id)] {
         let document = documents.get(&scope, id).await?;

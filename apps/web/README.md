@@ -123,6 +123,8 @@ no missing-record redirect or shell applies.
 targeted panels, URL changes and guarded subscriptions. HTTP-only adapters should
 return `live: false`. F6 owns queued events and retained fragment/iframe lifecycle.
 
+A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
+
 # Public endpoints (`src/endpoints.rs`)
 
 **A token link that a mail client, image proxy or mail provider calls with no session is a `PUBLIC_ENDPOINTS` contribution, not a `Public` page.** Use one for an open-tracking pixel, a click-tracking redirect or an RFC 8058 one-click unsubscribe.

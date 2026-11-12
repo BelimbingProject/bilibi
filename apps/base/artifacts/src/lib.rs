@@ -317,6 +317,27 @@ impl Artifacts {
             grant: Some(Granted::Disclose(grant, subject)),
         }
     }
+    /// A facade for a portal customer's reads (ADR 16). A customer reads a
+    /// file the tenant files under its own company, which is never the
+    /// customer's company, so the company check that keeps a business
+    /// customer to its own company's files is not made; `read` alone is
+    /// allowed, and the owner's `authorize` still decides it with the
+    /// customer's live scope (a share it keeps for that customer). Every other
+    /// operation is refused. The read is audited as the customer.
+    pub fn for_portal<'a, O: Owner>(
+        &'a self,
+        portal: &'a bilibi_tenancy::PortalScope,
+        company: OrganisationId,
+        owner: &'a O,
+    ) -> Owned<'a, O> {
+        Owned {
+            store: self,
+            scope: portal.scope(),
+            company,
+            owner,
+            grant: Some(Granted::Portal),
+        }
+    }
     /// A facade for one subject's documents under an approved erasure (ADR
     /// 05): `delete` needs no owner permission for that subject's documents,
     /// when the subject is the grant's person ID under a declared person-keyed
@@ -446,6 +467,8 @@ impl Artifacts {
 enum Granted<'a> {
     Disclose(&'a Disclosure, &'a str),
     Erase(&'a Erasure, &'a str),
+    /// A portal customer's read: the owner still decides, see `for_portal`.
+    Portal,
 }
 /// Scoped facade; the concrete adapter cannot be swapped by a client string.
 pub struct Owned<'a, O: Owner> {
@@ -636,6 +659,13 @@ impl<O: Owner> Owned<'_, O> {
         if granted {
             return Ok(());
         }
+        let portal = matches!(self.grant, Some(Granted::Portal));
+        if portal
+            && (operation != Operation::Read
+                || live.actor().kind() != bilibi_tenancy::AccountKind::Customer)
+        {
+            return Err(bilibi_database::Error::Forbidden.into());
+        }
         if live.actor().person() != self.scope.actor().person()
             || live.actor().organisation() != self.scope.actor().organisation()
             || live.actor().affiliation() != self.scope.actor().affiliation()
@@ -649,6 +679,7 @@ impl<O: Owner> Owned<'_, O> {
                 .await?;
         }
         if live.actor().kind() == bilibi_tenancy::AccountKind::Customer
+            && !portal
             && live
                 .actor()
                 .organisation()

@@ -5,14 +5,15 @@
 use crate::{
     identity::Audience,
     password::{self, check_policy},
+    sign_in::PRINCIPAL,
     CredentialError, UserService,
 };
-use bilibi_database::{Change, Context, Error};
-use bilibi_mail::{Address, Message};
+use bilibi_database::{Change, Context, Db, Error, MutationBoundary};
+use bilibi_mail::{Address, Mailer, Message};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use subtle::ConstantTimeEq;
-use tokio_postgres::GenericClient;
 
 /// A reset link stays valid this long and a new one may be requested this often.
 const RESET_LIFETIME_SECONDS: f64 = 3600.0;
@@ -34,31 +35,176 @@ pub(crate) fn random_token() -> Result<String, Error> {
 fn digest(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
-/// A new one-time reset token for the account, stored hashed, unless one was
-/// issued within the throttle (one a minute); expired rows are swept here,
-/// which keeps storage bounded without a scheduler.
-async fn issue_reset_token(
-    client: &impl GenericClient,
-    tenant: i64,
-    user: i64,
-) -> Result<Option<String>, Error> {
-    let token = random_token()?;
-    let claimed = client
-        .query_opt(
-            "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT identity_id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users WHERE tenant_id=$1 AND id=$2 ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
-            &[&tenant, &user, &digest(&token), &RESET_LIFETIME_SECONDS, &RESET_THROTTLE_SECONDS],
-        )
-        .await?;
-    if claimed.is_none() {
-        return Ok(None);
+/// Everything a reset mail needs, owned, so a mail can be issued from a
+/// task that outlives the request (the sign-in lock notice is).
+#[derive(Clone)]
+pub(crate) struct ResetMail {
+    pub(crate) db: Db,
+    pub(crate) mutations: Arc<MutationBoundary>,
+    mailer: Arc<Mailer>,
+    origin: String,
+}
+
+impl ResetMail {
+    /// A new one-time reset token for the account, stored hashed, unless one
+    /// was issued within the throttle (one a minute). A sign-in has one slot
+    /// (`password_reset_tokens` is keyed by identity), so storage stays
+    /// bounded; an expired token only fails to redeem until it is replaced.
+    /// Audited as `user.reset_requested` by the `sign-in` principal; the
+    /// token and its digest never enter the change.
+    async fn issue_token(&self, tenant: i64, user: i64) -> Result<Option<String>, Error> {
+        let token = random_token()?;
+        let hash = digest(&token);
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, PRINCIPAL, "user.reset_requested"),
+            )
+            .await?;
+        let issued = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let identity: i64 = sql
+                        .query_opt(
+                            "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT identity_id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users WHERE tenant_id=$1 AND id=$2 ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
+                            &[&tenant, &user, &hash, &RESET_LIFETIME_SECONDS, &RESET_THROTTLE_SECONDS],
+                        )
+                        .await?
+                        .ok_or(Error::Conflict)?
+                        .get(0);
+                    Ok((
+                        (),
+                        vec![token_change(identity, "issued")],
+                    ))
+                })
+            })
+            .await;
+        match issued {
+            Ok(()) => {
+                tx.commit().await?;
+                Ok(Some(token))
+            }
+            // Throttled: a token issued within the last minute stands.
+            Err(Error::Conflict) => {
+                tx.rollback().await?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
-    client
-        .execute(
-            "DELETE FROM password_reset_tokens WHERE expires_at<now()",
-            &[],
-        )
-        .await?;
-    Ok(Some(token))
+
+    /// Delivers `message` after the caller returns; a failed delivery
+    /// withdraws the token it carried (audited as
+    /// `user.reset_withdrawn`), which releases the throttle so the person
+    /// can ask again.
+    fn deliver(&self, tenant: i64, user: i64, message: Message, token: Option<&str>) {
+        let (mail, hash) = (self.clone(), token.map(digest));
+        tokio::spawn(async move {
+            let Err(error) = mail.mailer.deliver(&message).await else {
+                return;
+            };
+            eprintln!("mail: reset link for user {user} was not delivered: {error}");
+            if let Some(hash) = hash {
+                if let Err(error) = mail.withdraw(tenant, user, hash).await {
+                    eprintln!("mail: reset link for user {user} was not withdrawn: {error}");
+                }
+            }
+        });
+    }
+
+    async fn withdraw(&self, tenant: i64, user: i64, hash: Vec<u8>) -> Result<(), Error> {
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, PRINCIPAL, "user.reset_withdrawn"),
+            )
+            .await?;
+        let withdrawn = tx
+            .mutate(move |sql| {
+                Box::pin(async move {
+                    let identity: i64 = sql
+                        .query_opt(
+                            "DELETE FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND token_hash=$3 RETURNING identity_id",
+                            &[&tenant, &user, &hash],
+                        )
+                        .await?
+                        .ok_or(Error::NotFound)?
+                        .get(0);
+                    Ok(((), vec![token_change(identity, "withdrawn")]))
+                })
+            })
+            .await;
+        match withdrawn {
+            Ok(()) => tx.commit().await,
+            // Already redeemed or replaced: nothing to withdraw.
+            Err(Error::NotFound) => tx.rollback().await,
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Mails `text` to the account with a reset link appended, when a token
+    /// can be issued now (a request within the last minute already holds
+    /// one; the mail then points to "Forgot your password?"). A failed
+    /// delivery releases the token, as for a requested reset.
+    pub(crate) async fn mail_with_reset_link(
+        &self,
+        tenant: i64,
+        user: i64,
+        subject: &str,
+        text: &str,
+    ) -> Result<(), Error> {
+        let client = self.db.get().await?;
+        let Some(row) = client
+            .query_opt(
+                "SELECT u.name,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active'",
+                &[&tenant, &user],
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        drop(client);
+        let (name, address): (String, String) = (row.get(0), row.get(1));
+        let token = self.issue_token(tenant, user).await?;
+        let link = match &token {
+            Some(token) => format!(
+                "Reset your password with this link:\n\n{}\n",
+                reset_link(&self.origin, &address, token)
+            ),
+            None => {
+                "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
+            }
+        };
+        let message = Message::text(
+            Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
+            subject,
+            format!("{text}\n\n{link}"),
+        );
+        self.deliver(tenant, user, message, token.as_deref());
+        Ok(())
+    }
+}
+
+/// The audit change of a reset token: only that it was issued or withdrawn.
+fn token_change(identity: i64, reset_token: &str) -> Change {
+    Change {
+        kind: "user_identity".into(),
+        id: identity,
+        old: json!({}),
+        new: json!({"reset_token": reset_token}),
+    }
+}
+
+/// Where the emailed link points; the reset page reads both values.
+fn reset_link(origin: &str, email: &str, token: &str) -> String {
+    format!(
+        "{origin}/reset-password/{token}?email={}",
+        encode_component(email)
+    )
 }
 
 async fn finish_reset_request() -> Result<(), CredentialError> {
@@ -67,6 +213,13 @@ async fn finish_reset_request() -> Result<(), CredentialError> {
     password::verify("", None).await?;
     Ok(())
 }
+/// The account a forgotten-password request mails and its link redeems for:
+/// per sign-in under the address, the one `identity::password_identity`
+/// signs in to (last used, then home, then the lowest tenant), so a removed
+/// or suspended last tenant never strands the request. Columns: account,
+/// tenant, account name, address, identity, live token digest.
+const RESET_ACCOUNT: &str = "SELECT DISTINCT ON (i.id) u.id,u.tenant_id,u.name,i.email,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND u.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' ORDER BY i.id,(u.tenant_id=i.last_tenant_id) DESC,(u.tenant_id=i.home_tenant_id) DESC,u.tenant_id LIMIT 2";
+
 fn encode_component(value: &str) -> String {
     value
         .bytes()
@@ -156,7 +309,14 @@ impl UserService {
         })
         .await?;
         // Other live pages of this account hear it once the change is committed.
-        let ended = self.sessions.revoke(&mut tx, user, Some(token)).await?;
+        let ended = crate::sign_in_identity::end_everywhere(
+            &self.sessions,
+            &mut tx,
+            identity,
+            user,
+            Some(token),
+        )
+        .await?;
         let sessions = self.sessions.clone();
         tx.after_commit(move || sessions.announce(ended));
         tx.commit().await?;
@@ -180,15 +340,18 @@ impl UserService {
     ) -> Result<(), CredentialError> {
         let email = normalize_email(email)?;
         let client = self.db.get().await.map_err(Error::from)?;
+        // The account sign-in would choose (`identity::password_identity`):
+        // last used, then home, then any live membership. Ambiguity (two
+        // sign-ins under one address, possible only for customers) is
+        // treated as unknown rather than guessed; a frozen account
+        // (archived company, retired identity) is unknown here too.
         let candidates = client
             .query(
-                "SELECT u.id,u.tenant_id,u.name,i.email FROM user_identities i JOIN users u ON u.identity_id=i.id AND u.tenant_id=i.last_tenant_id JOIN tenants t ON t.id=u.tenant_id WHERE lower(i.email)=$1 AND i.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' LIMIT 2",
+                RESET_ACCOUNT,
                 &[&email, &audience.kind().as_str(), &audience.tenant()],
             )
             .await
             .map_err(Error::from)?;
-        // Ambiguity is treated as unknown rather than guessed; a frozen account
-        // (archived company, retired identity) is unknown here too.
         let [account] = &candidates[..] else {
             return finish_reset_request().await;
         };
@@ -204,7 +367,9 @@ impl UserService {
         ) {
             return finish_reset_request().await;
         }
-        let Some(token) = issue_reset_token(&**client, tenant, user).await? else {
+        drop(client);
+        let mail = self.reset_mail();
+        let Some(token) = mail.issue_token(tenant, user).await? else {
             return finish_reset_request().await;
         };
         let link = match site {
@@ -218,89 +383,23 @@ impl UserService {
                 "Reset your Bilibi password by opening this link:\n\n{link}\n\nIf you did not request this, you can ignore this email.\n"
             ),
         );
-        let (mailer, db, hash) = (self.mailer.clone(), self.db.clone(), digest(&token));
-        tokio::spawn(async move {
-            if let Err(error) = mailer.deliver(&message).await {
-                eprintln!("mail: password reset for user {user} was not delivered: {error}");
-                // Release the throttle so the person can ask again.
-                if let Ok(client) = db.get().await {
-                    let _ = client
-                        .execute(
-                            "DELETE FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND token_hash=$3",
-                            &[&tenant, &user, &hash],
-                        )
-                        .await;
-                }
-            }
-        });
+        mail.deliver(tenant, user, message, Some(&token));
         finish_reset_request().await
     }
 
-    /// Mails `text` to the account with a reset link appended, when a token
-    /// can be issued now (a request within the last minute already holds
-    /// one; the mail then points to "Forgot your password?"). A failed
-    /// delivery releases the token, as for a requested reset.
-    pub(crate) async fn mail_with_reset_link(
-        &self,
-        tenant: i64,
-        user: i64,
-        subject: &str,
-        text: &str,
-    ) -> Result<(), Error> {
-        let client = self.db.get().await?;
-        let Some(row) = client
-            .query_opt(
-                "SELECT u.name,i.email FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.deleted_at IS NULL AND i.status='active' WHERE u.tenant_id=$1 AND u.id=$2 AND u.deleted_at IS NULL AND u.status='active'",
-                &[&tenant, &user],
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        let (name, address): (String, String) = (row.get(0), row.get(1));
-        let token = issue_reset_token(&**client, tenant, user).await?;
-        let link = match &token {
-            Some(token) => format!(
-                "Reset your password with this link:\n\n{}\n",
-                self.reset_link(&address, token)
-            ),
-            None => {
-                "Reset your password with \"Forgot your password?\" on the sign-in page.\n".into()
-            }
-        };
-        let message = Message::text(
-            Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
-            subject,
-            format!("{text}\n\n{link}"),
-        );
-        let (mailer, db, hash) = (
-            self.mailer.clone(),
-            self.db.clone(),
-            token.as_deref().map(digest),
-        );
-        tokio::spawn(async move {
-            if let Err(error) = mailer.deliver(&message).await {
-                eprintln!("mail: notice for user {user} was not delivered: {error}");
-                if let (Some(hash), Ok(client)) = (hash, db.get().await) {
-                    let _ = client
-                        .execute(
-                            "DELETE FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND token_hash=$3",
-                            &[&tenant, &user, &hash],
-                        )
-                        .await;
-                }
-            }
-        });
-        Ok(())
+    /// The owned handles a reset mail is issued and delivered with.
+    pub(crate) fn reset_mail(&self) -> ResetMail {
+        ResetMail {
+            db: self.db.clone(),
+            mutations: self.mutations.clone(),
+            mailer: self.mailer.clone(),
+            origin: self.origin.clone(),
+        }
     }
 
     /// Where the emailed link points; the reset page reads both values.
     pub fn reset_link(&self, email: &str, token: &str) -> String {
-        format!(
-            "{}/reset-password/{token}?email={}",
-            self.origin,
-            encode_component(email)
-        )
+        reset_link(&self.origin, email, token)
     }
 
     /// Where a portal's emailed link points: the host's reset page of the
@@ -339,7 +438,7 @@ impl UserService {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let account = client
             .query(
-                "SELECT u.id,u.tenant_id,i.id,r.token_hash FROM user_identities i JOIN users u ON u.identity_id=i.id AND u.tenant_id=i.last_tenant_id JOIN tenants t ON t.id=u.tenant_id LEFT JOIN password_reset_tokens r ON r.identity_id=i.id AND r.expires_at>now() WHERE lower(i.email)=$1 AND i.kind=$2 AND ($3::bigint IS NULL OR i.tenant_id=$3) AND i.deleted_at IS NULL AND i.status='active' AND u.deleted_at IS NULL AND u.status='active' AND t.deleted_at IS NULL AND t.status='active' LIMIT 2",
+                RESET_ACCOUNT,
                 &[&email, &audience.kind().as_str(), &audience.tenant()],
             )
             .await
@@ -347,13 +446,13 @@ impl UserService {
         let presented = digest(token);
         let user = match &account[..] {
             [row] => row
-                .get::<_, Option<Vec<u8>>>(3)
+                .get::<_, Option<Vec<u8>>>(5)
                 .filter(|stored| bool::from(stored.ct_eq(&presented)))
                 .map(|_| {
                     (
                         row.get::<_, i64>(0),
                         row.get::<_, i64>(1),
-                        row.get::<_, i64>(2),
+                        row.get::<_, i64>(4),
                     )
                 }),
             _ => None,
@@ -418,7 +517,14 @@ impl UserService {
             .await;
         match claimed {
             Ok(()) => {
-                let ended = self.sessions.revoke(&mut tx, user, None).await?;
+                let ended = crate::sign_in_identity::end_everywhere(
+                    &self.sessions,
+                    &mut tx,
+                    identity,
+                    user,
+                    None,
+                )
+                .await?;
                 let sessions = self.sessions.clone();
                 tx.after_commit(move || sessions.announce(ended));
                 Ok(tx.commit().await?)

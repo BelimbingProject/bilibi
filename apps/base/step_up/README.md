@@ -55,6 +55,7 @@ Tenants decide per operation on **Administration › Authorization › Step-up 2
 | Longest window / cap any tenant may set (page: "Longest time any organisation may choose") | Installation (`step_up.window_limit_minutes`, `step_up.cap_limit_hours`) | 720 minutes / 24 hours | Same bounds |
 
 - Changing any of these is itself a step-up operation (`base.step_up.policy.update`, on the floor). Settings audits it.
+- `set_mode` and `set_floor` read the stored object in the caller's transaction under a lock for that tenant (or the installation), so two administrators changing two operations at once both keep their change.
 - The installation owner sees the floor and the maxima on the same page.
 - The stored Dev role turns ordinary enforcement off. Base System binds the live `Enforcement` policy, which reads `instance.role` on each check; changing the role takes effect without restarting. A missing binding enforces. A fixture binary with no authenticator may call `StepUp::set_enforced(false)` after installing its services; the host never does. An operation declared `.always()` is enforced everywhere, as "ask every time", and the policy page shows it as fixed.
 

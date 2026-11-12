@@ -44,3 +44,6 @@ sha1.workspace = true
 bilibi-workflow.workspace = true
 tokio.workspace = true
 zip.workspace = true
+
+[lints]
+workspace = true

@@ -17,7 +17,7 @@ use bilibi_user::{
     validate_first_administrator, BootstrapAffiliation, FieldError, FirstAdministrator,
     FirstAdministratorError, OperatorAccounts, OperatorCompany,
 };
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 const USAGE: &str =
     "usage: bilibi-web create-owner [--email ADDRESS] [--name NAME] [--password-stdin]
@@ -80,7 +80,7 @@ struct NewOperator {
 
 pub async fn create_owner(db: &Db, args: &[String]) -> Result<()> {
     let options = parse(args).ok_or_else(usage)?;
-    let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    let interactive = std::io::stdin().is_terminal();
     if !interactive && !options.password_stdin {
         eprintln!("No terminal to ask for the password: pass --password-stdin and write it on the first line of standard input.");
         return Err(usage());
@@ -359,28 +359,56 @@ fn ask_password() -> Result<String> {
     Err(Error::Invalid)
 }
 
-/// Reads one line from the terminal without echoing it, restoring the
-/// terminal afterwards, also on an error.
+/// Reads one line from the terminal without echoing it. Echo comes back
+/// on every way out: a return, an error or a panic.
 fn hidden(prompt: &str) -> Result<String> {
     print!("{prompt}");
     std::io::stdout().flush().map_err(|_| Error::Internal)?;
-    // SAFETY: termios on the process's own standard input, with a
-    // zero-initialised struct the kernel fills in before it is read.
-    let original = unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(libc::STDIN_FILENO, &mut term) != 0 {
-            return Err(Error::Internal);
-        }
-        let original = term;
-        term.c_lflag &= !libc::ECHO;
-        if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term) != 0 {
-            return Err(Error::Internal);
-        }
-        original
-    };
+    let echo_off = EchoOff::start()?;
     let line = read_raw_line();
-    // SAFETY: restores the settings read above on the same descriptor.
-    unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+    drop(echo_off);
     println!();
     line
+}
+
+/// Terminal echo is off on standard input while this value lives. Dropping
+/// it puts back the settings read at the start, so a panic while the
+/// password is typed cannot leave the operator's terminal without echo.
+struct EchoOff(libc::termios);
+
+#[allow(
+    unsafe_code,
+    reason = "the standard library has no terminal settings call; these are the only unsafe lines of the host"
+)]
+impl EchoOff {
+    fn start() -> Result<Self> {
+        // SAFETY: termios on the process's own standard input, with a
+        // zero-initialised struct the kernel fills in before it is read.
+        unsafe {
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut term) != 0 {
+                return Err(Error::Internal);
+            }
+            // The guard exists before echo goes off, so a failed or partial
+            // change is undone as well.
+            let guard = Self(term);
+            term.c_lflag &= !libc::ECHO;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &term) != 0 {
+                return Err(Error::Internal);
+            }
+            Ok(guard)
+        }
+    }
+}
+
+#[allow(
+    unsafe_code,
+    reason = "the standard library has no terminal settings call; these are the only unsafe lines of the host"
+)]
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        // SAFETY: restores the settings read in `start` on the same
+        // descriptor; nothing here can panic, so it is safe while unwinding.
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0) };
+    }
 }

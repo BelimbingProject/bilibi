@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 askama.workspace = true
 bilibi-agent-api.workspace = true
+bilibi-audit.workspace = true
 bilibi-authz = { path = "../authz" }
 bilibi-database.workspace = true
 bilibi-datetime.workspace = true
@@ -41,3 +42,6 @@ bilibi-base = { path = ".." }
 bilibi-core = { path = "../../core" }
 bilibi-web = { path = "../../web" }
 axum.workspace = true
+
+[lints]
+workspace = true

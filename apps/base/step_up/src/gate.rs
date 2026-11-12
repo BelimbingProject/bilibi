@@ -11,7 +11,7 @@ use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_module_registry::Catalog;
 use bilibi_settings::{Settings, Target};
-use bilibi_tenancy::{Channel, ProofClient, ProofFuture, Scope};
+use bilibi_tenancy::{Channel, ProofClient, ProofFuture, ReadClient, Scope};
 use serde_json::{json, Map, Value};
 use std::{
     collections::BTreeMap,
@@ -943,15 +943,23 @@ impl StepUp {
 
     async fn stored(&self, scope: &Scope) -> Result<(Map<String, Value>, Map<String, Value>)> {
         let client = self.db.get().await?;
+        self.stored_on(&**client, scope).await
+    }
+
+    /// [`Self::stored`] on the caller's connection: a policy edit reads it in
+    /// its own transaction, after [`lock_policy`], so two edits never merge
+    /// into the same stale copy.
+    async fn stored_on(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+    ) -> Result<(Map<String, Value>, Map<String, Value>)> {
         let choices = self
             .settings
-            .get(&**client, scope, Target::Tenant, policy::POLICY_KEY)
+            .get(client, scope, Target::Tenant, policy::POLICY_KEY)
             .await?
             .value;
-        let floors = self
-            .settings
-            .get_global(&**client, policy::FLOOR_KEY)
-            .await?;
+        let floors = self.settings.get_global(client, policy::FLOOR_KEY).await?;
         let object = |value: Value| match value {
             Value::Object(map) => map,
             _ => Map::new(),
@@ -1024,7 +1032,8 @@ impl StepUp {
         mode: Option<Mode>,
     ) -> Result<()> {
         let declared = self.declared(key).ok_or(Error::NotFound)?;
-        let (mut choices, floors) = self.stored(scope).await?;
+        lock_policy(tx, scope.tenant()).await?;
+        let (mut choices, floors) = self.stored_on(tx.sql(), scope).await?;
         let (floor, _) = effective(declared, &choices, &floors);
         if declared.operation.always || (floor && mode == Some(Mode::Off)) {
             return Err(Error::Conflict);
@@ -1057,7 +1066,8 @@ impl StepUp {
         if self.declared(key).ok_or(Error::NotFound)?.operation.always {
             return Err(Error::Conflict);
         }
-        let (_, mut floors) = self.stored(scope).await?;
+        lock_policy(tx, GLOBAL_POLICY).await?;
+        let (_, mut floors) = self.stored_on(tx.sql(), scope).await?;
         match floor {
             Some(floor) => floors.insert(key.to_owned(), json!(floor)),
             None => floors.remove(key),
@@ -1200,4 +1210,22 @@ fn local_destination(path: &str) -> bool {
         && path.len() <= 4096
         && !path.contains('\\')
         && !path.chars().any(char::is_control)
+}
+
+/// The lock [`lock_policy`] takes for the installation floor, which no
+/// tenant id can be.
+const GLOBAL_POLICY: i64 = 0;
+
+/// Serializes the read-merge-write of one stored policy object (a tenant's
+/// choices, or the installation floor with [`GLOBAL_POLICY`]) until the
+/// caller's transaction ends. Without it two administrators changing two
+/// operations at once each write their own copy, and one change is lost.
+async fn lock_policy(tx: &MutationTransaction<'_>, tenant: i64) -> Result<()> {
+    tx.sql()
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('base-step-up-policy-' || $1::bigint::text, 0))",
+            &[&tenant],
+        )
+        .await?;
+    Ok(())
 }

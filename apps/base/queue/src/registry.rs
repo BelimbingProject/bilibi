@@ -1,4 +1,5 @@
 //! Immutable contributed workers. Transport policy belongs to trusted owner code.
+use crate::execution::{EndingBinding, ENDINGS};
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{Catalog, Consumer, Entry, RegistryError};
 use serde_json::Value;
@@ -19,13 +20,17 @@ pub struct RegisteredWorker {
     pub module: &'static str,
     pub definition: &'static Worker,
 }
-pub struct Workers(BTreeMap<&'static str, RegisteredWorker>);
+pub struct Workers {
+    workers: BTreeMap<&'static str, RegisteredWorker>,
+    /// Workers whose owner is told when a job ends without finishing.
+    told: Vec<String>,
+}
 impl Workers {
     pub fn from_catalog(catalog: &Catalog) -> bilibi_module_registry::Result<Self> {
         let entries = catalog.entries::<Worker>(WORKERS)?;
         validate(entries)?;
-        Ok(Self(
-            entries
+        Ok(Self {
+            workers: entries
                 .iter()
                 .map(|entry| {
                     Ok((
@@ -38,13 +43,21 @@ impl Workers {
                     ))
                 })
                 .collect::<bilibi_module_registry::Result<_>>()?,
-        ))
+            told: catalog
+                .entries::<EndingBinding>(ENDINGS)?
+                .iter()
+                .map(|entry| entry.id.to_owned())
+                .collect(),
+        })
     }
     pub fn get(&self, id: &str) -> Result<RegisteredWorker> {
-        self.0.get(id).copied().ok_or(Error::Invalid)
+        self.workers.get(id).copied().ok_or(Error::Invalid)
     }
     pub fn iter(&self) -> impl Iterator<Item = RegisteredWorker> + '_ {
-        self.0.values().copied()
+        self.workers.values().copied()
+    }
+    pub(crate) fn told(&self) -> &[String] {
+        &self.told
     }
 }
 fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {

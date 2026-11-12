@@ -621,6 +621,19 @@ async fn main() -> Result<(), Failure> {
             ),
         );
     }
+    // Issue 574: the create reports its old side as JSON null, and is
+    // recorded as a create, not an update.
+    let first: String = client
+        .query_one(
+            "SELECT event FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id=$1 ORDER BY id LIMIT 1",
+            &[&gated_id],
+        )
+        .await?
+        .get(0);
+    show("person create is recorded as", &first);
+    if first != "created" {
+        return Err(format!("a person create was recorded as {first:?}, not \"created\"").into());
+    }
     while changes.try_recv().is_ok() {}
     client.batch_execute("CREATE FUNCTION k7_refuse_action() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event='person.update' THEN RAISE EXCEPTION 'K7 deliberate audit refusal'; END IF; RETURN NEW; END $$; CREATE TRIGGER k7_refuse_action BEFORE INSERT ON base_audit_actions FOR EACH ROW EXECUTE FUNCTION k7_refuse_action()").await?;
     show(
