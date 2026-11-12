@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .portal_login(1, "identity-customer@example.test", "incorrect-password")
             .await
             .is_err());
-        counted(&**client, 1, customer, 1, 0).await?;
+        counted(&client, 1, customer, 1, 0).await?;
         let customer_login = users
             .portal_login(
                 1,
@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     (attempt, run - 1)
                 };
-                counted(&**client, 1, 2, failures, locks).await?;
+                counted(&client, 1, 2, failures, locks).await?;
             }
             if run == 1 {
                 for _ in 0..50 {
@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_err());
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        counted(&**client, 1, customer, 0, 1).await?;
+        counted(&client, 1, customer, 0, 1).await?;
         let admin_login = users
             .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
             .await?;
@@ -266,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             users.unlock_sign_in(&admin, customer).await,
             Err(AccountError::NotFound)
         ));
-        counted(&**client, 1, customer, 0, 1).await?;
+        counted(&client, 1, customer, 0, 1).await?;
         assert!(users.sign_in_locked_until(&admin, 2).await?.is_some());
         users
             .unlock_sign_in(&admin, 2)
