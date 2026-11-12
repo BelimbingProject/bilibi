@@ -202,6 +202,10 @@ impl Grants {
                 ));
             }
         }
+        if !assigned {
+            self.validate_removal(client, actor, user, role, grant_all, bounds)
+                .await?;
+        }
         if assigned {
             let keys: Vec<String> = client
                 .query(
@@ -240,6 +244,62 @@ impl Grants {
         }
         Ok(())
     }
+    /// Taking a role away is bounded too: only a full-access actor changes a
+    /// full-access account's roles (else a narrow role administrator could
+    /// strip every administrator), and the tenant keeps at least one
+    /// tenant-wide full-access assignment, so it is never left without
+    /// someone who can administer it.
+    async fn validate_removal(
+        &self,
+        client: &(impl GenericClient + Sync),
+        actor: &Scope,
+        user: i64,
+        role: i64,
+        grant_all: bool,
+        bounds: &Assignment,
+    ) -> Result<()> {
+        self.require_full_access_for(client, actor, user).await?;
+        if !grant_all || bounds.company_id.is_some() {
+            return Ok(());
+        }
+        let another: bool = client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM authz_roles_for($1,NULL,NULL) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE r.grant_all AND p.company_id IS NULL AND NOT (p.user_id=$2 AND p.role_id=$3))",
+                &[&actor.tenant(), &user, &role],
+            )
+            .await?
+            .get(0);
+        if !another {
+            return Err(Error::Refused(
+                "This is the last full-access role assignment in this tenant. Give another administrator full access first.".into(),
+            ));
+        }
+        Ok(())
+    }
+    /// Refuses (`Forbidden`) when `user` holds full access and the actor
+    /// does not: a narrower administrator cannot take access away from a
+    /// full-access account, by removing its roles or by a direct deny (which
+    /// beats `grant_all`).
+    async fn require_full_access_for(
+        &self,
+        client: &(impl GenericClient + Sync),
+        actor: &Scope,
+        user: i64,
+    ) -> Result<()> {
+        if !crate::effective_capabilities_in_company(client, actor, user, None)
+            .await?
+            .grant_all
+        {
+            return Ok(());
+        }
+        if crate::effective_capabilities_in_company(client, actor, actor.user(), None)
+            .await?
+            .grant_all
+        {
+            return Ok(());
+        }
+        Err(Error::Forbidden)
+    }
     /// Set or remove one company/date-qualified assignment in the same audited
     /// transaction as an agent plan. Revalidates after preview, with role locks.
     pub async fn assign_role_with_in(
@@ -251,6 +311,11 @@ impl Grants {
         assigned: bool,
         bounds: &Assignment,
     ) -> Result<()> {
+        if !assigned {
+            // Two removals at once must not each see the other's
+            // full-access assignment as the one that remains.
+            lock_tenant_grants(tx, actor.tenant()).await?;
+        }
         self.validate_assignment(tx.sql(), actor, user, role, assigned, bounds)
             .await?;
         let grant_all: bool = tx
@@ -365,6 +430,9 @@ impl Grants {
         self.verify_user(tx.sql(), actor, actor.user()).await?;
         authorize_key(tx.sql(), actor, "admin.authz.role.update").await?;
         self.verify_user(tx.sql(), actor, user).await?;
+        if allowed == Some(false) {
+            self.require_full_access_for(tx.sql(), actor, user).await?;
+        }
         self.step_up
             .require(
                 actor,
@@ -830,4 +898,16 @@ impl bilibi_database::seeds::SeedExecutor for Grants {
             self.reconcile_in(tx).await
         })
     }
+}
+
+/// The per-tenant lock grant writes that check the tenant's other grants take
+/// (the same key the direct-capability write takes in its mutation).
+async fn lock_tenant_grants(tx: &MutationTransaction<'_>, tenant: i64) -> Result<()> {
+    tx.sql()
+        .execute(
+            "SELECT pg_advisory_xact_lock(841318,$1::integer)",
+            &[&i32::try_from(tenant).map_err(|_| Error::Invalid)?],
+        )
+        .await?;
+    Ok(())
 }

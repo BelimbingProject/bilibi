@@ -27,9 +27,9 @@ Base Records kind `user` names and links staff accounts through the same tenant,
 | `login(email, password)` / `logout` | The global sign-in: the address names the platform sign-in, whose last live tenant account is preferred, then its live home or another live membership. The sign-in lock is checked, the password verified, then the account's standing. Refusals are `CredentialError::{Rejected, CompanyArchived, WorkspaceUnavailable}`. A required second factor returns a pending credential, not a session; see [Sign-in admission](#sign-in-admission) |
 | `tenant_choices(client, scope)` / `choose_tenant(token, csrf, tenant, request)` | Lists the holder's live staff memberships and changes an ordinary browser session to one of them. A successful switch rotates the bearer and CSRF secret, clears tenant-local session state, saves the landing tenant and audits entry. Impersonation is refused. A target requiring a sign-in factor returns `TenantEntry::Challenge`, a pending sign-in for the existing second-factor page, and one enforcing company sign-in returns `TenantEntry::Sso`, the connection to start; neither touches the current session. Completing either admits a new session, and `retire_replaced_session(old, new)` then ends the old one of the same identity and closes its pages. A target needing a factor the holder has not enrolled is refused with `TenantChoiceRefusal::EntryPolicy` |
 | `change_password(token, csrf, current, new)` | Signed-in change. Needs the current password; ends the account's other sessions |
-| `request_password_reset(email)` | Always `Ok` for unknown, frozen or throttled accounts. Mail is sent after returning |
+| `request_password_reset(email)` | Always `Ok` for unknown, frozen or throttled accounts. The link goes to the account sign-in would choose (last used, then home, then any live membership), so a removed or suspended last tenant never strands it. The token's issue is audited (`user.reset_requested`, by the `sign-in` principal, never the token). Mail is sent after returning; a failed delivery withdraws the token (`user.reset_withdrawn`) |
 | `alert_new_device(token, device)` | The new-device sign-in email, sent in the background after the Web host records a staff sign-in that Base Session judged new. Claims the day's email and audits it before sending; a failure is logged and never reaches the sign-in. See [New-device sign-in email](../../base/session/README.md#new-device-sign-in-email) |
-| `reset_password(email, token, new)` | Consumes the one-time token, replaces the password, ends every session; a frozen account's link is as invalid as an unknown one |
+| `reset_password(email, token, new)` | Consumes the one-time token for the same account choice as the request, replaces the password, ends every session; a frozen account's link is as invalid as an unknown one |
 | `account(scope, user)` | One account of the tenant with its `AccountLinks`, version and timestamps; `admin.user.view` |
 | `link_person(scope, user, person)` / `unlink(scope, user)` | The account binder's commands; `admin.user.update`. See below |
 | `create_account` / `update_account` / `set_password` / `delete_account` | Account administration (`src/accounts.rs`): `admin.user.create`, `.update`, `.update`, `.delete`. See "Account administration" |
@@ -302,7 +302,7 @@ Authenticator entry uses the shared six-digit `CodeInput`: one native field, num
 
 Security rules:
 
-- **Secret at rest.** `user_two_factor.secret` is the AES-256-GCM envelope of `Settings::seal_owned` (`BILIBI_SETTINGS_KEY`), bound to `core/user.two_factor`, tenant and account (the enrollment row belongs to the sign-in identity). Without the key, setup refuses.
+- **Secret at rest.** `user_two_factor.secret` is the AES-256-GCM envelope of `Settings::seal_owned` (`BILIBI_SETTINGS_KEY`), bound to `core/user.two_factor`, the sign-in's home tenant and its identity id, so the one enrollment (a row per sign-in identity) opens in every tenant where the person has an account. Without the key, setup refuses.
 - **QR code.** The `otpauth://totp/<entry name>:<email>?secret=…&issuer=<entry name>&algorithm=SHA1&digits=6&period=30` URI is drawn on the server as one inline SVG path (`qrcode` crate, encoder only). It is sent only over the page's socket. No QR service, image URL or Bilibi URL carries it, and nothing logs it.
 - **Pending until proved.** A secret is unconfirmed until a current code arrives. Leaving setup keeps the pending row; the next setup replaces it.
 - **Verification.** Steps −1, 0 and +1 are each computed and compared in constant time (`subtle`). `last_step` only moves forward, by compare-and-set in the spending transaction, so a code is never accepted twice, even by two racing requests.
@@ -346,7 +346,9 @@ A subscriber's Cargo manifest names `bilibi-user` so the publisher is linked (AD
 Credential writes are audited as kind `user_identity` with marker values
 (`"password_hash":"replaced"`), never a hash; the audit layer redacts the field
 name as well. Reset and verification are attributed to the account that proved
-the token.
+the token; issuing and withdrawing a reset token (`user.reset_requested`,
+`user.reset_withdrawn`) to the `sign-in` principal, with `"reset_token":"issued"`
+or `"withdrawn"`, never the token or its digest.
 
 ## Sign-in attempt limits
 
@@ -361,7 +363,8 @@ Two limits, both operator settings (Settings › Session), with these defaults:
 - **One counter:** wrong passwords share `user_credential_attempts` with two-factor (migration `018-credential-attempts.sql`), kind `sign_in`, counted apart from kind `step_up` so guessing at the form never blocks the owner's own 2FA checks. One window/lock rule: `src/credential_attempts.rs`; sign-in side: the password step in `src/identity.rs` (`password_identity`) and the limit in `src/sign_in.rs`, before any second-factor challenge.
 - **A stranger cannot keep it locked:** a wrong password while locked is not counted and never extends the lock.
 - **Hidden from strangers:** a locked account gets the same answer as a wrong password, even with the right one; unknown addresses are not counted per account (the per-sender limit covers them). Over the per-sender limit the form says "Too many sign-in attempts", naming no account.
-- **Visible to the owner and administrators:** failures and locks are audited (`user.sign_in.failed`, `user.sign_in.locked`, actor the system principal `sign-in`); the owner is emailed a reset link when a lock starts; an administrator sees "Locked until" on the account page and can Unlock (`admin.user.update`, `user.sign_in.unlocked`).
+- **Visible to the owner and administrators:** failures and locks are audited (`user.sign_in.failed`, `user.sign_in.locked`, actor the system principal `sign-in`); the owner is emailed a reset link when the first lock of a run starts (later locks of the same run mail nothing, so a stranger cannot flood the inbox); an administrator sees "Locked until" on a staff account's page and can Unlock (`admin.user.update`, `user.sign_in.unlocked`); neither reaches a customer account.
+- **Same answer time:** a wrong password is counted after the form answers, so a real address answers no slower than an unknown one.
 - **Ends:** when the lock expires, after a password reset or an administrator's unlock. A successful sign-in forgets the count and the run of locks.
 
 ## Personal data
