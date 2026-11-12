@@ -253,4 +253,6 @@ Run `core.document.list`, `.get`, `.access`, `.duplicates`, `.create`, `.update`
 
 A sync ID is exact-match unique within the tenant when set. The Documents search matches it exactly as well as matching name text. Creating or updating a relation requires view access to the target; a related document's grant is still needed to open it. A revision may replace only an earlier revision of its own document. The metadata CSV includes the sync ID and document relation, while revision fields appear in get and on the record page.
 
+The CSV export writes every document that matches the list's search and filters, by name, up to 5,000. When more match, the file is saved as `documents-not-complete.csv` and its last line says how many were written and how many match, so a partial file is never mistaken for the whole list. Narrow the filters and export again for the rest. `examples/export-rows-proof.rs` checks this with more documents than one list page holds.
+
 The module owns `core_documents`, `core_document_revisions`, `core_document_links`, `core_document_access`, `core_document_marks`, `core_document_files` and `core_document_emails`; documents also hold `expires_on`, the reminder task id and `custom_fields`, and a grant its `expires_at`. Every query binds `tenant_id`. Applied migrations are immutable.
