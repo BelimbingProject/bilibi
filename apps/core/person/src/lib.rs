@@ -8,6 +8,7 @@ mod files;
 mod identity;
 mod identity_directory;
 mod model;
+mod portal;
 mod privacy;
 mod records;
 mod step_up;
@@ -30,6 +31,9 @@ pub use model::{
     validate as validate_person, CreatePreview, Custom, CustomFieldError, CustomFilter,
     DuplicateQuery, FieldError, Page, Person, PersonId, PersonInput, PersonKind, Search, Update,
     CUSTOM_FILTERS_MAX,
+};
+pub use portal::{
+    PortalChoice, PortalField, PortalPerson, PortalUpdate, PORTAL, PORTAL_EDITABLE_KEY,
 };
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
@@ -67,6 +71,8 @@ pub struct PersonService {
     db: Db,
     mutations: Arc<MutationBoundary>,
     authentication: Arc<Authentication>,
+    settings: Arc<bilibi_settings::Settings>,
+    picklists: Arc<bilibi_picklists::PickLists>,
 }
 impl PersonService {
     pub fn subscribe(&self) -> broadcast::Receiver<PersonChanged> {
@@ -228,7 +234,7 @@ inventory::submit! {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             custom::bind(services.get(bilibi_custom_fields::SERVICE)?)?;
             step_up::bind(services.get(bilibi_step_up::SERVICE)?)?;
-            let persons = Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")? });
+            let persons = Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")?, settings: services.get("base/settings.store")?, picklists: services.get(bilibi_picklists::SERVICE)? });
             agent_operations::bind(persons.clone())?;
             Ok(persons)
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {
