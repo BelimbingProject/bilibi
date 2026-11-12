@@ -802,14 +802,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("export {export}, {jobs} job(s)"),
             );
             // Queue ends the job before it runs (as when it refuses the
-            // requester): the request shows as failed, not preparing.
+            // requester). A running executor then tells Reports through the
+            // `base/queue.endings` hook, which fails the request: it shows
+            // as failed, not preparing. Nothing derives that from the job
+            // row, so the walkthrough runs an executor until it is told.
             client.execute("UPDATE base_queue_jobs SET state='cancelled', cancelled_at=now(), failure_code='actor_refused' WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?;
-            let listed = reports.exports(&manager, Some(rows_id)).await?;
-            let shown = listed.iter().find(|e| e.id == *export);
+            let executor = bilibi_queue::Executor::from_services(
+                &app.services,
+                bilibi_queue::Config::default(),
+            )?;
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            let workers = tokio::spawn(executor.run(stopped));
+            let mut shown = None;
+            for _ in 0..60 {
+                let listed = reports.exports(&manager, Some(rows_id)).await?;
+                shown = listed.into_iter().find(|e| e.id == *export);
+                if shown.as_ref().is_some_and(|e| e.state != "queued") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            stop.send(true)?;
+            workers.await??;
+            let told: Option<String> = client.query_one("SELECT ending FROM base_queue_jobs WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?.get(0);
+            checks.check(
+                "Queue tells Reports once that the job ended",
+                told.as_deref() == Some("told"),
+                format!("ending {told:?}"),
+            );
             checks.check(
                 "a request whose job ended unrun shows as failed with why",
-                shown.is_some_and(|e| e.state == "failed" && e.message.is_some()),
-                format!("{:?}", shown.map(|e| (e.state, e.message.clone()))),
+                shown
+                    .as_ref()
+                    .is_some_and(|e| e.state == "failed" && e.message.is_some()),
+                format!("{:?}", shown.map(|e| (e.state, e.message))),
             );
             // A file made under other access than the requester has now
             // is refused before any byte is read.
