@@ -20,8 +20,8 @@
 //! DATABASE_URL=… cargo run -p bilibi-document --example audit-coverage --locked`
 use bilibi_database::{pool, Db};
 use bilibi_document::{
-    Documents, Draft, MarkPatch, MergeSource, Patch, Reference, RevisionInput, ShareInput, Source,
-    Upload, SERVICE,
+    CustomerShareInput, Documents, Draft, MarkPatch, MergeSource, Patch, Recipient, Reference,
+    RevisionInput, ShareInput, Source, Upload, SERVICE,
 };
 use bilibi_media::{Media, ScanFacts, ScanFuture, Scanner, Verdict};
 use bilibi_queue::{Config, Executor};
@@ -571,6 +571,27 @@ async fn main() -> Result<()> {
         return Err("a reader with no grant got the file".into());
     }
     trail.finish("refused download", &[filed.id]).await?;
+
+    // Sharing with a portal customer (a company's business customers). The
+    // customer's own download and refusals are proved, with their audit, by
+    // `customer-share-walkthrough`; the share kept here goes with the delete.
+    let company = CustomerShareInput {
+        recipient: Recipient::Company(2),
+        until: None,
+    };
+    trail.start().await?;
+    let shared = write!(app, scope, "core.document.customer_share", |tx| documents
+        .share_customer(&mut tx, &scope, filed.id, &company)
+        .await?);
+    trail.finish("share with a customer", &[filed.id]).await?;
+    trail.start().await?;
+    write!(app, scope, "core.document.customer_unshare", |tx| documents
+        .unshare_customer(&mut tx, &scope, filed.id, shared.id)
+        .await?);
+    trail.finish("stop sharing", &[filed.id]).await?;
+    write!(app, scope, "core.document.customer_share", |tx| documents
+        .share_customer(&mut tx, &scope, filed.id, &company)
+        .await?);
 
     for (action, id) in [("delete (link)", copy.id), ("delete (file)", filed.id)] {
         let document = documents.get(&scope, id).await?;

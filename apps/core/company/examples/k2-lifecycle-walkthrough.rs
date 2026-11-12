@@ -45,6 +45,13 @@ async fn main() -> Result<(), Error> {
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let app = bilibi_web::App::new(db.clone(), "http://localhost:35572")?;
+    // The fixture's SQL grants only the company capabilities; the desk part
+    // below also creates a Person and links an account, which the fixture
+    // roles hold once the contributed role sets are reconciled.
+    app.services
+        .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
+        .reconcile()
+        .await?;
     let companies = app.services.get::<CompanyService>(SERVICE)?;
     let persons = app.services.get::<PersonService>(bilibi_person::SERVICE)?;
     let mutations = app

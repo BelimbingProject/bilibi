@@ -71,6 +71,7 @@ WALKTHROUGHS=(
   'base|bulk-import|apps/base/bulk_data|import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
+  'base|database-pool|apps/base/database|pool-walkthrough|none||-'
   'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
   'base|mail-inbound|apps/base/mail|inbound-walkthrough|none||@/parsed'
@@ -82,6 +83,7 @@ WALKTHROUGHS=(
   'base|perf|apps/base/perf|perf-walkthrough|migrate|BILIBI_DISPOSABLE_PERF_DEMO=yes|-;inspect'
   'base|queue|apps/base/queue|queue-walkthrough|migrate|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-;inspect'
   'base|queue-execution|apps/base/queue|execution-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|prepare;inspect'
+  'base|queue-retention|apps/base/queue|retention-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-'
   'base|schedule|apps/base/schedule|schedule-walkthrough|seed|BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes|dst;timing;review;prepare;coalesce;race 2026-06-03T10:00:00Z;overlap;execute 2026-06-04T12:00:10Z;inspect'
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
   'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1'
@@ -107,9 +109,11 @@ WALKTHROUGHS=(
   'core|company-owner-binders|apps/core/company|k15-owner-binders|seed|BILIBI_COMPANY_DEMO=disposable BILIBI_K15_DEMO_ROOT=@/files|-'
   'core|currency|apps/core/currency|currency-walkthrough|seed|BILIBI_CURRENCY_DEMO=disposable|-'
   'core|document-audit|apps/core/document|audit-coverage|fixture-seed|BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=@/documents|-'
+  'core|document-export-rows|apps/core/document|export-rows-proof|fixture-seed|BILIBI_DOCUMENT_EXPORT_PROOF=disposable|-'
   # A latency measurement: run small here, only to prove it still runs.
   'core|document-latency|apps/core/document|list-latency|fixture-seed|BILIBI_DOCUMENT_LATENCY=disposable BILIBI_DOCUMENT_LATENCY_DOCUMENTS=300 BILIBI_DOCUMENT_LATENCY_RUNS=3|-'
   'core|document-pending-merge|apps/core/document|pending-merge-proof|fixture-seed|BILIBI_DOCUMENT_MERGE_PROOF=disposable BILIBI_DOCUMENT_MERGE_ROOT=@/documents|-'
+  'core|document-customer-share|apps/core/document|customer-share-walkthrough|fixture-seed|BILIBI_DOCUMENT_CUSTOMER=disposable BILIBI_DOCUMENT_CUSTOMER_ROOT=@/documents|-'
   'core|document-scan-held|apps/core/document|scan-held-proof|fixture-seed|BILIBI_DOCUMENT_SCAN_PROOF=disposable BILIBI_DOCUMENT_SCAN_ROOT=@/documents|-'
   'core|geonames|apps/core/geonames|geonames-walkthrough|none|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
   'core|geonames-import|apps/core/geonames|geonames-import-walkthrough|migrate|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
@@ -120,6 +124,7 @@ WALKTHROUGHS=(
   'core|person-party-identities|apps/core/person|party-identities|none|BILIBI_PARTY_PROOF=disposable|-'
   'core|person-duplicates|apps/core/person|person-duplicates|none|BILIBI_PERSON_PROOF=disposable|-'
   'core|person-custom-fields|apps/core/person|person-custom-fields|migrate|BILIBI_PERSON_DEMO=disposable|-|serve'
+  'core|person-portal|apps/core/person|person-portal|migrate|BILIBI_PERSON_DEMO=disposable|-'
   'core|product|apps/core/product|product-walkthrough|seed|BILIBI_PRODUCT_WALKTHROUGH=disposable|-'
   'core|tenant-suspension|apps/core/tenant|tenant-suspension-walkthrough|none|BILIBI_TENANT_DEMO=disposable|-'
   'core|user-company-accounts|apps/core/user|company-accounts-walkthrough|migrate|BILIBI_COMPANY_ACCOUNTS_DEMO=disposable|-'
@@ -148,6 +153,7 @@ WALKTHROUGHS=(
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-summary|apps/web|g5-grid-summary|migrate|BILIBI_GRID_DEMO=disposable|-'
+  'web|live-wake|apps/web|live-wake-walkthrough|none|BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes|-'
   'web|reports|apps/web|r1-reports|migrate|BILIBI_GRID_DEMO=disposable|-'
   'web|seams|apps/web|p1-seams|migrate||-'
   'web|locale-datetime|apps/web|p4-locale-datetime|migrate|BILIBI_DISPOSABLE_P4_DEMO=yes|-'
@@ -197,14 +203,9 @@ NOT_RUN=(
 # run. Never add a line to get a pull request through: fix the walkthrough, or
 # the code it found broken.
 KNOWN_FAILURES=(
-  'affiliation|615'
-  'agent-access|616'
-  'company-lifecycle|617'
   'document-audit|618'
   'grid-catalog|621'
   'reports|622'
-  'seams|623'
-  'records|624'
 )
 
 if [[ -n ${WALKTHROUGH_EXTRA:-} ]]; then
