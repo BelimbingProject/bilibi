@@ -322,7 +322,10 @@ impl AuditCapture {
                 self.policy.apply(&change.kind, &change.old),
                 self.policy.apply(&change.kind, &change.new),
             );
-            let empty = |value: &Value| value.as_object().is_some_and(Map::is_empty);
+            // An owner reports "no record on this side" as JSON null or as
+            // `{}`; both are a create or a delete, never an update.
+            let empty =
+                |value: &Value| value.is_null() || value.as_object().is_some_and(Map::is_empty);
             let event = match (empty(&old_values), empty(&new_values)) {
                 (true, true) => continue,
                 (true, false) => "created",

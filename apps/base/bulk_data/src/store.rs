@@ -236,13 +236,26 @@ pub struct SavedMapping {
     pub version: i64,
 }
 
-/// The person's own run, optionally locked for an update.
+/// The person's own run with its counts, optionally locked for an update.
 pub(crate) async fn load(
     client: &impl GenericClient,
     scope: &Scope,
     id: i64,
     lock: bool,
 ) -> Result<Run> {
+    let mut run = row(client, scope, id, lock).await?;
+    count(client, scope.tenant(), std::slice::from_mut(&mut run)).await?;
+    Ok(run)
+}
+
+/// The person's own run, locked, without its counts. The import job takes
+/// this once per row: `count` reads every recorded row of the run, so
+/// counting here would make an import quadratic in its rows.
+pub(crate) async fn lock(client: &impl GenericClient, scope: &Scope, id: i64) -> Result<Run> {
+    row(client, scope, id, true).await
+}
+
+async fn row(client: &impl GenericClient, scope: &Scope, id: i64, lock: bool) -> Result<Run> {
     let company = scope.current_company().ok_or(Error::Forbidden)?.get();
     let sql = format!(
         "SELECT {COLUMNS} FROM base_bulk_data_runs WHERE tenant_id=$1 AND id=$2 AND started_by=$3 AND company_id=$4{}",
@@ -252,9 +265,7 @@ pub(crate) async fn load(
         .query_opt(&sql, &[&scope.tenant(), &id, &scope.user(), &company])
         .await?
         .ok_or(Error::NotFound)?;
-    let mut run = Run::from_row(&row)?;
-    count(client, scope.tenant(), std::slice::from_mut(&mut run)).await?;
-    Ok(run)
+    Run::from_row(&row)
 }
 
 /// Fills each run's counts and whether its job stopped short.

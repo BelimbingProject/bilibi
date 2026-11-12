@@ -292,6 +292,8 @@ impl Detail {
         // The tenant's own fields, edited in place through
         // `core.person.update` (`save_custom_field`).
         let definitions = super::custom::active(&self.pages, scope).await?;
+        // Resolved once for every date field, not once per field.
+        let display = self.pages.display(scope).await?;
         for definition in &definitions {
             let name = crate::custom::name(&definition.key);
             let value = super::custom::text(person.custom.get(&definition.key));
@@ -308,7 +310,8 @@ impl Detail {
             field = field.allow_empty();
             items.push(Fact {
                 title: &definition.label,
-                value: super::custom::fact(&self.pages, scope, definition, &value, field).await?,
+                value: super::custom::fact(&self.pages, scope, &display, definition, &value, field)
+                    .await?,
                 ..Fact::default()
             });
         }

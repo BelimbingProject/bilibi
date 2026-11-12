@@ -37,8 +37,12 @@ pub const SERVICE: &str = "core/document.pages";
 pub const FILES: &str = "core/document.files";
 /// The list's path.
 pub const INDEX: &str = "/documents";
-/// The most rows one CSV export writes.
-const EXPORT_ROWS: i64 = 5_000;
+/// The most rows one CSV export writes. A longer list ends with a line that
+/// says so and is saved under a name that says so.
+const EXPORT_ROWS: usize = 5_000;
+/// The rows the export asks `Documents::list` for at a time: the largest
+/// page it returns.
+const EXPORT_PAGE: i64 = 300;
 
 /// A document's record page.
 pub fn path(id: i64) -> String {
@@ -413,15 +417,38 @@ fn csv_row(cells: &[String]) -> String {
 pub struct Files(pub Arc<Documents>);
 impl Files {
     async fn export(&self, scope: &Scope, query: &HashMap<String, String>) -> Result<FileBody> {
-        let filter = Filter {
-            sort: Sort::Name,
-            descending: false,
-            page: 1,
-            page_size: EXPORT_ROWS,
-            ..filter_of(query)
-        };
-        let page = self.0.list(scope, &filter).await?;
-        let latest = self.0.latest_revisions(scope, &page.entries).await?;
+        // `list` returns one bounded page, so the export reads page after
+        // page until it holds every match or `EXPORT_ROWS` of them.
+        let mut entries: Vec<Document> = Vec::new();
+        let mut latest: HashMap<i64, crate::Revision> = HashMap::new();
+        let mut due: HashMap<i64, std::time::SystemTime> = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0;
+        for number in 1.. {
+            let filter = Filter {
+                sort: Sort::Name,
+                descending: false,
+                page: number,
+                page_size: EXPORT_PAGE,
+                ..filter_of(query)
+            };
+            let mut page = self.0.list(scope, &filter).await?;
+            total = usize::try_from(page.total).unwrap_or(0);
+            if page.entries.is_empty() {
+                break;
+            }
+            // A document filed between two reads can shift a row onto the
+            // next page: keep its first appearance only.
+            page.entries.retain(|d| seen.insert(d.id));
+            page.entries
+                .truncate(EXPORT_ROWS.saturating_sub(entries.len()));
+            latest.extend(self.0.latest_revisions(scope, &page.entries).await?);
+            due.extend(page.retention_due_at);
+            entries.extend(page.entries);
+            if entries.len() >= EXPORT_ROWS.min(total) {
+                break;
+            }
+        }
         let mut csv = csv_row(
             &[
                 "id",
@@ -446,18 +473,24 @@ impl Files {
             .map(String::from),
         );
         let text = |v: &Option<String>| v.clone().unwrap_or_default();
-        for d in &page.entries {
-            csv.push_str(&csv_row(&row(
-                d,
-                text,
-                latest.get(&d.id),
-                page.retention_due_at.get(&d.id),
-            )));
+        for d in &entries {
+            csv.push_str(&csv_row(&row(d, text, latest.get(&d.id), due.get(&d.id))));
+        }
+        let partial = total > entries.len();
+        if partial {
+            csv.push_str(&csv_row(&[format!(
+                "Not complete: the first {} of {total} documents. Narrow the filters and export again for the rest.",
+                entries.len()
+            )]));
         }
         Ok(FileBody::attachment(
             csv.into_bytes(),
             "text/csv",
-            "documents.csv",
+            if partial {
+                "documents-not-complete.csv"
+            } else {
+                "documents.csv"
+            },
         ))
     }
 }

@@ -455,7 +455,7 @@ fn contact_properties(properties: &mut serde_json::Map<String, Value>) {
         "person_id".into(),
         json!({"type":"integer","minimum":1,"description":"A Core person. Give this or address."}),
     );
-    properties.insert("address".into(), json!({"type":"string","maxLength":254,"description":"An email address, a phone number or another handle, normalised before use. Give this or person_id."}));
+    properties.insert("address".into(), json!({"type":"string","maxLength":254,"description":"An email address, a phone number with its country code (starting with + or 00) or another handle, normalised before use. Give this or person_id."}));
 }
 fn person_schema() -> Value {
     json!({"type":"object","required":["person_id"],"properties":{"person_id":{"type":"integer","minimum":1}}})

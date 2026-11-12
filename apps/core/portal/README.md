@@ -9,7 +9,7 @@ A tenant's customers sign in to its portal (`/portal/...`), never to the staff a
 | Facade | `PortalService`, service `core/portal.access` |
 | Staff page | `/customer-access` (`admin.customer-access.view`; writes need `admin.customer-access.manage`) |
 | Portal pages | `/portal` and `/portal/account` (`portal.account.view`) |
-| Portal role | `portal_customer`, given to every customer an invitation admits |
+| Portal role | `portal_customer`, given to every customer an invitation admits: `portal.account.view` and Core Person's `core.person.portal.manage` (the customer's own contact details, [Person](../person/README.md#the-customers-own-details-on-the-portal)) |
 | Settings | `customer_portal.invitation_days` (tenant, default 7), the installation-wide `customer_portal.registration_*` lifetime and abuse limits, and the company retention classes `core/portal.registration_requests` and `core/portal.invitations` |
 | Events | `core/portal.registration_approved` (see Events) |
 | Tables | `customer_portal_sites`, `customer_invitations`, `customer_registrations`, `customer_registration_limits`; customer accounts stay in Core User's `users` |
