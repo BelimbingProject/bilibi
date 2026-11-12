@@ -2,6 +2,7 @@
 //! page per socket.
 mod agent_targets;
 mod api;
+mod api_gate;
 mod auth;
 mod composition;
 mod create_owner;

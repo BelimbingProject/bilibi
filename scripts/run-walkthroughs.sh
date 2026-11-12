@@ -164,6 +164,7 @@ WALKTHROUGHS=(
   'web|role-assignment-bounds|apps/web|role-assignment-bounds|seed|BILIBI_ASSIGNMENT_PROOF=disposable|-'
   'web|system-principal-grants|apps/web|system-principal-grants|seed-app|BILIBI_PRINCIPAL_PROOF=disposable|-'
   'web|visitor|apps/web|visitor-walkthrough|migrate|BILIBI_DISPOSABLE_VISITOR_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
+  'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'
 )
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
@@ -203,9 +204,6 @@ NOT_RUN=(
 # run. Never add a line to get a pull request through: fix the walkthrough, or
 # the code it found broken.
 KNOWN_FAILURES=(
-  'document-audit|618'
-  'grid-catalog|621'
-  'reports|622'
 )
 
 if [[ -n ${WALKTHROUGH_EXTRA:-} ]]; then

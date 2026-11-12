@@ -255,8 +255,10 @@ impl Catalog {
     /// cross-catalog check here makes a new route fail boot before Web can log
     /// or expose its `{token}` segment without the matching privacy policy.
     fn validate_credential_routes(&self) -> Result<()> {
-        let credentials: BTreeMap<_, _> = self.entries[CREDENTIAL_PATHS]
-            .iter()
+        // An explicit catalog may leave out any of these points (`build`), so
+        // an absent one reads as empty instead of indexing into a panic.
+        let of = |consumer: &str| self.entries.get(consumer).into_iter().flatten();
+        let credentials: BTreeMap<_, _> = of(CREDENTIAL_PATHS)
             .map(|entry| Ok((entry.get::<CredentialPath>()?.path, entry)))
             .collect::<Result<_>>()?;
         let check = |entry: &Entry, path: &str| -> Result<()> {
@@ -281,16 +283,16 @@ impl Catalog {
             }
             Ok(())
         };
-        for entry in &self.entries[ROUTES] {
+        for entry in of(ROUTES) {
             check(entry, entry.get::<Route>()?.path)?;
         }
-        for entry in &self.entries[DOWNLOADS] {
+        for entry in of(DOWNLOADS) {
             check(entry, entry.get::<Download>()?.path)?;
         }
-        for entry in &self.entries[MOVED] {
+        for entry in of(MOVED) {
             check(entry, entry.get::<Moved>()?.from)?;
         }
-        for entry in &self.entries[PUBLIC_ENDPOINTS] {
+        for entry in of(PUBLIC_ENDPOINTS) {
             check(entry, entry.get::<PublicEndpoint>()?.path)?;
         }
         Ok(())
