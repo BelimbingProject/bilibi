@@ -25,8 +25,12 @@ business commit: there is no best-effort mode. Boot fails when nothing is bound.
 Before refusing, the capture writes a diagnostics row on another connection with
 identity and error type only, never values or messages.
 
-A `Change` becomes `created`, `updated` or `deleted` from its old/new objects; a
-change with two empty objects writes nothing. Bulk writes arrive as one slice
+A `Change` becomes `created`, `updated` or `deleted` from its old/new objects.
+An empty side is `{}` or JSON `null`: an empty old side is a create, an empty new
+side a delete, and a change with two empty sides writes nothing. Rows are
+append-only and `event` is inside the hash chain, so a wrong event can never be
+corrected afterwards; `person-walkthrough` (`core/person`) checks that a create
+reported with `null` is recorded as `created`. Bulk writes arrive as one slice
 through `Capture::mutations` and are inserted in chunks of 1,000 rows per
 statement. Values are stored in full, with NUL stored as `␀`. Redaction is by
 field name on every captured record (`GLOBAL_REDACTIONS`: `password`,
@@ -74,6 +78,15 @@ outcome; result rows never reach the record, and a command whose record cannot
 be written returns no answer. Database error details are returned to the operator
 but the recorded failure/refusal message is generic: PostgreSQL messages may
 quote parameter values or data raised by a function.
+
+Each command runs on a connection taken out of the pool and closed when it
+ends. A read-only transaction still allows functions with session effects (a
+session advisory lock such as `pg_advisory_lock`, a session setting through
+`set_config`); closing the connection ends them, so one command cannot hold the
+audit chain's commit lock or change the session of the next pooled caller.
+Known gap: the console still runs as the application's database role, so
+functions such as `pg_terminate_backend` are not refused; a SELECT-only role
+for the console is a later change.
 
 The table guard keeps the `sessions` table out of the console. It refuses a query that names it, plain or double-quoted, with or without a schema; a `U&"..."` identifier, which it does not decode; and functions that run SQL text or print whole tables (`query_to_xml` and the other `*_to_xml*` functions, `ts_stat`, `ts_rewrite`, `dblink*`). Like the other text guards it is advisory: the session token is safe because `base/session` stores only its digest (`apps/base/session/README.md#token-at-rest`). A column alias named `sessions` is refused too; rename it.
 

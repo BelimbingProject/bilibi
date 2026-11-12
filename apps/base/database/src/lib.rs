@@ -8,9 +8,10 @@ pub use transaction::{
 };
 
 use bilibi_module_registry::Module;
-use deadpool_postgres::{Manager, Pool};
+use deadpool_postgres::{Manager, Pool, PoolError, Runtime, TimeoutType};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::time::Duration;
 use tokio_postgres::NoTls;
 
 pub use deadpool_postgres::Pool as Db;
@@ -125,6 +126,14 @@ impl Error {
             _ => None,
         }
     }
+    /// Whether the pool stayed empty for its whole wait ([`PoolLimits`]): the
+    /// process is out of connections, the database itself may be healthy.
+    pub fn is_pool_exhausted(&self) -> bool {
+        matches!(
+            self,
+            Self::Pool(traced) if matches!(traced.error, PoolError::Timeout(TimeoutType::Wait))
+        )
+    }
     /// Whether PostgreSQL aborted a bounded lock wait or detected a deadlock,
     /// so the outer operation can roll back and offer a retry.
     pub fn is_retryable_lock_contention(&self) -> bool {
@@ -140,10 +149,61 @@ impl Error {
     }
 }
 
+/// How many connections one process may hold, and how long a caller waits
+/// for one. Every part of a process (pages, live sockets, Queue slots,
+/// schedulers) shares the one pool, so both are bounded: a caller that finds
+/// the pool empty for `wait` gets [`Error::Pool`] (a 503 for a page, a retry
+/// for a job) instead of waiting for ever.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PoolLimits {
+    pub size: usize,
+    pub wait: Duration,
+}
+impl PoolLimits {
+    pub const SIZE_ENV: &'static str = "DATABASE_POOL_SIZE";
+    pub const WAIT_ENV: &'static str = "DATABASE_POOL_WAIT_SECONDS";
+    /// The operator's limits: `DATABASE_POOL_SIZE` (1 to 1000, default 16)
+    /// and `DATABASE_POOL_WAIT_SECONDS` (1 to 300, default 5). They are
+    /// environment values, not settings: the pool exists before a setting
+    /// can be read. A value outside its range refuses the start.
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            size: env_number(Self::SIZE_ENV, 16, 1..=1000)? as usize,
+            wait: Duration::from_secs(env_number(Self::WAIT_ENV, 5, 1..=300)?),
+        })
+    }
+}
+fn env_number(name: &str, default: u64, range: std::ops::RangeInclusive<u64>) -> Result<u64> {
+    let value: Option<u64> = match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => return Ok(default),
+        Ok(value) if value.trim().is_empty() => return Ok(default),
+        Ok(value) => value.trim().parse().ok(),
+        Err(_) => None,
+    };
+    value.filter(|value| range.contains(value)).ok_or_else(|| {
+        eprintln!(
+            "{name} must be a whole number from {} to {}.",
+            range.start(),
+            range.end()
+        );
+        Error::Invalid
+    })
+}
+
+/// The process pool, with the operator's [`PoolLimits::from_env`].
 pub fn pool(url: &str) -> Result<Db> {
+    pool_with(url, PoolLimits::from_env()?)
+}
+/// A pool with explicit limits, for a private host or a walkthrough.
+pub fn pool_with(url: &str, limits: PoolLimits) -> Result<Db> {
+    if limits.size == 0 || limits.wait.is_zero() {
+        return Err(Error::Invalid);
+    }
     let config = url.parse().map_err(|_| Error::Invalid)?;
     Pool::builder(Manager::new(config, NoTls))
-        .max_size(16)
+        .max_size(limits.size)
+        .wait_timeout(Some(limits.wait))
+        .runtime(Runtime::Tokio1)
         .build()
         .map_err(|_| Error::Internal)
 }

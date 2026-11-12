@@ -722,16 +722,26 @@ async fn finish(
         guard.release().await?;
         return Ok(Finish::Done);
     }
+    // A hold on the person keeps their earlier exports and what their
+    // requests recorded; the owed cleanup forgets them once it is released.
+    // The guard stays until the completion commits.
+    let mut holds = None;
+    let mut forget = false;
     if request.kind == RequestKind::Erasure {
-        // The person's earlier exports go before their requests forget them,
-        // and before the certificate is filed, so a failing deletion never
-        // files another retained certificate on each retry; deleting an
-        // already deleted one is a no-op, so a retry is safe.
         let grant =
             privacy
                 .issuer
                 .erasure(scope.tenant(), Cause::Request(id), Some(request.person));
-        documents::delete_exports(privacy, &mut client, scope, &grant, request.person).await?;
+        let session = Holds::acquire(scope, &grant).await?;
+        forget = session.person_hold(&grant).await?.is_none();
+        // The person's earlier exports go before their requests forget them,
+        // and before the certificate is filed, so a failing deletion never
+        // files another retained certificate on each retry; deleting an
+        // already deleted one is a no-op, so a retry is safe.
+        if forget {
+            documents::delete_exports(privacy, &mut client, scope, &grant, request.person).await?;
+        }
+        holds = Some(session);
     }
     let artifact = match request.kind {
         RequestKind::Access | RequestKind::Portability => match &request.export_artifact {
@@ -766,7 +776,7 @@ async fn finish(
             return Ok(Finish::Done);
         }
     }
-    complete(&mut tx, scope, &request, artifact).await?;
+    complete(&mut tx, scope, &request, artifact, forget).await?;
     privacy
         .engine
         .transition_in(
@@ -779,6 +789,9 @@ async fn finish(
         )
         .await?;
     tx.commit().await?;
+    if let Some(holds) = holds {
+        holds.release().await?;
+    }
     guard.release().await?;
     Ok(Finish::Done)
 }
@@ -886,12 +899,14 @@ async fn restart_export(
 }
 
 /// Files the artifact on the request and drops its staged exports; for an
-/// erasure, every request about the person forgets its personal text.
+/// erasure, every request about the person forgets its personal text unless
+/// `forget` is false (a hold on the person), which leaves the cleanup owed.
 async fn complete(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
     request: &RequestView,
     artifact: String,
+    forget: bool,
 ) -> Result<()> {
     let (tenant, id, person) = (scope.tenant(), request.id, request.person);
     let before = requests::evidence(request);
@@ -933,8 +948,10 @@ async fn complete(
                 });
             }
             if erasure {
-                changes.extend(requests::forget_person(sql, tenant, person).await?);
-                changes.extend(forget_exports(sql, tenant, person).await?);
+                if forget {
+                    changes.extend(requests::forget_person(sql, tenant, person).await?);
+                    changes.extend(forget_exports(sql, tenant, person).await?);
+                }
                 // A hold or a retention date kept records, or a store deferred:
                 // the cleanup they owe is persisted and retried by the daily
                 // retention run, from the earliest date one ends (at once
@@ -946,10 +963,10 @@ async fn complete(
                             "INSERT INTO base_privacy_resumptions(tenant_id,request_id,person_id,not_before) \
                              SELECT $1,$2,$3,CASE WHEN bool_or(o.after IS NULL) THEN NULL ELSE min(o.after) END \
                              FROM (SELECT base_privacy_owed_after(s.result) AS after FROM base_privacy_request_stores s \
-                               WHERE s.tenant_id=$1 AND s.request_id=$2 AND {OWING}) o HAVING count(*) > 0 \
+                               WHERE s.tenant_id=$1 AND s.request_id=$2 AND {OWING}) o HAVING count(*) > 0 OR NOT $4 \
                              ON CONFLICT (request_id) DO NOTHING RETURNING id"
                         ),
-                        &[&tenant, &id, &person.get()],
+                        &[&tenant, &id, &person.get(), &forget],
                     )
                     .await?
                 {
@@ -1146,7 +1163,17 @@ impl Privacy {
         // As at the request's completion: what an access request disclosed
         // or staged while records were kept goes too. The person's exports
         // are deleted and every request about them forgets its personal text
-        // (a staged export is then read again).
+        // (a staged export is then read again), unless a hold on the person
+        // still keeps them: the cleanup then stays owed.
+        let holds = Holds::acquire(scope, &grant).await?;
+        if let Some(hold) = holds.person_hold(&grant).await? {
+            holds.release().await?;
+            let mut answer = answer.into_inner().map_err(|_| Error::Internal)?;
+            answer
+                .kept
+                .push(Kept::held(requests::REQUEST_KIND, id, hold));
+            return Ok(answer);
+        }
         documents::delete_exports(self, client, scope, &grant, request.person).await?;
         let mut tx = self
             .boundary
@@ -1163,6 +1190,7 @@ impl Privacy {
         })
         .await?;
         tx.commit().await?;
+        holds.release().await?;
         answer.into_inner().map_err(|_| Error::Internal)
     }
 }

@@ -98,7 +98,9 @@ Purposes come from the `core.consent.purposes` pick-list. The starting values ar
 
 ## Address matching
 
-Email addresses are lower-case. Phone numbers use international `+` form. SMS and voice refuse a national number without a country code. Other handles are trimmed.
+Email addresses are lower-case. Phone numbers use international form: `+60 12-345 6789` and `0060123456789` are both stored as `+60123456789`. Other handles are trimmed.
+
+Every channel refuses a number without `+` or `00`, such as `012-345 6789`, `(212) 555-1234` or `60123456789`. No country is guessed, as in Core Person. A stop stored as typed would be a key that no later check asks about, so the person would be contacted again.
 
 An address-only question does not infer a person. Pass `person_id` when the sender knows the person.
 

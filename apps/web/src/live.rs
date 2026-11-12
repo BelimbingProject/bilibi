@@ -20,7 +20,11 @@ use bilibi_ui::upload::{ClientEntry, Registration, UploadError, CHUNK_SIZE, MAX_
 use bilibi_ui::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{sync::mpsc, task::JoinSet};
 
 type State<C> = Box<dyn LiveState<C, Error>>;
@@ -410,6 +414,48 @@ struct Wake {
     target: String,
     change: Option<Change>,
 }
+/// Whom a socket's subscriptions are for. A change for another tenant, or for
+/// another person of this one, is dropped where it is heard, before it becomes
+/// a [`Wake`]: a wake costs a session guard and a capability check, and one
+/// tenant's notifications must not spend them on every other open tab.
+#[derive(Clone, Copy)]
+struct Audience {
+    tenant: i64,
+    user: i64,
+}
+impl Audience {
+    fn of(scope: &Scope) -> Self {
+        Self {
+            tenant: scope.tenant(),
+            user: scope.user(),
+        }
+    }
+    fn hears(self, change: &Change) -> bool {
+        change.tenant == self.tenant && change.user.is_none_or(|user| user == self.user)
+    }
+}
+/// The next wake to act on, with every wake already waiting merged into one
+/// per mounted target (and generation), so a burst refreshes a panel once and
+/// the subscriptions behind it are not held up by a full queue. `None` when
+/// the socket's senders are gone. Cancel-safe: nothing is taken from `wakes`
+/// that is not kept in `waiting`.
+async fn next_wake(waiting: &mut VecDeque<Wake>, wakes: &mut mpsc::Receiver<Wake>) -> Option<Wake> {
+    if waiting.is_empty() {
+        waiting.push_back(wakes.recv().await?);
+    }
+    while let Ok(wake) = wakes.try_recv() {
+        let same = waiting
+            .iter_mut()
+            .find(|held| held.generation == wake.generation && held.target == wake.target);
+        match same {
+            // Missed events (`None`) concern anyone, so they win the merge.
+            Some(held) if wake.change.is_none() => held.change = None,
+            Some(_) => {}
+            None => waiting.push_back(wake),
+        }
+    }
+    waiting.pop_front()
+}
 /// The page-write permit of one live event (ADR 01, `base/agent_api`
 /// `page`): while the owner handles it, a business write its page writes
 /// declaration does not cover is refused. Refresh and params write nothing.
@@ -460,6 +506,7 @@ impl<C: 'static> Mounted<C> {
         generation: u64,
         target: &str,
         sender: &mpsc::Sender<Wake>,
+        audience: Audience,
     ) -> Self {
         let mut jobs = JoinSet::new();
         for mut subscription in state.subscriptions() {
@@ -468,7 +515,9 @@ impl<C: 'static> Mounted<C> {
             jobs.spawn(async move {
                 loop {
                     let change = match subscription.receiver.recv().await {
+                        Ok(change) if !audience.hears(&change) => continue,
                         Ok(change) => Some(change),
+                        // Missed events may have been this socket's.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
@@ -642,6 +691,7 @@ impl<S: Side> Session<S> {
             self.generation,
             "page",
             &self.sender,
+            Audience::of(S::scope(&scope)),
         ));
         self.path = path;
         self.route = bound.route.path.to_owned();
@@ -727,6 +777,7 @@ impl<S: Side> Session<S> {
                 self.generation,
                 &slot.id,
                 &self.sender,
+                Audience::of(S::scope(scope)),
             );
             let spec = PanelSpec {
                 id: slot.id.clone(),
@@ -941,6 +992,7 @@ impl<S: Side> Session<S> {
                         self.generation,
                         &id,
                         &self.sender,
+                        Audience::of(S::scope(scope)),
                     );
                     self.panels.insert(id.clone(), Panel { spec, mounted });
                 }
@@ -1439,6 +1491,7 @@ pub async fn run<S: Side>(
     let _slot = slot;
     let mut refused = 0u32;
     let (sender, mut wakes) = mpsc::channel(64);
+    let mut waiting = VecDeque::new();
     let mut session = Session::<S> {
         identity,
         stale: false,
@@ -1534,7 +1587,7 @@ pub async fn run<S: Side>(
                 },
                 _ => break,
             },
-            wake = wakes.recv() => {
+            wake = next_wake(&mut waiting, &mut wakes) => {
                 let Some(wake) = wake else {break;};
                 let mounted = if wake.target == "page" { session.page.as_ref() } else { session.shell.get(&wake.target).or_else(|| session.panels.get(&wake.target)).map(|p| &p.mounted) };
                 if !mounted.is_some_and(|m| m.generation == wake.generation) {continue;}

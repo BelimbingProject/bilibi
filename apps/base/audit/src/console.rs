@@ -127,7 +127,11 @@ pub async fn execute_readonly_with_options(
     info: Option<&RequestInfo>,
 ) -> Result<ConsoleAnswer> {
     let execution = async {
-        let mut client = db.get().await?;
+        // The command runs on a connection taken out of the pool and closed
+        // when it ends: what a read-only transaction still allows to outlive
+        // it (a session advisory lock, a session setting) dies with that
+        // connection instead of reaching the next pooled caller.
+        let mut client = deadpool_postgres::Object::take(db.get().await?);
         run(&mut client, scope, &request, options).await
     }
     .await;
@@ -284,7 +288,8 @@ async fn run(
             Some(result),
         )),
         Err(error) => match error.as_db_error() {
-            // Text guards are advisory; PostgreSQL's read-only mode is the boundary.
+            // Text guards are advisory; PostgreSQL's read-only mode is the
+            // boundary for writes, and the closed connection for session state.
             Some(db) if *db.code() == SqlState::READ_ONLY_SQL_TRANSACTION => {
                 refused(Guard::ReadOnlyTransaction, db.message())
             }

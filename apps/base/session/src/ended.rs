@@ -9,7 +9,10 @@
 //! tenant (an operator ending another tenant's session) or may not enqueue work
 //! (an impersonated write) marks the row ended instead; the expiry sweep
 //! deletes it and records the notice in that tenant.
-use crate::{OwnTermination, Sessions, Terminated, Termination};
+use crate::{
+    CredentialRevocationReason, OwnTermination, RevocationAccount, Sessions, Terminated,
+    Termination,
+};
 use bilibi_database::{Change, Context, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_module_registry::RegistryError;
 use bilibi_tenancy::{AccountKind, Scope};
@@ -483,6 +486,72 @@ impl Sessions {
         self.announce_after(tx, ids.clone());
         Ok(ids)
     }
+    /// [`Sessions::revoke`] for a credential every account of one sign-in
+    /// shares (a password change, reset or administrator set). `elsewhere` is
+    /// the sign-in's accounts in other tenants as `(tenant, user)`, read by
+    /// the credential owner in this transaction. Their delegated credentials
+    /// and agent step-up windows end here as well. Their sessions are marked
+    /// ended, since this transaction records notices only in its own tenant;
+    /// the sweep records each tenant's notice. `keep` is the cookie token of
+    /// the session to leave open, as for [`Sessions::revoke`]. Returns every
+    /// ended id.
+    pub async fn revoke_sign_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        user: i64,
+        elsewhere: &[(i64, i64)],
+        keep: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let current = tx.context().tenant;
+        if elsewhere
+            .iter()
+            .any(|&(tenant, other)| tenant <= 0 || other <= 0 || tenant == current)
+        {
+            return Err(Error::Invalid);
+        }
+        let mut ended = self.revoke(tx, user, keep).await?;
+        if elsewhere.is_empty() {
+            return Ok(ended);
+        }
+        let reason = revocation_reason(tx);
+        let accounts: Vec<RevocationAccount> = elsewhere
+            .iter()
+            .map(|&(tenant, user)| RevocationAccount {
+                tenant,
+                user,
+                reason,
+            })
+            .collect();
+        let count = accounts.len();
+        let revokers = self.credential_revokers()?;
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let mut changes = Vec::new();
+                for account in accounts {
+                    for revoker in &revokers {
+                        changes.extend(revoker.revoke(sql, account).await?);
+                    }
+                }
+                // Names how many, never which tenants: this audit row is the
+                // current tenant's.
+                changes.push(Change {
+                    kind: "credential_revocation".into(),
+                    id: user,
+                    old: json!({}),
+                    new: json!({"event": "sign_in_reset", "other_accounts": count}),
+                });
+                Ok(((), changes))
+            })
+        })
+        .await?;
+        for &(tenant, other) in elsewhere {
+            ended.extend(
+                self.end_user_sessions(tx, tenant, other, None, Ending::Terminated)
+                    .await?,
+            );
+        }
+        Ok(ended)
+    }
     /// Ends a user's sessions inside the caller's own write, except the one
     /// named: a credential change keeps the session that made it. A session
     /// the user holds as an impersonating operator ends too. Returns the
@@ -492,11 +561,11 @@ impl Sessions {
     pub(crate) async fn end_user_sessions(
         &self,
         tx: &mut MutationTransaction<'_>,
+        tenant: i64,
         user: i64,
         except: Option<&str>,
         reason: Ending,
     ) -> Result<Vec<String>> {
-        let tenant = tx.context().tenant;
         if tenant <= 0
             || user <= 0
             || except.is_some_and(str::is_empty)
@@ -647,5 +716,17 @@ impl Sessions {
         self.announce_after(&mut tx, ids);
         tx.commit().await?;
         Ok(count)
+    }
+}
+
+/// Why delegated credentials end, from the owning transaction's action;
+/// an unknown action is the neutral account change.
+pub(crate) fn revocation_reason(tx: &MutationTransaction<'_>) -> CredentialRevocationReason {
+    match tx.context().action.as_str() {
+        "user.change_password" => CredentialRevocationReason::PasswordChanged,
+        "user.reset_password" => CredentialRevocationReason::PasswordReset,
+        "user.sso.backchannel_logout" => CredentialRevocationReason::SignedOut,
+        "user.password_reset" => CredentialRevocationReason::AdminAction,
+        _ => CredentialRevocationReason::AccountChanged,
     }
 }

@@ -1,7 +1,7 @@
 //! Platform sign-ins, owning account credentials while
 //! keeping Bilibi's tenant account as the actor. A staff identity may later
 //! own several tenant memberships; a customer identity remains tenant-bound.
-use bilibi_database::{Change, Error, Result};
+use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::AccountKind;
 use serde_json::json;
 use tokio_postgres::GenericClient;
@@ -77,4 +77,48 @@ pub(crate) async fn identity_and_home(
     .await?
     .map(|row| (row.get(0), row.get(1)))
     .ok_or(Error::NotFound)
+}
+
+/// Ends what the sign-in's shared password let in, in every tenant: the
+/// account's own sessions except the one the cookie token `keep` opens, and the sign-in's accounts in other
+/// tenants with their pending sign-ins, sessions and AI connections. Called in
+/// the password change, reset and administrator set transactions; the caller
+/// announces the returned session ids after its commit.
+pub(crate) async fn end_everywhere(
+    sessions: &bilibi_session::Sessions,
+    tx: &mut MutationTransaction<'_>,
+    identity: i64,
+    user: i64,
+    keep: Option<&str>,
+) -> Result<Vec<String>> {
+    let tenant = tx.context().tenant;
+    let elsewhere: Vec<(i64, i64)> = tx
+        .sql()
+        .query(
+            "SELECT tenant_id,id FROM users WHERE identity_id=$1 AND deleted_at IS NULL AND NOT (tenant_id=$2 AND id=$3) ORDER BY tenant_id,id",
+            &[&identity, &tenant, &user],
+        )
+        .await?
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    if !elsewhere.is_empty() {
+        let accounts = elsewhere.clone();
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let mut changes = vec![Change {
+                    kind: "user_identity".into(),
+                    id: identity,
+                    old: json!({}),
+                    new: json!({"other_accounts_signed_out": accounts.len()}),
+                }];
+                for (tenant, user) in accounts {
+                    changes.extend(crate::sign_in::revoke(sql, tenant, user).await?);
+                }
+                Ok(((), changes))
+            })
+        })
+        .await?;
+    }
+    sessions.revoke_sign_in(tx, user, &elsewhere, keep).await
 }

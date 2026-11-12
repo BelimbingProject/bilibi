@@ -707,8 +707,10 @@ impl Executor {
                 })
                 .await
         });
-        let mut heartbeat =
-            tokio::time::interval(Duration::from_secs(self.config.lease_seconds as u64 / 3));
+        let lease = Duration::from_secs(self.config.lease_seconds as u64);
+        let beat = lease / 3;
+        let mut heartbeat = tokio::time::interval(beat);
+        let mut renewed_at = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(self.config.max_runtime);
         tokio::pin!(deadline);
         let outcome = loop {
@@ -716,11 +718,20 @@ impl Executor {
                 result = child.join_next() => break match result {Some(Ok(outcome))=>outcome,_=>Outcome::Retry("worker_panicked")},
                 _ = &mut deadline => break Outcome::Retry("worker_timed_out"),
                 _ = heartbeat.tick() => {
-                    let renewed = tokio::time::timeout(
-                        Duration::from_secs(self.config.lease_seconds as u64 / 3),
+                    let asked = tokio::time::Instant::now();
+                    match tokio::time::timeout(
+                        beat,
                         store::heartbeat(&self.db,id,&token,self.config.lease_seconds),
-                    ).await.map_err(|_|Error::Internal)??;
-                    if !renewed { return Ok(()); }
+                    ).await {
+                        Ok(Ok(true)) => renewed_at = asked,
+                        Ok(Ok(false)) => return Ok(()),
+                        // A busy pool or database fails one renewal, not the
+                        // attempt: the handler keeps running while the next
+                        // beat still falls inside the lease it holds, and is
+                        // dropped before that lease can run out.
+                        _ if renewed_at.elapsed() + beat < lease => {}
+                        _ => return Err(Error::Internal),
+                    }
                 }
             }
         };

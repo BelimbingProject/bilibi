@@ -42,8 +42,8 @@ const fn role(
     }
 }
 inventory::submit! { Contribution::new(VOCABULARY, "core/person", Provenance { module: "core/person", source: file!(), line: line!() }, &VocabularyContribution {
-    domains: &[], verbs: &["retire"],
-    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(RETIRE), C::platform(SYSTEM_MANAGE), C::tenant(IMPORT), C::tenant(EXPORT), C::tenant(BULK_UPDATE)],
+    domains: &["core"], verbs: &["retire"],
+    capabilities: &[C::portal(crate::PORTAL), C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(RETIRE), C::platform(SYSTEM_MANAGE), C::tenant(IMPORT), C::tenant(EXPORT), C::tenant(BULK_UPDATE)],
     roles: &[role("tenant_owner", "Tenant Owner", CAPS)],
     system_principals: &[],
 }) }

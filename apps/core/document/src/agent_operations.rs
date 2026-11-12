@@ -1093,11 +1093,11 @@ fn link_schema() -> Value {
 fn share_schema() -> Value {
     json!({"type":"object","required":["id","user_id"],"properties":{
         "id":{"type":"integer","minimum":1},
-        "user_id":{"type":"integer","minimum":1,"description":"The active account to share with."},
-        "download":{"type":"boolean","description":"Allow file downloads as well as metadata viewing."},
-        "manage":{"type":"boolean","description":"Allow document changes."},
+        "user_id":{"type":"integer","minimum":1,"description":"The active account to share with: not yourself, and not the document's creator unless you are the creator."},
+        "download":{"type":"boolean","description":"Allow file downloads as well as metadata viewing; only when your own access allows downloads."},
+        "manage":{"type":"boolean","description":"Allow document changes; only when your own access allows managing."},
         "share":{"type":"boolean","description":"Allow changing this document's access."},
-        "until":{"type":"string","format":"date","description":"The last day (UTC) the access works; it does not expire when omitted. Not for your own access."},
+        "until":{"type":"string","format":"date","description":"The last day (UTC) the access works; it does not expire when omitted. Required, and no later than your own last day, when your own access ends."},
         "email":{"type":"boolean","description":"Email the person a link to the document after the change commits. The link opens it only for their account, while the access lasts."}
     }})
 }

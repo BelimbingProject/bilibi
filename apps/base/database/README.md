@@ -50,6 +50,30 @@ not panic or perform durable work: process failure can lose fan-out, and durable
 work belongs in a transactional Queue/outbox. Share the outer boundary rather
 than opening or committing an inner transaction.
 
+# The connection pool
+
+**One pool per process, bounded in size and in waiting time: `pool(url)` builds it from the environment.**
+
+| Limit | Environment | Default | Range |
+| --- | --- | --- | --- |
+| Connections the process may hold | `DATABASE_POOL_SIZE` | 16 | 1 to 1000 |
+| Seconds a caller waits for a free one | `DATABASE_POOL_WAIT_SECONDS` | 5 | 1 to 300 |
+
+- Pages, live sockets, Queue slots, the Scheduler and the Software loops share this pool.
+- A caller that finds it empty for the whole wait gets `Error::Pool` (`Error::is_pool_exhausted`): a page answers 503, a job retries. Nothing waits for ever.
+- These are environment values, not settings, because the pool exists before a setting can be read. A value outside its range refuses the start and names the variable.
+- System Info shows the size in use as Pool Size.
+- `pool_with(url, PoolLimits { size, wait })` is for a private host or a walkthrough that needs its own limits.
+- The timeout turns a lock-up into refusals; it does not make nested asks right. Code that holds a connection still must not ask for another (`apps/AGENTS.md`).
+
+Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
+
+```sh
+cargo run -p bilibi-database --example pool-walkthrough
+```
+
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals.
+
 # Schema ownership
 
 `001-base`, `002-user` and `003-company` and their SQL files are frozen historical

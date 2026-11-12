@@ -44,4 +44,8 @@ tokio-postgres.workspace = true
 [dev-dependencies]
 axum.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+bilibi-user.workspace = true
 bilibi-web = { path = "../../web" }
+
+[lints]
+workspace = true

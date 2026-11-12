@@ -354,6 +354,34 @@ async fn main() -> Result<()> {
             .await?
             .get::<_, i64>(0)
     );
+    // A session advisory lock outlives a rolled-back read-only transaction.
+    // The console closes its connection after each command (#575), so the
+    // lock every audited commit takes is free again once the command ends.
+    run(
+        &queries,
+        actor,
+        "session advisory lock",
+        "SELECT pg_advisory_lock(841332)",
+        ConsoleOptions::default(),
+        1,
+        25,
+    )
+    .await?;
+    let mut free = false;
+    for _ in 0..50 {
+        free = client
+            .query_one("SELECT pg_try_advisory_xact_lock(841332)", &[])
+            .await?
+            .get(0);
+        if free {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    println!("audit chain lock free after the console command: {free}");
+    if !free {
+        return Err(Error::Internal);
+    }
     run(
         &queries,
         actor,

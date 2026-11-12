@@ -16,7 +16,7 @@ async fn fields(client: &impl GenericClient, scope: &Scope) -> Result<Restrictio
         masks: bilibi_authz::fields::masks_for(client, scope, "persons").await?,
     })
 }
-async fn read_fields(
+pub(crate) async fn read_fields(
     client: &dyn bilibi_tenancy::ReadClient,
     scope: &Scope,
 ) -> Result<Restrictions> {
@@ -28,7 +28,7 @@ async fn read_fields(
         masks: bilibi_authz::fields::masks_for_read(client, scope, "persons").await?,
     })
 }
-async fn raw<C: bilibi_tenancy::ReadClient + ?Sized>(
+pub(crate) async fn raw<C: bilibi_tenancy::ReadClient + ?Sized>(
     client: &C,
     scope: &Scope,
     id: PersonId,
@@ -567,7 +567,7 @@ pub async fn retire(
     crate::publish(tx, scope.tenant(), person.id);
     Ok(person.redact(&masked))
 }
-fn check_context(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
+pub(crate) fn check_context(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
     let context = tx.context();
     if context.tenant != scope.tenant()
         || context.actor.kind != "user"

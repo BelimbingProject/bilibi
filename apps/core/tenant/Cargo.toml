@@ -32,3 +32,6 @@ jiff.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
 tokio.workspace = true
+
+[lints]
+workspace = true
