@@ -29,3 +29,6 @@ sha2 = "0.11.1"
 tokio.workspace = true
 tokio-postgres.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true

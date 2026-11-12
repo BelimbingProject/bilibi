@@ -65,3 +65,6 @@ bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-base = { path = "../../base" }
 bilibi-core = { path = ".." }
 bilibi-web = { path = "../../web" }
+
+[lints]
+workspace = true

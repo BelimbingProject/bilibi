@@ -24,3 +24,6 @@ jiff = "0.2.38"
 serde_json.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+
+[lints]
+workspace = true

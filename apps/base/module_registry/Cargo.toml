@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 inventory.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

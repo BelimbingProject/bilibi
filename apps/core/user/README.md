@@ -26,10 +26,10 @@ Base Records kind `user` names and links staff accounts through the same tenant,
 |---|---|
 | `login(email, password)` / `logout` | The global sign-in: the address names the platform sign-in, whose last live tenant account is preferred, then its live home or another live membership. The sign-in lock is checked, the password verified, then the account's standing. Refusals are `CredentialError::{Rejected, CompanyArchived, WorkspaceUnavailable}`. A required second factor returns a pending credential, not a session; see [Sign-in admission](#sign-in-admission) |
 | `tenant_choices(client, scope)` / `choose_tenant(token, csrf, tenant, request)` | Lists the holder's live staff memberships and changes an ordinary browser session to one of them. A successful switch rotates the bearer and CSRF secret, clears tenant-local session state, saves the landing tenant and audits entry. Impersonation is refused. A target requiring a sign-in factor returns `TenantEntry::Challenge`, a pending sign-in for the existing second-factor page, and one enforcing company sign-in returns `TenantEntry::Sso`, the connection to start; neither touches the current session. Completing either admits a new session, and `retire_replaced_session(old, new)` then ends the old one of the same identity and closes its pages. A target needing a factor the holder has not enrolled is refused with `TenantChoiceRefusal::EntryPolicy` |
-| `change_password(token, csrf, current, new)` | Signed-in change. Needs the current password; ends the account's other sessions |
+| `change_password(token, csrf, current, new)` | Signed-in change. Needs the current password; ends the account's other sessions and the sign-in's sessions in every other tenant (see [A password ends every tenant's sessions](#a-password-ends-every-tenants-sessions)) |
 | `request_password_reset(email)` | Always `Ok` for unknown, frozen or throttled accounts. The link goes to the account sign-in would choose (last used, then home, then any live membership), so a removed or suspended last tenant never strands it. The token's issue is audited (`user.reset_requested`, by the `sign-in` principal, never the token). Mail is sent after returning; a failed delivery withdraws the token (`user.reset_withdrawn`) |
 | `alert_new_device(token, device)` | The new-device sign-in email, sent in the background after the Web host records a staff sign-in that Base Session judged new. Claims the day's email and audits it before sending; a failure is logged and never reaches the sign-in. See [New-device sign-in email](../../base/session/README.md#new-device-sign-in-email) |
-| `reset_password(email, token, new)` | Consumes the one-time token for the same account choice as the request, replaces the password, ends every session; a frozen account's link is as invalid as an unknown one |
+| `reset_password(email, token, new)` | Consumes the one-time token for the same account choice as the request, replaces the password, ends every session of the sign-in in every tenant; a frozen account's link is as invalid as an unknown one |
 | `account(scope, user)` | One account of the tenant with its `AccountLinks`, version and timestamps; `admin.user.view` |
 | `link_person(scope, user, person)` / `unlink(scope, user)` | The account binder's commands; `admin.user.update`. See below |
 | `create_account` / `update_account` / `set_password` / `delete_account` | Account administration (`src/accounts.rs`): `admin.user.create`, `.update`, `.update`, `.delete`. See "Account administration" |
@@ -203,7 +203,7 @@ The same page uploads or removes the account's own `ui.profile_image_asset_id`. 
   first through the shared dialog. Each absent control states its reason
   where it would be.
 - Change Password (`set_password`) needs no current password, ends every
-  session of the account and audits a marker, never a hash.
+  session of the sign-in in every tenant and audits a marker, never a hash.
 - Delete (`admin.user.delete`, `delete_account`) confirms through the shared dialog and never deletes the actor's own account. Deleting an outside membership retires only that tenant's account. Deleting the home account also closes the shared sign-in, so every membership stops authenticating. The page returns to `/users`.
 
 
@@ -399,6 +399,20 @@ Each account follows its company's settings, and a notification its recipient's;
 
 Authorization of the link commands is tenant-scoped (K15).
 
+## A password ends every tenant's sessions
+
+**One sign-in shares its password across its tenant accounts, so a password change, reset or administrator set ends what that password let in everywhere.** `sign_in_identity::end_everywhere` runs in each of the three transactions.
+
+| What | This tenant's account | The sign-in's accounts in other tenants |
+|---|---|---|
+| Sessions | Ended and recorded now, except the session that changed it | Marked ended now (they stop signing in at once); the expiry sweep records each tenant's notice |
+| AI connections | Revoked | Revoked, with the same reason (`password_changed`, `password_reset`, `admin_action`) |
+| Pending sign-ins | Revoked | Revoked |
+
+- Accounts are the identity's `users` rows that are not deleted; Base Session's `revoke_sign_in` takes them as `(tenant, user)` from Core User and runs every credential revoker for each.
+- The audit row is the acting tenant's: it says how many other accounts were signed out, never which tenants.
+- A refused change (wrong current password, a weak password, an outside tenant's administrator) ends nothing.
+
 ## Walkthrough
 
 `cargo run -p bilibi-user --example credentials-walkthrough` against a
@@ -406,6 +420,8 @@ disposable database after `migrate` (set
 `BILIBI_DISPOSABLE_CREDENTIALS_DEMO=yes`, `BILIBI_MAIL_DIR` and
 `BILIBI_USER_SIGNING_KEY`). It prints every outcome above and reads the dev
 mailbox to follow the links.
+
+`cargo run -p bilibi-user --example memberships-walkthrough` (set `BILIBI_MEMBERSHIPS_DEMO=disposable`, `APP_ORIGIN` and `BILIBI_MAIL_DIR`) proves invitations and [A password ends every tenant's sessions](#a-password-ends-every-tenants-sessions): with sessions and AI connections in tenants 1 and 2, each of the three password paths ends both, and the refused ones end neither.
 
 ## Saved database queries (C9; pages follow in C10)
 

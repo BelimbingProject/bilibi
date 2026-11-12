@@ -32,3 +32,6 @@ jiff = "0.2.38"
 [dev-dependencies]
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
+
+[lints]
+workspace = true

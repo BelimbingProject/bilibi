@@ -309,7 +309,14 @@ impl UserService {
         })
         .await?;
         // Other live pages of this account hear it once the change is committed.
-        let ended = self.sessions.revoke(&mut tx, user, Some(token)).await?;
+        let ended = crate::sign_in_identity::end_everywhere(
+            &self.sessions,
+            &mut tx,
+            identity,
+            user,
+            Some(token),
+        )
+        .await?;
         let sessions = self.sessions.clone();
         tx.after_commit(move || sessions.announce(ended));
         tx.commit().await?;
@@ -510,7 +517,14 @@ impl UserService {
             .await;
         match claimed {
             Ok(()) => {
-                let ended = self.sessions.revoke(&mut tx, user, None).await?;
+                let ended = crate::sign_in_identity::end_everywhere(
+                    &self.sessions,
+                    &mut tx,
+                    identity,
+                    user,
+                    None,
+                )
+                .await?;
                 let sessions = self.sessions.clone();
                 tx.after_commit(move || sessions.announce(ended));
                 Ok(tx.commit().await?)

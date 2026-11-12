@@ -23,3 +23,6 @@ bilibi-datetime = { path = "../datetime" }
 bilibi-locale = { path = "../locale" }
 askama.workspace = true
 jiff = { version = "0.2.38", features = ["tzdb-bundle-always"] }
+
+[lints]
+workspace = true
