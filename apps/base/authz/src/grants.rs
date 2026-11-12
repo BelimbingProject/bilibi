@@ -262,9 +262,11 @@ impl Grants {
         if !grant_all || bounds.company_id.is_some() {
             return Ok(());
         }
+        // Only a live staff account counts: a deleted, suspended or
+        // still-invited holder cannot administer the tenant.
         let another: bool = client
             .query_one(
-                "SELECT EXISTS(SELECT 1 FROM authz_roles_for($1,NULL,NULL) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE r.grant_all AND p.company_id IS NULL AND NOT (p.user_id=$2 AND p.role_id=$3))",
+                "SELECT EXISTS(SELECT 1 FROM authz_roles_for($1,NULL,NULL) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id JOIN users u ON u.tenant_id=p.tenant_id AND u.id=p.user_id AND u.kind='staff' AND u.status='active' AND u.deleted_at IS NULL WHERE r.grant_all AND p.company_id IS NULL AND NOT (p.user_id=$2 AND p.role_id=$3))",
                 &[&actor.tenant(), &user, &role],
             )
             .await?

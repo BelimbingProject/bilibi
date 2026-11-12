@@ -70,7 +70,7 @@ identity **and** a grant; tenant 1 and grant-all have no implicit operator power
 Direct deny wins over direct allow, role grants and grant-all. Permission reads
 are fresh.
 
-**Taking access away is bounded too.** Only a full-access actor removes a role from, or directly denies a capability to, an account that holds full access (`Error::Forbidden` otherwise), so a narrower role administrator cannot lock out the tenant's administrators. Removing a tenant's last tenant-wide full-access assignment is refused (`Error::Refused`); give another administrator full access first. Removals take the tenant's grant lock, so two at once cannot each leave the other as the one that remains. Proof: `apps/web/examples/role-assignment-bounds.rs`. Reauthenticate/revalidate a retained Scope at every request/event/job
+**Taking access away is bounded too.** Only a full-access actor removes a role from, or directly denies a capability to, an account that holds full access (`Error::Forbidden` otherwise), so a narrower role administrator cannot lock out the tenant's administrators. Removing a tenant's last tenant-wide full-access assignment held by a live staff account (not deleted, suspended or still invited) is refused (`Error::Refused`); give another administrator full access first. Removals take the tenant's grant lock, so two at once cannot each leave the other as the one that remains. Proof: `apps/web/examples/role-assignment-bounds.rs`. Reauthenticate/revalidate a retained Scope at every request/event/job
 edge; the sealed scope is identity for one unit of work, not a permanent login.
 Decisions record reason and principal kind using the caller's connection; decisions
 inside an owner transaction follow that transaction's commit/rollback.
