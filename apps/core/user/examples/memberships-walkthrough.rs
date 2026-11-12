@@ -453,10 +453,12 @@ async fn main() -> Result<()> {
             bilibi_walkthrough_fixture::PASSWORD,
         )
         .await;
-    // #536: the issued token left a system-attributed audit row, without it.
+    // #536: the issued token left a change row attributed to the `sign-in`
+    // principal, without it. The action name is on the transaction's action
+    // row; the change row's own event is `created`.
     let issued: Vec<String> = client
         .query(
-            "SELECT new_values::text FROM base_audit_mutations WHERE tenant_id=1 AND event='user.reset_requested' AND auditable_type='user_identity' AND actor_type='system'",
+            "SELECT m.new_values::text FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id AND a.tenant_id=m.tenant_id WHERE m.tenant_id=1 AND a.event='user.reset_requested' AND m.auditable_type='user_identity' AND m.actor_type='system' AND m.system_principal='sign-in'",
             &[],
         )
         .await?

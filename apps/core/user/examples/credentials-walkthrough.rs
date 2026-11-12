@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
 
     println!("\n== audit (secrets redacted) ==");
     for row in client
-        .query("SELECT event,actor_type,new_values::text FROM base_audit_mutations WHERE auditable_type='user_identity' AND event IN ('user.reset_requested','user.reset_withdrawn') ORDER BY id DESC LIMIT 3", &[])
+        .query("SELECT a.event,m.actor_type,m.new_values::text FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id AND a.tenant_id=m.tenant_id WHERE m.auditable_type='user_identity' AND a.event IN ('user.reset_requested','user.reset_withdrawn') ORDER BY m.id DESC LIMIT 3", &[])
         .await?
     {
         println!("{} by {} new={}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2));
