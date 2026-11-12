@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     let geo = services.get::<Geonames>(SERVICE)?;
     let client = db.get().await?;
     client
-        .batch_execute("TRUNCATE address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
+        .batch_execute("TRUNCATE address_person_subjects, address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
         .await?;
 
     let (port, fixture) = fixture::start().await.map_err(|_| Error::Internal)?;

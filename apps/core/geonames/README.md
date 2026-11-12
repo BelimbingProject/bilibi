@@ -46,6 +46,7 @@ or one country's postcodes), in that order.
   dataset; datasets before it stay committed.
 - **Local names survive.** A re-import refreshes every upstream fact but never
   replaces a country's `country` or an Admin1 `name`.
+- **A moved Admin1 code.** When upstream gives a division a new code, the import adds the new code. The old code's row stays, for the records that name it, and gives up its GeoNames ID.
 - **ETag cache.** Downloads go through `base/integration` (`stream`, recorded as
   system exchanges) into `--cache-dir`, default `GEONAMES_CACHE_DIR` or
   `$TMPDIR/bilibi/geonames`; use a durable directory in production. A cached
@@ -188,7 +189,7 @@ DATABASE_URL=<disposable migrated db> BILIBI_DISPOSABLE_GEONAMES_DEMO=yes \
 
 Serves `sample/` (small GeoNames-format payloads, see its README) from a local
 ETag fixture (`examples/support/fixture.rs`) and runs the importer through
-first import, 304 revalidation, local-name preservation, 503/unreachable
+first import, 304 revalidation, local-name preservation, a moved Admin1 code, 503/unreachable
 fallback, `force`, a no-valid-rows payload, a database failure in a late batch,
 the ETag-less cache lifetime and the capability gate.
 
