@@ -16,6 +16,7 @@ pub const SOCKETS_PER_SESSION_KEY: &str = "visitor.sockets_per_session";
 pub const SOCKETS_TOTAL_KEY: &str = "visitor.sockets_total";
 pub const UPLOAD_MAX_BYTES_KEY: &str = "visitor.upload_max_bytes";
 pub const UPLOADS_PER_MINUTE_KEY: &str = "visitor.uploads_per_minute";
+pub const UPLOAD_BUFFER_BYTES_KEY: &str = "visitor.upload_buffer_bytes";
 
 macro_rules! provenance {
     () => {
@@ -111,4 +112,12 @@ setting!(
     1_000,
     "Visitor files per minute",
     "Most files one visitor session may send per minute."
+);
+setting!(
+    UPLOAD_BUFFER_BYTES_KEY,
+    268_435_456u64,
+    1_024,
+    17_179_869_184u64,
+    "Visitor files in transit per server (bytes)",
+    "Most memory each server holds for visitor files that are still arriving. A file announced beyond it is refused until others finish."
 );

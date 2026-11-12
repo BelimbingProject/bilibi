@@ -78,6 +78,16 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 
 A declared `document-scanner` Queue job rechecks a pending attachment under the owner-scoped Media inspection grant. Only a clean verdict copies bytes to an Artifact and makes the revision downloadable; an infected, failed or unscanned verdict settles its status without publishing bytes. Queue's ending hook marks any still-pending revision failed if the job is cancelled or discarded. The uploader and current document managers receive notices when a file is held and when its verdict settles. List, record, agent and CSV views show the status; file links, preview and download work only for clean internal revisions. A direct download rechecks this state. Copying a file document requires a clean latest revision. Merge preserves each moved revision's file/status and its queued job continues to target the revision ID. Deletion waits for pending scans to settle, then removes held ledger rows after Base checks every published Artifact; Media's draft cleanup owns remaining staged bytes.
 
+### Upload progress and resume
+
+The New document, New revision and Quick add dialogs take the file through one resumable input (`UploadSpec::resumable`), so a large upload shows its progress and survives a dropped connection; the contract is `docs/live-pages.md` (Resumable uploads) and `apps/base/media/README.md` (Resumable uploads).
+
+- **Progress:** the chosen file's row shows the percentage received while it arrives; Upload (Add document in Quick add) waits until every byte is there.
+- **Resume:** the bytes wait on Media's staging disk (`media.upload.staging_disk`). While the New document dialog is open the list's address carries `new=1`, so the remount after a dropped connection opens it again and the file carries on from the bytes already there. After a reload, or in a dialog the remount does not reopen (New revision, Quick add), choosing the same file again continues it, until `media.upload.staging_hours` passes.
+- **Limit:** the largest file is Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB); `store_file` still applies `core.document.max_upload_bytes` and `artifacts.max_bytes`. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
+- **Scan:** a resumed file is stored like any other: `store_file` stages it through Media, and it stays held, unreadable, until the scan calls it clean.
+- **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold.
+
 Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
 ## Tenant retention and due documents
@@ -157,6 +167,23 @@ WHERE tenant_id = 1 AND event = 'core.document.download_refused' AND payload ->>
 ORDER BY id;
 ```
 
+One person's document trail, newest first, is a page of each table by actor (here user 7):
+
+```sql
+SELECT id, occurred_at, auditable_type, auditable_id, event
+FROM base_audit_mutations
+WHERE tenant_id = 1 AND actor_type = 'user' AND actor_id = 7 AND auditable_type LIKE 'core.document.%'
+ORDER BY occurred_at DESC, id DESC
+LIMIT 100;
+
+SELECT id, occurred_at, event, payload
+FROM base_audit_actions
+WHERE tenant_id = 1 AND actor_type = 'user' AND actor_id = 7
+  AND (event LIKE 'core.document.%' OR (event LIKE 'artifacts.%' AND payload ->> 'owner_id' = 'core.document'))
+ORDER BY occurred_at DESC, id DESC
+LIMIT 100;
+```
+
 The coverage check is `apps/core/document/examples/audit-coverage.rs`. On a disposable database that is migrated, holds the walkthrough fixture and is seeded (`bilibi-web migrate`, `bilibi-walkthrough-fixture`, then `bilibi-web seed-production`, which gives the fixture's tenants their pick-lists) it performs each action above through the facade, then fails unless the action wrote at least one audited row and the first query above finds every document row it wrote:
 
 ```sh
@@ -164,6 +191,20 @@ BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=/an/empty/folder car
 ```
 
 A new document action belongs in that example in the same change.
+
+## List and audit latency
+
+`apps/core/document/examples/list-latency.rs` seeds a large library through the facade and times the list, its filters and the audit queries above.
+
+- **Fixture.** 50,000 link documents filed by the administrator, each related to one walkthrough company. The viewer holds view and download on 40%, view without download on 10% and an ended grant on 10%, and favourites 1,000 of them. The contractor sees 1% and the manager and staff a third and a fifth. Every twentieth document has expired.
+- **Run.** On a migrated database that holds the walkthrough fixture and is seeded (as for the coverage check). Seeding takes about ten minutes once; a rerun only measures. `BILIBI_DOCUMENT_LATENCY_DOCUMENTS` and `BILIBI_DOCUMENT_LATENCY_RUNS` (50) change the size and repetitions.
+
+```sh
+BILIBI_DOCUMENT_LATENCY=disposable cargo run -p bilibi-document --example list-latency --release --locked
+```
+
+- **Output.** One Markdown row per case and reader: rows on the page and in total, median, p95 and maximum in milliseconds, timed around `Documents::list` (authorization and both statements) or the audit statement.
+- **Shape of the reads.** A record or mark filter is a top-level `EXISTS`, so the planner starts from the record's links or the reader's marks; the default order has an index (`core_documents_last_revision_idx`) so a page walks documents newest first and checks each grant. The total still counts every document the reader may see, and name search scans names. The per-document audit queries filter on JSON values and scan the audit tables; the per-actor queries use Base Audit's actor index.
 
 ## Public facade
 

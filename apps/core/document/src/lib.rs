@@ -1178,6 +1178,7 @@ inventory::submit! { Module {
         ("core-document-005-governance-references", include_str!("../migrations/005-governance-references.sql")),
         ("core-document-006-email-job", include_str!("../migrations/006-email-job.sql")),
         ("core-document-007-scan-held-revisions", include_str!("../migrations/007-scan-held-revisions.sql")),
+        ("core-document-008-list-order", include_str!("../migrations/008-list-order.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;

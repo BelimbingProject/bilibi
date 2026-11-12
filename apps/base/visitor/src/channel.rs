@@ -166,7 +166,8 @@ pub struct Upload {
 pub struct Outbox {
     pub items: Vec<Value>,
     /// Handed back by the browser on its next `since`, so a dropped
-    /// connection loses nothing. At most 128 characters.
+    /// connection loses nothing. At most 128 characters. Keep it a position
+    /// only: the browser may send back anything in its place.
     pub cursor: Option<String>,
 }
 pub type ChannelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -191,8 +192,12 @@ pub trait VisitorChannel: Send + Sync {
         scope: &'a VisitorScope,
         frame: Frame,
     ) -> ChannelFuture<'a, Option<Value>>;
-    /// What the visitor has not seen yet. `cursor` is the last one this
-    /// channel returned to this visitor, or `None` for everything.
+    /// What the visitor has not seen yet. `cursor` is what the browser sent
+    /// back: normally the last one this channel returned to this visitor,
+    /// `None` for everything, but untrusted text (at most 128 characters)
+    /// that a visitor can replace. Read it as a position within
+    /// `scope.subject()` and nothing more: it must never select another
+    /// conversation, and an unknown one means everything.
     fn since<'a>(
         &'a self,
         scope: &'a VisitorScope,

@@ -36,7 +36,7 @@ inventory::submit! { Contribution::new(CHANNELS, "cx/chat", provenance!(), &Chan
 | `site(key)` | Which tenant and origins a site key means, from its own records. Asked before a session exists and again on every use, so a closed site or a removed origin stops its sessions at once. |
 | `admit(site, hello)` | Whether this visitor starts a conversation, and its `subject` (at most 128 printable characters). `hello.details` is untrusted JSON the embed sent (at most 4 KiB). |
 | `receive(scope, frame)` | A message (JSON, at most 16 KiB), a typing signal (1 KiB) or a complete file (`Upload`, bytes). The reply, if any, is the acknowledgement. |
-| `since(scope, cursor)` | What the visitor has not seen. The browser returns the last cursor, so a dropped connection loses nothing. |
+| `since(scope, cursor)` | What the visitor has not seen. The browser returns the last cursor, so a dropped connection loses nothing. The cursor is the browser's text, not something to trust: read it as a position within `scope.subject()` only. |
 | `watch(scope)` | A wake-up when `since` has something new. No I/O. |
 
 Rules a channel keeps:
@@ -64,18 +64,20 @@ All HTTP calls are `POST` with `Content-Type: text/plain` and a JSON body, so a 
 | --- | --- |
 | `{"type":"message","id":1,"body":{…}}` | A message. Answered `{"type":"ack","id":1,"reply":…}` or `{"type":"error","id":1,"code":…}` |
 | `{"type":"typing","body":{…}}` | A typing signal. No answer |
-| `{"type":"upload","id":3,"name":"…","size":N}` | Announces a file; answered `{"type":"upload_ready","id":3}`. Then binary frames `[id u32][offset u32][bytes ≤ 64 KiB]` in order, the same header as the staff live socket's. The channel is handed the file when every byte is there |
+| `{"type":"upload","id":3,"name":"…","size":N}` | Announces a file; answered `{"type":"upload_ready","id":3}`. Then binary frames `[id u32][offset u32][bytes ≤ 64 KiB]` in order, the same header as the staff live socket's. The channel is handed the file when every byte is there. A file with no chunk for 30 seconds, or not complete within 10 minutes, is dropped with an `error` for its `id` |
 | `{"type":"upload_cancel"}` | Drops the file being received |
 
 | From the server | Meaning |
 | --- | --- |
-| `ready` | The session proved; `since` follows |
+| `ready` | The session proved (`session`, and `upload_max_bytes`, the file size limit at that moment); `since` follows |
 | `items` | `{items:[…], cursor}` from the channel |
 | `renewed` | The session was renewed by use (`expires_in`) |
 | `error` | A refused frame (`refused`, `invalid`, `rate_limited`, `unavailable`); the socket stays open |
 | `closed` | `{reason: "refused" \| "ended" \| "rate_limited" \| "unavailable"}`, then the socket closes |
 
-Before any frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A socket also rechecks every 10 seconds, and a staff revocation closes it at once.
+A text frame is at most 32 KiB and a binary frame one chunk with its header (64 KiB + 8 bytes); a larger frame ends the socket without a `closed` frame. An announced file's size is held against `visitor.upload_buffer_bytes` until the channel has the file or it is dropped; an announcement beyond it is answered `rate_limited` and may be sent again. A peer that does not take a frame within 10 seconds is disconnected.
+
+Before any frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A socket also rechecks every 10 seconds, and a revocation of its session or its subject closes it at once.
 
 ## The browser client
 
@@ -107,17 +109,18 @@ Platform capability `admin.system.visitor.manage`; group Visitor in the settings
 | `visitor.session_max_hours` | 12 | Its longest life, however often renewed |
 | `visitor.sessions_per_sender_per_minute` | 10 | New sessions per network address, per server; renewals, endings and socket upgrades from one address get six times as many |
 | `visitor.sessions_per_site_per_minute` | 120 | New sessions per site, per server |
-| `visitor.messages_per_minute` | 60 | Frames per session; the 101st refusal in a row closes the socket |
+| `visitor.messages_per_minute` | 60 | Frames per session; the 100th refusal in a row closes the socket |
 | `visitor.sockets_per_session` | 3 | Open sockets per session, per server |
 | `visitor.sockets_total` | 2,000 | Open visitor sockets per server; staff and portal sockets have their own places |
 | `visitor.upload_max_bytes` | 5 MiB | A file's size; Media's own limit can only be smaller |
 | `visitor.uploads_per_minute` | 6 | Files per session |
+| `visitor.upload_buffer_bytes` | 256 MiB | Memory each server holds for visitor files still arriving, whatever the number of sockets; keep it at or above the file size limit |
 
-Counts are per server, as the HTTP throttles' are. A changed setting applies within two seconds.
+Counts are per server, as the HTTP throttles' are. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session counters grow with `visitor.sockets_total`. A changed setting applies within two seconds.
 
 ## Staff side
 
-`Visitors::revoke_session(client, scope, channel, session)` and `revoke_subject(client, scope, channel, subject)` end sessions of the staff scope's own tenant, record who did it as `visitor.session.revoked`, and close open sockets. **Check your own capability first**; the Platform proves only that the scope is live. Opening and ending a session are audited as `visitor.session.opened` and `visitor.session.ended` by a guest of the tenant. Refusals are not audited one by one, because a public caller could flood the ledger; they are rate-limited instead. Rows ended or expired more than a day ago are removed by the next session opened, in batches of 100.
+`Visitors::revoke_session(client, scope, channel, session)` and `revoke_subject(client, scope, channel, subject)` end sessions of the staff scope's own tenant, record who did it as `visitor.session.revoked`, and close open sockets. **Check your own capability first**; the Platform proves only that the scope is live. Opening and ending a session are audited as `visitor.session.opened` and `visitor.session.ended` by a guest of the tenant. Refusals are not audited one by one, because a public caller could flood the ledger; they are rate-limited instead. A row is removed a day after its `visitor.session_max_hours` limit passed, by the next session opened, in batches of 100.
 
 ## Checks
 
@@ -126,4 +129,4 @@ Counts are per server, as the HTTP throttles' are. A changed setting applies wit
     cargo run -p bilibi-web --example visitor-walkthrough           # prepare: every case, exits non-zero on a FAIL
     cargo run -p bilibi-web --example visitor-walkthrough -- serve  # the host for a browser, with a staff control address
 
-`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), an oversize file and a broken chunk, rate limits, renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.
+`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget and a stalled file, rate limits, renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.

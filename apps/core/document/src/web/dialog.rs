@@ -42,10 +42,13 @@ struct FormView<'a> {
     body: Html,
 }
 
-/// The uploads a page that offers the dialogs declares at mount.
+/// The uploads a page that offers the dialogs declares at mount. The file
+/// input is resumable: its chunks wait on Media's staging disk, so a dropped
+/// connection or a reload carries on from the bytes already there, up to
+/// Media's staging limit (`docs/live-pages.md`, Resumable uploads).
 pub fn uploads() -> Uploads {
     Uploads::new([
-        UploadSpec::new(UPLOAD, bilibi_ui::upload::MAX_FILE_SIZE).accept(
+        UploadSpec::resumable(UPLOAD, bilibi_ui::upload::MAX_RESUMABLE_FILE_SIZE).accept(
             FILE_TYPES
                 .iter()
                 .map(|(extension, _)| format!(".{extension}")),

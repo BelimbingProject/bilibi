@@ -47,3 +47,4 @@ uuid.workspace = true
 [dev-dependencies]
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
+axum.workspace = true
