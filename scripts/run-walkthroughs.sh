@@ -44,7 +44,8 @@ cd "$root"
 # prepare: what the fresh database holds before the first step.
 #   none          nothing (the walkthrough migrates, or needs no database)
 #   migrate       `bilibi-web migrate`
-#   seed          migrate, then `seed-production` (the Dev instance role, the reference lists)
+#   seed          migrate, then `seed-production` (the reference lists, and the Dev instance
+#                 role: without it a grant change asks for a second factor nobody enrolled)
 #   fixture-seed  migrate, the walkthrough fixture, then seed-production (its tenants get their pick-lists)
 #   operator      migrate, the walkthrough fixture, and tenant 1 appointed platform operator
 #   geonames      migrate, then `geonames-import` of apps/core/geonames/sample from a local server
@@ -56,20 +57,20 @@ cd "$root"
 #   database, separated by `;`. `-` is a run without arguments. `@/x` and @model as above.
 # kind: `serve` for a walkthrough that ends by serving the app (see above).
 WALKTHROUGHS=(
-  'base|agent|apps/base/agent_api|agent-walkthrough|migrate|BILIBI_AGENT_DEMO=disposable|-'
-  'base|agent-write|apps/base/agent_api|write-walkthrough|migrate|BILIBI_AGENT_DEMO=disposable|-'
-  'base|artifacts|apps/base/artifacts|artifacts-walkthrough|none|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;recover'
+  'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
+  'base|agent-write|apps/base/agent_api|write-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
+  'base|artifacts|apps/base/artifacts|artifacts-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;recover'
   'base|artifacts-html-pdf|apps/base/artifacts|html-pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out BILIBI_PDF_CHROMIUM=@chromium|-'
-  'base|artifacts-pdf|apps/base/artifacts|pdf-walkthrough|none|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out|fixtures;-'
+  'base|artifacts-pdf|apps/base/artifacts|pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out|fixtures;-'
   'base|artifacts-queued-pdf|apps/base/artifacts|queued-pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out BILIBI_PDF_CHROMIUM=@chromium BILIBI_PDF_QPDF=@qpdf BILIBI_PDF_DEMO_PORT=@port|-'
-  'base|artifacts-retention|apps/base/artifacts|retention-walkthrough|none|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;report'
+  'base|artifacts-retention|apps/base/artifacts|retention-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;report'
   'base|audit-actions|apps/base/audit_views|actions-fixture|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-mutations|apps/base/audit_views|mutations-fixture|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-history-kinds|apps/base/audit_views|history-kinds|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-|serve'
   'base|bulk-import|apps/base/bulk_data|import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
-  'base|integration|apps/base/integration|integration-walkthrough|none|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
+  'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
   'base|mail-inbound|apps/base/mail|inbound-walkthrough|none||@/parsed'
   'base|mail|apps/base/mail|mail-walkthrough|none||@/wire.eml'
@@ -77,10 +78,10 @@ WALKTHROUGHS=(
   'base|media-attachments|apps/base/media|attachments-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|media-scan|apps/base/media|scan-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|media-scan-no-scanner|apps/base/media|scan-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|no-scanner'
-  'base|perf|apps/base/perf|perf-walkthrough|none|BILIBI_DISPOSABLE_PERF_DEMO=yes|-;inspect'
+  'base|perf|apps/base/perf|perf-walkthrough|migrate|BILIBI_DISPOSABLE_PERF_DEMO=yes|-;inspect'
   'base|queue|apps/base/queue|queue-walkthrough|migrate|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-;inspect'
   'base|queue-execution|apps/base/queue|execution-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|prepare;inspect'
-  'base|schedule|apps/base/schedule|schedule-walkthrough|migrate|BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes|dst;timing;review;prepare;coalesce;race 2026-06-03T10:00:00Z;overlap;execute 2026-06-04T12:00:10Z;inspect'
+  'base|schedule|apps/base/schedule|schedule-walkthrough|seed|BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes|dst;timing;review;prepare;coalesce;race 2026-06-03T10:00:00Z;overlap;execute 2026-06-04T12:00:10Z;inspect'
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
   'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1'
 
@@ -94,13 +95,13 @@ WALKTHROUGHS=(
   'privacy|consent|apps/core/consent|consent-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
 
   'core|address|apps/core/address|address-walkthrough|geonames|BILIBI_ADDRESS_DEMO=disposable|-'
-  'core|affiliation|apps/core/affiliation|affiliation-walkthrough|seed|BILIBI_AFFILIATION_DEMO=disposable|-'
+  'core|affiliation|apps/core/affiliation|affiliation-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
   'core|affiliation-contact-matching|apps/core/affiliation|contact-matching-walkthrough|none|BILIBI_CONTACT_MATCHING=disposable BILIBI_INSTANCE_DIR=@/instance|seed;-'
   'core|affiliation-operations|apps/core/affiliation|k19-operations-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
-  'core|agent-access|apps/core/agent|agent-access-walkthrough|seed|BILIBI_DISPOSABLE_AGENT_ACCESS_DEMO=yes|-'
+  'core|agent-access|apps/core/agent|agent-access-walkthrough|migrate|BILIBI_DISPOSABLE_AGENT_ACCESS_DEMO=yes|-'
   'core|company-caller-reads|apps/core/company|caller-reads-walkthrough|seed|BILIBI_CALLER_READS=disposable|-'
   'core|company-organisation|apps/core/company|k1-organisation-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
-  'core|company-lifecycle|apps/core/company|k2-lifecycle-walkthrough|seed|BILIBI_COMPANY_DEMO=disposable|-'
+  'core|company-lifecycle|apps/core/company|k2-lifecycle-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-relationships|apps/core/company|k5-relationships-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-owner-binders|apps/core/company|k15-owner-binders|seed|BILIBI_COMPANY_DEMO=disposable BILIBI_K15_DEMO_ROOT=@/files|-'
   'core|currency|apps/core/currency|currency-walkthrough|seed|BILIBI_CURRENCY_DEMO=disposable|-'
