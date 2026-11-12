@@ -743,6 +743,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     sign_in_session(&client, 1, 3).await?;
     let (admin_id, admin_connection) =
         connect(&grants, &client, &staff, "Admin password agent").await?;
+    // Setting another person's password asks for step-up, which this
+    // fixture's administrator has no authenticator to pass on a migrate-only
+    // (Production) database; the identity walkthrough proves that refusal.
+    services
+        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?
+        .set_enforced(false);
     users
         .set_password(&admin, 3, "walkthrough-admin-secret")
         .await?;

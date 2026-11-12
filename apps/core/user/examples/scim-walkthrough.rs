@@ -60,6 +60,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
+        // Only a signed-in session for the provisioned account is wanted here.
+        // Setting another person's password asks the administrator for step-up,
+        // which this fixture's administrator has no authenticator to pass; the
+        // identity walkthrough proves that refusal.
+        app.services
+            .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?
+            .set_enforced(false);
         users.set_password(&scope, user, &password).await?;
         let session = users.login(email, &password).await?;
         if session.pending {

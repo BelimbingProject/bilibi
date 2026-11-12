@@ -87,6 +87,7 @@ pub async fn enter(
             Ok(refused(&app, auth::IMPERSONATE_NESTED, DASHBOARD))
         }
         Err(Refusal::OwnAccount) => Ok(refused(&app, auth::IMPERSONATE_SELF, USERS)),
+        Err(Refusal::Outranked) => Ok(refused(&app, auth::IMPERSONATE_OUTRANKED, USERS)),
         Err(Refusal::NotFound) => Ok(refused(&app, auth::IMPERSONATE_MISSING, USERS)),
         Err(Refusal::Unable) => Ok(refused(&app, auth::IMPERSONATE_UNABLE, USERS)),
         Err(Refusal::Other(error)) => signed_out(&app, error),

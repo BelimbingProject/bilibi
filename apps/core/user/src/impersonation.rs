@@ -1,6 +1,8 @@
 //! Impersonation: an
 //! operator holding `admin.user.impersonate` moves their own live session onto
-//! another account of the tenant, and back. The session row keeps its token
+//! another account of the tenant that holds nothing the operator lacks, and
+//! back. The impersonated session creates, changes and deletes no account
+//! (`AccountError::Impersonating`). The session row keeps its token
 //! and names the operator (`sessions.impersonator_id`), so the pair is sealed
 //! into every later `Scope` and every audit row names both identities.
 //!
@@ -35,6 +37,11 @@ pub enum Refusal {
     AlreadyImpersonating,
     #[error("You cannot impersonate yourself.")]
     OwnAccount,
+    /// The target holds a permission the operator does not
+    /// (`bilibi_authz::holds_everything_of`): viewing as it would hand the
+    /// operator that permission.
+    #[error("You cannot impersonate someone who has permissions you do not have.")]
+    Outranked,
     #[error("Unable to find that user in this workspace.")]
     NotFound,
     /// The target's company is archived (refused at the session
@@ -127,6 +134,9 @@ impl UserService {
             Standing::Frozen(Freeze::Identity) | Standing::Unknown => {
                 return Err(Refusal::NotFound)
             }
+        }
+        if !bilibi_authz::holds_everything_of(&*tx, &scope, target).await? {
+            return Err(Refusal::Outranked);
         }
         let csrf = match self
             .sessions

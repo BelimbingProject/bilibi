@@ -149,6 +149,13 @@ BILIBI_ASSIGNMENT_PROOF=disposable cargo run -p bilibi-web --example role-assign
 
 It uses real grants, desks and Company authorization for two people with desks in two companies. It proves different company grants, exact-company revocation, future and expired dates, direct denies, incomplete engagement refusals, scoped grant-all and tenant-only-key refusals, another tenant, preserved unscoped behavior and audit capture. Finance supplies the source, report, retained-download and authenticated MCP proofs for its roles.
 
+## Administering another account
+
+`holds_everything_of(client, scope, target)` answers whether the actor holds everything `target` holds: tenant-wide, in the actor's current company and in each company where `target` has a company role. A target with a full-access role needs an actor with one; a named system principal compares its own grants and never covers a full-access account. It logs nothing.
+
+- It is the subset rule `Grants::validate_assignment` applies when giving a role.
+- Call it from any write that lets one account set another's password or sign-in address, delete it or act as it. Otherwise the account is the way around the role rule. Core User's account writes and impersonation use it (`apps/core/user/README.md`, "Who may change whose account").
+
 ## Step-up on grant changes
 
 Authz is a Base Step-up consumer (`src/step_up.rs`, `apps/base/step_up/README.md`). These operations are declared on by default, and each tenant may change them:
