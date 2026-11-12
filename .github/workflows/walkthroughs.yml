@@ -1,0 +1,222 @@
+# Runs the example walkthroughs (apps/**/examples), which ci.yml only compiles
+# (clippy --all-targets): a walkthrough nobody runs rots unnoticed, and the
+# refusals it proves are never executed.
+#
+# scripts/run-walkthroughs.sh holds the two lists: WALKTHROUGHS, the examples
+# that check and exit (each on its own fresh database), and NOT_RUN, the
+# examples left out with the reason. Left out are the ones that only serve the
+# app with a reference page for a person to use in a browser (dashboard-,
+# download-, flex-, list-, live-, schedule- and settings-editor-reference,
+# g3-lenses, g4-page-columns, softphone-walkthrough, u5-inline,
+# w7-workflow-reference, person-contact-panel, upload-resume-proof), the ones
+# that need something a person or another run supplies (sso-walkthrough,
+# delivery-walkthrough, import-results-walkthrough, owner-agent-standing,
+# step-up-reference), and the compositions that need a fixture container
+# mounted and a rebuild (session-ended-walkthrough, and the mounted runs of
+# events-reference and ports-reference). The script fails while an example is
+# in neither list.
+#
+# Its own workflow, and four groups side by side: each group builds the app
+# and its examples (every example is a whole linked app) and runs them, which
+# would more than double the wait of ci.yml's one job. `Run the walkthroughs`
+# is the one stable check for branch protection.
+#
+# A pull request that cannot affect the build (docs, and the other paths
+# scripts/compatibility.py treats as harmless) passes without building.
+#
+# Started by hand, it can run this branch's script against another branch or
+# pull request head (`ref`), with lines for walkthroughs that branch adds
+# (`extra`), or only some walkthroughs (`only`).
+name: Walkthroughs
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit whose walkthroughs to run with this branch's script (default, this branch)
+        required: false
+      only:
+        description: Walkthrough names to run, space-separated (default, all)
+        required: false
+      extra:
+        description: Extra WALKTHROUGHS lines for examples the script does not list yet, separated by a comma
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: walkthroughs-${{ github.event.pull_request.number || github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Debug info dominates compile and link time, and the walkthroughs do not read it.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+
+jobs:
+  decide:
+    name: Select the walkthroughs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      affected: ${{ steps.decide.outputs.affected }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base commit has to be present so a pull request can diff
+          # against it. The repository is small.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide whether this change affects the build
+        id: decide
+        run: python3 scripts/compatibility.py affected platform
+      - name: Every example is listed as run or not run
+        run: scripts/run-walkthroughs.sh --check
+
+  walkthroughs:
+    name: Walkthroughs (${{ matrix.group }})
+    needs: decide
+    if: needs.decide.outputs.affected == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [base, privacy, core, web]
+
+    env:
+      DATABASE_URL: postgres://bilibi:bilibi@localhost:5432/bilibi
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: bilibi
+          POSTGRES_PASSWORD: bilibi
+          POSTGRES_USER: bilibi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bilibi"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      # A hand-started run against another branch uses this branch's script,
+      # so a branch made before the script existed can still be run.
+      - name: Check out this branch's script
+        if: inputs.ref != ''
+        uses: actions/checkout@v7
+        with:
+          path: .walkthrough-script
+          sparse-checkout: scripts/run-walkthroughs.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Use this branch's script on the other branch
+        if: inputs.ref != ''
+        run: |
+          install -m 755 .walkthrough-script/scripts/run-walkthroughs.sh "$RUNNER_TEMP/run-walkthroughs.sh"
+          rm -rf .walkthrough-script
+          echo WALKTHROUGH_ALLOW_MISSING=1 >> "$GITHUB_ENV"
+
+      # The build and the example programs need more room than a runner has free.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+
+      - run: rustup show active-toolchain || rustup toolchain install
+      # One cache for the four groups: they compile the same crates. Only the
+      # web group on main saves it, because it builds every crate and a cache
+      # per group and pull request would push the other workflows' caches out.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          prefix-key: v1-walkthroughs
+          shared-key: debug
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.group == 'web' }}
+
+      # qpdf protects PDFs, pdftotext reads exports back, and the PDF and
+      # privacy walkthroughs drive the runner's own Chrome.
+      - name: Install the programs the walkthroughs call
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qpdf poppler-utils zip
+          # Ubuntu 24.04 refuses Chrome's sandbox to an unprivileged process by default.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo "WALKTHROUGH_CHROMIUM=$(command -v google-chrome)" >> "$GITHUB_ENV"
+
+      - name: Restore the language model
+        if: matrix.group == 'base'
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/bilibi-language-model
+          key: language-model-${{ hashFiles('apps/base/language_detection/model.json') }}
+      - name: Provision the pinned language model
+        if: matrix.group == 'base'
+        run: |
+          python3 scripts/provision-language-model.py ~/.cache/bilibi-language-model
+          echo "WALKTHROUGH_LANGUAGE_MODEL=$HOME/.cache/bilibi-language-model/lid.176.bin" >> "$GITHUB_ENV"
+
+      - name: Run the walkthroughs
+        env:
+          WALKTHROUGH_GROUP: ${{ matrix.group }}
+          WALKTHROUGH_LOGS: ${{ runner.temp }}/walkthrough-logs
+          ONLY: ${{ inputs.only }}
+          EXTRA: ${{ inputs.extra }}
+        run: |
+          script=scripts/run-walkthroughs.sh
+          # The other branch's checkout stays untouched: pinning refuses a changed one.
+          if [ -f "$RUNNER_TEMP/run-walkthroughs.sh" ]; then
+            script="$RUNNER_TEMP/run-walkthroughs.sh"
+            export WALKTHROUGH_ROOT="$GITHUB_WORKSPACE"
+          fi
+          WALKTHROUGH_EXTRA=$(printf '%s' "$EXTRA" | tr ',' '\n')
+          export WALKTHROUGH_EXTRA
+          # shellcheck disable=SC2086 # one walkthrough name per word
+          "$script" $ONLY
+
+      - name: Keep the walkthrough output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: walkthrough-logs-${{ matrix.group }}
+          path: ${{ runner.temp }}/walkthrough-logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # One stable check for branch protection, independent of the groups.
+  required:
+    name: Run the walkthroughs
+    needs: [decide, walkthroughs]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every walkthrough to pass
+        env:
+          DECIDED: ${{ needs.decide.result }}
+          AFFECTED: ${{ needs.decide.outputs.affected }}
+          RAN: ${{ needs.walkthroughs.result }}
+        run: |
+          if [ "$DECIDED" = success ] && [ "$AFFECTED" = false ]; then
+            echo 'No changed file can affect a walkthrough. Passing without building.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$DECIDED" = success ] && [ "$RAN" = success ]; then
+            echo 'Every walkthrough passed.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          message='A walkthrough failed, or an example is not listed. Read the failing Walkthroughs (group) job; scripts/run-walkthroughs.sh runs the same thing locally.'
+          echo "::error::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
