@@ -413,6 +413,69 @@ async fn main() -> DbResult<()> {
         fetch(&media, &client, &actor, &receipt.public_id).await,
     );
 
+    println!("== every delivery and every owner refusal is an audit action (#568)");
+    // Alex Admin (4) viewing as Ada Manager (1), as an impersonated session does.
+    let impersonated_reader = authentication
+        .authenticate_session(&**client, 1, 1, Some(4), None, String::new())
+        .await?;
+    let mark = count(
+        &client,
+        "SELECT coalesce(max(id),0) FROM base_audit_actions",
+    )
+    .await?;
+    show(
+        "the operator, viewing as the uploader, downloads the png",
+        fetch(&media, &client, &impersonated_reader, &receipt.public_id).await,
+    );
+    client
+        .batch_execute(
+            "UPDATE walkthrough_tickets SET denied='{download}' WHERE id='1' AND tenant_id=1",
+        )
+        .await?;
+    show(
+        "owner denies download again",
+        fetch(&media, &client, &actor, &receipt.public_id).await,
+    );
+    client
+        .batch_execute("UPDATE walkthrough_tickets SET denied='{}' WHERE id='1' AND tenant_id=1")
+        .await?;
+    let trail = client
+        .query(
+            "SELECT event, actor_id, impersonator_id, coalesce(payload->>'reason',''), payload->>'attachment', payload->>'subject_type', payload->>'subject_id', payload::text \
+             FROM base_audit_actions WHERE tenant_id=1 AND id > $1 AND event LIKE 'media.attachment.download%' ORDER BY id",
+            &[&mark],
+        )
+        .await?;
+    for row in &trail {
+        println!(
+            "audit {} actor={} impersonator={:?} reason={:?}",
+            row.get::<_, String>(0),
+            row.get::<_, i64>(1),
+            row.get::<_, Option<i64>>(2),
+            row.get::<_, String>(3)
+        );
+    }
+    let named = |row: &tokio_postgres::Row| {
+        row.get::<_, Option<String>>(4).as_deref() == Some(receipt.public_id.as_str())
+            && row.get::<_, Option<String>>(5).as_deref() == Some(TICKET)
+            && row.get::<_, Option<String>>(6).as_deref() == Some("1")
+            && !row.get::<_, String>(7).contains("receipt.png")
+    };
+    let recorded = trail.len() == 2
+        && trail[0].get::<_, String>(0) == "media.attachment.downloaded"
+        && trail[0].get::<_, i64>(1) == 1
+        && trail[0].get::<_, Option<i64>>(2) == Some(4)
+        && trail[1].get::<_, String>(0) == "media.attachment.download_refused"
+        && trail[1].get::<_, i64>(1) == 1
+        && trail[1].get::<_, Option<i64>>(2).is_none()
+        && trail[1].get::<_, String>(3) == "forbidden"
+        && trail.iter().all(named);
+    if !recorded {
+        println!("download audit trail is wrong");
+        return Err(bilibi_database::Error::Internal);
+    }
+    println!("download audit: the delivery names the operator behind the session, the refusal its reason; neither names the file");
+
     println!("== submit and retain join the owner's transaction");
     let ids = [receipt.public_id.as_str()];
     macro_rules! in_tx {

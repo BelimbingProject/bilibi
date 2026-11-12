@@ -8,6 +8,8 @@
 //! since it expired or was revoked, and its address and the sign-in-less
 //! account prepared for it are anonymised. Neither is swept until a company turns it on and sets a period,
 //! and both skip what legal holds name: the record, or the account's person.
+//! A held accepted invitation keeps its account, and a held prepared account
+//! its invitation, so the run after release finishes both.
 use bilibi_database::{Change, MutationTransaction};
 use bilibi_personal_data::{ErasedRecord, Erasure, HandlerFuture, Holds, ERASED};
 use bilibi_privacy::{Companies, Sweeper, Swept};
@@ -91,6 +93,25 @@ impl Sweeper for ClosedAccounts {
                     kept.push(user);
                 }
             }
+            // A held accepted invitation keeps its account.
+            let open: Vec<i64> = keys
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| !kept.contains(id))
+                .collect();
+            for (_, user, _) in crate::privacy::invitations::held_accepted_invitations(
+                tx.sql(),
+                holds,
+                grant,
+                tenant,
+                &open,
+            )
+            .await?
+            {
+                if !kept.contains(&user) {
+                    kept.push(user);
+                }
+            }
             let due: Vec<(i64, String, String, i64, bool)> = rows
                 .iter()
                 .filter(|row| !kept.contains(&row.get::<_, i64>(0)))
@@ -163,7 +184,7 @@ impl Sweeper for ClosedAccounts {
                             }
                             changes.extend(links);
                             let (invitation_changes, records) =
-                                crate::privacy::anonymise_accepted_invitations(sql, tenant, user)
+                                crate::privacy::invitations::anonymise_accepted_invitations(sql, tenant, user)
                                     .await?;
                             changes.extend(invitation_changes);
                             extra.extend(records);
@@ -231,12 +252,25 @@ impl Sweeper for LapsedInvitations {
                 )
                 .await?;
             let keys: Vec<(i64, Option<i64>)> = rows.iter().map(|row| (row.get(0), None)).collect();
-            let kept = held(holds, grant, crate::privacy::INVITATION_KIND, &keys).await?;
-            let due: Vec<i64> = keys
+            let mut kept = held(holds, grant, crate::privacy::INVITATION_KIND, &keys).await?;
+            // A held prepared account keeps its invitation.
+            let open: Vec<i64> = keys
                 .iter()
                 .map(|(id, _)| *id)
                 .filter(|id| !kept.contains(id))
                 .collect();
+            for (invitation, _, _) in crate::privacy::invitations::held_prepared_accounts(
+                tx.sql(),
+                holds,
+                grant,
+                tenant,
+                &open,
+            )
+            .await?
+            {
+                kept.push(invitation);
+            }
+            let due: Vec<i64> = open.into_iter().filter(|id| !kept.contains(id)).collect();
             let mut swept = Swept {
                 kept: kept.len() as i64,
                 next: next(&keys, limit),
@@ -251,7 +285,8 @@ impl Sweeper for LapsedInvitations {
                 .mutate(move |sql| {
                     Box::pin(async move {
                         let (changes, records) =
-                            crate::privacy::anonymise_invitations(sql, tenant, &due).await?;
+                            crate::privacy::invitations::anonymise_invitations(sql, tenant, &due)
+                                .await?;
                         Ok((records, changes))
                     })
                 })
