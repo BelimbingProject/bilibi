@@ -1,5 +1,7 @@
 //! Inspect tenant identity and explicit desks through the real User/Company
-//! facades for ADR 19.
+//! facades for ADR 19, then the account takeover bounds (#530, #531).
+//! Run on a freshly migrated disposable database: its instance role is
+//! Production, so step-up is enforced.
 use bilibi_audit::RequestInfo;
 use bilibi_company::{CompanyService, SERVICE as COMPANIES};
 use bilibi_database::pool;
@@ -496,5 +498,271 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "No desks: {:?}; tenant account remains active",
         no_desk.current_company().map(|id| id.get())
     );
+    account_bounds(&app, &db, &users).await
+}
+
+/// An account's current version, which an inline edit carries.
+async fn version(sql: &tokio_postgres::Client, user: i64) -> Result<i64, tokio_postgres::Error> {
+    Ok(sql
+        .query_one(
+            "SELECT version FROM users WHERE tenant_id=1 AND id=$1",
+            &[&user],
+        )
+        .await?
+        .get(0))
+}
+
+/// The step-up operation that guards setting another person's password or
+/// sign-in email (`core/user` `accounts.rs`).
+const SET_CREDENTIALS: &str = "core.user.account.credentials.set";
+
+/// Account takeover bounds (#530, #531): a User Editor cannot set the password
+/// or sign-in email of, or delete, an account holding more than they do;
+/// setting another person's password or email needs step-up; impersonation
+/// reaches only accounts holding nothing the operator lacks; and an
+/// impersonated session creates, changes and deletes no account.
+///
+/// Mallory is the viewer (id 2) given the system role User Editor and
+/// `admin.user.impersonate`. The administrator (id 4) holds a full-access role.
+/// The contractor (id 7) is left with no role, so Mallory covers it, and staff
+/// (id 3) is made a second User Editor for the impersonated writes.
+async fn account_bounds(
+    app: &bilibi_web::App,
+    db: &bilibi_database::Db,
+    users: &UserService,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use bilibi_database::Error;
+    use bilibi_user::{
+        impersonation::Refusal, AccountError, AccountField, AccountInput, InvitationError,
+        InvitationInput,
+    };
+    let password = bilibi_walkthrough_fixture::PASSWORD;
+    let (mallory_id, admin_id, staff_id, contractor_id) = (2_i64, 4_i64, 3_i64, 7_i64);
+    let sql = db.get().await?;
+    let editor_role: i64 = sql
+        .query_opt(
+            "SELECT id FROM roles WHERE tenant_id=1 AND code='user_editor'",
+            &[],
+        )
+        .await?
+        .ok_or("the User Editor system role was not reconciled")?
+        .get(0);
+    sql.execute(
+        "DELETE FROM principal_roles WHERE tenant_id=1 AND user_id IN ($1,$2)",
+        &[&staff_id, &contractor_id],
+    )
+    .await?;
+    sql.execute(
+        "DELETE FROM authz_identity_roles WHERE tenant_id=1 AND user_id IN ($1,$2)",
+        &[&staff_id, &contractor_id],
+    )
+    .await?;
+    sql.execute(
+        "INSERT INTO principal_roles(tenant_id,user_id,role_id) VALUES(1,$1,$3),(1,$2,$3) ON CONFLICT DO NOTHING",
+        &[&mallory_id, &staff_id, &editor_role],
+    )
+    .await?;
+    sql.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,$1,'admin.user.impersonate',true) ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
+        &[&mallory_id],
+    )
+    .await?;
+    let mallory_login = users.login("viewer@example.test", password).await?;
+    let mallory = app.security.guard(&mallory_login.token).await?;
+
+    // #530: the User Editor cannot take over or remove the administrator.
+    let password_refused = users
+        .set_password(&mallory, admin_id, "mallory-chose-this-password")
+        .await;
+    let email_refused = users
+        .update_account(
+            &mallory,
+            admin_id,
+            version(&sql, admin_id).await?,
+            AccountField::Email,
+            "mallory@example.test",
+        )
+        .await;
+    let delete_refused = users.delete_account(&mallory, admin_id).await;
+    if !matches!(password_refused, Err(AccountError::Outranked))
+        || !matches!(email_refused, Err(AccountError::Outranked))
+        || !matches!(delete_refused, Err(AccountError::Outranked))
+    {
+        return Err(format!(
+            "A User Editor changed a full-access account: password {password_refused:?}, email {:?}, delete {delete_refused:?}",
+            email_refused.map(|account| account.id)
+        )
+        .into());
+    }
+    users
+        .login("admin@example.test", password)
+        .await
+        .map_err(|error| format!("The administrator's own password stopped working: {error}"))?;
+    println!("PASS: a User Editor cannot set the password or sign-in email of, or delete, a full-access account; its password still signs in");
+
+    // #530: setting another person's password or email asks for step-up,
+    // which is on by default (this database's instance role is Production).
+    let step_up = app
+        .services
+        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
+    if !step_up.required(&mallory, SET_CREDENTIALS).await? {
+        return Err("Setting another person's password is not guarded by step-up by default; run on a freshly migrated database".into());
+    }
+    let password_step_up = users
+        .set_password(&mallory, contractor_id, "covered-new-password")
+        .await;
+    let email_step_up = users
+        .update_account(
+            &mallory,
+            contractor_id,
+            version(&sql, contractor_id).await?,
+            AccountField::Email,
+            "contractor-moved@example.test",
+        )
+        .await;
+    for (what, refused) in [
+        ("password", password_step_up.as_ref().err()),
+        ("email", email_step_up.as_ref().err()),
+    ] {
+        if !matches!(
+            refused,
+            Some(AccountError::Access(Error::StepUpRequired {
+                operation: SET_CREDENTIALS,
+                ..
+            }))
+        ) {
+            return Err(format!(
+                "Setting another person's {what} did not ask for step-up: {refused:?}"
+            )
+            .into());
+        }
+    }
+    users
+        .login("contractor@example.test", password)
+        .await
+        .map_err(|error| format!("A refused password change still took effect: {error}"))?;
+    println!("PASS: setting another person's password or sign-in email is refused until step-up passes ({SET_CREDENTIALS})");
+
+    // With enforcement off, as on a Dev server, a covered account's credentials change.
+    step_up.set_enforced(false);
+    users
+        .set_password(&mallory, contractor_id, "covered-new-password")
+        .await
+        .map_err(|error| format!("A User Editor could not set a covered password: {error:?}"))?;
+    let new_password_signs_in = users
+        .login("contractor@example.test", "covered-new-password")
+        .await
+        .is_ok();
+    users
+        .update_account(
+            &mallory,
+            contractor_id,
+            version(&sql, contractor_id).await?,
+            AccountField::Email,
+            "contractor-moved@example.test",
+        )
+        .await
+        .map_err(|error| format!("A User Editor could not set a covered email: {error:?}"))?;
+    if !new_password_signs_in {
+        return Err("The covered account's new password does not sign in".into());
+    }
+    println!("PASS: once step-up passes, a User Editor sets the password and sign-in email of an account holding nothing more");
+
+    // #531: impersonation reaches only an account holding nothing the
+    // operator lacks, and the impersonated session changes no account.
+    let outranked = users
+        .impersonate(
+            &mallory_login.token,
+            &mallory_login.csrf,
+            admin_id,
+            &RequestInfo::default(),
+        )
+        .await;
+    if !matches!(outranked, Err(Refusal::Outranked)) {
+        return Err(
+            format!("Impersonating a full-access account was not refused: {outranked:?}").into(),
+        );
+    }
+    let csrf = users
+        .impersonate(
+            &mallory_login.token,
+            &mallory_login.csrf,
+            staff_id,
+            &RequestInfo::default(),
+        )
+        .await
+        .map_err(|error| format!("Impersonating a covered account was refused: {error:?}"))?;
+    let viewing = app.security.guard(&mallory_login.token).await?;
+    if viewing.user() != staff_id || viewing.impersonator().is_none() {
+        return Err("The impersonation did not switch the session".into());
+    }
+    let set = users
+        .set_password(&viewing, contractor_id, "impersonated-password")
+        .await;
+    let renamed = users
+        .update_account(
+            &viewing,
+            contractor_id,
+            version(&sql, contractor_id).await?,
+            AccountField::Name,
+            "Renamed while impersonating",
+        )
+        .await;
+    let deleted = users.delete_account(&viewing, contractor_id).await;
+    let created = users
+        .create_account(
+            &viewing,
+            &AccountInput {
+                name: "Created while impersonating".into(),
+                email: "impersonated-create@example.test".into(),
+                password: "impersonated-create-password".into(),
+                ..AccountInput::default()
+            },
+        )
+        .await;
+    let invited = users
+        .invite_member(
+            &viewing,
+            &InvitationInput {
+                name: "Invited while impersonating".into(),
+                email: "impersonated-invite@example.test".into(),
+                roles: Vec::new(),
+            },
+        )
+        .await;
+    if !matches!(set, Err(AccountError::Impersonating))
+        || !matches!(renamed, Err(AccountError::Impersonating))
+        || !matches!(deleted, Err(AccountError::Impersonating))
+        || !matches!(created, Err(AccountError::Impersonating))
+        || !matches!(invited, Err(InvitationError::Access(Error::Refused(_))))
+    {
+        return Err(format!(
+            "An impersonated session changed an account: password {set:?}, name {:?}, delete {deleted:?}, create {:?}, invite {:?}",
+            renamed.map(|account| account.id),
+            created.map(|account| account.id),
+            invited.map(|invitation| invitation.user)
+        )
+        .into());
+    }
+    users
+        .login("contractor@example.test", "covered-new-password")
+        .await
+        .map_err(|error| format!("An impersonated password change took effect: {error}"))?;
+    users
+        .leave_impersonation(&mallory_login.token, &csrf, &RequestInfo::default())
+        .await?;
+    println!("PASS: impersonating a full-access account is refused; an impersonated session cannot set a password, edit, delete, create or invite an account");
+
+    // Back as herself, Mallory may delete the covered account.
+    let mallory = app.security.guard(&mallory_login.token).await?;
+    if mallory.impersonator().is_some() || mallory.user() != mallory_id {
+        return Err("Leaving impersonation did not restore the operator".into());
+    }
+    users
+        .delete_account(&mallory, contractor_id)
+        .await
+        .map_err(|error| format!("A User Editor could not delete a covered account: {error:?}"))?;
+    step_up.set_enforced(true);
+    println!("PASS: a User Editor deletes an account holding nothing more");
     Ok(())
 }

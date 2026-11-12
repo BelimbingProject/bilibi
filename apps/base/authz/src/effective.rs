@@ -253,6 +253,49 @@ pub async fn effective_capabilities_in_company(
     })
 }
 
+/// Whether the actor holds everything `target` holds: every capability the
+/// target holds tenant-wide, in the actor's current company and in each company
+/// where the target has a company-bounded role, the actor holds there too, and a
+/// target with a full-access role needs an actor with one. It is the rule
+/// `Grants::validate_assignment` applies to giving a role. An owner that lets
+/// one account set another's password or sign-in address, delete it or act as
+/// it checks it first, so the account is not a way around that rule. A named
+/// system principal compares its own grants and never covers a full-access
+/// account. A read, not a decision: nothing is logged.
+pub async fn holds_everything_of(
+    client: &impl GenericClient,
+    scope: &Scope,
+    target: i64,
+) -> Result<bool> {
+    let mut companies: BTreeSet<Option<i64>> = BTreeSet::new();
+    companies.insert(None);
+    companies.insert(scope.current_company().map(|id| id.get()));
+    for row in client
+        .query(
+            "SELECT DISTINCT company_id FROM effective_principal_roles WHERE tenant_id=$1 AND user_id=$2 AND company_id IS NOT NULL",
+            &[&scope.tenant(), &target],
+        )
+        .await?
+    {
+        companies.insert(Some(row.get::<_, i64>(0)));
+    }
+    let principal = match scope.principal() {
+        Some(principal) => Some(effective_system(client, scope.tenant(), principal).await?),
+        None => None,
+    };
+    for company in companies {
+        let held = effective_capabilities_in_company(client, scope, target, company).await?;
+        let actor = match &principal {
+            Some(grants) => grants.clone(),
+            None => effective_capabilities_in_company(client, scope, scope.user(), company).await?,
+        };
+        if (held.grant_all && !actor.grant_all) || !held.allowed.is_subset(&actor.allowed) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Live named-role eligibility, including provider-managed effective roles.
 /// A grant-all capability never substitutes for membership in this role.
 pub async fn has_effective_role(

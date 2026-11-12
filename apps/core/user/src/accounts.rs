@@ -27,6 +27,16 @@ pub const NAME_MAX: usize = 255;
 const BLANK: &str = "can't be blank";
 const EMAIL_FORMAT: &str = "must be an email address";
 pub(crate) const EMAIL_TAKEN: &str = "has already been taken";
+/// Setting another account's password or sign-in address: on by default,
+/// because either one hands over the account.
+pub(crate) const SET_CREDENTIALS: &str = "core.user.account.credentials.set";
+bilibi_step_up::declare!(
+    "core/user",
+    bilibi_step_up::Operation::new(
+        SET_CREDENTIALS,
+        "Set another person's password or sign-in email"
+    )
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldError {
@@ -56,6 +66,14 @@ pub enum AccountError {
     Conflict,
     #[error("You cannot delete your own account")]
     OwnAccount,
+    /// The account holds a permission the actor does not
+    /// (`bilibi_authz::holds_everything_of`).
+    #[error("This account has permissions you do not have")]
+    Outranked,
+    /// The request comes from an impersonated session: creating, changing
+    /// and deleting accounts is never done while viewing as someone else.
+    #[error("Accounts cannot be changed while viewing as someone else")]
+    Impersonating,
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -204,6 +222,9 @@ impl UserService {
         scope: &Scope,
         input: &AccountInput,
     ) -> std::result::Result<Account, AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
         let mut errors = Vec::new();
         errors.extend(validate_name(&input.name));
         let email = match validate_email(&input.email) {
@@ -364,8 +385,25 @@ impl UserService {
         Ok(account)
     }
 
+    /// Refuses a write that would hand the actor more than they hold: the
+    /// account's credentials, or its removal, stay with someone who holds
+    /// everything it holds.
+    async fn require_covered(
+        tx: &MutationTransaction<'_>,
+        scope: &Scope,
+        user: i64,
+    ) -> std::result::Result<(), AccountError> {
+        if bilibi_authz::holds_everything_of(tx.sql(), scope, user).await? {
+            Ok(())
+        } else {
+            Err(AccountError::Outranked)
+        }
+    }
+
     /// Replaces the name or email an administrator edited in place.
     /// A changed email is unverified again, so `email_verified_at` is cleared.
+    /// A new email also needs an actor who holds everything the account holds
+    /// and passes step-up (`SET_CREDENTIALS`): it is where a reset link goes.
     pub async fn update_account(
         &self,
         scope: &Scope,
@@ -374,6 +412,9 @@ impl UserService {
         field: AccountField,
         value: &str,
     ) -> std::result::Result<Account, AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
         let value = match field {
             AccountField::Name => {
                 if let Some(error) = validate_name(value) {
@@ -401,6 +442,9 @@ impl UserService {
         {
             return Err(AccountError::Access(Error::Forbidden));
         }
+        if field == AccountField::Email {
+            Self::require_covered(&tx, &scope, user).await?;
+        }
         let current = match field {
             AccountField::Name => account.name.clone(),
             AccountField::Email => account.email.clone(),
@@ -414,6 +458,11 @@ impl UserService {
                 "email",
                 EMAIL_TAKEN,
             )]));
+        }
+        if field == AccountField::Email {
+            self.step_up
+                .require(&scope, SET_CREDENTIALS, &format!("user:{user}"))
+                .await?;
         }
         let tenant = scope.tenant();
         let identity = crate::sign_in_identity::id(tx.sql(), tenant, user).await?;
@@ -458,13 +507,17 @@ impl UserService {
     }
 
     /// Sets a new password for another account: no current password is asked, every session
-    /// of the account ends, and the audit row carries a marker, never a hash.
+    /// of the account ends, and the audit row carries a marker, never a hash. The actor must
+    /// hold everything the account holds and pass step-up (`SET_CREDENTIALS`).
     pub async fn set_password(
         &self,
         scope: &Scope,
         user: i64,
         new_password: &str,
     ) -> std::result::Result<(), AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
         if let Some(error) = validate_password(new_password) {
             return Err(AccountError::Validation(vec![error]));
         }
@@ -483,6 +536,10 @@ impl UserService {
         if !home {
             return Err(AccountError::Access(Error::Forbidden));
         }
+        Self::require_covered(&tx, &scope, user).await?;
+        self.step_up
+            .require(&scope, SET_CREDENTIALS, &format!("user:{user}"))
+            .await?;
         tx
             .mutate(move |sql| {
                 Box::pin(async move {
@@ -521,14 +578,18 @@ impl UserService {
         Ok(())
     }
 
-    /// Deletes an account: `admin.user.delete`, never
-    /// the actor's own. An outside membership retires only this tenant's row.
-    /// Deleting the home account also closes the shared sign-in.
+    /// Deletes an account: `admin.user.delete`, never the actor's own nor one
+    /// holding a permission the actor lacks. An outside membership retires
+    /// only this tenant's row. Deleting the home account also closes the
+    /// shared sign-in.
     pub async fn delete_account(
         &self,
         scope: &Scope,
         user: i64,
     ) -> std::result::Result<(), AccountError> {
+        if scope.impersonator().is_some() {
+            return Err(AccountError::Impersonating);
+        }
         if scope.user() == user {
             return Err(AccountError::OwnAccount);
         }
@@ -541,6 +602,7 @@ impl UserService {
         let account = self
             .open_account_write(&tx, &scope, user, None, DELETE)
             .await?;
+        Self::require_covered(&tx, &scope, user).await?;
         let tenant = scope.tenant();
         let (identity, home) =
             crate::sign_in_identity::identity_and_home(tx.sql(), tenant, user).await?;

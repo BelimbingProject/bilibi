@@ -105,11 +105,12 @@ pub const IMPERSONATE_NESTED: &str = "impersonate-nested";
 pub const IMPERSONATE_SELF: &str = "impersonate-self";
 pub const IMPERSONATE_MISSING: &str = "impersonate-missing";
 pub const IMPERSONATE_UNABLE: &str = "impersonate-unable";
+pub const IMPERSONATE_OUTRANKED: &str = "impersonate-outranked";
 /// The company switcher was sent a company the account does not reach.
 pub const COMPANY_UNAVAILABLE: &str = "company-unavailable";
 pub const TENANT_UNAVAILABLE: &str = "tenant-unavailable";
 pub const TENANT_ENTRY_POLICY: &str = "tenant-entry-policy";
-const ACTION_REFUSALS: [(&str, &str); 8] = [
+const ACTION_REFUSALS: [(&str, &str); 9] = [
     (
         IMPERSONATE_FORBIDDEN,
         "You do not have access to that action.",
@@ -124,6 +125,10 @@ const ACTION_REFUSALS: [(&str, &str); 8] = [
         "Unable to find that user in this workspace.",
     ),
     (IMPERSONATE_UNABLE, "Unable to impersonate that user."),
+    (
+        IMPERSONATE_OUTRANKED,
+        "You cannot impersonate someone who has permissions you do not have.",
+    ),
     (COMPANY_UNAVAILABLE, "That company is not available to you."),
     (TENANT_UNAVAILABLE, "That tenant is not available to you."),
     (

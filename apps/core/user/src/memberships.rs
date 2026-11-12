@@ -63,6 +63,10 @@ impl From<tokio_postgres::Error> for InvitationError {
     }
 }
 
+/// Why `invite_member` refuses an impersonated session: inviting someone is
+/// account administration, which is never done while viewing as someone else.
+const IMPERSONATING_INVITE: &str = "Invitations cannot be sent while viewing as someone else.";
+
 fn digest(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
@@ -108,6 +112,11 @@ impl UserService {
         scope: &Scope,
         input: &InvitationInput,
     ) -> std::result::Result<Invitation, InvitationError> {
+        if scope.impersonator().is_some() {
+            return Err(InvitationError::Access(Error::Refused(
+                IMPERSONATING_INVITE.into(),
+            )));
+        }
         let mut errors = Vec::new();
         errors.extend(validate_name(&input.name));
         let email = match validate_email(&input.email) {

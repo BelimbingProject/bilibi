@@ -300,6 +300,10 @@ impl LiveState<Scope, Error> for Create {
                         Err(AccountError::Access(Error::Forbidden)) => {
                             self.notice = "You do not have permission to create users.".into()
                         }
+                        Err(AccountError::Impersonating) => {
+                            self.notice =
+                                "Users cannot be created while viewing as someone else.".into()
+                        }
                         Err(_) => self.notice = "The user was not created. Try again.".into(),
                     }
                 } else {
