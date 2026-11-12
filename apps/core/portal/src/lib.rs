@@ -187,7 +187,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/portal", provenance!(),
     ],
     roles: &[
         RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: &[VIEW, MANAGE] },
-        RoleDefinition { code: PORTAL_ROLE, name: "Portal customer", description: "Every customer an invitation admits: its own portal home and account", grant_all: false, capabilities: &[PORTAL_ACCOUNT] },
+        RoleDefinition { code: PORTAL_ROLE, name: "Portal customer", description: "Every customer an invitation admits: its own portal home and account, and its own contact details", grant_all: false, capabilities: &[PORTAL_ACCOUNT, bilibi_person::PORTAL] },
     ],
     system_principals: &[],
 }) }

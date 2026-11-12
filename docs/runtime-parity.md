@@ -11,6 +11,15 @@ Bilibi has no unit tests. Use this checklist to record real app evidence. The wa
 
 The walkthrough fixture (`fixtures/walkthrough`) creates tenants 1 and 2, five permission roles, seven accounts (three linked to Persons; two of those Persons have business affiliations and explicit desks), 62 tenant 1 companies and one tenant 2 company. Sign-in is by email alone; re-installing the fixture is idempotent. It is not product data: a real install creates its first operator with `create-owner`. The fixture's password is a fixture credential and must only be used against disposable local databases.
 
+## Walkthroughs in CI
+
+Every example under `apps/**/examples` that checks and exits runs on each pull request, each on its own fresh database: the **Walkthroughs** workflow (`.github/workflows/walkthroughs.yml`, stable check `Run the walkthroughs`).
+
+- **Run them yourself:** `DATABASE_URL=postgres://…/postgres scripts/run-walkthroughs.sh [name…]`, with a role that may create databases. The script's header lists the programs some walkthroughs call (Chromium, qpdf, pdftotext, the language model).
+- **Add an example:** add its line to `WALKTHROUGHS` in that script (the database it starts from, its environment, its steps). One that cannot run unattended (it only serves a page for a browser, or needs something a person supplies) goes in `NOT_RUN` with the reason. The check fails while an example is in neither list.
+- **A failure is real:** a walkthrough that fails on `main` gets an issue and a line in the script's `KNOWN_FAILURES` (`name|issue`). It still runs: while it fails it is reported with a warning and does not fail the check; once it passes the check fails with "remove it from the known list", so the change that fixes it deletes its line. An unlisted failure fails the check. Never add a line to get a pull request through.
+- **Another branch:** start the workflow by hand with `ref` to run this branch's script against a branch that does not have it yet, and `extra` for lines that branch's new examples need.
+
 ## Smoke checks
 
 Use `chrome-devtools-axi` with `CHROME_DEVTOOLS_AXI_SESSION` set to the task ID on every invocation; the default browser session is shared with other workers. Record the viewport size, device scale factor, browser zoom, locale, timezone, color scheme, account/tenant, and browser version. Wait for fonts and loading indicators before capture. Run the cases where the behavior exists; mark behavior that is not built yet as a gap instead of skipping it silently.

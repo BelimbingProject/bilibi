@@ -405,14 +405,14 @@ fn id_value(field: &Field, id: String) -> std::result::Result<Option<Value>, Str
     }
 }
 
-/// Locks the run and says whether this pass may still record.
+/// Locks the run (no counts: `store::lock`); may this pass still record?
 async fn current(
     tx: &MutationTransaction<'_>,
     scope: &Scope,
     run: i64,
     pass: Pass,
 ) -> Result<Option<Run>> {
-    let run = store::load(tx.sql(), scope, run, true).await?;
+    let run = store::lock(tx.sql(), scope, run).await?;
     Ok((run.state.working() && run.pass == Some(pass)).then_some(run))
 }
 

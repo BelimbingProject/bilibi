@@ -105,11 +105,11 @@ def affects_domains(path):
 
 
 def affects_platform(path):
-    """True when a pull request file can change the unmounted Rust gates."""
+    """True when a pull request file can change the unmounted Rust gates or the walkthrough runs."""
     if harmless(path):
         return False
     if path.startswith('.github/'):
-        return path == '.github/workflows/ci.yml'
+        return path in ('.github/workflows/ci.yml', '.github/workflows/walkthroughs.yml')
     return True
 
 
