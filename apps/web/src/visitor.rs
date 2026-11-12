@@ -30,7 +30,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -299,19 +299,12 @@ fn refused(refusal: Refusal) -> Response {
 fn origin_of(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
 }
-/// The key a sender is counted under on this edge: its IPv4 address, or the
-/// /64 network of its IPv6 address, since one subscriber is usually handed a
-/// whole /64 and could otherwise take a fresh key per request.
+/// The key a sender is counted under on this edge ([`api::sender_key`]).
 fn sender(peer: &Option<Extension<ConnectInfo<SocketAddr>>>, headers: &HeaderMap) -> String {
-    let address = api::client_address(peer.as_ref().map(|Extension(ConnectInfo(p))| *p), headers);
-    match address.map(|ip| ip.to_canonical()) {
-        Some(IpAddr::V6(ip)) => {
-            let [a, b, c, d, ..] = ip.segments();
-            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
-        }
-        Some(ip) => ip.to_string(),
-        None => "unknown".into(),
-    }
+    api::sender_key(api::client_address(
+        peer.as_ref().map(|Extension(ConnectInfo(p))| *p),
+        headers,
+    ))
 }
 async fn policy(app: &App) -> Result<Policy, Refusal> {
     let client = app.db.get().await.map_err(Error::from)?;

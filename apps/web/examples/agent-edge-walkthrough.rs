@@ -104,6 +104,28 @@ async fn main() -> Result<()> {
     );
     tally(&mut expected, &[reply.status]);
 
+    println!("== unknown paths with no token, a fresh address each time in one IPv6 /64");
+    aligned().await;
+    let before = exchanges().await?;
+    let mut statuses = Vec::with_capacity(LIMIT + 10);
+    for n in 1..=LIMIT + 10 {
+        let sender = format!("2001:db8:5::{n:x}");
+        statuses.push(
+            get(&addr, "/api/v1/nothing-here", &sender, None)
+                .await
+                .status,
+        );
+    }
+    let after = exchanges().await?;
+    tally(&mut expected, &statuses);
+    run.expect(
+        "a /64 shares one budget, whatever address in it sends",
+        statuses[..LIMIT].iter().all(|s| *s == 404)
+            && statuses[LIMIT..].iter().all(|s| *s == 429)
+            && after == before,
+        format!("{}, {} new rows", summary(&statuses), after - before),
+    );
+
     println!("== made-up tokens, from another sender");
     aligned().await;
     let before = exchanges().await?;

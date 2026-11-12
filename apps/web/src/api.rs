@@ -200,7 +200,11 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
     // no handler and no row.
     let gate = &app.api.gate;
     let bearer = bearer(request.headers()).is_some();
-    let sender = sender(&request);
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| *peer);
+    let sender = sender_key(client_address(peer, request.headers()));
     if let Err(error) = gate.open(&app).await {
         return unavailable(&error).into_response();
     }
@@ -532,6 +536,20 @@ pub(crate) fn client_address(peer: Option<SocketAddr>, headers: &HeaderMap) -> O
         }
     }
     Some(peer)
+}
+
+/// The key a public edge budgets a sender under: its IPv4 address, or the
+/// /64 network of its IPv6 address, since one subscriber is usually handed a
+/// whole /64 and could otherwise take a fresh key per request.
+pub(crate) fn sender_key(address: Option<IpAddr>) -> String {
+    match address.map(|ip| ip.to_canonical()) {
+        Some(IpAddr::V6(ip)) => {
+            let [a, b, c, d, ..] = ip.segments();
+            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+        }
+        Some(ip) => ip.to_string(),
+        None => "unknown".into(),
+    }
 }
 
 pub(crate) async fn allowed(app: &App, kind: &str, sender: &str) -> Result<bool, Error> {
