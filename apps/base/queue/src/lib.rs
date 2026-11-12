@@ -147,6 +147,27 @@ impl Queue {
         )
         .await
     }
+    /// One retention pass: deletes jobs that finished more than `keep_days`
+    /// days before `now` and returns how many. Zero keeps everything. A
+    /// cancelled or discarded job whose owner has an [`Ending`] and was not
+    /// told yet is kept. Housekeeping over transport state, called by the
+    /// `base/schedule.queue-retention` task: no Audit row per deleted job, and
+    /// no authority of its own, so the caller decides who may run it.
+    pub async fn prune(
+        &self,
+        client: &impl tokio_postgres::GenericClient,
+        keep_days: i64,
+        now: SystemTime,
+    ) -> Result<u64> {
+        if keep_days == 0 {
+            return Ok(0);
+        }
+        if !(1..=3650).contains(&keep_days) {
+            return Err(Error::Invalid);
+        }
+        let cutoff = now - std::time::Duration::from_secs(keep_days as u64 * 86_400);
+        store::prune(client, self.workers.told(), cutoff).await
+    }
     async fn insert(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -188,7 +209,7 @@ enum Actor {
 inventory::submit! {
     Module {id:"base/queue",layer:bilibi_module_registry::Layer::Base,
         dependencies:&["base/module_registry","base/database","base/audit","base/tenancy","base/authz"],
-        migrations:&[("base-queue-001",include_str!("../migrations/001-queue.sql")),("base-queue-002",include_str!("../migrations/002-queue-system-actor.sql")),("base-queue-003-work-company",include_str!("../migrations/003-work-company.sql")),("base-queue-004-job-endings",include_str!("../migrations/004-job-endings.sql"))],
+        migrations:&[("base-queue-001",include_str!("../migrations/001-queue.sql")),("base-queue-002",include_str!("../migrations/002-queue-system-actor.sql")),("base-queue-003-work-company",include_str!("../migrations/003-work-company.sql")),("base-queue-004-job-endings",include_str!("../migrations/004-job-endings.sql")),("base-queue-005-status-counts",include_str!("../migrations/005-status-counts.sql"))],
         services:&[Service {id:"base/queue.store",factory:|_| {
             let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
             Ok(Arc::new(Queue::new(Workers::from_catalog(&catalog)?)))

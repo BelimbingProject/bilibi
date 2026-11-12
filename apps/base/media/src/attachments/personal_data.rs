@@ -6,7 +6,7 @@ use super::{bound, facts, valid_public_id, Attachment, AttachmentSubject, CLEANU
 use crate::{audit, storage, Error, Media, Result, StreamFile};
 use bilibi_database::{Change, MutationTransaction};
 use bilibi_party_ids::PersonId;
-use bilibi_personal_data::{Disclosure, Erasure, Holds};
+use bilibi_personal_data::{Cause, Disclosure, Erasure, Holds};
 use bilibi_tenancy::{ProofClient, Scope};
 use serde_json::json;
 use tokio_postgres::{Client, GenericClient};
@@ -16,6 +16,8 @@ pub const ATTACHMENT_KIND: &str = "base/media/attachment";
 pub const ASSET_KIND: &str = "base/media/asset";
 /// Attachments read per page when a request lists a subject's files.
 const DISCLOSE_PAGE: i64 = 500;
+/// Subjects read per page when a sweep looks for files whose bytes remain.
+const SWEPT_PAGE: i64 = 100;
 
 /// One attachment an erasure turned into a tombstone. Its row and its removed
 /// asset are both audit records whose evidence the erasure clears.
@@ -65,6 +67,9 @@ impl Media {
             declared => Ok(declared?),
         }
     }
+    /// As `disclosed_subject`, for an erasure. A sweep grant names no
+    /// person: it reaches a subject only when its owner says its own sweep
+    /// erased that record (`SubjectOwner::swept_subject`).
     async fn erased_subject(
         &self,
         client: &dyn ProofClient,
@@ -73,6 +78,17 @@ impl Media {
         subject: AttachmentSubject<'_>,
     ) -> Result<()> {
         grant.check(scope)?;
+        if let (Cause::Sweep(_), None) = (grant.cause(), grant.person()) {
+            return if self
+                .subjects
+                .swept_subject(client, scope, subject.kind, subject.id)
+                .await?
+            {
+                Ok(())
+            } else {
+                Err(Error::Database(bilibi_database::Error::Forbidden))
+            };
+        }
         match grant.check_file_subject(scope, subject.kind, subject.id) {
             Err(bilibi_database::Error::Forbidden) => {
                 self.vouched(client, scope, grant.person(), subject).await
@@ -168,6 +184,72 @@ impl Media {
                 .unwrap_or_else(|| public_id.to_owned()),
             mime_type: asset.asset.mime_type,
         })
+    }
+
+    /// After a retention sweep (ADR 05): removes the bytes of erased
+    /// attachments of subjects of `kind` whose owner says its sweep erased
+    /// them (`SubjectOwner::swept_subject`), through
+    /// [`Media::remove_erased_bytes`], one file per transaction. Only a sweep
+    /// grant. A subject the owner does not vouch for (one a person's request
+    /// erased, whose cleanup is that request's) is left as it is. A file
+    /// that will not go does not hold back the other subjects: they are
+    /// removed first, then `CleanupFailed` reports it, left pending for the
+    /// next call. Removes at most one batch; `more` says files may remain:
+    /// call again, for example from the next sweep.
+    pub async fn remove_swept_bytes(
+        &self,
+        client: &mut Client,
+        scope: &Scope,
+        grant: &Erasure,
+        kind: &str,
+    ) -> Result<Removal> {
+        grant.check(scope)?;
+        if !matches!(grant.cause(), Cause::Sweep(_)) || grant.person().is_some() {
+            return Err(Error::Database(bilibi_database::Error::Forbidden));
+        }
+        let mut removal = Removal::default();
+        let mut after = String::new();
+        let mut failed = false;
+        loop {
+            let subjects: Vec<String> = client
+                .query(
+                    "SELECT DISTINCT subject_id FROM base_media_attachments WHERE tenant_id=$1 AND subject_type=$2 \
+                     AND state='erased' AND bytes_removed_at IS NULL AND subject_id>$3 ORDER BY subject_id LIMIT $4",
+                    &[&scope.tenant(), &kind, &after, &SWEPT_PAGE],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            for id in &subjects {
+                after.clone_from(id);
+                let subject = AttachmentSubject { kind, id };
+                match self
+                    .remove_erased_bytes(client, scope, grant, subject)
+                    .await
+                {
+                    Ok(done) => {
+                        removal.removed += done.removed;
+                        removal.more |= done.more;
+                    }
+                    // Not this owner's sweep: another path removes its bytes.
+                    Err(Error::Database(bilibi_database::Error::Forbidden)) => {}
+                    Err(Error::CleanupFailed) => failed = true,
+                    Err(error) => return Err(error),
+                }
+                if removal.removed >= CLEANUP_BATCH as u64 {
+                    removal.more = true;
+                    return Ok(removal);
+                }
+            }
+            if (subjects.len() as i64) < SWEPT_PAGE {
+                return if failed {
+                    Err(Error::CleanupFailed)
+                } else {
+                    Ok(removal)
+                };
+            }
+        }
     }
 
     /// Erasure (ADR 05): turn every live attachment of `subject` that no hold

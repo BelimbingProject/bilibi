@@ -53,6 +53,24 @@ pub trait SubjectOwner: Send + Sync {
     ) -> ProofFuture<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+    /// Whether `subject_id`, one of this owner's records in `scope`'s tenant,
+    /// was erased by one of this owner's retention sweeps, so a sweep grant
+    /// (which names no person) reaches its files for erasure and byte
+    /// removal. Answer from your own record on `client`, the caller's
+    /// connection (inside the sweep's transaction for `erase_attachments`):
+    /// mark the record swept before erasing its files in that transaction,
+    /// and keep it marked until no hold keeps any of its files and their
+    /// bytes are removed, since `remove_swept_bytes` asks again later. A yes
+    /// vouches for every file under the subject. It is never an
+    /// authorization: Media asks it only under a sweep grant. Default: no.
+    fn swept_subject<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _scope: &'a Scope,
+        _subject_id: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
 }
 /// Contribution payload: `Contribution::new(SUBJECTS, "orders.order", provenance, &Subject { owner: &OWNER })`.
 pub struct Subject {
@@ -145,5 +163,22 @@ impl Subjects {
         Ok(owner
             .person_subject(client, scope, person, subject_id)
             .await?)
+    }
+    /// Whether the registered owner of `key` says its sweep erased
+    /// `subject_id`. An unknown key or an out-of-range ID is no.
+    pub(crate) async fn swept_subject(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        key: &str,
+        subject_id: &str,
+    ) -> Result<bool> {
+        if subject_id.is_empty() || subject_id.len() > 255 {
+            return Ok(false);
+        }
+        let Some(owner) = self.owners.get(key) else {
+            return Ok(false);
+        };
+        Ok(owner.swept_subject(client, scope, subject_id).await?)
     }
 }

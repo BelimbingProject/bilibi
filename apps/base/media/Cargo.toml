@@ -41,3 +41,6 @@ bilibi-base = { path = ".." }
 bilibi-core = { path = "../../core" }
 bilibi-web = { path = "../../web" }
 axum.workspace = true
+
+[lints]
+workspace = true

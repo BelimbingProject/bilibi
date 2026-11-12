@@ -166,6 +166,10 @@ struct Run {
     pid: Option<u32>,
 }
 impl Drop for Run {
+    #[allow(
+        unsafe_code,
+        reason = "the standard library cannot signal a process group"
+    )]
     fn drop(&mut self) {
         if let Some(pid) = self.pid {
             // SAFETY: the child leads its own group (`process_group(0)`) and has

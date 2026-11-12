@@ -246,6 +246,16 @@ def check_core_use(root, modules):
                               f'when something that uses it declares it (see {ADR})')
 
 
+def check_lints(root, modules):
+    """Refuse a Platform crate that does not inherit the workspace lints, which deny unsafe code."""
+    manifests = [root / 'apps' / layer / path / 'Cargo.toml' for layer in ('base', 'core') for path, _ in modules[layer]]
+    for manifest in manifests + host_manifests(root):
+        if tomllib.loads(manifest.read_text()).get('lints', {}).get('workspace') is not True:
+            raise Refused(f'{manifest.relative_to(root)} does not inherit the workspace lints. Add a [lints] table '
+                          'with workspace = true, so unsafe code is refused unless a documented '
+                          '#[allow(unsafe_code, reason = "...")] covers it')
+
+
 def explain(root, modules):
     requests = core_requests(root, modules)
     if requests is None:
@@ -269,6 +279,7 @@ def composition(layer, modules):
             f'[package]\nname = "bilibi-{layer}"\nversion.workspace = true\n'
             'edition.workspace = true\nrust-version.workspace = true\nlicense.workspace = true\n\n[dependencies]\n')
     text += ''.join(f'{name} = {{ path = "{path}" }}\n' for path, name in modules)
+    text += '\n[lints]\nworkspace = true\n'
     code = '// Generated composition links. Runtime inventory owns discovery.\n'
     # Rustfmt sorts imports by Rust crate identifier, not container/module path.
     # Keep discovery order for the manifest and MODULES table below.
@@ -474,6 +485,7 @@ def main():
         parser.error('--staged only applies to --check')
     try:
         modules = discovered(ROOT)
+        check_lints(ROOT, modules)
         files = outputs(ROOT, modules)
         if args.explain:
             explain(ROOT, modules)

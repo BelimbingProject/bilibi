@@ -33,3 +33,6 @@ bilibi-web = { path = "../../web" }
 bilibi-base = { path = "../../base" }
 bilibi-core = { path = ".." }
 tokio.workspace = true
+
+[lints]
+workspace = true

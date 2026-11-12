@@ -298,7 +298,8 @@ impl Sessions {
     }
     /// Revoke pending challenges, delegated credentials and all holder
     /// sessions in the owner's audited transaction. Tenant comes from its
-    /// trusted context.
+    /// trusted context. A credential the sign-in's other tenant accounts share
+    /// uses [`Self::revoke_sign_in`].
     pub async fn revoke(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -313,13 +314,7 @@ impl Sessions {
         let account = RevocationAccount {
             tenant: tx.context().tenant,
             user,
-            reason: match tx.context().action.as_str() {
-                "user.change_password" => CredentialRevocationReason::PasswordChanged,
-                "user.reset_password" => CredentialRevocationReason::PasswordReset,
-                "user.sso.backchannel_logout" => CredentialRevocationReason::SignedOut,
-                "user.password_reset" => CredentialRevocationReason::AdminAction,
-                _ => CredentialRevocationReason::AccountChanged,
-            },
+            reason: ended::revocation_reason(tx),
         };
         let revokers = self.credential_revokers()?;
         tx.mutate(move |sql| {
@@ -342,7 +337,8 @@ impl Sessions {
             CredentialRevocationReason::SignedOut => Ending::SignedOut,
             _ => Ending::Terminated,
         };
-        self.end_user_sessions(tx, user, except, ending).await
+        self.end_user_sessions(tx, account.tenant, user, except, ending)
+            .await
     }
     /// The current operator policy. Read on every check, so a changed lifetime
     /// applies to the next request without a restart.

@@ -37,3 +37,6 @@ hmac.workspace = true
 sha1.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
+
+[lints]
+workspace = true
