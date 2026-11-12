@@ -87,6 +87,10 @@ struct Browser {
     dir: PathBuf,
 }
 impl Drop for Browser {
+    #[allow(
+        unsafe_code,
+        reason = "the standard library cannot signal a process group"
+    )]
     fn drop(&mut self) {
         if let Some(pid) = self.child.id() {
             // SAFETY: the child leads its own group (`process_group(0)`), and
@@ -97,6 +101,10 @@ impl Drop for Browser {
     }
 }
 impl Browser {
+    #[allow(
+        unsafe_code,
+        reason = "Chromium takes its command pipes on fixed descriptors, set between fork and exec"
+    )]
     fn launch(binary: &Path, network: &Network) -> Result<(Self, pipe::Sender, pipe::Receiver)> {
         let dir = std::env::temp_dir().join(format!("bilibi-pdf-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
@@ -166,6 +174,10 @@ impl Drop for DirGuard {
         }
     }
 }
+#[allow(
+    unsafe_code,
+    reason = "the standard library has no close-on-exec pipe call"
+)]
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
     // SAFETY: fds is a valid two-element array; both ends are close-on-exec.

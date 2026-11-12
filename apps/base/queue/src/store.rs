@@ -73,11 +73,14 @@ pub async fn states(
 /// The one-line queue status System Info shows: platform-wide backlog and
 /// recovery counts only, no job, tenant or actor detail. It
 /// counts `available` and `scheduled` jobs as pending, and names ended jobs
-/// whose owner's ending hook gave up.
+/// whose owner's ending hook gave up. Each count reads one partial index
+/// (`base_queue_claim`, `base_queue_jobs_discarded`,
+/// `base_queue_jobs_ending_failed`), never the finished jobs: keep every
+/// predicate here equal to its index's.
 pub async fn health_status(client: &impl GenericClient) -> Result<String> {
     let row = client
         .query_one(
-            "SELECT count(*) FILTER (WHERE state IN ('available','scheduled')), count(*) FILTER (WHERE state='retryable'), count(*) FILTER (WHERE state='discarded'), count(*) FILTER (WHERE ending='failed') FROM base_queue_jobs",
+            "SELECT waiting.pending, waiting.retryable, (SELECT count(*) FROM base_queue_jobs WHERE state='discarded'), (SELECT count(*) FROM base_queue_jobs WHERE ending='failed') FROM (SELECT count(*) FILTER (WHERE state<>'retryable') AS pending, count(*) FILTER (WHERE state='retryable') AS retryable FROM base_queue_jobs WHERE state IN ('available','scheduled','retryable')) waiting",
             &[],
         )
         .await?;
@@ -148,12 +151,17 @@ pub(crate) struct Claim {
 }
 /// Reaping and claiming are one transaction. SKIP LOCKED lets independent app
 /// processes claim different jobs. An expired final attempt is discarded.
+/// Both searches compare with `now()` (this transaction's start), not
+/// `clock_timestamp()`: a volatile clock cannot bound an index scan, so every
+/// poll would read every running or waiting job; with `now()` a poll reads
+/// only the expired leases and the due jobs (`base_queue_expired_leases`,
+/// `base_queue_claim`). The times written still come from the clock.
 pub(crate) async fn claim(db: &Db, lease_seconds: i32) -> Result<Option<Claim>> {
     let mut client = db.get().await?;
     let tx = client.transaction().await?;
-    tx.execute("WITH expired AS (SELECT id FROM base_queue_jobs WHERE state='executing' AND lease_expires_at<=clock_timestamp() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_queue_jobs j SET state=CASE WHEN attempt>=max_attempts THEN 'discarded' ELSE 'retryable' END,available_at=clock_timestamp()+make_interval(secs=>LEAST(3600, power(2,LEAST(attempt,12))::integer)),discarded_at=CASE WHEN attempt>=max_attempts THEN clock_timestamp() ELSE NULL END,lease_token=NULL,lease_expires_at=NULL,failure_code='lease_expired',updated_at=clock_timestamp() FROM expired e WHERE j.id=e.id", &[]).await?;
+    tx.execute("WITH expired AS (SELECT id FROM base_queue_jobs WHERE state='executing' AND lease_expires_at<=now() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_queue_jobs j SET state=CASE WHEN attempt>=max_attempts THEN 'discarded' ELSE 'retryable' END,available_at=clock_timestamp()+make_interval(secs=>LEAST(3600, power(2,LEAST(attempt,12))::integer)),discarded_at=CASE WHEN attempt>=max_attempts THEN clock_timestamp() ELSE NULL END,lease_token=NULL,lease_expires_at=NULL,failure_code='lease_expired',updated_at=clock_timestamp() FROM expired e WHERE j.id=e.id", &[]).await?;
     let token = uuid::Uuid::new_v4().to_string();
-    let row = tx.query_opt("WITH candidate AS (SELECT id FROM base_queue_jobs WHERE state IN ('available','scheduled','retryable') AND available_at<=clock_timestamp() AND attempt<max_attempts ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE base_queue_jobs j SET state='executing',attempt=attempt+1,attempted_at=clock_timestamp(),updated_at=clock_timestamp(),lease_token=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$2::integer) FROM candidate c WHERE j.id=c.id RETURNING j.*", &[&token,&lease_seconds]).await?;
+    let row = tx.query_opt("WITH candidate AS (SELECT id FROM base_queue_jobs WHERE state IN ('available','scheduled','retryable') AND available_at<=now() AND attempt<max_attempts ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE base_queue_jobs j SET state='executing',attempt=attempt+1,attempted_at=clock_timestamp(),updated_at=clock_timestamp(),lease_token=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$2::integer) FROM candidate c WHERE j.id=c.id RETURNING j.*", &[&token,&lease_seconds]).await?;
     tx.commit().await?;
     Ok(row.map(|row| Claim { row, token }))
 }
@@ -186,4 +194,27 @@ pub(crate) async fn due_endings(
 pub(crate) async fn ending_failed(db: &Db, id: i64) -> Result<()> {
     db.get().await?.execute("UPDATE base_queue_jobs SET ending_attempts=ending_attempts+1,ending_after=clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(ending_attempts+1,12))::integer)),ending=CASE WHEN ending_attempts+1>=$2 THEN 'failed' ELSE NULL END,updated_at=clock_timestamp() WHERE id=$1 AND state IN ('cancelled','discarded') AND ending IS NULL", &[&id,&ENDING_ATTEMPTS]).await?;
     Ok(())
+}
+
+/// Finished jobs one statement deletes; a pass repeats until fewer are left.
+const PRUNE_BATCH: i64 = 10_000;
+/// Deletes jobs that finished (`completed`, `cancelled`, `discarded`) and were
+/// last touched before `cutoff`, a batch per statement so no long lock or
+/// transaction is held. A cancelled or discarded job of a worker in `told`
+/// (the ones with an ending hook) stays until its owner was told: untold and
+/// `failed` endings are kept. Rows another transaction holds are skipped and
+/// go with the next pass.
+pub(crate) async fn prune(
+    client: &impl GenericClient,
+    told: &[String],
+    cutoff: std::time::SystemTime,
+) -> Result<u64> {
+    let mut pruned = 0;
+    loop {
+        let deleted = client.execute("DELETE FROM base_queue_jobs WHERE id IN (SELECT id FROM base_queue_jobs WHERE state IN ('completed','cancelled','discarded') AND updated_at<$1 AND NOT (state<>'completed' AND ending IS DISTINCT FROM 'told' AND worker_id=ANY($2)) LIMIT $3 FOR UPDATE SKIP LOCKED)", &[&cutoff,&told,&PRUNE_BATCH]).await?;
+        pruned += deleted;
+        if deleted < PRUNE_BATCH as u64 {
+            return Ok(pruned);
+        }
+    }
 }

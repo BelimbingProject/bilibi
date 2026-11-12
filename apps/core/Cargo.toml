@@ -23,3 +23,6 @@ bilibi-product = { path = "product" }
 bilibi-tenant = { path = "tenant" }
 bilibi-user = { path = "user" }
 bilibi-work-calendar = { path = "work_calendar" }
+
+[lints]
+workspace = true

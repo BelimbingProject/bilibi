@@ -571,7 +571,9 @@ impl UserService {
                 })
             })
             .await?;
-        let ended = self.sessions.revoke(&mut tx, user, None).await?;
+        let ended =
+            crate::sign_in_identity::end_everywhere(&self.sessions, &mut tx, identity, user, None)
+                .await?;
         let sessions = self.sessions.clone();
         tx.after_commit(move || sessions.announce(ended));
         tx.commit().await?;

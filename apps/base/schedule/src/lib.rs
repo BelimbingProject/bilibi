@@ -9,6 +9,7 @@ mod fan_out;
 mod occurrence;
 mod phrase;
 mod principals;
+mod queue_retention;
 pub mod recurrence;
 mod retention;
 pub mod scheduler;
@@ -836,6 +837,13 @@ inventory::submit! {
         } }, Service { id: "base/schedule.retention", factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(retention::Retention {
                 schedule: services.get("base/schedule.store")?,
+                settings: services.get("base/settings.store")?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+            }))))
+        } }, Service { id: "base/schedule.queue-retention", factory: |services| {
+            Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(queue_retention::QueueRetention {
+                schedule: services.get("base/schedule.store")?,
+                queue: services.get("base/queue.store")?,
                 settings: services.get("base/settings.store")?,
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
             }))))

@@ -53,3 +53,6 @@ bilibi-tiling = { path = "tiling" }
 bilibi-ui = { path = "ui" }
 bilibi-visitor = { path = "visitor" }
 bilibi-workflow = { path = "workflow" }
+
+[lints]
+workspace = true

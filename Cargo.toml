@@ -8,6 +8,12 @@ edition = "2021"
 rust-version = "1.99"
 license = "MIT"
 
+# `deny`, not `forbid`: the few audited system calls opt out with
+# `#[allow(unsafe_code, reason = "…")]`, which `forbid` would refuse.
+# Every Platform crate inherits this with `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
 [workspace.dependencies]
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"] }
 tower-http = { version = "0.6.11", features = ["compression-gzip", "compression-br"] }
