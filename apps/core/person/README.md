@@ -18,7 +18,7 @@ exact normalized name/email (case insensitive) or trimmed phone, bounds results
 to 1–100, can exclude an existing ID and includes retired identities. It proposes
 candidates without choosing, merging or linking them.
 
-Every public read and write gates on contributed `admin.person.*` capabilities.
+Every public read and write gates on contributed `admin.person.*` capabilities, except the customer's own portal door, which asks for the portal capability `core.person.portal.manage` (see [The customer's own details on the portal](#the-customers-own-details-on-the-portal)).
 The tenant-owner role receives all Person commands; the walkthrough fixture's
 manager does too, its staff can create and edit and its viewer can read/list. Existing installations run explicit
 `bilibi-web authz-reconcile` after migration; the walkthrough explicitly
@@ -63,6 +63,29 @@ create and use empty strings to clear visible contacts on update.
 - **Refuse before the write.** Run your own check first and return its error; the caller then rolls back and nothing is written or audited. A later failure in the caller's operation rolls the person change back too, and no change notification is published.
 - **Review first.** `preview_update_person(client, scope, id, &Update)` runs the same checks on a read connection or transaction (a contract's preview) and returns the person before, the identity it would store and the custom values after. It locks and writes nothing.
 - **Not for system principals.** A system-context owner uses `PersonService::update_provisioned_contact_in` (below).
+
+## The customer's own details on the portal
+
+**A Domain's portal page reads and changes the signed-in customer's own Person through `PersonService::portal_read(&PortalScope)` and `portal_update_in(tx, &PortalScope, &PortalUpdate)`, never with SQL on `persons`.** The Person is always the `PortalScope`'s ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)); no method takes a Person ID. Code: `src/portal.rs`.
+
+| Item | Value |
+| --- | --- |
+| Capability | `core.person.portal.manage`, a portal capability held by Core Portal's `portal_customer` role, never by a staff role |
+| Setting | `person.portal_editable` (tenant, default `[]`): what a customer may change, from `name`, `phone` and `cf_<key>` for a custom field; email is refused. Edited on System Settings (`/system/settings`, area Contacts) with `admin.person.update` |
+| Setting | `person.portal_visible` (tenant, default `[]`): the custom fields a customer sees, as `cf_<key>`. A field the customer may change is always shown; every other field stays internal (a risk note, a rating). Same page and capability |
+| Read model | `PortalPerson`: `id`, `name`, `email`, `phone`, `version`, `custom` (`PortalField` `{key, label, type, value}` per active custom field the customer is shown, with a choice's `text`, `retired`, `editable` and, when editable, its `choices`), `editable` (what may change now), `restricted`, `masked` |
+| Write | `PortalUpdate { version, name?, phone?, custom }`; a fact left out is kept, a blank phone or custom value clears |
+
+- **Proof.** Both re-prove the customer on the connection or transaction they use, seal the `PortalScope` again (the same Person, or `Unauthorized`) and ask for `core.person.portal.manage` with `authorize_portal`. Staff capabilities play no part: Authz denies every staff key to a customer.
+- **Restrictions.** A field restriction on the customer's role withholds or masks `email` or `phone` as on any read; a restricted phone is not editable, and sending one is `Forbidden`.
+- **What may change.** A fact the setting does not list is refused (`WriteError::Validation` on `name` or `phone`, `WriteError::CustomFields` on `cf_<key>`, "cannot be changed on the portal") unless the submitted value equals what is stored, so a page may post the whole form; a number field compares by value, so a JSON `1.5` equals a stored `1.50`. A custom field the customer is not shown is refused whatever the value, so a guess cannot learn what is stored. `PortalUpdate` has no `email`: an `email` key is refused when it is read, because email is the address the customer signs in with and the duplicate key.
+- **The write.** Open the transaction with `portal.mutation_context(...)`; a transaction for another actor or tenant is refused. Core's validation, custom-field checks (`validate_locked`), the version check (`Conflict`), the retired (`Retired`) and system or agent identity (`SystemIdentity`) refusals and one audited `person` change by the customer account apply, and the change notification follows commit. A change that alters nothing writes nothing.
+- **Not here.** The portal page itself: the Domain that has a portal (`cx/profiles`, an invoice portal) draws it and calls these.
+- **Walkthrough.** `person-portal` proves it on a disposable database, each line `ok` or `FAIL`: no staff role (grant-all included) holds the portal key, the customer holds no staff key, the read is the proof's Person, no custom field is shown and nothing is editable by default, only the listed fields are shown (an editable one always), the visible list refuses `name`, an unchanged number posted as a JSON number is accepted while a different one is refused, a hidden field is refused even when the guess is right, an `email` key and an editable list naming email are refused, Core's checks, one audited change as the customer, a field the tenant did not list, a stale version, a transaction attributed to someone else, another person untouched, and a revoked customer reads nothing:
+
+```sh
+BILIBI_PERSON_DEMO=disposable cargo run -p bilibi-person --example person-portal --locked
+```
 
 ## Exact contact lookup on a caller client
 
