@@ -85,7 +85,7 @@ jobs:
         run: scripts/run-walkthroughs.sh --check
 
   walkthroughs:
-    name: Walkthroughs (${{ matrix.group }})
+    name: Walkthroughs (${{ matrix.group }}, ${{ matrix.target.name }})
     needs: decide
     if: needs.decide.outputs.affected == 'true'
     runs-on: ubuntu-latest
@@ -94,7 +94,46 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [base, privacy, core, web]
+        # TEMPORARY PROBE, reverted before review: the heads of other open pull requests.
+        include:
+          - group: core
+            target: {name: pr525, ref: d94edea23bbb95595edecc2d52067dce1975a998, extra: 'core|person-portal|apps/core/person|person-portal|migrate|BILIBI_PERSON_DEMO=disposable|-'}
+          - group: core
+            target: {name: pr526, ref: c3e547609dc715bc9d6315703d06d6fea5c66fe0, extra: 'core|document-customer-share|apps/core/document|customer-share-walkthrough|fixture-seed|BILIBI_DOCUMENT_CUSTOMER=disposable BILIBI_DOCUMENT_CUSTOMER_ROOT=@/documents|-'}
+          - group: core
+            target: {name: pr606, ref: 4ed42655f344b2ebe6cf770ec9b9e29f05718376, extra: ''}
+          - group: web
+            target: {name: pr606, ref: 4ed42655f344b2ebe6cf770ec9b9e29f05718376, extra: ''}
+          - group: core
+            target: {name: pr607, ref: 2954260786021d4c35a16a0a72955664027df089, extra: ''}
+          - group: core
+            target: {name: pr608, ref: ccf5d85ead33c457380e23c498c732536d8a8636, extra: ''}
+          - group: web
+            target: {name: pr608, ref: ccf5d85ead33c457380e23c498c732536d8a8636, extra: ''}
+          - group: web
+            target: {name: pr609, ref: 11fb6f877c9e50f0d7f61650b2992ef339f6db7c, extra: 'web|live-wake|apps/web|live-wake-walkthrough|migrate|BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes|-'}
+          - group: base
+            target: {name: pr610, ref: 5239ae8bc9a5fa683a932de1f02bb3ffa9cb9a17, extra: ''}
+          - group: privacy
+            target: {name: pr610, ref: 5239ae8bc9a5fa683a932de1f02bb3ffa9cb9a17, extra: ''}
+          - group: core
+            target: {name: pr610, ref: 5239ae8bc9a5fa683a932de1f02bb3ffa9cb9a17, extra: ''}
+          - group: web
+            target: {name: pr610, ref: 5239ae8bc9a5fa683a932de1f02bb3ffa9cb9a17, extra: ''}
+          - group: base
+            target: {name: pr611, ref: b48bbef5b8fb72815861368c7858da48c14626ca, extra: 'base|database-pool|apps/base/database|pool-walkthrough|none||-;limits,base|queue-retention|apps/base/queue|retention-walkthrough|migrate|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-'}
+          - group: web
+            target: {name: pr612, ref: 35ad82109b3a8b286fee08a51631901733ee763a, extra: 'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'}
+          - group: privacy
+            target: {name: pr613, ref: 396f6b7ee0801e66634380cb1748f871b676a9bc, extra: 'core|document-export-rows|apps/core/document|export-rows-proof|fixture-seed|BILIBI_DOCUMENT_EXPORT_PROOF=disposable|-'}
+          - group: core
+            target: {name: pr613, ref: 396f6b7ee0801e66634380cb1748f871b676a9bc, extra: 'core|document-export-rows|apps/core/document|export-rows-proof|fixture-seed|BILIBI_DOCUMENT_EXPORT_PROOF=disposable|-'}
+          - group: base
+            target: {name: pr627, ref: 8d9a2f091741bae6f0fcd437d15e21e55372dfb3, extra: ''}
+          - group: privacy
+            target: {name: pr627, ref: 8d9a2f091741bae6f0fcd437d15e21e55372dfb3, extra: ''}
+          - group: core
+            target: {name: pr627, ref: 8d9a2f091741bae6f0fcd437d15e21e55372dfb3, extra: ''}
 
     env:
       DATABASE_URL: postgres://bilibi:bilibi@localhost:5432/bilibi
@@ -117,13 +156,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ matrix.target.ref }}
           persist-credentials: false
 
       # A hand-started run against another branch uses this branch's script,
       # so a branch made before the script existed can still be run.
       - name: Check out this branch's script
-        if: inputs.ref != ''
+        if: true
         uses: actions/checkout@v7
         with:
           path: .walkthrough-script
@@ -131,7 +170,7 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Use this branch's script on the other branch
-        if: inputs.ref != ''
+        if: true
         run: |
           install -m 755 .walkthrough-script/scripts/run-walkthroughs.sh "$RUNNER_TEMP/run-walkthroughs.sh"
           rm -rf .walkthrough-script
@@ -184,7 +223,7 @@ jobs:
           WALKTHROUGH_GROUP: ${{ matrix.group }}
           WALKTHROUGH_LOGS: ${{ runner.temp }}/walkthrough-logs
           ONLY: ${{ inputs.only }}
-          EXTRA: ${{ inputs.extra }}
+          EXTRA: ${{ matrix.target.extra }}
         run: |
           script=scripts/run-walkthroughs.sh
           # The other branch's checkout stays untouched: pinning refuses a changed one.
@@ -201,7 +240,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: walkthrough-logs-${{ matrix.group }}
+          name: walkthrough-logs-${{ matrix.group }}-${{ matrix.target.name }}
           path: ${{ runner.temp }}/walkthrough-logs
           if-no-files-found: ignore
           retention-days: 14
