@@ -66,7 +66,7 @@ to 80 characters; free text in payloads goes through `bounded_text` (2,000
 characters with a marker).
 
 `console::execute_readonly(db, &scope, request, info)` is the read-only SQL
-console engine: operator proof, empty/statement/keyword text guards, then a
+console engine: operator proof, empty/statement/keyword/table text guards, then a
 PostgreSQL `READ ONLY` transaction with a 10 s statement timeout, count, column
 names and at most 1,000 rows per page. Every command is one
 `database_query.executed|refused|failed` action row with the SQL as typed and the
@@ -74,6 +74,8 @@ outcome; result rows never reach the record, and a command whose record cannot
 be written returns no answer. Database error details are returned to the operator
 but the recorded failure/refusal message is generic: PostgreSQL messages may
 quote parameter values or data raised by a function.
+
+The table guard keeps the `sessions` table out of the console. It refuses a query that names it, plain or double-quoted, with or without a schema; a `U&"..."` identifier, which it does not decode; and functions that run SQL text or print whole tables (`query_to_xml` and the other `*_to_xml*` functions, `ts_stat`, `ts_rewrite`, `dblink*`). Like the other text guards it is advisory: the session token is safe because `base/session` stores only its digest (`apps/base/session/README.md#token-at-rest`). A column alias named `sessions` is refused too; rename it.
 
 `execute_readonly_with_options` also accepts named parameters and output sorting.
 Its lexical binder skips strings, quoted identifiers, dollar quotes, casts and

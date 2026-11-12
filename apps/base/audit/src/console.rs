@@ -16,6 +16,20 @@ const FORBIDDEN: [&str; 12] = [
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "REPLACE", "GRANT",
     "REVOKE", "LOCK", "UNLOCK",
 ];
+/// Tables the console never reads. `sessions` (`base/session`) is every
+/// signed-in browser of every tenant; its id is only the cookie's digest, but
+/// no console should list who is signed in where. Text guards are advisory:
+/// hashing the token at rest is what keeps a reader from using a session.
+const HIDDEN_TABLES: [&str; 1] = ["sessions"];
+/// Functions that run SQL given as text, or print whole tables or schemas,
+/// so a hidden table would be read without being named.
+fn reads_unnamed_tables(name: &str) -> bool {
+    name.ends_with("_to_xml")
+        || name.ends_with("_to_xmlschema")
+        || name.ends_with("_to_xml_and_xmlschema")
+        || name.starts_with("dblink")
+        || matches!(name, "ts_stat" | "ts_rewrite")
+}
 
 #[derive(Clone, Debug)]
 pub struct ConsoleRequest<'a> {
@@ -40,6 +54,8 @@ pub enum Guard {
     Empty,
     Statement,
     Keyword,
+    /// A hidden table, or a way to read one without naming it.
+    Table,
     ReadOnlyTransaction,
     Capability,
     Actor,
@@ -52,6 +68,7 @@ impl Guard {
             Self::Empty => "empty",
             Self::Statement => "statement",
             Self::Keyword => "keyword",
+            Self::Table => "table",
             Self::ReadOnlyTransaction => "read_only_transaction",
             Self::Capability => "capability",
             Self::Actor => "actor",
@@ -232,6 +249,26 @@ async fn run(
             Guard::Keyword,
             "Write or DDL statements are not permitted in queries.",
         );
+    }
+    for name in parameters::names(sql) {
+        let Some(name) = name else {
+            return refused(
+                Guard::Table,
+                "Write identifiers as plain or double-quoted names, not U&\"...\".",
+            );
+        };
+        if HIDDEN_TABLES.contains(&name.as_str()) {
+            return refused(
+                Guard::Table,
+                "Queries cannot name the sessions table: it holds every signed-in browser.",
+            );
+        }
+        if reads_unnamed_tables(&name) {
+            return refused(
+                Guard::Table,
+                "Functions that run SQL text or print whole tables are not permitted in queries.",
+            );
+        }
     }
     let page = request.page.max(1);
     let per_page = request.per_page.clamp(1, MAX_ROWS);

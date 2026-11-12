@@ -535,16 +535,18 @@ impl Sessions {
     /// transaction: nobody decided about someone else, so no session audit
     /// row; the notice is recorded and every other live page of that session
     /// is told after the commit. An impersonated session is marked ended and
-    /// its operator's notice recorded by the expiry sweep.
+    /// its operator's notice recorded by the expiry sweep. `token` is the
+    /// holder's cookie.
     pub async fn delete(
         &self,
         tx: &mut MutationTransaction<'_>,
         scope: &Scope,
-        id: &str,
+        token: &str,
     ) -> Result<()> {
-        if id.is_empty() || tx.context().tenant != scope.tenant() {
+        if token.is_empty() || tx.context().tenant != scope.tenant() {
             return Err(Error::Invalid);
         }
+        let id = crate::session_id(token);
         let ended = if Self::records_now(tx, scope.tenant()) {
             let row = tx.sql().query_opt(
                 "DELETE FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 RETURNING COALESCE(impersonator_id,user_id)",
@@ -564,7 +566,7 @@ impl Sessions {
             ).await? > 0
         };
         if ended {
-            self.announce_after(tx, vec![id.to_owned()]);
+            self.announce_after(tx, vec![id]);
         }
         Ok(())
     }

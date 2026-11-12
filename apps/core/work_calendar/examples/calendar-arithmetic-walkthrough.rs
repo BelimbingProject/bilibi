@@ -24,14 +24,8 @@ struct Browser<'a> {
 impl PlanAuthority for Browser<'_> {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(Error::Unauthorized)?;
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })

@@ -1463,6 +1463,8 @@ pub async fn run<S: Side>(
     // the expired-session message. A lagged receiver is covered by the next
     // guarded action or refresh, which refuses an ended session anyway.
     let mut terminations = app.security.sessions.subscribe_terminations();
+    // Endings name the stored id, the cookie's digest: hashed once here.
+    let stored = bilibi_base::session::session_id(&token);
     let mut refresh = tokio::time::interval(Duration::from_secs(15));
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     refresh.tick().await;
@@ -1552,7 +1554,7 @@ pub async fn run<S: Side>(
             },
             terminated = terminations.recv() => {
                 match terminated {
-                    Ok(event) if event.id == token => {
+                    Ok(event) if event.id == stored => {
                         reload(&mut socket, event.redirect.unwrap_or(&session.path)).await;
                         break;
                     },

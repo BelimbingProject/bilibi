@@ -142,7 +142,10 @@ async fn main() -> Result<()> {
             db.get()
                 .await
                 .ok()?
-                .query_one("SELECT count(*) FROM sessions WHERE id=$1", &[&token])
+                .query_one(
+                    "SELECT count(*) FROM sessions WHERE id=$1",
+                    &[&bilibi_session::session_id(&token)],
+                )
                 .await
                 .ok()
                 .map(|r| r.get::<_, i64>(0))

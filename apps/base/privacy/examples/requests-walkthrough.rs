@@ -43,14 +43,8 @@ impl bilibi_base::agent_api::plans::PlanAuthority for Browser<'_> {
         tx: &'a tokio_postgres::Transaction<'_>,
     ) -> bilibi_tenancy::ProofFuture<'a, bilibi_base::agent_api::plans::PlanIdentity> {
         Box::pin(async move {
-            tx.query_opt(
-                "SELECT id FROM sessions WHERE id=$1 AND expires_at>clock_timestamp() FOR UPDATE",
-                &[&self.token],
-            )
-            .await?
-            .ok_or(bilibi_database::Error::Unauthorized)?;
             Ok(bilibi_base::agent_api::plans::PlanIdentity {
-                scope: self.app.security.sessions.check(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })

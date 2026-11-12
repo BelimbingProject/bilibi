@@ -619,7 +619,7 @@ impl UserService {
             })
             .transpose()?;
         let external=tx.mutate(move|sql|Box::pin(async move{
-   let ended=sql.query("DELETE FROM user_external_sessions WHERE tenant_id=$1 AND id IN (SELECT e.id FROM user_external_sessions e WHERE e.tenant_id=$1 AND NOT EXISTS(SELECT 1 FROM sessions s WHERE s.tenant_id=e.tenant_id AND s.user_id=e.user_id AND s.expires_at>clock_timestamp() AND sha256(convert_to(s.id,'UTF8'))=e.session_hash) AND NOT EXISTS(SELECT 1 FROM user_sign_ins p WHERE p.tenant_id=e.tenant_id AND p.external_session_id=e.id AND p.state='pending' AND p.expires_at>clock_timestamp()) ORDER BY e.id LIMIT 1000) RETURNING id",&[&tenant]).await?;
+   let ended=sql.query("DELETE FROM user_external_sessions WHERE tenant_id=$1 AND id IN (SELECT e.id FROM user_external_sessions e WHERE e.tenant_id=$1 AND NOT EXISTS(SELECT 1 FROM sessions s WHERE s.tenant_id=e.tenant_id AND s.user_id=e.user_id AND s.expires_at>clock_timestamp() AND decode(s.id,'hex')=e.session_hash) AND NOT EXISTS(SELECT 1 FROM user_sign_ins p WHERE p.tenant_id=e.tenant_id AND p.external_session_id=e.id AND p.state='pending' AND p.expires_at>clock_timestamp()) ORDER BY e.id LIMIT 1000) RETURNING id",&[&tenant]).await?;
    let id:i64=sql.query_one("INSERT INTO user_external_sessions(tenant_id,provider_id,user_id,subject,provider_sid,session_hash,logout_hint) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id",&[&tenant,&provider,&user,&subject,&sid,&session_hash,&hint]).await?.get(0);
    let mut changes=vec![change("user.external_session",id,json!(null),json!({"user":user,"provider":provider,"pending":pending,"provider_mfa":mfa}))];
    changes.extend(ended.iter().map(|r|change("user.external_session",r.get(0),json!({"active":false}),json!(null))));

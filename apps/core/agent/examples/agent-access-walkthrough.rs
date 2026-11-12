@@ -109,12 +109,14 @@ async fn connect(
         .get(0);
     Ok((id, tokens))
 }
-/// The session row a browser sign-in writes; a credential reset ends it.
+/// The session row a browser sign-in writes (its id the token's digest); a
+/// credential reset ends it.
 async fn sign_in_session(client: &Client, tenant: i64, user: i64) -> Result<()> {
+    let id = bilibi_base::session::session_id(&format!("walkthrough-{tenant}-{user}"));
     client
         .execute(
             "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,'walkthrough',now()+interval '24 hours') ON CONFLICT (id) DO NOTHING",
-            &[&format!("walkthrough-{tenant}-{user}"), &tenant, &user],
+            &[&id, &tenant, &user],
         )
         .await?;
     Ok(())

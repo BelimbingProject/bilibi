@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) SELECT u.tenant_id,u.id,$3,true FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND i.email=$2 ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true", &[&tenant,&email,&LIST]).await?;
     }
     let mut scopes = Vec::new();
+    let mut tokens = Vec::new();
     for email in [
         "admin@example.test",
         "manager@example.test",
@@ -74,8 +75,27 @@ async fn main() -> Result<()> {
             .await
             .map_err(|_| bilibi_database::Error::Unauthorized)?;
         scopes.push(users.sessions.check(&**client, &login.token).await?);
+        tokens.push(login.token);
     }
     let actor = &scopes[0];
+    // A session row keeps only its token's digest (#533): nothing is stored
+    // under the cookie value, and the stored id is no cookie.
+    let digest = bilibi_session::session_id(&tokens[0]);
+    for (label, id) in [("the token", &tokens[0]), ("its digest", &digest)] {
+        let rows: i64 = client
+            .query_one("SELECT count(*) FROM sessions WHERE id=$1", &[id])
+            .await?
+            .get(0);
+        println!("session rows stored under {label}: {rows}");
+    }
+    println!(
+        "stored id presented as a cookie: {:?}",
+        users
+            .sessions
+            .check(&**client, &digest)
+            .await
+            .map(|scope| scope.user())
+    );
     let input = QueryInput {
         name: "C9 owned report".into(),
         sql_query: "SELECT :minimum::int AS minimum, :minimum::int + 1 AS next".into(),
@@ -234,6 +254,43 @@ async fn main() -> Result<()> {
         25,
     )
     .await?;
+    // The sessions table stays out of the console however it is named; a
+    // near name, or the word in a literal, is not refused.
+    for (label, sql) in [
+        (
+            "hidden table",
+            "SELECT id, csrf, tenant_id, user_id FROM sessions",
+        ),
+        ("hidden table quoted", "SELECT * FROM public.\"sessions\""),
+        (
+            "hidden table unicode name",
+            "SELECT * FROM U&\"\\0073essions\"",
+        ),
+        (
+            "hidden table through text",
+            "SELECT query_to_xml('SELECT * FROM sess' || 'ions', true, false, '')",
+        ),
+        (
+            "hidden table through a schema dump",
+            "SELECT schema_to_xml('public', true, false, '')",
+        ),
+        (
+            "near name allowed",
+            "SELECT count(*) AS sign_ins FROM session_sign_ins",
+        ),
+        ("word in a literal allowed", "SELECT 'sessions' AS word"),
+    ] {
+        run(
+            &queries,
+            actor,
+            label,
+            sql,
+            ConsoleOptions::default(),
+            1,
+            25,
+        )
+        .await?;
+    }
     run(
         &queries,
         actor,

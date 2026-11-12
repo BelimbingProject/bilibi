@@ -89,9 +89,10 @@ async fn transition(
 async fn admit(tx: &mut MutationTransaction<'_>, scope: &Scope, login: &Login) -> Result<()> {
     let (tenant, user) = (scope.tenant(), scope.user());
     let company = scope.current_company().map(|company| company.get());
-    let (token, csrf) = (login.token.clone(), login.csrf.clone());
+    // The row keeps only the token's digest (`bilibi_session::session_id`).
+    let (id, csrf) = (bilibi_session::session_id(&login.token), login.csrf.clone());
     tx.mutate(move |sql| Box::pin(async move {
-        sql.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,company_id,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours')", &[&token,&tenant,&user,&csrf,&company]).await?;
+        sql.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,company_id,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '24 hours')", &[&id,&tenant,&user,&csrf,&company]).await?;
         let row=sql.query_one("SELECT i.id,i.last_tenant_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.id=$2 FOR UPDATE OF i", &[&tenant,&user]).await?;
         let identity:i64=row.get(0);
         let previous:Option<i64>=row.get(1);

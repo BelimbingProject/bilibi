@@ -371,7 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let impersonated_company: Option<i64> = sql
         .query_one(
             "SELECT company_id FROM sessions WHERE id=$1",
-            &[&impersonation_login.token],
+            &[&bilibi_session::session_id(&impersonation_login.token)],
         )
         .await?
         .get(0);

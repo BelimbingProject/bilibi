@@ -173,15 +173,15 @@ impl UserService {
                 target_scope.mutation_context("user.tenant.switch"),
             )
             .await?;
-        let token_for_update = token.to_owned();
-        let next_token = new_token.clone();
+        let current_id = bilibi_session::session_id(token);
+        let next_id = bilibi_session::session_id(&new_token);
         let next_csrf = new_csrf.clone();
         let moved = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let row = sql.query_opt(
                         "UPDATE sessions s SET id=$6,tenant_id=$3,user_id=$4,csrf=$7,company_id=$8,held_company_id=NULL,impersonator_id=NULL,last_activity=now(),stepped_up_at=NULL,step_up_used_at=NULL,step_up_spent_at=NULL FROM users current,users target_user,tenants target_tenant WHERE s.id=$5 AND s.tenant_id=$1 AND s.user_id=$2 AND s.csrf=$9 AND s.impersonator_id IS NULL AND current.tenant_id=$1 AND current.id=$2 AND target_user.tenant_id=$3 AND target_user.id=$4 AND target_user.identity_id=current.identity_id AND target_user.status='active' AND target_user.deleted_at IS NULL AND target_tenant.id=$3 AND target_tenant.status='active' AND target_tenant.deleted_at IS NULL RETURNING current.identity_id",
-                        &[&from_tenant,&from_user,&target,&target_user,&token_for_update,&next_token,&next_csrf,&company,&old_csrf],
+                        &[&from_tenant,&from_user,&target,&target_user,&current_id,&next_id,&next_csrf,&company,&old_csrf],
                     ).await?;
                     let Some(row) = row else { return Err(Error::Unauthorized); };
                     let identity: i64 = row.get(0);
@@ -210,7 +210,7 @@ impl UserService {
         )
         .await?;
         tx.commit().await?;
-        self.sessions.announce_tenant_switch(token.to_owned());
+        self.sessions.announce_tenant_switch(token);
         Ok(TenantEntry::Entered(Login {
             token: new_token,
             csrf: new_csrf,
@@ -237,7 +237,10 @@ impl UserService {
             )
             .await?;
         let (tenant, user) = (current.tenant(), current.user());
-        let (old_id, new_id) = (old.to_owned(), new.to_owned());
+        let (old_id, new_id) = (
+            bilibi_session::session_id(old),
+            bilibi_session::session_id(new),
+        );
         let ended = tx
             .mutate(move |sql| {
                 Box::pin(async move {
@@ -249,7 +252,7 @@ impl UserService {
             .await?;
         tx.commit().await?;
         if ended {
-            self.sessions.announce_tenant_switch(old.to_owned());
+            self.sessions.announce_tenant_switch(old);
         }
         Ok(())
     }
