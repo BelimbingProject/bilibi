@@ -275,7 +275,6 @@ async fn main() -> Result<()> {
                 .await
         )
     );
-    client.execute("INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) VALUES((SELECT identity_id FROM users WHERE tenant_id=1 AND id=1),decode(repeat('ab',32),'hex'),now()-interval '3 hours',now()-interval '2 hours')", &[]).await?;
     let before = count(&mailbox);
     users
         .request_password_reset(email)
@@ -290,12 +289,12 @@ async fn main() -> Result<()> {
         .to_owned();
     let rows: i64 = client
         .query_one(
-            "SELECT count(*) FROM password_reset_tokens WHERE expires_at<now()",
+            "SELECT count(*) FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=3) AND expires_at<now()",
             &[],
         )
         .await?
         .get(0);
-    println!("expired rows left after the next request: {rows}");
+    println!("the next request replaced the expired token: {}", rows == 0);
     let (a, b) = tokio::join!(
         users.reset_password(email, &racing, "race-secret-5"),
         users.reset_password(email, &racing, "race-secret-6")
@@ -369,6 +368,12 @@ async fn main() -> Result<()> {
     }
 
     println!("\n== audit (secrets redacted) ==");
+    for row in client
+        .query("SELECT a.event,m.actor_type,m.new_values::text FROM base_audit_mutations m JOIN base_audit_actions a ON a.trace_id=m.trace_id AND a.tenant_id=m.tenant_id WHERE m.auditable_type='user_identity' AND a.event IN ('user.reset_requested','user.reset_withdrawn') ORDER BY m.id DESC LIMIT 3", &[])
+        .await?
+    {
+        println!("{} by {} new={}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2));
+    }
     for row in client
         .query("SELECT auditable_id,event,actor_type,actor_id,old_values::text,new_values::text FROM base_audit_mutations WHERE auditable_type='user' AND tenant_id=1 ORDER BY id DESC LIMIT 5", &[])
         .await?

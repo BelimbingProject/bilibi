@@ -74,22 +74,36 @@ pub(crate) async fn count(
         .map(|row| i64::from(row.get::<_, i32>(0))))
 }
 
-/// Locks `kind` for the account and starts a new count; returns when the
-/// lock ends and how many whole minutes it lasts.
+/// A lock just started.
+pub(crate) struct Lock {
+    /// When it ends.
+    pub until: String,
+    /// How many whole minutes it lasts.
+    pub minutes: i64,
+    /// Which lock of the current run this is, from 1 (the run ends when the
+    /// row is forgotten).
+    pub locks: i32,
+}
+
+/// Locks `kind` for the account and starts a new count.
 pub(crate) async fn lock(
     sql: &impl GenericClient,
     tenant: i64,
     user: i64,
     kind: Kind,
     limits: Limits,
-) -> Result<(String, i64)> {
+) -> Result<Lock> {
     let row = sql
         .query_one(
-            "UPDATE user_credential_attempts SET failures=0,window_started_at=now(),locks=locks+1,locked_until=now()+make_interval(secs => CASE WHEN $5 THEN least($4::double precision, 60*power(2::double precision, least(locks, 20))) ELSE $4::double precision END) WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND kind=$3 RETURNING locked_until::text, ceil(extract(epoch FROM locked_until-now())/60)::bigint",
+            "UPDATE user_credential_attempts SET failures=0,window_started_at=now(),locks=locks+1,locked_until=now()+make_interval(secs => CASE WHEN $5 THEN least($4::double precision, 60*power(2::double precision, least(locks, 20))) ELSE $4::double precision END) WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND kind=$3 RETURNING locked_until::text, ceil(extract(epoch FROM locked_until-now())/60)::bigint, locks",
             &[&tenant, &user, &kind.as_str(), &limits.lock_seconds, &limits.growing],
         )
         .await?;
-    Ok((row.get(0), row.get(1)))
+    Ok(Lock {
+        until: row.get(0),
+        minutes: row.get(1),
+        locks: row.get(2),
+    })
 }
 
 /// After a passed check: the count starts again. A lock still running stays.

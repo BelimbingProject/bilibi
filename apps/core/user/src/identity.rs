@@ -291,7 +291,15 @@ pub(crate) async fn password_identity(
     if !matched {
         let limits = users.sign_in_limits(&**client).await?;
         drop(client);
-        users.sign_in_failed(tenant, user, limits).await?;
+        // Counted after the answer: the audited writes (and at the limit
+        // the lock and its notice) would otherwise make a wrong password on
+        // a real address measurably slower than on an unknown one.
+        let mail = users.reset_mail();
+        tokio::spawn(async move {
+            if let Err(error) = mail.sign_in_failed(tenant, user, limits).await {
+                eprintln!("sign-in: a wrong password for user {user} was not counted: {error}");
+            }
+        });
         return Err(CredentialError::Rejected);
     }
     if !workspace {

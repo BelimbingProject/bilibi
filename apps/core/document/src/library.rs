@@ -801,6 +801,8 @@ impl Store<'_> {
                                 changes.push(Change { kind: ACCESS_RECORD.into(), id: new.get(0), old: was, new: now });
                             }
                         }
+                        // Customer shares: live ones the survivor lacks.
+                        changes.extend(crate::customer::carry(sql, tenant, source.id, before.id).await?);
                         // Marks: either mark carries over.
                         for row in sql
                             .query(

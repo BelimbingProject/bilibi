@@ -475,6 +475,64 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     proof.read(&second, 1, false).await?;
     println!("Company-limited authority cannot become an unscoped role, direct grant, provider mapping or named-principal grant.");
 
+    // #537: taking access away is bounded. The delegated administrator holds
+    // admin.authz.role.update but not full access.
+    let client = db.get().await?;
+    let full: i64 = client
+        .query_one(
+            "SELECT p.role_id FROM principal_roles p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=1 AND p.user_id=$1 AND r.grant_all AND p.company_id IS NULL ORDER BY p.role_id LIMIT 1",
+            &[&proof.admin.user()],
+        )
+        .await?
+        .get(0);
+    drop(client);
+    assert!(matches!(
+        grants
+            .assign_role(&delegated, proof.admin.user(), full, false)
+            .await,
+        Err(Error::Forbidden)
+    ));
+    assert!(matches!(
+        grants
+            .set_direct(
+                &delegated,
+                proof.admin.user(),
+                "companies.view",
+                Some(false)
+            )
+            .await,
+        Err(Error::Forbidden)
+    ));
+    let client = db.get().await?;
+    let still_full =
+        authz::effective_capabilities_in_company(&**client, &proof.admin, proof.admin.user(), None)
+            .await?;
+    assert!(still_full.grant_all && still_full.allowed.contains("companies.view"));
+    // Only the administrator holds full access for a moment: their own last
+    // full-access assignment cannot go.
+    let others = client
+        .query(
+            "DELETE FROM principal_roles p USING roles r WHERE r.tenant_id=p.tenant_id AND r.id=p.role_id AND r.grant_all AND p.tenant_id=1 AND p.user_id<>$1 RETURNING p.user_id,p.role_id",
+            &[&proof.admin.user()],
+        )
+        .await?;
+    drop(client);
+    let last = proof
+        .assign(proof.admin.user(), full, false, &Assignment::default())
+        .await;
+    let client = db.get().await?;
+    for row in &others {
+        client
+            .execute(
+                "INSERT INTO principal_roles(tenant_id,user_id,role_id) VALUES(1,$1,$2) ON CONFLICT DO NOTHING",
+                &[&row.get::<_, i64>(0), &row.get::<_, i64>(1)],
+            )
+            .await?;
+    }
+    drop(client);
+    assert!(matches!(last, Err(Error::Refused(_))), "{last:?}");
+    println!("A narrower role administrator cannot remove a full-access role or deny a full-access account; the last full-access assignment stays.");
+
     let mut client = db.get().await?;
     let mut tx = proof
         .boundary
@@ -536,6 +594,86 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         assert!(authz::decide(&**client, &first, GLOBAL).await?.allowed);
     }
     println!("Expired and future manual assignments stay inactive beside an effective provider grant; current manual assignments remain current.");
+
+    // #537: two administrators changing two operations of the Step-up policy
+    // at once both keep their change. The first holds its transaction open
+    // while the second edits, then commits.
+    let step_up = app
+        .services
+        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
+    let (role_key, principal_key) = (
+        "base.authz.role_capability.set",
+        "base.authz.system_principal.set",
+    );
+    let mut first_client = db.get().await?;
+    let mut first_tx = proof
+        .boundary
+        .begin(
+            &mut first_client,
+            proof.admin.mutation_context("step_up.mode.save"),
+        )
+        .await?;
+    step_up
+        .set_mode(
+            &mut first_tx,
+            &proof.admin,
+            role_key,
+            Some(bilibi_step_up::Mode::EveryTime),
+        )
+        .await?;
+    let second_edit = async {
+        let mut client = db.get().await?;
+        let mut tx = proof
+            .boundary
+            .begin(
+                &mut client,
+                proof.admin.mutation_context("step_up.mode.save"),
+            )
+            .await?;
+        step_up
+            .set_mode(
+                &mut tx,
+                &proof.admin,
+                principal_key,
+                Some(bilibi_step_up::Mode::EveryTime),
+            )
+            .await?;
+        tx.commit().await
+    };
+    let first_commit = async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        first_tx.commit().await
+    };
+    let (second, first) = tokio::join!(second_edit, first_commit);
+    first?;
+    second?;
+    let chosen: Vec<&str> = step_up
+        .rules(&proof.admin)
+        .await?
+        .into_iter()
+        .filter(|rule| rule.choice == Some(bilibi_step_up::Mode::EveryTime))
+        .map(|rule| rule.declared.operation.key)
+        .collect();
+    assert!(
+        chosen.contains(&role_key) && chosen.contains(&principal_key),
+        "{chosen:?}"
+    );
+    let mut client = db.get().await?;
+    let mut tx = proof
+        .boundary
+        .begin(
+            &mut client,
+            proof.admin.mutation_context("step_up.mode.save"),
+        )
+        .await?;
+    step_up
+        .set_mode(&mut tx, &proof.admin, role_key, None)
+        .await?;
+    step_up
+        .set_mode(&mut tx, &proof.admin, principal_key, None)
+        .await?;
+    tx.commit().await?;
+    println!("Two Step-up policy edits at the same time both stay.");
 
     Ok(())
 }

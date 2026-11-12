@@ -22,6 +22,10 @@ Use `core.document.mark` to favourite or follow a document: marks are yours alon
 
 Use `core.document.access` to read the current explicit grants. Use `core.document.share` to give an active account view access, with optional download, manage or share permission, `until` (the last day it works, UTC) and `email` (queue an email with a link that opens the document only for their account; it is audited and limited, and the result says `rate_limited` when a limit stopped it). Use `core.document.unshare` with the grant ID to remove access; you cannot remove your own grant.
 
+## Share with a portal customer
+
+Use `core.document.customer_share` to let a customer see a document that keeps a file on the portal and download its latest file once it is scanned clean. The `recipient` is a `person` record (one customer) or a `company` record (every business customer who signs in for that company), found with `base.records.search`; `until` is the last day (UTC) it works. Sharing again with the same customer replaces the end. It needs the same share permission as `core.document.share`. Use `core.document.customer_shares` to read who sees it, and `core.document.customer_unshare` with the share ID to stop: the document leaves the customer's portal at once. Customers never see links, grants, revisions or the filing company.
+
 ## Expiry and custom fields
 
 Set `expires_on` in `core.document.create` or `core.document.update` (an empty string clears it): you get a reminder task through Core Activity, due the tenant's lead time before, and the list filters `expiry` (`expired` or `soon`). Tenant-defined custom fields travel as `custom` `{key, value}` pairs on create and in `patch`; `core.document.get` returns them with labels and types.
