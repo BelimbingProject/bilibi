@@ -6,4 +6,4 @@ Consent answers whether a company may send an elective message to a person or ad
 - **`core.consent.for_person`** shows current decisions and active suppressions for the selected company. **`core.consent.history`** includes source, capture channel and evidence.
 - **`core.consent.record`** adds a grant or withdrawal. Record only what the person actually decided.
 - **`core.consent.suppress`** stops elective contact after a bounce, complaint or unsubscribe. **`core.consent.lift`** needs a reason.
-- Email addresses are lower-case. SMS and voice numbers need an international country code.
+- Email addresses are lower-case. A phone number needs its country code and starts with `+` or `00`, on every channel.

@@ -1112,6 +1112,92 @@ async fn main() -> Result<()> {
         export_text(&privacy, &mut client, &admin.scope, access.id).await
     );
 
+    println!("== B5: a person hold keeps what their requests recorded and their exports (#563)");
+    let fay = new_person(&client, "Fay Held", "fay-held@example.test").await?;
+    let access = received(
+        &privacy,
+        &mut client,
+        &second.scope,
+        RequestKind::Access,
+        fay,
+        "fay-held@example.test",
+    )
+    .await?;
+    let access = privacy
+        .approve(&mut client, &admin.scope, access.id, access.version)
+        .await?;
+    let access = settle(&privacy, &client, &admin.scope, access.id, 180).await?;
+    let export = access
+        .export_artifact
+        .clone()
+        .ok_or("the access request filed no export")?;
+    let hold = privacy
+        .place_hold(
+            &mut client,
+            &admin.scope,
+            HoldTarget::Person { person: fay },
+            "Dispute about request handling",
+        )
+        .await?;
+    let erasure = received(
+        &privacy,
+        &mut client,
+        &admin.scope,
+        RequestKind::Erasure,
+        fay,
+        "fay-held@example.test",
+    )
+    .await?;
+    let erasure = erasure_approval::decide(
+        &app,
+        &privacy,
+        &mut client,
+        &admin.scope,
+        &second.step_up().await,
+        &erasure,
+        true,
+    )
+    .await?;
+    let erasure = settle(&privacy, &client, &admin.scope, erasure.id, 180).await?;
+    summary(&erasure);
+    // `kept`: requests remember what was given, the export stands and the
+    // cleanup is owed. `forgotten`: the opposite, once the hold is released.
+    let requests = vec![access.id, erasure.id];
+    let state = "SELECT \
+        (SELECT bool_and(identifiers <> '[]'::jsonb AND erased_at IS NULL) FROM base_privacy_requests WHERE id = ANY($1)) \
+        AND EXISTS(SELECT 1 FROM base_artifacts WHERE public_id=$2 AND deleted_at IS NULL) \
+        AND EXISTS(SELECT 1 FROM base_privacy_resumptions WHERE request_id=$3 AND done_at IS NULL), \
+        (SELECT bool_and(identifiers = '[]'::jsonb AND erased_at IS NOT NULL) FROM base_privacy_requests WHERE id = ANY($1)) \
+        AND NOT EXISTS(SELECT 1 FROM base_artifacts WHERE public_id=$2 AND deleted_at IS NULL) \
+        AND EXISTS(SELECT 1 FROM base_privacy_resumptions WHERE request_id=$3 AND done_at IS NOT NULL)";
+    let held = client
+        .query_one(state, &[&requests, &export, &erasure.id])
+        .await?;
+    if erasure.status != "completed" || !held.get::<_, bool>(0) {
+        return Err("completing an erasure under a person hold forgot the person's requests or deleted their export".into());
+    }
+    println!("erasure under a person hold: completed; request text and export kept; cleanup owed");
+    privacy
+        .release_hold(&mut client, &admin.scope, hold.id, "Dispute settled")
+        .await?;
+    sweep(
+        &app,
+        &mut client,
+        &admin.scope,
+        "sweep after the person hold is released",
+    )
+    .await?;
+    let released = client
+        .query_one(state, &[&requests, &export, &erasure.id])
+        .await?;
+    if !released.get::<_, bool>(1) {
+        return Err(
+            "the owed cleanup did not forget the requests and delete the export after release"
+                .into(),
+        );
+    }
+    println!("after release: the owed cleanup forgot the request text and deleted the export");
+
     println!("== S1: Search neither matches nor shows a masked field");
     let probe = new_person(&client, "Search Probe", "probe-unique@example.test").await?;
     let found = |found: bilibi_base::search::Found| -> Vec<String> {
