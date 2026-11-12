@@ -135,6 +135,15 @@ pub trait Sweeper: Send + Sync {
         after: i64,
         limit: i64,
     ) -> HandlerFuture<'a, Swept>;
+    /// After each batch commits, with the same grant (README, "Retention"). Default: nothing.
+    fn after_sweep<'a>(
+        &'a self,
+        _client: &'a mut Client,
+        _scope: &'a Scope,
+        _grant: &'a Erasure,
+    ) -> HandlerFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// The keys of a class's company settings.
@@ -518,7 +527,7 @@ impl Privacy {
         let grant = self
             .issuer
             .erasure(scope.tenant(), Cause::Sweep(sweep), None);
-        let (mut acted, mut kept, mut batches, mut after) = (0, 0, 0, 0);
+        let (mut acted, mut kept, mut batches, mut after, mut cleanup) = (0, 0, 0, 0, Ok(()));
         loop {
             let holds = Holds::acquire(scope, &grant).await?;
             let mut tx = self
@@ -538,6 +547,7 @@ impl Privacy {
             runner::clear_evidence(&tx, &grant, &mut step, minimums).await?;
             tx.commit().await?;
             holds.release().await?;
+            cleanup = cleanup.and(class.sweeper.after_sweep(client, scope, &grant).await);
             acted += swept.acted;
             kept += swept.kept;
             batches += 1;
@@ -546,8 +556,8 @@ impl Privacy {
                 _ => break,
             }
         }
-        self.close_sweep(client, scope, sweep, (acted, kept, batches))
-            .await
+        let closed = self.close_sweep(client, scope, sweep, (acted, kept, batches));
+        closed.await.and(cleanup)
     }
 
     /// The deferred audit erasure: evidence kept for its legal minimum whose
