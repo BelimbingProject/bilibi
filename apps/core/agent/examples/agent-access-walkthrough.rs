@@ -488,42 +488,41 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             &[],
         )
         .await?;
-    let archive_scope = actor.clone();
-    let archive_companies = companies.clone();
-    let archive = tokio::spawn(async move {
-        archive_companies
-            .archive_company(&archive_scope, 2, Some("Walkthrough lock order"))
-            .await
-    });
-    let mut archive_waiting = false;
-    for _ in 0..100 {
-        archive_waiting = client
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT id,person_id FROM user_desks%FOR UPDATE')",
-                &[],
-            )
-            .await?
-            .get(0);
-        if archive_waiting {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    if !archive_waiting {
-        return Err(Error::Internal.into());
-    }
+    // A desk row held by another transaction: the workplace proof takes the
+    // company before the desk and bounds its wait, so the plan is refused as
+    // retryable instead of hanging.
     let started = Instant::now();
-    let archive_plan = plans.preview(&authority, &operations).await;
+    let held_desk_plan = plans.preview(&authority, &operations).await;
     if !matches!(
-        archive_plan,
+        held_desk_plan,
         Err(bilibi_agent_api::Error::Backend(Error::Conflict))
     ) || started.elapsed() > Duration::from_secs(2)
     {
         return Err(Error::Internal.into());
     }
+    println!("held desk row returned a retryable plan refusal: true");
+    // Archiving changes the company's status only. It keeps the desks (their
+    // people still read the archived company's records) and locks no desk
+    // row, so it finishes while the desk row is still held: there is no
+    // company/desk lock cycle for an archive to deadlock on.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        companies.archive_company(&actor, 2, Some("Walkthrough lock order")),
+    )
+    .await
+    .map_err(|_| Error::Internal)??;
+    let kept: bool = client
+        .query_one(
+            "SELECT c.status='archived' AND EXISTS(SELECT 1 FROM user_desks d WHERE d.tenant_id=c.tenant_id AND d.company_id=c.id AND d.person_id=3) FROM companies c WHERE c.tenant_id=1 AND c.id=2",
+            &[],
+        )
+        .await?
+        .get(0);
+    if !kept {
+        return Err(Error::Internal.into());
+    }
     held_desk.rollback().await?;
-    archive.await??;
-    println!("archive kept company-before-desk order and plan refused without deadlock: true");
+    println!("archive finished behind the held desk row and kept the desk: true");
 
     println!("\n== observed agent IDs ==");
     for stated in [
