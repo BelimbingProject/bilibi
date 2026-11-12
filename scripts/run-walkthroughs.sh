@@ -50,7 +50,8 @@ cd "$root"
 #   geonames      migrate, then `geonames-import` of apps/core/geonames/sample from a local server
 #   seed-app      seed, and the app itself running at APP_ORIGIN beside the walkthrough
 # environment: space-separated KEY=VALUE. `@/x` is a private folder made for this
-#   walkthrough; @chromium, @qpdf, @model and @port (a free local port) are filled in.
+#   walkthrough; @chromium, @qpdf and @port (a free local port) are filled in.
+#   `-KEY` unsets a variable every walkthrough otherwise gets (APP_ORIGIN).
 # steps: the argument lists of the processes to run in order on the one
 #   database, separated by `;`. `-` is a run without arguments. `@/x` and @model as above.
 # kind: `serve` for a walkthrough that ends by serving the app (see above).
@@ -93,13 +94,13 @@ WALKTHROUGHS=(
   'privacy|consent|apps/core/consent|consent-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
 
   'core|address|apps/core/address|address-walkthrough|geonames|BILIBI_ADDRESS_DEMO=disposable|-'
-  'core|affiliation|apps/core/affiliation|affiliation-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
+  'core|affiliation|apps/core/affiliation|affiliation-walkthrough|seed|BILIBI_AFFILIATION_DEMO=disposable|-'
   'core|affiliation-contact-matching|apps/core/affiliation|contact-matching-walkthrough|none|BILIBI_CONTACT_MATCHING=disposable BILIBI_INSTANCE_DIR=@/instance|seed;-'
   'core|affiliation-operations|apps/core/affiliation|k19-operations-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
-  'core|agent-access|apps/core/agent|agent-access-walkthrough|migrate|BILIBI_DISPOSABLE_AGENT_ACCESS_DEMO=yes|-'
+  'core|agent-access|apps/core/agent|agent-access-walkthrough|seed|BILIBI_DISPOSABLE_AGENT_ACCESS_DEMO=yes|-'
   'core|company-caller-reads|apps/core/company|caller-reads-walkthrough|seed|BILIBI_CALLER_READS=disposable|-'
   'core|company-organisation|apps/core/company|k1-organisation-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
-  'core|company-lifecycle|apps/core/company|k2-lifecycle-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
+  'core|company-lifecycle|apps/core/company|k2-lifecycle-walkthrough|seed|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-relationships|apps/core/company|k5-relationships-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-owner-binders|apps/core/company|k15-owner-binders|seed|BILIBI_COMPANY_DEMO=disposable BILIBI_K15_DEMO_ROOT=@/files|-'
   'core|currency|apps/core/currency|currency-walkthrough|seed|BILIBI_CURRENCY_DEMO=disposable|-'
@@ -140,17 +141,17 @@ WALKTHROUGHS=(
   'web|optional-capabilities-catalogs|apps/web|optional-capabilities|none||--catalogs'
   'web|optional-capabilities|apps/web|optional-capabilities|seed|BILIBI_OPTIONAL_PROOF=disposable|-'
   # Only the composition with nothing mounted; see NOT_RUN for the mounted ones.
-  'web|events-unmounted|apps/web|events-reference|none||-'
+  'web|events-unmounted|apps/web|events-reference|seed||-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
-  'web|grid-catalog|apps/web|g1-grid|migrate|BILIBI_GRID_DEMO=disposable|-'
-  'web|grid-projection|apps/web|g2-grid|migrate|BILIBI_GRID_DEMO=disposable|-'
+  'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
+  'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-summary|apps/web|g5-grid-summary|migrate|BILIBI_GRID_DEMO=disposable|-'
   'web|reports|apps/web|r1-reports|migrate|BILIBI_GRID_DEMO=disposable|-'
   'web|seams|apps/web|p1-seams|migrate||-'
   'web|locale-datetime|apps/web|p4-locale-datetime|migrate|BILIBI_DISPOSABLE_P4_DEMO=yes|-'
   'web|authz|apps/web|p6-authz|seed|BILIBI_AUTHZ_DEMO=disposable|-'
   'web|picklists|apps/web|picklists-reference|none||-'
-  'web|records|apps/web|records-reference|none||-'
+  'web|records|apps/web|records-reference|none|-APP_ORIGIN|-'
   'web|records-equivalence|apps/web|records-equivalence|none||-'
   'web|role-assignment-bounds|apps/web|role-assignment-bounds|seed|BILIBI_ASSIGNMENT_PROOF=disposable|-'
   'web|system-principal-grants|apps/web|system-principal-grants|seed-app|BILIBI_PRINCIPAL_PROOF=disposable|-'
@@ -346,6 +347,10 @@ run_one() {
     mkdir -m 700 "$dir/mail" "$dir/cwd"
     [[ $kind == serve ]] && export BIND_ADDR="127.0.0.1:$port"
     for pair in $environment; do
+      if [[ $pair == -* ]]; then
+        unset "${pair#-}"
+        continue
+      fi
       key=${pair%%=*}
       value=${pair#*=}
       case "$value" in
@@ -467,6 +472,13 @@ for folder in "${folders[@]}"; do
     IFS='|' read -r _ name entry_folder example prepare environment steps kind <<<"$entry"
     [[ $entry_folder == "$folder" ]] || continue
     step "Walkthrough: $name ($folder/examples/$example)"
+    if [[ $steps == *@model* && ! -f $model ]]; then
+      # The model is a 131 MB download from its publisher; its absence says
+      # nothing about this repository.
+      echo "::warning title=Walkthrough $name skipped::the pinned language model is not provisioned (WALKTHROUGH_LANGUAGE_MODEL)"
+      printf '| %s | skipped: no language model | 0 |\n' "$name" >>"$summary"
+      continue
+    fi
     started=$SECONDS
     run_one "$name" "$example" "$prepare" "$environment" "${steps:--}" "${kind:-}"
     elapsed=$((SECONDS - started))
