@@ -745,7 +745,7 @@ async fn account_bounds(
         .into());
     }
     users
-        .login("contractor@example.test", "covered-new-password")
+        .login("contractor-moved@example.test", "covered-new-password")
         .await
         .map_err(|error| format!("An impersonated password change took effect: {error}"))?;
     users
