@@ -16,14 +16,20 @@ pub struct Throttle {
 impl Throttle {
     /// True when this request fits the current minute for `key`.
     pub fn allow(&self, key: &str, per_minute: u32) -> bool {
+        self.allow_among(key, per_minute, MAX_KEYS)
+    }
+    /// The same, for a caller whose keys are bounded by something larger
+    /// than the default: at most `max_keys` are counted in one minute, and a
+    /// new key beyond that is refused.
+    pub fn allow_among(&self, key: &str, per_minute: u32, max_keys: usize) -> bool {
         let minute = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() / 60)
             .unwrap_or(0);
         let mut windows = self.windows.lock().unwrap_or_else(|p| p.into_inner());
-        if windows.len() >= MAX_KEYS {
+        if windows.len() >= max_keys && !windows.contains_key(key) {
             windows.retain(|_, (window, _)| *window == minute);
-            if windows.len() >= MAX_KEYS && !windows.contains_key(key) {
+            if windows.len() >= max_keys {
                 return false;
             }
         }

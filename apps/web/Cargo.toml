@@ -42,6 +42,8 @@ http-body-util = "0.1.5"
 futures-core.workspace = true
 
 [dev-dependencies]
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 bilibi-mail.workspace = true
 bilibi-notifications.workspace = true
 bilibi-queue.workspace = true

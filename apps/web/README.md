@@ -147,6 +147,17 @@ inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenan
 
 `apps/web/examples/public-endpoint-reference.rs` is the running specimen; `--refusals` prints each boot refusal without a database.
 
+# Visitor edge (`src/visitor.rs`)
+
+**A website on another origin lets someone with no account talk to a Domain's channel here.** `base/visitor` owns the session store and the channel contract (`apps/base/visitor/README.md`, [ADR 27](../../docs/architecture/decisions/27-visitor-sessions-are-a-separate-credential.md)); this host owns the transport under `/visitor/v1/`, which the discovered pages and downloads can never claim (`api::reserved`).
+
+- `POST /visitor/v1/sessions`, `/session/renew` and `/session/end` take a JSON body sent as `text/plain`, so a browser makes a simple cross-origin request and no preflight. The reply carries `Access-Control-Allow-Origin` for the origin only when it is accepted; every refusal of a credential or site is one `403 {"error":"refused"}`, a bad value `400 invalid`, an exceeded limit `429 rate_limited`.
+- `GET /visitor/v1/live` is a WebSocket that needs an `Origin`. Its first frame (`hello`) carries the token within 10 seconds; the token is never a cookie or a URL. Frames are bounded (32 KiB of JSON, a message 16 KiB, a typing signal 1 KiB, an upload chunk 64 KiB with the staff socket's eight-byte header), counted per session per minute, and each proves the session, the origin and the site again before the channel sees it. A socket rechecks every 10 seconds and closes at once on a staff revocation.
+- No cookie, session, CSRF secret or staff route is read or reachable: the token is a `vst_` credential in its own table. A visitor token sent as a cookie, a bearer or a query to any staff, portal, agent or live route proves nothing there.
+- Limits are `base/visitor`'s operator settings: sessions per sender and per site per minute, frames and files per session per minute, sockets per session and in total (apart from the staff and portal sockets'), a file's size and the memory held for files still arriving (a stalled file is dropped after 30 seconds without a chunk).
+
+`apps/web/examples/visitor-walkthrough.rs` is the running specimen and proof.
+
 # Agent edge (`src/api.rs`)
 
 The host owns the machine endpoints; discovered pages cannot claim them

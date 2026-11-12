@@ -134,7 +134,7 @@ Each Domain and each Extension lives in its own repository, with one or more mod
 
 | Layer | Modules |
 | --- | --- |
-| Base | `agent_api`, `artifacts`, `audit`, `audit_views`, `authz`, `authz_agent`, `custom_fields`, `dashboard`, `database`, `datetime`, `design_library`, `events`, `grid`, `integration`, `language_detection`, `locale`, `mail`, `media`, `menu`, `module_registry`, `notifications`, `party_ids`, `perf`, `personal_data`, `picklists`, `ports`, `principal_directory`, `privacy`, `queue`, `records`, `schedule`, `search`, `security`, `session`, `settings`, `settings_editor`, `software`, `step_up`, `system`, `tenancy`, `tiling`, `ui`, `workflow` |
+| Base | `agent_api`, `artifacts`, `audit`, `audit_views`, `authz`, `authz_agent`, `custom_fields`, `dashboard`, `database`, `datetime`, `design_library`, `events`, `grid`, `integration`, `language_detection`, `locale`, `mail`, `media`, `menu`, `module_registry`, `notifications`, `party_ids`, `perf`, `personal_data`, `picklists`, `ports`, `principal_directory`, `privacy`, `queue`, `records`, `schedule`, `search`, `security`, `session`, `settings`, `settings_editor`, `software`, `step_up`, `system`, `tenancy`, `tiling`, `ui`, `visitor`, `workflow` |
 | Core | `activity`, `address`, `affiliation`, `agent`, `company`, `consent`, `currency`, `document`, `geonames`, `party`, `person`, `portal`, `product`, `tenant`, `user`, `work_calendar` |
 
 - `base/security` is a compatibility facade over Session, Tenancy and Authz.

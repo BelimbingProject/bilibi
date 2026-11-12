@@ -20,6 +20,7 @@ mod routes;
 mod scim;
 mod shell;
 mod two_factor_reset;
+mod visitor;
 mod webhooks;
 use askama::Template;
 use axum::{
@@ -67,6 +68,7 @@ pub struct App {
     pub(crate) live: Arc<live::Limits>,
     api: Arc<api::Edge>,
     webhooks: Arc<webhooks::Boundary>,
+    visitor: Arc<visitor::Boundary>,
 }
 impl App {
     /// Which instance this is, with the operator's label and colour
@@ -138,6 +140,7 @@ impl App {
         let credential_paths = Arc::new(CredentialPaths::from_catalog(services.catalog()?)?);
         let api = Arc::new(api::Edge::new(&services)?);
         let webhooks = Arc::new(webhooks::Boundary::bind(&services)?);
+        let visitor = Arc::new(visitor::Boundary::bind(&services)?);
         Ok(Self {
             routes,
             downloads,
@@ -161,6 +164,7 @@ impl App {
             live: Arc::default(),
             api,
             webhooks,
+            visitor,
             services: Arc::new(services),
         })
     }
@@ -332,6 +336,7 @@ pub fn router(app: App) -> Router {
     routes::install_moved(pages, &app.moved)
         .merge(api::router(app.clone()))
         .merge(webhooks::router())
+        .merge(visitor::router())
         .merge(scim::router())
         .route("/", get(auth::home).post(auth::login))
         .route("/login", get(auth::home).post(auth::login))

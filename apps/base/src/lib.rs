@@ -43,5 +43,6 @@ pub use bilibi_system as system;
 pub use bilibi_tenancy as tenancy;
 pub use bilibi_tiling as tiling;
 pub use bilibi_ui as ui;
+pub use bilibi_visitor as visitor;
 pub use bilibi_workflow as workflow;
 pub fn link() {}
