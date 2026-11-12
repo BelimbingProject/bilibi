@@ -10,7 +10,8 @@
 //! `prepare` (default) serves the host on a free local port and plays a
 //! browser by hand: it opens sessions from allowed and refused origins, chats
 //! over the socket (messages, typing, a clean and an infected file, an
-//! oversize file, a broken chunk), sees a staff reply arrive, hits each rate
+//! oversize file, a broken chunk, a file of several chunks, the in-transit
+//! budget and a stalled file), sees a staff reply arrive, hits each rate
 //! limit, expires, renews, ends and revokes a session, proves another
 //! tenant's visitor sees none of this tenant's conversations, and sends a
 //! visitor token to every kind of staff route. Each line says what was sent
@@ -858,7 +859,9 @@ async fn prepare(db: Db) -> Result<()> {
     let greeting = until(&mut ws, "items", 5).await;
     run.expect(
         "ready, then the conversation so far",
-        ready.as_ref().is_some_and(|f| f["type"] == "ready")
+        ready
+            .as_ref()
+            .is_some_and(|f| f["type"] == "ready" && f["upload_max_bytes"] == 5_242_880)
             && greeting
                 .as_ref()
                 .is_some_and(|f| f["items"][0]["text"] == "Hello! How can we help?"),
@@ -991,6 +994,98 @@ async fn prepare(db: Db) -> Result<()> {
         ready_upload.is_some() && skipped.as_ref().is_some_and(|f| f["code"] == "invalid"),
         format!("{skipped:?}"),
     );
+
+    println!("== files of several chunks, and the memory files in transit may hold");
+    setting(
+        &setup,
+        &mut client,
+        "visitor.uploads_per_minute",
+        json!(100),
+    )
+    .await?;
+    say(
+        &mut ws,
+        json!({"type": "message", "id": 4, "body": {"text": "x".repeat(40_000)}}),
+    )
+    .await;
+    let wide = until(&mut ws, "error", 5).await;
+    run.expect(
+        "a text frame over 32 KiB is invalid, the socket stays open",
+        wide.as_ref().is_some_and(|f| f["code"] == "invalid"),
+        format!("{wide:?}"),
+    );
+    // Four chunks: three of 64 KiB and a short last one.
+    let long: Vec<u8> = (0..)
+        .flat_map(|line: u32| format!("line {line} of a long note\n").into_bytes())
+        .take(200_000)
+        .collect();
+    let several = send_file(&mut ws, 11, "long-note.txt", &long).await;
+    let stored: Option<i64> = client
+        .query_opt(
+            "SELECT s.file_size FROM base_media_assets s JOIN base_media_attachments a ON a.media_asset_id = s.id WHERE a.subject_type = $1 AND s.original_filename = 'long-note.txt'",
+            &[&SUBJECT_KIND],
+        )
+        .await?
+        .and_then(|row| row.get(0));
+    run.expect(
+        "a 200,000-byte file sent as four chunks is acknowledged and stored whole",
+        several.as_ref().is_some_and(|f| f["type"] == "ack") && stored == Some(200_000),
+        format!("{several:?}; Media holds {stored:?} bytes"),
+    );
+    setting(
+        &setup,
+        &mut client,
+        "visitor.upload_buffer_bytes",
+        json!(2_048),
+    )
+    .await?;
+    say(
+        &mut ws,
+        json!({"type": "upload", "id": 12, "name": "held.txt", "size": 1_500}),
+    )
+    .await;
+    let held = until(&mut ws, "upload_ready", 5).await;
+    let mut second = socket(&addr, Some(PAGE)).await.expect("socket");
+    hello(&mut second, &token, None).await;
+    let _ = until(&mut second, "ready", 5).await;
+    say(
+        &mut second,
+        json!({"type": "upload", "id": 13, "name": "waiting.txt", "size": 1_500}),
+    )
+    .await;
+    let over = until(&mut second, "error", 5).await;
+    run.expect(
+        "a file announced beyond the server's in-transit budget is refused",
+        held.is_some()
+            && over
+                .as_ref()
+                .is_some_and(|f| f["id"] == 13 && f["code"] == "rate_limited"),
+        format!("{over:?}"),
+    );
+    let waited = std::time::Instant::now();
+    let stalled = until(&mut ws, "error", 40).await;
+    run.expect(
+        "a file with no chunk for 30 seconds is dropped",
+        stalled
+            .as_ref()
+            .is_some_and(|f| f["id"] == 12 && f["code"] == "invalid")
+            && waited.elapsed() >= Duration::from_secs(25),
+        format!("{stalled:?} after {} s", waited.elapsed().as_secs()),
+    );
+    let freed = send_file(&mut second, 14, "waiting.txt", &[b'w'; 1_500]).await;
+    run.expect(
+        "the dropped file gave its bytes back: the refused one now goes through",
+        freed.as_ref().is_some_and(|f| f["type"] == "ack"),
+        format!("{freed:?}"),
+    );
+    drop(second);
+    setting(
+        &setup,
+        &mut client,
+        "visitor.upload_buffer_bytes",
+        json!(268_435_456u64),
+    )
+    .await?;
 
     println!("== renewal, expiry, ending");
     let renewed = post(
@@ -1221,6 +1316,13 @@ async fn prepare(db: Db) -> Result<()> {
         texts == vec!["\"Hello! How can we help?\"".to_string()],
         format!("{texts:?}"),
     );
+    let tenant_one_before = conversations()
+        .chats
+        .lock()
+        .unwrap()
+        .get(&(1, subject.clone()))
+        .map(|c| c.items.len())
+        .unwrap_or(0);
     say(&mut ows, json!({"type": "message", "id": 1, "body": {"text": "hi", "subject": subject, "tenant": 1}})).await;
     let own = until(&mut ows, "ack", 5).await;
     let tenant_one_items = conversations()
@@ -1240,8 +1342,11 @@ async fn prepare(db: Db) -> Result<()> {
         .sum();
     run.expect(
         "a subject or tenant named in a frame is ignored: the message landed in its own conversation",
-        own.is_some() && tenant_one_items == 5 && tenant_two_items == 2,
-        format!("tenant 1 conversation {tenant_one_items} items, tenant 2 {tenant_two_items}"),
+        own.is_some()
+            && tenant_one_before > 0
+            && tenant_one_items == tenant_one_before
+            && tenant_two_items == 2,
+        format!("tenant 1 conversation {tenant_one_before} items before and {tenant_one_items} after, tenant 2 {tenant_two_items}"),
     );
     let swapped = post(
         &addr,

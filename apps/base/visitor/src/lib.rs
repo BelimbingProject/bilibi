@@ -27,7 +27,7 @@ pub use channel::{
 pub use contributions::{
     MANAGE, MESSAGES_PER_MINUTE_KEY, SESSIONS_PER_SENDER_KEY, SESSIONS_PER_SITE_KEY,
     SESSION_MAX_HOURS_KEY, SESSION_MINUTES_KEY, SOCKETS_PER_SESSION_KEY, SOCKETS_TOTAL_KEY,
-    UPLOADS_PER_MINUTE_KEY, UPLOAD_MAX_BYTES_KEY,
+    UPLOADS_PER_MINUTE_KEY, UPLOAD_BUFFER_BYTES_KEY, UPLOAD_MAX_BYTES_KEY,
 };
 pub use origin::{parse as parse_origin, MAX_ORIGINS};
 
@@ -39,10 +39,10 @@ pub const TOKEN_PREFIX: &str = "vst_";
 const TOKEN_LEN: usize = TOKEN_PREFIX.len() + 64;
 /// The longest subject and cursor a channel may return.
 pub const SUBJECT_MAX: usize = 128;
-/// Expired and ended rows are kept this long, then removed by the next
-/// session opened, in batches of [`PRUNE_BATCH`].
 /// How long one reading of the operator's limits is reused.
 pub const POLICY_FRESH: Duration = Duration::from_secs(2);
+/// A row is kept this long after its limit passed, then removed by the next
+/// session opened, in batches of [`PRUNE_BATCH`].
 const KEEP_DAYS: i64 = 1;
 const PRUNE_BATCH: i64 = 100;
 
@@ -59,6 +59,7 @@ pub struct Policy {
     pub sockets_total: u32,
     pub upload_max_bytes: u64,
     pub uploads_per_minute: u32,
+    pub upload_buffer_bytes: u64,
 }
 
 /// A session just opened. The token is shown once and never stored.
@@ -123,6 +124,7 @@ impl Visitors {
             sockets_total: narrow(read(SOCKETS_TOTAL_KEY).await?)?,
             upload_max_bytes: read(UPLOAD_MAX_BYTES_KEY).await?,
             uploads_per_minute: narrow(read(UPLOADS_PER_MINUTE_KEY).await?)?,
+            upload_buffer_bytes: read(UPLOAD_BUFFER_BYTES_KEY).await?,
         })
     }
 
@@ -135,8 +137,8 @@ impl Visitors {
     }
 
     /// Starts a session for the visitor a channel just admitted, on the origin
-    /// a site's allow-list accepted. The tenant must be live. Sessions that
-    /// ended or expired more than a day ago are removed in a bounded batch.
+    /// a site's allow-list accepted. The tenant must be live. Sessions whose
+    /// limit passed more than a day ago are removed in a bounded batch.
     pub async fn open(
         &self,
         client: &(impl GenericClient + Sync),
@@ -156,8 +158,7 @@ impl Visitors {
         client
             .execute(
                 "DELETE FROM visitor_sessions WHERE id IN (SELECT id FROM visitor_sessions \
-                 WHERE absolute_expires_at < now() - make_interval(days => $1::int) \
-                 OR revoked_at < now() - make_interval(days => $1::int) LIMIT $2)",
+                 WHERE absolute_expires_at < now() - make_interval(days => $1::int) LIMIT $2)",
                 &[&(KEEP_DAYS as i32), &PRUNE_BATCH],
             )
             .await?;

@@ -21,7 +21,8 @@ use axum::{
 };
 use bilibi_agent::Throttle;
 use bilibi_base::visitor::{
-    Channel, ChannelService, Frame, Hello, Policy, Upload, VisitorScope, Visitors, CHANNELS,
+    Channel, ChannelService, Frame, Hello, Policy, Revoked, Upload, VisitorScope, Visitors,
+    CHANNELS,
 };
 use bilibi_database::Error;
 use bilibi_module_registry::Services;
@@ -33,6 +34,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::sync::broadcast;
 
 pub const SESSIONS: &str = "/visitor/v1/sessions";
 pub const RENEW: &str = "/visitor/v1/session/renew";
@@ -53,6 +55,12 @@ const DETAILS_LIMIT: usize = 4 * 1024;
 /// big-endian `u32`s) as the staff live socket's.
 const CHUNK: usize = 64 * 1024;
 const HEADER: usize = 8;
+/// The largest frame the socket reads: a whole chunk with its header.
+const SOCKET_LIMIT: usize = if FRAME_LIMIT > CHUNK + HEADER {
+    FRAME_LIMIT
+} else {
+    CHUNK + HEADER
+};
 /// A socket that has not said who it is within this long is closed.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
 /// How often an open socket proves its session and site again.
@@ -62,6 +70,15 @@ const RECHECK: Duration = Duration::from_secs(10);
 const RECONNECTS: u32 = 6;
 /// Refused frames in a row after which a socket is closed.
 const REFUSALS_BEFORE_CLOSE: u32 = 100;
+/// A file being received is dropped when no chunk arrives for this long, or
+/// when the whole file has not arrived within [`UPLOAD_WAIT`], so a stalled
+/// upload gives its bytes back.
+const UPLOAD_IDLE: Duration = Duration::from_secs(30);
+const UPLOAD_WAIT: Duration = Duration::from_secs(600);
+/// A peer that does not take a frame within this long has left.
+const SEND_WAIT: Duration = Duration::from_secs(10);
+/// Sender addresses counted in one minute; a new one beyond this is refused.
+const SENDER_KEYS: usize = 65_536;
 
 /// The bound channels and the edge's own counters, apart from sign-in's and
 /// the other public endpoints'.
@@ -72,6 +89,8 @@ pub struct Boundary {
     sites: Throttle,
     frames: Throttle,
     sockets: Mutex<Sockets>,
+    /// Bytes of every file announced and not yet handed to its channel.
+    uploading: Mutex<u64>,
 }
 #[derive(Default)]
 struct Sockets {
@@ -92,10 +111,45 @@ impl Boundary {
             sites: Throttle::default(),
             frames: Throttle::default(),
             sockets: Mutex::default(),
+            uploading: Mutex::default(),
         })
     }
     fn channel(&self, key: &str) -> Result<Arc<ChannelService>, Error> {
         self.channels.get(key).cloned().ok_or(Error::NotFound)
+    }
+}
+/// A file's announced size, held against `visitor.upload_buffer_bytes` from
+/// the announcement until the channel has the file or it is dropped.
+struct Reserved {
+    app: App,
+    bytes: u64,
+}
+impl Reserved {
+    fn take(app: &App, bytes: u64, budget: u64) -> Option<Self> {
+        let mut held = app
+            .visitor
+            .uploading
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if held.saturating_add(bytes) > budget {
+            return None;
+        }
+        *held += bytes;
+        Some(Self {
+            app: app.clone(),
+            bytes,
+        })
+    }
+}
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        let mut held = self
+            .app
+            .visitor
+            .uploading
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *held = held.saturating_sub(self.bytes);
     }
 }
 /// One open socket's place; dropping it frees it.
@@ -274,10 +328,11 @@ async fn open_session(
     let boundary = &app.visitor;
     let sender = sender(peer, headers);
     let policy = policy(app).await?;
-    if !boundary
-        .senders
-        .allow(&format!("open:{sender}"), policy.sessions_per_sender)
-    {
+    if !boundary.senders.allow_among(
+        &format!("open:{sender}"),
+        policy.sessions_per_sender,
+        SENDER_KEYS,
+    ) {
         return Err(Refusal::LIMITED);
     }
     let request: OpenRequest = serde_json::from_slice(body).map_err(|_| Error::Invalid)?;
@@ -290,13 +345,15 @@ async fn open_session(
         .site(&request.site)
         .await?
         .ok_or(Error::Forbidden)?;
+    // The origin first: only a page the site lists may spend the site's own
+    // budget; any other caller is bounded by its address alone.
+    let admission = site.admit(origin_of(headers))?;
     if !boundary.sites.allow(
         &format!("open:{}:{}", request.channel, site.key()),
         policy.sessions_per_site,
     ) {
         return Err(Refusal::LIMITED);
     }
-    let admission = site.admit(origin_of(headers))?;
     let hello = Hello {
         remote: api::client_address(peer.as_ref().map(|Extension(ConnectInfo(p))| *p), headers),
         details: request.details,
@@ -369,9 +426,10 @@ async fn with_session(
 ) -> Result<(Value, String), Refusal> {
     let boundary = &app.visitor;
     let policy = policy(app).await?;
-    if !boundary.senders.allow(
+    if !boundary.senders.allow_among(
         &format!("session:{}", sender(peer, headers)),
         policy.sessions_per_sender.saturating_mul(RECONNECTS),
+        SENDER_KEYS,
     ) {
         return Err(Refusal::LIMITED);
     }
@@ -404,17 +462,20 @@ async fn upgrade(
         Ok(policy) => policy,
         Err(refusal) => return refused(refusal),
     };
-    if !app.visitor.senders.allow(
+    if !app.visitor.senders.allow_among(
         &format!("live:{}", sender(&peer, &headers)),
         policy.sessions_per_sender.saturating_mul(RECONNECTS),
+        SENDER_KEYS,
     ) {
         return refused(Refusal::LIMITED);
     }
     let Some(slot) = Slot::admit(&app, policy.sockets_total) else {
         return refused(Refusal::LIMITED);
     };
-    ws.max_message_size(FRAME_LIMIT + HEADER)
-        .max_frame_size(FRAME_LIMIT + HEADER)
+    // The socket admits the larger of a text frame and an upload chunk; a
+    // text frame is held to `FRAME_LIMIT` where it is read.
+    ws.max_message_size(SOCKET_LIMIT)
+        .max_frame_size(SOCKET_LIMIT)
         .on_upgrade(move |socket| run(app, socket, origin, slot))
         .into_response()
 }
@@ -450,27 +511,63 @@ struct Receiving {
     name: String,
     size: usize,
     bytes: Vec<u8>,
+    started: Instant,
+    touched: Instant,
+    /// Freed when this is dropped, however the upload ends.
+    _reserved: Reserved,
+}
+impl Receiving {
+    fn deadline(&self) -> Instant {
+        (self.touched + UPLOAD_IDLE).min(self.started + UPLOAD_WAIT)
+    }
+}
+/// Resolves when the file being received has stalled; never without one.
+async fn stalled(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
+}
+/// `false` when the peer is gone or does not take the frame in time.
+async fn put(socket: &mut WebSocket, message: Message) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_WAIT, socket.send(message)).await,
+        Ok(Ok(()))
+    )
 }
 async fn send(socket: &mut WebSocket, message: Value) -> bool {
-    socket
-        .send(Message::Text(message.to_string().into()))
-        .await
-        .is_ok()
+    put(socket, Message::Text(message.to_string().into())).await
 }
 async fn close(socket: &mut WebSocket, reason: &str) {
-    send(socket, json!({"type": "closed", "reason": reason})).await;
-    let _ = socket.send(Message::Close(None)).await;
+    if send(socket, json!({"type": "closed", "reason": reason})).await {
+        put(socket, Message::Close(None)).await;
+    }
 }
 fn code(refusal: &Refusal) -> &'static str {
     refusal.code
 }
-async fn wake(receiver: &mut Option<tokio::sync::broadcast::Receiver<()>>) {
-    match receiver {
-        Some(receiver) => {
-            let _ = receiver.recv().await;
+/// The next event of a subscription: `Some` with it, `None` when events were
+/// missed. A subscription whose sender is gone is dropped and never wakes
+/// again, so a closed one cannot spin the socket's loop.
+async fn heard<T: Clone>(receiver: &mut Option<broadcast::Receiver<T>>) -> Option<T> {
+    use broadcast::error::RecvError;
+    loop {
+        let Some(open) = receiver else {
+            return std::future::pending().await;
+        };
+        match open.recv().await {
+            Ok(event) => return Some(event),
+            Err(RecvError::Lagged(_)) => return None,
+            Err(RecvError::Closed) => *receiver = None,
         }
-        None => std::future::pending().await,
     }
+}
+/// Whether a revocation names this socket's session or its conversation.
+fn names(event: &Revoked, scope: &VisitorScope) -> bool {
+    event.tenant == scope.tenant()
+        && event.channel == scope.channel()
+        && (event.session.as_deref() == Some(scope.session())
+            || event.subject.as_deref() == Some(scope.subject()))
 }
 
 async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
@@ -480,6 +577,9 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
     let Ok(Some(Ok(Message::Text(text)))) = first else {
         return close(&mut socket, "refused").await;
     };
+    if text.len() > FRAME_LIMIT {
+        return close(&mut socket, "refused").await;
+    }
     let Ok(Inbound::Hello { token, cursor }) = serde_json::from_str(&text) else {
         return close(&mut socket, "refused").await;
     };
@@ -497,7 +597,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
     }
     let mut cursor = cursor;
     let mut watch = channel.0.watch(&scope);
-    let mut revoked = boundary.visitors.subscribe_revocations();
+    let mut revoked = Some(boundary.visitors.subscribe_revocations());
     let mut recheck = tokio::time::interval(RECHECK);
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     recheck.tick().await;
@@ -506,7 +606,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
     let mut refusals = 0u32;
     if !send(
         &mut socket,
-        json!({"type": "ready", "session": scope.session()}),
+        json!({"type": "ready", "session": scope.session(), "upload_max_bytes": policy.upload_max_bytes}),
     )
     .await
         || !deliver(&channel, &scope, &mut cursor, &mut socket).await
@@ -516,15 +616,27 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
     loop {
         let message = tokio::select! {
             message = socket.recv() => message,
-            _ = wake(&mut watch) => {
+            _ = heard(&mut watch) => {
                 if !deliver(&channel, &scope, &mut cursor, &mut socket).await { return; }
                 continue;
             }
-            _ = revoked.recv() => {
+            event = heard(&mut revoked) => {
+                // Another session's ending is not this socket's business;
+                // missed events could have been, so they are checked.
+                if event.is_some_and(|event| !names(&event, &scope)) {
+                    continue;
+                }
                 match authenticate(&app, &token, Some(&origin)).await {
                     Ok(_) => continue,
                     Err(_) => return close(&mut socket, "ended").await,
                 }
+            }
+            _ = stalled(receiving.as_ref().map(Receiving::deadline)) => {
+                let Some(file) = receiving.take() else { continue };
+                if !send(&mut socket, failure(Some(file.id.into()), Error::Invalid)).await {
+                    return;
+                }
+                continue;
             }
             _ = recheck.tick() => {
                 match authenticate(&app, &token, Some(&origin)).await {
@@ -544,9 +656,10 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                 let Ok(policy) = self::policy(&app).await else {
                     return close(&mut socket, "unavailable").await;
                 };
-                if !boundary.frames.allow(
+                if !boundary.frames.allow_among(
                     &format!("frame:{}", scope.session()),
                     policy.messages_per_minute,
+                    frame_keys(&policy),
                 ) {
                     refusals += 1;
                     if refusals >= REFUSALS_BEFORE_CLOSE {
@@ -579,9 +692,10 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                 };
                 let chunks =
                     policy.uploads_per_minute as u64 * (policy.upload_max_bytes / CHUNK as u64 + 1);
-                if !boundary.frames.allow(
+                if !boundary.frames.allow_among(
                     &format!("chunk:{}", scope.session()),
                     u32::try_from(chunks).unwrap_or(u32::MAX),
+                    frame_keys(&policy),
                 ) {
                     return close(&mut socket, "rate_limited").await;
                 }
@@ -592,7 +706,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                 chunked(&channel, &scope, &chunk, &mut receiving).await
             }
             Some(Ok(Message::Ping(data))) => {
-                if socket.send(Message::Pong(data)).await.is_err() {
+                if !put(&mut socket, Message::Pong(data)).await {
                     return;
                 }
                 continue;
@@ -642,6 +756,12 @@ async fn deliver(
     .await
 }
 
+/// Keys the per-session counters may hold in one minute: three for each
+/// session the server has room for, twice over for sessions that came and
+/// went, so raising `visitor.sockets_total` never starves a new session.
+fn frame_keys(policy: &Policy) -> usize {
+    (policy.sockets_total as usize).saturating_mul(6).max(4_096)
+}
 fn failure(id: Option<u64>, error: Error) -> Value {
     let refusal = Refusal::from(error);
     json!({"type": "error", "id": id, "code": code(&refusal)})
@@ -694,18 +814,29 @@ async fn frame(
                 || !name_ok
                 || size == 0
                 || size as u64 > policy.upload_max_bytes
-                || !app.visitor.frames.allow(
+                || !app.visitor.frames.allow_among(
                     &format!("upload:{}", scope.session()),
                     policy.uploads_per_minute,
+                    frame_keys(policy),
                 )
             {
                 return Some(failure(Some(id.into()), Error::Invalid));
             }
+            // Every file in flight on this server fits one budget, so open
+            // sockets cannot each hold a file's worth of memory.
+            let Some(reserved) = Reserved::take(app, size as u64, policy.upload_buffer_bytes)
+            else {
+                return Some(json!({"type": "error", "id": id, "code": Refusal::LIMITED.code}));
+            };
+            let now = Instant::now();
             *receiving = Some(Receiving {
                 id,
                 name,
                 size,
                 bytes: Vec::with_capacity(size.min(CHUNK)),
+                started: now,
+                touched: now,
+                _reserved: reserved,
             });
             Some(json!({"type": "upload_ready", "id": id}))
         }
@@ -744,6 +875,7 @@ async fn chunked(
         return Some(failure(Some(id.into()), Error::Invalid));
     }
     file.bytes.extend_from_slice(bytes);
+    file.touched = Instant::now();
     if file.bytes.len() < file.size {
         return None;
     }
@@ -752,6 +884,8 @@ async fn chunked(
         name: done.name,
         bytes: done.bytes,
     };
+    // The reservation is held until the channel has taken the file.
+    let _reserved = done._reserved;
     Some(
         match channel.0.receive(scope, Frame::Upload(upload)).await {
             Ok(reply) => ack(Some(id.into()), reply),
