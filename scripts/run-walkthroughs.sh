@@ -110,6 +110,7 @@ WALKTHROUGHS=(
   # A latency measurement: run small here, only to prove it still runs.
   'core|document-latency|apps/core/document|list-latency|fixture-seed|BILIBI_DOCUMENT_LATENCY=disposable BILIBI_DOCUMENT_LATENCY_DOCUMENTS=300 BILIBI_DOCUMENT_LATENCY_RUNS=3|-'
   'core|document-pending-merge|apps/core/document|pending-merge-proof|fixture-seed|BILIBI_DOCUMENT_MERGE_PROOF=disposable BILIBI_DOCUMENT_MERGE_ROOT=@/documents|-'
+  'core|document-customer-share|apps/core/document|customer-share-walkthrough|fixture-seed|BILIBI_DOCUMENT_CUSTOMER=disposable BILIBI_DOCUMENT_CUSTOMER_ROOT=@/documents|-'
   'core|document-scan-held|apps/core/document|scan-held-proof|fixture-seed|BILIBI_DOCUMENT_SCAN_PROOF=disposable BILIBI_DOCUMENT_SCAN_ROOT=@/documents|-'
   'core|geonames|apps/core/geonames|geonames-walkthrough|none|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
   'core|geonames-import|apps/core/geonames|geonames-import-walkthrough|migrate|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
