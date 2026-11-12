@@ -297,8 +297,18 @@ impl Index {
         // Where a contact may go from here (issue 265): rows become draggable
         // and offer "Non-local actions" only when a page the person may use accepts one.
         let add_to = self.pages.records.add_to(scope, PERSON_KIND).await?;
+        // Only the custom fields whose column is on screen are read and
+        // drawn, with the display settings this render already resolved.
+        let on_screen: Vec<_> = self
+            .definitions
+            .iter()
+            .filter(|definition| {
+                let name = crate::custom::name(&definition.key);
+                self.columns.columns.iter().any(|column| column.id == name)
+            })
+            .collect();
         let cells =
-            super::custom::cells(&self.pages, scope, &self.definitions, &page.entries).await?;
+            super::custom::cells(&self.pages, scope, &display, &on_screen, &page.entries).await?;
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {
             let Some(person) = page
@@ -344,7 +354,7 @@ impl Index {
                         .insert(key.into(), Html::text(value.as_deref().unwrap_or("—")));
                 }
             }
-            for definition in &self.definitions {
+            for definition in &on_screen {
                 let name = crate::custom::name(&definition.key);
                 let shown = cells
                     .get(&(person.id.get(), name.clone()))

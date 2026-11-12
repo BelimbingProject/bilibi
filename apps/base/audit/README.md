@@ -25,8 +25,12 @@ business commit: there is no best-effort mode. Boot fails when nothing is bound.
 Before refusing, the capture writes a diagnostics row on another connection with
 identity and error type only, never values or messages.
 
-A `Change` becomes `created`, `updated` or `deleted` from its old/new objects; a
-change with two empty objects writes nothing. Bulk writes arrive as one slice
+A `Change` becomes `created`, `updated` or `deleted` from its old/new objects.
+An empty side is `{}` or JSON `null`: an empty old side is a create, an empty new
+side a delete, and a change with two empty sides writes nothing. Rows are
+append-only and `event` is inside the hash chain, so a wrong event can never be
+corrected afterwards; `person-walkthrough` (`core/person`) checks that a create
+reported with `null` is recorded as `created`. Bulk writes arrive as one slice
 through `Capture::mutations` and are inserted in chunks of 1,000 rows per
 statement. Values are stored in full, with NUL stored as `␀`. Redaction is by
 field name on every captured record (`GLOBAL_REDACTIONS`: `password`,
