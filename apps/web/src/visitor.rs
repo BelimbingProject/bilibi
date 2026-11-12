@@ -687,7 +687,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                     if refusals >= REFUSALS_BEFORE_CLOSE {
                         return close(&mut socket, "rate_limited").await;
                     }
-                    Some(json!({"type": "error", "code": "rate_limited"}))
+                    Some(json!({"type": "error", "id": named(&text), "code": "rate_limited"}))
                 } else {
                     refusals = 0;
                     if renewed_at.elapsed() >= Duration::from_secs(policy.session_seconds / 2) {
@@ -783,6 +783,18 @@ async fn deliver(
 /// went, so raising `visitor.sockets_total` never starves a new session.
 fn frame_keys(policy: &Policy) -> usize {
     (policy.sockets_total as usize).saturating_mul(6).max(4_096)
+}
+/// The `id` of a message or a file announcement, so a frame refused before
+/// it acts still tells the browser which one was refused.
+fn named(text: &str) -> Option<u64> {
+    if text.len() > FRAME_LIMIT {
+        return None;
+    }
+    match serde_json::from_str::<Inbound>(text).ok()? {
+        Inbound::Message { id, .. } => id,
+        Inbound::Upload { id, .. } => Some(id.into()),
+        _ => None,
+    }
 }
 fn failure(id: Option<u64>, error: Error) -> Value {
     let refusal = Refusal::from(error);

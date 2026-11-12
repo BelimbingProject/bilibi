@@ -1435,6 +1435,19 @@ async fn prepare(db: Db) -> Result<()> {
             .is_some_and(|f| f["code"] == "rate_limited"),
         format!("{limited:?}"),
     );
+    say(
+        &mut rate,
+        json!({"type": "message", "id": 77, "body": {"text": "one too many"}}),
+    )
+    .await;
+    let named = until(&mut rate, "error", 2).await;
+    run.expect(
+        "a message refused by the budget is named by its id, so the browser can give it back",
+        named
+            .as_ref()
+            .is_some_and(|f| f["id"] == 77 && f["code"] == "rate_limited"),
+        format!("{named:?}"),
+    );
     setting(
         &setup,
         &mut client,
