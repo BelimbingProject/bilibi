@@ -91,7 +91,7 @@ The dashboard's Companies strip and Current company card follow `current_company
 | `status` | Stored lifecycle state: `active`, `pending`, `suspended` or `archived` |
 | `archived` | `true` exactly when `status == "archived"`; retained for existing readers |
 
-All four directory methods (`in_scope`, `selectable`, `target`, `lookup`) carry the status. They retain their existing tenant, capability and reach rules. `selectable` excludes archived companies but still includes pending and suspended companies when otherwise permitted. Status grants no authority and does not change account eligibility.
+All the naming directory methods (`in_scope`, `named`, `selectable`, `target`, `lookup`) carry the status. They retain their existing tenant, capability and reach rules. `selectable` excludes archived companies but still includes pending and suspended companies when otherwise permitted. Status grants no authority and does not change account eligibility.
 
 Domains that need an active-company chooser can carry `summary.status` through their own summary and filter with `summary.status == "active"`. Keep authorization at the existing directory or owner boundary; do not query Company's tables. This Platform change supplies the status only; each Domain owns its chooser policy.
 
@@ -152,8 +152,11 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
 - `bilibi_company::Directory` is Tenancy's `OrganisationDirectory` (K15), bound
   beside it: the companies a Base picker may offer (`in_scope`: every live
   company, archived flagged; `selectable`: the unarchived ones the actor may
-  target with a capability, current company or tenant-wide) and `target`, the
-  `authorize_target` rule on the sealed proof connection. The settings
+  target with a capability, current company or tenant-wide, filtered in SQL
+  so an actor without the tenant-wide reach reads only its current company),
+  `named`: the live ones among given ids (Authz asks only about the companies
+  that own a role), and `target`, the `authorize_target` rule on the sealed
+  proof connection. The settings
   editor's company picker and the Authz role create picker read it; Base
   never queries `companies`. Migration `006-authz-role-owner` contributes the
   scoped foreign key behind Authz's `roles.company_id`.

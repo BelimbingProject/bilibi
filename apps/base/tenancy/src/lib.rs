@@ -1233,6 +1233,16 @@ pub trait OrganisationDirectory: Send + Sync {
         client: &'a dyn ProofClient,
         scope: &'a Scope,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
+    /// The live companies among `ids`, named and sorted like `in_scope`,
+    /// archived ones flagged; a missing or cross-tenant id is left out. For a
+    /// caller that holds company ids (a role's owner) and needs to know which
+    /// are live, without reading every company of the tenant.
+    fn named<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        ids: &'a [OrganisationId],
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
     /// The unarchived companies this actor may target with `capability`:
     /// none without the capability, the current company, or every company of
     /// the tenant with Company's tenant-wide management reach.
@@ -1390,6 +1400,19 @@ impl PartyProofs {
     ) -> Result<Vec<NamedOrganisation>> {
         match self.directory.get() {
             Some(directory) => directory.in_scope(client, scope).await,
+            None => Ok(Vec::new()),
+        }
+    }
+    /// The live companies among `ids` (`OrganisationDirectory::named`); none
+    /// when no Company owner is installed.
+    pub async fn organisations_named(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        ids: &[OrganisationId],
+    ) -> Result<Vec<NamedOrganisation>> {
+        match self.directory.get() {
+            Some(directory) => directory.named(client, scope, ids).await,
             None => Ok(Vec::new()),
         }
     }

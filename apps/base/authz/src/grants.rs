@@ -85,17 +85,28 @@ impl Grants {
     pub fn vocabulary(&self) -> &Vocabulary {
         &self.vocabulary
     }
-    /// The company ids Tenancy's organisation directory names for this actor:
-    /// the `companies` argument of `roles::list`/`get`, which decides which
-    /// custom roles are visible.
+    /// The live companies that own a role of this tenant, as Tenancy's
+    /// organisation directory names them: the `companies` argument of
+    /// `roles::list`/`get`, which decides which custom roles are visible.
+    /// Only role owners are asked about, so a tenant with many companies
+    /// (customers, suppliers) does not load them all for each roles page.
     pub async fn visible_companies(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Vec<i64>> {
+        let owners = client
+            .query(
+                "SELECT DISTINCT company_id FROM roles WHERE tenant_id=$1 AND company_id IS NOT NULL",
+                &[&scope.tenant()],
+            )
+            .await?
+            .iter()
+            .map(|row| OrganisationId::new(row.get(0)).map_err(|_| Error::Internal))
+            .collect::<Result<Vec<_>>>()?;
         Ok(self
             .parties
-            .organisations_in_scope(client, scope)
+            .organisations_named(client, scope, &owners)
             .await?
             .into_iter()
             .map(|company| company.id.get())
