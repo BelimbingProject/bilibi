@@ -129,8 +129,8 @@ pub use settings::{SettingsTab, SETTINGS_LOCATION};
 pub use specimen::ComponentsSpecimen;
 pub use statusbar::StatusbarTag;
 pub use upload::{
-    ChunkOutcome, ClientEntry, FileInput, Registration, UploadEntry, UploadError, UploadSpec,
-    UploadedFile, Uploads,
+    ChunkOutcome, ClientEntry, FileInput, Registration, UploadBudget, UploadEntry, UploadError,
+    UploadSpec, UploadedFile, Uploads,
 };
 
 /// The HTML document around a page. `title` is the page's own name, or the product name when a page has none.

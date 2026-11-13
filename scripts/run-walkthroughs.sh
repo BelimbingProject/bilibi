@@ -160,6 +160,7 @@ WALKTHROUGHS=(
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-summary|apps/web|g5-grid-summary|migrate|BILIBI_GRID_DEMO=disposable|-'
+  'web|live-upload|apps/web|live-upload-walkthrough|none|BILIBI_DISPOSABLE_LIVE_UPLOAD_DEMO=yes|-'
   'web|live-wake|apps/web|live-wake-walkthrough|none|BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes|-'
   'web|reports|apps/web|r1-reports|migrate|BILIBI_GRID_DEMO=disposable|-'
   'web|seams|apps/web|p1-seams|migrate||-'
