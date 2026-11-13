@@ -1,19 +1,24 @@
 //! Documents related to a person reach privacy requests (ADR 05, #583), on a
 //! disposable database, through `base/privacy` as an operator runs them.
 //!
-//! Files four documents: A related only to person 1, B related to person 1
+//! Files seven documents: A related only to person 1, B related to person 1
 //! and company 1, C related only to person 1 with its file under legal hold,
-//! and D related only to company 1. An access request for person 1 must
-//! export A, B and C with their revisions and their three files, never D. An
-//! approved erasure must then erase A (its name and file name gone from the
-//! tables and the audit trail, its file deleted by the delete job), keep B as
-//! shared with only its person link removed, keep C under the hold, and leave
-//! D alone. Exits non-zero when a check fails.
+//! D related only to company 1, E related to person 1 whose upload failed
+//! its malware check (held: its bytes stay a Media file, never an Artifact),
+//! F related to person 1 and already being deleted, and G related to person
+//! 1 with a privacy hold on its revision. An access request for person 1 must
+//! export A, B, C, E and G with their revisions and their clean files,
+//! never D or F. An approved erasure must then delete A, E and F (their names
+//! and file names gone from the tables and the audit trail, A's Artifact and
+//! E's Media bytes gone from disk) and count them deleted, keep B as shared
+//! with only its person link removed, keep C under its file's hold and G
+//! under its revision's hold, and leave D alone (#583, #659). Exits non-zero
+//! when a check fails.
 use bilibi_authz::grants::Grants;
 use bilibi_database::{pool, MutationBoundary};
-use bilibi_document::{Documents, Draft, Reference, Upload, SERVICE as DOCUMENTS};
+use bilibi_document::{Documents, Draft, Reference, RevisionInput, Upload, SERVICE as DOCUMENTS};
 use bilibi_party_ids::{OrganisationId, PersonId};
-use bilibi_privacy::{NewRequest, Privacy, RequestKind, RequestView, SERVICE};
+use bilibi_privacy::{HoldTarget, NewRequest, Privacy, RequestKind, RequestView, SERVICE};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -32,7 +37,8 @@ mod erasure_approval;
 
 const STORE: &str = "core/document.documents";
 
-/// Fixture scanner, not a production adapter.
+/// Fixture scanner, not a production adapter: a "medical" file fails the
+/// check, so its upload is held as a Media file; every other file is clean.
 struct Clean;
 impl bilibi_media::Scanner for Clean {
     fn name(&self) -> &str {
@@ -43,10 +49,18 @@ impl bilibi_media::Scanner for Clean {
     }
     fn scan<'a>(
         &'a self,
-        _bytes: &'a [u8],
+        bytes: &'a [u8],
         _facts: bilibi_media::ScanFacts<'a>,
     ) -> bilibi_media::ScanFuture<'a> {
-        Box::pin(async { bilibi_media::Verdict::Clean })
+        Box::pin(async move {
+            if String::from_utf8_lossy(bytes).contains("medical") {
+                bilibi_media::Verdict::Infected {
+                    signature: "fixture".into(),
+                }
+            } else {
+                bilibi_media::Verdict::Clean
+            }
+        })
     }
 }
 
@@ -114,15 +128,34 @@ async fn settle(privacy: &Privacy, client: &Client, scope: &Scope, id: i64) -> R
     }
     Ok(privacy.request(client, scope, id).await?)
 }
-/// Rows of the document tables and the document audit trail holding `needle`.
+/// Rows of the document tables, the document audit trail and document
+/// notices holding `needle`.
 async fn holding(client: &Client, needle: &str) -> Result<i64> {
     Ok(client.query_one(
         "SELECT (SELECT count(*) FROM core_documents d WHERE d.tenant_id=1 AND d::text LIKE $1)
               + (SELECT count(*) FROM core_document_revisions r WHERE r.tenant_id=1 AND r::text LIKE $1)
               + (SELECT count(*) FROM core_document_files f WHERE f.tenant_id=1 AND f::text LIKE $1)
-              + (SELECT count(*) FROM base_audit_mutations m WHERE m.tenant_id=1 AND m.auditable_type LIKE 'core.document.%' AND (coalesce(m.old_values::text,'') || coalesce(m.new_values::text,'')) LIKE $1)",
+              + (SELECT count(*) FROM base_audit_mutations m WHERE m.tenant_id=1 AND m.auditable_type LIKE 'core.document.%' AND (coalesce(m.old_values::text,'') || coalesce(m.new_values::text,'')) LIKE $1)
+              + (SELECT count(*) FROM notifications n WHERE n.type LIKE 'core.document.%' AND n::text LIKE $1)",
         &[&format!("%{needle}%")],
     ).await?.get(0))
+}
+/// Whether a file under `dir` holds `needle`.
+fn on_disk(dir: &std::path::Path, needle: &[u8]) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if on_disk(&path, needle)? {
+                return Ok(true);
+            }
+        } else if std::fs::read(&path)?
+            .windows(needle.len())
+            .any(|w| w == needle)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[tokio::main]
@@ -206,7 +239,7 @@ async fn main() -> Result<()> {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let workers = tokio::spawn(executor.run(stopped));
 
-    println!("== four documents: A (person 1), B (person 1 and company 1), C (person 1, held), D (company 1)");
+    println!("== seven documents: A, B (also company 1), C (file held), D (company 1 only), E (upload held), F (deleting), G (revision held)");
     let person = Reference::new("person", "1");
     let company = Reference::new("company", "1");
     let mut filed = Vec::new();
@@ -231,6 +264,9 @@ async fn main() -> Result<()> {
             "price-list.txt",
             vec![company.clone()],
         ),
+        ("Ada medical note", "ada-medical.txt", vec![person.clone()]),
+        ("Ada old payslip", "ada-payslip.txt", vec![person.clone()]),
+        ("Ada bank letter", "ada-bank.txt", vec![person.clone()]),
     ] {
         let stored = documents
             .store_file(
@@ -259,8 +295,67 @@ async fn main() -> Result<()> {
         tx.commit().await?;
         filed.push((document.id, stored.artifact_id));
     }
-    let [(a, a_file), (b, _), (c, c_file), (d, _)] =
-        <[_; 4]>::try_from(filed).map_err(|_| "four documents")?;
+    let [(a, a_file), (b, _), (c, c_file), (d, _), (e, e_file), (f, _), (g, _)] =
+        <[_; 7]>::try_from(filed).map_err(|_| "seven documents")?;
+    let e_subject = e_file
+        .strip_prefix("upload:")
+        .ok_or("E's upload is held, not an Artifact")?
+        .to_owned();
+    // F's delete was confirmed and its job has not finished yet.
+    client
+        .execute(
+            "UPDATE core_documents SET deleting_at=now() WHERE tenant_id=1 AND id=$1",
+            &[&f],
+        )
+        .await?;
+    // A follower of A is told of a new revision: the notice must not carry
+    // A's name or the change log, which no erasure reaches.
+    for sql in [
+        "INSERT INTO core_document_access(tenant_id,document_id,user_id,can_view,granted_by) VALUES(1,$1,$2,true,$3)",
+        "INSERT INTO core_document_marks(tenant_id,user_id,document_id,following) SELECT 1,$2,$1,true WHERE $3::bigint IS NOT NULL",
+    ] {
+        client.execute(sql, &[&a, &second.user(), &admin.user()]).await?;
+    }
+    {
+        let renewed = documents
+            .store_file(
+                &admin,
+                Upload {
+                    bytes: b"Ada passport scan, renewed\n",
+                    file_name: "ada-passport-renewed.txt",
+                },
+            )
+            .await?;
+        let version = documents.get(&admin, a).await?.version;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("core.document.add_revision"),
+            )
+            .await?;
+        documents
+            .add_revision(
+                &mut tx,
+                &admin,
+                a,
+                version,
+                &RevisionInput {
+                    artifact_id: Some(renewed.artifact_id),
+                    change_log: "Ada renewed passport".into(),
+                    ..RevisionInput::default()
+                },
+            )
+            .await?;
+        tx.commit().await?;
+    }
+    let notices: i64 = client
+        .query_one(
+            "SELECT count(*) FROM notifications WHERE tenant_id=1 AND user_id=$1 AND type='core.document.revision'",
+            &[&second.user()],
+        )
+        .await?
+        .get(0);
+    ensure(notices == 1, "A's follower is told of its new revision")?;
     client.execute(
         "UPDATE base_artifacts SET retain_until=now()+interval '1 day',legal_hold_at=now(),expires_at=NULL WHERE public_id=$1",
         &[&c_file],
@@ -286,8 +381,8 @@ async fn main() -> Result<()> {
         }
     }
     ensure(
-        located == Some(3),
-        "locate counts the three documents related to person 1",
+        located == Some(6),
+        "locate counts the six documents related to person 1, F too",
     )?;
     let access = privacy
         .verify(
@@ -329,8 +424,8 @@ async fn main() -> Result<()> {
         .collect();
     println!("  exported documents: {exported:?}");
     ensure(
-        exported == vec![a, b, c],
-        "A, B and C are exported, D is not",
+        exported == vec![a, b, c, e, g],
+        "A, B, C, E and G are exported, D and F (deleting) are not",
     )?;
     ensure(
         records["documents"][0]["revisions"][0]["file_name"] == "ada-passport.txt",
@@ -348,16 +443,36 @@ async fn main() -> Result<()> {
     }
     println!("  exported files: {files:?}");
     ensure(
-        files.len() == 3
+        files.len() == 5
             && [
                 "Ada passport scan",
                 "Ada supplier contract",
                 "Ada disputed invoice",
+                "Ada bank letter",
             ]
             .iter()
             .all(|name| files.iter().any(|f| f.contains(name))),
-        "the three files are in the export, read through the owner",
+        "the five clean files (two of A) are in the export, read through the owner",
     )?;
+
+    let g_revision: i64 = client
+        .query_one(
+            "SELECT id FROM core_document_revisions WHERE tenant_id=1 AND document_id=$1",
+            &[&g],
+        )
+        .await?
+        .get(0);
+    privacy
+        .place_hold(
+            &mut client,
+            &admin,
+            HoldTarget::Record {
+                kind: "core.document.revision".into(),
+                id: g_revision,
+            },
+            "Bank dispute pending",
+        )
+        .await?;
 
     println!("== erasure request: person 1");
     let erasure = privacy
@@ -401,21 +516,31 @@ async fn main() -> Result<()> {
         );
     }
     ensure(erased.status == "completed", "the erasure completed")?;
-    let mut gone = false;
-    for _ in 0..150 {
-        gone = client
-            .query_opt(
-                "SELECT 1 FROM core_documents WHERE tenant_id=1 AND id=$1",
-                &[&a],
-            )
-            .await?
-            .is_none();
-        if gone {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    ensure(gone, "A is removed by its delete job")?;
+    let deleted: i64 = erased
+        .stores
+        .iter()
+        .filter(|s| s.store == STORE)
+        .flat_map(|s| {
+            s.result
+                .as_ref()
+                .and_then(|r| r["actions"].as_array().cloned())
+                .unwrap_or_default()
+        })
+        .filter(|a| a["kind"] == "core.document.document" && a["action"] == "deleted")
+        .filter_map(|a| a["count"].as_i64())
+        .sum();
+    ensure(deleted == 3, "the certificate counts A, E and F deleted")?;
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM core_documents WHERE tenant_id=1 AND id = ANY($1)",
+            &[&vec![a, e, f]],
+        )
+        .await?
+        .get(0);
+    ensure(
+        left == 0,
+        "A, E and F are removed when the erasure finishes",
+    )?;
     let deleted: bool = client
         .query_one(
             "SELECT deleted_at IS NOT NULL FROM base_artifacts WHERE public_id=$1",
@@ -424,7 +549,40 @@ async fn main() -> Result<()> {
         .await?
         .get(0);
     ensure(deleted, "A's file is deleted")?;
-    for needle in ["Ada passport scan", "ada-passport.txt"] {
+    let held_file = client
+        .query_opt(
+            "SELECT state, bytes_removed_at IS NOT NULL FROM base_media_attachments WHERE tenant_id=1 AND subject_type='core.document.upload' AND subject_id=$1",
+            &[&e_subject],
+        )
+        .await?
+        .map(|row| (row.get::<_, String>(0), row.get::<_, bool>(1)));
+    ensure(
+        held_file == Some(("erased".into(), true)),
+        "E's held upload is an erased Media file whose bytes are removed",
+    )?;
+    let media_names: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type LIKE 'base/media/%' AND (coalesce(old_values::text,'') || coalesce(new_values::text,'')) LIKE '%ada-medical.txt%'",
+            &[],
+        )
+        .await?
+        .get(0);
+    ensure(media_names == 0, "no Media audit value holds E's file name")?;
+    for needle in ["Ada passport scan", "Ada medical note"] {
+        ensure(
+            !on_disk(std::path::Path::new(&root), needle.as_bytes())?,
+            &format!("no stored file holds {needle:?}"),
+        )?;
+    }
+    for needle in [
+        "Ada passport scan",
+        "ada-passport.txt",
+        "Ada medical note",
+        "ada-medical.txt",
+        "Ada old payslip",
+        "ada-payslip.txt",
+        "Ada renewed passport",
+    ] {
         ensure(
             holding(&client, needle).await? == 0,
             &format!("no document row or document audit value holds {needle:?}"),
@@ -460,6 +618,14 @@ async fn main() -> Result<()> {
     ensure(
         documents.get(&admin, d).await?.name == "Company price list",
         "D is untouched",
+    )?;
+    ensure(
+        documents
+            .get(&admin, g)
+            .await
+            .is_ok_and(|d| d.name == "Ada bank letter")
+            && links(g).await? == vec!["person".to_owned()],
+        "G is kept under its revision's privacy hold",
     )?;
 
     stop.send(true)?;

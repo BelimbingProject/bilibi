@@ -7,7 +7,8 @@
 //! still deleting, so a deleting document always has its job. A hold or
 //! retention placed after the delete committed makes the batch refuse: the
 //! document is then shown again with its full history (README,
-//! "Retention-safe deletion").
+//! "Retention-safe deletion"). A document a privacy erasure marked is the
+//! erasure's to finish (`privacy.rs`), so the job leaves it alone.
 use crate::contributions::DELETION_SETTLE;
 use crate::store::{audit_values, from_row, Store, COLUMNS};
 use crate::{WriteError, WriteResult, RECORD};
@@ -136,7 +137,7 @@ impl DeleteJob {
         let mut client = self.db.get().await?;
         if client
             .query_opt(
-                "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL",
+                "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL AND erased_at IS NULL",
                 &[&tenant, &document],
             )
             .await?
@@ -176,7 +177,7 @@ impl DeleteJob {
         if tx
             .sql()
             .query_opt(
-                "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL FOR UPDATE",
+                "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL AND erased_at IS NULL FOR UPDATE",
                 &[&tenant, &document],
             )
             .await?
@@ -194,9 +195,13 @@ impl DeleteJob {
 }
 
 /// Shows a document again whose files a hold or retention placed after the
-/// delete committed now keeps: every row is still there, so it reads as
-/// before the delete.
-async fn restore(tx: &mut MutationTransaction<'_>, tenant: i64, document: i64) -> Result<()> {
+/// delete (or a privacy erasure) committed now keeps: every row is still
+/// there, so it reads as before the delete (anonymised, after an erasure).
+pub(crate) async fn restore(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    document: i64,
+) -> Result<()> {
     tx.mutate(move |sql| Box::pin(async move {
         let Some(row) = sql.query_opt(
             &format!("SELECT {COLUMNS} FROM core_documents d WHERE d.tenant_id=$1 AND d.id=$2 AND d.deleting_at IS NOT NULL FOR UPDATE"),
@@ -204,7 +209,7 @@ async fn restore(tx: &mut MutationTransaction<'_>, tenant: i64, document: i64) -
         ).await? else { return Ok(((), Vec::new())); };
         let before = from_row(&row)?;
         let row = sql.query_one(
-            &format!("UPDATE core_documents d SET deleting_at=NULL,version=d.version+1,updated_at=now() WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {COLUMNS}"),
+            &format!("UPDATE core_documents d SET deleting_at=NULL,erased_at=NULL,version=d.version+1,updated_at=now() WHERE d.tenant_id=$1 AND d.id=$2 RETURNING {COLUMNS}"),
             &[&tenant, &document],
         ).await?;
         let after = from_row(&row)?;
@@ -233,7 +238,7 @@ impl bilibi_queue::Ending for DeleteEnded {
             let deleting = tx
                 .sql()
                 .query_opt(
-                    "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL",
+                    "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL AND erased_at IS NULL",
                     &[&tenant, &document],
                 )
                 .await?
