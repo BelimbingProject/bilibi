@@ -31,7 +31,7 @@ use bilibi_party_ids::OrganisationId;
 use bilibi_personal_data::{
     Action, Disclosure, Erased, ErasedRecord, Erasure, Exported, File, FileRef, Handler,
     HandlerFuture, Holds, Kept, KeptReason, KindCount, Located, PersonalData, Progress, RecordKind,
-    Subject, ERASED, PERSONAL_DATA, RECORD_KINDS,
+    Subject, Withheld, ERASED, PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_tenancy::{ProofClient, Scope};
 use serde_json::{json, Value};
@@ -344,20 +344,29 @@ impl Handler for DocumentData {
                     "SELECT f.company_id,f.subject::text FROM core_document_files f WHERE f.tenant_id=$1 AND f.artifact_id=$2 AND f.state='attached'",
                     &[&scope.tenant(), &reference],
                 )
-                .await?
-                .ok_or(Error::NotFound)?;
+                .await?;
+            // The export lists only clean files, so none is withheld as not
+            // cleared; one removed since it was listed (its document
+            // deleted or erased) is listed as missing instead of failing
+            // the bundle.
+            let Some(row) = row else {
+                return Ok(File::Withheld(Withheld::Missing));
+            };
             let company = OrganisationId::new(row.get(0)).map_err(|_| Error::Internal)?;
             let subject: String = row.get(1);
-            let document = bound()?
+            match bound()?
                 .artifacts
                 .for_disclosure(scope, company, &FILES, grant, &subject)
                 .read(client, reference)
                 .await
-                .map_err(artifact_error)?;
-            Ok(File {
-                content_type: document.metadata.content_type.clone(),
-                bytes: document.bytes,
-            })
+            {
+                Ok(document) => Ok(File::Read {
+                    content_type: document.metadata.content_type.clone(),
+                    bytes: document.bytes,
+                }),
+                Err(bilibi_artifacts::Error::NotFound) => Ok(File::Withheld(Withheld::Missing)),
+                Err(error) => Err(artifact_error(error)),
+            }
         })
     }
 
