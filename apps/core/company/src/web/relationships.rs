@@ -40,7 +40,7 @@ use bilibi_party::{
     CalendarDate, EffectiveDates, OrganisationId, PartyId, PersonId, RelationshipId,
     RelationshipRoleId,
 };
-use bilibi_person::PersonService;
+use bilibi_records::{Hit, Records, Reference, Resolved};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     page::{
@@ -50,7 +50,7 @@ use bilibi_ui::{
     ActionLink, Alert, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card,
     Choice, ConfirmDialog, CreateButton, Field, FlashGroup, FlashMap, FlexRow, FlexTable, Header,
     Html, IconButton, IconKind, InputKind, ListColumns, Modal, Page, PageVariant, RadioGroup,
-    RecordLink, RowMode, SectionHeading, StatusKind, TableEmpty,
+    RecordLink, RecordPicker, RowMode, SectionHeading, StatusKind, TableEmpty,
 };
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
@@ -61,7 +61,6 @@ const FORBIDDEN: &str = "You do not have permission to change company administra
 const ARCHIVED: &str = "This company is archived and read-only, so nothing was changed.";
 const OTHER_ARCHIVED: &str =
     "The other company is archived and read-only, so the relationship was not changed.";
-const PERSONS: i64 = 100;
 
 macro_rules! provenance {
     () => {
@@ -134,13 +133,13 @@ bilibi_menu::contribute!(
 pub struct RelationshipPages {
     pub db: Db,
     pub company: Arc<CompanyService>,
-    pub persons: Arc<PersonService>,
+    pub records: Arc<Records>,
     pub contracts: Arc<PageContracts>,
 }
 struct Shared {
     db: Db,
     company: Arc<CompanyService>,
-    persons: Arc<PersonService>,
+    records: Arc<Records>,
     contracts: Arc<PageContracts>,
 }
 impl Shared {
@@ -230,7 +229,7 @@ impl RelationshipPages {
         Arc::new(Shared {
             db: self.db.clone(),
             company: self.company.clone(),
-            persons: self.persons.clone(),
+            records: self.records.clone(),
             contracts: self.contracts.clone(),
         })
     }
@@ -1215,19 +1214,31 @@ fn link_table<'a>(
     table
 }
 
-struct Options {
-    companies: Vec<Choice>,
-    persons: Vec<Choice>,
-    roles: Vec<Choice>,
-    /// Whether the reader may list persons at all (Person's own capability).
-    persons_readable: bool,
-}
+/// The related party of a new link is found by name on the server (Base
+/// Records, under the reader's own permissions), so a tenant with any number
+/// of companies or people can link each of them.
+const PARTY_FORM: &str = "relationship";
+const PARTY_SEARCH: &str = "relationship[party_search]";
 struct LinkModal {
     editing: Option<Entry>,
     ending: bool,
     values: HashMap<String, String>,
     errors: Vec<FieldError>,
-    options: Options,
+    roles: Vec<Choice>,
+    /// The typed search, its hits and the chosen related party.
+    query: String,
+    hits: Vec<Hit>,
+    chosen: Option<Resolved>,
+}
+impl LinkModal {
+    /// The record kind the radio asks for.
+    fn kind(&self) -> &'static str {
+        if self.values.get("target_kind").map(String::as_str) == Some("person") {
+            "person"
+        } else {
+            "company"
+        }
+    }
 }
 struct LinksPage {
     shared: Arc<Shared>,
@@ -1239,58 +1250,15 @@ struct LinksPage {
     flash: Flash,
 }
 impl LinksPage {
-    async fn options(&self, client: &impl GenericClient, scope: &Scope) -> Result<Options> {
-        let companies = client
-            .query(
-                "SELECT id,name,code FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id<>$2 AND status<>'archived' ORDER BY lower(name),id",
-                &[&scope.tenant(), &self.company.get()],
-            )
-            .await?
-            .into_iter()
-            .map(|row| {
-                Choice::new(
-                    format!("{} ({})", row.get::<_, String>(1), row.get::<_, String>(2)),
-                    row.get::<_, i64>(0).to_string(),
-                )
-            })
-            .collect();
-        let (persons, persons_readable) = match self
-            .shared
-            .persons
-            .search(
-                scope,
-                &bilibi_person::Search {
-                    page_size: PERSONS,
-                    ..bilibi_person::Search::default()
-                },
-            )
-            .await
-        {
-            Ok(page) => (
-                page.entries
-                    .into_iter()
-                    .filter(|person| person.system_key.is_none())
-                    .map(|person| Choice::new(person.name, person.id.get().to_string()))
-                    .collect(),
-                true,
-            ),
-            Err(Error::Forbidden) => (Vec::new(), false),
-            Err(e) => return Err(e),
-        };
-        let roles = self
+    async fn roles(&self, scope: &Scope) -> Result<Vec<Choice>> {
+        Ok(self
             .shared
             .company
             .relationship_roles(scope, false)
             .await?
             .into_iter()
             .map(|role| Choice::new(role.name, role.id.get().to_string()))
-            .collect();
-        Ok(Options {
-            companies,
-            persons,
-            roles,
-            persons_readable,
-        })
+            .collect())
     }
     async fn draw(&mut self, scope: &Scope, workspace: bool) -> Result<LiveBody> {
         let client = self.shared.db.get().await?;
@@ -1430,39 +1398,30 @@ impl LinksPage {
                 .label("Related To")
                 .value(kind),
             )?);
-            let target_errors = errors_for(&modal.errors, "target");
-            if kind == "person" {
-                let mut field = Field::named("target_person_id")
-                    .id("relationship-related-person-id")
-                    .kind(InputKind::Select)
-                    .label("Related Person")
-                    .prompt("Select a person")
-                    .options(modal.options.persons.clone())
-                    .value(value("target_person_id"))
-                    .errors(target_errors)
-                    .required();
-                if !modal.options.persons_readable {
-                    field = field.hint("You do not have permission to list people.");
-                } else if modal.options.persons.is_empty() {
-                    field = field.hint("No people have been added yet.");
-                }
-                save_disabled = modal.options.persons.is_empty();
-                fields.push(render(&field)?);
-            } else {
-                save_disabled = modal.options.companies.is_empty();
-                fields.push(render(
-                    &Field::named("target_organisation_id")
-                        .id("relationship-related-company-id")
-                        .kind(InputKind::Select)
-                        .label("Related Company")
-                        .prompt("Select a company")
-                        .options(modal.options.companies.clone())
-                        .value(value("target_organisation_id"))
-                        .errors(target_errors)
-                        .required(),
-                )?);
-            }
-            save_disabled |= modal.options.roles.is_empty();
+            let selected = modal.chosen.as_ref().map(|chosen| {
+                (
+                    format!("{}:{}", chosen.reference.kind, chosen.id),
+                    chosen.pill("relationship-party-pill", false),
+                )
+            });
+            fields.push(render(&RecordPicker::new(
+                "relationship-party",
+                PARTY_FORM,
+                "party",
+                if kind == "person" {
+                    "Related Person"
+                } else {
+                    "Related Company"
+                },
+                &modal.query,
+                &self.shared.records.picker_hits(&modal.hits),
+                selected
+                    .as_ref()
+                    .map(|(value, pill)| (value.as_str(), pill.clone())),
+                ("pick_party", "clear_party"),
+                errors_for(&modal.errors, "target"),
+            ))?);
+            save_disabled = modal.roles.is_empty();
             fields.push(render(
                 &Field::named("role_id")
                     .id("relationship-role-id")
@@ -1470,7 +1429,7 @@ impl LinksPage {
                     .label("Relationship Role")
                     .prompt("Select relationship role")
                     .hint("What the related party is to this company.")
-                    .options(modal.options.roles.clone())
+                    .options(modal.roles.clone())
                     .value(value("role_id"))
                     .errors(errors_for(&modal.errors, "role_id"))
                     .required(),
@@ -1569,7 +1528,7 @@ impl LinksPage {
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
-                let options = self.options(&**client, scope).await?;
+                let roles = self.roles(scope).await?;
                 // The form opens with today as the start.
                 let today: String = client
                     .query_one("SELECT CURRENT_DATE::text", &[])
@@ -1583,7 +1542,10 @@ impl LinksPage {
                         ("effective_from".to_owned(), today),
                     ]),
                     errors: Vec::new(),
-                    options,
+                    roles,
+                    query: String::new(),
+                    hits: Vec::new(),
+                    chosen: None,
                 });
             }
             "edit" | "end" => {
@@ -1617,12 +1579,10 @@ impl LinksPage {
                             ending: kind == "end",
                             values,
                             errors: Vec::new(),
-                            options: Options {
-                                companies: Vec::new(),
-                                persons: Vec::new(),
-                                roles: Vec::new(),
-                                persons_readable: true,
-                            },
+                            roles: Vec::new(),
+                            query: String::new(),
+                            hits: Vec::new(),
+                            chosen: None,
                         });
                     }
                     None => self.flash.error("Relationship not found."),
@@ -1631,15 +1591,61 @@ impl LinksPage {
             "close_modal" => self.modal = None,
             "validate" => {
                 if let Some(modal) = self.modal.as_mut() {
-                    let was_person =
-                        modal.values.get("target_kind").map(String::as_str) == Some("person");
+                    let kind = modal.kind();
                     modal.values = values_of(value)?;
-                    // The picker the radio hid keeps nothing it never showed.
-                    if was_person
-                        != (modal.values.get("target_kind").map(String::as_str) == Some("person"))
-                    {
+                    let query: String = modal
+                        .values
+                        .get(PARTY_SEARCH)
+                        .map(|text| text.chars().take(100).collect())
+                        .unwrap_or_default();
+                    if kind != modal.kind() {
+                        // The picker the radio replaced keeps nothing it showed.
                         modal.errors.retain(|e| e.field != "target");
+                        modal.chosen = None;
+                        modal.query.clear();
+                        modal.hits.clear();
+                    } else if query != modal.query {
+                        modal.query = query;
+                        modal.hits = if modal.query.trim().is_empty() {
+                            Vec::new()
+                        } else {
+                            let own = self.company.get().to_string();
+                            let mut hits = self
+                                .shared
+                                .records
+                                .search(scope, &[kind], &modal.query)
+                                .await?;
+                            // A company cannot relate to itself.
+                            hits.retain(|hit| !(hit.kind == "company" && hit.id == own));
+                            hits
+                        };
                     }
+                }
+            }
+            "pick_party" => {
+                let Some(modal) = self.modal.as_mut() else {
+                    return Ok(());
+                };
+                let (kind, id) = value["record"]
+                    .as_str()
+                    .and_then(|record| record.split_once(':'))
+                    .filter(|(kind, _)| *kind == modal.kind())
+                    .ok_or(Error::Invalid)?;
+                modal.chosen = self
+                    .shared
+                    .records
+                    .resolve(scope, &[Reference::new(kind, id)])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .filter(|chosen| chosen.label.is_some());
+                modal.errors.retain(|e| e.field != "target");
+                modal.query.clear();
+                modal.hits.clear();
+            }
+            "clear_party" => {
+                if let Some(modal) = self.modal.as_mut() {
+                    modal.chosen = None;
                 }
             }
             "save_relationship" => {
@@ -1715,18 +1721,17 @@ impl LinksPage {
                     }
                     None => {
                         let text = |key: &str| modal.values.get(key).cloned().unwrap_or_default();
-                        let target = if text("target_kind") == "person" {
-                            text("target_person_id")
-                                .parse()
-                                .ok()
-                                .and_then(|id| PersonId::new(id).ok())
-                                .map(PartyId::Person)
-                        } else {
-                            text("target_organisation_id")
-                                .parse()
-                                .ok()
-                                .and_then(|id| OrganisationId::new(id).ok())
-                                .map(PartyId::Organisation)
+                        let chosen = modal
+                            .chosen
+                            .as_ref()
+                            .filter(|chosen| chosen.reference.kind == modal.kind())
+                            .and_then(|chosen| chosen.id.parse::<i64>().ok());
+                        let target = match (modal.kind(), chosen) {
+                            ("person", Some(id)) => PersonId::new(id).ok().map(PartyId::Person),
+                            (_, Some(id)) => {
+                                OrganisationId::new(id).ok().map(PartyId::Organisation)
+                            }
+                            _ => None,
                         };
                         if target.is_none() {
                             errors.push(FieldError::new("target", "can't be blank"));
