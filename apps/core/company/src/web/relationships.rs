@@ -19,8 +19,11 @@
 //! `can_update` flag only decides which controls render. A denial, an archived company and a stale
 //! version are flash messages, never a fatal `Error`.
 use crate::{
-    organisation, relationship_roles::RelationshipRole, relationships::Direction,
-    relationships::Entry, CompanyService, FieldError, WriteError, CREATE, LIST, UPDATE, VIEW,
+    organisation,
+    relationship_roles::RelationshipRole,
+    relationships::Direction,
+    relationships::{Entry, Window},
+    CompanyService, FieldError, WriteError, CREATE, LIST, UPDATE, VIEW,
 };
 use askama::Template;
 use bilibi_agent_api::{
@@ -43,17 +46,22 @@ use bilibi_party::{
 use bilibi_person::PersonService;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
+    list_state::FILTERS_FORM,
     page::{
         self, LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, PageBody,
         PageFuture, PageRequest,
     },
-    ActionLink, Alert, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card,
-    Choice, ConfirmDialog, CreateButton, Field, FlashGroup, FlashMap, FlexRow, FlexTable, Header,
-    Html, IconButton, IconKind, InputKind, ListColumns, Modal, Page, PageVariant, RadioGroup,
-    RecordLink, RowMode, SectionHeading, StatusKind, TableEmpty,
+    params, ActionLink, Alert, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant,
+    Card, Choice, ConfirmDialog, CreateButton, Field, FlashGroup, FlashMap, FlexRow, FlexTable,
+    Header, Html, IconButton, IconKind, InputKind, ListColumns, ListSpec, ListState, Modal, Page,
+    PageCounts, PageVariant, Pagination, RadioGroup, RecordLink, RowMode, SectionHeading,
+    StatusKind, TableEmpty,
 };
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 use tokio_postgres::GenericClient;
 
 pub const SERVICE: &str = "core/company.relationship_pages";
@@ -62,6 +70,38 @@ const ARCHIVED: &str = "This company is archived and read-only, so nothing was c
 const OTHER_ARCHIVED: &str =
     "The other company is archived and read-only, so the relationship was not changed.";
 const PERSONS: i64 = 100;
+const PAGE_SIZES: [u64; 4] = [25, 50, 100, 300];
+/// A party's links, a page at a time; the relationships page keeps its page
+/// in the URL, a record page's panel in its own state.
+static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
+    ListSpec {
+        page_sizes: PAGE_SIZES.to_vec(),
+        default_page_size: PAGE_SIZES[0],
+        omit_defaults: true,
+        ..ListSpec::default()
+    }
+    .shared()
+    .expect("relationship list spec")
+});
+fn window(list: &ListState) -> Window {
+    Window {
+        page: list.page as i64,
+        page_size: list.page_size as i64,
+    }
+}
+/// A page or rows-per-page event of a list's `Pagination`; false for any
+/// other event.
+fn paginate(list: &mut ListState, kind: &str, value: &Value) -> Result<bool> {
+    match kind {
+        "page" => list.put_page(value["page"].as_str()),
+        "filters" => list.apply_filters(
+            &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                .map_err(Error::refused)?,
+        ),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
 
 macro_rules! provenance {
     () => {
@@ -260,6 +300,7 @@ impl RelationshipPages {
                 shared: self.shared(),
                 company: OrganisationId::new(id("id")?).map_err(|_| Error::Invalid)?,
                 columns: link_columns("company-relationships", true)?,
+                list: ListState::parse(request.query, SPEC.clone()).map_err(|_| Error::Internal)?,
                 history: false,
                 modal: None,
                 pending_unlink: None,
@@ -294,6 +335,8 @@ impl RelationshipPages {
                 Box::new(Panel {
                     shared: self.shared(),
                     columns: link_columns(&format!("{panel}-table"), false)?,
+                    list: ListState::parse(&HashMap::new(), SPEC.clone())
+                        .map_err(|_| Error::Internal)?,
                     id: panel,
                     party,
                 })
@@ -1233,6 +1276,7 @@ struct LinksPage {
     shared: Arc<Shared>,
     company: OrganisationId,
     columns: ListColumns,
+    list: ListState,
     history: bool,
     modal: Option<LinkModal>,
     pending_unlink: Option<Entry>,
@@ -1299,11 +1343,22 @@ impl LinksPage {
             .ok_or(Error::NotFound)?;
         let writable = writable(&**client, scope, self.company.get()).await?;
         let can_update = writable == Writable::Yes;
-        let entries = self
+        let mut links = self
             .shared
             .company
-            .company_relationships(scope, self.company, self.history)
+            .company_relationships(scope, self.company, self.history, window(&self.list))
             .await?;
+        if self
+            .list
+            .clamp_to_last_page((links.total as u64).div_ceil(self.list.page_size), true)
+        {
+            links = self
+                .shared
+                .company
+                .company_relationships(scope, self.company, self.history, window(&self.list))
+                .await?;
+        }
+        let entries = &links.entries;
         let title = format!("{} — Relationships", company.display_name);
         let back_title = format!("Back to {}", company.display_name);
         let mut html = self.flash.render()?;
@@ -1354,7 +1409,7 @@ impl LinksPage {
             body: render(&SectionHeading {
                 id: "company-relationships-heading",
                 title: "Relationships",
-                count: Some(entries.len()),
+                count: Some(links.total as usize),
                 actions: render(&Wrap {
                     class: "flex items-center gap-2",
                     body: actions,
@@ -1376,6 +1431,11 @@ impl LinksPage {
             } else {
                 "No company relationships configured yet."
             },
+        ))?);
+        body.push(&render(&Pagination::new(
+            "company-relationships-pages",
+            PageCounts::new(self.list.page, self.list.page_size, links.total as u64),
+            &PAGE_SIZES,
         ))?);
         html.push(&render(&Card {
             id: "company-relationships-card",
@@ -1404,6 +1464,7 @@ impl LinksPage {
         }
         Ok(LiveBody {
             html: page("company-relationships-page", PageVariant::Detail, html)?,
+            query: self.list.to_params(),
             rows: 1,
             ..LiveBody::default()
         })
@@ -1546,13 +1607,16 @@ impl LinksPage {
         })
     }
     async fn find(&self, scope: &Scope, id: RelationshipId) -> Result<Option<Entry>> {
-        Ok(self
+        match self
             .shared
             .company
-            .company_relationships(scope, self.company, true)
-            .await?
-            .into_iter()
-            .find(|entry| entry.relationship.id == id && !entry.relationship.unlinked()))
+            .company_relationship(scope, self.company, id)
+            .await
+        {
+            Ok(entry) => Ok(Some(entry).filter(|entry| !entry.relationship.unlinked())),
+            Err(Error::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let client = self.shared.db.get().await?;
@@ -1560,11 +1624,17 @@ impl LinksPage {
         if !matches!(kind, "grid" | "validate") {
             self.flash.clear();
         }
+        if paginate(&mut self.list, kind, value)? {
+            return Ok(());
+        }
         match kind {
             "grid" => {
                 self.columns.handle(&values_of(value)?);
             }
-            "toggle_history" => self.history = !self.history,
+            "toggle_history" => {
+                self.history = !self.history;
+                self.list.put_page(None);
+            }
             "new" => {
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
@@ -1873,8 +1943,15 @@ fn parse_dates(
 impl LiveState<Scope, Error> for LinksPage {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            if let LiveInput::Event(value) = request.input {
-                self.event(request.scope, request.credential, value).await?;
+            match request.input {
+                LiveInput::Event(value) => {
+                    self.event(request.scope, request.credential, value).await?
+                }
+                LiveInput::Params(values) => {
+                    self.list =
+                        ListState::parse(values, SPEC.clone()).map_err(|_| Error::Internal)?
+                }
+                LiveInput::Refresh => {}
             }
             self.draw(request.scope, false).await
         })
@@ -1889,23 +1966,34 @@ struct Panel {
     id: String,
     party: PartyId,
     columns: ListColumns,
+    list: ListState,
 }
 impl Panel {
-    async fn draw(&self, scope: &Scope) -> Result<LiveBody> {
-        let entries = match self.party {
+    async fn links(&self, scope: &Scope) -> Result<crate::RelationshipLinks> {
+        match self.party {
             PartyId::Organisation(company) => {
                 self.shared
                     .company
-                    .company_relationships(scope, company, false)
-                    .await?
+                    .company_relationships(scope, company, false, window(&self.list))
+                    .await
             }
             PartyId::Person(person) => {
                 self.shared
                     .company
-                    .person_relationships(scope, person, false)
-                    .await?
+                    .person_relationships(scope, person, false, window(&self.list))
+                    .await
             }
-        };
+        }
+    }
+    async fn draw(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let mut links = self.links(scope).await?;
+        if self
+            .list
+            .clamp_to_last_page((links.total as u64).div_ceil(self.list.page_size), true)
+        {
+            links = self.links(scope).await?;
+        }
+        let entries = &links.entries;
         let heading = format!("{}-heading", self.id);
         let card = format!("{}-card", self.id);
         let manage_id = format!("{}-manage", self.id);
@@ -1925,7 +2013,7 @@ impl Panel {
             body: render(&SectionHeading {
                 id: &heading,
                 title: "Relationships",
-                count: Some(entries.len()),
+                count: Some(links.total as usize),
                 actions,
                 ..SectionHeading::default()
             })?,
@@ -1943,6 +2031,14 @@ impl Panel {
         );
         table.target = &self.id;
         body.push(&render(&table)?);
+        let pages = format!("{}-pages", self.id);
+        let mut pagination = Pagination::new(
+            &pages,
+            PageCounts::new(self.list.page, self.list.page_size, links.total as u64),
+            &PAGE_SIZES,
+        );
+        pagination.target = &self.id;
+        body.push(&render(&pagination)?);
         let card = render(&Card {
             id: &card,
             class: "mt-6",
@@ -1970,10 +2066,13 @@ impl LiveState<Scope, Error> for Panel {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
             if let LiveInput::Event(value) = request.input {
-                if get(value, "type") != "grid" {
-                    return Err(Error::Invalid);
+                let kind = get(value, "type");
+                if !paginate(&mut self.list, kind, value)? {
+                    if kind != "grid" {
+                        return Err(Error::Invalid);
+                    }
+                    self.columns.handle(&values_of(value)?);
                 }
-                self.columns.handle(&values_of(value)?);
             }
             self.draw(request.scope).await
         })

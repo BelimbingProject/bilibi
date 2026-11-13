@@ -9,11 +9,11 @@ use crate::{
     contributions::{CREATE, LIST, UPDATE, VIEW},
     reference_types::Outcome,
     relationship_roles::{self, RoleUpdate},
-    relationships::{self, RelationshipUpdate},
+    relationships::{self, RelationshipUpdate, Window},
     FieldError, WriteError,
 };
 use bilibi_agent_api::{
-    json::{Data, Output},
+    json::{Data, Output, Page},
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
     ReadHandler, WriteHandler, DEFINITIONS,
 };
@@ -193,8 +193,11 @@ impl ReadHandler for Read {
                     .to_json(),
                 Self::Links => {
                     let history = input["include_history"].as_bool().unwrap_or(false);
-                    let entries = match (input["company_id"].as_i64(), input["person_id"].as_i64())
-                    {
+                    let window = Window {
+                        page: input["page"].as_i64().unwrap_or(1).max(1),
+                        page_size: input["page_size"].as_i64().unwrap_or(25).clamp(1, 100),
+                    };
+                    let links = match (input["company_id"].as_i64(), input["person_id"].as_i64()) {
                         (Some(company), None) => {
                             let company =
                                 OrganisationId::new(company).map_err(|_| Error::Invalid)?;
@@ -204,6 +207,7 @@ impl ReadHandler for Read {
                                 &bound.directory,
                                 company,
                                 history,
+                                window,
                             )
                             .await
                         }
@@ -215,13 +219,21 @@ impl ReadHandler for Read {
                                 &bound.directory,
                                 person,
                                 history,
+                                window,
                             )
                             .await
                         }
                         _ => return Err(Error::Invalid.into()),
                     }
                     .map_err(not_found)?;
-                    Value::Array(entries.iter().map(|entry| entry.to_json()).collect())
+                    return Ok(Output::Page(Page {
+                        entries: record(Value::Array(
+                            links.entries.iter().map(|entry| entry.to_json()).collect(),
+                        )),
+                        page: window.page.unsigned_abs(),
+                        page_size: window.page_size.unsigned_abs(),
+                        total: links.total.unsigned_abs(),
+                    }));
                 }
                 Self::Link => {
                     relationships::read(&**client, scope, &bound.directory, relationship_id(input)?)
@@ -519,7 +531,9 @@ fn retire_role_schema() -> Value {
 fn links_schema() -> Value {
     json!({"type":"object","properties":{
         "company_id":id_schema(),"person_id":id_schema(),
-        "include_history":{"type":"boolean","description":"Also ended and unlinked links."}
+        "include_history":{"type":"boolean","description":"Also ended and unlinked links."},
+        "page":{"type":"integer","minimum":1},
+        "page_size":{"type":"integer","minimum":1,"maximum":100}
     }})
 }
 fn link_schema() -> Value {
@@ -552,7 +566,7 @@ fn link_output() -> Value {
     json!({"type":"object","description":"A directed link: id, source_organisation_id, target {kind,id}, role_id, dates, unlinked_at, current, version, plus direction, other, other_name, role_* and label from the listed party's perspective."})
 }
 fn links_output() -> Value {
-    json!({"type":"array","description":"Links by other party name then label."})
+    json!({"type":"array","description":"One page of links (25 by default): other companies by name, then links to persons, each by label."})
 }
 
 inventory::submit! { Contribution::new(DEFINITIONS, "core/company.relationships.agent", Provenance { module: "core/company", source: file!(), line: line!() }, &Definitions {

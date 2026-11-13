@@ -386,7 +386,13 @@ the last day, `unlink` sets `unlinked_at`: every row stays as history and
 of a link may administer it; a person target confers nothing.
 Each entry carries the link, its direction from the listed party, the other
 party's name and the label from that party's side (`name` outgoing,
-`inverse_name` incoming), sorted by other party then label. Refusals are
+`inverse_name` incoming). Both lists read one page (`Window`, at most
+`MAX_PAGE_SIZE` = 300 links) with the party's total, ordered in SQL by the
+other company's name, then label, then id; links to persons, which only
+Person names, follow the companies by label and id. Only the persons of the
+page are named, so a party with any number of links stays readable.
+`read_for_company` reads one link by id from a company's side, for the
+page's edit, end and unlink. Refusals are
 `Outcome::Refused` field errors; `Stale`, `NotFound` (including an unlinked
 link) and `Archived` are `WriteError`s.
 
@@ -397,7 +403,8 @@ are reviewed safe writes: previews share the owner's checks without locking
 or writing, commits write through the plan's audited transaction. Assign
 input is flat (`source_organisation_id`, `target_kind`, `target_id`,
 `role_id`, optional `effective_from`/`effective_to`); omitted dates are
-unbounded.
+unbounded. `core.company.relationship.list` answers a page (`page`,
+`page_size` up to 100, 25 by default) with the total in `meta.page`.
 
 ```sh
 BILIBI_COMPANY_DEMO=disposable cargo run -p bilibi-company --example k5-relationships-walkthrough --locked
@@ -412,6 +419,11 @@ unlinking with history, an edit from the target's side, the agent reads and
 the reviewed assign/create commits with replay refusal, then bounded audit
 counts. It creates persons and companies with `K5`/`k5_`/`wt_` prefixes in
 the disposable database only. The screens are described under "Relationship screens (K6)".
+
+`relationship-scale-proof` (`BILIBI_COMPANY_DEMO=disposable`) links one
+company to 2,001 persons, more than the Principal Directory names in one
+call, and checks that the relationships page, both panels, paging, an edit
+past the first page and the agent list still answer, a page at a time.
 
 ## Relationship screens (K6)
 
@@ -457,7 +469,11 @@ UI (`core/company.relationship_pages`):
 The pages hold no client-chosen version: edits, unlinks and retirements
 carry the version of the row read when the dialog opened, so a concurrent
 change is refused as stale rather than overwritten. Rows keep the K5 order
-(other party, then label); none of these tables sorts.
+(other company, then label; persons after); none of these tables sorts.
+The page and both panels show 25 links at a time under the shared
+`Pagination` (25, 50, 100 or 300 rows); the page keeps its page in the
+address, a panel in its own state. Edit, End and Unlink read only the link
+they act on.
 
 The relationship table and its record panels also offer **Effective From** and **Effective To** as separate columns. Their labels come from the date editor’s shared record fields. The default Effective Period column stays in place.
 
