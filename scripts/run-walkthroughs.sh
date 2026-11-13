@@ -113,6 +113,7 @@ WALKTHROUGHS=(
   'core|company-organisation|apps/core/company|k1-organisation-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-lifecycle|apps/core/company|k2-lifecycle-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-relationships|apps/core/company|k5-relationships-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
+  'core|company-relationship-scale|apps/core/company|relationship-scale-proof|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-pickers|apps/core/company|company-picker-proof|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-owner-binders|apps/core/company|k15-owner-binders|seed|BILIBI_COMPANY_DEMO=disposable BILIBI_K15_DEMO_ROOT=@/files|-'
   'core|consent-dispatch-check|apps/core/consent|dispatch-check-proof|none|BILIBI_DISPOSABLE_CONSENT_DEMO=yes|seed;-'
