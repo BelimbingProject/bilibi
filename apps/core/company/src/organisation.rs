@@ -907,9 +907,11 @@ pub async fn preview_create_with_fields(
     Ok(Ok(CreatePreview { company, matches }))
 }
 
-/// One bounded page of the administration index: search over name, code, legal name, email
-/// and jurisdiction, skipping a restricted column, with each row's parent
-/// name and whether it is the tenant's primary company.
+/// One page of companies: search words over name, code and legal name
+/// through the indexed `search_vector`, with each row's parent name and
+/// whether it is the tenant's primary company. The caller sets the
+/// statement bounds of its connection (`core.company.list` reads under
+/// Grid's `BOUNDS`).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SearchQuery {
@@ -952,20 +954,27 @@ pub async fn search(
     }
     authorize_key(client, scope, crate::contributions::LIST).await?;
     let masked = restrictions(client, scope).await?;
-    let columns = ["name", "code", "legal_name", "email", "jurisdiction"]
-        .into_iter()
-        .filter(|column| !masked.contains(*column))
-        .map(|column| format!("c.{column} ILIKE $3"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let pattern = format!("%{}%", escape_like(query.search.trim()));
+    // Words match through the indexed `search_vector` (name, code, legal
+    // name; none of them restrictable), each as a word prefix, all required.
+    let words = search_words(&query.search);
+    if words.is_none() && !query.search.trim().is_empty() {
+        return Ok(SearchPage {
+            entries: Vec::new(),
+            total: 0,
+        });
+    }
     let filter = format!(
-        "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND ($3='%%' OR {columns})"
+        "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND {}",
+        if words.is_some() {
+            "c.search_vector @@ to_tsquery('simple', $3::text)"
+        } else {
+            "$3::text IS NULL"
+        }
     );
     let total: i64 = client
         .query_one(
             &format!("SELECT count(*) FROM companies c WHERE {filter}"),
-            &[&scope.tenant(), &query.status, &pattern],
+            &[&scope.tenant(), &query.status, &words],
         )
         .await?
         .get(0);
@@ -983,7 +992,7 @@ pub async fn search(
             &[
                 &scope.tenant(),
                 &query.status,
-                &pattern,
+                &words,
                 &query.page_size,
                 &((query.page - 1) * query.page_size),
             ],
@@ -997,6 +1006,19 @@ pub async fn search(
         })
         .collect();
     Ok(SearchPage { entries, total })
+}
+/// The `tsquery` for `to_tsquery('simple', …)`: each run of letters and
+/// digits, lower-cased, as a required prefix, at most eight. Nothing typed
+/// reaches the query as syntax. `None` when the text holds no word.
+fn search_words(text: &str) -> Option<String> {
+    let words = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(8)
+        .map(|word| format!("'{word}':*"))
+        .collect::<Vec<_>>();
+    (!words.is_empty()).then(|| words.join(" & "))
 }
 /// LIKE metacharacters are literal: search is a case-insensitive substring.
 pub fn escape_like(value: &str) -> String {
