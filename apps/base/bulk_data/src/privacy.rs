@@ -271,6 +271,20 @@ impl BulkData {
         let mut from = 0_i32;
         while from < count {
             let to = from.saturating_add(ROW_BATCH);
+            // An audited write must change something: skip a batch that
+            // holds nothing (a draft run, or one a retry already blanked).
+            let holds = client
+                .query_opt(
+                    "SELECT 1 FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND row_number>$3 AND row_number<=$4 \
+                     AND (source_key IS NOT NULL OR message IS NOT NULL) LIMIT 1",
+                    &[&tenant, &run, &from, &to],
+                )
+                .await?
+                .is_some();
+            if !holds {
+                from = to;
+                continue;
+            }
             let mut tx = self
                 .boundary
                 .begin(&mut *client, scope.mutation_context(CLEAN))
@@ -285,16 +299,16 @@ impl BulkData {
                             &[&tenant, &run, &from, &to],
                         )
                         .await?;
-                    let changes = if cleared == 0 {
-                        Vec::new()
-                    } else {
-                        vec![Change {
-                            kind: "base/bulk_data.run".into(),
-                            id: run,
-                            old: Value::Null,
-                            new: json!({"cleared_rows": cleared}),
-                        }]
-                    };
+                    if cleared == 0 {
+                        // Blanked meanwhile by another attempt: let this one retry.
+                        return Err(Error::Conflict);
+                    }
+                    let changes = vec![Change {
+                        kind: "base/bulk_data.run".into(),
+                        id: run,
+                        old: Value::Null,
+                        new: json!({"cleared_rows": cleared}),
+                    }];
                     Ok(((), changes))
                 })
             })
@@ -322,16 +336,16 @@ impl BulkData {
         tx.mutate(move |sql| {
             Box::pin(async move {
                 let done = sql.execute(statement, &[&tenant, &id]).await?;
-                let changes = if done == 0 {
-                    Vec::new()
-                } else {
-                    vec![Change {
-                        kind: kind.into(),
-                        id,
-                        old: Value::Null,
-                        new: json!({"cleaned": true}),
-                    }]
-                };
+                if done == 0 {
+                    // Marked meanwhile by another attempt: let this one retry.
+                    return Err(Error::Conflict);
+                }
+                let changes = vec![Change {
+                    kind: kind.into(),
+                    id,
+                    old: Value::Null,
+                    new: json!({"cleaned": true}),
+                }];
                 Ok(((), changes))
             })
         })

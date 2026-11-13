@@ -536,32 +536,33 @@ impl BulkData {
             if !ended.contains(&job) {
                 continue;
             }
+            // Locked before the audited write, which must change something:
+            // an update its job ended meanwhile is left as it is.
+            let Some(old) = tx.sql().query_opt(&format!("SELECT {COLUMNS} FROM base_bulk_data_updates WHERE tenant_id=$1 AND id=$2 AND state='resolving' FOR UPDATE"), &[&tenant, &id]).await? else {
+                continue;
+            };
+            let old = UpdateRun::from_row(&old)?.evidence();
             let ended = tx
                 .mutate(move |sql| {
                     Box::pin(async move {
-                        let Some(old) = sql.query_opt(&format!("SELECT {COLUMNS} FROM base_bulk_data_updates WHERE tenant_id=$1 AND id=$2 AND state='resolving' FOR UPDATE"), &[&tenant, &id]).await? else {
-                            return Ok((None, Vec::new()));
-                        };
-                        let old = UpdateRun::from_row(&old)?;
                         let row = sql.query_one(&format!("UPDATE base_bulk_data_updates SET state='failed',error=$3,filter=NULL,ids=NULL,except_ids=NULL,finished_at=clock_timestamp(),version=version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 RETURNING {COLUMNS}, started_by"), &[&tenant, &id, &STRANDED]).await?;
                         let starter: i64 = row.get("started_by");
                         let run = UpdateRun::from_row(&row)?;
-                        Ok((Some((starter, run.record_type.clone())), vec![Change { kind: "base/bulk_data.update".into(), id, old: old.evidence(), new: run.evidence() }]))
+                        Ok(((starter, run.record_type.clone()), vec![Change { kind: "base/bulk_data.update".into(), id, old, new: run.evidence() }]))
                     })
                 })
                 .await?;
-            if let Some((starter, record_type)) = ended {
-                let notice = Notice::new(format!(
-                    "Bulk update of {} did not start",
-                    self.label(&record_type).to_lowercase()
-                ))
-                .body(STRANDED)
-                .kind("bulk_data.update")
-                .url(format!("/updates/{id}"));
-                self.notifications
-                    .notify(tx, scope, &[starter], &notice)
-                    .await?;
-            }
+            let (starter, record_type) = ended;
+            let notice = Notice::new(format!(
+                "Bulk update of {} did not start",
+                self.label(&record_type).to_lowercase()
+            ))
+            .body(STRANDED)
+            .kind("bulk_data.update")
+            .url(format!("/updates/{id}"));
+            self.notifications
+                .notify(tx, scope, &[starter], &notice)
+                .await?;
         }
         Ok(())
     }
