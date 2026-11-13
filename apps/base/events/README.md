@@ -227,15 +227,24 @@ For each subscriber, `subscriber_states` reports:
 - its missed events (those with no delivery at all);
 - `gap_from`, where the gap starts.
 
+`subscriber_states` takes a `&mut tokio_postgres::Client` and reads in a transaction of its own. It never reads the tenant's whole event history without a bound:
+
+- **Pending and failing** come from the pending rows only (the partial index `base_events_pending`). So a subscriber that is not mounted is listed only while it has pending deliveries.
+- **Last delivered** is one newest-first read per subscriber (index `base_events_delivered`, migration 003).
+- **Missed** is counted per event name in recording order, up to `MISSED_CAP` (10,000) for each name. At the cap, `missed_more` is true: there are at least that many.
+- **Time limit.** Each statement may run five seconds. A last-delivered or missed read that runs longer is left out instead of failing the page: `last_delivered` is `None`, or `missed_counted` is false. After ten seconds of these reads, the rest are left out too.
+
+Recorded events and their deliveries are not deleted yet; retention is tracked in issue 547.
+
 ### Replaying from the page
 
 Open **Administration › System › Events** (`/system/events`, which needs `admin.events.view`). Its list follows the Sessions page. Each subscriber gets one row:
 
-- its status: Up to date, Gap or Not mounted;
+- its status: Up to date, Gap, Not mounted, or Not checked when its missed events could not be counted in time;
 - the events it reads;
 - its last delivered event, and when it was delivered;
 - its pending deliveries, and how many are failing;
-- its missed events, and which event they start from.
+- its missed events, and which event they start from ("or more" at the cap, "Not counted" past the time limit).
 
 A row with a gap shows a Replay button, for people with `admin.events.replay`. It asks for confirmation through `ConfirmDialog`. It then calls the `base.events.replay` contract from `gap_from` (`PageContracts::submit`, ADR 01). The owner rechecks the capability and the step-up policy. If a step-up is needed, the browser goes to the check and comes back.
 
