@@ -248,8 +248,9 @@ impl<O: Owner> Owned<'_, O> {
         Ok(next.metadata)
     }
     /// Current state for a bounded batch of this owner's attached artifacts.
-    /// Each row needs the owner's `Retain` grant. Unknown or unavailable IDs
-    /// refuse the whole request, so callers cannot infer cross-tenant files.
+    /// Every row needs the owner's `Retain` grant, proved for the batch at
+    /// once (`Owner::authorize_all`). Unknown or unavailable IDs refuse the
+    /// whole request, so callers cannot infer cross-tenant files.
     pub async fn retention_statuses(
         &self,
         client: &Client,
@@ -273,12 +274,18 @@ impl<O: Owner> Owned<'_, O> {
         if rows.len() != unique.len() {
             return Err(Error::NotFound);
         }
+        let rows: Vec<(Option<SystemTime>, Stored)> = rows
+            .into_iter()
+            .map(|row| (row.get("retain_until_instant"), stored(row)))
+            .collect();
+        let references: Vec<_> = rows
+            .iter()
+            .map(|(_, row)| row.metadata.reference.clone())
+            .collect();
+        self.authorize_all(client, Operation::Retain, &references)
+            .await?;
         let mut result = Vec::with_capacity(rows.len());
-        for row in rows {
-            let until: Option<SystemTime> = row.get("retain_until_instant");
-            let row = stored(row);
-            self.authorize(client, Operation::Retain, Some(&row.metadata.reference))
-                .await?;
+        for (until, row) in rows {
             if !row.ready || row.deleted {
                 return Err(Error::NotFound);
             }

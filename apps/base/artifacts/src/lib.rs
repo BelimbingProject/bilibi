@@ -154,6 +154,26 @@ pub trait Owner: Send + Sync + 'static {
         operation: Operation,
         reference: Option<&'a Reference>,
     ) -> ProofFuture<'a, ()>;
+    /// `authorize` for every one of `references` at once, for a batch read
+    /// (`retention_statuses`): refuse the whole set when any one is refused.
+    /// The default asks `authorize` for each; an owner whose rule is a set
+    /// query overrides it so a batch costs a few statements, not a few per file.
+    fn authorize_all<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        company: OrganisationId,
+        operation: Operation,
+        references: &'a [Reference],
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            for reference in references {
+                self.authorize(client, scope, company, operation, Some(reference))
+                    .await?;
+            }
+            Ok(())
+        })
+    }
     /// Whether `subject`, one of this owner's subjects that is not a person ID
     /// (such as a request about a person), names a document of the erasure
     /// grant's own person, so the erasure may delete it in any company of the
@@ -622,12 +642,34 @@ pub struct Recovery {
     pub purged: Vec<String>,
     pub failed: Vec<(String, Error)>,
 }
+/// What one authorization covers: one reference (none for `Purge`) or a set.
+enum Target<'r> {
+    One(Option<&'r Reference>),
+    All(&'r [Reference]),
+}
 impl<O: Owner> Owned<'_, O> {
     async fn authorize(
         &self,
         client: &(impl GenericClient + Sync),
         operation: Operation,
         reference: Option<&Reference>,
+    ) -> Result<()> {
+        self.admit(client, operation, Target::One(reference)).await
+    }
+    /// One live-account and desk check for the set, then the owner's set rule.
+    async fn authorize_all(
+        &self,
+        client: &(impl GenericClient + Sync),
+        operation: Operation,
+        references: &[Reference],
+    ) -> Result<()> {
+        self.admit(client, operation, Target::All(references)).await
+    }
+    async fn admit(
+        &self,
+        client: &(impl GenericClient + Sync),
+        operation: Operation,
+        target: Target<'_>,
     ) -> Result<()> {
         if !bounded(self.owner.owner_id(), 255) || type_name::<O>().len() > 1024 {
             return Err(Error::Invalid);
@@ -638,15 +680,24 @@ impl<O: Owner> Owned<'_, O> {
             .reprove(client, self.scope)
             .await?;
         // An approved request is the authority for its subject's documents:
-        // the account must still be live, but the owner is not asked.
-        let granted = match (&self.grant, operation, reference) {
-            (Some(Granted::Disclose(grant, subject)), Operation::Read, Some(reference)) => {
+        // the account must still be live, but the owner is not asked. It
+        // covers one file; a set is always the owner's to decide.
+        let granted = match (&self.grant, operation, &target) {
+            (
+                Some(Granted::Disclose(grant, subject)),
+                Operation::Read,
+                Target::One(Some(reference)),
+            ) => {
                 grant
                     .check_file_subject(&live, self.owner.owner_id(), subject)
                     .is_ok()
                     && reference.subject == *subject
             }
-            (Some(Granted::Erase(grant, subject)), Operation::Delete, Some(reference)) => {
+            (
+                Some(Granted::Erase(grant, subject)),
+                Operation::Delete,
+                Target::One(Some(reference)),
+            ) => {
                 reference.subject == *subject
                     && (grant
                         .check_file_subject(&live, self.owner.owner_id(), subject)
@@ -687,9 +738,18 @@ impl<O: Owner> Owned<'_, O> {
         {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        self.owner
-            .authorize(client, &live, self.company, operation, reference)
-            .await?;
+        match target {
+            Target::One(reference) => {
+                self.owner
+                    .authorize(client, &live, self.company, operation, reference)
+                    .await?
+            }
+            Target::All(references) => {
+                self.owner
+                    .authorize_all(client, &live, self.company, operation, references)
+                    .await?
+            }
+        }
         Ok(())
     }
     /// Refuses with `Retained` or `LegalHold` when any of this owner's

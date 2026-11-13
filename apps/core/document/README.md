@@ -141,6 +141,8 @@ for an explicit reviewed deletion; nothing is deleted automatically. Base still
 rechecks every revision under lock in delete and merge, so a new hold refuses
 those actions even after the list was read.
 
+The view costs the same few statements however many files it checks: Base asks the owner for `Retain` on each batch of up to 1000 files at once (`Owner::authorize_all`), and Documents answers a manager's batch with one query (each file attached to an undeleted document the reader may manage now). The `document-retention-due` walkthrough counts them.
+
 ## Retention-safe deletion
 
 Deleting a document first checks every revision's file. If any revision is retained or under legal hold, `preview_delete` and `delete` refuse with `Retained` or `LegalHold` before anything changes (the check reads the Artifacts rows `FOR SHARE` inside the commit, so a hold placed meanwhile waits). The document stays readable with its complete revision history.

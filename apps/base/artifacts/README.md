@@ -153,7 +153,10 @@ extend-only guard, audit action and append-only retention event as `retain`;
 it does not open another transaction. `retention_statuses(client, ids)` returns
 at most 1000 owned, attached artifacts' retain-until, hold and due state without
 reading bytes or paths, after checking the owner's `Retain` grant on each. A
-missing or unauthorized artifact refuses the batch.
+missing or unauthorized artifact refuses the batch. Base checks the live account
+and desk once for the batch and asks `Owner::authorize_all` for the whole set;
+its default asks `authorize` for each, and an owner whose rule is a set query
+overrides it so a batch costs a few statements instead of a few per file.
 
 A records-grade document has `expires_at: None`; reads keep working before and
 after retain-until, and `purge_expired` never selects it. `delete` answers

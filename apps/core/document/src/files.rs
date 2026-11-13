@@ -322,6 +322,59 @@ impl Owner for DocumentFiles {
             }
         })
     }
+    /// A manager's `Retain` on a set (the Retention due list reads every
+    /// managed file) is one query: each file attached to an undeleted
+    /// document this person may manage now. Anything else is asked one by one.
+    fn authorize_all<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        company: OrganisationId,
+        operation: Operation,
+        references: &'a [Reference],
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            if operation != Operation::Retain || scope.principal().is_some() {
+                for reference in references {
+                    Owner::authorize(self, client, scope, company, operation, Some(reference))
+                        .await?;
+                }
+                return Ok(());
+            }
+            let parties = PARTIES.get().ok_or(Error::Forbidden)?;
+            parties.organisation(client, scope, company).await?;
+            authorize_proof(client, scope, MANAGE).await?;
+            store::reader(client, scope).await?;
+            let mut subjects = references
+                .iter()
+                .map(|reference| {
+                    (reference.kind == FILE_KIND)
+                        .then(|| uuid::Uuid::parse_str(&reference.subject).ok())
+                        .flatten()
+                        .map(|subject| subject.to_string())
+                        .ok_or(Error::NotFound)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            subjects.sort_unstable();
+            subjects.dedup();
+            let managed: i64 = client
+                .query_opt(
+                    "SELECT count(*) FROM core_document_files f WHERE f.tenant_id=$1 AND f.company_id=$2 AND f.subject=ANY($3::text[]::uuid[]) AND f.state='attached'
+                       AND EXISTS (SELECT 1 FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id
+                         JOIN core_document_access a ON a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$4 AND a.can_manage AND (a.expires_at IS NULL OR a.expires_at > now())
+                         WHERE r.tenant_id=f.tenant_id AND r.artifact_id=f.artifact_id AND d.deleting_at IS NULL)",
+                    &[&scope.tenant(), &company.get(), &subjects, &scope.user()],
+                )
+                .await?
+                .ok_or(Error::Internal)?
+                .get(0);
+            if usize::try_from(managed).ok() == Some(subjects.len()) {
+                Ok(())
+            } else {
+                Err(Error::Forbidden)
+            }
+        })
+    }
 }
 
 /// Maps a refusal from `base/artifacts` to the facade's errors. Storage
