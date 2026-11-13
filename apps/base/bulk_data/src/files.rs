@@ -3,6 +3,8 @@
 //! written from it on every download, through a `Download` contribution that
 //! reads the artifact each time. An export's file is a private artifact owned
 //! by the export (kind `export`, subject `export:{id}`), served the same way.
+//! Neither is read once an owner's erasure has marked its run or export
+//! (`privacy`), which also lets that erasure delete it.
 //! Only the person who started the run or export reaches its files, in the
 //! company it was filed under. Both kinds expire after `bulk_data.file_days`;
 //! each upload and each export first purges the company's expired ones
@@ -96,7 +98,7 @@ impl Owner for RunFiles {
             client
                 .query_opt(
                     &format!("SELECT 1 FROM {table} WHERE tenant_id=$1 AND id=$2 AND started_by=$3 AND company_id=$4{}",
-                        if reference.kind == EXPORTED && operation == Operation::Read { " AND cardinality(erased_for)=0" } else { "" }),
+                        if operation == Operation::Read { " AND cardinality(erased_for)=0" } else { "" }),
                     &[&scope.tenant(), &id, &scope.user(), &company.get()],
                 )
                 .await?
@@ -111,19 +113,23 @@ impl Owner for RunFiles {
         subject: &'a str,
     ) -> ProofFuture<'a, bool> {
         Box::pin(async move {
-            let Some(id) = subject
-                .strip_prefix("export:")
-                .and_then(|id| id.parse::<i64>().ok())
-            else {
+            // An export's subject is `export:{id}`; an import run's is its id.
+            let (table, id) = match subject.strip_prefix("export:") {
+                Some(id) => ("base_bulk_data_exports", id),
+                None => ("base_bulk_data_runs", subject),
+            };
+            let (Ok(id), Some(person)) = (id.parse::<i64>(), grant.person()) else {
                 return Ok(false);
             };
-            let Some(person) = grant.person() else {
-                return Ok(false);
-            };
-            Ok(client.query_opt(
-                "SELECT 1 FROM base_bulk_data_exports WHERE tenant_id=$1 AND id=$2 AND $3=ANY(erased_for)",
-                &[&grant.tenant(), &id, &person.get()],
-            ).await?.is_some())
+            Ok(client
+                .query_opt(
+                    &format!(
+                        "SELECT 1 FROM {table} WHERE tenant_id=$1 AND id=$2 AND $3=ANY(erased_for)"
+                    ),
+                    &[&grant.tenant(), &id, &person.get()],
+                )
+                .await?
+                .is_some())
         })
     }
 }

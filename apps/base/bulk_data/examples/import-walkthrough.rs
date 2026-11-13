@@ -724,6 +724,50 @@ async fn main() -> Result<(), Failure> {
         );
     }
 
+    println!("\n== a check cancelled and started again: the first job records nothing more");
+    // Issue 600: the first check's job is still working through the file
+    // when the check is cancelled and started again with another mapping.
+    // It must stop, not record rows planned with the mapping it began with.
+    let again = admin
+        .upload(
+            "core/person.contacts",
+            "again.csv",
+            &csv(
+                header,
+                (1..=1000).map(|n| format!("G{n},Again Person {n},human,again.{n}@import.test,")),
+            ),
+        )
+        .await?;
+    let version = admin.run(again).await.version;
+    admin
+        .write(
+            "base.bulk_data.import.preview",
+            json!({"run_id": again, "version": version, "mapping": mapping}),
+        )
+        .await?;
+    while admin.run(again).await.progress() < 50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let version = admin.run(again).await.version;
+    admin
+        .write(
+            "base.bulk_data.import.cancel",
+            json!({"run_id": again, "version": version}),
+        )
+        .await?;
+    // Every row of the second mapping fails: its email is the name column.
+    let failing = json!({"fields": [
+        {"field": "name", "column": "Full name"}, {"field": "kind", "column": "Kind"},
+        {"field": "email", "column": "Full name"}
+    ], "duplicates": "skip"});
+    let run = admin
+        .pass("base.bulk_data.import.preview", again, &failing)
+        .await?;
+    counts("checked again with a mapping whose every row fails", &run);
+    if run.preview.error != i64::from(run.row_count) || run.preview.create != 0 {
+        return Err("the cancelled check's job recorded rows into the new check".into());
+    }
+
     let _ = stop.send(true);
     worker.await?;
     Ok(())

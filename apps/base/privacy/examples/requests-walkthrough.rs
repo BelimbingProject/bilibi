@@ -495,7 +495,7 @@ async fn main() -> Result<()> {
     let workers = tokio::spawn(executor.run(stopped));
 
     println!("== stage 8 regression: save a Contacts CSV before erasure");
-    use bilibi_base::bulk_data::{BulkData, ExportState};
+    use bilibi_base::bulk_data::{BulkData, ExportState, Pass};
     let bulk = app
         .services
         .get::<BulkData>(bilibi_base::bulk_data::SERVICE)?;
@@ -529,6 +529,70 @@ async fn main() -> Result<()> {
         String::from_utf8_lossy(&before_csv).contains("Ada Manager"),
         String::from_utf8_lossy(&before_csv).contains("ada@example.test")
     );
+
+    println!("== issue 571: a Contacts import and a child file hold Ada's data before erasure");
+    // One row that is refused (an unknown kind), so nothing is written and
+    // the run keeps her email as its source key, with the file whole.
+    let ada_import = bulk
+        .upload(
+            &admin,
+            "core/person.contacts",
+            "ada-contacts.csv",
+            b"Ref,Full name,Kind,E-mail\r\nada@example.test,Ada Manager,robot,ada@example.test\r\n",
+        )
+        .await?
+        .map_err(|why| format!("contacts upload refused: {why}"))?;
+    let version = bulk.run(&**client, &admin, ada_import).await?.version;
+    write(
+        &app,
+        &admin_login.token,
+        &admin,
+        "base.bulk_data.import.start",
+        json!({"run_id": ada_import, "version": version, "mapping": {"fields": [
+            {"field": "name", "column": "Full name"}, {"field": "kind", "column": "Kind"},
+            {"field": "email", "column": "E-mail"}
+        ], "source_key": "Ref", "duplicates": "skip"}}),
+    )
+    .await?;
+    for _ in 0..120 {
+        if !bulk
+            .run(&**client, &admin, ada_import)
+            .await?
+            .state
+            .working()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // A file of the child record type, uploaded and never run: its rows would
+    // name contacts, so the same erasure must reach it.
+    let child_import = bulk
+        .upload(
+            &admin,
+            "core/affiliation.affiliations",
+            "ada-affiliations.csv",
+            b"Email,Role\r\nada@example.test,Director\r\n",
+        )
+        .await?
+        .map_err(|why| format!("affiliations upload refused: {why}"))?;
+    let keyed: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_bulk_data_rows WHERE tenant_id=1 AND run_id=$1 AND source_key='ada@example.test'",
+            &[&ada_import],
+        )
+        .await?
+        .get(0);
+    show(
+        "failed rows of the import before erasure",
+        bulk.failed_rows(&admin, ada_import, Pass::Run)
+            .await
+            .map(|(_, bytes)| String::from_utf8_lossy(&bytes).contains("ada@example.test")),
+    );
+    println!("import {ada_import}: rows keyed by Ada's email={keyed}; child file {child_import} uploaded");
+    if keyed != 1 {
+        return Err("the import did not record Ada's row before erasure".into());
+    }
 
     println!("== failed publication leaves durable, unreadable reservations");
     // Fail after Artifacts has synced the bytes, not before reservation or IO.
@@ -912,7 +976,8 @@ async fn main() -> Result<()> {
 
     println!("== erasure for person 1, with the affiliation store failing first");
     // Pause a real export at artifact publication, after it has read Contacts.
-    // The erasure must wait for this reader, then invalidate both saved copies.
+    // The erasure must not run beside this reader: it gives way and retries,
+    // then invalidates both saved copies.
     client.batch_execute("SELECT pg_advisory_lock(18203591); \
         CREATE FUNCTION walkthrough_export_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
         IF NEW.owner_id='base.bulk_data' THEN PERFORM pg_advisory_xact_lock(18203591); END IF; RETURN NEW; END $$; \
@@ -1054,9 +1119,18 @@ async fn main() -> Result<()> {
         true,
     )
     .await?;
-    for attempt in 0..120 {
-        let blocked: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.locktype='advisory' AND NOT l.granted AND a.query LIKE 'SELECT pg_advisory_xact_lock(hashtextextended%')", &[]).await?.get(0);
-        if blocked {
+    // Issue 572: the erasure asks for its guard for two seconds, then gives
+    // way with `conflict` for Queue to retry. It never waits on the export
+    // inside its own transaction, where Queue's row for its job is locked.
+    for attempt in 0..240 {
+        let gave_way: bool = client
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM base_privacy_request_stores WHERE tenant_id=1 AND request_id=$1 AND last_error='conflict')",
+                &[&erasure.id],
+            )
+            .await?
+            .get(0);
+        if gave_way {
             let original: bool = client
                 .query_one(
                     "SELECT name='Ada Manager' FROM persons WHERE tenant_id=1 AND id=1",
@@ -1064,11 +1138,15 @@ async fn main() -> Result<()> {
                 )
                 .await?
                 .get(0);
-            println!("erasure waits for publishing export; source still original={original}");
+            let waiting: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING(pid) WHERE l.locktype='advisory' AND NOT l.granted AND a.query LIKE '%bulk-export-%')", &[]).await?.get(0);
+            println!("erasure gave way to the publishing export and will retry; source still original={original}; a session left waiting on the guard={waiting}");
+            if !original || waiting {
+                return Err("the erasure did not give way cleanly to the publishing export".into());
+            }
             break;
         }
-        if attempt == 119 {
-            return Err("erasure did not wait for publishing export".into());
+        if attempt == 239 {
+            return Err("erasure did not give way to the publishing export".into());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1180,6 +1258,55 @@ async fn main() -> Result<()> {
         );
     }
     rows(&client, "cached export files", "SELECT row_to_json(a)::text FROM (SELECT e.id,e.state,e.erased_for,a.deleted_at IS NOT NULL AS file_deleted FROM base_bulk_data_exports e JOIN base_artifacts a ON a.tenant_id=e.tenant_id AND a.owner_id='base.bulk_data' AND a.subject='export:'||e.id WHERE e.tenant_id=1 ORDER BY e.id,a.id) a").await?;
+    // Issue 600: the invalidations are audited under the documented kind,
+    // and an export an erasure has cleaned is marked so the next one skips it.
+    let misfiled: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='bulk_data_export'",
+            &[],
+        )
+        .await?
+        .get(0);
+    rows(&client, "exports after erasure", "SELECT row_to_json(e)::text FROM (SELECT id,state,erased_for,cleaned_at IS NOT NULL AS cleaned,(SELECT count(*) FROM base_audit_mutations m WHERE m.tenant_id=1 AND m.auditable_type='base/bulk_data.export' AND m.auditable_id=x.id::text) AS audited FROM base_bulk_data_exports x WHERE tenant_id=1 ORDER BY id) e").await?;
+    println!("export changes audited under the old kind: {misfiled}");
+    if misfiled != 0 {
+        return Err("an export invalidation was audited under the wrong kind".into());
+    }
+
+    println!("== issue 571: the imports hold nothing of Ada after erasure");
+    for id in [ada_import, child_import] {
+        let row = client
+            .query_one(
+                "SELECT r.state, r.erased_for::text, r.cleaned_at IS NOT NULL, r.source_artifact IS NULL, \
+                 (SELECT count(*) FROM base_bulk_data_rows w WHERE w.tenant_id=r.tenant_id AND w.run_id=r.id AND (w.source_key IS NOT NULL OR w.message IS NOT NULL)), \
+                 (SELECT count(*) FROM base_artifacts a WHERE a.tenant_id=r.tenant_id AND a.owner_id='base.bulk_data' AND a.subject=r.id::text AND a.deleted_at IS NULL) \
+                 FROM base_bulk_data_runs r WHERE r.tenant_id=1 AND r.id=$1",
+                &[&id],
+            )
+            .await?;
+        let (cleaned, unlinked, details, files): (bool, bool, i64, i64) =
+            (row.get(2), row.get(3), row.get(4), row.get(5));
+        println!(
+            "import {id}: state={} erased_for={} cleaned={cleaned} file reference dropped={unlinked} rows still holding a key or message={details} live files={files}",
+            row.get::<_, String>(0),
+            row.get::<_, String>(1)
+        );
+        if !cleaned || !unlinked || details != 0 || files != 0 {
+            return Err(format!("import {id} still holds data after the erasure").into());
+        }
+    }
+    let failed_rows = bulk.failed_rows(&admin, ada_import, Pass::Run).await;
+    let refused = failed_rows.is_err();
+    show(
+        "download the failed rows of the erased import",
+        failed_rows.map(|(_, bytes)| bytes.len()),
+    );
+    let erased = bulk.run(&**client, &admin, ada_import).await?.erased;
+    println!("import {ada_import} reads as erased: {erased}");
+    if !refused || !erased {
+        return Err("the erased import still offers its file".into());
+    }
+
     let fresh_export = write(
         &app,
         &admin_login.token,
