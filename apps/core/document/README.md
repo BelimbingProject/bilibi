@@ -120,8 +120,11 @@ Internal revisions store the ledger file ID and either a clean Artifact ID or a 
 ## Tenant retention and due documents
 
 Settings › Documents offers **Keep new document files for (days)**
-(`core.document.retention_days`, 0 by default). Zero leaves ordinary Artifact
-expiry and explicit deletion as before. When a tenant chooses a positive period
+(`core.document.retention_days`, 0 by default). With zero, each private file
+revision is kept without an expiry (`Artifacts::keep_in`) when a clean Artifact
+is attached or a pending revision is promoted: it stays readable until its
+document is deleted, whatever the installation's `artifacts.retention_days`
+(which bounds exports, and a file stored but never attached). When a tenant chooses a positive period
 (1–36500 days), every newly attached **private file revision** receives an
 irreversible Base retain-until when a clean Artifact is attached or a pending
 revision is promoted. The owner calls `Artifacts::retain_in` inside the same
