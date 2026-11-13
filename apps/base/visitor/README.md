@@ -36,7 +36,7 @@ inventory::submit! { Contribution::new(CHANNELS, "cx/chat", provenance!(), &Chan
 | `site(key)` | Which tenant and origins a site key means, from its own records. Asked before a session exists and again on every use, so a closed site or a removed origin stops its sessions at once. |
 | `admit(site, hello)` | Whether this visitor starts a conversation, and its `subject` (at most 128 printable characters). `hello.details` is untrusted JSON the embed sent (at most 4 KiB). |
 | `receive(scope, frame)` | A message (JSON, at most 16 KiB), a typing signal (1 KiB) or a complete file (`Upload`, bytes). The reply, if any, is the acknowledgement. |
-| `since(scope, cursor)` | What the visitor has not seen. The browser returns the last cursor, so a dropped connection loses nothing. The cursor is the browser's text, not something to trust: read it as a position within `scope.subject()` only. |
+| `since(scope, cursor)` | What the visitor has not seen. The browser returns the last cursor, so a dropped connection loses nothing; with no cursor, return the whole conversation, because a new page asks without one. The cursor is the browser's text, not something to trust: read it as a position within `scope.subject()` only. |
 | `watch(scope)` | A wake-up when `since` has something new. No I/O. |
 
 Rules a channel keeps:
@@ -72,12 +72,35 @@ All HTTP calls are `POST` with `Content-Type: text/plain` and a JSON body, so a 
 | `ready` | The session proved (`session`, and `upload_max_bytes`, the file size limit at that moment); `since` follows |
 | `items` | `{items:[…], cursor}` from the channel |
 | `renewed` | The session was renewed by use (`expires_in`) |
-| `error` | A refused frame (`refused`, `invalid`, `rate_limited`, `unavailable`); the socket stays open |
+| `error` | A refused frame (`refused`, `invalid`, `rate_limited`, `unavailable`), with the `id` of the message or file announcement it refuses; the socket stays open |
 | `closed` | `{reason: "refused" \| "ended" \| "rate_limited" \| "unavailable"}`, then the socket closes |
 
-A text frame is at most 32 KiB and a binary frame one chunk with its header (64 KiB + 8 bytes); a larger frame ends the socket without a `closed` frame. An announced file's size is held against `visitor.upload_buffer_bytes` until the channel has the file or it is dropped; an announcement beyond it is answered `rate_limited` and may be sent again. A peer that does not take a frame within 10 seconds is disconnected.
+A text frame is at most 32 KiB and a binary frame one chunk with its header (64 KiB + 8 bytes); a larger frame ends the socket without a `closed` frame. A file's bytes are held against `visitor.upload_buffer_bytes` from the chunk that brings them until the channel has the file or it is dropped; an announcement holds nothing. One sender may hold one file's size limit (`visitor.upload_max_bytes`) of that budget across all its sockets. A chunk beyond either is answered `{"type":"error","id":…,"code":"rate_limited"}`, the file is dropped, and it may be sent again. A peer that does not take a frame within 10 seconds is disconnected.
 
-Before any frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A socket also rechecks every 10 seconds, and a revocation of its session or its subject closes it at once.
+A frame is first counted against the session's budget; one over it is answered `rate_limited` and reads nothing. Before a counted frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A revocation of its session or its subject on this server closes a socket at once. An idle socket rechecks every 60 seconds, which finds a session that ran out, or was ended on another server, while nobody typed.
+
+## The browser client
+
+One script, `GET /visitor/v1/client.js` (`CLIENT_V1`, `assets/client-v1.js`). A breaking change is a new major path (`/v2/`), so a page that embeds this one keeps working. It has no dependencies and no build step.
+
+```html
+<script src="https://bilibi.example/visitor/v1/client.js" data-channel="cx/chat" data-site="front-desk" async></script>
+```
+
+| Attribute | Meaning |
+| --- | --- |
+| `data-channel`, `data-site` | Required: the Domain's channel key and the site key its `site` lookup knows |
+| `data-details` | JSON sent as `hello.details` when a session opens (at most 4 KiB) |
+| `data-title` | The window's title, default "Chat with us" |
+
+- **Strict Content-Security-Policy.** The page needs `script-src` and `connect-src` for the Bilibi host (and its `wss://` address) and nothing else. The client sets no inline style or script, uses no `eval`, loads no font, image or stylesheet, and styles its shadow DOM with a constructed stylesheet. It uses a system font, so a customer's page makes no font request.
+- **A session starts when the visitor opens the window**, not on page load. The token lives in `sessionStorage` (a blocked store only means the chat lasts for the page); it is renewed on the next open and by use. Only a refusal on renewal (`403`) starts a new session; the Domain decides whether that is the same conversation. A busy or unavailable answer keeps the session.
+- **Any script on the embedding page can read the token.** `sessionStorage` belongs to the customer's page, so the token is as safe as that page's own scripts. It opens one visitor conversation from that one origin and nothing else.
+- **A new page shows the conversation again.** The cursor is kept for the page only: the first `hello` of a page sends none, so `since` returns the whole conversation; a reconnect on the same page sends the last cursor.
+- **Items.** The client renders each item `{from: "visitor" | "agent" | "system", text?, attachment?: {name}, seq?}` as a message and shows "Typing…" for `{from: "agent", typing: true}` until a message or `typing: false`. `seq` de-duplicates. Anything else is ignored; the transport carries any JSON.
+- **It sends** `{text}` messages (at most 4,000 characters), throttled typing signals and files in 64 KiB chunks. A refused message goes back to the message box. A file over `upload_max_bytes` or an empty one is refused before it is announced.
+- **A dropped connection gives up the file being sent** and says so; the visitor attaches it again. A message not yet confirmed goes back to the message box.
+- **It reconnects** with backoff while the window is open, and on `closed` with `ended` or `refused` says the chat has ended and offers a new one.
 
 ## Operator settings
 
@@ -92,12 +115,13 @@ Platform capability `admin.system.visitor.manage`; group Visitor in the settings
 | `visitor.messages_per_minute` | 60 | Frames per session; the 100th refusal in a row closes the socket |
 | `visitor.sockets_per_session` | 3 | Open sockets per session, per server |
 | `visitor.sockets_per_sender` | 20 | Open sockets per network address, per server, whatever the session, so one address cannot hold every place of `visitor.sockets_total`; an upgrade over it is refused `429` |
+| `visitor.sockets_per_site` | 500 | Open sockets per site, per server, counted from the socket's `hello`; keep it below `visitor.sockets_total`, so one site cannot hold every place. A `hello` over it closes the socket with `rate_limited` |
 | `visitor.sockets_total` | 2,000 | Open visitor sockets per server; staff and portal sockets have their own places |
 | `visitor.upload_max_bytes` | 5 MiB | A file's size; Media's own limit can only be smaller |
 | `visitor.uploads_per_minute` | 6 | Files per session |
-| `visitor.upload_buffer_bytes` | 256 MiB | Memory each server holds for visitor files still arriving, whatever the number of sockets; keep it at or above the file size limit |
+| `visitor.upload_buffer_bytes` | 256 MiB | Memory each server holds for visitor files still arriving, whatever the number of sockets; keep it at or above the file size limit. One sender holds at most one file size limit of it |
 
-Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address, or the /64 network of its IPv6 address, which one subscriber usually holds whole. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session and per-sender socket counters grow with `visitor.sockets_total`. A changed setting applies within two seconds.
+Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address, or the /64 network of its IPv6 address, which one subscriber usually holds whole. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session, per-sender and per-site socket counters grow with `visitor.sockets_total`. Behind a reverse proxy on another machine, list the proxy in `session.trusted_proxies` (Base Session), or every visitor counts as the proxy's one address. A changed setting applies within two seconds.
 
 ## Staff side
 
@@ -110,4 +134,4 @@ Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address,
     cargo run -p bilibi-web --example visitor-walkthrough           # prepare: every case, exits non-zero on a FAIL
     cargo run -p bilibi-web --example visitor-walkthrough -- serve  # the host for a browser, with a staff control address
 
-`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget and a stalled file, rate limits, open sockets per sender (an IPv6 /64 counts as one), renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.
+`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget (an announcement holds nothing, one sender's share) and a stalled file, rate limits (a frame over its budget reads no session; an idle socket is not rechecked every 10 seconds), open sockets per sender (an IPv6 /64 counts as one) and per site, senders behind a proxy on another machine before and after it is listed, renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.

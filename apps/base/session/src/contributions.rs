@@ -8,7 +8,7 @@ use bilibi_module_registry::{
     contributions::{Access, Embed, EmbedContext, Method, Route, EMBEDS, ROUTES},
     Contribution, Provenance,
 };
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
+use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Validator, ValueType, DEFINITIONS};
 use serde_json::json;
 
 pub const LIST: &str = "admin.system.session.list";
@@ -25,6 +25,9 @@ pub const LIVE_SOCKETS_TOTAL_KEY: &str = "session.live.sockets_total";
 pub const LIVE_MESSAGES_PER_MINUTE_KEY: &str = "session.live.messages_per_minute";
 pub const LIVE_SOCKETS_PER_CUSTOMER_KEY: &str = "session.live.sockets_per_customer";
 pub const LIVE_CHUNKS_PER_MINUTE_KEY: &str = "session.live.chunks_per_minute";
+/// The memory each server holds for files still arriving over the staff and
+/// portal live sockets, whatever the number of sign-ins and pages.
+pub const LIVE_UPLOAD_BUFFER_BYTES_KEY: &str = "session.live.upload_buffer_bytes";
 pub const PATH: &str = "/system/sessions";
 pub const OWN_PATH: &str = "/settings/sessions";
 /// The dashboard entry id is stored in each account's arrangement: never rename.
@@ -136,5 +139,20 @@ inventory::submit! { Contribution::new(DEFINITIONS, LIVE_CHUNKS_PER_MINUTE_KEY, 
     minimum: Some(60.0), maximum: Some(1_000_000.0), validator: None,
     editor: Some(Editor { group: "Session", label: "Upload chunks per minute",
         help: "Most file chunks one sign-in may send across its live pages on each server. Exceeding this closes the sending page's connection.",
+        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, LIVE_UPLOAD_BUFFER_BYTES_KEY, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: GLOBAL, default: || json!(1_073_741_824u64), nullable: false, encrypted: false,
+    minimum: Some(1_048_576.0), maximum: Some(68_719_476_736.0), validator: None,
+    editor: Some(Editor { group: "Session", label: "Uploads in transit per server (bytes)",
+        help: "Most memory each server holds for files that staff and portal customers are still uploading or have not saved yet. A file that would go beyond it is refused until others finish. Large files chosen on a resumable input wait on disk and count only once they have arrived.",
+        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, crate::TRUSTED_PROXIES_KEY, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::String, scopes: GLOBAL, default: || json!(""), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(Validator { accepts: |value| value.as_str().is_some_and(|list| list.len() <= 4_096 && crate::TrustedProxies::parse(list).is_some()), message: "List addresses or networks, such as 10.0.0.5 or 10.1.0.0/16, separated by commas" }),
+    editor: Some(Editor { group: "Session", label: "Trusted proxy addresses",
+        help: "The addresses or networks of your own reverse proxies or load balancers on other machines, separated by commas. A request from one of them is counted and recorded under the client address it reports. Leave empty when the proxy runs on this machine. List only proxies you run: anyone at a listed address can pretend to be any client.",
         capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }

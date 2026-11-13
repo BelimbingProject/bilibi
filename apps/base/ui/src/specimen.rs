@@ -1120,8 +1120,10 @@ fn specimen_uploads() -> Uploads {
         &mut ids,
     );
     // The first file is complete, the second a little over a third in.
-    let _ = uploads.append(1, 0, &[0; 3_200]);
-    let _ = uploads.append(2, 0, &[0; 700]);
+    // A specimen's bytes are a few kilobytes and counted nowhere else.
+    let budget = crate::UploadBudget::default();
+    let _ = uploads.append(1, 0, &[0; 3_200], &budget, u64::MAX);
+    let _ = uploads.append(2, 0, &[0; 700], &budget, u64::MAX);
     uploads.register(
         "scan",
         vec![

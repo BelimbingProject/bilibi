@@ -1,7 +1,8 @@
-//! Daily payload retention. Like every contributed
+//! Daily retention: saved previews first, then whole exchanges past their
+//! own, longer keep time. Like every contributed
 //! recurrence it runs nothing until an operator reviews and enables it on the
 //! Schedule board.
-use crate::contributions::{RETENTION_DAYS, RETENTION_MAX};
+use crate::contributions::{EXCHANGE_RETENTION_DAYS, RETENTION_DAYS, RETENTION_MAX};
 use crate::Integration;
 use bilibi_database::{Db, Error, Result};
 use bilibi_module_registry::{Contribution, Provenance};
@@ -35,7 +36,7 @@ fn no_arguments(args: Value) -> Result<Value> {
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: 5, validate: |args| worker::validate(args, no_arguments) }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: "base/integration.retention", capability: EXECUTE }) }
 inventory::submit! { Contribution::new(DEFINITIONS, "base/integration-payload-retention", provenance!(), &Definition {
-    name: "Prune API exchange payloads", expression: "17 3 * * *", timezone: "Etc/UTC",
+    name: "Prune API exchange payloads and old exchanges", expression: "17 3 * * *", timezone: "Etc/UTC",
     task_name: "Base Integration payload retention", worker: WORKER, args: || json!({}),
     overlap: Overlap::Forbid, misfire: Misfire::Coalesce, reach: Reach::Installation, owner_route: None,
 }) }
@@ -51,16 +52,24 @@ impl Handler for Retention {
         Box::pin(self.schedule.run(execution, args, |_| async {
             let pruned = async {
                 let mut client = self.db.get().await?;
-                let days = self
-                    .settings
-                    .get_global(&**client, RETENTION_DAYS)
-                    .await?
-                    .as_i64()
-                    .filter(|days| (1..=RETENTION_MAX).contains(days))
-                    .ok_or(Error::Invalid)?;
+                let mut days = [0_i64; 2];
+                for (days, key) in days
+                    .iter_mut()
+                    .zip([RETENTION_DAYS, EXCHANGE_RETENTION_DAYS])
+                {
+                    *days = self
+                        .settings
+                        .get_global(&**client, key)
+                        .await?
+                        .as_i64()
+                        .filter(|days| (1..=RETENTION_MAX).contains(days))
+                        .ok_or(Error::Invalid)?;
+                }
+                let now = SystemTime::now();
                 self.integration
-                    .prune_payloads(&mut client, days, SystemTime::now())
-                    .await
+                    .prune_payloads(&mut client, days[0], now)
+                    .await?;
+                self.integration.prune_rows(&client, days[1], now).await
             }
             .await;
             match pruned {

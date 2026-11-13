@@ -124,7 +124,7 @@ no missing-record redirect or shell applies.
 targeted panels, URL changes and guarded subscriptions. HTTP-only adapters should
 return `live: false`. F6 owns queued events and retained fragment/iframe lifecycle.
 
-A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
+A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. A wake or 15-second refresh that renders what the browser already holds sends nothing and does not draw the shell, and a tab out of view is not refreshed on the timer. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
 
 # Public endpoints (`src/endpoints.rs`)
 
@@ -155,10 +155,11 @@ inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenan
 **A website on another origin lets someone with no account talk to a Domain's channel here.** `base/visitor` owns the session store and the channel contract (`apps/base/visitor/README.md`, [ADR 27](../../docs/architecture/decisions/27-visitor-sessions-are-a-separate-credential.md)); this host owns the transport under `/visitor/v1/`, which the discovered pages and downloads can never claim (`api::reserved`).
 
 - `POST /visitor/v1/sessions`, `/session/renew` and `/session/end` take a JSON body sent as `text/plain`, so a browser makes a simple cross-origin request and no preflight. The reply carries `Access-Control-Allow-Origin` for the origin only when it is accepted; every refusal of a credential or site is one `403 {"error":"refused"}`, a bad value `400 invalid`, an exceeded limit `429 rate_limited`.
-- `GET /visitor/v1/live` is a WebSocket that needs an `Origin`. Its first frame (`hello`) carries the token within 10 seconds; the token is never a cookie or a URL. Frames are bounded (32 KiB of JSON, a message 16 KiB, a typing signal 1 KiB, an upload chunk 64 KiB with the staff socket's eight-byte header), counted per session per minute, and each proves the session, the origin and the site again before the channel sees it. A socket rechecks every 10 seconds and closes at once on a staff revocation.
+- `GET /visitor/v1/live` is a WebSocket that needs an `Origin`. Its first frame (`hello`) carries the token within 10 seconds; the token is never a cookie or a URL. Frames are bounded (32 KiB of JSON, a message 16 KiB, a typing signal 1 KiB, an upload chunk 64 KiB with the staff socket's eight-byte header), counted per session per minute, and each proves the session, the origin and the site again before the channel sees it. A frame over the session's budget is refused before any of that is read. An idle socket rechecks every 60 seconds and closes at once on a staff revocation.
+- `GET /visitor/v1/client.js` serves the embeddable browser client (`bilibi_visitor::CLIENT_V1`, version 1 by its path): one dependency-free script that runs under a strict Content-Security-Policy and is readable by any page (`Cross-Origin-Resource-Policy: cross-origin`, five minutes of caching). `apps/base/visitor/README.md` has its attributes.
 - No cookie, session, CSRF secret or staff route is read or reachable: the token is a `vst_` credential in its own table. A visitor token sent as a cookie, a bearer or a query to any staff, portal, agent or live route proves nothing there.
 - A sender on this edge is its IPv4 address, or the /64 network of its IPv6 address, so one subscriber cannot take a fresh key per request.
-- Limits are `base/visitor`'s operator settings: sessions per sender and per site per minute, frames and files per session per minute, open sockets per session, per sender and in total (apart from the staff and portal sockets'), a file's size and the memory held for files still arriving (a stalled file is dropped after 30 seconds without a chunk).
+- Limits are `base/visitor`'s operator settings: sessions per sender and per site per minute, frames and files per session per minute, open sockets per session, per sender, per site and in total (apart from the staff and portal sockets'), a file's size and the memory held for files still arriving, counted as bytes arrive and at most one file's size limit per sender (a stalled file is dropped after 30 seconds without a chunk).
 
 `apps/web/examples/visitor-walkthrough.rs` is the running specimen and proof.
 
@@ -176,8 +177,8 @@ The host owns the machine endpoints; discovered pages cannot claim them
   (device, refresh and PKCE code grants). Errors are `400 {"error":code}`;
   storage failure is `503 temporarily_unavailable`. Each endpoint has its own
   per-sender bucket from `agent_access.oauth_requests_per_minute`. The sender
-  is the peer address, or the first non-loopback `X-Forwarded-For` hop when the
-  peer is a loopback proxy, counted by its IPv6 /64. `main.rs` serves with `ConnectInfo` for this.
+  is the client address (see "Client address" below), counted by its IPv6 /64.
+  `main.rs` serves with `ConnectInfo` for this.
 - `/api/v1`: `GET search` (`q`, `limit` 1–50, `kind` read|write,
   `include_unavailable`), `GET operations/{key}`, `GET guides/{key}`,
   `POST operations/{key}/call` (`{"input":{…}}`), `POST plans`
@@ -314,3 +315,14 @@ OAuth discovery advertises `/oauth/register` and client ID metadata documents. P
 **The top bar always names the selected desk; the route says whether it filters the page.** Routes declare `CompanyScope::Company` or `CompanyScope::Tenant`. Company pages show the desk label or switcher. Tenant-wide pages retain it as a plain label without the switcher. Menu leaves default to tenant scope; `.company_scoped()` must agree with the route, checked at boot.
 
 Staff work access comes from explicit desks. The shell offers only the person's live desks, and Session/Tenancy prove the selection on every request. One desk renders a plain label; several render **Switch desk** and **Your desks**. Removing a desk ends the person's sessions; the next sign-in selects another valid desk or no desk. Live pages retain their company fence and reload before acting when that context changes. Decision: [ADR 19](../../docs/architecture/decisions/19-company-work-access-and-page-scope.md).
+
+## Client address
+
+Every sender limit, sign-in record and audit row uses one answer to "who sent this request": `api::client_address`.
+
+- A direct connection: the peer address.
+- A reverse proxy on the same machine (the installer's Caddy): the last `X-Forwarded-For` hop that is not a trusted proxy. Nothing to configure.
+- A reverse proxy or load balancer on another machine: list its address or network in the operator setting `session.trusted_proxies` (`bilibi_base::session::TrustedProxies`). The router middleware `proxies::resolve` then puts the client the proxy named in the peer's place before any handler runs. Without the entry, the proxy is the sender and everyone behind it shares one budget.
+- A peer that is not this machine and not listed is never believed about `X-Forwarded-For`.
+
+The host reads the setting again when it changes in this process, and otherwise once a minute. Never read `X-Forwarded-For` or `ConnectInfo` in a handler for this; call `api::client_address` (or `api::sender_key` for a budget key). `apps/web/examples/visitor-walkthrough.rs` ("senders behind a proxy on another machine") is the running proof.

@@ -2,7 +2,10 @@
 //! code. The reference publisher (`fixtures/containers/event_publisher`) and
 //! subscriber (`fixtures/containers/event_subscriber`) are Domain containers
 //! that are never mounted in the Platform and never name each other. On a
-//! fresh disposable DATABASE_URL, run the four compositions in this order:
+//! fresh disposable DATABASE_URL, migrated and seeded first (`bilibi-web
+//! migrate`, then `BILIBI_ENV=development bilibi-web seed-production`: the
+//! Dev instance role keeps grant changes from asking for a second factor
+//! nobody enrolled), run the four compositions in this order:
 //!
 //! ```text
 //! cargo run -p bilibi-web --example events-reference                 # 1. nothing mounted
@@ -17,7 +20,9 @@
 //!
 //! Every composition boots, and every one prints the boot refusals of a
 //! subscriber in its publisher's own container and of a malformed event name.
-//! Unmounted, the publisher's command is unknown. With the publisher alone,
+//! Unmounted, the publisher's command is unknown, and the Events page's
+//! read is checked on rows written for a subscriber no build mounts (issue
+//! 547): a failed check ends the run with an error. With the publisher alone,
 //! a receipt records an event with no deliveries. With both, the subscriber
 //! is new: the earlier receipt is not delivered to it; a receipt from a
 //! supplier it has not onboarded is refused and retried while the return of
@@ -215,6 +220,91 @@ impl Proof {
         }
         Ok(())
     }
+    /// The Events page's read (`subscriber_states`) over rows written
+    /// directly, since no publisher is mounted: three events for a subscriber
+    /// this build does not mount, two delivered and one failing. The rows are
+    /// removed again, so the later compositions start as before.
+    async fn operator_reads(&self) -> Result<()> {
+        const GONE: &str = "walkthrough/gone.receipts";
+        let mut client = self.db.get().await?;
+        client.execute(
+            "INSERT INTO base_events(tenant_id,publisher,name,version,subject,event_key,payload,trace_id) \
+             SELECT 1,'walkthrough/gone','walkthrough/gone.noted',1,'note:1','noted:'||n,'{}'::jsonb,'walkthrough' FROM generate_series(1,3) n",
+            &[],
+        ).await?;
+        let ids: Vec<i64> = client
+            .query(
+                "SELECT id FROM base_events WHERE tenant_id=1 AND publisher='walkthrough/gone' ORDER BY id",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        client.execute(
+            "INSERT INTO base_events_deliveries(event_id,subscriber,attempts,last_error,failed_at,delivered_at) VALUES \
+             ($1,$4,1,NULL,NULL,clock_timestamp()),($2,$4,1,NULL,NULL,clock_timestamp()),($3,$4,2,'subscriber_refused',clock_timestamp(),NULL)",
+            &[&ids[0], &ids[1], &ids[2], &GONE],
+        ).await?;
+        let states = self
+            .events
+            .subscriber_states(&mut client, &self.admin)
+            .await?;
+        let gone = states.iter().find(|state| state.subscriber == GONE);
+        let read = gone.is_some_and(|state| {
+            !state.mounted
+                && state.pending == 1
+                && state.failing == 1
+                && state.first_pending == Some(ids[2])
+                && state
+                    .last_delivered
+                    .is_some_and(|last| last.event_id == ids[1])
+                && state.missed == 0
+                && !state.missed_more
+        });
+        println!(
+            "{} unmounted subscriber with two receipts and one failing delivery: {:?}",
+            if read { "ok   " } else { "FAIL " },
+            gone.map(|state| (
+                state.pending,
+                state.failing,
+                state.first_pending,
+                state.last_delivered.map(|last| last.event_id)
+            ))
+        );
+        client
+            .execute(
+                "DELETE FROM base_events_deliveries WHERE subscriber=$1 AND delivered_at IS NULL",
+                &[&GONE],
+            )
+            .await?;
+        let states = self
+            .events
+            .subscriber_states(&mut client, &self.admin)
+            .await?;
+        let dropped = states.iter().all(|state| state.subscriber != GONE);
+        println!(
+            "{} with nothing pending, the unmounted subscriber is no longer listed",
+            if dropped { "ok   " } else { "FAIL " }
+        );
+        client
+            .execute(
+                "DELETE FROM base_events_deliveries WHERE subscriber=$1",
+                &[&GONE],
+            )
+            .await?;
+        client
+            .execute(
+                "DELETE FROM base_events WHERE tenant_id=1 AND publisher='walkthrough/gone'",
+                &[],
+            )
+            .await?;
+        if read && dropped {
+            Ok(())
+        } else {
+            Err(Error::Internal)
+        }
+    }
     async fn copy(&self) -> Result<()> {
         let client = self.db.get().await?;
         for row in client.query("SELECT receipt_number,supplier,quantity::text,returned_event IS NOT NULL FROM event_subscriber_receipts WHERE tenant_id=1 ORDER BY receipt_number", &[]).await? {
@@ -341,7 +431,8 @@ async fn main() -> Result<()> {
             );
             proof
                 .state("no publisher mounted: nothing new is recorded or delivered")
-                .await
+                .await?;
+            proof.operator_reads().await
         }
         (true, false) => {
             proof.receive("GRN-0001", "ACME", "12.5").await?;

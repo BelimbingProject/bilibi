@@ -854,7 +854,7 @@ inventory::submit! {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, views: services.get(bilibi_grid::PAGE_VIEWS)?, datetime: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, picklists: services.get(bilibi_picklists::SERVICE)?, records: services.get(bilibi_records::SERVICE)?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, record_panels: web::record_panels()?,
             })))) },
             bilibi_module_registry::Service { id: web::relationships::SERVICE, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::relationships::RelationshipPages {
-                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, persons: services.get(bilibi_person::SERVICE)?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, records: services.get(bilibi_records::SERVICE)?,
                 contracts: services.get(bilibi_agent_api::page::SERVICE)?,
             })))) },
         ],
@@ -1064,7 +1064,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
     service: "core/company.pages",
     contracts: &[("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update")],
     pending: bilibi_module_registry::contributions::Pending::Events {
-        events: &["save_field", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
-        reason: "Built-in facts, activities, lifecycle and Company create still write through their owner facade.",
+        events: &["save_field", "pick_parent", "remove_parent", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
+        reason: "Built-in facts (the parent picker included), activities, lifecycle and Company create still write through their owner facade.",
     },
 }) }

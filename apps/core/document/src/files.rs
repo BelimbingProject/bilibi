@@ -28,7 +28,7 @@ use crate::{
 use bilibi_artifacts::{Artifacts, Operation, Owner, Reference};
 use bilibi_audit::{record_action, Attribution};
 use bilibi_authz::{authorize_proof, holds_proof};
-use bilibi_database::{Change, Error, MutationBoundary, Result};
+use bilibi_database::{Change, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_media::{
     AttachmentSubject, Media, Rules as MediaRules, ScanState as MediaScanState, SubjectAction,
     SubjectOwner, Upload as MediaUpload,
@@ -187,6 +187,12 @@ impl Owner for DocumentFiles {
                         .await?
                         .ok_or(Error::NotFound)?;
                 }
+                Operation::Delete if scope.principal() == Some(crate::deletion::PRINCIPAL) => {
+                    parties
+                        .organisation_name(client, scope, company)
+                        .await?
+                        .ok_or(Error::NotFound)?;
+                }
                 Operation::Create | Operation::Delete | Operation::Retain => {
                     parties.organisation(client, scope, company).await?;
                 }
@@ -271,8 +277,21 @@ impl Owner for DocumentFiles {
                     }
                 }
                 Operation::Delete => {
-                    authorize_proof(client, scope, MANAGE).await?;
+                    let deleter = scope.principal() == Some(crate::deletion::PRINCIPAL);
+                    authorize_proof(
+                        client,
+                        scope,
+                        if deleter {
+                            crate::contributions::DELETION_SETTLE
+                        } else {
+                            MANAGE
+                        },
+                    )
+                    .await?;
                     match row.state.as_str() {
+                        // The deleter only ever finishes a delete a person
+                        // confirmed: an attached file of a deleting document.
+                        "reserved" | "stored" if deleter => false,
                         "reserved" | "stored" => own,
                         "attached" => client
                             .query_opt(
@@ -379,7 +398,11 @@ fn media_error(error: bilibi_media::Error) -> WriteError {
 }
 
 /// The upload limit: the tenant's, never above the operator's.
-async fn upload_limit(client: &Client, scope: &Scope, settings: &Settings) -> Result<u64> {
+pub(crate) async fn upload_limit(
+    client: &Client,
+    scope: &Scope,
+    settings: &Settings,
+) -> Result<u64> {
     let tenant = settings
         .get(client, scope, Target::Tenant, MAX_UPLOAD_BYTES)
         .await?
@@ -698,31 +721,21 @@ pub(crate) async fn attached_document(
     Ok(row.map(|row| row.get(0)))
 }
 
-/// Removes metadata only after every Artifact has accepted deletion. Until
-/// this commits, the document and its full revision history remain available
-/// to retention and legal-hold checks.
+/// Removes metadata only after every Artifact has accepted deletion, in the
+/// deletion job's transaction (`deletion.rs`). Until this commits, the
+/// document and its full revision history remain available to retention and
+/// legal-hold checks. A document no longer deleting (finished meanwhile) is
+/// left alone.
 pub(crate) async fn finalize_document_delete(
-    client: &mut Client,
-    scope: &Scope,
-    boundary: &MutationBoundary,
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
     document: i64,
 ) -> Result<()> {
-    authorize_proof(&*client, scope, MANAGE).await?;
-    if !store::permission(&*client, scope, document, "manage").await? {
-        return Err(Error::Forbidden);
-    }
-    let mut tx = boundary
-        .begin(
-            client,
-            scope.mutation_context("core.document.delete.finalize"),
-        )
-        .await?;
-    let tenant = scope.tenant();
     tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_opt(
+        let Some(row) = sql.query_opt(
             "SELECT name,version FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL FOR UPDATE",
             &[&tenant, &document],
-        ).await?.ok_or(Error::NotFound)?;
+        ).await? else { return Ok(((), Vec::new())); };
         let mut changes = Vec::new();
         for row in sql.query(
             "DELETE FROM core_document_marks WHERE tenant_id=$1 AND document_id=$2 RETURNING id,user_id,favourite,following",
@@ -775,8 +788,7 @@ pub(crate) async fn finalize_document_delete(
         sql.execute("DELETE FROM core_documents WHERE tenant_id=$1 AND id=$2", &[&tenant, &document]).await?;
         changes.push(Change { kind: crate::RECORD.into(), id: document, old: json!({"name":row.get::<_,String>(0),"version":row.get::<_,i64>(1),"deleting":true}), new: json!({}) });
         Ok(((), changes))
-    })).await?;
-    tx.commit().await
+    })).await
 }
 
 /// Deletes unattached files from `base/artifacts`, then their ledger rows.

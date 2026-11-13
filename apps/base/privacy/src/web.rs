@@ -21,7 +21,7 @@ use bilibi_authz::effective_capabilities;
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
 use bilibi_locale::Locales;
-use bilibi_personal_data::Identifier;
+use bilibi_personal_data::{Identifier, Located};
 use bilibi_tenancy::{PartyProofs, Scope};
 use bilibi_ui::{
     download::{Download, DownloadFuture, DownloadRequest, FileBody},
@@ -629,6 +629,11 @@ struct RequestPage {
     flash: Option<(StatusKind, String)>,
     /// The reason given for this export download, once.
     export_reason: Option<String>,
+    /// What every store holds, located once per mounted page while the
+    /// request is open (#565): a store's email and phone match can scan all
+    /// it keeps, and the page renders after every input. A write from this
+    /// page, or Find again, locates again.
+    located: Option<Vec<(String, String, Located)>>,
 }
 fn summary(result: &Option<Value>) -> String {
     let Some(result) = result else {
@@ -659,6 +664,15 @@ fn summary(result: &Option<Value>) -> String {
     {
         parts.push(format!("{files} files listed"));
     }
+    if let Some(left) = result
+        .get("unconfirmed")
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+    {
+        parts.push(format!(
+            "{left} found only by email or phone left unconfirmed"
+        ));
+    }
     if let Some(deferral) = result.get("deferral").filter(|d| !d.is_null()) {
         parts.push(format!(
             "deferred until {}",
@@ -687,6 +701,7 @@ impl RequestPage {
             dialog: None,
             flash: None,
             export_reason: None,
+            located: None,
         })
     }
     fn version(&self) -> i64 {
@@ -704,16 +719,20 @@ impl RequestPage {
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
             "clear-flash" => clear_flash(&mut self.flash, value),
+            "locate_again" => self.located = None,
             "open_verify" => {
-                let client = self.pages.db.get().await?;
+                if self.located.is_none() {
+                    let client = self.pages.db.get().await?;
+                    self.located = Some(self.pages.privacy.locate(&client, scope, id).await?);
+                }
                 let mut candidates = Vec::new();
-                for (store, label, found) in self.pages.privacy.locate(&client, scope, id).await? {
-                    for candidate in found.candidates {
+                for (store, label, found) in self.located.iter().flatten() {
+                    for candidate in &found.candidates {
                         candidates.push((
                             ConfirmedRecord {
                                 store: store.clone(),
-                                kind: candidate.kind,
-                                id: candidate.id,
+                                kind: candidate.kind.clone(),
+                                id: candidate.id.clone(),
                             },
                             format!("{label}: {}", candidate.summary),
                         ));
@@ -795,6 +814,7 @@ impl RequestPage {
                 {
                     Ok(_) => {
                         self.dialog = None;
+                        self.located = None;
                         let erasure = self
                             .request
                             .as_ref()
@@ -846,6 +866,7 @@ impl RequestPage {
                     .await
                 {
                     Ok(_) => {
+                        self.located = None;
                         self.flash = Some((
                             StatusKind::Success,
                             "Approved. Every store is being answered in the background.".into(),
@@ -869,12 +890,18 @@ impl RequestPage {
                     .pages
                     .contracts
                     .submit(
-                        &call(scope, credential, "run_again", "base.privacy.request.run_again"),
+                        &call(
+                            scope,
+                            credential,
+                            "run_again",
+                            "base.privacy.request.run_again",
+                        ),
                         input,
                     )
                     .await
                 {
                     Ok(_) => {
+                        self.located = None;
                         self.flash = Some((
                             StatusKind::Success,
                             "Running again. Every store that had not answered is asked again in the background.".into(),
@@ -892,7 +919,10 @@ impl RequestPage {
             "submit" => {
                 let input = json!({"id": id, "version": self.version()});
                 match self.pages.contracts.submit(&call(scope, credential, "submit", "base.privacy.erasure.submit"), input).await {
-                    Ok(_) => self.flash = Some((StatusKind::Success, "Sent for approval. Someone independent of this request decides on Waiting for my approval.".into())),
+                    Ok(_) => {
+                        self.located = None;
+                        self.flash = Some((StatusKind::Success, "Sent for approval. Someone independent of this request decides on Waiting for my approval.".into()));
+                    }
                     Err(error) => {
                         self.flash = Some(refusal(
                             error,
@@ -947,11 +977,18 @@ impl RequestPage {
         let open = matches!(request.status.as_str(), "received" | "verified")
             && !request.approval_awaiting;
         let erasure = request.kind == RequestKind::Erasure;
-        let located = if open {
-            pages.privacy.locate(&client, scope, self.id).await?
-        } else {
-            Vec::new()
-        };
+        if open && self.located.is_none() {
+            self.located = Some(match pages.privacy.locate(&client, scope, self.id).await {
+                Ok(found) => found,
+                Err(_) => {
+                    self.flash = Some((
+                        StatusKind::Warning,
+                        "The stores could not be searched for this person just now. Select Find again to retry.".into(),
+                    ));
+                    Vec::new()
+                }
+            });
+        }
         let mut rows: BTreeMap<String, StoreRow> = BTreeMap::new();
         for (store, label) in pages.privacy.stores() {
             rows.insert(
@@ -967,7 +1004,7 @@ impl RequestPage {
                 },
             );
         }
-        for (store, _, found) in &located {
+        for (store, _, found) in self.located.iter().flatten().filter(|_| open) {
             if let Some(row) = rows.get_mut(store) {
                 row.found = Some(found.kinds.iter().map(|k| k.by_person).sum());
                 row.matched = Some(found.kinds.iter().map(|k| k.by_identifier).sum());
@@ -1001,9 +1038,13 @@ impl RequestPage {
                 "pending" => "Working".into(),
                 "answered" => "Answered".into(),
                 "deferred" => "Deferred".into(),
+                "unmounted" => "Not asked: no longer installed".into(),
                 other => other.into(),
             };
-            row.result = summary(&progress.result);
+            row.result = match summary(&progress.result) {
+                text if progress.state == "unmounted" && text == "Nothing held" => "—".into(),
+                text => text,
+            };
             row.attempts = progress.attempts;
         }
         self.rows = rows.into_values().collect();
@@ -1207,16 +1248,27 @@ impl RequestPage {
             body: facts,
             ..Card::default()
         })?;
+        let find_again = if open {
+            render(Button {
+                event: "locate_again",
+                id: "privacy-locate-again",
+                body: Html::text("Find again"),
+                ..Button::default()
+            })?
+        } else {
+            Html::EMPTY
+        };
         body.push(&render(SectionHeading {
             title: "Stores",
             id: "privacy-request-stores-heading",
             description: if open {
-                "What each store holds about the person. Verifying confirms the email and phone matches; approving runs every store."
+                "What each store held about the person when last searched; Find again searches now. Verifying confirms the email and phone matches; approving runs every store."
             } else if request.status == "failed" {
-                "Run again asks every store that has not answered; the others keep their answers."
+                "Run again asks every store that has not answered, and any store installed since; the others keep their answers."
             } else {
-                "Every store mounted on this server must answer before the request completes."
+                "Every store the request runs in must answer before it completes."
             },
+            actions: find_again,
             ..SectionHeading::default()
         })?);
         let mut table_rows = Vec::with_capacity(self.rows.len());

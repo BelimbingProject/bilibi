@@ -11,15 +11,20 @@
 //! browser by hand: it opens sessions from allowed and refused origins, chats
 //! over the socket (messages, typing, a clean and an infected file, an
 //! oversize file, a broken chunk, a file of several chunks, the in-transit
-//! budget and a stalled file), sees a staff reply arrive, hits each rate
-//! limit, expires, renews, ends and revokes a session, proves another
+//! budget, one sender's share of it and a stalled file), sees a staff reply
+//! arrive, hits each rate limit (a frame over its budget costs no session
+//! read), fills a site's and a sender's sockets, sends requests through a
+//! proxy on another machine before and after the operator lists it,
+//! expires, renews, ends and revokes a session, proves another
 //! tenant's visitor sees none of this tenant's conversations, and sends a
 //! visitor token to every kind of staff route. Each line says what was sent
 //! and what answered; a line starting `FAIL` makes the run exit non-zero.
 //!
 //! `serve` runs the host for a real browser on BIND_ADDR (APP_ORIGIN must be
-//! its address) and a staff control address on CONTROL_ADDR (default
-//! 127.0.0.1:3991): `/reply?subject=…&text=…`, `/revoke?subject=…`,
+//! its address), a customer's page on another origin on PAGE_ADDR (default
+//! 127.0.0.1:3992, which embeds the client under a strict Content-Security-
+//! Policy: `/?site=other-desk` embeds the other tenant's site) and a staff
+//! control address on CONTROL_ADDR (default 127.0.0.1:3991): `/reply?subject=…&text=…`, `/revoke?subject=…`,
 //! `/origins?site=…&list=…` (comma-separated; empty closes the site) and
 //! `/state`. VISITOR_ORIGINS (comma-separated) lists the origins the sites
 //! allow; the sites are `front-desk` (tenant 1) and `other-desk` (tenant 2).
@@ -422,6 +427,7 @@ async fn serve(db: Db) -> Result<()> {
         .filter(|origin| !origin.is_empty())
         .map(str::to_owned)
         .collect();
+    let page = std::env::var("PAGE_ADDR").unwrap_or_else(|_| "127.0.0.1:3992".into());
     open_sites(&pages, &pages);
     let app = bilibi_web::App::new(db.clone(), &origin)?;
     let setup = prepare_host(&db, app.services.clone()).await?;
@@ -432,10 +438,11 @@ async fn serve(db: Db) -> Result<()> {
         db.clone(),
         control.clone(),
     ));
+    tokio::spawn(page_server(page.clone(), origin.clone()));
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(internal)?;
-    println!("Bilibi at {origin}; staff control at http://{control}; sites allow {pages:?}");
+    println!("Bilibi at {origin}; customer page at http://{page}; staff control at http://{control}; sites allow {pages:?}");
     let served = axum::serve(
         listener,
         bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -454,6 +461,34 @@ fn executor(services: &Services) -> Result<Arc<Executor>> {
             ..Config::default()
         },
     )
+}
+/// A customer's page on its own origin: nothing but the embed, under a
+/// policy that allows scripts and connections to the Bilibi host only (no
+/// inline script, no inline style, no frames, no images).
+async fn page_server(address: String, host: String) {
+    use axum::{extract::Query, http::header, response::IntoResponse, routing::get, Router};
+    let socket = host.replacen("http", "ws", 1);
+    let policy = format!(
+        "default-src 'none'; script-src {host}; connect-src {host} {socket}; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    let router = Router::new().route(
+        "/",
+        get(move |Query(q): Query<HashMap<String, String>>| {
+            let policy = policy.clone();
+            let host = host.clone();
+            async move {
+                let site = q.get("site").map_or("front-desk", String::as_str);
+                let site: String = site.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+                let body = format!(
+                    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>A customer's website</title></head><body><h1>A customer's website</h1><p>This page is served from another origin than Bilibi. It embeds the visitor chat with one script tag.</p><script src=\"{host}/visitor/v1/client.js\" data-channel=\"{CHANNEL}\" data-site=\"{site}\" data-title=\"Chat with us\" async></script></body></html>"
+                );
+                ([(header::CONTENT_SECURITY_POLICY, policy), (header::CONTENT_TYPE, "text/html; charset=utf-8".into())], body).into_response()
+            }
+        }),
+    );
+    if let Ok(listener) = tokio::net::TcpListener::bind(&address).await {
+        let _ = axum::serve(listener, router).await;
+    }
 }
 /// The staff side for a browser proof, on its own local address.
 async fn control_server(services: Arc<Services>, db: Db, address: String) {
@@ -675,7 +710,10 @@ async fn next(ws: &mut Socket, seconds: u64) -> Option<Value> {
         match tokio::time::timeout(Duration::from_secs(seconds), ws.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => return serde_json::from_str(&text).ok(),
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
-            _ => return None,
+            other => {
+                eprintln!("  (socket gave nothing more: {other:?})");
+                return None;
+            }
         }
     }
 }
@@ -707,6 +745,66 @@ async fn open(addr: &str, site: &str, origin: Option<&str>) -> Reply {
     )
     .await
 }
+/// Plays a connection from another machine: a request that names
+/// `X-Walkthrough-Peer` reaches the host as if that address had connected.
+/// Only this walkthrough's server has it.
+async fn played_peer(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let peer = request
+        .headers()
+        .get("x-walkthrough-peer")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<std::net::IpAddr>().ok());
+    if let Some(peer) = peer {
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                peer, 40_000,
+            )));
+    }
+    next.run(request).await
+}
+/// Opens three sessions as connections from `peer` carrying `forwarded`,
+/// and answers their statuses.
+async fn open_through(addr: &str, peer: &str, forwarded: &str) -> Vec<u16> {
+    let mut statuses = Vec::new();
+    for _ in 0..3 {
+        let reply = http(
+            addr,
+            "POST",
+            "/visitor/v1/sessions",
+            &[
+                ("Content-Type", "text/plain;charset=UTF-8"),
+                ("Origin", "https://shop.example.test"),
+                ("X-Walkthrough-Peer", peer),
+                ("X-Forwarded-For", forwarded),
+            ],
+            &json!({"channel": CHANNEL, "site": "front-desk"}).to_string(),
+        )
+        .await;
+        statuses.push(reply.status);
+    }
+    statuses
+}
+/// Waits for the next minute when this one is more than `seconds` old: the
+/// host counts each budget by the clock's minute.
+async fn early_in_minute(seconds: u64) {
+    let into = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() % 60);
+    if into > seconds {
+        tokio::time::sleep(Duration::from_secs(61 - into)).await;
+    }
+}
+/// One upload chunk: `[entry id][offset][bytes]`.
+async fn chunk(ws: &mut Socket, id: u32, offset: u32, bytes: &[u8]) {
+    let mut frame = id.to_be_bytes().to_vec();
+    frame.extend_from_slice(&offset.to_be_bytes());
+    frame.extend_from_slice(bytes);
+    ws.send(Message::Binary(frame.into())).await.expect("send");
+}
 async fn count(client: &tokio_postgres::Client, sql: &str) -> i64 {
     client
         .query_one(sql, &[])
@@ -730,7 +828,9 @@ async fn prepare(db: Db) -> Result<()> {
     tokio::spawn(async move {
         let _ = axum::serve(
             listener,
-            bilibi_web::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            bilibi_web::router(app)
+                .layer(axum::middleware::from_fn(played_peer))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await;
     });
@@ -863,6 +963,24 @@ async fn prepare(db: Db) -> Result<()> {
         "a preflight is never answered with permission",
         preflight.header("access-control-allow-origin").is_none(),
         format!("{}", preflight.status),
+    );
+
+    let script = http(&addr, "GET", "/visitor/v1/client.js", &[], "").await;
+    run.expect(
+        "the embeddable script is served as JavaScript any page may load, with no cookie",
+        script.status == 200
+            && script
+                .header("content-type")
+                .is_some_and(|t| t.starts_with("text/javascript"))
+            && script.header("cross-origin-resource-policy") == Some("cross-origin")
+            && script.header("set-cookie").is_none()
+            && script.body.contains("Bilibi visitor chat client v1"),
+        format!(
+            "{} {:?} {} bytes",
+            script.status,
+            script.header("content-type"),
+            script.body.len()
+        ),
     );
 
     println!("== chatting over the socket");
@@ -1058,6 +1176,7 @@ async fn prepare(db: Db) -> Result<()> {
     )
     .await;
     let held = until(&mut ws, "upload_ready", 5).await;
+    chunk(&mut ws, 12, 0, &[b'h'; 1_000]).await;
     let mut second = socket(&addr, Some(PAGE)).await.expect("socket");
     hello(&mut second, &token, None).await;
     let _ = until(&mut second, "ready", 5).await;
@@ -1066,14 +1185,17 @@ async fn prepare(db: Db) -> Result<()> {
         json!({"type": "upload", "id": 13, "name": "waiting.txt", "size": 1_500}),
     )
     .await;
+    let announced = until(&mut second, "upload_ready", 5).await;
+    chunk(&mut second, 13, 0, &[b'w'; 1_500]).await;
     let over = until(&mut second, "error", 5).await;
     run.expect(
-        "a file announced beyond the server's in-transit budget is refused",
+        "an announced file holds nothing; bytes beyond the server's in-transit budget are refused",
         held.is_some()
+            && announced.is_some()
             && over
                 .as_ref()
                 .is_some_and(|f| f["id"] == 13 && f["code"] == "rate_limited"),
-        format!("{over:?}"),
+        format!("announced {announced:?}, then {over:?}"),
     );
     let waited = std::time::Instant::now();
     let stalled = until(&mut ws, "error", 40).await;
@@ -1097,6 +1219,77 @@ async fn prepare(db: Db) -> Result<()> {
         &mut client,
         "visitor.upload_buffer_bytes",
         json!(268_435_456u64),
+    )
+    .await?;
+    // One sender may hold one file's size limit of the budget, whatever the
+    // number of its sessions and sockets.
+    setting(
+        &setup,
+        &mut client,
+        "visitor.upload_max_bytes",
+        json!(2_048),
+    )
+    .await?;
+    let share_a = open(&addr, "front-desk", Some(PAGE)).await.json();
+    let share_b = open(&addr, "front-desk", Some(PAGE)).await.json();
+    let mut near = socket_from(&addr, Some(PAGE), Some("203.0.113.40"))
+        .await
+        .expect("socket");
+    hello(
+        &mut near,
+        share_a["token"].as_str().unwrap_or_default(),
+        None,
+    )
+    .await;
+    let _ = until(&mut near, "ready", 5).await;
+    say(
+        &mut near,
+        json!({"type": "upload", "id": 15, "name": "first.txt", "size": 1_500}),
+    )
+    .await;
+    let _ = until(&mut near, "upload_ready", 5).await;
+    chunk(&mut near, 15, 0, &[b'a'; 1_000]).await;
+    let mut beside = socket_from(&addr, Some(PAGE), Some("203.0.113.40"))
+        .await
+        .expect("socket");
+    hello(
+        &mut beside,
+        share_b["token"].as_str().unwrap_or_default(),
+        None,
+    )
+    .await;
+    let _ = until(&mut beside, "ready", 5).await;
+    say(
+        &mut beside,
+        json!({"type": "upload", "id": 16, "name": "second.txt", "size": 1_500}),
+    )
+    .await;
+    let _ = until(&mut beside, "upload_ready", 5).await;
+    chunk(&mut beside, 16, 0, &[b'b'; 1_500]).await;
+    let shared = until(&mut beside, "error", 5).await;
+    let mut far = socket(&addr, Some(PAGE)).await.expect("socket");
+    hello(
+        &mut far,
+        share_b["token"].as_str().unwrap_or_default(),
+        None,
+    )
+    .await;
+    let _ = until(&mut far, "ready", 5).await;
+    let apart = send_file(&mut far, 17, "elsewhere.txt", &[b'c'; 1_500]).await;
+    run.expect(
+        "one sender's files in transit stop at one file's size limit; another sender's file goes through",
+        shared
+            .as_ref()
+            .is_some_and(|f| f["id"] == 16 && f["code"] == "rate_limited")
+            && apart.as_ref().is_some_and(|f| f["type"] == "ack"),
+        format!("same sender {shared:?}; another sender {apart:?}"),
+    );
+    drop((near, beside, far));
+    setting(
+        &setup,
+        &mut client,
+        "visitor.upload_max_bytes",
+        json!(5_242_880),
     )
     .await?;
 
@@ -1376,6 +1569,9 @@ async fn prepare(db: Db) -> Result<()> {
 
     println!("== rate limits");
     setting(&setup, &mut client, "visitor.messages_per_minute", json!(5)).await?;
+    // Budgets are counted by the clock's minute; the cases below need twelve
+    // quiet seconds inside the one they filled.
+    early_in_minute(35).await;
     let mut limited = None;
     let mut rate = socket(&addr, Some(PAGE)).await.expect("upgrade");
     let burst = open(&addr, "front-desk", Some(PAGE)).await.json();
@@ -1394,6 +1590,44 @@ async fn prepare(db: Db) -> Result<()> {
             .as_ref()
             .is_some_and(|f| f["code"] == "rate_limited"),
         format!("{limited:?}"),
+    );
+    say(
+        &mut rate,
+        json!({"type": "message", "id": 77, "body": {"text": "one too many"}}),
+    )
+    .await;
+    let named = until(&mut rate, "error", 2).await;
+    run.expect(
+        "a message refused by the budget is named by its id, so the browser can give it back",
+        named
+            .as_ref()
+            .is_some_and(|f| f["id"] == 77 && f["code"] == "rate_limited"),
+        format!("{named:?}"),
+    );
+    // The session ends where this server is not told (another server's
+    // revocation): the row changes and no revocation is announced here.
+    client
+        .execute(
+            "UPDATE visitor_sessions SET revoked_at = now(), revoked_reason = 'staff' WHERE token_digest = sha256(convert_to($1, 'UTF8'))",
+            &[&burst["token"].as_str().unwrap_or_default()],
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    say(&mut rate, json!({"type": "typing", "body": {"n": 99}})).await;
+    let unread = next(&mut rate, 3).await;
+    run.expect(
+        "a frame over the budget is refused before the session is read, and an idle socket is not rechecked every 10 seconds",
+        unread
+            .as_ref()
+            .is_some_and(|f| f["type"] == "error" && f["code"] == "rate_limited"),
+        format!("12 s after the session ended elsewhere: {unread:?}"),
+    );
+    chunk(&mut rate, 1, 0, b"x").await;
+    let proved = until(&mut rate, "closed", 5).await;
+    run.expect(
+        "a frame inside its budget still proves the session before it acts",
+        proved.as_ref().is_some_and(|f| f["reason"] == "ended"),
+        format!("{proved:?}"),
     );
     setting(
         &setup,
@@ -1486,6 +1720,147 @@ async fn prepare(db: Db) -> Result<()> {
     );
     drop((held, elsewhere, again));
     setting(&setup, &mut client, "visitor.sockets_per_sender", json!(20)).await?;
+
+    println!("== open sockets per site");
+    for site in ["side-desk", "back-desk"] {
+        conversations()
+            .sites
+            .lock()
+            .unwrap()
+            .insert(site.into(), (1, vec![PAGE.into()]));
+    }
+    setting(&setup, &mut client, "visitor.sockets_per_site", json!(1)).await?;
+    let mut greeted = Vec::new();
+    for site in ["side-desk", "side-desk", "back-desk"] {
+        let session = open(&addr, site, Some(PAGE)).await.json();
+        let mut ws = socket(&addr, Some(PAGE)).await.expect("upgrade");
+        hello(&mut ws, session["token"].as_str().unwrap_or_default(), None).await;
+        let answer = next(&mut ws, 5).await;
+        greeted.push((ws, session, answer));
+    }
+    let answers: Vec<String> = greeted
+        .iter()
+        .map(|(_, _, answer)| {
+            answer.as_ref().map_or("nothing".into(), |f| {
+                format!("{} {}", f["type"], f["reason"])
+            })
+        })
+        .collect();
+    run.expect(
+        "a site's open sockets stop at the per-site limit; another site still opens one",
+        greeted[0].2.as_ref().is_some_and(|f| f["type"] == "ready")
+            && greeted[1]
+                .2
+                .as_ref()
+                .is_some_and(|f| f["type"] == "closed" && f["reason"] == "rate_limited")
+            && greeted[2].2.as_ref().is_some_and(|f| f["type"] == "ready"),
+        format!("side-desk, side-desk, back-desk: {answers:?}"),
+    );
+    let waiting_token = greeted[1].1["token"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let (mut leaving, _, _) = greeted.remove(0);
+    let _ = leaving.close(None).await;
+    let mut place = None;
+    for _ in 0..30 {
+        let mut ws = socket(&addr, Some(PAGE)).await.expect("upgrade");
+        hello(&mut ws, &waiting_token, None).await;
+        place = next(&mut ws, 5).await;
+        if place.as_ref().is_some_and(|f| f["type"] == "ready") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    run.expect(
+        "a closed socket gives its place back to its site",
+        place.as_ref().is_some_and(|f| f["type"] == "ready"),
+        format!("{place:?}"),
+    );
+    drop(greeted);
+    setting(&setup, &mut client, "visitor.sockets_per_site", json!(500)).await?;
+
+    println!("== senders behind a proxy on another machine");
+    setting(
+        &setup,
+        &mut client,
+        "visitor.sessions_per_sender_per_minute",
+        json!(2),
+    )
+    .await?;
+    // Every case below reads budgets filled earlier in the same minute.
+    early_in_minute(45).await;
+    let unlisted = open_through(&addr, "10.9.0.5", "203.0.113.1").await;
+    let unlisted_other = open_through(&addr, "10.9.0.5", "203.0.113.2").await;
+    run.expect(
+        "a proxy the operator has not listed is the sender: everyone behind it shares its budget",
+        unlisted == [200, 200, 429] && unlisted_other == [429, 429, 429],
+        format!("first client {unlisted:?}, second client {unlisted_other:?}"),
+    );
+    let everyone = setting(
+        &setup,
+        &mut client,
+        "session.trusted_proxies",
+        json!("0.0.0.0/0"),
+    )
+    .await;
+    let nonsense = setting(
+        &setup,
+        &mut client,
+        "session.trusted_proxies",
+        json!("the load balancer"),
+    )
+    .await;
+    run.expect(
+        "the setting refuses a list that trusts every address, or is not addresses",
+        everyone.is_err() && nonsense.is_err(),
+        format!("0.0.0.0/0: {everyone:?}; words: {nonsense:?}"),
+    );
+    setting(
+        &setup,
+        &mut client,
+        "session.trusted_proxies",
+        json!("10.9.0.0/24, fd00:9::1"),
+    )
+    .await?;
+    let listed = open_through(&addr, "10.9.0.5", "203.0.113.11").await;
+    let listed_other = open_through(&addr, "10.9.0.5", "203.0.113.12").await;
+    let listed_v6 = open_through(&addr, "fd00:9::1", "203.0.113.13").await;
+    run.expect(
+        "once the proxy is listed, each client behind it has its own budget",
+        listed == [200, 200, 429]
+            && listed_other == [200, 200, 429]
+            && listed_v6 == [200, 200, 429],
+        format!("clients {listed:?}, {listed_other:?}, through the IPv6 proxy {listed_v6:?}"),
+    );
+    let pretender = open_through(&addr, "198.51.100.9", "203.0.113.21").await;
+    let pretender_again = open_through(&addr, "198.51.100.9", "203.0.113.22").await;
+    run.expect(
+        "an address that is not listed is never believed about who the client is",
+        pretender == [200, 200, 429] && pretender_again == [429, 429, 429],
+        format!("naming one client {pretender:?}, naming another {pretender_again:?}"),
+    );
+    let appended = open_through(&addr, "10.9.0.5", "203.0.113.31, 203.0.113.30").await;
+    let appended_again = open_through(&addr, "10.9.0.5", "203.0.113.32, 203.0.113.30").await;
+    run.expect(
+        "the client is the address the proxy appended, not one the client wrote before it",
+        appended == [200, 200, 429] && appended_again == [429, 429, 429],
+        format!("{appended:?}, then with another made-up first hop {appended_again:?}"),
+    );
+    setting(&setup, &mut client, "session.trusted_proxies", json!("")).await?;
+    let unlisted_again = open_through(&addr, "10.9.0.5", "203.0.113.41").await;
+    run.expect(
+        "emptying the list applies at once: the proxy is the sender again",
+        unlisted_again == [429, 429, 429],
+        format!("{unlisted_again:?}"),
+    );
+    setting(
+        &setup,
+        &mut client,
+        "visitor.sessions_per_sender_per_minute",
+        json!(10_000),
+    )
+    .await?;
 
     println!("== a visitor token against every staff route");
     let t = token.as_str();

@@ -17,6 +17,7 @@ mod pdf;
 mod perf;
 mod portal;
 mod portal_auth;
+mod proxies;
 mod routes;
 mod scim;
 mod shell;
@@ -70,6 +71,7 @@ pub struct App {
     api: Arc<api::Edge>,
     webhooks: Arc<webhooks::Boundary>,
     visitor: Arc<visitor::Boundary>,
+    proxies: Arc<proxies::Proxies>,
 }
 impl App {
     /// Which instance this is, with the operator's label and colour
@@ -114,7 +116,7 @@ impl App {
         let security = services.get("base/security.guard")?;
         let step_up: Arc<bilibi_base::step_up::StepUp> =
             services.get(bilibi_base::step_up::SERVICE)?;
-        let settings = services.get("base/settings.store")?;
+        let settings: Arc<bilibi_base::settings::Settings> = services.get("base/settings.store")?;
         let renderer = services.get("base/ui.renderer")?;
         for entry in services
             .catalog()?
@@ -142,6 +144,7 @@ impl App {
         let api = Arc::new(api::Edge::new(&services)?);
         let webhooks = Arc::new(webhooks::Boundary::bind(&services)?);
         let visitor = Arc::new(visitor::Boundary::bind(&services)?);
+        let proxies = Arc::new(proxies::Proxies::new(&settings));
         Ok(Self {
             routes,
             downloads,
@@ -166,6 +169,7 @@ impl App {
             api,
             webhooks,
             visitor,
+            proxies,
             services: Arc::new(services),
         })
     }
@@ -429,6 +433,10 @@ pub fn router(app: App) -> Router {
                 )),
         )
         .layer(middleware::from_fn_with_state(perf, perf::requests))
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            proxies::resolve,
+        ))
         .with_state(app)
 }
 

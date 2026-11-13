@@ -548,7 +548,7 @@ async fn main() -> Result<()> {
             .execute("DELETE FROM base_audit_mutations WHERE id=$1", &[&row])
             .await,
     );
-    for report in bilibi_audit_verify(&client).await? {
+    for report in bilibi_audit_verify(&boundary, &mut client, &admin.scope).await? {
         println!("verify: {report}");
     }
 
@@ -2347,7 +2347,7 @@ async fn main() -> Result<()> {
              SET session_replication_role = origin;",
         )
         .await?;
-    for report in bilibi_audit_verify(&client).await? {
+    for report in bilibi_audit_verify(&boundary, &mut client, &admin.scope).await? {
         println!("verify: {report}");
     }
 
@@ -2401,9 +2401,27 @@ async fn search_everywhere(client: &Client, needle: &str) -> Result<Vec<String>>
     Ok(hits)
 }
 
-async fn bilibi_audit_verify(client: &Client) -> Result<Vec<String>> {
-    Ok(bilibi_base::audit::verify(client)
-        .await?
+/// One verification, started as the page starts it and stepped here as its
+/// queued job steps it.
+async fn bilibi_audit_verify(
+    boundary: &MutationBoundary,
+    client: &mut Client,
+    scope: &Scope,
+) -> Result<Vec<String>> {
+    let mut tx = boundary
+        .begin(client, scope.mutation_context("audit.chain.verify"))
+        .await?;
+    let id = bilibi_base::audit::request_verification(&mut tx, scope).await?;
+    tx.commit().await?;
+    let who = bilibi_base::audit::Attribution::from_scope(scope);
+    let run = loop {
+        let run = bilibi_base::audit::advance_verification(client, id, &who).await?;
+        if !run.running() {
+            break run;
+        }
+    };
+    Ok(run
+        .reports
         .into_iter()
         .map(|report| {
             format!(
@@ -2411,7 +2429,7 @@ async fn bilibi_audit_verify(client: &Client) -> Result<Vec<String>> {
                 report.chain,
                 report.checked,
                 report.unsealed,
-                report.break_at.map(|b| (b.seq, b.reason))
+                report.break_at.map(|b| (b.tenant, b.seq, b.row, b.reason))
             )
         })
         .collect())

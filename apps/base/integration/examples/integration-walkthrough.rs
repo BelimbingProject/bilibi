@@ -5,7 +5,9 @@
 //! HTTP error, body limit, stream, connect failure, timeout), records incoming
 //! calls for a tenant and for the tenantless system path, then reads them back
 //! through every visibility and capability gate, deletes one with audit and
-//! prunes an aged payload. Run against a freshly migrated database.
+//! prunes an aged payload. It then checks row retention and the bounded list
+//! count (issue 541), and exits non-zero when one of those checks fails. Run
+//! against a freshly migrated database.
 use axum::{
     http::{header, StatusCode},
     response::IntoResponse,
@@ -484,6 +486,101 @@ async fn main() -> DbResult<()> {
                 .map(|s| (s.operation, s.response_status)),
         );
     }
+    println!("== row retention and the bounded count");
+    let mut failures = 0;
+    let mut check = |label: &str, ok: bool, saw: String| {
+        println!("{} {label}: {saw}", if ok { "ok   " } else { "FAIL " });
+        failures += u32::from(!ok);
+    };
+    // 10,050 aged incoming rows for tenant 1, and one row 100 days old.
+    client
+        .execute(
+            "INSERT INTO base_integration_exchanges(public_id,tenant_id,direction,system,operation,endpoint,path,outcome,occurred_at) \
+             SELECT 'bulk-'||n,1,'incoming','walkthrough','bulk.read','/bulk','/bulk','success',now()-interval '200 days'-(n||' seconds')::interval \
+             FROM generate_series(1,10050) n",
+            &[],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO base_integration_exchanges(public_id,tenant_id,direction,system,operation,endpoint,path,outcome,occurred_at) \
+             VALUES('bulk-recent',1,'incoming','walkthrough','bulk.read','/bulk','/bulk','success',now()-interval '100 days')",
+            &[],
+        )
+        .await?;
+    let bulk = Filter {
+        direction: Direction::Incoming,
+        search: "bulk.read".into(),
+        ..Filter::default()
+    };
+    let page = integration.list(&**client, &admin, &bulk, 1, 25).await?;
+    check(
+        "10,051 matching rows are counted to the cap and marked as more",
+        page.total_entries == 10_000 && page.more && page.entries.len() == 25,
+        format!(
+            "total {} more {} rows {}",
+            page.total_entries,
+            page.more,
+            page.entries.len()
+        ),
+    );
+    let past = integration.list(&**client, &admin, &bulk, 401, 25).await?;
+    check(
+        "a page past the cap reads nothing",
+        past.entries.is_empty() && past.total_pages == 400,
+        format!("rows {} pages {}", past.entries.len(), past.total_pages),
+    );
+    client
+        .batch_execute("ANALYZE base_integration_exchanges")
+        .await?;
+    let plan: String = client
+        .query(
+            "EXPLAIN SELECT id FROM base_integration_exchanges WHERE occurred_at<now() AND id>0 \
+             AND (request_headers IS NOT NULL OR request_body IS NOT NULL OR response_headers IS NOT NULL OR response_body IS NOT NULL) \
+             ORDER BY id LIMIT 500",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+        .join(" ");
+    check(
+        "the payload prune reads the partial index, not the whole log",
+        plan.contains("base_integration_exchanges_payload_idx"),
+        plan.chars().take(160).collect(),
+    );
+    let pruned = integration
+        .prune_rows(&client, 180, SystemTime::now())
+        .await?;
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_integration_exchanges WHERE public_id LIKE 'bulk-%'",
+            &[],
+        )
+        .await?
+        .get(0);
+    check(
+        "retention at 180 days deletes the 10,050 older rows and keeps the newer one",
+        pruned == 10_050 && left == 1,
+        format!("deleted {pruned}, left {left}"),
+    );
+    let again = integration
+        .prune_rows(&client, 180, SystemTime::now())
+        .await?;
+    let page = integration.list(&**client, &admin, &bulk, 1, 25).await?;
+    check(
+        "a second run deletes nothing, and the small result is counted exactly",
+        again == 0 && page.total_entries == 1 && !page.more,
+        format!(
+            "deleted {again}, total {} more {}",
+            page.total_entries, page.more
+        ),
+    );
+    show(
+        "retention of 0 days is refused",
+        integration.prune_rows(&client, 0, SystemTime::now()).await,
+    );
     let registered = schedule.definition("base/integration-payload-retention");
     println!(
         "schedule definition: {:?}",
@@ -494,5 +591,9 @@ async fn main() -> DbResult<()> {
             r.fingerprint().to_string()
         ))
     );
+    if failures > 0 {
+        println!("{failures} check(s) failed");
+        return Err(bilibi_database::Error::Internal);
+    }
     Ok(())
 }
