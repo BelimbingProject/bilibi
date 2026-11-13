@@ -90,6 +90,10 @@ pub(crate) struct Answer {
     pub(crate) deferral: Option<Deferral>,
     #[serde(default)]
     pub(crate) records: u64,
+    /// Records matched only by an email or phone given that the operator did
+    /// not confirm, so the store left them alone (#564).
+    #[serde(default)]
+    pub(crate) unconfirmed: i64,
 }
 impl Answer {
     fn add(&mut self, step: &Erased) {
@@ -276,7 +280,11 @@ async fn answer(
         return Ok(());
     }
     request.confirmed = requests::confirmed(&**client, scope.tenant(), id).await?;
-    let (key, data) = privacy.stores.get(store).ok_or(Error::Conflict)?;
+    let Some((key, data)) = privacy.stores.get(store) else {
+        // The store's module is no longer mounted (#561): it cannot answer,
+        // and waiting for it would strand the request.
+        return unmounted(privacy, execution, scope, id, store).await;
+    };
     let subject = requests::subject_for(&request, key);
     let state = client
         .query_opt(
@@ -286,6 +294,12 @@ async fn answer(
         .await?
         .ok_or(Error::NotFound)?;
     let (state, finished): (String, bool) = (state.get(0), state.get(1));
+    // Counted before the store acts, while every match is still there.
+    let left = if state == "pending" {
+        unconfirmed(&client, scope, data.handler, &subject).await?
+    } else {
+        0
+    };
     match request.kind {
         RequestKind::Access | RequestKind::Portability => {
             if state != "pending" {
@@ -318,7 +332,7 @@ async fn answer(
             }
             let records = exported.records;
             let files = serde_json::to_value(&exported.files).map_err(|_| Error::Internal)?;
-            let summary = json!({"files": exported.files.len()});
+            let summary = json!({"files": exported.files.len(), "unconfirmed": left});
             let tenant = scope.tenant();
             let answered = tx
                 .mutate(move |sql| {
@@ -384,7 +398,10 @@ async fn answer(
                         .erase(&mut tx, scope, &subject, &grant, &holds)
                         .await?;
                     clear_evidence(&tx, &grant, &mut erased, &minimums).await?;
-                    let mut answer = Answer::default();
+                    let mut answer = Answer {
+                        unconfirmed: left,
+                        ..Answer::default()
+                    };
                     answer.add(&erased);
                     record_answer(&mut tx, scope, id, key, &answer, false).await?;
                     tx.commit().await?;
@@ -419,6 +436,71 @@ async fn answer(
             tx.commit().await
         }
     }
+}
+
+/// How many of the store's records matched only an email or phone given and
+/// were not confirmed as the person's when the request was verified.
+async fn unconfirmed(
+    client: &tokio_postgres::Client,
+    scope: &Scope,
+    handler: &dyn bilibi_personal_data::Handler,
+    subject: &bilibi_personal_data::Subject,
+) -> Result<i64> {
+    if subject.identifiers.is_empty() {
+        return Ok(0);
+    }
+    let located = handler.locate(client, scope, subject).await?;
+    let matched: i64 = located.kinds.iter().map(|k| k.by_identifier).sum();
+    Ok((matched - subject.confirmed.len() as i64).max(0))
+}
+
+/// Answers a store whose module is no longer mounted as `unmounted`, in its
+/// own transaction, then finishes the request if it was the last.
+async fn unmounted(
+    privacy: &Privacy,
+    execution: &Execution,
+    scope: &Scope,
+    id: i64,
+    store: &str,
+) -> Result<()> {
+    let mut client = privacy.db.get().await?;
+    let mut tx = execution
+        .begin(&mut client, "privacy.request.store_unmounted")
+        .await?;
+    let tenant = scope.tenant();
+    let Some(row) = tx
+        .sql()
+        .query_opt(
+            "SELECT id FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND store=$3 \
+             AND (state='pending' OR NOT finished) FOR UPDATE",
+            &[&tenant, &id, &store],
+        )
+        .await?
+    else {
+        tx.rollback().await?;
+        return Ok(());
+    };
+    let (row, store): (i64, String) = (row.get(0), store.to_owned());
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            sql.execute(
+                "UPDATE base_privacy_request_stores SET state='unmounted',finished=true,result=coalesce(result,'{}'::jsonb),\
+                 answered_at=coalesce(answered_at,clock_timestamp()),last_error=NULL WHERE id=$1",
+                &[&row],
+            )
+            .await?;
+            let change = Change {
+                kind: STORE_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": id, "store": store, "state": "unmounted"}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await?;
+    finish_when_done(privacy, &mut tx, scope, id).await?;
+    tx.commit().await
 }
 
 async fn stored_answer(
@@ -743,21 +825,33 @@ async fn finish(
         }
         holds = Some(session);
     }
+    // An earlier attempt may have stored its document and failed before
+    // filing it (#562): its export goes before another is built, so no copy
+    // of the person's data is left unreferenced; its certificate, retained
+    // and complete, is filed instead of rendering another.
     let artifact = match request.kind {
         RequestKind::Access | RequestKind::Portability => match &request.export_artifact {
             Some(id) => id.clone(),
-            None => Box::pin(documents::export(privacy, &mut client, scope, &request)).await?,
+            None => {
+                documents::delete_unfiled_exports(privacy, &mut client, scope, &request).await?;
+                Box::pin(documents::export(privacy, &mut client, scope, &request)).await?
+            }
         },
         RequestKind::Erasure => match &request.certificate_artifact {
             Some(id) => id.clone(),
             None => {
-                Box::pin(documents::certificate(
-                    privacy,
-                    &mut client,
-                    scope,
-                    &request,
-                ))
-                .await?
+                match documents::unfiled_certificate(privacy, &client, scope, &request).await? {
+                    Some(id) => id,
+                    None => {
+                        Box::pin(documents::certificate(
+                            privacy,
+                            &mut client,
+                            scope,
+                            &request,
+                        ))
+                        .await?
+                    }
+                }
             }
         },
     };
@@ -799,7 +893,8 @@ async fn finish(
 /// Whether every store of the request has its staged export, each read in
 /// the person's current erasure generation, with no erasure of the person
 /// running. A staged export an erasure dropped counts as stale too: an
-/// export is never published with a store missing.
+/// export is never published with a store missing. A store no longer
+/// mounted stages nothing; the export names it.
 async fn current_export(
     sql: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
@@ -809,14 +904,14 @@ async fn current_export(
         requests::erasure_generation(sql, scope.tenant(), request.person).await?;
     let row = sql
         .query_one(
-            "SELECT (SELECT count(*) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2), \
+            "SELECT (SELECT count(*) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND state<>'unmounted'), \
              (SELECT count(*) FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 AND generation=$3), \
              (SELECT count(*) FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2)",
             &[&scope.tenant(), &request.id, &generation],
         )
         .await?;
     let (stores, current, staged): (i64, i64, i64) = (row.get(0), row.get(1), row.get(2));
-    Ok(!erasing && stores > 0 && current == stores && staged == stores)
+    Ok(!erasing && current == stores && staged == stores)
 }
 
 /// Drops the staged exports and asks every store again, in one transaction.
@@ -831,23 +926,9 @@ async fn restart_export(
         .begin(&mut client, "privacy.request.export_restarted")
         .await?;
     let (tenant, id) = (scope.tenant(), request.id);
-    tx.mutate(move |sql| {
+    let stores = tx.mutate(move |sql| {
         Box::pin(async move {
-            let mut changes = Vec::new();
-            for row in sql
-                .query(
-                    "DELETE FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 RETURNING id,store",
-                    &[&tenant, &id],
-                )
-                .await?
-            {
-                changes.push(Change {
-                    kind: EXPORT_KIND.into(),
-                    id: row.get(0),
-                    old: json!({"request": id, "store": row.get::<_, String>(1), "staged": true}),
-                    new: json!({}),
-                });
-            }
+            let mut changes = requests::drop_staged(sql, tenant, id).await?;
             // A finish error belongs to the export being restarted.
             if let Some(row) = sql
                 .query_opt(
@@ -864,6 +945,7 @@ async fn restart_export(
                     new: json!({"finish_error": null}),
                 });
             }
+            let mut stores = Vec::new();
             for row in sql
                 .query(
                     "UPDATE base_privacy_request_stores SET state='pending',result=NULL,answered_at=NULL,finished=false \
@@ -872,28 +954,32 @@ async fn restart_export(
                 )
                 .await?
             {
+                let store: String = row.get(1);
                 changes.push(Change {
                     kind: STORE_KIND.into(),
                     id: row.get(0),
                     old: json!({"state": "answered"}),
-                    new: json!({"request": id, "store": row.get::<_, String>(1), "state": "pending", "restarted": "an erasure of the person ran since the store read"}),
+                    new: json!({"request": id, "store": store, "state": "pending", "restarted": "an erasure of the person ran since the store read"}),
                 });
+                stores.push(store);
             }
-            Ok(((), changes))
+            Ok((stores, changes))
         })
     })
     .await?;
-    for (key, _, _) in privacy.stores.iter() {
+    // Every row the request has, mounted or not: each pending row needs its
+    // job, or the request would wait for ever.
+    for store in &stores {
         let job = privacy
             .queue
             .enqueue_for(
                 &mut tx,
                 scope,
                 STORE_WORKER,
-                json!({"request_id": id, "store": key}),
+                json!({"request_id": id, "store": store}),
             )
             .await?;
-        requests::track_store_job(&mut tx, tenant, id, key, job.id()).await?;
+        requests::track_store_job(&mut tx, tenant, id, store, job.id()).await?;
     }
     tx.commit().await
 }
@@ -926,12 +1012,7 @@ async fn complete(
                 )
                 .await?;
             }
-            let staged = sql
-                .query(
-                    "DELETE FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 RETURNING id,store",
-                    &[&tenant, &id],
-                )
-                .await?;
+            let staged = requests::drop_staged(sql, tenant, id).await?;
             let after = requests::load(sql, tenant, id, false).await?;
             let mut changes = vec![Change {
                 kind: requests::REQUEST_KIND.into(),
@@ -939,14 +1020,7 @@ async fn complete(
                 old: before,
                 new: requests::evidence(&after),
             }];
-            for row in staged {
-                changes.push(Change {
-                    kind: EXPORT_KIND.into(),
-                    id: row.get(0),
-                    old: json!({"request": id, "store": row.get::<_, String>(1), "staged": true}),
-                    new: json!({}),
-                });
-            }
+            changes.extend(staged);
             if erasure {
                 if forget {
                     changes.extend(requests::forget_person(sql, tenant, person).await?);
@@ -1144,6 +1218,7 @@ impl Privacy {
                 .erase(&mut tx, scope, &subject, &grant, &holds)
                 .await?;
             clear_evidence(&tx, &grant, &mut erased, minimums).await?;
+            count_erasure(&mut tx, tenant, id).await?;
             tx.commit().await?;
             holds.release().await?;
             answer.lock().map_err(|_| Error::Internal)?.add(&erased);
@@ -1193,6 +1268,31 @@ impl Privacy {
         holds.release().await?;
         answer.into_inner().map_err(|_| Error::Internal)
     }
+}
+
+/// Counts one more owed-cleanup erasure of the request's person in that
+/// erasure's own transaction, so the person's erasure generation moves with
+/// it and an access read that spans it is read again.
+async fn count_erasure(tx: &mut MutationTransaction<'_>, tenant: i64, request: i64) -> Result<()> {
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            let row: i64 = sql
+                .query_one(
+                    "UPDATE base_privacy_resumptions SET erasures=erasures+1 WHERE tenant_id=$1 AND request_id=$2 AND done_at IS NULL RETURNING id",
+                    &[&tenant, &request],
+                )
+                .await?
+                .get(0);
+            let change = Change {
+                kind: RESUMPTION_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": request, "erased": true}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
 }
 
 /// `after_erase` steps of an owed cleanup, each committed as reported.

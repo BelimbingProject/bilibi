@@ -92,6 +92,7 @@ WALKTHROUGHS=(
   'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-failures|apps/base/privacy|failures-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-job-ends|apps/base/privacy|job-ends-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
+  'privacy|privacy-repairs|apps/base/privacy|repairs-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-holds|apps/base/privacy|holds-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-;report'
   'privacy|privacy-masking|apps/base/privacy|masking-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-'
   'privacy|privacy-retention|apps/base/privacy|retention-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|seed;-'
