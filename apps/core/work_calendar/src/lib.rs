@@ -57,8 +57,37 @@ pub const INSTALLATION_MANAGE: &str = "admin.work-calendar.holiday-sets.manage";
 pub const DEFAULT: &str = "work_calendar.default";
 /// Recorded once per calendar whose dates a write changed, with payload
 /// `{"calendar": code, "from": date|null, "to": date|null}` (null: open-ended).
-/// A module with open items (SLA due times) recomputes them itself.
+/// A module with open items (SLA due times) recomputes them itself; with
+/// [`changed_instants`] it can recompute only the items whose arithmetic
+/// read an instant the change can move.
 pub const CHANGED: &str = "core/work_calendar.changed";
+
+/// The instants a [`CHANGED`] range can move business time in: every opening
+/// that a change of the days `from..=to` adds, removes or moves lies in
+/// `[start, end)`, whatever the calendar's zone, including a zone change.
+/// A day's openings lie within its local midnight and the local midnight two
+/// days later (a period starts on its own day and lasts under 24 hours), and
+/// every zone's local midnight falls between 14 hours before and 12 hours
+/// after midnight UTC; so `start` is midnight UTC on the day before `from`
+/// and `end` midnight UTC three days after `to`. A substitute a change can
+/// move is already inside the event's range. `None` is open-ended, as the
+/// event's `null`, and so is a bound past the supported dates.
+pub fn changed_instants(
+    from: Option<jiff::civil::Date>,
+    to: Option<jiff::civil::Date>,
+) -> (Option<jiff::Timestamp>, Option<jiff::Timestamp>) {
+    use jiff::ToSpan;
+    let midnight = |date: jiff::civil::Date, days: i64| {
+        date.checked_add(days.days())
+            .ok()
+            .and_then(|day| day.to_zoned(jiff::tz::TimeZone::UTC).ok())
+            .map(|zoned| zoned.timestamp())
+    };
+    (
+        from.and_then(|date| midnight(date, -1)),
+        to.and_then(|date| midnight(date, 3)),
+    )
+}
 
 /// A calendar a record may be assigned now, locked against retirement until
 /// the caller's transaction ends.

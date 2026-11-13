@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 pub use contributions::{CHECK, DEFAULT_NEW_ADDRESS, MANAGE, PURPOSES, RECORD, VIEW};
 pub use model::{
-    normalise, Answer, Capture, Channel, Contact, DecisionInput, FieldError, NewAddress, Question,
-    Reason, Refusal, Source, SuppressionInput, ADDRESS_MAX, EVIDENCE_MAX, KEY_MAX, LIFT_REASON_MAX,
+    normalise, Answer, Batch, Capture, Channel, Contact, DecisionInput, FieldError, NewAddress,
+    Question, Reason, Recipient, Refusal, Source, SuppressionInput, ADDRESS_MAX, BATCH_MAX,
+    EVIDENCE_MAX, KEY_MAX, LIFT_REASON_MAX,
 };
 
 pub const MODULE: &str = "core/consent";
@@ -156,14 +157,19 @@ async fn writable(client: &dyn ReadClient, scope: &Scope, company: i64) -> Write
         None => Err(Error::NotFound.into()),
     }
 }
-/// The same check on a write's transaction, holding the company against a
-/// concurrent archive until the write commits.
+/// The same check on a write's transaction. With `lock`, the company is held
+/// `FOR NO KEY UPDATE` against a concurrent archive until the write commits.
+/// A dispatch check passes `false`: `authorize_work_target` already holds the
+/// company `FOR KEY SHARE` on the same transaction, which archiving's
+/// `FOR UPDATE` waits for, and a shared hold lets concurrent checks and other
+/// writes into the company go on (#587).
 async fn lock_writable(
     tx: &MutationTransaction<'_>,
     scope: &Scope,
     company: i64,
+    lock: bool,
 ) -> WriteResult<()> {
-    match bilibi_company::require_writable(tx.sql(), scope, company, true).await {
+    match bilibi_company::require_writable(tx.sql(), scope, company, lock).await {
         Ok(_) => Ok(()),
         Err(bilibi_company::WriteError::Archived) => Err(WriteError::CompanyArchived),
         Err(bilibi_company::WriteError::Access(error)) => Err(error.into()),
@@ -206,20 +212,16 @@ impl Consent {
             .and_then(NewAddress::parse)
             .unwrap_or(NewAddress::OptedOut))
     }
-    /// The keyed hash an erased suppression of the question's address keeps.
-    async fn address_hash(
+    /// The keyed hash an erased suppression of each contact's address keeps,
+    /// in order; the tenant's key is read once.
+    async fn address_hashes(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
-        question: &Question,
-    ) -> Result<Option<Vec<u8>>> {
-        privacy::address_hash(
-            client,
-            &self.settings,
-            scope.tenant(),
-            question.contact.address.as_deref(),
-        )
-        .await
+        contacts: &[&Contact],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let addresses: Vec<Option<&str>> = contacts.iter().map(|c| c.address.as_deref()).collect();
+        privacy::address_hashes(client, &self.settings, scope.tenant(), &addresses).await
     }
     /// The question with its address normalised.
     fn question(question: &Question, errors: &mut Vec<FieldError>) -> Question {
@@ -258,7 +260,8 @@ impl Consent {
     /// correlation `key`. Senders call this immediately before every
     /// elective dispatch; delivery idempotency stays with the sender. A
     /// required business message does not call Consent. Needs
-    /// `core.consent.check`.
+    /// `core.consent.check`. A sender with many recipients calls
+    /// [`Consent::check_many`] instead.
     pub async fn check(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -267,24 +270,87 @@ impl Consent {
         key: &str,
         caller: &'static str,
     ) -> WriteResult<Answer> {
+        let batch = Batch {
+            company_id: question.company_id,
+            channel: question.channel,
+            purpose: question.purpose.clone(),
+            recipients: vec![Recipient {
+                contact: question.contact.clone(),
+                key: key.to_owned(),
+            }],
+        };
+        let answers = self.check_many(tx, scope, &batch, caller).await?;
+        answers
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Internal.into())
+    }
+    /// [`Consent::check`] for up to [`BATCH_MAX`] recipients of one message:
+    /// one answer per recipient, in order, each logged under its own key.
+    /// Access, the company, the purpose, the default and the tenant's key are
+    /// checked once; decisions and suppressions are read for every recipient
+    /// at once and the log is one insert. A recipient's invalid key or
+    /// address refuses the whole batch, naming the recipient by position.
+    pub async fn check_many(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        batch: &Batch,
+        caller: &'static str,
+    ) -> WriteResult<Vec<Answer>> {
         let scope = self.fresh(tx.sql(), scope).await?;
         bilibi_authz::authorize_proof(tx.sql(), &scope, CHECK).await?;
-        let key = key.trim();
         let mut errors = Vec::new();
-        if key.is_empty() || key.len() > KEY_MAX {
-            errors.push(model::field("key", "must be 1 to 200 bytes"));
-        }
         if caller.is_empty() || caller.len() > 100 {
             errors.push(model::field("caller", "must be the caller's module id"));
         }
-        let question = Self::question(question, &mut errors);
+        if batch.channel == Channel::Any {
+            errors.push(model::field(
+                "channel",
+                "must be the channel the message is sent on",
+            ));
+        }
+        if batch.recipients.is_empty() || batch.recipients.len() > BATCH_MAX {
+            errors.push(model::field(
+                "recipients",
+                format!("must be 1 to {BATCH_MAX} recipients"),
+            ));
+        }
+        let many = batch.recipients.len() > 1;
+        let mut recipients = Vec::with_capacity(batch.recipients.len());
+        for (n, recipient) in batch.recipients.iter().enumerate() {
+            let mut own = Vec::new();
+            let key = recipient.key.trim();
+            if key.is_empty() || key.len() > KEY_MAX {
+                own.push(model::field("key", "must be 1 to 200 bytes"));
+            }
+            let contact = model::contact(&recipient.contact, batch.channel, true, &mut own);
+            errors.extend(own.into_iter().map(|e| match many {
+                true => FieldError {
+                    message: format!("recipient {}: {}", n + 1, e.message),
+                    ..e
+                },
+                false => e,
+            }));
+            recipients.push(Recipient {
+                contact,
+                key: key.to_owned(),
+            });
+        }
         invalid(errors)?;
-        bilibi_company::authorize_work_target(tx.sql(), &scope, question.company_id, CHECK).await?;
-        lock_writable(tx, &scope, question.company_id).await?;
-        self.lock_purpose(tx, &scope, &question.purpose).await?;
+        let batch = Batch {
+            company_id: batch.company_id,
+            channel: batch.channel,
+            purpose: batch.purpose.clone(),
+            recipients,
+        };
+        bilibi_company::authorize_work_target(tx.sql(), &scope, batch.company_id, CHECK).await?;
+        lock_writable(tx, &scope, batch.company_id, false).await?;
+        self.lock_purpose(tx, &scope, &batch.purpose).await?;
         let default = self.default(tx.sql(), &scope).await?;
-        let hash = self.address_hash(tx.sql(), &scope, &question).await?;
-        Ok(store::log(tx, &scope, &question, key, caller, default, hash.as_deref()).await?)
+        let contacts: Vec<&Contact> = batch.recipients.iter().map(|r| &r.contact).collect();
+        let hashes = self.address_hashes(tx.sql(), &scope, &contacts).await?;
+        Ok(store::log(tx, &scope, &batch, caller, default, &hashes).await?)
     }
     /// Locks the purpose `FOR SHARE` on the write's transaction, so a
     /// concurrent retirement waits for this write.
@@ -319,8 +385,21 @@ impl Consent {
         invalid(errors)?;
         bilibi_company::authorize_work_target(&**client, &scope, question.company_id, VIEW).await?;
         let default = self.default(&**client, &scope).await?;
-        let hash = self.address_hash(&**client, &scope, &question).await?;
-        Ok(store::answer(&**client, &scope, &question, default, hash.as_deref()).await?)
+        let hashes = self
+            .address_hashes(&**client, &scope, &[&question.contact])
+            .await?;
+        // The answer reads no key.
+        let batch = Batch {
+            company_id: question.company_id,
+            channel: question.channel,
+            purpose: question.purpose,
+            recipients: vec![Recipient {
+                contact: question.contact,
+                key: String::new(),
+            }],
+        };
+        let answers = store::answers(&**client, &scope, &batch, default, &hashes).await?;
+        Ok(answers.into_iter().next().ok_or(Error::Internal)?)
     }
 
     /// A person's consent matrix and active suppressions. Needs
@@ -423,7 +502,7 @@ impl Consent {
         input: &DecisionInput,
     ) -> WriteResult<Decision> {
         let scope = self.fresh(tx.sql(), scope).await?;
-        lock_writable(tx, &scope, input.company_id).await?;
+        lock_writable(tx, &scope, input.company_id, true).await?;
         let input = self.preview_record(tx.sql(), &scope, input).await?;
         self.lock_purpose(tx, &scope, &input.purpose).await?;
         Ok(store::record(tx, &scope, &input).await?)
@@ -467,7 +546,7 @@ impl Consent {
         input: &SuppressionInput,
     ) -> WriteResult<Suppression> {
         let scope = self.fresh(tx.sql(), scope).await?;
-        lock_writable(tx, &scope, input.company_id).await?;
+        lock_writable(tx, &scope, input.company_id, true).await?;
         let input = self.preview_suppress(tx.sql(), &scope, input).await?;
         Ok(store::suppress(tx, &scope, &input).await?.0)
     }
@@ -522,7 +601,7 @@ impl Consent {
     ) -> WriteResult<Suppression> {
         let scope = self.fresh(tx.sql(), scope).await?;
         let before = self.liftable(tx.sql(), &scope, id, reason, true).await?;
-        lock_writable(tx, &scope, before.company_id).await?;
+        lock_writable(tx, &scope, before.company_id, true).await?;
         Ok(store::lift(tx, &scope, before, reason.trim()).await?)
     }
     /// One suppression. Needs `core.consent.view`.

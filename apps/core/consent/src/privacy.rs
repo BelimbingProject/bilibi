@@ -65,18 +65,21 @@ fn open(settings: &Settings, tenant: i64, sealed: &Value) -> Result<Vec<u8>> {
     })
     .ok_or(Error::Internal)
 }
-/// The keyed hash `answer` matches erased suppressions by, or `None` when the
-/// tenant has no key yet (so no suppression was hashed). A key that cannot be
-/// opened (no Settings key) refuses the check rather than miss a suppression.
-pub(crate) async fn address_hash(
+/// The keyed hash `answers` matches erased suppressions by, for each address
+/// in order; `None` for no address or when the tenant has no key yet (so no
+/// suppression was hashed). The key is read and opened once. A key that cannot
+/// be opened (no Settings key) refuses the check rather than miss a
+/// suppression.
+pub(crate) async fn address_hashes(
     client: &dyn ReadClient,
     settings: &Settings,
     tenant: i64,
-    address: Option<&str>,
-) -> Result<Option<Vec<u8>>> {
-    let Some(address) = address else {
-        return Ok(None);
-    };
+    addresses: &[Option<&str>],
+) -> Result<Vec<Option<Vec<u8>>>> {
+    let none = || addresses.iter().map(|_| None).collect();
+    if addresses.iter().all(Option::is_none) {
+        return Ok(none());
+    }
     let Some(row) = client
         .query_opt(
             "SELECT sealed FROM core_consent_keys WHERE tenant_id=$1",
@@ -84,9 +87,13 @@ pub(crate) async fn address_hash(
         )
         .await?
     else {
-        return Ok(None);
+        return Ok(none());
     };
-    digest(&open(settings, tenant, &row.get(0))?, address).map(Some)
+    let key = open(settings, tenant, &row.get(0))?;
+    addresses
+        .iter()
+        .map(|address| address.map(|a| digest(&key, a)).transpose())
+        .collect()
 }
 /// The tenant's key, created and sealed on first use in the erasure's
 /// transaction. Refuses without a Settings key, so nothing is erased unhashed.

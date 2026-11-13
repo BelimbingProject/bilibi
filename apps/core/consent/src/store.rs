@@ -4,7 +4,7 @@
 //! transaction.
 use crate::model::{Answer, Capture, Channel, Contact, NewAddress, Reason, Refusal, Source};
 use crate::{
-    Current, Decision, DecisionInput, Question, State, Suppression, SuppressionFilter,
+    Batch, Current, Decision, DecisionInput, State, Suppression, SuppressionFilter,
     SuppressionInput, SuppressionPage, CURRENT_RECORD, DECISION_RECORD, LOG_RECORD,
     SUPPRESSION_RECORD,
 };
@@ -13,6 +13,7 @@ use bilibi_party_ids::PersonId;
 use bilibi_tenancy::{ReadClient, Scope};
 use jiff::Timestamp;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 use tokio_postgres::{types::ToSql, Row, Transaction};
 
@@ -154,87 +155,165 @@ fn suppression_values(s: &Suppression) -> Value {
     })
 }
 
-/// The answer `check` gives, from the suppressions and the current state.
-/// Steps 1, 2 and 4 of the README's order; the first refusal wins.
-pub(crate) async fn answer(
-    client: &dyn ReadClient,
-    scope: &Scope,
-    question: &Question,
-    default: NewAddress,
-    hash: Option<&[u8]>,
-) -> Result<Answer> {
-    let tenant = scope.tenant();
-    let person = question.contact.person.map(|p| p.get());
-    let address = question.contact.address.as_deref();
-    let channel = question.channel.code();
-    // An erased suppression keeps only its address's keyed hash.
-    let reasons = client
-        .query(
-            "SELECT DISTINCT reason FROM core_consent_suppressions WHERE tenant_id=$1 AND company_id=$2 AND channel=$3 AND lifted_at IS NULL AND (person_id=$4 OR address=$5 OR address_hash=$6)",
-            &[&tenant, &question.company_id, &channel, &person, &address, &hash],
-        )
-        .await?;
-    let reasons: Vec<Reason> = reasons
-        .iter()
-        .filter_map(|row| Reason::parse(row.get(0)))
-        .collect();
-    if !reasons.is_empty() {
-        return Ok(Answer::Refused(Refusal::Suppressed));
-    }
-    // The decision for the channel beats one for any channel; between the
-    // person's and the address's, the latest recorded wins, and a tie
-    // refuses.
-    let granted = client
-        .query_opt(
-            "SELECT granted FROM core_consent_current WHERE tenant_id=$1 AND company_id=$2 AND purpose=$3 AND channel IN ($4,'any') AND (person_id=$5 OR address=$6) ORDER BY channel='any', recorded_at DESC, granted LIMIT 1",
-            &[&tenant, &question.company_id, &question.purpose, &channel, &person, &address],
-        )
-        .await?
-        .map(|row| row.get::<_, bool>(0));
-    Ok(match (granted, default) {
-        (Some(true), _) | (None, NewAddress::OptedIn) => Answer::Allowed,
-        (Some(false), _) => Answer::Refused(Refusal::Withdrawn),
-        (None, NewAddress::OptedOut) => Answer::Refused(Refusal::NoConsent),
+/// A current-state row an answer weighs: for every channel or the asked one,
+/// granted or withdrawn, and when it was recorded.
+struct Weighed {
+    any: bool,
+    granted: bool,
+    at: SystemTime,
+}
+/// The latest of `rows`; on a tie, a withdrawal.
+fn latest<'a>(rows: impl Iterator<Item = &'a Weighed>) -> Option<&'a Weighed> {
+    rows.fold(None, |best: Option<&Weighed>, row| match best {
+        Some(b) if b.at > row.at || (b.at == row.at && !b.granted) => Some(b),
+        _ => Some(row),
     })
 }
 
-/// Answers `question` at call time and logs the fresh answer under `key`.
+/// The answer `check` gives each of the batch's recipients, in order, from
+/// the suppressions and the current state, read for all of them at once.
+/// `hashes` holds each recipient's address hash. The README's order; the
+/// first refusal wins.
+pub(crate) async fn answers(
+    client: &dyn ReadClient,
+    scope: &Scope,
+    batch: &Batch,
+    default: NewAddress,
+    hashes: &[Option<Vec<u8>>],
+) -> Result<Vec<Answer>> {
+    let tenant = scope.tenant();
+    let channel = batch.channel.code();
+    let contacts = || batch.recipients.iter().map(|r| &r.contact);
+    let persons: Vec<i64> = contacts()
+        .filter_map(|c| c.person.map(|p| p.get()))
+        .collect();
+    let addresses: Vec<&str> = contacts().filter_map(|c| c.address.as_deref()).collect();
+    let digests: Vec<&[u8]> = hashes.iter().flatten().map(Vec::as_slice).collect();
+    // An erased suppression keeps only its address's keyed hash.
+    let (mut by_person, mut by_address, mut by_hash) =
+        (HashSet::new(), HashSet::new(), HashSet::new());
+    for row in client
+        .query(
+            "SELECT person_id,address,address_hash FROM core_consent_suppressions WHERE tenant_id=$1 AND company_id=$2 AND channel=$3 AND lifted_at IS NULL AND (person_id=ANY($4) OR address=ANY($5) OR address_hash=ANY($6))",
+            &[&tenant, &batch.company_id, &channel, &persons, &addresses, &digests],
+        )
+        .await?
+    {
+        by_person.extend(row.get::<_, Option<i64>>(0));
+        by_address.extend(row.get::<_, Option<String>>(1));
+        by_hash.extend(row.get::<_, Option<Vec<u8>>>(2));
+    }
+    let mut person_rows: HashMap<i64, Vec<Weighed>> = HashMap::new();
+    let mut address_rows: HashMap<String, Vec<Weighed>> = HashMap::new();
+    for row in client
+        .query(
+            "SELECT person_id,address,channel='any',granted,recorded_at FROM core_consent_current WHERE tenant_id=$1 AND company_id=$2 AND purpose=$3 AND channel IN ($4,'any') AND (person_id=ANY($5) OR address=ANY($6))",
+            &[&tenant, &batch.company_id, &batch.purpose, &channel, &persons, &addresses],
+        )
+        .await?
+    {
+        let weighed = Weighed {
+            any: row.get(2),
+            granted: row.get(3),
+            at: row.get(4),
+        };
+        match (row.get::<_, Option<i64>>(0), row.get::<_, Option<String>>(1)) {
+            (Some(person), _) => person_rows.entry(person).or_default().push(weighed),
+            (None, Some(address)) => address_rows.entry(address).or_default().push(weighed),
+            (None, None) => {}
+        }
+    }
+    let answer = |contact: &Contact, hash: Option<&Vec<u8>>| {
+        let person = contact.person.map(|p| p.get());
+        let address = contact.address.as_deref();
+        if person.is_some_and(|p| by_person.contains(&p))
+            || address.is_some_and(|a| by_address.contains(a))
+            || hash.is_some_and(|h| by_hash.contains(h))
+        {
+            return Answer::Refused(Refusal::Suppressed);
+        }
+        // Between the person's and the address's decisions, the latest
+        // recorded wins, and a tie refuses. The decision for the channel
+        // beats one for any channel, unless that one is a withdrawal
+        // recorded at the same time or later: a later "stop everything"
+        // ends every earlier channel grant (#604).
+        let rows: Vec<&Weighed> = person
+            .and_then(|p| person_rows.get(&p))
+            .into_iter()
+            .chain(address.and_then(|a| address_rows.get(a)))
+            .flatten()
+            .collect();
+        let specific = latest(rows.iter().copied().filter(|r| !r.any));
+        let blanket = latest(rows.iter().copied().filter(|r| r.any));
+        let granted = match (specific, blanket) {
+            (Some(s), Some(b)) if !b.granted && b.at >= s.at => Some(false),
+            (Some(s), _) => Some(s.granted),
+            (None, b) => b.map(|b| b.granted),
+        };
+        match (granted, default) {
+            (Some(true), _) | (None, NewAddress::OptedIn) => Answer::Allowed,
+            (Some(false), _) => Answer::Refused(Refusal::Withdrawn),
+            (None, NewAddress::OptedOut) => Answer::Refused(Refusal::NoConsent),
+        }
+    };
+    Ok(contacts()
+        .zip(hashes)
+        .map(|(contact, hash)| answer(contact, hash.as_ref()))
+        .collect())
+}
+
+/// Answers every recipient at call time and logs each fresh answer under its
+/// key, in one insert.
 pub(crate) async fn log(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
-    question: &Question,
-    key: &str,
+    batch: &Batch,
     caller: &'static str,
     default: NewAddress,
-    hash: Option<&[u8]>,
-) -> Result<Answer> {
+    hashes: &[Option<Vec<u8>>],
+) -> Result<Vec<Answer>> {
     let tenant = scope.tenant();
-    let company_id = question.company_id;
-    let answer = answer(tx.sql(), scope, question, default, hash).await?;
-    let person = question.contact.person.map(|p| p.get());
-    let address = question.contact.address.clone();
-    let channel = question.channel.code();
-    let purpose = question.purpose.clone();
+    let company_id = batch.company_id;
+    let answers = answers(tx.sql(), scope, batch, default, hashes).await?;
+    let persons: Vec<Option<i64>> = batch
+        .recipients
+        .iter()
+        .map(|r| r.contact.person.map(|p| p.get()))
+        .collect();
+    let addresses: Vec<Option<String>> = batch
+        .recipients
+        .iter()
+        .map(|r| r.contact.address.clone())
+        .collect();
+    let keys: Vec<String> = batch.recipients.iter().map(|r| r.key.clone()).collect();
+    let outcomes: Vec<&str> = answers.iter().map(|a| a.code()).collect();
+    let channel = batch.channel.code();
+    let purpose = batch.purpose.clone();
     let at = SystemTime::now();
-    let key = key.to_owned();
     tx.mutate(move |sql| {
         Box::pin(async move {
-            let row = sql
-                .query_one(
-                    "INSERT INTO core_consent_log (tenant_id,company_id,person_id,address,channel,purpose,key,at,outcome,caller) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
-                    &[&tenant, &company_id, &person, &address, &channel, &purpose, &key, &at, &answer.code(), &caller],
+            let rows = sql
+                .query(
+                    "INSERT INTO core_consent_log (tenant_id,company_id,person_id,address,channel,purpose,key,at,outcome,caller) \
+                     SELECT $1,$2,t.person_id,t.address,$3,$4,t.key,$5,t.outcome,$6 FROM unnest($7::bigint[],$8::text[],$9::text[],$10::text[]) AS t(person_id,address,key,outcome) \
+                     RETURNING id,person_id,address,key,outcome",
+                    &[&tenant, &company_id, &channel, &purpose, &at, &caller, &persons, &addresses, &keys, &outcomes],
                 )
                 .await?;
-            let change = Change {
-                kind: LOG_RECORD.into(),
-                id: row.get(0),
-                old: json!({}),
-                new: json!({
-                    "company_id": company_id, "person_id": person, "address": address, "channel": channel,
-                    "purpose": purpose, "key": key, "outcome": answer.code(), "caller": caller,
-                }),
-            };
-            Ok((answer, vec![change]))
+            let changes = rows
+                .iter()
+                .map(|row| Change {
+                    kind: LOG_RECORD.into(),
+                    id: row.get(0),
+                    old: json!({}),
+                    new: json!({
+                        "company_id": company_id, "person_id": row.get::<_, Option<i64>>(1),
+                        "address": row.get::<_, Option<String>>(2), "channel": channel, "purpose": purpose,
+                        "key": row.get::<_, String>(3), "outcome": row.get::<_, String>(4), "caller": caller,
+                    }),
+                })
+                .collect();
+            Ok((answers, changes))
         })
     })
     .await
