@@ -118,6 +118,19 @@ async fn put(
         .await?;
     tx.commit().await
 }
+/// A statement the database must refuse.
+async fn sql_refused(client: &Client, label: &str, sql: &str) -> Result<()> {
+    match client.batch_execute(sql).await {
+        Ok(()) => Err(format!("{label}: was not refused").into()),
+        Err(error) => {
+            println!(
+                "{label}: refused — {}",
+                error.as_db_error().map_or("error", |e| e.message())
+            );
+            Ok(())
+        }
+    }
+}
 /// Queues a run now and waits for the queue to finish it.
 async fn sweep(
     app: &bilibi_web::App,
@@ -196,6 +209,7 @@ async fn main() -> Result<()> {
     let [notices_on, notices_days, _] = setting_keys("core/user.notifications");
     let [invitations_on, invitations_days, _] = setting_keys("core/user.lapsed_invitations");
     let [portal_on, portal_days, _] = setting_keys("core/portal.invitations");
+    let [actions_on, actions_days, _] = setting_keys("base/privacy.audit_actions");
 
     // Synthetic portal lifecycle rows: expiration alone, early revocation,
     // acceptance, a still-live link, a recent acceptance of an old invitation,
@@ -625,7 +639,63 @@ async fn main() -> Result<()> {
         }
         .await,
     );
+    // The action ledger (class `base/privacy.audit_actions`): 230 actions of
+    // tenant 1 past the period (one recorded as retained, one bookmarked), a
+    // recent one, and one of tenant 2, which did not turn the class on.
+    client.batch_execute("INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,ip_address,url,user_agent,event,payload,is_retained,occurred_at) \
+        SELECT 1,'user',4,'203.0.113.9','https://bilibi.test/people?email=old@example.test','Firefox','walkthrough.retention',jsonb_build_object('status',200,'email','old@example.test'),n=1,now()-interval '90 days' FROM generate_series(1,230) n; \
+        INSERT INTO base_audit_action_metadata(action_id,is_retained) SELECT max(id),true FROM base_audit_actions WHERE event='walkthrough.retention'; \
+        INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,ip_address,url,user_agent,event,payload,occurred_at) VALUES \
+          (1,'user',4,'203.0.113.9','https://bilibi.test/recent','Firefox','walkthrough.retention.recent','{\"status\":200}',now()-interval '2 days'), \
+          (2,'user',5,'203.0.113.9','https://bilibi.test/other','Firefox','walkthrough.retention','{\"status\":200}',now()-interval '90 days');").await?;
+    show(
+        "audit actions on, 30 days",
+        async {
+            put(
+                &boundary,
+                &settings,
+                &mut client,
+                &admin,
+                &actions_days,
+                json!(30),
+            )
+            .await?;
+            put(
+                &boundary,
+                &settings,
+                &mut client,
+                &admin,
+                &actions_on,
+                json!(true),
+            )
+            .await
+        }
+        .await,
+    );
     sweep(&app, &mut client, &admin, "run 2").await?;
+    let actions_result: bool = client.query_one("SELECT \
+        (SELECT count(*)=228 FROM base_audit_actions WHERE tenant_id=1 AND event='walkthrough.retention' AND erased_at IS NOT NULL AND ip_address IS NULL AND url IS NULL AND user_agent IS NULL \
+           AND payload=jsonb_build_object('email','[erased]','status','[erased]') AND actor_id=4 AND chain_seq IS NOT NULL) \
+        AND (SELECT count(*)=2 FROM base_audit_actions WHERE tenant_id=1 AND event='walkthrough.retention' AND erased_at IS NULL AND url IS NOT NULL AND payload->>'email'='old@example.test') \
+        AND EXISTS(SELECT 1 FROM base_audit_actions WHERE event='walkthrough.retention.recent' AND erased_at IS NULL AND url IS NOT NULL) \
+        AND EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=2 AND event='walkthrough.retention' AND erased_at IS NULL AND url IS NOT NULL) \
+        AND EXISTS(SELECT 1 FROM base_privacy_sweeps WHERE tenant_id=1 AND class='base/privacy.audit_actions' AND acted=228 AND kept=2 AND batches>1 AND finished_at IS NOT NULL) \
+        AND (SELECT coalesce(sum(action_rows),0)=228 FROM base_audit_action_erasures WHERE tenant_id=1) \
+        AND (SELECT finished AND reason IS NULL FROM base_audit_verify_range('actions',1,0,''::bytea,100000))", &[]).await?.get(0);
+    if !actions_result {
+        return Err(
+            "action ledger retention: erased rows, retained exemption, tenant isolation, ledger or chain failed".into(),
+        );
+    }
+    println!("audit actions retention: 228 actions lost their address, URL, browser and payload values across batches; the 2 retained, the recent one and the other tenant's kept theirs; the chain holds");
+    rows(&client, "action erasure ledger", "SELECT 'sweep '||sweep_id||' actions '||first_id||'-'||last_id||' erased='||action_rows||' kept='||kept_rows FROM base_audit_action_erasures ORDER BY id").await?;
+    sql_refused(
+        &client,
+        "erase an action row directly",
+        "UPDATE base_audit_actions SET erased_at=now() WHERE event='walkthrough.retention.recent'",
+    )
+    .await?;
+    sql_refused(&client, "erase actions without an open sweep", "SELECT base_audit_erase_actions(1,999999,now()-interval '30 days',0,10,1,true,'{1}','user',4,'walkthrough')").await?;
     let portal_result: bool = client.query_one("SELECT \
         (SELECT count(*)=208 FROM customer_invitations WHERE tenant_id=1 AND name='[erased]' AND email='[erased]' AND (accepted_at IS NOT NULL OR revoked_at IS NOT NULL)) \
         AND NOT EXISTS(SELECT 1 FROM customer_invitations WHERE id BETWEEN 45204 AND 45209 AND name='[erased]') \

@@ -2,7 +2,10 @@
 //! code. The reference publisher (`fixtures/containers/event_publisher`) and
 //! subscriber (`fixtures/containers/event_subscriber`) are Domain containers
 //! that are never mounted in the Platform and never name each other. On a
-//! fresh disposable DATABASE_URL, run the four compositions in this order:
+//! fresh disposable DATABASE_URL, migrated and seeded first (`bilibi-web
+//! migrate`, then `BILIBI_ENV=development bilibi-web seed-production`: the
+//! Dev instance role keeps grant changes from asking for a second factor
+//! nobody enrolled), run the four compositions in this order:
 //!
 //! ```text
 //! cargo run -p bilibi-web --example events-reference                 # 1. nothing mounted
@@ -257,7 +260,7 @@ impl Proof {
                     .last_delivered
                     .is_some_and(|last| last.event_id == ids[1])
                 && state.missed == 0
-                && state.missed_counted
+                && !state.missed_more
         });
         println!(
             "{} unmounted subscriber with two receipts and one failing delivery: {:?}",
