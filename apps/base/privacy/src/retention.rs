@@ -91,7 +91,8 @@ pub struct Swept {
 pub struct Companies {
     company: OrganisationId,
     primary: bool,
-    listed: Vec<i64>,
+    /// Shared by every company's run of a sweep, never copied per company.
+    listed: Arc<[i64]>,
 }
 impl Companies {
     /// The company whose settings this run follows.
@@ -703,12 +704,13 @@ impl Privacy {
             if !listed.contains(&primary.get()) {
                 listed.push(primary.get());
             }
-            for &id in &listed {
+            let listed: Arc<[i64]> = listed.into();
+            for &id in listed.iter() {
                 let company = OrganisationId::new(id).map_err(|_| Error::Internal)?;
                 let companies = Companies {
                     company,
                     primary: company == primary,
-                    listed: listed.clone(),
+                    listed: Arc::clone(&listed),
                 };
                 for (key, (_, class)) in &self.classes.by_key {
                     let policy = match self.policy(client, &scope, company, key).await {

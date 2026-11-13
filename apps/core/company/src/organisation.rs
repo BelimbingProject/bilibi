@@ -207,17 +207,20 @@ fn named(row: &tokio_postgres::Row) -> Result<NamedOrganisation> {
         archived,
     })
 }
+/// The live companies of the tenant, or only those among `ids`, without the
+/// archived ones when `unarchived`; the filter runs in SQL.
 async fn named_in_scope(
     client: &dyn ProofClient,
     scope: &Scope,
     ids: Option<Vec<i64>>,
+    unarchived: bool,
 ) -> Result<Vec<NamedOrganisation>> {
     // The proof connection answers one row; a tenant's companies arrive as
     // one JSON array of tenant-scoped rows, never as client input.
     let rows: serde_json::Value = client
         .query_opt(
-            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2))",
-            &[&scope.tenant(), &ids],
+            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2)) AND NOT ($3 AND status=$4)",
+            &[&scope.tenant(), &ids, &unarchived, &ARCHIVED],
         )
         .await?
         .map(|row| row.get(0))
@@ -302,7 +305,21 @@ impl OrganisationDirectory for Directory {
         client: &'a dyn ProofClient,
         scope: &'a Scope,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
-        Box::pin(named_in_scope(client, scope, None))
+        Box::pin(named_in_scope(client, scope, None, false))
+    }
+    fn named<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        ids: &'a [OrganisationId],
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
+        Box::pin(async move {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let ids = ids.iter().map(|id| id.get()).collect();
+            named_in_scope(client, scope, Some(ids), false).await
+        })
     }
     fn selectable<'a>(
         &'a self,
@@ -316,14 +333,17 @@ impl OrganisationDirectory for Directory {
             }
             let tenant_wide = scope.principal().is_some()
                 || decide_proof(client, scope, TENANT_WIDE).await?.allowed;
-            Ok(named_in_scope(client, scope, None)
-                .await?
-                .into_iter()
-                .filter(|company| {
-                    !company.archived
-                        && (tenant_wide || reaches_without_tenant_wide(scope, company.id.get()))
-                })
-                .collect())
+            // Without the tenant-wide reach only the current company is
+            // selectable, so only it is read.
+            let ids = if tenant_wide {
+                None
+            } else {
+                match scope.current_company() {
+                    Some(company) => Some(vec![company.get()]),
+                    None => return Ok(Vec::new()),
+                }
+            };
+            named_in_scope(client, scope, ids, true).await
         })
     }
     fn target<'a>(
@@ -394,7 +414,7 @@ impl OrganisationDirectory for Directory {
                 .map(OrganisationId::get)
                 .collect();
             // Archived desks stay listed, flagged, so their records can be read.
-            named_in_scope(client, scope, Some(ids)).await
+            named_in_scope(client, scope, Some(ids), false).await
         })
     }
 }
