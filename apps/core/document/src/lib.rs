@@ -8,6 +8,7 @@ mod contributions;
 mod custom;
 mod customer;
 mod customer_operations;
+mod deletion;
 mod email;
 mod files;
 mod library;
@@ -592,10 +593,10 @@ impl Documents {
         self.store().unlink(tx, &scope, id, record).await
     }
 
-    /// Removes the document with its revisions, links and marks in the
-    /// caller's transaction, fenced on `version`. Its files remain attached
-    /// and readable until `base/artifacts` deletes them as one protected
-    /// batch once it commits. A retained or held revision refuses the delete
+    /// Marks the document as deleting in the caller's transaction, fenced on
+    /// `version`, and queues the durable job that deletes its files as one
+    /// protected `base/artifacts` batch and then its revisions, links and
+    /// marks (`deletion.rs`). A retained or held revision refuses the delete
     /// before anything is marked (`WriteError::Retained` or `LegalHold`, in
     /// `preview_delete` too), so the document stays readable with its full
     /// history; the later batch check is the same fence under its own locks.
@@ -608,36 +609,7 @@ impl Documents {
     ) -> WriteResult<Deleted> {
         let scope = self.fresh(tx.sql(), scope).await?;
         let deleted = self.store().delete(tx, &scope, id, version).await?;
-        {
-            let (db, authentication, boundary, artifacts) = (
-                self.db.clone(),
-                self.authentication.clone(),
-                self.boundary.clone(),
-                self.artifacts.clone(),
-            );
-            let files = deleted.files.clone();
-            let document = id;
-            tx.after_commit(move || {
-                tokio::spawn(async move {
-                    let Ok(mut client) = db.get().await else {
-                        return;
-                    };
-                    let Ok(scope) = authentication.reprove(&**client, &scope).await else {
-                        return;
-                    };
-                    match files::discard_document(&mut client, &scope, &artifacts, &files).await {
-                        Ok(()) => {
-                            if let Err(error) = files::finalize_document_delete(&mut client, &scope, &boundary, document).await {
-                                eprintln!("warning: document {document} metadata awaits delete finalization: {error}");
-                            }
-                        }
-                        Err(error) => eprintln!(
-                            "warning: document {document} and its full revision history await delete retry: {error}"
-                        ),
-                    }
-                });
-            });
-        }
+        self.store().finish_delete(tx, &scope, id).await?;
         Ok(deleted)
     }
 
@@ -1309,6 +1281,15 @@ inventory::submit! { Module {
         }))))
     }}, Service { id: scan::ENDED, factory: |s| {
         Ok(Arc::new(bilibi_queue::EndingService(Arc::new(scan::ScanEnded {
+            documents: s.get(SERVICE)?,
+        }))))
+    }}, Service { id: deletion::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(deletion::DeleteJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            documents: s.get(SERVICE)?,
+        }))))
+    }}, Service { id: deletion::ENDED, factory: |s| {
+        Ok(Arc::new(bilibi_queue::EndingService(Arc::new(deletion::DeleteEnded {
             documents: s.get(SERVICE)?,
         }))))
     }}, Service { id: web::SERVICE, factory: |s| {

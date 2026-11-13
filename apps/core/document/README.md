@@ -145,7 +145,13 @@ those actions even after the list was read.
 
 Deleting a document first checks every revision's file. If any revision is retained or under legal hold, `preview_delete` and `delete` refuse with `Retained` or `LegalHold` before anything changes (the check reads the Artifacts rows `FOR SHARE` inside the commit, so a hold placed meanwhile waits). The document stays readable with its complete revision history.
 
-Otherwise `delete` marks the document as deleting while preserving the document, every revision, every file-ledger row, every link, every mark and every access grant. After that transaction commits, `Artifacts::delete_batch` locks and checks the complete revision set again before it tombstones any file, and metadata is removed only after every Artifact accepts deletion and every ledger row is safely removed. That finalization first clears incoming document relations with audited changes. Repeating `delete` at the current version retries an interrupted byte or metadata finalization; a document already being deleted skips the first check, because it is unreadable and its retry is the batch check.
+Otherwise `delete` marks the document as deleting while preserving the document, every revision, every file-ledger row, every link, every mark and every access grant, and in the same transaction queues a durable `core/document-delete` job, so a deleting document always has its job and a restart loses nothing.
+
+- The job runs as the system principal `document-deleter`, which holds only `core.document.deletion.settle` (a standing grant) and may delete only the attached files of a document already being deleted.
+- `Artifacts::delete_batch` locks and checks the complete revision set again before it tombstones any file. Metadata is removed only after every Artifact accepts deletion: that finalization first clears incoming document relations with audited changes, then removes the revisions, ledger rows, links, marks, grants and customer shares.
+- A failed attempt retries with Queue's backoff (30 attempts, about a day). A job that ends without finishing queues the next one an hour later while the document is still deleting.
+- A hold or retention placed after the delete committed makes the batch refuse: the job then clears the deleting mark (an audited `core.document.document` change), so the document is readable again with its complete history.
+- Repeating `delete` on a deleting document queues another job; a job finding the document gone or no longer deleting does nothing.
 
 ### Delete from the list
 
@@ -168,7 +174,7 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | Email them a link | `core.document.email` created, then updated when it is sent, failed, suppressed or rate limited |
 | Favourite, Follow | `core.document.mark` created or updated (the reader's own flags) |
 | Merge | the survivor's revisions, links, access and marks created or updated; every source's rows deleted |
-| Delete, one or from the list | `core.document.document` updated (marked as deleting), then every row of the document deleted once the files are gone |
+| Delete, one or from the list | `core.document.document` updated (marked as deleting) with its queued job, then every row of the document deleted once the files are gone (`System · document-deleter`), or the mark cleared when a hold keeps a file |
 | Upload, discard a stored file | `core.document.file` ledger changes |
 | Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
 | Refused download or preview | a `core.document.download_refused` action with the actor, `document_id`, `revision` and `reason`: `no_grant`, `grant_ended`, `no_download_permission`, `no_download_capability` or `no_file_access` |
