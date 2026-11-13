@@ -8,6 +8,7 @@ mod contributions;
 mod definition;
 mod export;
 mod exports;
+mod listing;
 mod oversight;
 mod schedules;
 mod store;
@@ -31,9 +32,7 @@ pub use store::Report;
 use bilibi_agent_api::schema::FieldErrors;
 use bilibi_database::{Change, Db, Error, MutationTransaction};
 use bilibi_datetime::DisplayPolicy;
-use bilibi_grid::{
-    Catalog, Column, FieldType, Filter, KeyPage, PageSpec, QueryError, SummarySpec, Test,
-};
+use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, SummarySpec, Test};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
 use serde::Serialize;
@@ -82,6 +81,11 @@ const KIND: &str = "base_report";
 const MAX_OFFERED: usize = 300;
 /// Roles one report is shared with, at most.
 const MAX_SHARE_ROLES: usize = 50;
+/// Staff a schedule's form offers as extra recipients, at most; a page of
+/// holders read at once.
+const OFFERED_PEOPLE: usize = 500;
+/// Pages of `reports.view` holders read for that offer, at most.
+const PEOPLE_PAGES: usize = 4;
 
 /// Why a report request was refused; pages and agents show the message.
 #[derive(Debug, thiserror::Error)]
@@ -366,12 +370,12 @@ fn access_key(catalog: &Catalog, report: &Report) -> String {
         .chain(d.measures.iter().map(|m| &m.column))
         .chain(d.sort.iter().map(|s| &s.column))
         .chain(d.filters.iter().map(|f| &f.column))
-        .map(|spec| {
-            if catalog.resolve(root, spec).is_ok() {
-                '1'
-            } else {
-                '0'
-            }
+        // A masked column still resolves; its values are read partial, so
+        // masking it changes what the reader sees (ADR 05).
+        .map(|spec| match catalog.resolve(root, spec) {
+            Ok(column) if catalog.mask(&column).is_some() => 'm',
+            Ok(_) => '1',
+            Err(_) => '0',
         })
         .collect();
     format!("{}:{seen}", report.version)
@@ -715,30 +719,32 @@ impl Reports {
     }
 
     /// The staff who can run reports, as `(id, name)`, for choosing whom a
-    /// schedule also goes to. Needs `reports.share`; at most 500 are offered.
+    /// schedule also goes to. Needs `reports.share`; at most
+    /// [`OFFERED_PEOPLE`] are offered. Each page of holders is proved staff in
+    /// one read, over at most [`PEOPLE_PAGES`] pages.
     pub async fn share_people(&self, scope: &Scope) -> Outcome<Vec<(i64, String)>> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, SHARE).await?;
         let mut accounts = Vec::new();
         let mut after = 0_i64;
-        while accounts.len() < 500 {
-            let page = bilibi_authz::holder_page(&**client, scope, after, VIEW, 100).await?;
-            for id in &page {
-                after = *id;
-                if self
-                    .authentication
-                    .account_identity(&**client, scope, *id)
-                    .await
-                    .is_ok_and(|identity| identity.kind == bilibi_tenancy::AccountKind::Staff)
-                {
-                    accounts.push(*id);
-                }
-            }
-            if page.len() < 100 {
+        for _ in 0..PEOPLE_PAGES {
+            let page =
+                bilibi_authz::holder_page(&**client, scope, after, VIEW, OFFERED_PEOPLE as i64)
+                    .await?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            after = *last;
+            accounts.extend(
+                self.authentication
+                    .live_staff(&**client, scope, &page)
+                    .await?,
+            );
+            if accounts.len() >= OFFERED_PEOPLE || page.len() < OFFERED_PEOPLE {
                 break;
             }
         }
-        accounts.truncate(500);
+        accounts.truncate(OFFERED_PEOPLE);
         let principals = accounts
             .iter()
             .filter_map(|id| {
@@ -768,7 +774,8 @@ impl Reports {
     }
 
     /// What this reader may see of a report now, as a key that changes when
-    /// it does: its version and which of its columns their catalog resolves.
+    /// it does: its version and, per column, whether their catalog resolves
+    /// it, and whether they see it masked.
     /// A cached drawing is reused only while this key holds, so a field
     /// restriction or a lost share shows at the next refresh, not the next
     /// run. Cheaper than a run: no Grid read. Needs `reports.view`.
@@ -846,14 +853,20 @@ impl Reports {
     /// out and listed; a filter on one refuses the run, so it cannot be used
     /// to infer a hidden value. Needs `reports.view`.
     pub async fn run(&self, scope: &Scope, id: i64, input: &RunInput) -> Outcome<Run> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
-        let report = match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
-            Err(Error::NotFound) => return Err(ReportError::NotFound),
-            other => other?,
-        };
-        drop(client);
+        let report = self.get(scope, id).await?;
         self.run_report(scope, report, input).await
+    }
+
+    /// A run for a file: no record links, and a list's question kept so its
+    /// other pages are read with only their keys and cells.
+    pub(crate) async fn run_for_file(
+        &self,
+        scope: &Scope,
+        id: i64,
+        input: &RunInput,
+    ) -> Outcome<(Run, Option<listing::Listing>)> {
+        let report = self.get(scope, id).await?;
+        self.run_report_for(scope, report, input, true).await
     }
 
     /// Runs a built-in report as the reader, like a stored one.
@@ -900,8 +913,18 @@ impl Reports {
     }
 
     async fn run_report(&self, scope: &Scope, report: Report, input: &RunInput) -> Outcome<Run> {
+        Ok(self.run_report_for(scope, report, input, false).await?.0)
+    }
+
+    async fn run_report_for(
+        &self,
+        scope: &Scope,
+        report: Report,
+        input: &RunInput,
+        file: bool,
+    ) -> Outcome<(Run, Option<listing::Listing>)> {
         if report.definition.oversight {
-            return self.run_oversight(scope, report, input).await;
+            return Ok((self.run_oversight(scope, report, input).await?, None));
         }
         let bounds = self.bounds(scope, input.background).await?;
         let client = self.db.get().await.map_err(Error::from)?;
@@ -942,6 +965,7 @@ impl Reports {
             filters.extend(typed);
         }
         let as_rows = report.kind == Kind::Rows || input.as_rows;
+        let mut kept = None;
         let result = match report.kind {
             _ if as_rows => {
                 let specs: Vec<String> = if report.kind == Kind::Rows {
@@ -989,46 +1013,29 @@ impl Reports {
                     .await?
                     .clamp(1, 100);
                 drop(client);
-                let page: KeyPage = bilibi_grid::page_keys(
-                    &self.db,
-                    scope,
-                    &report.record_type,
-                    &PageSpec {
-                        bounds,
-                        filters,
-                        sorts,
-                        timezone: timezone.clone(),
-                        offset: input.page.saturating_mul(page_size),
-                        limit: page_size,
-                    },
-                )
-                .await
-                .map_err(grid)?;
-                let specs: Vec<&str> = columns.iter().map(|c| c.spec.as_str()).collect();
-                // Filled under the same bounds the keys were read under.
-                let projection = bilibi_grid::project_within(
-                    &self.db,
-                    scope,
-                    &report.record_type,
-                    &page.keys,
-                    &specs,
+                let listing = listing::Listing {
+                    record_type: report.record_type.clone(),
+                    filters,
+                    sorts,
+                    specs: columns.iter().map(|c| c.spec.clone()).collect(),
                     bounds,
-                )
-                .await
-                .map_err(grid)?;
-                let rows: Vec<(Value, Vec<Value>)> = projection
-                    .rows
-                    .into_iter()
-                    .map(|row| {
-                        let cells = projection
-                            .columns
-                            .iter()
-                            .map(|c| row.cells.get(&c.id).cloned().unwrap_or(Value::Null))
-                            .collect();
-                        (row.key, cells)
-                    })
-                    .collect();
-                let pages = self.record_pages(scope, root, &rows).await?;
+                    timezone: timezone.clone(),
+                };
+                let page = listing
+                    .page(
+                        &self.db,
+                        scope,
+                        input.page.saturating_mul(page_size),
+                        page_size,
+                    )
+                    .await?;
+                let rows = page.rows;
+                // A file holds no links: the reader opens records from the page.
+                let pages = if file {
+                    Vec::new()
+                } else {
+                    self.record_pages(scope, root, &rows).await?
+                };
                 let totals = if totals_of.iter().any(Option::is_some) {
                     // Grid totals up to 8 measures a read; a wider list
                     // (up to 32 columns) takes one read per eight.
@@ -1068,8 +1075,9 @@ impl Reports {
                 } else {
                     None
                 };
+                kept = Some(listing);
                 RunResult::Rows {
-                    columns: projection.columns.iter().map(info).collect(),
+                    columns: page.columns.iter().map(info).collect(),
                     rows,
                     pages,
                     total: page.total,
@@ -1129,13 +1137,14 @@ impl Reports {
                 }
             }
         };
-        Ok(Run {
+        let run = Run {
             report,
             oversight: Vec::new(),
             left_out,
             timezone,
             result,
-        })
+        };
+        Ok((run, kept))
     }
 
     /// Saves a new report owned by the actor, inside the caller's audited

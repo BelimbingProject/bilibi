@@ -87,6 +87,23 @@ pub async fn install(db: &Db) -> Result<()> {
     Ok(())
 }
 
+/// Stores the instance role (`development`, `staging` or `production`) as
+/// the install seed and Instance settings do. A migrated database without
+/// it is Production. Off development, step-up is enforced and the dev
+/// mailbox refuses to send (`base/mail`), so an example that follows an
+/// emailed link stores `development` first, and one that also proves a
+/// step-up refusal stores `production` again before it.
+pub async fn set_instance_role(db: &Db, role: &str) -> Result<()> {
+    db.get()
+        .await?
+        .execute(
+            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('instance.role',0,'global',0,to_jsonb($1::text),false) ON CONFLICT (key,tenant_id,scope_type,scope_id) DO UPDATE SET value=EXCLUDED.value",
+            &[&role],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Declares the fixture's `companies.view` and `companies.update`
 /// capabilities and its `manager`, `viewer`, `staff` and grant-all `admin`
 /// roles in the expanding example's own crate. The manager and staff edit,

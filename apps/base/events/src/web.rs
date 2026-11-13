@@ -274,7 +274,7 @@ impl Index {
 
     async fn render(&mut self, scope: &Scope) -> Result<String> {
         let pages = self.pages.clone();
-        let client = pages.db.get().await?;
+        let mut client = pages.db.get().await?;
         let locale = pages.locales.resolve(&**client, scope, None).await?.locale;
         let display = pages
             .display
@@ -283,7 +283,7 @@ impl Index {
         let can_replay = effective_capabilities(&**client, scope)
             .await?
             .contains(REPLAY);
-        let mut all = pages.events.subscriber_states(&**client, scope).await?;
+        let mut all = pages.events.subscriber_states(&mut client, scope).await?;
         let search = self.state.search.to_lowercase();
         if !search.is_empty() {
             all.retain(|row| row.subscriber.to_lowercase().contains(&search));
@@ -320,6 +320,10 @@ impl Index {
                 render(Badge::status(BadgeKind::Neutral, "Not mounted"))?
             } else if gap.is_some() {
                 render(Badge::status(BadgeKind::Warning, "Gap"))?
+            } else if state.missed_more {
+                // The count stopped early with nothing found yet: not a
+                // claim that there are none.
+                render(Badge::status(BadgeKind::Neutral, "Not checked"))?
             } else {
                 render(Badge::status(BadgeKind::Success, "Up to date"))?
             };
@@ -341,10 +345,17 @@ impl Index {
                     state.first_pending.unwrap_or_default()
                 )
             });
-            let missed_note = (!compact)
-                .then_some(state.first_missed)
-                .flatten()
-                .map(|first| format!("from #{first}"));
+            let missed_note = match (state.first_missed, state.missed_more) {
+                _ if compact => None,
+                (Some(first), true) => Some(format!("or more, from #{first}")),
+                (Some(first), false) => Some(format!("from #{first}")),
+                (None, true) => Some("or more".to_owned()),
+                (None, false) => None,
+            };
+            let missed = render(CountCell {
+                count: state.missed,
+                note: missed_note,
+            })?;
             let actions = if can_replay && state.mounted && gap.is_some() {
                 let id = format!("events-replay-{dom}");
                 render(IconButton {
@@ -381,13 +392,7 @@ impl Index {
                         note: pending_note,
                     })?,
                 )
-                .slot(
-                    "missed",
-                    render(CountCell {
-                        count: state.missed,
-                        note: missed_note,
-                    })?,
-                );
+                .slot("missed", missed);
             row.dom_id = Some(format!("events-{dom}"));
             row.actions = actions;
             rows.push(row);

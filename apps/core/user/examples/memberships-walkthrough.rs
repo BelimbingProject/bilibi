@@ -5,7 +5,8 @@
 //! administrator set ends the sign-in's sessions and AI connections in every
 //! tenant (#532), and that "Forgot your password?" still mails a working link
 //! after the last-used tenant account is removed (#535), with the reset
-//! token's issue audited (#536).
+//! token's issue audited (#536). It stores the development instance role
+//! first: the dev mailbox sends nowhere else.
 use bilibi_audit::RequestInfo;
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
@@ -202,6 +203,7 @@ async fn main() -> Result<()> {
     }
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
+    bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let app = bilibi_web::App::new(
         db.clone(),
         &std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?,
@@ -408,9 +410,9 @@ async fn main() -> Result<()> {
     let first = session_in(&users, &app, &password, 1).await?;
     let second = session_in(&users, &app, &password, 2).await?;
     let agent = connection(&client, 2, joined).await?;
-    // Setting another person's password asks for step-up, which this
-    // fixture's administrator has no authenticator to pass on a migrate-only
-    // (Production) database; the identity walkthrough proves that refusal.
+    // Setting another person's password asks for step-up off a development
+    // instance, which this fixture's administrator has no authenticator to
+    // pass; the identity walkthrough proves that refusal.
     let step_up = app
         .services
         .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;

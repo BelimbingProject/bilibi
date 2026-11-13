@@ -1,7 +1,9 @@
 //! Manual walkthrough of password, reset and verification flows against an
 //! explicitly supplied disposable database, run after `migrate`.
 //! No test harness or assertions; prints each outcome for inspection, and reads
-//! the dev mailbox exactly as a developer would to follow an emailed link.
+//! the dev mailbox exactly as a developer would to follow an emailed link. It
+//! stores the development instance role first: the dev mailbox sends nowhere
+//! else.
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::{Mailbox, Mailer};
 use bilibi_module_registry::Services;
@@ -70,6 +72,7 @@ async fn main() -> Result<()> {
     bilibi_walkthrough_fixture::install(&db).await?;
     let modules = bilibi_module_registry::discover()?;
     bilibi_database::migrate(&db, &modules).await?;
+    bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let mut services = Services::default();
     services.provide("bootstrap.database", Arc::new(db.clone()))?;
     services.provide(

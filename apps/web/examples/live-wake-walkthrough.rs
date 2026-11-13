@@ -19,6 +19,15 @@
 //! - a change still passes the session guard: after the person's session has
 //!   expired, their next change sends the page back through sign-in.
 //!
+//! Last, what a refresh nobody asked for sends (issue 550). A second fixture
+//! page (`/wake-reference-still`) renders the same body every time:
+//!
+//! - a wake renders it and sends nothing, since the browser holds that body;
+//! - a tab that reports itself out of view is answered and is not refreshed
+//!   on the 15-second timer;
+//! - back in view it is refreshed at once and answered with the page;
+//! - in view, the timer renders it and still sends nothing.
+//!
 //! Each line says what was announced and what was counted; a line starting
 //! `FAIL` makes the run exit non-zero.
 //!
@@ -48,6 +57,7 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 const MODULE: &str = "extensions/wake_reference";
 const SERVICE: &str = "extensions/wake_reference.pages";
 const PATH: &str = "/wake-reference";
+const STILL_PATH: &str = "/wake-reference-still";
 /// The same buffer as the notification and agent-activity channels'.
 const BUFFER: usize = 128;
 /// Fewer than [`BUFFER`], so no subscriber can miss one: each is a wake.
@@ -59,6 +69,8 @@ struct Wakes {
     changes: broadcast::Sender<Change>,
     /// Refreshes asked of a page, by tenant and account.
     refreshes: Mutex<HashMap<(i64, i64), u64>>,
+    /// Refreshes asked of the unchanging page, by tenant and account.
+    still: Mutex<HashMap<(i64, i64), u64>>,
 }
 fn wakes() -> Arc<Wakes> {
     static WAKES: OnceLock<Arc<Wakes>> = OnceLock::new();
@@ -67,6 +79,7 @@ fn wakes() -> Arc<Wakes> {
             Arc::new(Wakes {
                 changes: broadcast::channel(BUFFER).0,
                 refreshes: Mutex::default(),
+                still: Mutex::default(),
             })
         })
         .clone()
@@ -77,6 +90,14 @@ impl Wakes {
     }
     fn refreshes(&self, tenant: i64, user: i64) -> u64 {
         self.refreshes
+            .lock()
+            .unwrap()
+            .get(&(tenant, user))
+            .copied()
+            .unwrap_or(0)
+    }
+    fn still(&self, tenant: i64, user: i64) -> u64 {
+        self.still
             .lock()
             .unwrap()
             .get(&(tenant, user))
@@ -99,11 +120,40 @@ impl Page<Scope, Error> for Reference {
             })
         })
     }
-    fn mount<'a>(&'a self, _request: PageRequest<'a, Scope>) -> MountFuture<'a, Scope, Error> {
+    fn mount<'a>(&'a self, request: PageRequest<'a, Scope>) -> MountFuture<'a, Scope, Error> {
         Box::pin(async move {
-            let state: Box<dyn LiveState<Scope, Error>> = Box::new(ReferenceState);
+            let state: Box<dyn LiveState<Scope, Error>> = if request.operation == "still" {
+                Box::new(StillState)
+            } else {
+                Box::new(ReferenceState)
+            };
             Ok(Some(state))
         })
+    }
+}
+/// The page that renders the same body on every refresh, and counts them.
+struct StillState;
+impl LiveState<Scope, Error> for StillState {
+    fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
+        Box::pin(async move {
+            if !matches!(request.input, LiveInput::Refresh) {
+                return Err(Error::Invalid);
+            }
+            let key = (request.scope.tenant(), request.scope.user());
+            *wakes().still.lock().unwrap().entry(key).or_default() += 1;
+            Ok(LiveBody {
+                html: body(0),
+                ..LiveBody::default()
+            })
+        })
+    }
+    fn panels(&self) -> Vec<PanelSpec> {
+        Vec::new()
+    }
+    fn subscriptions(&mut self) -> Vec<Subscription> {
+        vec![Subscription {
+            receiver: wakes().changes.subscribe(),
+        }]
     }
 }
 impl LiveState<Scope, Error> for ReferenceState {
@@ -145,6 +195,11 @@ inventory::submit! {
 inventory::submit! {
     Contribution::new(ROUTES, "extensions/wake_reference.page", Provenance {module: MODULE, source: file!(), line: line!()}, &Route { company_scope: CompanyScope::Tenant,
         method: Method::Get, path: PATH, service: SERVICE, operation: "page", access: Access::SignedIn, framed: true,
+    })
+}
+inventory::submit! {
+    Contribution::new(ROUTES, "extensions/wake_reference.still", Provenance {module: MODULE, source: file!(), line: line!()}, &Route { company_scope: CompanyScope::Tenant,
+        method: Method::Get, path: STILL_PATH, service: SERVICE, operation: "still", access: Access::SignedIn, framed: true,
     })
 }
 
@@ -194,6 +249,7 @@ async fn open(
     name: &'static str,
     tenant: i64,
     user: i64,
+    path: &str,
 ) -> Result<Tab> {
     let token = uuid::Uuid::new_v4().simple().to_string();
     let csrf = uuid::Uuid::new_v4().simple().to_string();
@@ -215,7 +271,7 @@ async fn open(
     let (mut socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(internal)?;
-    let mount = json!({"type": "mount", "path": PATH, "params": {}, "request_id": 1});
+    let mount = json!({"type": "mount", "path": path, "params": {}, "request_id": 1});
     socket
         .send(Message::text(mount.to_string()))
         .await
@@ -225,7 +281,7 @@ async fn open(
         .as_ref()
         .is_some_and(|frame| frame["type"] == "page")
     {
-        eprintln!("walkthrough: {name} could not mount {PATH}: {mounted:?}");
+        eprintln!("walkthrough: {name} could not mount {path}: {mounted:?}");
         return Err(Error::Internal);
     }
     Ok(Tab {
@@ -298,9 +354,9 @@ async fn main() -> Result<()> {
     // A socket refreshes its page by itself every 15 seconds; the counts
     // below are read before the first of those.
     let opened = Instant::now();
-    let mut ada = open(&db, &addr, &host, "Ada (tenant 1)", 1, 1).await?;
-    let mut lee = open(&db, &addr, &host, "Lee (tenant 1)", 1, 2).await?;
-    let mut other = open(&db, &addr, &host, "Other (tenant 2)", 2, 5).await?;
+    let mut ada = open(&db, &addr, &host, "Ada (tenant 1)", 1, 1, PATH).await?;
+    let mut lee = open(&db, &addr, &host, "Lee (tenant 1)", 1, 2, PATH).await?;
+    let mut other = open(&db, &addr, &host, "Other (tenant 2)", 2, 5, PATH).await?;
     println!(
         "== three pages are open: {}, {}, {}",
         ada.name, lee.name, other.name
@@ -421,6 +477,87 @@ async fn main() -> Result<()> {
         "Lee's page, in the same tenant, still hears a tenant-wide change",
         saw == (1, 0),
         format!("refreshes Lee {}, Other {}", saw.0, saw.1),
+    );
+
+    println!("== what a refresh nobody asked for sends");
+    let mut quiet = open(
+        &db,
+        &addr,
+        &host,
+        "Other, unchanging page",
+        2,
+        5,
+        STILL_PATH,
+    )
+    .await?;
+    let before = channel.still(2, 5);
+    channel.announce(2, Some(5));
+    let asked = Instant::now();
+    while channel.still(2, 5) == before && asked.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let frame = next(&mut quiet.socket, 1).await;
+    run.expect(
+        "a wake renders the unchanged page and sends nothing",
+        channel.still(2, 5) == before + 1 && frame.is_none(),
+        format!(
+            "renders {}, frame {:?}",
+            channel.still(2, 5) - before,
+            frame.as_ref().map(|frame| frame["type"].clone())
+        ),
+    );
+    let visibility = |hidden: bool, id: u64| {
+        Message::text(json!({"type": "visibility", "hidden": hidden, "request_id": id}).to_string())
+    };
+    quiet
+        .socket
+        .send(visibility(true, 2))
+        .await
+        .map_err(internal)?;
+    let answer = next(&mut quiet.socket, 5).await;
+    let before = channel.still(2, 5);
+    tokio::time::sleep(Duration::from_secs(17)).await;
+    let rendered = channel.still(2, 5) - before;
+    run.expect(
+        "a tab out of view is answered and not refreshed on the 15-second timer",
+        answer
+            .as_ref()
+            .is_some_and(|frame| frame["type"] == "ack" && frame["request_id"] == 2)
+            && rendered == 0,
+        format!(
+            "answer {:?}, renders in 17 s {rendered}",
+            answer.as_ref().map(|frame| frame["type"].clone())
+        ),
+    );
+    quiet
+        .socket
+        .send(visibility(false, 3))
+        .await
+        .map_err(internal)?;
+    let answer = next(&mut quiet.socket, 5).await;
+    let rendered = channel.still(2, 5) - before;
+    run.expect(
+        "back in view it is refreshed at once and answered with the page",
+        answer
+            .as_ref()
+            .is_some_and(|frame| frame["type"] == "page" && frame["request_id"] == 3)
+            && rendered == 1,
+        format!(
+            "answer {:?}, renders {rendered}",
+            answer.as_ref().map(|frame| frame["type"].clone())
+        ),
+    );
+    let before = channel.still(2, 5);
+    tokio::time::sleep(Duration::from_secs(17)).await;
+    let rendered = channel.still(2, 5) - before;
+    let frame = next(&mut quiet.socket, 1).await;
+    run.expect(
+        "in view, the timer renders the unchanged page and sends nothing",
+        rendered >= 1 && frame.is_none(),
+        format!(
+            "renders in 17 s {rendered}, frame {:?}",
+            frame.as_ref().map(|frame| frame["type"].clone())
+        ),
     );
 
     println!();

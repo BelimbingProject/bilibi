@@ -343,7 +343,7 @@ Keys in `env` (the service's environment; `README.md` explains each):
 | `BIND_ADDR` | `127.0.0.1:<port>`, where Caddy forwards to; the first free port from 4300 unless you pass `--port` |
 | `DATABASE_URL` | the instance's own database and role on the local cluster |
 | `BILIBI_SETTINGS_KEY`, `BILIBI_USER_SIGNING_KEY`, `BILIBI_MEDIA_SIGNING_KEY` | generated 64-hex-character keys; keep them, losing `BILIBI_SETTINGS_KEY` loses every secret setting and authenticator key |
-| `BILIBI_MAIL_DIR` | `data/mailbox`, until an SMTP relay is set |
+| `BILIBI_MAIL_DIR` | `data/mailbox`, used only by a Dev instance. A Staging or Production instance sends no mail until you add the `MAIL_*` relay variables ([Mail](../apps/base/mail/README.md#choosing-the-transport)); until then every send fails and System Info's Mail line says why |
 | `BILIBI_INSTANCE_DIR` | The instance folder: the program lists and serves releases, and receives bundles under `incoming/` for the installer |
 
 Files outside `/opt/bilibi`: `/etc/systemd/system/bilibi@.service`, `/etc/systemd/system/bilibi-installer@.service`, `/etc/systemd/system/caddy.service.d/bilibi.conf`, `/etc/sudoers.d/bilibi-build`, `/etc/caddy/sites/bilibi-<instance>.caddy`, and one `import` line in `/etc/caddy/Caddyfile`.
