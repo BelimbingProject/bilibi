@@ -501,6 +501,11 @@ impl Store<'_> {
             if !store::permission(client, scope, named.id, "share").await? {
                 return Err(WriteError::Forbidden);
             }
+            if !store::full_open_grant(client, scope, named.id).await? {
+                return Err(WriteError::MergeRefused(
+                    "your own access to each document must include downloading, managing and sharing, with no end date",
+                ));
+            }
             found.insert(named.id, document);
         }
         let survivor_document = found.remove(&survivor.id).ok_or(WriteError::NotFound)?;

@@ -489,6 +489,68 @@ async fn main() -> Result<()> {
         "delegated share: within the sharer's own bounds only; own and creator's grants unchanged"
     );
 
+    // A merge unites who may read, and the survivor's creator holds a full
+    // grant with no end: a delegate who merges a document they hold less on
+    // into one they created would download what their own grant forbids.
+    db.get()
+        .await?
+        .execute(
+            "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES($1,$2,'core.document.merge',true) ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
+            &[&scope.tenant(), &manager],
+        )
+        .await?;
+    let own = write!(app, delegate, "core.document.create", |tx| documents
+        .create(
+            &mut tx,
+            &delegate,
+            &link("Audit coverage delegate's own", "https://example.test/own")
+        )
+        .await?);
+    let shared = documents.get(&delegate, a.id).await?;
+    let (survivor, source) = (
+        MergeSource {
+            id: own.id,
+            version: own.version,
+        },
+        [MergeSource {
+            id: shared.id,
+            version: shared.version,
+        }],
+    );
+    let client = db.get().await?;
+    if documents
+        .preview_merge(&**client, &delegate, survivor, &source)
+        .await
+        .is_ok()
+        || documents.may_merge(&delegate, &shared).await?
+    {
+        return Err("a delegate could merge a document they hold less on into their own".into());
+    }
+    let mut owned = db.get().await?;
+    let mut tx = app
+        .mutations
+        .begin(&mut owned, delegate.mutation_context("core.document.merge"))
+        .await?;
+    let merged = documents.merge(&mut tx, &delegate, survivor, &source).await;
+    tx.rollback().await?;
+    match merged {
+        Ok(_) => return Err("a delegate committed a merge past their own bounds".into()),
+        Err(error) => println!("delegated merge refused: {error}"),
+    }
+    if !documents.may_merge(&delegate, &own).await? {
+        return Err("the creator of a document could not merge it".into());
+    }
+    let still_there: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2)",
+            &[&scope.tenant(), &a.id],
+        )
+        .await?
+        .get(0);
+    if !still_there {
+        return Err("the refused merge still removed the source".into());
+    }
+
     trail.start().await?;
     write!(app, scope, "core.document.mark", |tx| documents
         .mark(

@@ -126,7 +126,7 @@ deploying. The tables are empty unless a walkthrough or fixture fills them.
 
 ## Running evidence
 
-No unit tests. On a disposable migrated database:
+No unit tests. On a disposable migrated database, seeded first (`BILIBI_ENV=development cargo run -p bilibi-web --locked -- seed-production` stores the Dev instance role; grant changes otherwise ask for a second factor nobody enrolled):
 
 ```sh
 BILIBI_GRID_DEMO=disposable cargo run -p bilibi-web --example g1-grid
@@ -179,7 +179,7 @@ The query returns typed `QueryError`s and converts to the shared database error
 for page handlers. It does not sort/filter walked columns or persist layouts (G4); `page_keys` does the sorting and filtering (G5).
 
 Run the live projection walkthrough against a **disposable** migrated
-PostgreSQL database:
+PostgreSQL database, migrated and seeded as above:
 
 ```sh
 BILIBI_GRID_DEMO=disposable cargo run -p bilibi-web --example g2-grid

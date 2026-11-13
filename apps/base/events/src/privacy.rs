@@ -27,7 +27,7 @@ use std::{
 };
 use tokio_postgres::Client;
 
-const KIND: &str = "base/events.event";
+pub(crate) const KIND: &str = "base/events.event";
 const PAGE: i64 = 1000;
 /// More linked events than this is an export too large to bundle.
 const MAX_EXPORT: usize = 100_000;

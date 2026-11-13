@@ -8,6 +8,7 @@ mod contributions;
 mod custom;
 mod customer;
 mod customer_operations;
+mod deletion;
 mod email;
 mod files;
 mod library;
@@ -61,6 +62,8 @@ pub const ACCESS_RECORD: &str = "core.document.access";
 pub const FILE_RECORD: &str = "core.document.file";
 /// The audit kind of a person's favourite and follow marks.
 pub const MARK_RECORD: &str = "core.document.mark";
+/// The audit action of a metadata export (the list's CSV).
+const EXPORTED: &str = "core.document.exported";
 
 /// One document as stored.
 #[derive(Clone, Debug)]
@@ -592,10 +595,10 @@ impl Documents {
         self.store().unlink(tx, &scope, id, record).await
     }
 
-    /// Removes the document with its revisions, links and marks in the
-    /// caller's transaction, fenced on `version`. Its files remain attached
-    /// and readable until `base/artifacts` deletes them as one protected
-    /// batch once it commits. A retained or held revision refuses the delete
+    /// Marks the document as deleting in the caller's transaction, fenced on
+    /// `version`, and queues the durable job that deletes its files as one
+    /// protected `base/artifacts` batch and then its revisions, links and
+    /// marks (`deletion.rs`). A retained or held revision refuses the delete
     /// before anything is marked (`WriteError::Retained` or `LegalHold`, in
     /// `preview_delete` too), so the document stays readable with its full
     /// history; the later batch check is the same fence under its own locks.
@@ -608,36 +611,7 @@ impl Documents {
     ) -> WriteResult<Deleted> {
         let scope = self.fresh(tx.sql(), scope).await?;
         let deleted = self.store().delete(tx, &scope, id, version).await?;
-        {
-            let (db, authentication, boundary, artifacts) = (
-                self.db.clone(),
-                self.authentication.clone(),
-                self.boundary.clone(),
-                self.artifacts.clone(),
-            );
-            let files = deleted.files.clone();
-            let document = id;
-            tx.after_commit(move || {
-                tokio::spawn(async move {
-                    let Ok(mut client) = db.get().await else {
-                        return;
-                    };
-                    let Ok(scope) = authentication.reprove(&**client, &scope).await else {
-                        return;
-                    };
-                    match files::discard_document(&mut client, &scope, &artifacts, &files).await {
-                        Ok(()) => {
-                            if let Err(error) = files::finalize_document_delete(&mut client, &scope, &boundary, document).await {
-                                eprintln!("warning: document {document} metadata awaits delete finalization: {error}");
-                            }
-                        }
-                        Err(error) => eprintln!(
-                            "warning: document {document} and its full revision history await delete retry: {error}"
-                        ),
-                    }
-                });
-            });
-        }
+        self.store().finish_delete(tx, &scope, id).await?;
         Ok(deleted)
     }
 
@@ -750,6 +724,50 @@ impl Documents {
         let client = self.db.get().await?;
         let scope = self.fresh(&**client, scope).await?;
         library::granted(&**client, &scope, ids, permission).await
+    }
+    /// The largest file `store_file` accepts in this tenant now, so a page
+    /// declares its file input with it and refuses a larger file before any
+    /// byte arrives; `store_file` still checks it.
+    pub(crate) async fn upload_limit(&self, scope: &Scope) -> Result<u64> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        files::upload_limit(&client, &scope, &self.settings).await
+    }
+    /// Records a `core.document.exported` action for a metadata export:
+    /// the filter it used and how many of how many matches it wrote.
+    pub(crate) async fn exported(
+        &self,
+        scope: &Scope,
+        filter: &Filter,
+        rows: usize,
+        total: usize,
+    ) -> Result<()> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_audit::record_action(
+            &**client,
+            &bilibi_audit::Attribution::from_scope(&scope),
+            None,
+            EXPORTED,
+            serde_json::json!({
+                "format": "csv",
+                "rows": rows,
+                "total": total,
+                "filter": {
+                    "search": filter.search,
+                    "category": filter.category,
+                    "document_type": filter.document_type,
+                    "status": filter.status,
+                    "related": filter.related.as_ref().map(|r| format!("{}:{}", r.kind, r.id)),
+                    "marked": filter.marked.map(|m| m.code()),
+                    "expiry": filter.expiry.map(|e| e.code()),
+                    "retention_due": filter.retention_due,
+                },
+            }),
+            false,
+        )
+        .await?;
+        Ok(())
     }
     /// The records the document relates to, oldest link first.
     pub async fn links(&self, scope: &Scope, id: i64) -> Result<Vec<Link>> {
@@ -1065,7 +1083,8 @@ impl Documents {
         }
         Ok(
             store::permission(&**client, scope, document.id, "manage").await?
-                && store::permission(&**client, scope, document.id, "share").await?,
+                && store::permission(&**client, scope, document.id, "share").await?
+                && store::full_open_grant(&**client, scope, document.id).await?,
         )
     }
     /// Names references with the reader's permissions (`base/records`).
@@ -1309,6 +1328,15 @@ inventory::submit! { Module {
         }))))
     }}, Service { id: scan::ENDED, factory: |s| {
         Ok(Arc::new(bilibi_queue::EndingService(Arc::new(scan::ScanEnded {
+            documents: s.get(SERVICE)?,
+        }))))
+    }}, Service { id: deletion::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(deletion::DeleteJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            documents: s.get(SERVICE)?,
+        }))))
+    }}, Service { id: deletion::ENDED, factory: |s| {
+        Ok(Arc::new(bilibi_queue::EndingService(Arc::new(deletion::DeleteEnded {
             documents: s.get(SERVICE)?,
         }))))
     }}, Service { id: web::SERVICE, factory: |s| {

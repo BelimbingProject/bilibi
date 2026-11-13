@@ -26,9 +26,17 @@
 //! entry by [`MAX_RESUMABLE_FILE_SIZE`] and the largest file Media stages) and
 //! [`MAX_ENTRIES`], the host accepts at most [`MAX_UPLOADS`] specs per state,
 //! and a chunk must continue exactly where the last one ended. A frame is
-//! `u32 id, u32 offset, bytes` with `bytes` at most [`CHUNK_SIZE`].
+//! `u32 id, u32 offset, bytes` with `bytes` at most [`CHUNK_SIZE`]. The bytes
+//! every buffer of a process holds are counted in one [`UploadBudget`], from
+//! the chunk that brought them until the owner consumes them or the entry
+//! goes, so many pages cannot each hold a file's worth of memory: a chunk
+//! that does not fit marks its entry [`UploadError::Busy`].
 use askama::Template;
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 /// The largest file a spec may accept, however large it asks for.
 pub const MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
@@ -42,6 +50,41 @@ pub const MAX_ENTRIES: usize = 20;
 pub const MAX_UPLOADS: usize = 8;
 /// The bytes of one chunk frame, after its eight-byte header.
 pub const CHUNK_SIZE: usize = 64 * 1024;
+
+/// The bytes every [`Uploads`] of one process holds in memory. The host keeps
+/// one and passes it, with the operator's limit, to each call that takes
+/// bytes in ([`Uploads::append`], [`Uploads::complete`]).
+#[derive(Clone, Debug, Default)]
+pub struct UploadBudget(Arc<AtomicU64>);
+
+/// One entry's share of an [`UploadBudget`], given back when it is dropped.
+#[derive(Debug)]
+struct Held {
+    budget: UploadBudget,
+    bytes: u64,
+}
+
+impl Held {
+    /// Holds `bytes` of `budget`, or nothing when that would pass `limit`.
+    fn take(budget: &UploadBudget, bytes: u64, limit: u64) -> Option<Self> {
+        budget
+            .0
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                held.checked_add(bytes).filter(|held| *held <= limit)
+            })
+            .ok()
+            .map(|_| Self {
+                budget: budget.clone(),
+                bytes,
+            })
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.budget.0.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
 
 /// One file input's rules. `accept` holds
 /// extensions (`.csv`) and media types (`text/csv`, `image/*`); empty accepts
@@ -173,6 +216,8 @@ pub enum UploadError {
     TooManyFiles,
     /// The stream broke off or the file changed while it was read.
     Interrupted,
+    /// The server holds as many upload bytes as it may ([`UploadBudget`]).
+    Busy,
 }
 
 impl UploadError {
@@ -182,6 +227,7 @@ impl UploadError {
             Self::NotAccepted => "not_accepted",
             Self::TooManyFiles => "too_many_files",
             Self::Interrupted => "interrupted",
+            Self::Busy => "busy",
         }
     }
 
@@ -194,6 +240,10 @@ impl UploadError {
             Self::TooManyFiles if spec.max_entries == 1 => "Choose one file at a time.".into(),
             Self::TooManyFiles => format!("Choose at most {} files.", spec.max_entries),
             Self::Interrupted => "The upload was interrupted; choose the file again.".into(),
+            Self::Busy => {
+                "The server is receiving too many files right now. Wait a moment, then choose the file again."
+                    .into()
+            }
         }
     }
 }
@@ -209,6 +259,9 @@ pub struct UploadEntry {
     pub size: u64,
     pub content_type: String,
     bytes: Vec<u8>,
+    /// What `bytes` takes of the process's [`UploadBudget`], one share per
+    /// chunk; given back when the entry goes or is refused.
+    held: Vec<Held>,
     /// A resumable entry's SHA-256 and the bytes staged so far, while they
     /// wait on Media's disk; `None` once they are held in `bytes`.
     staged: Option<([u8; 32], u64)>,
@@ -461,6 +514,7 @@ impl Uploads {
                 size: client.size,
                 content_type: client.content_type,
                 bytes: Vec::new(),
+                held: Vec::new(),
                 staged: None,
                 error,
             };
@@ -543,12 +597,20 @@ impl Uploads {
     }
 
     /// Host side: a staged entry's bytes, all there and hashed as announced,
-    /// now held here for [`Uploads::consume`].
-    pub fn complete(&mut self, id: u64, bytes: Vec<u8>) -> Option<ChunkOutcome> {
+    /// now held here for [`Uploads::consume`]. `None` also when `budget` has
+    /// no room for them under `limit`.
+    pub fn complete(
+        &mut self,
+        id: u64,
+        bytes: Vec<u8>,
+        budget: &UploadBudget,
+        limit: u64,
+    ) -> Option<ChunkOutcome> {
         let entry = self.entries.iter_mut().find(|entry| entry.id == id)?;
         if entry.error.is_some() || entry.staged.is_none() || bytes.len() as u64 != entry.size {
             return None;
         }
+        entry.held = vec![Held::take(budget, entry.size, limit)?];
         entry.staged = None;
         entry.bytes = bytes;
         Some(ChunkOutcome {
@@ -564,6 +626,7 @@ impl Uploads {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.error = Some(UploadError::Interrupted);
             entry.bytes = Vec::new();
+            entry.held = Vec::new();
             entry.staged = None;
         }
     }
@@ -573,12 +636,17 @@ impl Uploads {
     /// announced size; otherwise the entry is marked interrupted and the
     /// error returned. `Err(None)` is an unknown, staged, complete or already
     /// refused entry, or a chunk that makes no progress. A zero-byte file is
-    /// already complete at registration and needs no chunk.
+    /// already complete at registration and needs no chunk. A chunk that
+    /// `budget` has no room for under `limit` (the operator's
+    /// `session.live.upload_buffer_bytes`) refuses the entry as
+    /// [`UploadError::Busy`] and gives back what it held.
     pub fn append(
         &mut self,
         id: u64,
         offset: u64,
         bytes: &[u8],
+        budget: &UploadBudget,
+        limit: u64,
     ) -> Result<ChunkOutcome, Option<UploadError>> {
         let entry = self
             .entries
@@ -594,8 +662,16 @@ impl Uploads {
         {
             entry.error = Some(UploadError::Interrupted);
             entry.bytes = Vec::new();
+            entry.held = Vec::new();
             return Err(Some(UploadError::Interrupted));
         }
+        let Some(held) = Held::take(budget, bytes.len() as u64, limit) else {
+            entry.error = Some(UploadError::Busy);
+            entry.bytes = Vec::new();
+            entry.held = Vec::new();
+            return Err(Some(UploadError::Busy));
+        };
+        entry.held.push(held);
         entry.bytes.extend_from_slice(bytes);
         Ok(ChunkOutcome {
             received: entry.received(),

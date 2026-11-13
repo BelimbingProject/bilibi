@@ -320,8 +320,8 @@ impl Index {
                 render(Badge::status(BadgeKind::Neutral, "Not mounted"))?
             } else if gap.is_some() {
                 render(Badge::status(BadgeKind::Warning, "Gap"))?
-            } else if !state.missed_counted {
-                // The missed events could not be counted in time: not a
+            } else if state.missed_more {
+                // The count stopped early with nothing found yet: not a
                 // claim that there are none.
                 render(Badge::status(BadgeKind::Neutral, "Not checked"))?
             } else {
@@ -345,24 +345,17 @@ impl Index {
                     state.first_pending.unwrap_or_default()
                 )
             });
-            let missed_note = (!compact)
-                .then_some(state.first_missed)
-                .flatten()
-                .map(|first| {
-                    if state.missed_more {
-                        format!("or more, from #{first}")
-                    } else {
-                        format!("from #{first}")
-                    }
-                });
-            let missed = if state.missed_counted {
-                render(CountCell {
-                    count: state.missed,
-                    note: missed_note,
-                })?
-            } else {
-                Html::text("Not counted")
+            let missed_note = match (state.first_missed, state.missed_more) {
+                _ if compact => None,
+                (Some(first), true) => Some(format!("or more, from #{first}")),
+                (Some(first), false) => Some(format!("from #{first}")),
+                (None, true) => Some("or more".to_owned()),
+                (None, false) => None,
             };
+            let missed = render(CountCell {
+                count: state.missed,
+                note: missed_note,
+            })?;
             let actions = if can_replay && state.mounted && gap.is_some() {
                 let id = format!("events-replay-{dom}");
                 render(IconButton {

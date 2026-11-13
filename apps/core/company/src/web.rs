@@ -223,6 +223,10 @@ impl Pages {
             active_panels: Vec::new(),
             notice: String::new(),
             landing: Flash::default(),
+            parent_query: String::new(),
+            parent_hits: Vec::new(),
+            parent_chosen: None,
+            parent_changing: false,
         })
     }
 }
@@ -435,8 +439,99 @@ struct CompanyPage {
     notice: String,
     /// What the page a create redirects to shows.
     landing: Flash,
+    /// The parent picker: the typed search, its hits, the create form's
+    /// chosen parent, and whether the record page is changing its parent.
+    parent_query: String,
+    parent_hits: Vec<bilibi_records::Hit>,
+    parent_chosen: Option<(i64, String)>,
+    parent_changing: bool,
 }
 impl CompanyPage {
+    /// Companies whose name contains `query`, without this company itself.
+    async fn search_parents(&mut self, scope: &Scope, query: &str) -> Result<()> {
+        let query: String = query.chars().take(100).collect();
+        if query == self.parent_query {
+            return Ok(());
+        }
+        self.parent_query = query;
+        self.parent_hits = if self.parent_query.trim().is_empty() {
+            Vec::new()
+        } else {
+            let own = self.id.map(|id| id.to_string());
+            let mut hits = self
+                .records
+                .search(scope, &["company"], &self.parent_query)
+                .await?;
+            hits.retain(|hit| hit.kind == "company" && Some(&hit.id) != own.as_ref());
+            hits
+        };
+        Ok(())
+    }
+    fn parent_picker(&self) -> views::ParentPicker<'_> {
+        views::ParentPicker {
+            query: &self.parent_query,
+            hits: self.records.picker_hits(&self.parent_hits),
+            chosen: self
+                .parent_chosen
+                .as_ref()
+                .map(|(id, label)| (*id, label.as_str())),
+            changing: self.parent_changing,
+        }
+    }
+    /// The record page saves a new parent (or none) through the same owner
+    /// path as every inline fact, at the company's current version.
+    async fn save_parent(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        parent: Option<i64>,
+    ) -> Result<()> {
+        let id = self.id.ok_or(Error::Invalid)?;
+        let version: i64 = {
+            let client = self.db.get().await?;
+            client
+                .query_one(
+                    "SELECT version FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL",
+                    &[&scope.tenant(), &id],
+                )
+                .await?
+                .get(0)
+        };
+        let edit = Edit {
+            id,
+            field: "parent_id".into(),
+            value: parent.map(|p| p.to_string()).unwrap_or_default(),
+            version,
+        };
+        let status = match self.company.save_fact(scope, credential, &edit).await {
+            Ok(()) => {
+                self.parent_changing = false;
+                self.parent_query.clear();
+                self.parent_hits.clear();
+                CommitStatus::Saved
+            }
+            Err(crate::WriteError::Access(Error::Unauthorized)) => return Err(Error::Unauthorized),
+            Err(crate::WriteError::Access(Error::Forbidden)) => CommitStatus::Error(
+                "You may not set that parent, or this company is archived.".into(),
+            ),
+            Err(crate::WriteError::Access(Error::Conflict)) => {
+                CommitStatus::Error("The record changed. Reload before changing its parent.".into())
+            }
+            Err(crate::WriteError::Invalid(errors)) => CommitStatus::Error(
+                errors
+                    .into_iter()
+                    .map(|e| e.message)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            Err(crate::WriteError::Archived) => {
+                CommitStatus::Error("That company is archived, so it cannot be the parent.".into())
+            }
+            Err(_) => CommitStatus::failure(),
+        };
+        self.statuses.put("parent_id", status);
+        Ok(())
+    }
     /// The contributed record panels this reader may mount.
     async fn allowed_panels(
         &self,
@@ -616,6 +711,12 @@ impl CompanyPage {
                         workspace: self.framed,
                         display: &display,
                         panels: &anchors,
+                        parent: views::ParentPicker {
+                            query: &self.parent_query,
+                            hits: self.records.picker_hits(&self.parent_hits),
+                            chosen: None,
+                            changing: self.parent_changing,
+                        },
                     },
                 )
                 .await?
@@ -633,6 +734,7 @@ impl CompanyPage {
                         confirming: self.confirming_duplicate,
                         likely: self.duplicate_likely,
                         reason: &self.duplicate_reason,
+                        parent: self.parent_picker(),
                     },
                 )
                 .await?
@@ -1024,6 +1126,50 @@ impl CompanyPage {
                     Err(error) => pending.error = error.to_string(),
                 }
             }
+            "parent_search" if self.operation == "detail" => {
+                let fields = bilibi_ui::params::form_values_checked(
+                    value,
+                    views::PARENT_FORM,
+                    bilibi_ui::params::FIELD_LIMIT,
+                )
+                .map_err(Error::refused)?;
+                let query = fields.get("parent_search").cloned().unwrap_or_default();
+                self.search_parents(scope, &query).await?;
+            }
+            "pick_parent" if matches!(self.operation, "detail" | "create") => {
+                let id: i64 = get("record")
+                    .strip_prefix("company:")
+                    .and_then(|id| id.parse().ok())
+                    .filter(|id| *id > 0)
+                    .ok_or(Error::Invalid)?;
+                if self.operation == "detail" {
+                    self.save_parent(scope, credential, Some(id)).await?;
+                } else {
+                    self.parent_chosen = self
+                        .records
+                        .resolve(
+                            scope,
+                            &[bilibi_records::Reference::new("company", id.to_string())],
+                        )
+                        .await?
+                        .into_iter()
+                        .next()
+                        .and_then(|chosen| Some((chosen.id.parse().ok()?, chosen.label?)));
+                    self.errors.retain(|e| e.field != "parent_id");
+                    self.parent_query.clear();
+                    self.parent_hits.clear();
+                }
+            }
+            "clear_parent" if self.operation == "create" => self.parent_chosen = None,
+            "change_parent" if self.operation == "detail" => self.parent_changing = true,
+            "keep_parent" if self.operation == "detail" => {
+                self.parent_changing = false;
+                self.parent_query.clear();
+                self.parent_hits.clear();
+            }
+            "remove_parent" if self.operation == "detail" => {
+                self.save_parent(scope, credential, None).await?;
+            }
             "validate_company" if self.operation == "create" => {
                 let old_name = self.form.get("name").cloned().unwrap_or_default();
                 self.code_edited |= value
@@ -1040,7 +1186,12 @@ impl CompanyPage {
                     .filter(|(key, _)| key != "type")
                     .collect();
                 let name = values.get("name").cloned().unwrap_or_default();
+                let query = values
+                    .get("parent[parent_search]")
+                    .cloned()
+                    .unwrap_or_default();
                 self.form = values;
+                self.search_parents(scope, &query).await?;
                 if name != old_name && !self.code_edited {
                     let client = self.db.get().await?;
                     bilibi_authz::authorize_key(&**client, scope, crate::CREATE).await?;
@@ -1088,6 +1239,10 @@ impl CompanyPage {
                     self.duplicate_candidates.clear();
                     self.duplicate_likely = false;
                 }
+                match &self.parent_chosen {
+                    Some((id, _)) => self.form.insert("parent_id".into(), id.to_string()),
+                    None => self.form.remove("parent_id"),
+                };
                 let (mut new, company_fields, activities, metadata, errors) =
                     views::new_company(&self.form);
                 if !self.code_edited {
