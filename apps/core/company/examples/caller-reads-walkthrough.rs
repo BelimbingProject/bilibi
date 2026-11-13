@@ -71,7 +71,6 @@ async fn main() -> Result<(), Failure> {
         .get::<MutationBoundary>("base/database.mutations")?;
     let proofs = app.services.get::<PartyProofs>("base/tenancy.parties")?;
     let mut client = db.get().await?;
-    bilibi_company::ensure_default_relationship_roles(&**client, manager.tenant()).await?;
     let role = relationship_role_by_code(&**client, &manager, "customer")
         .await?
         .ok_or("customer role missing")?;

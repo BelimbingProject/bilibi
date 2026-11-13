@@ -107,7 +107,6 @@ async fn main() -> Result<(), Error> {
     let client = db.get().await?;
     let client: &tokio_postgres::Client = &client;
     client.batch_execute("DELETE FROM company_relationships WHERE source_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'picker\\_%'); UPDATE companies SET parent_id=NULL WHERE code LIKE 'picker\\_%'; DELETE FROM companies WHERE code LIKE 'picker\\_%'; DELETE FROM persons WHERE code LIKE 'picker-person-%'").await?;
-    bilibi_company::ensure_default_relationship_roles(client, tenant).await?;
     let customer: i64 = client
         .query_one(
             "SELECT id FROM company_relationship_roles WHERE tenant_id=$1 AND code='customer'",

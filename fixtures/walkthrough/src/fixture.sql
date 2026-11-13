@@ -1,4 +1,11 @@
 INSERT INTO tenants(id,name) VALUES(1,'Example Labs'),(2,'Other Workspace') ON CONFLICT DO NOTHING;
+-- Core Company's default relationship roles (bilibi_party::DEFAULT_RELATIONSHIP_ROLES):
+-- the migration seeds existing tenants and provisioning new ones; these tenants
+-- arrive after both, and a read never seeds them.
+INSERT INTO company_relationship_roles(tenant_id,code,name,inverse_name)
+SELECT t.id,d.code,d.name,d.inverse_name FROM (VALUES(1),(2)) t(id)
+CROSS JOIN (VALUES('vendor','Vendor','Customer'),('customer','Customer','Vendor'),('prospect','Prospect','Prospective vendor'),('partner','Partner','Partner')) d(code,name,inverse_name)
+ON CONFLICT (tenant_id,code) DO NOTHING;
 INSERT INTO roles(id,tenant_id,name,grant_all) VALUES(1,1,'manager',false),(2,1,'viewer',false),(3,1,'staff',false),(4,1,'admin',true),(5,2,'manager',false) ON CONFLICT DO NOTHING;
 INSERT INTO role_capabilities(tenant_id,role_id,capability)
 SELECT tenant_id,id,capability FROM roles CROSS JOIN unnest(ARRAY['companies.view']) capability WHERE id IN (1,2,3,4,5) ON CONFLICT DO NOTHING;

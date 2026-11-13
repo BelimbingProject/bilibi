@@ -366,9 +366,9 @@ Directory.
 is to the target) and confers no capability; it is never an Authz role. The
 contributed defaults (`vendor`, `customer`, `prospect`, `partner`) are
 reconciled **by code** into each tenant: the migration does it for existing
-tenants, provisioning for new ones, and `CompanyService::relationship_roles`
-for a tenant whose catalog is still empty (the walkthrough fixture creates its
-tenants after the migration). An administered role is never overwritten; no default
+tenants and provisioning for new ones (an audited change per role when Core
+Tenant creates the tenant); a read never writes, and the walkthrough fixture
+inserts its tenants' defaults itself. An administered role is never overwritten; no default
 has a fixed id. Codes are trimmed, lower-cased, 1–64 characters of letters,
 digits, `_`, `-` and `.`, unique within the tenant under an advisory lock.
 `create` needs `admin.company.create`; `update` (a rename: id and code never

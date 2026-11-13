@@ -130,7 +130,6 @@ async fn main() -> Result<(), Error> {
     let client = db.get().await?;
     let client: &tokio_postgres::Client = &client;
     client.batch_execute("DELETE FROM company_relationships WHERE source_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'scale\\_%') OR target_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'scale\\_%'); DELETE FROM companies WHERE code LIKE 'scale\\_%'; DELETE FROM persons WHERE code LIKE 'scale-person-%'").await?;
-    bilibi_company::ensure_default_relationship_roles(client, tenant).await?;
     let role = |code: &'static str| async move {
         client
             .query_one(

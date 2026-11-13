@@ -12,9 +12,8 @@ use bilibi_agent_api::{
     Registry,
 };
 use bilibi_company::{
-    assign_relationship, ensure_default_relationship_roles, CompanyService, CreateOutcome,
-    NewCompany, RelationshipEntry, RelationshipRoleUpdate, RelationshipUpdate, TypeOutcome,
-    SERVICE,
+    assign_relationship, CompanyService, CreateOutcome, NewCompany, RelationshipEntry,
+    RelationshipRoleUpdate, RelationshipUpdate, TypeOutcome, SERVICE,
 };
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_party::{
@@ -182,10 +181,6 @@ async fn main() -> Result<(), Error> {
             .iter()
             .map(|r| r.code.clone())
             .collect::<Vec<_>>(),
-    );
-    show(
-        "second read inserts nothing",
-        ensure_default_relationship_roles(client, 1).await?,
     );
     let role = |code: &str| {
         roles
