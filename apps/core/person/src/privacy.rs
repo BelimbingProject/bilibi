@@ -250,7 +250,7 @@ impl Handler for People {
             let files = services()?;
             let id = grant.person().get().to_string();
             if let Some(public_id) = reference.strip_prefix("media:") {
-                let file = files
+                return files
                     .media
                     .disclosed_attachment(
                         &*client,
@@ -263,13 +263,7 @@ impl Handler for People {
                         public_id,
                     )
                     .await
-                    .map_err(media_error)?;
-                return Ok(File {
-                    content_type: file
-                        .mime_type
-                        .unwrap_or_else(|| "application/octet-stream".into()),
-                    bytes: file.bytes,
-                });
+                    .map_err(media_error);
             }
             let (company, document) = reference
                 .strip_prefix("artifact:")
@@ -286,7 +280,7 @@ impl Handler for People {
                 .read(client, document)
                 .await
                 .map_err(artifact_error)?;
-            Ok(File {
+            Ok(File::Read {
                 content_type: read.metadata.content_type,
                 bytes: read.bytes,
             })
