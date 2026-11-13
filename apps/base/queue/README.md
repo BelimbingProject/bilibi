@@ -144,7 +144,7 @@ caller-supplied audit attribution cannot create execution authority.
 | Failure | An error, panic or timeout rolls back and is tried again with the job backoff (`min(3600, 2^n)` seconds), 25 times, then `ending='failed'`, counted on System Info |
 | Retry | `retry_for` makes the job alive again and clears its ending, so a second ending is told again |
 
-- Each executor runs one endings loop beside its slots, every poll, up to 100 jobs; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
+- Each executor runs one endings loop beside its slots, up to 100 jobs a pass; after a full pass in which every job was told it goes straight to the next, otherwise it waits a poll; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
 - Move the waiting record to a named state through the owner's normal path (a Workflow edge for a business status), and give people a permission-gated way to run it again. `base/privacy` is the first user: a request job that ends moves the request `running → failed`, as `privacy-monitor`.
 
 ## Retention and the status line
@@ -251,4 +251,4 @@ Queue's implementation modules are private. Import `Execution`, `Executor`, `Con
 BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example throughput-walkthrough
 ```
 
-On a fresh disposable database it runs one slot with a one-second poll interval and proves that 30 quick jobs finish in a fraction of 30 seconds, each exactly once; that an idle queue is polled about once a second rather than spun on; and that a failing job still waits its backoff before its next attempt and is discarded after its last.
+On a fresh disposable database it runs one slot with a one-second poll interval and proves that 30 quick jobs finish in a fraction of 30 seconds, each exactly once; that an idle queue is polled about once a second rather than spun on; that a failing job still waits its backoff before its next attempt and is discarded after its last; and that 250 cancelled jobs with an ending hook are all told in less than one ten-second poll, the loop going straight from one full batch to the next.
