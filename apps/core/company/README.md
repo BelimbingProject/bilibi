@@ -432,10 +432,11 @@ UI (`core/company.relationship_pages`):
   the role's label from this company's side, the inclusive dates and the
   status (`active`, `inactive`, `unlinked`). "Show history" brings ended and
   unlinked links back; a retired role stays visible on its links. "Add
-  Relationship" chooses a company or a person of the tenant, an unretired
-  role and optional dates, validating as values change so the picker
-  follows the kind; a person picker needs `admin.person.list`, which the
-  form says when the reader lacks it. Edit changes only the dates, so
+  Relationship" finds a company or a person of the tenant by name with the
+  shared `RecordPicker` (Base Records search under the reader's own
+  permissions, so the person kind needs Person's read capability), then an
+  unretired role and optional dates. The radio switches the kind and clears
+  the choice; no list of every company or person is loaded. Edit changes only the dates, so
   ending a link is setting its last day; Unlink confirms and keeps the row
   as history. Every opening and write asks `bilibi_company::authorize_target`
   and `require_writable` again; a denial, an archived company (either
@@ -622,7 +623,7 @@ A candidate's score is its best matching fact:
 | Phone digits, at least seven | 0.85 |
 | Name after removing configured words | Trigram intersection divided by union |
 
-Name comparison runs in Rust over at most 200 rows preselected by overlapping indexed name tokens, the rows sharing the most tokens with the query first. Exact-key candidates are selected separately, so the name bound cannot hide a registration match. Results sort by descending score, then ID, at or above the threshold; `limit` is 1–100, default 10. Public email domains such as Gmail never count as an email match.
+Name comparison runs in Rust over at most 200 rows preselected by indexed name tokens, the rows sharing the most tokens with the query first. Each query word reads at most 201 of the tenant's companies holding it, in ID order; a word more than 200 companies hold (such as "trading") picks no candidate alone, so the read never sorts every company sharing one common word. When every word is that common, only companies holding all of them qualify, the lowest 200 IDs. A caller with no statement timeout of its own runs the matching statement under 1 second, set and restored on its transaction, so a create under `require_reason` never holds the tenant lock longer on matching. Exact-key candidates are selected separately, so the name bound cannot hide a registration match. Results sort by descending score, then ID, at or above the threshold; `limit` is 1–100, default 10. Public email domains such as Gmail never count as an email match.
 
 Create Company shows candidates below the form. **Use existing** opens the record; **Create anyway** submits the form's current values and opens a confirmation for the reason. `NewCompany::create_anyway` carries `CreateAnyway { candidate_ids, reason }` for pages, agent writes and other module callers. The reason is trimmed and must contain 1–500 characters. The create's audit `Change` records the reason and IDs under `create_anyway`; this read-only context does not become a company scalar field.
 
@@ -632,7 +633,7 @@ The create path checks under `admin.company.create`, not `admin.company.list`. `
 
 ## Company hierarchies
 
-**Use `CompanyService::hierarchy(scope, id)` or `core.company.hierarchy` to read relatives.** Both require `admin.company.view`, use current Company's tenant-wide read visibility, and return id, name, status, level and `parent_id`, so a caller can draw the tree (`None` at the root; outside the list when the limit cut the chain). Ancestors are root first and keep their true depth from the root; when the limit cuts the chain, the nearest ancestors stay with their real levels and `truncated` is set. Descendant levels count the requested company as level 1. The read caps traversal at the tenant's depth limit and the returned relatives at 1,000 nodes, with `truncated` when more exist. The requested company is not repeated in either list. The record page links its parent chain, starting with “… N higher levels” when the limit hid some.
+**Use `CompanyService::hierarchy(scope, id)` or `core.company.hierarchy` to read relatives.** Both require `admin.company.view`, use current Company's tenant-wide read visibility, and return id, name, status, level and `parent_id`, so a caller can draw the tree (`None` at the root; outside the list when the limit cut the chain). Ancestors are root first and keep their true depth from the root; when the limit cuts the chain, the nearest ancestors stay with their real levels and `truncated` is set. Descendant levels count the requested company as level 1. The read caps traversal at the tenant's depth limit and the returned relatives at 1,000 nodes, with `truncated` when more exist. The requested company is not repeated in either list. The record page links its parent chain, starting with “… N higher levels” when the limit hid some. The Parent Company fact and the create form choose a parent with the shared `RecordPicker`: typing searches the tenant's companies through Base Records under the reader's permissions, and the record page saves the choice (or Remove parent) through `save_fact` at the current version. Neither page loads a list of every company; the owner still authorizes, locks and cycle-checks the chosen parent.
 
 Every ordinary create with a parent and every parent edit shares the tenant lock and the same hierarchy checks. A loop returns `Parent company cannot be one of its own subsidiaries.` The new parent's chain depth plus the moving company's subtree height must fit the limit. The default refusal is `Parent company would make the company tree deeper than 10 levels.` Existing deep trees can remain or become shallower; a move is refused only if it increases depth beyond the limit. `save_fact` returns `WriteError::Invalid` with these field messages, preserving the inline draft.
 

@@ -5,7 +5,8 @@
 //! administrator, then downloads `/documents/export.csv` through the module's
 //! download service, as the route does, and compares the file with the list's
 //! own total. Fails the executable when a row is missing, repeated, or when a
-//! partial file does not say that it is partial.
+//! partial file does not say that it is partial, or when an export leaves no
+//! `core.document.exported` action with its filter and row count (issue 602).
 //!
 //! On a migrated database that holds the walkthrough fixture and that
 //! `bilibi-web seed-production` then seeded (the pick-lists a document is
@@ -159,5 +160,45 @@ async fn main() -> Result<()> {
         .filter_map(|line| line.split(',').next())
         .collect();
     ensure(ids.len() == expected, "every row is a different document")?;
+
+    let search = HashMap::from([("search".to_owned(), "Export proof 00001".to_owned())]);
+    let narrow = files
+        .0
+        .serve(DownloadRequest {
+            operation: "export",
+            scope: &admin,
+            path: &nothing,
+            query: &search,
+        })
+        .await?;
+    let narrow_rows = String::from_utf8(narrow.bytes)?
+        .split("\r\n")
+        .filter(|l| !l.is_empty())
+        .count()
+        - 1;
+    let actions = app
+        .db
+        .get()
+        .await?
+        .query(
+            "SELECT actor_id,payload FROM base_audit_actions WHERE tenant_id=$1 AND event='core.document.exported' ORDER BY id",
+            &[&admin.tenant()],
+        )
+        .await?;
+    println!("== {} core.document.exported action(s)", actions.len());
+    ensure(actions.len() == 2, "each export leaves one exported action")?;
+    let payload = |i: usize| actions[i].get::<_, serde_json::Value>(1);
+    ensure(
+        actions.iter().all(|a| a.get::<_, i64>(0) == admin.user()),
+        "the actions name the administrator who exported",
+    )?;
+    ensure(
+        payload(0)["rows"] == expected && payload(0)["total"] == total,
+        &format!("the first action records {expected} of {total} rows"),
+    )?;
+    ensure(
+        payload(1)["rows"] == narrow_rows && payload(1)["filter"]["search"] == "Export proof 00001",
+        &format!("the searched export records its search and its {narrow_rows} row(s)"),
+    )?;
     Ok(())
 }

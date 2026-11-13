@@ -5,7 +5,6 @@ use bilibi_authz::{authorize_key, restrictions_for};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::{PersonProvider, ProofClient, ProofFuture, Scope};
 use serde_json::Value;
-use std::collections::HashSet;
 use tokio_postgres::GenericClient;
 
 pub const SYSTEM_KEY: &str = "platform-orchestrator";
@@ -305,7 +304,8 @@ fn restricted_input(input: &PersonInput, masked: &Restrictions) -> Result<()> {
     Ok(())
 }
 
-// Retired identities keep their codes; choose the first available suffix.
+// Retired identities keep their codes; choose the unsuffixed code when it is
+// free, else the suffix after the highest one taken.
 pub(crate) async fn available_code(
     client: &dyn bilibi_tenancy::ReadClient,
     tenant: i64,
@@ -331,30 +331,56 @@ async fn available_code_matching<C: bilibi_tenancy::ReadClient + ?Sized>(
     name: &str,
     mut accept: impl FnMut(&str) -> bool,
 ) -> Result<String> {
-    const BATCH: u64 = 128;
-    const MAX: u64 = 9_999_999_999;
-    let mut start = 1;
-    while start <= MAX {
-        let end = (start + BATCH - 1).min(MAX);
-        let candidates: Vec<_> = (start..=end)
-            .map(|suffix| bilibi_party::default_code(name, bilibi_party::CodeKind::Person, suffix))
-            .collect();
-        let taken: HashSet<String> = client
-            .query(
-                "SELECT code FROM persons WHERE tenant_id=$1 AND code=ANY($2::text[])",
-                &[&tenant, &candidates],
+    let code = |suffix| bilibi_party::default_code(name, bilibi_party::CodeKind::Person, suffix);
+    let unsuffixed = code(1);
+    let taken = client
+        .query_opt(
+            "SELECT 1 FROM persons WHERE tenant_id=$1 AND code=$2",
+            &[&tenant, &unsuffixed],
+        )
+        .await?
+        .is_some();
+    if !taken && accept(&unsuffixed) {
+        return Ok(unsuffixed);
+    }
+    // Every suffix of one length shares its base (the base shortens as the
+    // suffix grows), and those codes sort as their numbers do. So one probe of
+    // `persons_code_suffix` per length finds the highest taken, however many
+    // people share the base (#591); a number after it is free, and `accept`
+    // passes over values this plan already reserved. Gaps below it are not
+    // reused.
+    for digits in 1..=10u32 {
+        let low = if digits == 1 {
+            2
+        } else {
+            10u64.pow(digits - 1)
+        };
+        let high = 10u64.pow(digits) - 1;
+        let first = code(low);
+        let prefix = &first[..first.len() - digits as usize];
+        let last = code(high);
+        let length = i32::try_from(first.len()).map_err(|_| Error::Internal)?;
+        let highest = client
+            .query_opt(
+                r#"SELECT code FROM persons WHERE tenant_id=$1 AND length(code)=$2 AND (code COLLATE "C") BETWEEN $3 AND $4 AND code ~ $5 ORDER BY (code COLLATE "C") DESC LIMIT 1"#,
+                &[
+                    &tenant,
+                    &length,
+                    &first,
+                    &last,
+                    &format!("^{prefix}[0-9]{{{digits}}}$"),
+                ],
             )
             .await?
-            .iter()
-            .map(|row| row.get(0))
-            .collect();
-        if let Some(candidate) = candidates
-            .into_iter()
-            .find(|code| !taken.contains(code) && accept(code))
-        {
-            return Ok(candidate);
+            .map(|row| row.get::<_, String>(0)[prefix.len()..].parse::<u64>())
+            .transpose()
+            .map_err(|_| Error::Internal)?;
+        for suffix in highest.map_or(low, |n| n + 1)..=high {
+            let candidate = code(suffix);
+            if accept(&candidate) {
+                return Ok(candidate);
+            }
         }
-        start = end + 1;
     }
     Err(Error::Internal)
 }

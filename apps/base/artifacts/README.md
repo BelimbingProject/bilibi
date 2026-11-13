@@ -155,6 +155,8 @@ at most 1000 owned, attached artifacts' retain-until, hold and due state without
 reading bytes or paths, after checking the owner's `Retain` grant on each. A
 missing or unauthorized artifact refuses the batch.
 
+An owner whose record lists an ordinary Artifact as its file for as long as the record keeps it (Core Document's library revisions) calls `keep_in(tx, id)` in the same mutation, after the attachment row is written. It clears the expiry, so neither `artifacts.retention_days` nor `purge_expired` ever removes the document, and writes an `artifacts.kept` audit action. It needs the owner's `Retain` grant, because the installation setting no longer bounds the document's life, but it is not retention: nothing becomes irreversible, the document has no retain-until, and an explicit `Delete` removes it as before. A records-grade document is left as it is; an already expired one is `NotFound`.
+
 A records-grade document has `expires_at: None`; reads keep working before and
 after retain-until, and `purge_expired` never selects it. `delete` answers
 `Error::LegalHold` while a hold stands and `Error::Retained` before retain-until
@@ -173,7 +175,7 @@ publication transaction, so a failed upload stays an ordinary reservation that
 The database guards the same rules for any client (`base_artifacts_retention_guard`,
 `migrations/002-retention.sql`): retain-until cannot be cleared or moved earlier, a
 retained row cannot be tombstoned, purged or removed while on hold or before
-retain-until, exactly one of expiry and retain-until is set, and a hold needs
+retain-until, at most one of expiry and retain-until is set, and a hold needs
 retain-until. Each change writes one row to `base_artifact_retention_events`
 (`retained`, `retention_extended`, `hold_placed`, `hold_released`) with the
 retain-until and hold state after it, the reason, and the attributed actor (user,
@@ -202,7 +204,7 @@ alerting on `failed`; Base enumerates no companies.
 
 **`subject_documents(client, scope, owner, subject)` lists one subject's live documents of an owner** in every company of the tenant, keeping those the owner lets the scope `Read`, however many ([ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md)).
 
-- An approved request carries a sealed `base/personal_data` grant: `disclosed_documents` and `for_disclosure(.., &Disclosure, subject).read` read that subject's published documents; `erasable_documents` and `for_erasure(.., &Erasure, subject).delete` delete every unpurged document, including unpublished reservations that may already hold durable bytes. Subject and disclosure reads remain published-only. The owner is not asked for that subject's documents; the account must still be live, retention and legal holds still refuse, and every step is audited. An erasure's subject must be the grant's person ID under a declared person-keyed kind, or one the owner's `erasure_subject` confirms is that person's (default: none).
+- An approved request carries a sealed `base/personal_data` grant: `disclosed_documents` and `for_disclosure(.., &Disclosure, subject).read` read that subject's published documents; `erasable_documents` and `for_erasure(.., &Erasure, subject).delete` delete every unpurged document, including unpublished reservations that may already hold durable bytes. Subject and disclosure reads remain published-only. The owner is not asked for that subject's documents; the account must still be live, retention and legal holds still refuse, and every step is audited. An erasure's subject must be the grant's person ID under a declared person-keyed kind, or one the owner's `erasure_subject` confirms is that person's (default: none). A disclosure read's subject is likewise the grant's person ID under a person-keyed kind, or one the owner's `disclosure_subject` confirms (default: none); `disclosed_documents` takes only the first.
 - A portal customer reads through `for_portal(&PortalScope, company, &Owner).read` (ADR 16). The tenant files a document under its own company, never the customer's, so the check that keeps a business customer to its own company's files is not made there; only `read` is allowed, the owner's `authorize` still decides it with the customer's live scope, and the read is audited as the customer. Every other customer use of `for_owner` keeps that check.
 - `PdfOptions::retained(Retention)` publishes a rendered PDF records-grade, as `put_retained` does.
 

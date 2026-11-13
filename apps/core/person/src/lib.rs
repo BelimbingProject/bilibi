@@ -221,6 +221,7 @@ inventory::submit! {
             ("core-person-004-erasure", include_str!("../migrations/004-erasure.sql")),
             ("core-person-005-contact-lookup", include_str!("../migrations/005-contact-lookup.sql")),
             ("core-person-006-custom-fields", include_str!("../migrations/006-custom-fields.sql")),
+            ("core-person-007-code-suffix", include_str!("../migrations/007-code-suffix.sql")),
         ],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let parties = services.get::<bilibi_tenancy::PartyProofs>("base/tenancy.parties")?;

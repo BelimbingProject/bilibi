@@ -231,7 +231,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, crate::reminders::REMINDER_D
         reveal_duration_ms: 5_000,
     }),
 })) }
-// Zero leaves ordinary Artifact expiry and explicit deletion unchanged.
+// Zero keeps each new file until its document is deleted, with no expiry.
 // Retention is irreversible, so a new rule applies to future revisions only.
 inventory::submit! { Contribution::new(DEFINITIONS, RETENTION_DAYS, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: &[ScopeKind::Global, ScopeKind::Tenant], default: || json!(0),
@@ -239,7 +239,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, RETENTION_DAYS, provenance!(
     editor: Some(Editor {
         group: "Documents",
         label: "Keep new document files for (days)",
-        help: "Zero leaves retention off. A positive period protects each new private revision from deletion for that many days. Existing retention can only be extended, even if this setting is lowered later.",
+        help: "Zero keeps each file until its document is deleted. A positive period protects each new private revision from deletion for that many days. Existing retention can only be extended, even if this setting is lowered later.",
         capability: None,
         reveal_duration_ms: 5_000,
     }),

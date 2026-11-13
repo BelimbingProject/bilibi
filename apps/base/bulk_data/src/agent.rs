@@ -486,7 +486,7 @@ fn export_output() -> Value {
     json!({"type": "object", "description": "An export: record type, filter, how many ticked records it takes (selected), columns, state (running, completed or failed), the rows it holds, the reason it failed, the download path once completed, and its version. Never the file's data."})
 }
 fn run_output() -> Value {
-    json!({"type": "object", "description": "An import run: file name, record type, columns, rows, state (draft, previewing, previewed, running, completed, cancelled or stopped), progress, mapping, the dry run's and the real run's counts (create, update, action, skip, error), trace ID and version. Never the file's data."})
+    json!({"type": "object", "description": "An import run: file name, record type, columns, rows, state (draft, previewing, previewed, running, completed, cancelled or stopped), erased (true once a person's erasure removed its file and its rows' source keys and messages), progress, mapping, the dry run's and the real run's counts (create, update, action, skip, error), trace ID and version. Never the file's data."})
 }
 fn list_output() -> Value {
     json!({"type": "array", "description": "Import runs or row results."})

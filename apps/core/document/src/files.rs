@@ -168,6 +168,18 @@ impl Owner for DocumentFiles {
     fn owner_id(&self) -> &'static str {
         ARTIFACT_OWNER
     }
+    /// An access export reads the files of the documents related to the
+    /// request's person (`privacy.rs`).
+    fn disclosure_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        grant: &'a bilibi_personal_data::Disclosure,
+        subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move {
+            crate::privacy::person_file(client, grant.tenant(), grant.person().get(), subject).await
+        })
+    }
     fn authorize<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -407,7 +419,11 @@ fn media_error(error: bilibi_media::Error) -> WriteError {
 }
 
 /// The upload limit: the tenant's, never above the operator's.
-async fn upload_limit(client: &Client, scope: &Scope, settings: &Settings) -> Result<u64> {
+pub(crate) async fn upload_limit(
+    client: &Client,
+    scope: &Scope,
+    settings: &Settings,
+) -> Result<u64> {
     let tenant = settings
         .get(client, scope, Target::Tenant, MAX_UPLOAD_BYTES)
         .await?
