@@ -57,7 +57,7 @@ inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBi
 
 /// Queues the job that finishes deleting `document`, in `tx`, at `at`
 /// (`None`: now).
-async fn enqueue(
+pub(crate) async fn enqueue(
     queue: &bilibi_queue::Queue,
     tx: &mut MutationTransaction<'_>,
     tenant: i64,

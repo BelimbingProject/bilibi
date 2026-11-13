@@ -141,6 +141,15 @@ for an explicit reviewed deletion; nothing is deleted automatically. Base still
 rechecks every revision under lock in delete and merge, so a new hold refuses
 those actions even after the list was read.
 
+## Privacy requests
+
+Documents related to a person (a `person` link) are a `base/personal_data` store, `core/document.documents` (ADR 05, `src/privacy.rs`).
+
+- **Locate and export:** an access request finds and exports every such document that is not being deleted, with its revisions, and every clean file, read through `Artifacts::for_disclosure` (the owner's `disclosure_subject` vouches that the file belongs to a revision of a document related to the request's person).
+- **Erase, kept:** a document under a legal hold (on the person or the document), or whose file Base still retains or holds, is kept with that reason. A document also related to another record is that record's too: only its link to the person is removed, and it is reported as shared.
+- **Erase, deleted:** every other document is anonymised in the erasing transaction and marked as deleting with its durable delete job (below). The document's name, link and custom fields, its revisions' names, file names, links, change logs and labels, and its ledger rows' file names read `[erased]`. The job then deletes its files and rows as for any delete, and the certificate counts it deleted.
+- **Audit:** `core.document.document`, `.revision` and `.file` declare their personal fields, so the erasure clears them from earlier audit evidence too.
+
 ## Retention-safe deletion
 
 Deleting a document first checks every revision's file. If any revision is retained or under legal hold, `preview_delete` and `delete` refuse with `Retained` or `LegalHold` before anything changes (the check reads the Artifacts rows `FOR SHARE` inside the commit, so a hold placed meanwhile waits). The document stays readable with its complete revision history.
