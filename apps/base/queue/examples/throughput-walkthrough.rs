@@ -194,14 +194,27 @@ async fn main() -> Result<()> {
         .await?
         .id();
     tx.commit().await?;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let (first, attempt) = state(&client, failing).await?;
-    println!("after 1.5 s: {first}, attempt {attempt}");
+    // Wait for its first attempt (an idle slot polls once a second), then
+    // look again inside its two-second backoff.
+    let mut first = state(&client, failing).await?;
+    for _ in 0..100 {
+        if first.1 >= 1 && first.0 != "executing" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        first = state(&client, failing).await?;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (again, attempt) = state(&client, failing).await?;
+    println!(
+        "after its first attempt: {}, attempt {}; a second later: {again}, attempt {attempt}",
+        first.0, first.1
+    );
     check(
         "it ran once and is retryable: not claimed again before its backoff ends",
-        first == "retryable" && attempt == 1,
+        first == ("retryable".to_owned(), 1) && again == "retryable" && attempt == 1,
     )?;
-    let mut last = (first, attempt);
+    let mut last = (again, attempt);
     for _ in 0..200 {
         last = state(&client, failing).await?;
         if last.0 == "discarded" {
