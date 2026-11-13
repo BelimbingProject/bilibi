@@ -398,7 +398,11 @@ fn media_error(error: bilibi_media::Error) -> WriteError {
 }
 
 /// The upload limit: the tenant's, never above the operator's.
-async fn upload_limit(client: &Client, scope: &Scope, settings: &Settings) -> Result<u64> {
+pub(crate) async fn upload_limit(
+    client: &Client,
+    scope: &Scope,
+    settings: &Settings,
+) -> Result<u64> {
     let tenant = settings
         .get(client, scope, Target::Tenant, MAX_UPLOAD_BYTES)
         .await?

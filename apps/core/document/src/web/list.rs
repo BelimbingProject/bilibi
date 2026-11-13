@@ -139,13 +139,14 @@ impl Index {
         let categories = pages.choices(scope, LIST_CATEGORY, None).await?;
         let types = pages.choices(scope, LIST_TYPE, None).await?;
         let statuses = pages.choices(scope, LIST_STATUS, None).await?;
+        let uploads = dialog::uploads(pages.documents.upload_limit(scope).await?);
         let mut index = Self {
             pages,
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
             columns: columns()?,
             related: related_of(query),
             framed,
-            uploads: dialog::uploads(),
+            uploads,
             dialog: None,
             quick: None,
             flash: None,

@@ -62,6 +62,8 @@ pub const ACCESS_RECORD: &str = "core.document.access";
 pub const FILE_RECORD: &str = "core.document.file";
 /// The audit kind of a person's favourite and follow marks.
 pub const MARK_RECORD: &str = "core.document.mark";
+/// The audit action of a metadata export (the list's CSV).
+const EXPORTED: &str = "core.document.exported";
 
 /// One document as stored.
 #[derive(Clone, Debug)]
@@ -722,6 +724,50 @@ impl Documents {
         let client = self.db.get().await?;
         let scope = self.fresh(&**client, scope).await?;
         library::granted(&**client, &scope, ids, permission).await
+    }
+    /// The largest file `store_file` accepts in this tenant now, so a page
+    /// declares its file input with it and refuses a larger file before any
+    /// byte arrives; `store_file` still checks it.
+    pub(crate) async fn upload_limit(&self, scope: &Scope) -> Result<u64> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        files::upload_limit(&client, &scope, &self.settings).await
+    }
+    /// Records a `core.document.exported` action for a metadata export:
+    /// the filter it used and how many of how many matches it wrote.
+    pub(crate) async fn exported(
+        &self,
+        scope: &Scope,
+        filter: &Filter,
+        rows: usize,
+        total: usize,
+    ) -> Result<()> {
+        let client = self.db.get().await?;
+        let scope = self.fresh(&**client, scope).await?;
+        bilibi_audit::record_action(
+            &**client,
+            &bilibi_audit::Attribution::from_scope(&scope),
+            None,
+            EXPORTED,
+            serde_json::json!({
+                "format": "csv",
+                "rows": rows,
+                "total": total,
+                "filter": {
+                    "search": filter.search,
+                    "category": filter.category,
+                    "document_type": filter.document_type,
+                    "status": filter.status,
+                    "related": filter.related.as_ref().map(|r| format!("{}:{}", r.kind, r.id)),
+                    "marked": filter.marked.map(|m| m.code()),
+                    "expiry": filter.expiry.map(|e| e.code()),
+                    "retention_due": filter.retention_due,
+                },
+            }),
+            false,
+        )
+        .await?;
+        Ok(())
     }
     /// The records the document relates to, oldest link first.
     pub async fn links(&self, scope: &Scope, id: i64) -> Result<Vec<Link>> {
