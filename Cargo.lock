@@ -946,6 +946,8 @@ dependencies = [
  "bilibi-module-registry",
  "bilibi-personal-data",
  "bilibi-queue",
+ "bilibi-schedule",
+ "bilibi-settings",
  "bilibi-step-up",
  "bilibi-tenancy",
  "bilibi-ui",

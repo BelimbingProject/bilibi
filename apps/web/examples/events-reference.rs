@@ -257,7 +257,7 @@ impl Proof {
                     .last_delivered
                     .is_some_and(|last| last.event_id == ids[1])
                 && state.missed == 0
-                && state.missed_counted
+                && !state.missed_more
         });
         println!(
             "{} unmounted subscriber with two receipts and one failing delivery: {:?}",
