@@ -87,11 +87,12 @@ WALKTHROUGHS=(
   'base|queue-retention|apps/base/queue|retention-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-'
   'base|schedule|apps/base/schedule|schedule-walkthrough|seed|BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes|dst;timing;review;prepare;coalesce;race 2026-06-03T10:00:00Z;overlap;execute 2026-06-04T12:00:10Z;inspect'
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
-  'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1'
+  'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1;proof-delivery 4 2;proof-maintenance 4;approval-init 4;proof-bell 4'
 
   'privacy|privacy-requests|apps/base/privacy|requests-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-failures|apps/base/privacy|failures-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-job-ends|apps/base/privacy|job-ends-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
+  'privacy|privacy-repairs|apps/base/privacy|repairs-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-holds|apps/base/privacy|holds-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-;report'
   'privacy|privacy-masking|apps/base/privacy|masking-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-'
   'privacy|privacy-retention|apps/base/privacy|retention-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|seed;-'

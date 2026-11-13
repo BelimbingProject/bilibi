@@ -13,6 +13,11 @@ use tokio_postgres::Transaction;
 
 pub const DELIVERY_WORKER: &str = "base/workflow-transition-delivery";
 pub const DELIVER: &str = "workflow.transition.deliver";
+/// Attempts of the immediate delivery job. Queue waits `2^attempt` seconds
+/// after each one, so ten attempts span about 17 minutes: longer than the
+/// five-minute lease a dead attempt leaves on the event, which a retried job
+/// has to outlast before it can deliver.
+pub(crate) const DELIVERY_ATTEMPTS: i32 = 10;
 #[derive(Clone, Copy)]
 pub struct Listener {
     pub key: &'static str,
@@ -113,6 +118,18 @@ impl Engine {
         } else {
             DeliveryOutcome::Deferred
         })
+    }
+    /// Whether the event of `history_id` needs no further delivery: its row
+    /// is delivered, or delivered and already pruned (only delivered rows are).
+    async fn transition_delivered(&self, history_id: i64) -> Result<bool> {
+        let client = self.db.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT delivered_at IS NOT NULL FROM base_workflow_transition_outbox WHERE history_id=$1",
+                &[&history_id],
+            )
+            .await?;
+        Ok(row.is_none_or(|row| row.get(0)))
     }
     pub async fn deliver_due_transitions(&self, limit: i64) -> Result<DeliverySummary> {
         if !(1..=1000).contains(&limit) {
@@ -242,7 +259,16 @@ impl Handler for Delivery {
                 Err(_) => return Outcome::Retry("transition_store_unavailable"),
             }
             match self.engine.deliver_transition(id).await {
-                Ok(DeliveryOutcome::Delivered | DeliveryOutcome::Skipped) => Outcome::Completed,
+                Ok(DeliveryOutcome::Delivered) => Outcome::Completed,
+                // Skipped means "not mine to deliver now": done only when the
+                // event was delivered. A row another attempt still leases (a
+                // process that died holds it for up to five minutes) or that
+                // is not due yet is retried, so this job never completes
+                // over an undelivered event.
+                Ok(DeliveryOutcome::Skipped) => match self.engine.transition_delivered(id).await {
+                    Ok(true) => Outcome::Completed,
+                    _ => Outcome::Retry("transition_delivery_deferred"),
+                },
                 Ok(DeliveryOutcome::Deferred) | Err(_) => {
                     Outcome::Retry("transition_delivery_deferred")
                 }

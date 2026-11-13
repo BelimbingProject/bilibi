@@ -36,7 +36,7 @@ inventory::submit! { Contribution::new(CHANNELS, "cx/chat", provenance!(), &Chan
 | `site(key)` | Which tenant and origins a site key means, from its own records. Asked before a session exists and again on every use, so a closed site or a removed origin stops its sessions at once. |
 | `admit(site, hello)` | Whether this visitor starts a conversation, and its `subject` (at most 128 printable characters). `hello.details` is untrusted JSON the embed sent (at most 4 KiB). |
 | `receive(scope, frame)` | A message (JSON, at most 16 KiB), a typing signal (1 KiB) or a complete file (`Upload`, bytes). The reply, if any, is the acknowledgement. |
-| `since(scope, cursor)` | What the visitor has not seen. The browser returns the last cursor, so a dropped connection loses nothing. The cursor is the browser's text, not something to trust: read it as a position within `scope.subject()` only. |
+| `since(scope, cursor)` | What the visitor has not seen. The browser returns the last cursor, so a dropped connection loses nothing; with no cursor, return the whole conversation, because a new page asks without one. The cursor is the browser's text, not something to trust: read it as a position within `scope.subject()` only. |
 | `watch(scope)` | A wake-up when `since` has something new. No I/O. |
 
 Rules a channel keeps:
@@ -72,12 +72,35 @@ All HTTP calls are `POST` with `Content-Type: text/plain` and a JSON body, so a 
 | `ready` | The session proved (`session`, and `upload_max_bytes`, the file size limit at that moment); `since` follows |
 | `items` | `{items:[…], cursor}` from the channel |
 | `renewed` | The session was renewed by use (`expires_in`) |
-| `error` | A refused frame (`refused`, `invalid`, `rate_limited`, `unavailable`); the socket stays open |
+| `error` | A refused frame (`refused`, `invalid`, `rate_limited`, `unavailable`), with the `id` of the message or file announcement it refuses; the socket stays open |
 | `closed` | `{reason: "refused" \| "ended" \| "rate_limited" \| "unavailable"}`, then the socket closes |
 
 A text frame is at most 32 KiB and a binary frame one chunk with its header (64 KiB + 8 bytes); a larger frame ends the socket without a `closed` frame. A file's bytes are held against `visitor.upload_buffer_bytes` from the chunk that brings them until the channel has the file or it is dropped; an announcement holds nothing. One sender may hold one file's size limit (`visitor.upload_max_bytes`) of that budget across all its sockets. A chunk beyond either is answered `{"type":"error","id":…,"code":"rate_limited"}`, the file is dropped, and it may be sent again. A peer that does not take a frame within 10 seconds is disconnected.
 
 A frame is first counted against the session's budget; one over it is answered `rate_limited` and reads nothing. Before a counted frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A revocation of its session or its subject on this server closes a socket at once. An idle socket rechecks every 60 seconds, which finds a session that ran out, or was ended on another server, while nobody typed.
+
+## The browser client
+
+One script, `GET /visitor/v1/client.js` (`CLIENT_V1`, `assets/client-v1.js`). A breaking change is a new major path (`/v2/`), so a page that embeds this one keeps working. It has no dependencies and no build step.
+
+```html
+<script src="https://bilibi.example/visitor/v1/client.js" data-channel="cx/chat" data-site="front-desk" async></script>
+```
+
+| Attribute | Meaning |
+| --- | --- |
+| `data-channel`, `data-site` | Required: the Domain's channel key and the site key its `site` lookup knows |
+| `data-details` | JSON sent as `hello.details` when a session opens (at most 4 KiB) |
+| `data-title` | The window's title, default "Chat with us" |
+
+- **Strict Content-Security-Policy.** The page needs `script-src` and `connect-src` for the Bilibi host (and its `wss://` address) and nothing else. The client sets no inline style or script, uses no `eval`, loads no font, image or stylesheet, and styles its shadow DOM with a constructed stylesheet. It uses a system font, so a customer's page makes no font request.
+- **A session starts when the visitor opens the window**, not on page load. The token lives in `sessionStorage` (a blocked store only means the chat lasts for the page); it is renewed on the next open and by use. Only a refusal on renewal (`403`) starts a new session; the Domain decides whether that is the same conversation. A busy or unavailable answer keeps the session.
+- **Any script on the embedding page can read the token.** `sessionStorage` belongs to the customer's page, so the token is as safe as that page's own scripts. It opens one visitor conversation from that one origin and nothing else.
+- **A new page shows the conversation again.** The cursor is kept for the page only: the first `hello` of a page sends none, so `since` returns the whole conversation; a reconnect on the same page sends the last cursor.
+- **Items.** The client renders each item `{from: "visitor" | "agent" | "system", text?, attachment?: {name}, seq?}` as a message and shows "Typing…" for `{from: "agent", typing: true}` until a message or `typing: false`. `seq` de-duplicates. Anything else is ignored; the transport carries any JSON.
+- **It sends** `{text}` messages (at most 4,000 characters), throttled typing signals and files in 64 KiB chunks. A refused message goes back to the message box. A file over `upload_max_bytes` or an empty one is refused before it is announced.
+- **A dropped connection gives up the file being sent** and says so; the visitor attaches it again. A message not yet confirmed goes back to the message box.
+- **It reconnects** with backoff while the window is open, and on `closed` with `ended` or `refused` says the chat has ended and offers a new one.
 
 ## Operator settings
 

@@ -527,6 +527,13 @@ cannot overwrite a newer attempt. Failures retain a bounded error code and
 retry after `2^min(attempt,10)` seconds (maximum 1,024 seconds). Pending rows
 have no terminal retry limit: maintenance recovers them even if their immediate
 queue job exhausts retries or its original user is no longer eligible.
+
+The immediate job completes only when the event is delivered. When another
+attempt still holds the lease (a process that stopped mid-delivery leaves it
+for up to five minutes) or the event is not due yet, the job retries with
+`transition_delivery_deferred` instead of completing. It has ten attempts,
+which Queue spreads over about 17 minutes, so a retry arrives after the lease
+has run out.
 The immediate job needs `workflow.transition.deliver`, which no product role
 carries: grant it to the roles that deliver (`core_admin`'s grant-all permits
 it; the walkthrough fixture's manager holds it).
@@ -545,12 +552,21 @@ owner's runs. It must only load/lock, never apply business policy or effects.
 The worker preserves owner → run → work lock order and executes no process,
 guard, action or human handler. Missing owners/definitions, changed fingerprints,
 inactive tenants and invalid graphs are skipped without changing their runs.
-Keyset pages visit every running row, so unavailable early rows cannot starve
-later ones. Completed facts remain intact and paused runs remain paused.
+Completed facts remain intact and paused runs remain paused.
 
-After reconciliation, maintenance delivers up to 100 due events and removes
+A pass is bounded. The scheduled pass visits at most 1,000 running runs, in id
+order across all tenants, and continues after the last run of the previous
+pass (saved in `base_workflow_process_maintenance`), so unavailable early runs
+cannot starve later ones and every running run is visited once per lap: one
+minute per thousand running runs. `Engine::maintain_workflows` visits at most
+`batch_size` runs. A run with nothing to repair is rolled back and leaves no
+Audit row; a repaired run records `workflow.process_maintenance` with its
+changes.
+
+Before the sweeps, each pass delivers up to 100 due events and removes
 up to 100 delivered rows older than `workflow.outbox.keep_days` (global integer,
-1–3,650, default 30). Receipts are removed only with their delivered event.
+1–3,650, default 30), so delivery does not wait for the sweeps or depend on
+them finishing. Receipts are removed only with their delivered event.
 Pending/leased events, status history, process events and human-action replay
 records are retained. Retention never reconstructs or replays old events.
 
@@ -579,6 +595,20 @@ listener for 30 seconds so the operator can stop that example process and
 observe lease recovery on restart. `maintenance` also repairs expired work
 created by `start-worker`/`claim-race` and releases due timers without executing
 the work. These are real database/app commands, with no unit-test runner.
+
+Three commands check the bounds and exit 1 when one is broken
+(`scripts/run-walkthroughs.sh` runs them after `init`):
+
+```sh
+cargo run -p bilibi-workflow --example owner -- proof-delivery 4 2
+cargo run -p bilibi-workflow --example owner -- proof-maintenance 4
+cargo run -p bilibi-workflow --example owner -- approval-init 4
+cargo run -p bilibi-workflow --example owner -- proof-bell 4
+```
+
+- `proof-delivery` approves record 2, leaves its event leased as a stopped process would, and runs the real Queue executor: the job stays retryable while the lease lasts and delivers once it has run out.
+- `proof-maintenance` starts three runs: two passes over unchanged runs add no Audit row, a pass that requeues one expired lease adds one, and passes bounded to one run visit the running runs in turn and start again from the first.
+- `proof-bell` submits twelve approvals: the bell's to-do source counts ten, reports more and lists five. It also checks that the indexes of migration 008 exist.
 
 ## Shared approvals
 
@@ -639,7 +669,7 @@ Recall is available only while waiting, to the initiating person when the owner 
 
 ### Waiting list and exceptions
 
-**Waiting for my approval** (`/workflow/approvals`) is reached from See all in the bell's **To do** tab, not a sidebar menu item. Workflow supplies the bell through the [to-do source boundary](../notifications/README.md); read state never completes an approval. The page scans bounded aggregate work candidates and applies live owner visibility, capability, selector and independence checks. Filters and cursors stay in `ListState`. Returned counts describe eligible rows on the page; hidden candidates do not contribute a total. Capability removal hides the request on the next read and refuses an already-open decision.
+**Waiting for my approval** (`/workflow/approvals`) is reached from See all in the bell's **To do** tab, not a sidebar menu item. Workflow supplies the bell through the [to-do source boundary](../notifications/README.md); read state never completes an approval. The bell makes one such read for at most ten requests, lists five and shows `10+` when more may wait. The page scans bounded aggregate work candidates and applies live owner visibility, capability, selector and independence checks. Filters and cursors stay in `ListState`. Returned counts describe eligible rows on the page; hidden candidates do not contribute a total. Capability removal hides the request on the next read and refuses an already-open decision.
 
 The shared read contracts are `base.workflow.approvals.list`, `.history`, `.delegations` and `.exceptions`. Their read permission admits the projection only, and the five approval pages require the same `workflow.approvals.view` in addition to the owner's checks. Decision and management writes use static per-case contracts; there is no permission to approve everything. The shared page opts into owner-contributed bindings through Agent API's page-family contract, without a host list or module endpoint.
 

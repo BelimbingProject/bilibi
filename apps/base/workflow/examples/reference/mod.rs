@@ -16,6 +16,7 @@ use bilibi_workflow::{
 use serde_json::json;
 use tokio_postgres::Transaction;
 mod followup;
+pub mod proofs;
 pub const SYSTEM_PRINCIPAL: &str = "reference-workflow";
 struct Owner;
 impl SubjectAdapter for Owner {

@@ -426,6 +426,7 @@ impl SubjectAdapter for Requests {
             let user = scope.user();
             let impersonator = scope.impersonator().map(|operator| operator.user());
             let (tenant, id) = (scope.tenant(), subject.id);
+            let mut staged = Vec::new();
             match to {
                 "verified" => {
                     let note = request
@@ -456,19 +457,22 @@ impl SubjectAdapter for Requests {
                         eligible_with(&bound.parties, tx, scope, before.company, REQUEST_APPROVE)
                             .await?;
                     }
-                    // Only once every mounted store has its row and job.
-                    let mounted = bilibi_personal_data::Stores::installed()
+                    // Only once every mounted store has its row and job. A
+                    // row of a store no longer mounted may stay: its job
+                    // answers it as `unmounted`.
+                    let mounted: Vec<&str> = bilibi_personal_data::Stores::installed()
                         .map_err(|_| Error::Internal)?
                         .iter()
-                        .count() as i64;
+                        .map(|(key, _, _)| key)
+                        .collect();
                     let started: i64 = tx
                         .query_one(
-                            "SELECT count(*) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2",
-                            &[&tenant, &id],
+                            "SELECT count(*) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND store=ANY($3)",
+                            &[&tenant, &id, &mounted],
                         )
                         .await?
                         .get(0);
-                    if started != mounted {
+                    if started != mounted.len() as i64 {
                         return Err(Error::Invalid);
                     }
                     tx.execute("UPDATE base_privacy_requests SET status='running',version=version+1,runs=runs+1,failed_at=NULL,failure=NULL,finish_error=NULL WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
@@ -486,26 +490,28 @@ impl SubjectAdapter for Requests {
                         .filter(|code| failure_code(code))
                         .ok_or(Error::Invalid)?;
                     tx.execute("UPDATE base_privacy_requests SET status='failed',version=version+1,failed_at=clock_timestamp(),failure=$3 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &failure]).await?;
+                    // A failed access request keeps no staged copy of the
+                    // person's data: Run again reads every store again.
+                    staged = drop_staged(tx, tenant, id).await?;
                 }
                 "completed" => {
-                    // Only when every store has answered and finished and the
-                    // request's document is filed.
-                    let mounted = bilibi_personal_data::Stores::installed()
-                        .map_err(|_| Error::Internal)?
-                        .iter()
-                        .count() as i64;
-                    let row = tx
+                    // Only when every store the request ran in has answered
+                    // and finished and the request's document is filed. Its
+                    // own rows, not the stores mounted now: `running` proved
+                    // they covered every store mounted then, and a module
+                    // mounted or removed since must not strand the request.
+                    let open: i64 = tx
                         .query_one(
-                            "SELECT count(*),count(*) FILTER (WHERE state='pending' OR NOT finished) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2",
+                            "SELECT count(*) FILTER (WHERE state='pending' OR NOT finished) FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2",
                             &[&tenant, &id],
                         )
-                        .await?;
-                    let (stores, open): (i64, i64) = (row.get(0), row.get(1));
+                        .await?
+                        .get(0);
                     let filed = match before.kind {
                         RequestKind::Erasure => before.certificate_artifact.is_some(),
                         _ => before.export_artifact.is_some(),
                     };
-                    if stores != mounted || open > 0 || !filed {
+                    if open > 0 || !filed {
                         return Err(Error::Invalid);
                     }
                     tx.execute("UPDATE base_privacy_requests SET status='completed',version=version+1,completed_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
@@ -531,14 +537,38 @@ impl SubjectAdapter for Requests {
                 _ => return Err(Error::Invalid),
             }
             let after = load(tx, tenant, id, false).await?;
-            Ok(vec![Change {
+            let mut changes = vec![Change {
                 kind: REQUEST_KIND.into(),
                 id,
                 old: evidence(&before),
                 new: evidence(&after),
-            }])
+            }];
+            changes.extend(staged);
+            Ok(changes)
         })
     }
+}
+
+/// Drops a request's staged exports, one `Change` per staged store.
+pub(crate) async fn drop_staged(
+    sql: &Transaction<'_>,
+    tenant: i64,
+    request: i64,
+) -> Result<Vec<Change>> {
+    Ok(sql
+        .query(
+            "DELETE FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 RETURNING id,store",
+            &[&tenant, &request],
+        )
+        .await?
+        .iter()
+        .map(|row| Change {
+            kind: EXPORT_KIND.into(),
+            id: row.get(0),
+            old: json!({"request": request, "store": row.get::<_, String>(1), "staged": true}),
+            new: json!({}),
+        })
+        .collect())
 }
 
 /// `received → verified` needs a note saying how the requester's identity was checked.
@@ -784,9 +814,22 @@ impl Privacy {
         bilibi_authz::authorize_key(client, scope, REQUEST_VIEW).await?;
         let mut request = load(client, scope.tenant(), id, false).await?;
         request.confirmed = confirmed(client, scope.tenant(), id).await?;
-        self.locate_all(client, scope, &request).await
+        self.locate_all(scope, &request).await
     }
+    /// Every store's locate on one connection of its own, each statement cut
+    /// off after [`LOCATE_TIMEOUT`]: a store's identifier match may scan all
+    /// it keeps (#565). The handlers read committed data.
     async fn locate_all(
+        &self,
+        scope: &Scope,
+        request: &RequestView,
+    ) -> Result<Vec<(String, String, Located)>> {
+        let bounded = Bounded::open(&self.db).await?;
+        let found = self.locate_on(bounded.client()?, scope, request).await;
+        bounded.release().await;
+        found
+    }
+    async fn locate_on(
         &self,
         client: &Client,
         scope: &Scope,
@@ -849,9 +892,7 @@ impl Privacy {
         confirm.sort();
         confirm.dedup();
         if !confirm.is_empty() {
-            // Read on another connection: the handlers read committed data.
-            let client = self.db.get().await?;
-            let located = self.locate_all(&client, scope, &request).await?;
+            let located = self.locate_all(scope, &request).await?;
             let listed = |c: &ConfirmedRecord| {
                 located.iter().any(|(store, _, found)| {
                     *store == c.store
@@ -983,25 +1024,7 @@ impl Privacy {
     ) -> Result<()> {
         let tenant = scope.tenant();
         for (key, _, _) in self.stores.iter() {
-            tx.mutate(move |sql| {
-                Box::pin(async move {
-                    let row: i64 = sql
-                        .query_one(
-                            "INSERT INTO base_privacy_request_stores(request_id,tenant_id,store) VALUES($1,$2,$3) RETURNING id",
-                            &[&id, &tenant, &key],
-                        )
-                        .await?
-                        .get(0);
-                    let change = Change {
-                        kind: STORE_KIND.into(),
-                        id: row,
-                        old: json!({}),
-                        new: json!({"request": id, "store": key, "state": "pending"}),
-                    };
-                    Ok(((), vec![change]))
-                })
-            })
-            .await?;
+            add_store(tx, tenant, id, key).await?;
             let job = self
                 .queue
                 .enqueue_for(
@@ -1069,6 +1092,25 @@ impl Privacy {
             // As at its first run: an access export of the person being
             // published finishes first, and any later one starts again.
             person_guard(tx.sql(), tenant, subject.person, true).await?;
+        }
+        // A store mounted since the request first ran is asked too: its row
+        // goes in first, because `running` needs one per mounted store. A
+        // row whose store is no longer mounted stays; its job answers it as
+        // `unmounted`.
+        let have: Vec<String> = tx
+            .sql()
+            .query(
+                "SELECT store FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2",
+                &[&tenant, &id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        for (key, _, _) in self.stores.iter() {
+            if !have.iter().any(|store| store == key) {
+                add_store(tx, tenant, id, key).await?;
+            }
         }
         let again = Move {
             expected_version: Some(expected_version),
@@ -1382,6 +1424,44 @@ impl Privacy {
     }
 }
 
+/// How long one statement of a store's locate may run.
+const LOCATE_TIMEOUT: &str = "SET statement_timeout = '20s'";
+/// A pooled connection with [`LOCATE_TIMEOUT`] set. `release` resets it and
+/// returns it to the pool; dropped otherwise (a cancelled read, a failed
+/// reset), the connection is closed, so the timeout never reaches another
+/// caller of the pool.
+struct Bounded(Option<deadpool_postgres::Object>);
+impl Bounded {
+    async fn open(db: &bilibi_database::Db) -> Result<Self> {
+        let bounded = Self(Some(db.get().await?));
+        bounded.client()?.batch_execute(LOCATE_TIMEOUT).await?;
+        Ok(bounded)
+    }
+    fn client(&self) -> Result<&Client> {
+        let object = self.0.as_ref().ok_or(Error::Internal)?;
+        let client: &Client = object;
+        Ok(client)
+    }
+    async fn release(mut self) {
+        if let Some(client) = self.0.take() {
+            if client
+                .batch_execute("RESET statement_timeout")
+                .await
+                .is_err()
+            {
+                drop(deadpool_postgres::Object::take(client));
+            }
+        }
+    }
+}
+impl Drop for Bounded {
+    fn drop(&mut self) {
+        if let Some(client) = self.0.take() {
+            drop(deadpool_postgres::Object::take(client));
+        }
+    }
+}
+
 /// The person's erasure guard: approving an erasure takes it exclusively;
 /// access staging and publication take it shared, so they take turns.
 pub(crate) async fn person_guard(
@@ -1399,10 +1479,11 @@ pub(crate) async fn person_guard(
     Ok(())
 }
 /// The person's erasure generation (how many times their erasures have
-/// started running, a failed one run again included) and whether one is
-/// running now. The owner path moves approved to running in one transaction,
-/// so a committed `approved` erasure never ran a store; a `failed` one is not
-/// running, so it holds back no access export.
+/// started running, a failed one run again included, plus every store
+/// erasure of their owed cleanups) and whether one is running now. The owner
+/// path moves approved to running in one transaction, so a committed
+/// `approved` erasure never ran a store; a `failed` one is not running, so it
+/// holds back no access export.
 pub(crate) async fn erasure_generation(
     sql: &(impl GenericClient + Sync),
     tenant: i64,
@@ -1410,7 +1491,8 @@ pub(crate) async fn erasure_generation(
 ) -> Result<(i64, bool)> {
     let row = sql
         .query_one(
-            "SELECT coalesce(sum(runs),0)::bigint, \
+            "SELECT coalesce(sum(runs),0)::bigint + (SELECT coalesce(sum(erasures),0)::bigint FROM base_privacy_resumptions \
+             WHERE tenant_id=$1 AND person_id=$2), \
              count(*) FILTER (WHERE status = 'running') > 0 \
              FROM base_privacy_requests WHERE tenant_id=$1 AND person_id=$2 AND kind='erasure'",
             &[&tenant, &person.get()],
@@ -1450,28 +1532,43 @@ pub(crate) async fn forget_person(
             &[&tenant, &id, &ERASED],
         )
         .await?;
-        let staged = sql
-            .query(
-                "DELETE FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 RETURNING id,store",
-                &[&tenant, &id],
-            )
-            .await?;
         changes.push(Change {
             kind: REQUEST_KIND.into(),
             id,
             old: json!({"identifiers": given, "verification": noted, "refused_reason": refused}),
             new: json!({"identifiers": 0, "verification": noted.then_some(ERASED), "refused_reason": refused.then_some(ERASED)}),
         });
-        for staged in staged {
-            changes.push(Change {
-                kind: EXPORT_KIND.into(),
-                id: staged.get(0),
-                old: json!({"request": id, "store": staged.get::<_, String>(1), "staged": true}),
-                new: json!({}),
-            });
-        }
+        changes.extend(drop_staged(sql, tenant, id).await?);
     }
     Ok(changes)
+}
+
+/// One pending store row of a request.
+async fn add_store(
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
+    request: i64,
+    store: &'static str,
+) -> Result<()> {
+    tx.mutate(move |sql| {
+        Box::pin(async move {
+            let row: i64 = sql
+                .query_one(
+                    "INSERT INTO base_privacy_request_stores(request_id,tenant_id,store) VALUES($1,$2,$3) RETURNING id",
+                    &[&request, &tenant, &store],
+                )
+                .await?
+                .get(0);
+            let change = Change {
+                kind: STORE_KIND.into(),
+                id: row,
+                old: json!({}),
+                new: json!({"request": request, "store": store, "state": "pending"}),
+            };
+            Ok(((), vec![change]))
+        })
+    })
+    .await
 }
 
 /// Records the job a store row now waits on.
