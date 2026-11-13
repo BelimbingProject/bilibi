@@ -121,16 +121,39 @@ impl ReadHandler for List {
                 page: input["page"].as_i64().unwrap_or(1),
                 page_size: input["page_size"].as_i64().unwrap_or(25),
             };
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
-            let page = organisation::search(&**client, scope, &query).await?;
-            let ids = page
-                .entries
-                .iter()
-                .map(|entry| entry.company.id)
-                .collect::<Vec<_>>();
-            let extension_values = crate::field_contributions::read(&**client, scope, &ids).await?;
-            let restricted =
-                crate::field_contributions::effective_restrictions(&**client, scope).await?;
+            // Grid's bounds, as the page list reads under: a search the
+            // server cannot finish in time ends as unavailable, never as a
+            // pooled connection held for as long as it takes. Not read-only:
+            // the capability check logs its decision, kept unless the
+            // database itself failed.
+            let mut pooled = db()?.get().await.map_err(bilibi_database::Error::from)?;
+            let client: &mut tokio_postgres::Client = &mut pooled;
+            let tx = client
+                .build_transaction()
+                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+                .start()
+                .await
+                .map_err(bilibi_database::Error::from)?;
+            tx.batch_execute(bilibi_grid::BOUNDS)
+                .await
+                .map_err(bilibi_database::Error::from)?;
+            let read = async {
+                let page = organisation::search(&tx, scope, &query).await?;
+                let ids = page
+                    .entries
+                    .iter()
+                    .map(|entry| entry.company.id)
+                    .collect::<Vec<_>>();
+                let extension_values = crate::field_contributions::read(&tx, scope, &ids).await?;
+                let restricted =
+                    crate::field_contributions::effective_restrictions(&tx, scope).await?;
+                Ok::<_, bilibi_database::Error>((page, extension_values, restricted))
+            }
+            .await;
+            if !matches!(read, Err(bilibi_database::Error::Database(_))) {
+                tx.commit().await.map_err(bilibi_database::Error::from)?;
+            }
+            let (page, extension_values, restricted) = read?;
             let entries = page
                 .entries
                 .into_iter()
@@ -606,7 +629,7 @@ fn text() -> Value {
 }
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
-        "search":{"type":"string","maxLength":200,"description":"Words matched against name, code, legal name, email and jurisdiction."},
+        "search":{"type":"string","maxLength":200,"description":"Words, each matched as the start of a word in the name, code or legal name; all must match."},
         "status":{"type":"string","enum":STATUSES},
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}
@@ -723,7 +746,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/company.agent", Proven
         Operation { key: "core.company.hierarchy", title: "Read a company hierarchy", summary: "Read a bounded parent chain and subsidiary tree.", keywords: &["parent", "subsidiary", "tree"], capability: VIEW, input: get_schema, output: hierarchy_output, handler: Handler::Read(&Lookup::Hierarchy), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.create", title: "Create a company", summary: "Create an organisation in your tenant after searching for an existing company.", keywords: &["add", "organisation", "business"], capability: CREATE, input: create_schema, output: create_output, handler: Handler::SafeWrite(&Create), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.update", title: "Update contributed Company fields", summary: "Review and update static Extension-contributed fields on the current Company, or with tenant-wide administration reach.", keywords: &["edit", "update", "segment", "renewal", "choice"], capability: UPDATE, input: update_schema, output: update_output, handler: Handler::SafeWrite(&Update), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.company.list", title: "List companies", summary: "Find companies of your tenant by name, code, legal name, email or jurisdiction, one page at a time, with the fields you may see.", keywords: &["find", "search", "browse", "organisation", "business", "firm"], capability: LIST, input: list_schema, output: list_output, handler: Handler::Read(&List), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.company.list", title: "List companies", summary: "Find companies of your tenant by words of their name, code or legal name, one page at a time, with the fields you may see.", keywords: &["find", "search", "browse", "organisation", "business", "firm"], capability: LIST, input: list_schema, output: list_output, handler: Handler::Read(&List), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.get", title: "Read a company", summary: "One company of your tenant by id, with the fields you may see.", keywords: &["show", "detail", "organisation", "business", "firm"], capability: VIEW, input: get_schema, output: get_output, handler: Handler::Read(&Get), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.reachable", title: "List the companies you may work in", summary: "The workplaces assigned to you through desks; an archived one is read-only. Work access does not grant Company-record administration.", keywords: &["current", "switch", "context", "my company", "organisation"], capability: VIEW, input: empty_schema, output: reachable_output, handler: Handler::Read(&Reachable), channels: Channels::Every, step_up: &[] },
     ],
