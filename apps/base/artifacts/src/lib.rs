@@ -167,6 +167,18 @@ pub trait Owner: Send + Sync + 'static {
     ) -> ProofFuture<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+    /// Whether `subject`, one of this owner's subjects that is not a person
+    /// ID, names a document of the access grant's own person, so the access
+    /// export may read it (`for_disclosure`) in any company of the tenant.
+    /// The same answer as `erasure_subject`, for an access request.
+    fn disclosure_subject<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _grant: &'a Disclosure,
+        _subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
 }
 pub type RenderFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
 /// Implement on an owner that generates PDFs. Base authorizes `Create` before
@@ -298,8 +310,10 @@ impl Artifacts {
         }
     }
     /// A facade for one subject's documents under an approved access request
-    /// (ADR 05): `read` needs no owner permission for that subject's documents,
-    /// so a retired record's or another company's documents are still read.
+    /// (ADR 05): `read` needs no owner permission for that subject's documents
+    /// (the grant's person ID under a declared person-keyed kind, or one the
+    /// owner's `disclosure_subject` says is that person's), so a retired
+    /// record's or another company's documents are still read.
     /// Everything else is asked of the owner as usual.
     pub fn for_disclosure<'a, O: Owner>(
         &'a self,
@@ -641,10 +655,15 @@ impl<O: Owner> Owned<'_, O> {
         // the account must still be live, but the owner is not asked.
         let granted = match (&self.grant, operation, reference) {
             (Some(Granted::Disclose(grant, subject)), Operation::Read, Some(reference)) => {
-                grant
-                    .check_file_subject(&live, self.owner.owner_id(), subject)
-                    .is_ok()
-                    && reference.subject == *subject
+                reference.subject == *subject
+                    && (grant
+                        .check_file_subject(&live, self.owner.owner_id(), subject)
+                        .is_ok()
+                        || (grant.check(&live).is_ok()
+                            && self
+                                .owner
+                                .disclosure_subject(client, grant, subject)
+                                .await?))
             }
             (Some(Granted::Erase(grant, subject)), Operation::Delete, Some(reference)) => {
                 reference.subject == *subject

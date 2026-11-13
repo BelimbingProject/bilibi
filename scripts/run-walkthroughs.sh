@@ -100,6 +100,7 @@ WALKTHROUGHS=(
   'privacy|privacy-retention|apps/base/privacy|retention-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|seed;-'
   'privacy|privacy-swept-files|apps/base/privacy|swept-files-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy|seed;-'
   'privacy|consent|apps/core/consent|consent-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
+  'privacy|document-privacy|apps/core/document|privacy-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
 
   'core|address|apps/core/address|address-walkthrough|geonames|BILIBI_ADDRESS_DEMO=disposable|-'
   'core|affiliation|apps/core/affiliation|affiliation-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'

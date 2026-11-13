@@ -13,6 +13,7 @@ mod email;
 mod files;
 mod library;
 mod model;
+mod privacy;
 mod reminders;
 mod scan;
 mod store;
@@ -1280,7 +1281,7 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
@@ -1291,9 +1292,11 @@ inventory::submit! { Module {
         ("core-document-007-scan-held-revisions", include_str!("../migrations/007-scan-held-revisions.sql")),
         ("core-document-008-list-order", include_str!("../migrations/008-list-order.sql")),
         ("core-document-009-customer-shares", include_str!("../migrations/009-customer-shares.sql")),
+        ("core-document-011-personal-data", include_str!("../migrations/011-personal-data.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
+        privacy::bind(s.get("base/artifacts.store")?, s.get("base/queue.store")?)?;
         let documents = Arc::new(Documents {
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
             authentication: s.get("base/tenancy.authentication")?,
