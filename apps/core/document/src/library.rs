@@ -307,13 +307,14 @@ impl Store<'_> {
         if followers.is_empty() {
             return Ok(());
         }
-        let name: String = revision.name.chars().take(140).collect();
-        let notice = Notice::new(format!("New revision: {name}"))
+        // No name or change log: a notification is never erased, and both
+        // are the document's personal data (#659). The link shows them to a
+        // follower who can still see the document.
+        let notice = Notice::new("New revision of a document you follow")
             .kind("core.document.revision")
             .body(format!(
-                "Revision {} of a document you follow was added: {}",
-                revision.revision,
-                revision.change_log.chars().take(200).collect::<String>()
+                "Revision {} was added to a document you follow.",
+                revision.revision
             ))
             .url(crate::web::path(id))
             .icon("document-text");
