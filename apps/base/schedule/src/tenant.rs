@@ -228,6 +228,20 @@ impl Schedule {
                 return Ok(Err(Refusal::Overlap));
             }
         }
+        // Allowed overlap still means one manual run at a time per tenant:
+        // each click would otherwise queue another job (#558).
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM base_schedule_tenant_runs WHERE tenant_id=$1 AND key=$2 AND trigger='manual' AND finished_at IS NULL",
+                &[&tenant, &key],
+            )
+            .await?
+            .is_some()
+        {
+            tx.rollback().await?;
+            return Ok(Err(Refusal::Overlap));
+        }
         let at = occurrence::to_pg(intended_at);
         if tx
             .sql()

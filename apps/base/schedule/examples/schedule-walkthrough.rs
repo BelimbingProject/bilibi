@@ -122,8 +122,16 @@ inventory::submit! { Contribution::new(DEFINITIONS, TENANT_KEY, provenance!(), &
     name: "Every minute, in every tenant", expression: "* * * * *", timezone: "Etc/UTC", task_name: "Every minute, in every tenant",
     worker: TENANT_WORKER, args: || json!({}), overlap: Overlap::Forbid, misfire: Misfire::Coalesce, reach: Reach::EachTenant, owner_route: None,
 }) }
-const KEYS: [&str; 6] = [
+// #558: an each-tenant definition that allows overlap, for a tenant
+// administrator's Run now.
+const ALLOW_KEY: &str = "schedule/walkthrough.each-tenant-allow";
+inventory::submit! { Contribution::new(DEFINITIONS, ALLOW_KEY, provenance!(), &Definition {
+    name: "Every minute, in every tenant, overlap allowed", expression: "* * * * *", timezone: "Etc/UTC", task_name: "Every minute, in every tenant, overlap allowed",
+    worker: TENANT_WORKER, args: || json!({}), overlap: Overlap::Allow, misfire: Misfire::Coalesce, reach: Reach::EachTenant, owner_route: None,
+}) }
+const KEYS: [&str; 7] = [
     TENANT_KEY,
+    ALLOW_KEY,
     "schedule/walkthrough.fold",
     "schedule/walkthrough.gap",
     "schedule/walkthrough.hourly",
@@ -790,6 +798,118 @@ async fn each_tenant(services: &Services, db: &Db) -> Result<()> {
     tenant_runs(db).await?;
     Ok(())
 }
+fn check(label: &str, ok: bool) -> Result<()> {
+    println!("{} {label}", if ok { "ok  " } else { "FAIL" });
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Internal)
+    }
+}
+/// #558: a tenant administrator's Run now waits for its manual run to end,
+/// even when the definition allows overlap; and reconciliation settles a run
+/// whose job is gone although 300 older runs are still waiting.
+async fn reconcile(services: &Services, db: &Db) -> Result<()> {
+    prepare(services, db).await?;
+    only(services, db, &[ALLOW_KEY]).await?;
+    let schedule = services.get::<Schedule>("base/schedule.store")?;
+    let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
+    let mut client = db.get().await?;
+    // User 5 administers tenant 2, which is not the operator tenant.
+    client.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(2,5,$1,true) ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
+        &[&bilibi_schedule::TENANT_RUN],
+    ).await?;
+    let tenant_admin = authentication
+        .authenticate(&**client, 2, 5, String::new())
+        .await?;
+    println!("== Run now in tenant 2 for {ALLOW_KEY} (overlap allowed), no executor running");
+    let first = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await?;
+    let job = match &first {
+        Ok(claimed) => claimed.job.id(),
+        Err(refusal) => {
+            println!("first Run now refused: {}", refusal.as_str());
+            return Err(Error::Internal);
+        }
+    };
+    println!("first Run now queued job {job}");
+    let second = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await?;
+    check(
+        "a second Run now is refused while the first manual run is unfinished",
+        second.as_ref().err() == Some(&Refusal::Overlap),
+    )?;
+    let queued: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_queue_jobs WHERE worker_id=$1 AND tenant_id=2",
+            &[&TENANT_WORKER],
+        )
+        .await?
+        .get(0);
+    check("only one job was queued", queued == 1)?;
+    // The job ends without the owner's wrapper recording it (an owner's
+    // cancel): the next Run now settles that run and is accepted.
+    client.execute("UPDATE base_queue_jobs SET state='cancelled',cancelled_at=now(),failure_code='owner_cancelled' WHERE id=$1", &[&job]).await?;
+    let third = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await?;
+    check(
+        "once that job has ended, Run now is accepted again",
+        third.is_ok(),
+    )?;
+    let alive = match third {
+        Ok(claimed) => claimed.job.id(),
+        Err(_) => return Err(Error::Internal),
+    };
+
+    println!("\n== 300 older runs whose job is still waiting, then one whose job is gone");
+    client.execute(
+        "INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id,claimed_at) \
+         SELECT $1,'2026-01-01T00:00:00Z'::timestamptz+make_interval(mins=>n),'scheduled','queued',2,$2,now()-interval '1 hour' FROM generate_series(1,300) n",
+        &[&ALLOW_KEY, &alive],
+    ).await?;
+    let gone: i64 = client.query_one(
+        "INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id) VALUES($1,'2026-02-01T00:00:00Z','scheduled','queued',2,2147483000) RETURNING id",
+        &[&ALLOW_KEY],
+    ).await?.get(0);
+    let mut client = db.get().await?;
+    schedule
+        .review(&mut client, &admin(services, db).await?.1, ALLOW_KEY, false)
+        .await?;
+    drop(client);
+    let report = poll(services, db, Timestamp::now()).await?;
+    let client = db.get().await?;
+    let row = client
+        .query_one(
+            "SELECT state,finished_at IS NOT NULL FROM base_schedule_occurrences WHERE id=$1",
+            &[&gone],
+        )
+        .await?;
+    let (state, finished): (String, bool) = (row.get(0), row.get(1));
+    println!(
+        "settled {} in one poll; the run whose job is gone: {state}",
+        report.settled
+    );
+    check(
+        "the run whose job is gone settles in the same poll, past the 300 waiting ones",
+        state == "failed" && finished,
+    )?;
+    let waiting: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_schedule_occurrences WHERE key=$1 AND job_id=$2 AND finished_at IS NULL",
+            &[&ALLOW_KEY, &alive],
+        )
+        .await?
+        .get(0);
+    check(
+        "the runs whose job is still waiting stay unfinished",
+        waiting >= 300,
+    )?;
+    Ok(())
+}
 /// Manual clock-setting evidence against the real facade, Queue and Audit.
 async fn timing(services: &Services, db: &Db) -> Result<()> {
     prepare(services, db).await?;
@@ -1136,6 +1256,7 @@ async fn main() -> Result<()> {
         "overlap" => overlap(&services, &db).await,
         "execute" => execute(&services, &db, instant(0)?).await,
         "each-tenant" => each_tenant(&services, &db).await,
+        "reconcile" => reconcile(&services, &db).await,
         "worker" => live(&services, &db).await,
         "inspect" => inspect(&services, &db).await,
         _ => Err(Error::Invalid),
