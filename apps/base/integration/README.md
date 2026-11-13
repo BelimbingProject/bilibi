@@ -73,7 +73,7 @@ integration.record_incoming_system(&Incoming { method: Some("POST".into()),
     endpoint: Some("/api/v1/operations".into()), response_status: Some(401), ..Incoming::default() }).await?;
 ```
 
-Call once after dispatch, including refused and failed requests. An edge open to callers with no credential must not write a row for each refusal that proved nothing: rows are never deleted, so count those instead, as the agent edge does (`apps/web/README.md`). The tenant and
+Call once after dispatch, including refused and failed requests. An edge open to callers with no credential must not write a row for each refusal that proved nothing: a row stays until retention deletes it (180 days by default), so count those instead, as the agent edge does (`apps/web/README.md`). The tenant and
 user come only from the sealed scope; a system row asserts neither, and only the
 platform operator can see it. Connection, agent and run ids are observations,
 never authority. `agent_self_report` is the agent's shape-checked
@@ -111,12 +111,14 @@ status, user and agent ids, exact status, actor, UTC `since` and exclusive
 `until`) and page sizes 25/50/100/300. Deletion is an audited mutation
 (`base/integration.exchange`) carrying metadata only.
 
-Recording is a machine measurement on its own pooled connection, outside the caller's transaction and outside mutation capture; pruning runs on the scheduler job's connection and is captured, as below. The global operator setting `integration.payload_retention_days` (default 30) drives the contributed daily schedule `base/integration-payload-retention` (03:17 UTC, forbid overlap), which clears previews and keeps metadata, per tenant in batches: a preview a legal hold names stays (checked under the hold guard), and each cleared preview is an audited change by the scheduler. Like every contributed recurrence it runs nothing until an operator enables it on `/system/schedule`.
+`list` never counts or skips the whole log. It counts a filter's rows up to `LIST_CAP` (10,000); past that `Page::more` is set and the pager reads "of 10000+ results" (`PageCounts::or_more`). Pages stop at the cap, so the skip is bounded too: older rows are reached by narrowing the period or the search. A tenant's read is an equality on `tenant_id`, which the timeline index serves; only the operator's every-tenant read names no tenant.
+
+Recording is a machine measurement on its own pooled connection, outside the caller's transaction and outside mutation capture; pruning runs on the scheduler job's connection and is captured, as below. The global operator setting `integration.payload_retention_days` (default 30) drives the contributed daily schedule `base/integration-payload-retention` (03:17 UTC, forbid overlap), which clears previews and keeps metadata, per tenant in batches: a preview a legal hold names stays (checked under the hold guard), and each cleared preview is an audited change by the scheduler. The same job then deletes whole exchanges older than `integration.exchange_retention_days` (default 180, 1 to 3650), oldest first in batches per tenant (`prune_rows`). A row a legal hold names stays. Like recording, this expiry writes no audit row; a person's `delete` is the audited one. The job finds rows that still hold a preview through the partial index `base_integration_exchanges_payload_idx` (migration 007) instead of walking the log. Like every contributed recurrence it runs nothing until an operator enables it on `/system/schedule`.
 
 ## Runtime evidence
 
 `examples/integration-walkthrough.rs` runs against a disposable database
-(`BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes`, `DATABASE_URL`) with a local fixture
+(`BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes`, `DATABASE_URL`, after `bilibi-web migrate`: it installs the fixture, which needs the tables) with a local fixture
 server: retained/redacted preview, HTTP error, body limit, streamed download,
 connect failure, timeout, tenant and system incoming rows, every visibility and
 capability gate, audited deletion and payload pruning.

@@ -45,6 +45,7 @@ fn subscriber_json(state: &SubscriberState) -> Value {
         "failing": state.failing,
         "first_pending": state.first_pending,
         "missed": state.missed,
+        "missed_more": state.missed_more,
         "first_missed": state.first_missed,
         "gap_from": state.gap_from(),
     })
@@ -66,10 +67,10 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let events = events()?;
-            let client = events.db.get().await.map_err(Error::from)?;
+            let mut client = events.db.get().await.map_err(Error::from)?;
             let data = match self {
                 Self::Subscribers => {
-                    let states = events.subscriber_states(&**client, scope).await?;
+                    let states = events.subscriber_states(&mut client, scope).await?;
                     json!({"subscribers": states.iter().map(subscriber_json).collect::<Vec<_>>()})
                 }
                 Self::Deliveries => {
@@ -201,7 +202,7 @@ fn replay_schema() -> Value {
     }})
 }
 fn subscribers_output() -> Value {
-    json!({"type":"object","description":"Each subscriber: key, mounted, event names it reads, last delivered event, pending and failing deliveries, missed events (no delivery at all) and gap_from, the event a replay closing the gap starts at."})
+    json!({"type":"object","description":"Each subscriber: key, mounted, event names it reads, last delivered event, pending and failing deliveries, missed events (no delivery at all; missed_more when the count stopped early, so there are at least that many) and gap_from, the event a replay closing the gap starts at."})
 }
 fn deliveries_output() -> Value {
     json!({"type":"object","description":"Deliveries in event then subscriber order: event, version, subject, key, subscriber, mounted, attempts, last failure code and receipt time."})

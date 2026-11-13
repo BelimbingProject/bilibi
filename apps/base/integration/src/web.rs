@@ -487,7 +487,8 @@ impl Index {
                     self.list.page,
                     self.list.page_size,
                     page.total_entries.max(0) as u64,
-                ),
+                )
+                .or_more(page.more),
                 &PAGE_SIZES,
             ))?,
         };

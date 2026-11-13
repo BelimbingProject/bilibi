@@ -493,10 +493,15 @@ impl Executor {
             // executor; abandoned claims are reconciled by DB lease recovery.
             match store::claim(&self.db, self.config.lease_seconds).await {
                 Ok(Some(claim)) => {
-                    if self.execute(claim).await.is_err() {
-                        eprintln!("queue execution infrastructure unavailable");
+                    if self.execute(claim).await.is_ok() {
+                        // More jobs may be waiting: claim the next at once. A
+                        // job that failed backs off in the database (its
+                        // `available_at`), so this never claims it again early.
+                        continue;
                     }
+                    eprintln!("queue execution infrastructure unavailable");
                 }
+                // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
                 Err(_) => eprintln!("queue claim infrastructure unavailable"),
             }
@@ -519,6 +524,11 @@ impl Executor {
             if !workers.is_empty() {
                 match store::due_endings(&self.db, &workers, ENDING_BATCH).await {
                     Ok(due) => {
+                        // A full batch may leave more waiting: take the next
+                        // at once, but only when every job in it was told; a
+                        // row another process holds, or a failure that could
+                        // not be recorded, would come straight back.
+                        let mut more = due.len() as i64 == ENDING_BATCH;
                         for (id, tenant, worker) in due {
                             if *stop.borrow() {
                                 return Ok(());
@@ -534,11 +544,19 @@ impl Executor {
                                 .await
                             })
                             .await;
-                            if !matches!(told, Ok(Ok(Ok(()))))
-                                && store::ending_failed(&self.db, id).await.is_err()
-                            {
-                                eprintln!("queue ending infrastructure unavailable");
+                            match told {
+                                Ok(Ok(Ok(true))) => {}
+                                Ok(Ok(Ok(false))) => more = false,
+                                _ => {
+                                    more = false;
+                                    if store::ending_failed(&self.db, id).await.is_err() {
+                                        eprintln!("queue ending infrastructure unavailable");
+                                    }
+                                }
                             }
+                        }
+                        if more {
+                            continue;
                         }
                     }
                     Err(_) => eprintln!("queue ending infrastructure unavailable"),
@@ -553,8 +571,8 @@ impl Executor {
     /// One ended job: the principal's scope, its capability, the owner's
     /// hook and the told mark, in one audited transaction attributed to the
     /// principal. A job already told, retried or taken by another process
-    /// is left alone.
-    async fn tell(&self, id: i64, tenant: i64, worker_id: &str) -> Result<()> {
+    /// is left alone: `false`, as nothing was told.
+    async fn tell(&self, id: i64, tenant: i64, worker_id: &str) -> Result<bool> {
         let bound = self.endings.get(worker_id).ok_or(Error::Invalid)?;
         let worker = self.queue.workers().get(worker_id)?;
         let mut client = self.db.get().await?;
@@ -568,7 +586,7 @@ impl Executor {
             .begin(&mut client, scope.mutation_context("queue.job.ended"))
             .await?;
         let Some(row) = tx.sql().query_opt("SELECT worker_module,state,failure_code,args FROM base_queue_jobs WHERE id=$1 AND tenant_id=$2 AND worker_id=$3 AND state IN ('cancelled','discarded') AND ending IS NULL FOR UPDATE SKIP LOCKED", &[&id,&tenant,&worker.id]).await? else {
-            return tx.rollback().await;
+            return tx.rollback().await.map(|()| false);
         };
         if row.get::<_, &str>(0) != worker.module {
             return Err(Error::Invalid);
@@ -591,7 +609,7 @@ impl Executor {
             sql.execute("UPDATE base_queue_jobs SET ending='told',updated_at=clock_timestamp() WHERE id=$1 AND tenant_id=$2", &[&id,&tenant]).await?;
             Ok(((), vec![bilibi_database::Change {kind:"base/queue.job".into(),id,old:serde_json::json!({"state":state,"ending":null}),new:serde_json::json!({"state":state,"ending":"told"})}]))
         })).await?;
-        tx.commit().await
+        tx.commit().await.map(|()| true)
     }
     async fn prepare(
         &self,

@@ -19,8 +19,8 @@ mod transport;
 mod web;
 pub mod webhooks;
 pub use contributions::{
-    WebhookLimits, DELETE, LIST, PAYLOAD, PUBLIC_ENDPOINT_SENDER_LIMIT, RETENTION_DAYS,
-    WEBHOOK_SETTINGS,
+    WebhookLimits, DELETE, EXCHANGE_RETENTION_DAYS, LIST, PAYLOAD, PUBLIC_ENDPOINT_SENDER_LIMIT,
+    RETENTION_DAYS, WEBHOOK_SETTINGS,
 };
 pub use redirect::RedirectPolicy;
 pub use transport::{Failure, Outgoing, Reply, Streamed};
@@ -277,6 +277,10 @@ pub struct Payload {
 }
 
 pub const PAGE_SIZES: [i64; 4] = [25, 50, 100, 300];
+/// The most rows one filter counts and pages through. A larger result says
+/// so ([`Page::more`]) and its older rows are reached by narrowing the period
+/// or the search, so no render counts or skips more than this.
+pub const LIST_CAP: i64 = 10_000;
 /// One search covers host, path, operation, HTTP status, user and agent ids.
 /// `since`/`until` are UTC instants, `until` exclusive; the web adapter resolves
 /// calendar days in the display zone before calling.
@@ -306,7 +310,10 @@ impl Default for Filter {
 #[derive(Clone, Debug)]
 pub struct Page {
     pub entries: Vec<Summary>,
+    /// Rows the filter matches, counted up to [`LIST_CAP`].
     pub total_entries: i64,
+    /// The filter matches more than [`LIST_CAP`] rows.
+    pub more: bool,
     pub total_pages: i64,
     pub page: i64,
     pub page_size: i64,
@@ -604,11 +611,18 @@ impl Integration {
         };
         let actor = Some(filter.actor.trim()).filter(|actor| !actor.is_empty());
         let outcome = filter.outcome.map(Outcome::as_str);
-        let where_ = "($1::bigint IS NULL OR tenant_id=$1) AND direction=$2 AND ($3::text IS NULL OR outcome=$3) \
+        // One tenant's rows are an equality the timeline index serves; the
+        // operator's every-tenant read names no tenant at all.
+        let tenant_sql = if tenant.is_some() {
+            "tenant_id=$1"
+        } else {
+            "$1::bigint IS NULL"
+        };
+        let where_ = format!("{tenant_sql} AND direction=$2 AND ($3::text IS NULL OR outcome=$3) \
                       AND ($4::text IS NULL OR host ILIKE $4 OR operation ILIKE $4 OR path ILIKE $4 OR response_status::text ILIKE $4 \
                            OR user_id::text ILIKE $4 OR agent_id ILIKE $4) \
                       AND ($5::smallint IS NULL OR response_status=$5) AND ($6::text IS NULL OR agent_id=$6 OR user_id::text=$6) \
-                      AND ($7::timestamptz IS NULL OR occurred_at>=$7) AND ($8::timestamptz IS NULL OR occurred_at<$8)";
+                      AND ($7::timestamptz IS NULL OR occurred_at>=$7) AND ($8::timestamptz IS NULL OR occurred_at<$8)");
         let params: [&(dyn tokio_postgres::types::ToSql + Sync); 8] = [
             &tenant,
             &filter.direction.as_str(),
@@ -619,26 +633,34 @@ impl Integration {
             &filter.since,
             &filter.until,
         ];
-        let total: i64 = client
+        // Counted up to the cap and one more, never the whole log.
+        let counted: i64 = client
             .query_one(
-                &format!("SELECT count(*) FROM base_integration_exchanges WHERE {where_}"),
+                &format!("SELECT count(*) FROM (SELECT 1 FROM base_integration_exchanges WHERE {where_} LIMIT {}) AS capped", LIST_CAP + 1),
                 &params,
             )
             .await?
             .get(0);
+        let total = counted.min(LIST_CAP);
         let offset = (page - 1).checked_mul(page_size).ok_or(Error::Invalid)?;
-        let mut paged = params.to_vec();
-        paged.push(&page_size);
-        paged.push(&offset);
-        let rows = client
-            .query(
-                &format!("SELECT {SUMMARY} FROM base_integration_exchanges WHERE {where_} ORDER BY occurred_at DESC,id DESC LIMIT $9 OFFSET $10"),
-                &paged,
-            )
-            .await?;
+        // A page past the cap holds nothing, so the skip is bounded too.
+        let rows = if offset >= LIST_CAP {
+            Vec::new()
+        } else {
+            let mut paged = params.to_vec();
+            paged.push(&page_size);
+            paged.push(&offset);
+            client
+                .query(
+                    &format!("SELECT {SUMMARY} FROM base_integration_exchanges WHERE {where_} ORDER BY occurred_at DESC,id DESC LIMIT $9 OFFSET $10"),
+                    &paged,
+                )
+                .await?
+        };
         Ok(Page {
             entries: rows.iter().map(Summary::from_row).collect(),
             total_entries: total,
+            more: counted > LIST_CAP,
             total_pages: (total + page_size - 1) / page_size,
             page,
             page_size,
@@ -816,6 +838,61 @@ impl Integration {
             }
         }
     }
+
+    /// Deletes exchanges older than `days` before `now`, oldest first, in
+    /// batches per tenant, and answers how many went. A row a legal hold
+    /// names stays (ADR 05), checked under the tenant's hold guard. Like the
+    /// recording of an exchange, its expiry is a machine measurement's end
+    /// and writes no audit row; a person's deletion ([`Integration::delete`])
+    /// is the audited one.
+    pub async fn prune_rows(
+        &self,
+        client: &tokio_postgres::Client,
+        days: i64,
+        now: SystemTime,
+    ) -> Result<u64> {
+        if !(1..=contributions::RETENTION_MAX).contains(&days) {
+            return Err(Error::Invalid);
+        }
+        let cutoff = now - std::time::Duration::from_secs(days as u64 * 86_400);
+        // Held rows stay at the front of the order; each batch starts past them.
+        let (mut pruned, mut held_back) = (0_u64, 0_i64);
+        loop {
+            let rows = client
+                .query(
+                    "SELECT id,coalesce(tenant_id,0) FROM base_integration_exchanges WHERE occurred_at<$1 \
+                     ORDER BY occurred_at,id LIMIT 500 OFFSET $2",
+                    &[&cutoff, &held_back],
+                )
+                .await?;
+            let done = rows.len() < 500;
+            let mut by_tenant: std::collections::BTreeMap<i64, Vec<i64>> = Default::default();
+            for row in &rows {
+                by_tenant.entry(row.get(1)).or_default().push(row.get(0));
+            }
+            for (tenant, ids) in by_tenant {
+                let holds = bilibi_personal_data::RecordHolds::acquire(tenant).await?;
+                let held = holds.records(privacy::KIND, &ids).await?;
+                held_back += held.len() as i64;
+                let ids: Vec<i64> = ids
+                    .into_iter()
+                    .filter(|id| !held.contains_key(id))
+                    .collect();
+                if !ids.is_empty() {
+                    pruned += client
+                        .execute(
+                            "DELETE FROM base_integration_exchanges WHERE id=ANY($1)",
+                            &[&ids],
+                        )
+                        .await?;
+                }
+                holds.release().await?;
+            }
+            if done {
+                return Ok(pruned);
+            }
+        }
+    }
 }
 
 /// `None` widens to every tenant and to system rows: only the sealed platform
@@ -839,7 +916,8 @@ inventory::submit! {
             ("base-integration-003-agent-self-report", include_str!("../migrations/003-agent-self-report.sql")),
             ("base-integration-004-client-identity", include_str!("../migrations/004-client-identity.sql")),
             ("base-integration-005-agent-activity-index", include_str!("../migrations/005-agent-activity-index.sql")),
-            ("base-integration-006-agent-targets", include_str!("../migrations/006-agent-targets.sql"))],
+            ("base-integration-006-agent-targets", include_str!("../migrations/006-agent-targets.sql")),
+            ("base-integration-007-payload-index", include_str!("../migrations/007-payload-index.sql"))],
         services: &[Service { id: SERVICE, factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
