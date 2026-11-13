@@ -559,19 +559,10 @@ struct Code<'a> {
 }
 
 struct Options {
-    parents: Vec<Choice>,
     types: Vec<Choice>,
     countries: Vec<Choice>,
 }
-async fn options(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-    except: Option<i64>,
-    create: bool,
-) -> Result<Options> {
-    let tenant_wide = allowed(client, scope, crate::TENANT_WIDE).await?;
-    let current = scope.current_company().map(|id| id.get());
-    let parents=client.query("SELECT id,COALESCE(NULLIF(legal_name,''),name) AS label FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id IS DISTINCT FROM $2 AND ($3 OR id=$4 OR id IN (SELECT parent_id FROM companies WHERE tenant_id=$1 AND id=$2)) ORDER BY label,id",&[&scope.tenant(),&except,&tenant_wide,&current]).await?.into_iter().map(|r|Choice::new(r.get::<_,String>(1),r.get::<_,i64>(0).to_string())).collect();
+async fn options(client: &(impl GenericClient + Sync), create: bool) -> Result<Options> {
     let types = crate::reference_types::list_legal_entity_types(
         client,
         crate::reference_types::TypeSort::Name,
@@ -591,11 +582,57 @@ async fn options(
         .into_iter()
         .map(|r| Choice::new(r.get::<_, String>(1), r.get::<_, String>(0)))
         .collect();
-    Ok(Options {
-        parents,
-        types,
-        countries,
-    })
+    Ok(Options { types, countries })
+}
+/// The parent picker: a search over the tenant's companies (Base Records,
+/// under the reader's own permissions) instead of a list of every company.
+/// The owner still checks the chosen parent on save.
+pub(super) struct ParentPicker<'a> {
+    pub query: &'a str,
+    pub hits: Vec<PickerHit>,
+    /// The create form's chosen parent: its id and name.
+    pub chosen: Option<(i64, &'a str)>,
+    /// The record page's Change was pressed: search instead of the pill.
+    pub changing: bool,
+}
+pub(super) const PARENT_FORM: &str = "parent";
+fn parent_pill(id: i64, label: &str, link: bool, workspace: bool) -> RelatedRecord {
+    RelatedRecord::new(
+        "company-parent-pill",
+        "core/company",
+        id.to_string(),
+        RecordState::Named {
+            label: label.to_owned(),
+            href: link.then(|| format!("/companies/{id}")),
+        },
+    )
+    .workspace(workspace)
+}
+/// `label` names the search box: the record page's fact already says
+/// "Parent Company", the create form's field does not.
+fn parent_picker(
+    picker: &ParentPicker<'_>,
+    label: &str,
+    selected: Option<(i64, RelatedRecord)>,
+    events: (&str, &str),
+    errors: Vec<String>,
+) -> Result<Html> {
+    let value = selected
+        .as_ref()
+        .map(|(id, pill)| (format!("company:{id}"), pill.clone()));
+    render(&RecordPicker::new(
+        "company-parent",
+        PARENT_FORM,
+        "parent",
+        label,
+        picker.query,
+        &picker.hits,
+        value
+            .as_ref()
+            .map(|(value, pill)| (value.as_str(), pill.clone())),
+        events,
+        errors,
+    ))
 }
 fn choice(
     id: &str,
@@ -610,7 +647,7 @@ fn choice(
         .iter()
         .find(|c| c.value == value)
         .map(|c| c.label.as_str())
-        .unwrap_or(if name == "parent_id" { "None" } else { "—" });
+        .unwrap_or("—");
     let editor = if name == "jurisdiction" {
         render(
             &Combobox::new(format!("{id}-input"), name)
@@ -632,7 +669,7 @@ fn choice(
                 .wrapper_class("mb-0"),
         )?
     };
-    let display = if value.is_empty() && name != "parent_id" {
+    let display = if value.is_empty() {
         render(&MutedValue { text: display })?
     } else {
         Html::text(display)
@@ -689,6 +726,7 @@ pub(super) struct DetailState<'a> {
     pub display: &'a bilibi_datetime::DisplayContext,
     /// Anchors of the contributed record panels the reader may mount.
     pub panels: &'a [String],
+    pub parent: ParentPicker<'a>,
 }
 pub(super) async fn detail(
     client: &Client,
@@ -707,6 +745,7 @@ pub(super) async fn detail(
         workspace,
         display,
         panels,
+        parent,
     } = state;
     let (company, masked) = crate::detail(client, scope, id).await?;
     let editable = allowed(client, scope, crate::UPDATE).await? && !company.archived();
@@ -746,7 +785,7 @@ pub(super) async fn detail(
         })?;
     }
     let primary = crate::primary::is_primary(client, scope, id).await?;
-    let opts = options(client, scope, Some(id), false).await?;
+    let opts = options(client, false).await?;
     let mut actions = badge(&company.status)?;
     actions.push(&render(&History {})?);
     actions.push(&back("company-back")?);
@@ -1059,18 +1098,70 @@ pub(super) async fn detail(
             });
         }
     }
+    let current = match company.parent_id {
+        Some(parent) => client
+            .query_opt(
+                "SELECT COALESCE(NULLIF(legal_name,''),name) FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL",
+                &[&scope.tenant(), &parent],
+            )
+            .await?
+            .map(|row| parent_pill(parent, &row.get::<_, String>(0), true, workspace))
+            .map(|pill| (parent, pill)),
+        None => None,
+    };
+    let value = if editable {
+        let errors = match statuses.get("parent_id") {
+            CommitStatus::Error(message) => vec![message],
+            _ => Vec::new(),
+        };
+        let (selected, actions) = if parent.changing || current.is_none() {
+            let mut actions = Html::EMPTY;
+            if parent.changing {
+                actions.push(&render(&Button {
+                    id: "company-parent-keep",
+                    event: "keep_parent",
+                    button_type: "button",
+                    body: Html::text("Keep current"),
+                    ..Button::default()
+                })?);
+            }
+            if current.is_some() {
+                actions.push(&render(&Button {
+                    id: "company-parent-remove",
+                    event: "remove_parent",
+                    button_type: "button",
+                    body: Html::text("Remove parent"),
+                    ..Button::default()
+                })?);
+            }
+            (None, actions)
+        } else {
+            (current, Html::EMPTY)
+        };
+        render(&Form {
+            id: "company-parent-form",
+            event: "parent_search",
+            change: true,
+            body: parent_picker(
+                &parent,
+                "Company",
+                selected,
+                ("pick_parent", "change_parent"),
+                errors,
+            )?,
+            actions,
+            ..Form::default()
+        })?
+    } else {
+        match current {
+            Some((_, pill)) => render(&pill)?,
+            None => render(&MutedValue { text: "None" })?,
+        }
+    };
     facts.push(Fact {
         title: fields::PARENT_ID.label,
         id: "detail-parent",
-        value: choice(
-            "company-parent",
-            "parent_id",
-            company.parent_id.map(|v| v.to_string()).unwrap_or_default(),
-            opts.parents,
-            statuses.get("parent_id"),
-            &company,
-            editable,
-        )?,
+        value,
     });
     let context = client
         .query_one(
@@ -1397,6 +1488,7 @@ pub(super) struct CreateState<'a> {
     pub confirming: bool,
     pub likely: bool,
     pub reason: &'a str,
+    pub parent: ParentPicker<'a>,
 }
 pub(super) fn duplicate_builtins() -> Vec<BuiltinColumn> {
     [
@@ -1423,13 +1515,14 @@ pub(super) async fn create(
         confirming,
         likely,
         reason,
+        parent,
     } = state;
     bilibi_authz::authorize_key(client, scope, crate::CREATE).await?;
     let masked = crate::field_contributions::effective_restrictions(client, scope).await?;
-    let opts = options(client, scope, None, true).await?;
+    let opts = options(client, true).await?;
     let mut fields = Vec::new();
     for (name, label, kind, placeholder) in [
-        ("parent_id", "Parent Company", InputKind::Select, ""),
+        ("parent_id", fields::PARENT_ID.label, InputKind::Select, ""),
         ("status", "Status", InputKind::Select, ""),
         ("name", "Name", InputKind::Text, "Company display name"),
         ("code", "Code", InputKind::Text, ""),
@@ -1461,6 +1554,24 @@ pub(super) async fn create(
             fields.push(render(&RestrictedField::new(&id, label))?);
             continue;
         }
+        if name == "parent_id" {
+            let errors = errors
+                .iter()
+                .filter(|e| e.field == name)
+                .map(|e| e.message.clone())
+                .collect();
+            let selected = parent
+                .chosen
+                .map(|(id, label)| (id, parent_pill(id, label, false, false)));
+            fields.push(parent_picker(
+                &parent,
+                label,
+                selected,
+                ("pick_parent", "clear_parent"),
+                errors,
+            )?);
+            continue;
+        }
         let mut field = Field::named(name)
             .id(id)
             .kind(kind)
@@ -1478,7 +1589,6 @@ pub(super) async fn create(
             field = field.required();
         }
         field = match name {
-            "parent_id" => field.prompt("None").options(opts.parents.clone()),
             "legal_entity_type_id" => field.prompt("Select type...").options(opts.types.clone()),
             "jurisdiction" => field
                 .prompt("Select country...")
