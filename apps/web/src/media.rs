@@ -94,7 +94,7 @@ fn delivered(file: FileStream, private: bool) -> Response {
             Ok(0) => None,
             Ok(read) => {
                 chunk.truncate(read);
-                Some((Ok(Bytes::from(chunk)), Some(reader)))
+                Some((Ok::<_, std::io::Error>(Bytes::from(chunk)), Some(reader)))
             }
             Err(error) => Some((Err(error), None)),
         }
