@@ -1065,7 +1065,8 @@ impl Documents {
         }
         Ok(
             store::permission(&**client, scope, document.id, "manage").await?
-                && store::permission(&**client, scope, document.id, "share").await?,
+                && store::permission(&**client, scope, document.id, "share").await?
+                && store::full_open_grant(&**client, scope, document.id).await?,
         )
     }
     /// Names references with the reader's permissions (`base/records`).

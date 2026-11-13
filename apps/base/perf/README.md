@@ -80,7 +80,7 @@ recording is switched off.
 
 `examples/perf-walkthrough.rs` drives observation, redaction, settings policy,
 queue saturation, an unreachable store, regressions and retention against a
-disposable database. It refuses to run without `BILIBI_DISPOSABLE_PERF_DEMO=yes`
+disposable database, migrated first (`bilibi-web migrate`: it installs the fixture, which needs the tables). It refuses to run without `BILIBI_DISPOSABLE_PERF_DEMO=yes`
 because it truncates `base_perf_samples`:
 
 ```sh

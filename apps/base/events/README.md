@@ -278,7 +278,7 @@ This module owns `base_events` and `base_events_deliveries`.
 
 ## Seeing it work
 
-The example `apps/web/examples/events-reference.rs` runs everything above on a fresh disposable database. Its header lists four compositions to run in order. It uses two reference Domains: the publisher `fixtures/containers/event_publisher` and the subscriber `fixtures/containers/event_subscriber`. They are never mounted in the Platform and never name each other.
+The example `apps/web/examples/events-reference.rs` runs everything above on a fresh disposable database, migrated and seeded first (`bilibi-web migrate`, then `BILIBI_ENV=development bilibi-web seed-production`, which stores the Dev instance role; its grant steps otherwise fail with `StepUpRequired { reason: "not_enrolled" }`). Its header lists four compositions to run in order. It uses two reference Domains: the publisher `fixtures/containers/event_publisher` and the subscriber `fixtures/containers/event_subscriber`. They are never mounted in the Platform and never name each other.
 
 Here is what you'll see:
 
