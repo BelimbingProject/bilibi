@@ -32,6 +32,9 @@ pub const MERGE: &str = "core.document.merge";
 pub const EMAIL_FAIL: &str = "core.document.email.fail";
 /// Narrow system authority to settle one held revision after Media's verdict.
 pub const SCAN_SETTLE: &str = "core.document.scan.settle";
+/// Narrow system authority to discard a file stored but not attached a day
+/// later.
+pub const DISCARD_SETTLE: &str = "core.document.discard.settle";
 /// Narrow system authority to finish deleting a document already marked as
 /// deleting: its files, then its metadata.
 pub const DELETION_SETTLE: &str = "core.document.deletion.settle";
@@ -66,7 +69,7 @@ inventory::submit! { Contribution::new(MEDIA_SUBJECTS, crate::files::MEDIA_SUBJE
 // `view` and `manage` are the Platform's verbs; the other three are ours.
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
     domains: &["core"], verbs: &["download", "merge", "fail", "settle"],
-    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL), C::tenant(SCAN_SETTLE), C::tenant(DELETION_SETTLE), C::portal(crate::PORTAL_VIEW)],
+    capabilities: &[C::tenant(VIEW), C::tenant(DOWNLOAD), C::tenant(MANAGE), C::tenant(MERGE), C::tenant(EMAIL_FAIL), C::tenant(SCAN_SETTLE), C::tenant(DISCARD_SETTLE), C::tenant(DELETION_SETTLE), C::portal(crate::PORTAL_VIEW)],
     roles: &[
         RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: CAPABILITIES },
         // Every invited customer may read what staff shared with them; the
@@ -76,6 +79,7 @@ inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &Vocab
     system_principals: &[
         SystemPrincipalDefinition { name: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] },
         SystemPrincipalDefinition { name: crate::scan::PRINCIPAL, capabilities: &[SCAN_SETTLE] },
+        SystemPrincipalDefinition { name: crate::discard::PRINCIPAL, capabilities: &[DISCARD_SETTLE] },
         SystemPrincipalDefinition { name: crate::deletion::PRINCIPAL, capabilities: &[DELETION_SETTLE] },
     ],
 }) }
@@ -84,6 +88,8 @@ inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &Vocab
 // request `queued`, as before.
 inventory::submit! { Contribution::new(STANDING_GRANTS, crate::email::MONITOR, provenance!(), &StandingGrant { principal: crate::email::MONITOR, capabilities: &[EMAIL_FAIL] }) }
 inventory::submit! { Contribution::new(STANDING_GRANTS, crate::scan::PRINCIPAL, provenance!(), &StandingGrant { principal: crate::scan::PRINCIPAL, capabilities: &[SCAN_SETTLE] }) }
+// Removing abandoned uploads is housekeeping no tenant has to switch on.
+inventory::submit! { Contribution::new(STANDING_GRANTS, crate::discard::PRINCIPAL, provenance!(), &StandingGrant { principal: crate::discard::PRINCIPAL, capabilities: &[DISCARD_SETTLE] }) }
 // Finishing a delete a person already confirmed is never switched off.
 inventory::submit! { Contribution::new(STANDING_GRANTS, crate::deletion::PRINCIPAL, provenance!(), &StandingGrant { principal: crate::deletion::PRINCIPAL, capabilities: &[DELETION_SETTLE] }) }
 
@@ -225,7 +231,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, crate::reminders::REMINDER_D
         reveal_duration_ms: 5_000,
     }),
 })) }
-// Zero leaves ordinary Artifact expiry and explicit deletion unchanged.
+// Zero keeps each new file until its document is deleted, with no expiry.
 // Retention is irreversible, so a new rule applies to future revisions only.
 inventory::submit! { Contribution::new(DEFINITIONS, RETENTION_DAYS, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: &[ScopeKind::Global, ScopeKind::Tenant], default: || json!(0),
@@ -233,7 +239,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, RETENTION_DAYS, provenance!(
     editor: Some(Editor {
         group: "Documents",
         label: "Keep new document files for (days)",
-        help: "Zero leaves retention off. A positive period protects each new private revision from deletion for that many days. Existing retention can only be extended, even if this setting is lowered later.",
+        help: "Zero keeps each file until its document is deleted. A positive period protects each new private revision from deletion for that many days. Existing retention can only be extended, even if this setting is lowered later.",
         capability: None,
         reveal_duration_ms: 5_000,
     }),

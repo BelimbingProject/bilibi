@@ -154,6 +154,26 @@ pub trait Owner: Send + Sync + 'static {
         operation: Operation,
         reference: Option<&'a Reference>,
     ) -> ProofFuture<'a, ()>;
+    /// `authorize` for every one of `references` at once, for a batch read
+    /// (`retention_statuses`): refuse the whole set when any one is refused.
+    /// The default asks `authorize` for each; an owner whose rule is a set
+    /// query overrides it so a batch costs a few statements, not a few per file.
+    fn authorize_all<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        company: OrganisationId,
+        operation: Operation,
+        references: &'a [Reference],
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            for reference in references {
+                self.authorize(client, scope, company, operation, Some(reference))
+                    .await?;
+            }
+            Ok(())
+        })
+    }
     /// Whether `subject`, one of this owner's subjects that is not a person ID
     /// (such as a request about a person), names a document of the erasure
     /// grant's own person, so the erasure may delete it in any company of the
@@ -163,6 +183,18 @@ pub trait Owner: Send + Sync + 'static {
         &'a self,
         _client: &'a dyn ProofClient,
         _grant: &'a Erasure,
+        _subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+    /// Whether `subject`, one of this owner's subjects that is not a person
+    /// ID, names a document of the access grant's own person, so the access
+    /// export may read it (`for_disclosure`) in any company of the tenant.
+    /// The same answer as `erasure_subject`, for an access request.
+    fn disclosure_subject<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _grant: &'a Disclosure,
         _subject: &'a str,
     ) -> ProofFuture<'a, bool> {
         Box::pin(async { Ok(false) })
@@ -190,7 +222,7 @@ pub struct Metadata {
     pub content_type: String,
     pub byte_size: i64,
     pub sha256: String,
-    /// Set for an ordinary document; a records-grade one has none.
+    /// Set for an ordinary document; a records-grade or kept one has none.
     pub expires_at: Option<String>,
     pub retain_until: Option<String>,
     pub legal_hold_at: Option<String>,
@@ -298,8 +330,10 @@ impl Artifacts {
         }
     }
     /// A facade for one subject's documents under an approved access request
-    /// (ADR 05): `read` needs no owner permission for that subject's documents,
-    /// so a retired record's or another company's documents are still read.
+    /// (ADR 05): `read` needs no owner permission for that subject's documents
+    /// (the grant's person ID under a declared person-keyed kind, or one the
+    /// owner's `disclosure_subject` says is that person's), so a retired
+    /// record's or another company's documents are still read.
     /// Everything else is asked of the owner as usual.
     pub fn for_disclosure<'a, O: Owner>(
         &'a self,
@@ -622,12 +656,34 @@ pub struct Recovery {
     pub purged: Vec<String>,
     pub failed: Vec<(String, Error)>,
 }
+/// What one authorization covers: one reference (none for `Purge`) or a set.
+enum Target<'r> {
+    One(Option<&'r Reference>),
+    All(&'r [Reference]),
+}
 impl<O: Owner> Owned<'_, O> {
     async fn authorize(
         &self,
         client: &(impl GenericClient + Sync),
         operation: Operation,
         reference: Option<&Reference>,
+    ) -> Result<()> {
+        self.admit(client, operation, Target::One(reference)).await
+    }
+    /// One live-account and desk check for the set, then the owner's set rule.
+    async fn authorize_all(
+        &self,
+        client: &(impl GenericClient + Sync),
+        operation: Operation,
+        references: &[Reference],
+    ) -> Result<()> {
+        self.admit(client, operation, Target::All(references)).await
+    }
+    async fn admit(
+        &self,
+        client: &(impl GenericClient + Sync),
+        operation: Operation,
+        target: Target<'_>,
     ) -> Result<()> {
         if !bounded(self.owner.owner_id(), 255) || type_name::<O>().len() > 1024 {
             return Err(Error::Invalid);
@@ -638,15 +694,29 @@ impl<O: Owner> Owned<'_, O> {
             .reprove(client, self.scope)
             .await?;
         // An approved request is the authority for its subject's documents:
-        // the account must still be live, but the owner is not asked.
-        let granted = match (&self.grant, operation, reference) {
-            (Some(Granted::Disclose(grant, subject)), Operation::Read, Some(reference)) => {
-                grant
-                    .check_file_subject(&live, self.owner.owner_id(), subject)
-                    .is_ok()
-                    && reference.subject == *subject
+        // the account must still be live, but the owner is not asked. It
+        // covers one file; a set is always the owner's to decide.
+        let granted = match (&self.grant, operation, &target) {
+            (
+                Some(Granted::Disclose(grant, subject)),
+                Operation::Read,
+                Target::One(Some(reference)),
+            ) => {
+                reference.subject == *subject
+                    && (grant
+                        .check_file_subject(&live, self.owner.owner_id(), subject)
+                        .is_ok()
+                        || (grant.check(&live).is_ok()
+                            && self
+                                .owner
+                                .disclosure_subject(client, grant, subject)
+                                .await?))
             }
-            (Some(Granted::Erase(grant, subject)), Operation::Delete, Some(reference)) => {
+            (
+                Some(Granted::Erase(grant, subject)),
+                Operation::Delete,
+                Target::One(Some(reference)),
+            ) => {
                 reference.subject == *subject
                     && (grant
                         .check_file_subject(&live, self.owner.owner_id(), subject)
@@ -687,9 +757,18 @@ impl<O: Owner> Owned<'_, O> {
         {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        self.owner
-            .authorize(client, &live, self.company, operation, reference)
-            .await?;
+        match target {
+            Target::One(reference) => {
+                self.owner
+                    .authorize(client, &live, self.company, operation, reference)
+                    .await?
+            }
+            Target::All(references) => {
+                self.owner
+                    .authorize_all(client, &live, self.company, operation, references)
+                    .await?
+            }
+        }
         Ok(())
     }
     /// Refuses with `Retained` or `LegalHold` when any of this owner's
@@ -1102,7 +1181,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id:"base/artifacts",layer:bilibi_module_registry::Layer::Base,
         dependencies:&["base/audit","base/authz","base/database","base/queue","base/settings","base/tenancy","base/party_ids","base/personal_data"],
-        migrations:&[("base-artifacts-001",include_str!("../migrations/001-artifacts.sql")),("base-artifacts-002",include_str!("../migrations/002-retention.sql"))],
+        migrations:&[("base-artifacts-001",include_str!("../migrations/001-artifacts.sql")),("base-artifacts-002",include_str!("../migrations/002-retention.sql")),("base-artifacts-003-kept",include_str!("../migrations/003-kept.sql"))],
         services:&[Service {id:"base/artifacts.install-policy",factory:|_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy))))},Service {id:"base/artifacts.store",factory:|services| Ok(Arc::new(Artifacts {
             boundary:services.get("base/database.mutations")?, settings:services.get("base/settings.store")?, authentication:services.get("base/tenancy.authentication")?,
             queue:services.get("base/queue.store")?, db:services.get::<Db>("base/database.pool")?.as_ref().clone(),

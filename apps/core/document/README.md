@@ -117,11 +117,23 @@ The New document, New revision and Quick add dialogs take the file through one r
 
 Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
+### Files never attached
+
+A file stored but never attached (a dialog cancelled, a file replaced, a create refused, a dropped connection, a copy refused) is removed a day after it was stored.
+
+- Storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
+- The job runs as the system principal `document-file-cleaner`, which holds only `core.document.discard.settle` (a standing grant). A file attached by then is left alone.
+- Otherwise the job moves the ledger row to `discarding`, which no write can attach ("is not a file you stored"), deletes its Artifact, then removes the row. Each step is audited as `System · document-file-cleaner`; a failed step retries with Queue's backoff.
+- A held upload's staged bytes stay Media's: its draft cleanup removes them.
+
 ## Tenant retention and due documents
 
 Settings › Documents offers **Keep new document files for (days)**
-(`core.document.retention_days`, 0 by default). Zero leaves ordinary Artifact
-expiry and explicit deletion as before. When a tenant chooses a positive period
+(`core.document.retention_days`, 0 by default). With zero, each private file
+revision is kept without an expiry (`Artifacts::keep_in`) when a clean Artifact
+is attached or a pending revision is promoted: it stays readable until its
+document is deleted, whatever the installation's `artifacts.retention_days`
+(which bounds exports, and a file stored but never attached). When a tenant chooses a positive period
 (1–36500 days), every newly attached **private file revision** receives an
 irreversible Base retain-until when a clean Artifact is attached or a pending
 revision is promoted. The owner calls `Artifacts::retain_in` inside the same
@@ -140,6 +152,17 @@ retention and hold state to its manager. Due means the document may be considere
 for an explicit reviewed deletion; nothing is deleted automatically. Base still
 rechecks every revision under lock in delete and merge, so a new hold refuses
 those actions even after the list was read.
+
+The view costs the same few statements however many files it checks: Base asks the owner for `Retain` on each batch of up to 1000 files at once (`Owner::authorize_all`), and Documents answers a manager's batch with one query (each file attached to an undeleted document the reader may manage now). The `document-retention-due` walkthrough counts them.
+
+## Privacy requests
+
+Documents related to a person (a `person` link) are a `base/personal_data` store, `core/document.documents` (ADR 05, `src/privacy.rs`).
+
+- **Locate and export:** an access request finds and exports every such document that is not being deleted, with its revisions, and every clean file, read through `Artifacts::for_disclosure` (the owner's `disclosure_subject` vouches that the file belongs to a revision of a document related to the request's person).
+- **Erase, kept:** a document under a legal hold (on the person or the document), or whose file Base still retains or holds, is kept with that reason. A document also related to another record is that record's too: only its link to the person is removed, and it is reported as shared.
+- **Erase, deleted:** every other document is anonymised in the erasing transaction and marked as deleting with its durable delete job (below). The document's name, link and custom fields, its revisions' names, file names, links, change logs and labels, and its ledger rows' file names read `[erased]`. The job then deletes its files and rows as for any delete, and the certificate counts it deleted.
+- **Audit:** `core.document.document`, `.revision` and `.file` declare their personal fields, so the erasure clears them from earlier audit evidence too.
 
 ## Retention-safe deletion
 

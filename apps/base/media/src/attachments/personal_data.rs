@@ -3,10 +3,10 @@
 //! authority to list and read them for an export, turn them into tombstones
 //! and remove their bytes.
 use super::{bound, facts, valid_public_id, Attachment, AttachmentSubject, CLEANUP_BATCH, SELECT};
-use crate::{audit, storage, Error, Media, Result, StreamFile};
+use crate::{audit, storage, Error, Media, Result};
 use bilibi_database::{Change, MutationTransaction};
 use bilibi_party_ids::PersonId;
-use bilibi_personal_data::{Cause, Disclosure, Erasure, Holds};
+use bilibi_personal_data::{Cause, Disclosure, Erasure, File, Holds, Withheld};
 use bilibi_tenancy::{ProofClient, Scope};
 use serde_json::json;
 use tokio_postgres::{Client, GenericClient};
@@ -152,7 +152,12 @@ impl Media {
     }
 
     /// The bytes of one of `subject`'s live attachments, for an approved
-    /// access request's bundle. Another subject's file is `NotFound`.
+    /// access request's bundle, read whole once a load slot is free. A file
+    /// that is not readable (the scan rule every download passes, purged
+    /// included) is [`File::Withheld`] `NotCleared`, one whose bytes are gone
+    /// `Missing`: the bundle lists it instead of failing. Another subject's
+    /// file is `NotFound`; a disk that cannot be read is an error, never a
+    /// shorter export.
     pub async fn disclosed_attachment(
         &self,
         client: &(impl GenericClient + Sync),
@@ -160,7 +165,7 @@ impl Media {
         grant: &Disclosure,
         subject: AttachmentSubject<'_>,
         public_id: &str,
-    ) -> Result<StreamFile> {
+    ) -> Result<File> {
         self.disclosed_subject(client, scope, grant, subject)
             .await?;
         if !valid_public_id(public_id) {
@@ -175,14 +180,28 @@ impl Media {
             .ok_or(Error::NotFound)?;
         let row = bound(&row)?;
         let asset = self.fetch(client, scope.tenant(), row.asset_id).await?;
-        let bytes = storage::read(&self.disks(client).await?, &asset.disk, &asset.key).await?;
-        Ok(StreamFile {
-            bytes,
-            filename: asset
+        match self.readable(client, &asset).await {
+            Ok(()) => {}
+            Err(
+                Error::ScanPending | Error::Quarantined | Error::ScanFailed | Error::NotScanned,
+            ) => return Ok(File::Withheld(Withheld::NotCleared)),
+            Err(error) => return Err(error),
+        }
+        let roots = self.disks(client).await?;
+        let _slot = self
+            .loads
+            .acquire()
+            .await
+            .map_err(|_| Error::StorageUnavailable)?;
+        let Some(opened) = storage::open(&roots, &asset.disk, &asset.key).await? else {
+            return Ok(File::Withheld(Withheld::Missing));
+        };
+        Ok(File::Read {
+            content_type: asset
                 .asset
-                .original_filename
-                .unwrap_or_else(|| public_id.to_owned()),
-            mime_type: asset.asset.mime_type,
+                .mime_type
+                .unwrap_or_else(|| "application/octet-stream".into()),
+            bytes: opened.read_all().await?,
         })
     }
 
@@ -340,11 +359,12 @@ impl Media {
     }
 
     /// Removes the bytes of `subject`'s erased attachments, one file per
-    /// transaction: each file is claimed under its row lock, removed, and
-    /// recorded once, so concurrent calls never remove or record one file
-    /// twice. A file already gone counts as removed. Removes at most one batch;
-    /// `more` says files remain, and a file that will not go is
-    /// `CleanupFailed`, left pending for the next call.
+    /// transaction, in id order: each file is claimed under its row lock,
+    /// removed, and recorded once, so concurrent calls never remove or record
+    /// one file twice. A file already gone counts as removed. Removes at most
+    /// one batch; `more` says files remain. A file that will not go is passed
+    /// over for the rest of the call, so it holds back no later file, and the
+    /// call then answers `CleanupFailed`, leaving it pending for the next.
     pub async fn remove_erased_bytes(
         &self,
         client: &mut Client,
@@ -355,6 +375,7 @@ impl Media {
         self.erased_subject(&*client, scope, grant, subject).await?;
         let roots = self.disks(&*client).await?;
         let mut removal = Removal::default();
+        let (mut after, mut failed) = (0_i64, false);
         for _ in 0..CLEANUP_BATCH {
             let mut tx = self
                 .boundary
@@ -367,8 +388,8 @@ impl Media {
                 .sql()
                 .query_opt(
                     "SELECT id,erased_disk,erased_key FROM base_media_attachments WHERE tenant_id=$1 AND subject_type=$2 AND subject_id=$3 \
-                     AND state='erased' AND bytes_removed_at IS NULL ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
-                    &[&scope.tenant(), &subject.kind, &subject.id],
+                     AND state='erased' AND bytes_removed_at IS NULL AND id>$4 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                    &[&scope.tenant(), &subject.kind, &subject.id, &after],
                 )
                 .await?
             else {
@@ -381,12 +402,18 @@ impl Media {
                     )
                     .await?
                     .get(0);
-                return Ok(removal);
+                return if failed {
+                    Err(Error::CleanupFailed)
+                } else {
+                    Ok(removal)
+                };
             };
             let (id, disk, key): (i64, String, String) = (row.get(0), row.get(1), row.get(2));
+            after = id;
             if storage::delete(&roots, &disk, &key).await.is_err() {
                 tx.rollback().await?;
-                return Err(Error::CleanupFailed);
+                failed = true;
+                continue;
             }
             tx.mutate(move |sql| {
                 Box::pin(async move {
@@ -409,6 +436,9 @@ impl Media {
             removal.removed += 1;
         }
         removal.more = true;
+        if failed {
+            return Err(Error::CleanupFailed);
+        }
         Ok(removal)
     }
 }

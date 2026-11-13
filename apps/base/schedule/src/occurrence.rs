@@ -36,7 +36,9 @@ pub enum Refusal {
     Suppressed,
     /// This exact intended instant was already claimed, by any process, ever.
     AlreadyClaimed,
-    /// A forbid-overlap definition still holds its lease for an earlier occurrence.
+    /// A forbid-overlap definition still holds its lease for an earlier
+    /// occurrence, or (a tenant administrator's Run now) a manual run of the
+    /// same task is still unfinished in that tenant.
     Overlap,
 }
 impl Refusal {
@@ -92,6 +94,10 @@ pub(crate) fn from_pg(at: SystemTime) -> Timestamp {
 }
 
 pub const RECONCILE_BATCH: i64 = 300;
+/// Batches one reconcile pass reads at most. A pass walks the unfinished rows
+/// oldest first, past the ones whose job is still alive, so a long backlog of
+/// waiting runs cannot keep a later run whose job ended from settling (#558).
+pub const RECONCILE_PAGES: usize = 40;
 
 /// Settles unfinished occurrences whose Queue job already reached a terminal
 /// state (or vanished): `completed` is `succeeded`, anything else terminal is
@@ -125,12 +131,29 @@ async fn reconcile_runs(client: &impl GenericClient, key: Option<&str>) -> Resul
         .await? as usize)
 }
 async fn reconcile_occurrences(client: &impl GenericClient, key: Option<&str>) -> Result<usize> {
-    let rows = client
-        .query(
-            "SELECT id,tenant_id,job_id FROM base_schedule_occurrences WHERE finished_at IS NULL AND job_id IS NOT NULL AND ($1::text IS NULL OR key=$1) ORDER BY claimed_at,id LIMIT $2",
-            &[&key, &RECONCILE_BATCH],
-        )
-        .await?;
+    let mut settled = 0;
+    let mut after: Option<(std::time::SystemTime, i64)> = None;
+    for _ in 0..RECONCILE_PAGES {
+        let rows = client
+            .query(
+                "SELECT id,tenant_id,job_id,claimed_at FROM base_schedule_occurrences WHERE finished_at IS NULL AND job_id IS NOT NULL AND ($1::text IS NULL OR key=$1) \
+                 AND ($3::timestamptz IS NULL OR (claimed_at,id)>($3,$4)) ORDER BY claimed_at,id LIMIT $2",
+                &[&key, &RECONCILE_BATCH, &after.map(|(at, _)| at), &after.map_or(0, |(_, id)| id)],
+            )
+            .await?;
+        let full = rows.len() as i64 == RECONCILE_BATCH;
+        after = rows.last().map(|row| (row.get(3), row.get(0)));
+        settled += settle_occurrences(client, rows).await?;
+        if !full {
+            break;
+        }
+    }
+    Ok(settled)
+}
+async fn settle_occurrences(
+    client: &impl GenericClient,
+    rows: Vec<tokio_postgres::Row>,
+) -> Result<usize> {
     let mut by_tenant: BTreeMap<i64, Vec<(i64, i64)>> = BTreeMap::new();
     for row in rows {
         by_tenant
@@ -169,12 +192,29 @@ pub async fn reconcile_tenant_runs(
     key: Option<&str>,
     tenant: Option<i64>,
 ) -> Result<usize> {
-    let rows = client
-        .query(
-            "SELECT id,tenant_id,job_id FROM base_schedule_tenant_runs WHERE finished_at IS NULL AND ($1::text IS NULL OR key=$1) AND ($2::bigint IS NULL OR tenant_id=$2) ORDER BY created_at,id LIMIT $3",
-            &[&key, &tenant, &RECONCILE_BATCH],
-        )
-        .await?;
+    let mut settled = 0;
+    let mut after: Option<(std::time::SystemTime, i64)> = None;
+    for _ in 0..RECONCILE_PAGES {
+        let rows = client
+            .query(
+                "SELECT id,tenant_id,job_id,created_at FROM base_schedule_tenant_runs WHERE finished_at IS NULL AND ($1::text IS NULL OR key=$1) AND ($2::bigint IS NULL OR tenant_id=$2) \
+                 AND ($4::timestamptz IS NULL OR (created_at,id)>($4,$5)) ORDER BY created_at,id LIMIT $3",
+                &[&key, &tenant, &RECONCILE_BATCH, &after.map(|(at, _)| at), &after.map_or(0, |(_, id)| id)],
+            )
+            .await?;
+        let full = rows.len() as i64 == RECONCILE_BATCH;
+        after = rows.last().map(|row| (row.get(3), row.get(0)));
+        settled += settle_tenant_runs(client, rows).await?;
+        if !full {
+            break;
+        }
+    }
+    Ok(settled)
+}
+async fn settle_tenant_runs(
+    client: &impl GenericClient,
+    rows: Vec<tokio_postgres::Row>,
+) -> Result<usize> {
     let mut by_tenant: BTreeMap<i64, Vec<(i64, i64)>> = BTreeMap::new();
     for row in rows {
         by_tenant
@@ -231,12 +271,18 @@ pub async fn latest_scheduled(
 ) -> Result<BTreeMap<String, Timestamp>> {
     Ok(client
         .query(
-            "SELECT key,max(intended_at) FROM base_schedule_occurrences WHERE trigger='scheduled' AND key=ANY($1) GROUP BY key",
+            // One index probe per key (`base_schedule_occurrences_latest_scheduled`),
+            // not an aggregate over every occurrence ever claimed (#558).
+            "SELECT k,(SELECT intended_at FROM base_schedule_occurrences WHERE trigger='scheduled' AND key=k ORDER BY intended_at DESC LIMIT 1) \
+             FROM unnest($1::text[]) k",
             &[&keys],
         )
         .await?
         .into_iter()
-        .map(|row| (row.get(0), from_pg(row.get(1))))
+        .filter_map(|row| {
+            row.get::<_, Option<_>>(1)
+                .map(|at| (row.get(0), from_pg(at)))
+        })
         .collect())
 }
 

@@ -79,8 +79,8 @@ pub use relationship_roles::{
 };
 pub use relationships::{
     assign as assign_relationship, current as current_relationship,
-    Direction as RelationshipDirection, Entry as RelationshipEntry, Relationship,
-    RelationshipUpdate,
+    Direction as RelationshipDirection, Entry as RelationshipEntry, Links as RelationshipLinks,
+    Relationship, RelationshipUpdate, Window as RelationshipWindow,
 };
 
 /// Company-scoped Media image shown by the authenticated shell.
@@ -948,18 +948,32 @@ impl CompanyService {
         scope: &Scope,
         company: bilibi_party::OrganisationId,
         history: bool,
-    ) -> Result<Vec<relationships::Entry>> {
+        window: relationships::Window,
+    ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_company(&**client, scope, &self.directory, company, history).await
+        relationships::list_for_company(&**client, scope, &self.directory, company, history, window)
+            .await
     }
     pub async fn person_relationships(
         &self,
         scope: &Scope,
         person: bilibi_party::PersonId,
         history: bool,
-    ) -> Result<Vec<relationships::Entry>> {
+        window: relationships::Window,
+    ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_person(&**client, scope, &self.directory, person, history).await
+        relationships::list_for_person(&**client, scope, &self.directory, person, history, window)
+            .await
+    }
+    /// One link on `company`'s page, from its perspective.
+    pub async fn company_relationship(
+        &self,
+        scope: &Scope,
+        company: bilibi_party::OrganisationId,
+        id: bilibi_party::RelationshipId,
+    ) -> Result<relationships::Entry> {
+        let client = self.db.get().await?;
+        relationships::read_for_company(&**client, scope, &self.directory, company, id).await
     }
     pub async fn relationship(
         &self,

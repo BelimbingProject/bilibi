@@ -7,10 +7,11 @@
 //! recheck `admin.media.quarantine.manage` inside the caller's transaction.
 use crate::{
     scan::{verdict, ScanState},
-    storage, stored, Error, Media, Result, COLUMNS,
+    storage, stored, Error, Media, Result, ASSET_KIND, ATTACHMENT_KIND, COLUMNS,
 };
 use bilibi_authz::{authorize_key, authorize_proof};
 use bilibi_database::{Change, MutationTransaction};
+use bilibi_personal_data::RecordHolds;
 use bilibi_queue::{Execution, Handler, HandlerFuture, Outcome};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
@@ -300,8 +301,36 @@ impl Media {
     /// the row's lock. A failed removal or record retries, and bytes already
     /// gone count as removed, so a retry after a lost record finishes it.
     async fn remove_purged(&self, execution: &Execution, id: i64) -> Result<Outcome> {
+        let holds = RecordHolds::acquire(execution.tenant()).await?;
+        let removed = self.remove_unheld(execution, id, &holds).await;
+        holds.release().await?;
+        removed
+    }
+    /// A legal hold on the file, or on the attachment it is bound to, keeps
+    /// its bytes: the job ends (`legal_hold`) and the file stays purging,
+    /// unreadable; a purge repeated once the hold is released removes them.
+    async fn remove_unheld(
+        &self,
+        execution: &Execution,
+        id: i64,
+        holds: &RecordHolds,
+    ) -> Result<Outcome> {
         let tenant = execution.tenant();
         let mut client = self.db.get().await.map_err(bilibi_database::Error::from)?;
+        let bindings: Vec<i64> = client
+            .query(
+                "SELECT id FROM base_media_attachments WHERE tenant_id=$1 AND media_asset_id=$2",
+                &[&tenant, &id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !holds.records(ASSET_KIND, &[id]).await?.is_empty()
+            || !holds.records(ATTACHMENT_KIND, &bindings).await?.is_empty()
+        {
+            return Ok(Outcome::Cancel("legal_hold"));
+        }
         let roots = self.disks(&**client).await?;
         // `begin` fences the lease and re-proves the principal's grant.
         let mut tx = execution.begin(&mut client, "media.purge.removal").await?;
