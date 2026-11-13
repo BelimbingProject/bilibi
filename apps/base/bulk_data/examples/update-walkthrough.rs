@@ -603,6 +603,53 @@ async fn main() -> Result<(), Failure> {
     )
     .await?;
 
+    println!(
+        "\n== an update whose job ended before it found its records is finished by the next one"
+    );
+    // Issue 600: Queue ended that job without running it, so the update is
+    // still resolving and still keeps its filter.
+    let left = sql
+        .query_one(
+            "SELECT state, filter IS NOT NULL FROM base_bulk_data_updates WHERE id=$1",
+            &[&moved_id],
+        )
+        .await?;
+    println!(
+        "  left by its job: state {}, filter kept {}",
+        left.get::<_, String>(0),
+        left.get::<_, bool>(1)
+    );
+    let next = manager
+        .start(
+            "the company's next update",
+            json!({"field": "kind", "value": "human", "filter": "{\"search\":\"Bulk 25\"}"}),
+        )
+        .await
+        .expect("started");
+    let run = manager.settle(next).await;
+    manager.report("the next update", &run);
+    let after = sql
+        .query_one(
+            "SELECT state, filter IS NULL AND ids IS NULL AND except_ids IS NULL, coalesce(error, '') FROM base_bulk_data_updates WHERE id=$1",
+            &[&moved_id],
+        )
+        .await?;
+    let told: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM notifications WHERE user_id=1 AND type='bulk_data.update' AND url=$1",
+            &[&format!("/updates/{moved_id}")],
+        )
+        .await?
+        .get(0);
+    let (state, dropped): (String, bool) = (after.get(0), after.get(1));
+    println!(
+        "  after the next update started: state {state}, filter and ids dropped {dropped}, its person told {told} — {}",
+        after.get::<_, String>(2)
+    );
+    if state != "failed" || !dropped || told == 0 {
+        return Err("the stranded update kept its filter".into());
+    }
+
     println!("\n== audit and notices");
     for row in sql
         .query(

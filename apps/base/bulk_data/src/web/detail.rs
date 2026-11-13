@@ -509,7 +509,17 @@ impl Detail {
             })?,
         })?);
         parts.push(self.facts(&run, &label, &display)?);
-        if run.state.open() && may_create {
+        if run.erased {
+            parts.push(render(Alert {
+                kind: StatusKind::Info,
+                id: "import-erased",
+                class: "",
+                body: Html::text(
+                    "The uploaded file and each row's key and message were removed because a person's data was erased. The results below stay. To import the file, upload it again.",
+                ),
+            })?);
+        }
+        if run.state.open() && may_create && !run.erased {
             match &info {
                 Some(info) => parts.push(self.mapping_section(&run, info)?),
                 None => parts.push(render(Alert {
@@ -924,7 +934,7 @@ impl Detail {
                 .load(results, |row: &crate::RowResult| row.row.to_string());
         }
         let preview = pass == Pass::Preview;
-        let download = if counts.error > 0 {
+        let download = if counts.error > 0 && !run.erased {
             let href = format!(
                 "/imports/{}/failed-rows{}",
                 run.id,
