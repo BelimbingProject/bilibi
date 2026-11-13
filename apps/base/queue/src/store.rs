@@ -192,6 +192,10 @@ pub(crate) async fn heartbeat(db: &Db, id: i64, token: &str, seconds: i32) -> Re
         Beat::Lost
     })
 }
+/// Records an attempt's result while the claim is still this one: a matching
+/// token on an executing job, even past `lease_expires_at` (a fenced
+/// transaction may outlast the lease, #557). Recovery clears the token, so a
+/// recovered claim is refused.
 pub(crate) async fn finish(
     db: &Db,
     id: i64,
@@ -199,7 +203,7 @@ pub(crate) async fn finish(
     state: &str,
     code: Option<&str>,
 ) -> Result<bool> {
-    Ok(db.get().await?.execute("UPDATE base_queue_jobs SET state=$3,failure_code=$4,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp(),available_at=CASE WHEN $3='retryable' THEN clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(attempt,12))::integer)) ELSE available_at END,completed_at=CASE WHEN $3='completed' THEN clock_timestamp() ELSE NULL END,cancelled_at=CASE WHEN $3='cancelled' THEN clock_timestamp() ELSE NULL END,discarded_at=CASE WHEN $3='discarded' THEN clock_timestamp() ELSE NULL END WHERE id=$1 AND state='executing' AND lease_token=$2 AND lease_expires_at>clock_timestamp()", &[&id,&token,&state,&code]).await? == 1)
+    Ok(db.get().await?.execute("UPDATE base_queue_jobs SET state=$3,failure_code=$4,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp(),available_at=CASE WHEN $3='retryable' THEN clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(attempt,12))::integer)) ELSE available_at END,completed_at=CASE WHEN $3='completed' THEN clock_timestamp() ELSE NULL END,cancelled_at=CASE WHEN $3='cancelled' THEN clock_timestamp() ELSE NULL END,discarded_at=CASE WHEN $3='discarded' THEN clock_timestamp() ELSE NULL END WHERE id=$1 AND state='executing' AND lease_token=$2", &[&id,&token,&state,&code]).await? == 1)
 }
 
 /// Owner attempts at recording one ended job before Queue stops asking.

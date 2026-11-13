@@ -210,6 +210,11 @@ struct BoundEnding {
     principal: &'static str,
     capability: &'static str,
 }
+/// How soon a heartbeat that found the job row locked asks again; shorter
+/// than the least retry backoff (2 s), so a lease recovered right after the
+/// fence commits is seen before anyone can claim the job again.
+const BUSY_BEAT: Duration = Duration::from_millis(500);
+
 /// The loops an executor runs: its slots and one endings loop.
 #[derive(Clone, Copy)]
 enum Loop {
@@ -808,10 +813,13 @@ impl Executor {
                     ).await {
                         Ok(Ok(store::Beat::Renewed)) => renewed_at = asked,
                         // The handler's own fenced transaction holds the row
-                        // (#557): the lease cannot be recovered while it does,
-                        // so wait for the next beat. It is not a renewal, so a
+                        // (#557): the lease cannot be recovered while it does.
+                        // Beat again soon: once the fence commits, the next
+                        // beat renews the lease or finds it recovered, well
+                        // before a recovered job's backoff (2 s at least) lets
+                        // another process claim it. It is not a renewal, so a
                         // failing beat after it still counts from the last one.
-                        Ok(Ok(store::Beat::Busy)) => {}
+                        Ok(Ok(store::Beat::Busy)) => heartbeat.reset_after(beat.min(BUSY_BEAT)),
                         Ok(Ok(store::Beat::Lost)) => return Ok(()),
                         // A busy pool or database fails one renewal, not the
                         // attempt: the handler keeps running while the next

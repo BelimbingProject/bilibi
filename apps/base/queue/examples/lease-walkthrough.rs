@@ -171,14 +171,16 @@ async fn main() -> Result<()> {
     let started = Instant::now();
     let running = tokio::spawn(executor.run(stopped));
     let mut seen = (String::new(), 0);
+    let mut code: Option<String> = None;
     while started.elapsed() < Duration::from_secs(30) {
         let row = client
             .query_one(
-                "SELECT state,attempt FROM base_queue_jobs WHERE id=$1",
+                "SELECT state,attempt,failure_code FROM base_queue_jobs WHERE id=$1",
                 &[&held],
             )
             .await?;
         seen = (row.get(0), row.get(1));
+        code = row.get(2);
         if seen.0 != "available" && seen.0 != "executing" {
             break;
         }
@@ -187,7 +189,7 @@ async fn main() -> Result<()> {
     let _ = stop.send(true);
     let _ = running.await;
     println!(
-        "after {:.2?}: {}, attempt {}",
+        "after {:.2?}: {}, attempt {}, failure {code:?}",
         started.elapsed(),
         seen.0,
         seen.1
