@@ -69,7 +69,7 @@ impl Held {
     fn take(budget: &UploadBudget, bytes: u64, limit: u64) -> Option<Self> {
         budget
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
                 held.checked_add(bytes).filter(|held| *held <= limit)
             })
             .ok()
