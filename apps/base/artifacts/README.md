@@ -153,7 +153,10 @@ extend-only guard, audit action and append-only retention event as `retain`;
 it does not open another transaction. `retention_statuses(client, ids)` returns
 at most 1000 owned, attached artifacts' retain-until, hold and due state without
 reading bytes or paths, after checking the owner's `Retain` grant on each. A
-missing or unauthorized artifact refuses the batch.
+missing or unauthorized artifact refuses the batch. Base checks the live account
+and desk once for the batch and asks `Owner::authorize_all` for the whole set;
+its default asks `authorize` for each, and an owner whose rule is a set query
+overrides it so a batch costs a few statements instead of a few per file.
 
 An owner whose record lists an ordinary Artifact as its file for as long as the record keeps it (Core Document's library revisions) calls `keep_in(tx, id)` in the same mutation, after the attachment row is written. It clears the expiry, so neither `artifacts.retention_days` nor `purge_expired` ever removes the document, and writes an `artifacts.kept` audit action. It needs the owner's `Retain` grant, because the installation setting no longer bounds the document's life, but it is not retention: nothing becomes irreversible, the document has no retain-until, and an explicit `Delete` removes it as before. A records-grade document is left as it is; an already expired one is `NotFound`.
 

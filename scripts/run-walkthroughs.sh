@@ -126,6 +126,7 @@ WALKTHROUGHS=(
   'core|document-scan-held|apps/core/document|scan-held-proof|fixture-seed|BILIBI_DOCUMENT_SCAN_PROOF=disposable BILIBI_DOCUMENT_SCAN_ROOT=@/documents|-'
   'core|document-delete-job|apps/core/document|delete-job-proof|fixture-seed|BILIBI_DOCUMENT_DELETE_PROOF=disposable BILIBI_DOCUMENT_DELETE_ROOT=@/documents|-'
   'core|document-keep-file|apps/core/document|keep-file-proof|fixture-seed|BILIBI_DOCUMENT_KEEP_PROOF=disposable BILIBI_DOCUMENT_KEEP_ROOT=@/documents|-'
+  'core|document-retention-due|apps/core/document|retention-due-proof|fixture-seed|BILIBI_DOCUMENT_RETENTION_PROOF=disposable BILIBI_DOCUMENT_RETENTION_ROOT=@/documents|-'
   'core|geonames|apps/core/geonames|geonames-walkthrough|none|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
   'core|geonames-import|apps/core/geonames|geonames-import-walkthrough|migrate|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
   'core|geonames-postcodes|apps/core/geonames|geonames-postcodes-walkthrough|migrate|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
