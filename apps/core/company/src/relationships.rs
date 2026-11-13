@@ -174,10 +174,73 @@ fn role_from_row(row: &Row) -> Result<RelationshipRole> {
     })
 }
 fn select(filter: &str) -> String {
-    format!("SELECT {COLUMNS},{ROLE_COLUMNS},s.name AS source_name,s.legal_name AS source_legal_name,s.code AS source_code,o.name AS target_name,o.legal_name AS target_legal_name,o.code AS target_code FROM company_relationships r JOIN company_relationship_roles t ON t.tenant_id=r.tenant_id AND t.id=r.role_id JOIN companies s ON s.tenant_id=r.tenant_id AND s.id=r.source_organisation_id LEFT JOIN companies o ON o.tenant_id=r.tenant_id AND o.id=r.target_organisation_id WHERE r.tenant_id=$1 AND {filter}")
+    format!("SELECT {COLUMNS},{ROLE_COLUMNS},s.name AS source_name,s.legal_name AS source_legal_name,s.code AS source_code,o.name AS target_name,o.legal_name AS target_legal_name,o.code AS target_code,count(*) OVER () AS total FROM company_relationships r JOIN company_relationship_roles t ON t.tenant_id=r.tenant_id AND t.id=r.role_id JOIN companies s ON s.tenant_id=r.tenant_id AND s.id=r.source_organisation_id LEFT JOIN companies o ON o.tenant_id=r.tenant_id AND o.id=r.target_organisation_id WHERE r.tenant_id=$1 AND {filter}")
 }
-/// Rows as entries from `party`'s perspective, person targets named through
-/// the Principal Directory (a retired or unnamed person keeps a durable label).
+/// The most links one page holds. Every person on a page is named in one
+/// Principal Directory call, so a page stays far below its ceiling.
+pub const MAX_PAGE_SIZE: i64 = 300;
+/// One page of `filter` (its page size `$4`, its offset `$5`) in the order a
+/// party's page reads: the other company's name, then the label, then id.
+/// `outgoing` is true on the rows whose source is the listed party. A person
+/// target has no name here (Person names it), so links to people follow the
+/// companies, by label and then in the order they were made.
+fn page_of(filter: &str, outgoing: &str) -> String {
+    format!("{} ORDER BY lower(CASE WHEN {outgoing} THEN COALESCE(NULLIF(btrim(o.legal_name),''),o.name) ELSE COALESCE(NULLIF(btrim(s.legal_name),''),s.name) END) NULLS LAST,lower(CASE WHEN {outgoing} THEN t.name ELSE t.inverse_name END),r.id LIMIT $4 OFFSET $5", select(filter))
+}
+/// One page of a party's links and how many links the party has in all.
+#[derive(Clone, Debug)]
+pub struct Links {
+    pub entries: Vec<Entry>,
+    pub total: i64,
+}
+/// Which page of a party's links to read; `page` counts from 1 and the size
+/// is held to `1..=MAX_PAGE_SIZE`.
+#[derive(Clone, Copy, Debug)]
+pub struct Window {
+    pub page: i64,
+    pub page_size: i64,
+}
+impl Window {
+    fn bounds(self) -> (i64, i64) {
+        let size = self.page_size.clamp(1, MAX_PAGE_SIZE);
+        (size, (self.page.max(1) - 1).saturating_mul(size))
+    }
+}
+async fn links(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    directory: &PrincipalDirectory,
+    party: PartyId,
+    sql: &str,
+    history: bool,
+    window: Window,
+) -> Result<Links> {
+    let id = match party {
+        PartyId::Organisation(id) => id.get(),
+        PartyId::Person(id) => id.get(),
+    };
+    let (limit, offset) = window.bounds();
+    let rows = client
+        .query(sql, &[&scope.tenant(), &id, &history, &limit, &offset])
+        .await?;
+    let total = match rows.first() {
+        Some(row) => row.get("total"),
+        // A page past the end still says how many links there are.
+        None if offset > 0 => client
+            .query(sql, &[&scope.tenant(), &id, &history, &1_i64, &0_i64])
+            .await?
+            .first()
+            .map_or(0, |row| row.get("total")),
+        None => 0,
+    };
+    Ok(Links {
+        entries: entries(client, scope, directory, party, &rows).await?,
+        total,
+    })
+}
+/// Rows as entries from `party`'s perspective, in the rows' order, person
+/// targets named through the Principal Directory (a retired or unnamed
+/// person keeps a durable label).
 async fn entries(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
@@ -250,38 +313,73 @@ async fn entries(
             label,
         });
     }
-    entries.sort_by(|a, b| {
-        (
-            a.other_name.to_lowercase(),
-            a.label.to_lowercase(),
-            a.relationship.id,
-        )
-            .cmp(&(
-                b.other_name.to_lowercase(),
-                b.label.to_lowercase(),
-                b.relationship.id,
-            ))
-    });
     Ok(entries)
 }
 
-/// The links on a company's page: outgoing
-/// where it is the source and incoming where it is the target, under
-/// `admin.company.view`. `history` adds ended and unlinked links. A missing
-/// or cross-tenant company is `NotFound`.
+/// One page of the links on a company's page: outgoing where it is the
+/// source and incoming where it is the target, under `admin.company.view`.
+/// `history` adds ended and unlinked links. A missing or cross-tenant
+/// company is `NotFound`.
 pub async fn list_for_company(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
     directory: &PrincipalDirectory,
     company: OrganisationId,
     history: bool,
-) -> Result<Vec<Entry>> {
+    window: Window,
+) -> Result<Links> {
+    authorize_key(client, scope, VIEW).await?;
+    organisation::require_live(client, scope, company.get()).await?;
+    links(
+        client,
+        scope,
+        directory,
+        PartyId::Organisation(company),
+        &page_of("(r.source_organisation_id=$2 OR r.target_organisation_id=$2) AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))", "r.source_organisation_id=$2"),
+        history,
+        window,
+    )
+    .await
+}
+/// One page of the links on a person's page: every company that relates to
+/// the person, under `admin.company.view`. The person's own identity is not
+/// read here; a caller shows the page under Person's own capability.
+pub async fn list_for_person(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    directory: &PrincipalDirectory,
+    person: PersonId,
+    history: bool,
+    window: Window,
+) -> Result<Links> {
+    authorize_key(client, scope, VIEW).await?;
+    links(
+        client,
+        scope,
+        directory,
+        PartyId::Person(person),
+        &page_of("r.target_person_id=$2 AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))", "false"),
+        history,
+        window,
+    )
+    .await
+}
+/// One link on a company's page by id, from that company's perspective,
+/// under `admin.company.view`: what an edit, end or unlink of the page acts
+/// on. A link the company is no party to is `NotFound`.
+pub async fn read_for_company(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    directory: &PrincipalDirectory,
+    company: OrganisationId,
+    id: RelationshipId,
+) -> Result<Entry> {
     authorize_key(client, scope, VIEW).await?;
     organisation::require_live(client, scope, company.get()).await?;
     let rows = client
         .query(
-            &select("(r.source_organisation_id=$2 OR r.target_organisation_id=$2) AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))"),
-            &[&scope.tenant(), &company.get(), &history],
+            &select("r.id=$2 AND (r.source_organisation_id=$3 OR r.target_organisation_id=$3)"),
+            &[&scope.tenant(), &id.get(), &company.get()],
         )
         .await?;
     entries(
@@ -291,26 +389,9 @@ pub async fn list_for_company(
         PartyId::Organisation(company),
         &rows,
     )
-    .await
-}
-/// The links on a person's page: every company that relates to the person,
-/// under `admin.company.view`. The person's own identity is not read here;
-/// a caller shows the page under Person's own capability.
-pub async fn list_for_person(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-    directory: &PrincipalDirectory,
-    person: PersonId,
-    history: bool,
-) -> Result<Vec<Entry>> {
-    authorize_key(client, scope, VIEW).await?;
-    let rows = client
-        .query(
-            &select("r.target_person_id=$2 AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))"),
-            &[&scope.tenant(), &person.get(), &history],
-        )
-        .await?;
-    entries(client, scope, directory, PartyId::Person(person), &rows).await
+    .await?
+    .pop()
+    .ok_or(Error::NotFound)
 }
 /// One link under `admin.company.view`, from its source's perspective.
 pub async fn read(

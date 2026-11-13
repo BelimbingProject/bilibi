@@ -117,6 +117,15 @@ The New document, New revision and Quick add dialogs take the file through one r
 
 Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
+### Files never attached
+
+A file stored but never attached (a dialog cancelled, a file replaced, a create refused, a dropped connection, a copy refused) is removed a day after it was stored.
+
+- Storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
+- The job runs as the system principal `document-file-cleaner`, which holds only `core.document.discard.settle` (a standing grant). A file attached by then is left alone.
+- Otherwise the job moves the ledger row to `discarding`, which no write can attach ("is not a file you stored"), deletes its Artifact, then removes the row. Each step is audited as `System · document-file-cleaner`; a failed step retries with Queue's backoff.
+- A held upload's staged bytes stay Media's: its draft cleanup removes them.
+
 ## Tenant retention and due documents
 
 Settings › Documents offers **Keep new document files for (days)**
@@ -143,6 +152,8 @@ retention and hold state to its manager. Due means the document may be considere
 for an explicit reviewed deletion; nothing is deleted automatically. Base still
 rechecks every revision under lock in delete and merge, so a new hold refuses
 those actions even after the list was read.
+
+The view costs the same few statements however many files it checks: Base asks the owner for `Retain` on each batch of up to 1000 files at once (`Owner::authorize_all`), and Documents answers a manager's batch with one query (each file attached to an undeleted document the reader may manage now). The `document-retention-due` walkthrough counts them.
 
 ## Privacy requests
 

@@ -116,24 +116,24 @@ impl SubjectOwner for DocumentFiles {
     }
 }
 
-const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
+pub(crate) const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
 
 /// One ledger row.
-struct Ledger {
-    id: i64,
-    company_id: i64,
+pub(crate) struct Ledger {
+    pub(crate) id: i64,
+    pub(crate) company_id: i64,
     subject: String,
-    artifact_id: Option<String>,
+    pub(crate) artifact_id: Option<String>,
     media_public_id: Option<String>,
     file_name: String,
     content_type: String,
     byte_size: i64,
     sha256: String,
     scan_status: String,
-    state: String,
+    pub(crate) state: String,
     stored_by: i64,
 }
-fn from_row(row: &Row) -> Ledger {
+pub(crate) fn from_row(row: &Row) -> Ledger {
     Ledger {
         id: row.get("id"),
         company_id: row.get("company_id"),
@@ -150,7 +150,7 @@ fn from_row(row: &Row) -> Ledger {
     }
 }
 /// The values audit keeps for a ledger row: no content, no storage path.
-fn audit_values(row: &Ledger) -> Value {
+pub(crate) fn audit_values(row: &Ledger) -> Value {
     json!({
         "artifact_id": row.artifact_id,
         "media_public_id": row.media_public_id,
@@ -199,7 +199,10 @@ impl Owner for DocumentFiles {
                         .await?
                         .ok_or(Error::NotFound)?;
                 }
-                Operation::Delete if scope.principal() == Some(crate::deletion::PRINCIPAL) => {
+                Operation::Delete
+                    if scope.principal() == Some(crate::discard::PRINCIPAL)
+                        || scope.principal() == Some(crate::deletion::PRINCIPAL) =>
+                {
                     parties
                         .organisation_name(client, scope, company)
                         .await?
@@ -288,6 +291,12 @@ impl Owner for DocumentFiles {
                         }
                     }
                 }
+                // The cleaner deletes only a file its job already took out of
+                // reach of every write (README, Files and scanning).
+                Operation::Delete if scope.principal() == Some(crate::discard::PRINCIPAL) => {
+                    authorize_proof(client, scope, crate::contributions::DISCARD_SETTLE).await?;
+                    row.state == "discarding"
+                }
                 Operation::Delete => {
                     let deleter = scope.principal() == Some(crate::deletion::PRINCIPAL);
                     authorize_proof(
@@ -347,6 +356,59 @@ impl Owner for DocumentFiles {
                 Operation::Purge => false,
             };
             if allowed {
+                Ok(())
+            } else {
+                Err(Error::Forbidden)
+            }
+        })
+    }
+    /// A manager's `Retain` on a set (the Retention due list reads every
+    /// managed file) is one query: each file attached to an undeleted
+    /// document this person may manage now. Anything else is asked one by one.
+    fn authorize_all<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        company: OrganisationId,
+        operation: Operation,
+        references: &'a [Reference],
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            if operation != Operation::Retain || scope.principal().is_some() {
+                for reference in references {
+                    Owner::authorize(self, client, scope, company, operation, Some(reference))
+                        .await?;
+                }
+                return Ok(());
+            }
+            let parties = PARTIES.get().ok_or(Error::Forbidden)?;
+            parties.organisation(client, scope, company).await?;
+            authorize_proof(client, scope, MANAGE).await?;
+            store::reader(client, scope).await?;
+            let mut subjects = references
+                .iter()
+                .map(|reference| {
+                    (reference.kind == FILE_KIND)
+                        .then(|| uuid::Uuid::parse_str(&reference.subject).ok())
+                        .flatten()
+                        .map(|subject| subject.to_string())
+                        .ok_or(Error::NotFound)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            subjects.sort_unstable();
+            subjects.dedup();
+            let managed: i64 = client
+                .query_opt(
+                    "SELECT count(*) FROM core_document_files f WHERE f.tenant_id=$1 AND f.company_id=$2 AND f.subject=ANY($3::text[]::uuid[]) AND f.state='attached'
+                       AND EXISTS (SELECT 1 FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id
+                         JOIN core_document_access a ON a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$4 AND a.can_manage AND (a.expires_at IS NULL OR a.expires_at > now())
+                         WHERE r.tenant_id=f.tenant_id AND r.artifact_id=f.artifact_id AND d.deleting_at IS NULL)",
+                    &[&scope.tenant(), &company.get(), &subjects, &scope.user()],
+                )
+                .await?
+                .ok_or(Error::Internal)?
+                .get(0);
+            if usize::try_from(managed).ok() == Some(subjects.len()) {
                 Ok(())
             } else {
                 Err(Error::Forbidden)
@@ -431,6 +493,7 @@ pub(crate) async fn upload_limit(
 
 /// Checks the upload, commits its reserved ledger row, stores the bytes
 /// through `base/artifacts` and marks the row stored.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
     client: &mut Client,
     scope: &Scope,
@@ -438,6 +501,7 @@ pub(crate) async fn store(
     artifacts: &Artifacts,
     media: &Media,
     settings: &Settings,
+    queue: &bilibi_queue::Queue,
     upload: Upload<'_>,
 ) -> WriteResult<StoredFile> {
     authorize_proof(&*client, scope, MANAGE).await?;
@@ -507,6 +571,7 @@ pub(crate) async fn store(
             })
         })
         .await?;
+    crate::discard::schedule(queue, &mut tx, tenant, reserved.id).await?;
     tx.commit().await?;
 
     let staged = media

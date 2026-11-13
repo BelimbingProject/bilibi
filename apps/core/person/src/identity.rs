@@ -187,6 +187,8 @@ pub async fn search(
 }
 
 /// Exact normalized name/email/phone candidates, never inferred identity.
+/// A phone also matches by its canonical international key (`+60 12-345 6789`
+/// and `0060123456789`); a national or ambiguous number matches as typed.
 /// A supplied restricted criterion is refused rather than silently searching it.
 /// Retired records are returned too so their identity/history is not recreated.
 pub async fn duplicates(
@@ -221,7 +223,7 @@ pub async fn duplicates(
         return Err(Error::Forbidden);
     }
     let except = query.except_id.map(PersonId::get);
-    let rows = client.query(&format!("SELECT {COLUMNS} FROM persons WHERE tenant_id=$1 AND id IS DISTINCT FROM $2 AND (($3::text IS NOT NULL AND lower(name)=$3) OR ($4::text IS NOT NULL AND lower(email)=$4) OR ($5::text IS NOT NULL AND phone=$5)) ORDER BY lower(name),id LIMIT $6"), &[&scope.tenant(), &except, &name, &email, &phone, &query.limit]).await?;
+    let rows = client.query(&format!("SELECT {COLUMNS} FROM persons WHERE tenant_id=$1 AND id IS DISTINCT FROM $2 AND (($3::text IS NOT NULL AND lower(name)=$3) OR ($4::text IS NOT NULL AND lower(email)=$4) OR ($5::text IS NOT NULL AND (phone=$5 OR core_person_phone_key(phone)=core_person_phone_key($5)))) ORDER BY lower(name),id LIMIT $6"), &[&scope.tenant(), &except, &name, &email, &phone, &query.limit]).await?;
     rows.iter()
         .map(|r| Person::from_row(r).map(|p| p.redact(&masked)))
         .collect()

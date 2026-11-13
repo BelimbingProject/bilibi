@@ -314,18 +314,10 @@ impl Media {
         let (finding, name, version) = match &scanner {
             None => (Finding::NoAnswer("scanner_unavailable"), None, None),
             Some(scanner) => {
-                let finding = match storage::read(&roots, &row.disk, &row.key).await {
+                let finding = match self.scanned_bytes(&roots, &row, scanner.max_bytes()).await {
                     Err(_) => Finding::NoAnswer("file_unavailable"),
-                    // The length read, never the size an owner declared
-                    // when registering the bytes.
-                    Ok(bytes)
-                        if scanner
-                            .max_bytes()
-                            .is_some_and(|max| bytes.len() as u64 > max) =>
-                    {
-                        Finding::TooLarge
-                    }
-                    Ok(bytes) => {
+                    Ok(None) => Finding::TooLarge,
+                    Ok(Some(bytes)) => {
                         let facts = ScanFacts {
                             mime_type: row.asset.mime_type.as_deref(),
                             size: bytes.len() as u64,
@@ -373,6 +365,29 @@ impl Media {
             version,
         };
         self.record(execution, id, generation, decision).await
+    }
+
+    /// The bytes to scan, read whole once a load slot is free (`streams.rs`),
+    /// or `None` when the stored file is larger than the scanner accepts:
+    /// measured on disk, never the size an owner declared, and never read.
+    async fn scanned_bytes(
+        &self,
+        roots: &Value,
+        row: &Stored,
+        max: Option<u64>,
+    ) -> Result<Option<Vec<u8>>> {
+        let _slot = self
+            .loads
+            .acquire()
+            .await
+            .map_err(|_| Error::StorageUnavailable)?;
+        let opened = storage::open(roots, &row.disk, &row.key)
+            .await?
+            .ok_or(Error::StorageUnavailable)?;
+        if max.is_some_and(|max| opened.size() > max) {
+            return Ok(None);
+        }
+        Ok(Some(opened.read_all().await?))
     }
 
     /// Write one attempt's decision under the job's fenced lease, while the

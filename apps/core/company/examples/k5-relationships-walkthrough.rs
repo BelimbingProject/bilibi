@@ -42,6 +42,11 @@ impl PlanAuthority for Browser<'_> {
         })
     }
 }
+/// More links than this walkthrough makes, so one page holds them all.
+const FIRST_PAGE: bilibi_company::RelationshipWindow = bilibi_company::RelationshipWindow {
+    page: 1,
+    page_size: 100,
+};
 fn show(label: &str, value: impl std::fmt::Debug) {
     println!("{label}: {value:?}");
 }
@@ -521,39 +526,42 @@ async fn main() -> Result<(), Error> {
         "source company page",
         summary(
             &companies
-                .company_relationships(&manager, source, false)
-                .await?,
+                .company_relationships(&manager, source, false, FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "supplier page (incoming, inverse labels)",
         summary(
             &companies
-                .company_relationships(&manager, supplier, false)
-                .await?,
+                .company_relationships(&manager, supplier, false, FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "person page",
         summary(
             &companies
-                .person_relationships(&manager, contact.id, false)
-                .await?,
+                .person_relationships(&manager, contact.id, false, FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "viewer reads the same page",
         companies
-            .company_relationships(&viewer, source, false)
+            .company_relationships(&viewer, source, false, FIRST_PAGE)
             .await
-            .map(|entries| entries.len()),
+            .map(|links| links.entries.len()),
     );
     show(
         "other tenant cannot read the company",
         companies
-            .company_relationships(&other, source, false)
+            .company_relationships(&other, source, false, FIRST_PAGE)
             .await
-            .map(|entries| entries.len()),
+            .map(|links| links.entries.len()),
     );
 
     println!("== retirement waits for an in-flight assignment, then refuses new ones");
@@ -625,8 +633,9 @@ async fn main() -> Result<(), Error> {
         "existing link keeps the retired role",
         summary(
             &companies
-                .company_relationships(&manager, source, false)
-                .await?,
+                .company_relationships(&manager, source, false, FIRST_PAGE)
+                .await?
+                .entries,
         )
         .into_iter()
         .filter(|line| line.contains("wt_reseller"))
@@ -679,8 +688,9 @@ async fn main() -> Result<(), Error> {
         "ended link still on the current page",
         summary(
             &companies
-                .company_relationships(&manager, source, false)
-                .await?,
+                .company_relationships(&manager, source, false, FIRST_PAGE)
+                .await?
+                .entries,
         )
         .iter()
         .any(|line| line.starts_with(&format!("#{} ", ended.id))),
@@ -702,16 +712,18 @@ async fn main() -> Result<(), Error> {
         "history view",
         summary(
             &companies
-                .company_relationships(&manager, source, true)
-                .await?,
+                .company_relationships(&manager, source, true, FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(
         "person history",
         summary(
             &companies
-                .person_relationships(&manager, contact.id, true)
-                .await?,
+                .person_relationships(&manager, contact.id, true, FIRST_PAGE)
+                .await?
+                .entries,
         ),
     );
     show(

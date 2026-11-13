@@ -9,11 +9,11 @@ use crate::{
     contributions::{CREATE, LIST, UPDATE, VIEW},
     reference_types::Outcome,
     relationship_roles::{self, RoleUpdate},
-    relationships::{self, RelationshipUpdate},
+    relationships::{self, RelationshipUpdate, Window},
     FieldError, WriteError,
 };
 use bilibi_agent_api::{
-    json::{Data, Output},
+    json::{Data, Output, Page},
     Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
     ReadHandler, WriteHandler, DEFINITIONS,
 };
@@ -192,8 +192,11 @@ impl ReadHandler for Read {
                     .to_json(),
                 Self::Links => {
                     let history = input["include_history"].as_bool().unwrap_or(false);
-                    let entries = match (input["company_id"].as_i64(), input["person_id"].as_i64())
-                    {
+                    let window = Window {
+                        page: input["page"].as_i64().unwrap_or(1).max(1),
+                        page_size: input["page_size"].as_i64().unwrap_or(25).clamp(1, 100),
+                    };
+                    let links = match (input["company_id"].as_i64(), input["person_id"].as_i64()) {
                         (Some(company), None) => {
                             let company =
                                 OrganisationId::new(company).map_err(|_| Error::Invalid)?;
@@ -203,6 +206,7 @@ impl ReadHandler for Read {
                                 &bound.directory,
                                 company,
                                 history,
+                                window,
                             )
                             .await
                         }
@@ -214,13 +218,21 @@ impl ReadHandler for Read {
                                 &bound.directory,
                                 person,
                                 history,
+                                window,
                             )
                             .await
                         }
                         _ => return Err(Error::Invalid.into()),
                     }
                     .map_err(not_found)?;
-                    Value::Array(entries.iter().map(|entry| entry.to_json()).collect())
+                    return Ok(Output::Page(Page {
+                        entries: record(Value::Array(
+                            links.entries.iter().map(|entry| entry.to_json()).collect(),
+                        )),
+                        page: window.page.unsigned_abs(),
+                        page_size: window.page_size.unsigned_abs(),
+                        total: links.total.unsigned_abs(),
+                    }));
                 }
                 Self::Link => {
                     relationships::read(&**client, scope, &bound.directory, relationship_id(input)?)
@@ -518,7 +530,9 @@ fn retire_role_schema() -> Value {
 fn links_schema() -> Value {
     json!({"type":"object","properties":{
         "company_id":id_schema(),"person_id":id_schema(),
-        "include_history":{"type":"boolean","description":"Also ended and unlinked links."}
+        "include_history":{"type":"boolean","description":"Also ended and unlinked links."},
+        "page":{"type":"integer","minimum":1,"description":"Page to read, from 1."},
+        "page_size":{"type":"integer","minimum":1,"maximum":100,"description":"Links per page, 25 by default."}
     }})
 }
 fn link_schema() -> Value {
@@ -551,7 +565,7 @@ fn link_output() -> Value {
     json!({"type":"object","description":"A directed link: id, source_organisation_id, target {kind,id}, role_id, dates, unlinked_at, current, version, plus direction, other, other_name, role_* and label from the listed party's perspective."})
 }
 fn links_output() -> Value {
-    json!({"type":"array","description":"Links by other party name then label."})
+    json!({"type":"array","description":"One page of links (25 by default): other companies by name, then links to persons, each by label."})
 }
 
 inventory::submit! { Contribution::new(DEFINITIONS, "core/company.relationships.agent", Provenance { module: "core/company", source: file!(), line: line!() }, &Definitions {
@@ -561,7 +575,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/company.relationships.
         Operation { key: "core.company.relationship_role.create", title: "Create a relationship role", summary: "Add a role to your tenant's catalog with a stable code, a name and its inverse. Confers no access.", keywords: &["role", "catalog", "add"], capability: CREATE, input: create_role_schema, output: role_output, handler: Handler::SafeWrite(&Write::CreateRole), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship_role.update", title: "Rename a relationship role", summary: "Change a role's name and inverse name; its id, code and every link stay.", keywords: &["role", "rename"], capability: UPDATE, input: update_role_schema, output: role_output, handler: Handler::SafeWrite(&Write::UpdateRole), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship_role.retire", title: "Retire a relationship role", summary: "Stop new assignments of a role; existing links and history are kept.", keywords: &["role", "retire", "archive"], capability: UPDATE, input: retire_role_schema, output: role_output, handler: Handler::SafeWrite(&Write::RetireRole), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.company.relationship.list", title: "List relationships", summary: "The links on a company's page (outgoing and incoming) or on a person's page, current by default.", keywords: &["vendor", "customer", "partner", "supplier", "contact", "links"], capability: VIEW, input: links_schema, output: links_output, handler: Handler::Read(&Read::Links), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.company.relationship.list", title: "List relationships", summary: "One page of the links on a company's page (outgoing and incoming) or on a person's page, current by default; meta.page.total counts them all.", keywords: &["vendor", "customer", "partner", "supplier", "contact", "links"], capability: VIEW, input: links_schema, output: links_output, handler: Handler::Read(&Read::Links), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship.get", title: "Read a relationship", summary: "One link by id, from its source company's perspective.", keywords: &["link", "relationship"], capability: VIEW, input: link_schema, output: link_output, handler: Handler::Read(&Read::Link), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship.assign", title: "Assign a relationship role", summary: "Link a company to an organisation or person under a role, with optional inclusive dates. Roles may overlap; an exact duplicate is refused.", keywords: &["vendor", "customer", "prospect", "partner", "link", "add"], capability: UPDATE, input: assign_schema, output: link_output, handler: Handler::SafeWrite(&Write::Assign), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship.update", title: "Change relationship dates", summary: "Replace a link's effective dates using its current version.", keywords: &["link", "dates", "edit"], capability: UPDATE, input: update_schema, output: link_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },
@@ -569,5 +583,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/company.relationships.
         Operation { key: "core.company.relationship.unlink", title: "Unlink a relationship", summary: "Retract a link while keeping it as dated history; nothing is deleted.", keywords: &["link", "remove", "unlink"], capability: UPDATE, input: unlink_schema, output: link_output, handler: Handler::SafeWrite(&Write::Unlink), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "core.company.relationship", title: "Business relationships", summary: "How a company relates to other organisations and to people: roles, direction, dates and history.", keywords: &["vendor", "customer", "prospect", "partner", "supplier", "contact"], capability: VIEW,
-        body: "A relationship links a source company of your tenant to a target: another company of the tenant or a person. It carries a role from the tenant's catalog (core.company.relationship_role.list): vendor means the target supplies the source, customer means the target buys from the source, prospect and partner likewise read from the source's side; the role's inverse_name is what the source is to the target. A role is a business fact only: it grants no login, capability or access.\n\nFind the parties first (core.company.list, core.person.list) and reuse them; record a vendor's contact person with core.affiliation.contact.create, which grants nothing either. Assign with core.company.relationship.assign through a dry run and explicit review before the write, naming source_organisation_id, target_kind, target_id, role_id and optional inclusive effective_from/effective_to. A company may hold several roles toward the same target at once, and one role may have separate dated intervals; only the same role with the same start is refused. A company cannot relate to itself, an archived company cannot be a source or an organisation target, and a retired person or role cannot be assigned.\n\nChange dates with core.company.relationship.update, close a link with core.company.relationship.end, or retract it with core.company.relationship.unlink: history is always kept, and core.company.relationship.list with include_history shows it. Administrators rename roles without changing their id or code and retire roles without touching existing links; create a new role rather than reusing a retired code for a different meaning." }],
+        body: "A relationship links a source company of your tenant to a target: another company of the tenant or a person. It carries a role from the tenant's catalog (core.company.relationship_role.list): vendor means the target supplies the source, customer means the target buys from the source, prospect and partner likewise read from the source's side; the role's inverse_name is what the source is to the target. A role is a business fact only: it grants no login, capability or access.\n\nFind the parties first (core.company.list, core.person.list) and reuse them; record a vendor's contact person with core.affiliation.contact.create, which grants nothing either. Assign with core.company.relationship.assign through a dry run and explicit review before the write, naming source_organisation_id, target_kind, target_id, role_id and optional inclusive effective_from/effective_to. A company may hold several roles toward the same target at once, and one role may have separate dated intervals; only the same role with the same start is refused. A company cannot relate to itself, an archived company cannot be a source or an organisation target, and a retired person or role cannot be assigned.\n\nChange dates with core.company.relationship.update, close a link with core.company.relationship.end, or retract it with core.company.relationship.unlink: history is always kept, and core.company.relationship.list with include_history shows it. That list answers one page (25 links by default, up to 100 with page_size); read the next page while meta.page.total says more remain. Administrators rename roles without changing their id or code and retire roles without touching existing links; create a new role rather than reusing a retired code for a different meaning." }],
 }) }

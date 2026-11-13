@@ -1888,8 +1888,274 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    withheld_and_held(&privacy, &media, &boundary, &mut client, &admin, one, &root).await?;
+
     stop.send(true)?;
     let _ = workers.await;
+    Ok(())
+}
+
+/// Media keeps a file that has not cleared its malware check, or whose
+/// bytes are gone, out of an export without failing it (#567), and a legal
+/// hold keeps drafts and assets from discard, cleanup and deletion (#599).
+async fn withheld_and_held(
+    privacy: &Privacy,
+    media: &Media,
+    boundary: &MutationBoundary,
+    client: &mut Client,
+    admin: &Scope,
+    one: OrganisationId,
+    root: &str,
+) -> Result<()> {
+    println!("== an export lists a file that is not cleared, or gone, instead of failing (#567)");
+    let max: i64 = client
+        .query_one(
+            "INSERT INTO persons(tenant_id,code,name,kind,email) VALUES(1,'max_withheld','Max Withheld','human','max-withheld@example.test') RETURNING id",
+            &[],
+        )
+        .await?
+        .get(0);
+    let max_id = max.to_string();
+    let subject = AttachmentSubject {
+        kind: person_files::ATTACHMENT_SUBJECT,
+        id: &max_id,
+    };
+    let mut keys = Vec::new();
+    for name in [
+        "max-clean.txt",
+        "max-pending.txt",
+        "max-purged.txt",
+        "max-missing.txt",
+    ] {
+        let file = media
+            .upload_attachment(
+                client,
+                admin,
+                subject,
+                Upload {
+                    filename: name.into(),
+                    bytes: format!("Max file {name}\n").into_bytes(),
+                },
+                Rules::default(),
+            )
+            .await?;
+        let mut tx = boundary
+            .begin(client, admin.mutation_context("privacy.walkthrough.attach"))
+            .await?;
+        media
+            .submit_attachments(&mut tx, admin, subject, &[file.public_id.as_str()])
+            .await?;
+        tx.commit().await?;
+        let row = client
+            .query_one(
+                "SELECT m.id,m.storage_key FROM base_media_attachments a JOIN base_media_assets m ON m.id=a.media_asset_id WHERE a.public_id=$1",
+                &[&file.public_id],
+            )
+            .await?;
+        keys.push((row.get::<_, i64>(0), row.get::<_, String>(1)));
+    }
+    // Stand in for a scan still running, a scanner verdict a manager then
+    // purged, and bytes lost from the disk.
+    client
+        .execute(
+            "UPDATE base_media_assets SET scan_state='pending' WHERE id=$1",
+            &[&keys[1].0],
+        )
+        .await?;
+    client
+        .execute(
+            "UPDATE base_media_assets SET scan_state='infected',purge_requested_at=now(),bytes_purged_at=now() WHERE id=$1",
+            &[&keys[2].0],
+        )
+        .await?;
+    for (_, key) in &keys[2..] {
+        std::fs::remove_file(std::path::Path::new(root).join(key))?;
+    }
+    let request = privacy
+        .receive(
+            client,
+            admin,
+            NewRequest {
+                kind: RequestKind::Access,
+                person: PersonId::new(max)?,
+                identifiers: vec![],
+                company: one,
+            },
+        )
+        .await?;
+    let request = privacy
+        .verify(
+            client,
+            admin,
+            request.id,
+            request.version,
+            "Seen in person",
+            &[],
+        )
+        .await?;
+    let request = privacy
+        .approve(client, admin, request.id, request.version)
+        .await?;
+    let request = settle(privacy, client, admin, request.id, 60).await?;
+    summary(&request);
+    let (_, bytes, _) = privacy
+        .request_document(client, admin, request.id, None)
+        .await?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let bundle: Value = serde_json::from_reader(zip.by_name("export.json")?)?;
+    let files: Vec<&Value> = bundle["stores"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|store| store["files"].as_array().into_iter().flatten())
+        .filter(|file| {
+            file["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("max-"))
+        })
+        .collect();
+    for file in &files {
+        println!("  export file {file}");
+    }
+    let entry = |name: &str| files.iter().find(|file| file["name"] == name).copied();
+    let clean = entry("max-clean.txt").and_then(|file| file["path"].as_str());
+    let clean_bytes = match clean {
+        Some(path) => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut zip.by_name(path)?, &mut text)?;
+            text
+        }
+        None => String::new(),
+    };
+    let reason = |name: &str| entry(name).and_then(|file| file["withheld"].as_str());
+    if request.status != "completed"
+        || clean_bytes != "Max file max-clean.txt\n"
+        || reason("max-pending.txt") != Some("not_cleared")
+        || reason("max-purged.txt") != Some("not_cleared")
+        || reason("max-missing.txt") != Some("missing")
+        || files
+            .iter()
+            .filter(|file| file.get("path").is_some())
+            .count()
+            != 1
+    {
+        return Err(format!(
+            "the export does not withhold Max's files as expected (status {})",
+            request.status
+        )
+        .into());
+    }
+    println!("export completed: the clean file is in the ZIP; pending and purged are not_cleared, the lost one missing");
+
+    println!(
+        "== a legal hold keeps a draft from discard and cleanup, and an asset from deletion (#599)"
+    );
+    let mut drafts = Vec::new();
+    for name in ["max-held-draft.txt", "max-loose-draft.txt"] {
+        drafts.push(
+            media
+                .upload_attachment(
+                    client,
+                    admin,
+                    subject,
+                    Upload {
+                        filename: name.into(),
+                        bytes: format!("Max draft {name}\n").into_bytes(),
+                    },
+                    Rules::default(),
+                )
+                .await?,
+        );
+    }
+    let held_row: i64 = client
+        .query_one(
+            "SELECT id FROM base_media_attachments WHERE public_id=$1",
+            &[&drafts[0].public_id],
+        )
+        .await?
+        .get(0);
+    let draft_hold = privacy
+        .place_hold(
+            client,
+            admin,
+            HoldTarget::Record {
+                kind: bilibi_base::media::ATTACHMENT_KIND.into(),
+                id: held_row,
+            },
+            "Draft under review",
+        )
+        .await?;
+    let discarded = media
+        .discard_draft(client, admin, &drafts[0].public_id)
+        .await;
+    println!("discard the held draft: {discarded:?}");
+    if !matches!(discarded, Err(bilibi_base::media::Error::Held)) {
+        return Err("a held draft was discarded".into());
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let cleaned = media
+        .cleanup_drafts(client, 1, Duration::from_secs(1))
+        .await?;
+    let mut left = Vec::new();
+    for draft in &drafts {
+        let found: i64 = client
+            .query_one(
+                "SELECT count(*) FROM base_media_attachments WHERE public_id=$1",
+                &[&draft.public_id],
+            )
+            .await?
+            .get(0);
+        left.push(found);
+    }
+    let (held_left, loose_left) = (left[0], left[1]);
+    println!("cleanup removed {} draft(s): the held one stays ({held_left}), the loose one goes ({loose_left})", cleaned.removed);
+    if held_left != 1 || loose_left != 0 {
+        return Err("cleanup did not respect the draft's hold".into());
+    }
+    privacy
+        .release_hold(client, admin, draft_hold.id, "Review done")
+        .await?;
+    let discarded = media
+        .discard_draft(client, admin, &drafts[0].public_id)
+        .await;
+    println!("after release, discard: {discarded:?}");
+    discarded?;
+
+    let asset = media
+        .put_upload(
+            client,
+            admin,
+            "local",
+            "walkthrough",
+            Upload {
+                filename: "max-public.txt".into(),
+                bytes: b"Max public note\n".to_vec(),
+            },
+            None,
+        )
+        .await?;
+    let asset_hold = privacy
+        .place_hold(
+            client,
+            admin,
+            HoldTarget::Record {
+                kind: bilibi_base::media::ASSET_KIND.into(),
+                id: asset.id,
+            },
+            "Asset under review",
+        )
+        .await?;
+    let deleted = media.delete_asset(client, admin, asset.id).await;
+    println!("delete the held asset: {deleted:?}");
+    if !matches!(deleted, Err(bilibi_base::media::Error::Held)) {
+        return Err("a held asset was deleted".into());
+    }
+    privacy
+        .release_hold(client, admin, asset_hold.id, "Review done")
+        .await?;
+    let deleted = media.delete_asset(client, admin, asset.id).await;
+    println!("after release, delete: {deleted:?}");
+    deleted?;
     Ok(())
 }
 /// Downloads a certificate and prints the readable lines of its PDF text.
