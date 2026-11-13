@@ -179,10 +179,33 @@ pub struct FileRef {
     pub name: String,
     pub content_type: String,
 }
-/// One file's bytes, read through its owner.
-pub struct File {
-    pub content_type: String,
-    pub bytes: Vec<u8>,
+/// One file a store's export listed, read through its owner: its bytes, or
+/// why its owner keeps them back. A withheld file is listed in the bundle
+/// with its reason and no bytes, so it never fails the export.
+pub enum File {
+    Read {
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+    Withheld(Withheld),
+}
+/// Why a listed file's bytes are not in the bundle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Withheld {
+    /// It has not cleared its malware check (still being checked,
+    /// quarantined, failed, purged, or unscanned while scanning is required):
+    /// no file leaves the system before it is readable.
+    NotCleared,
+    /// Its bytes are no longer stored.
+    Missing,
+}
+impl Withheld {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotCleared => "not_cleared",
+            Self::Missing => "missing",
+        }
+    }
 }
 
 /// What an erasure did.
@@ -322,7 +345,8 @@ pub trait Handler: Send + Sync {
         subject: &'a Subject,
         grant: &'a Disclosure,
     ) -> HandlerFuture<'a, Exported>;
-    /// One file the store's export listed, read through its owner.
+    /// One file the store's export listed, read through its owner, or
+    /// [`File::Withheld`] when its owner keeps the bytes back.
     fn file<'a>(
         &'a self,
         _client: &'a mut Client,

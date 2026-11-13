@@ -800,6 +800,76 @@ async fn main() -> DbResult<()> {
         .batch_execute("SET session_replication_role = DEFAULT")
         .await?;
 
+    println!("== an uploader keeps at most 200 unsubmitted drafts (#570)");
+    let unretained = "SELECT count(*) FROM base_media_attachments WHERE tenant_id=1 AND uploaded_by_id=2 AND state='draft' AND retained_at IS NULL";
+    let mut first_capped = None;
+    while count(&client, unretained).await? < 200 {
+        let draft = media
+            .upload_attachment(
+                &mut client,
+                &peer,
+                ticket("3"),
+                upload("bulk.txt", b"One of many drafts.\n"),
+                Rules::default(),
+            )
+            .await
+            .map_err(internal)?;
+        first_capped.get_or_insert(draft.public_id);
+    }
+    let over = media
+        .upload_attachment(
+            &mut client,
+            &peer,
+            ticket("3"),
+            upload("one-too-many.txt", b"Over the cap.\n"),
+            Rules::default(),
+        )
+        .await;
+    println!(
+        "draft 201 of one uploader: {}",
+        over.as_ref()
+            .map_or_else(|e| e.to_string(), |_| "stored".into())
+    );
+    if !matches!(over, Err(bilibi_media::Error::TooManyDrafts)) {
+        return Err(bilibi_database::Error::Invalid);
+    }
+    let first = first_capped.ok_or(bilibi_database::Error::Internal)?;
+    // Demonstration only, as below: one of them is a day and a half old.
+    client
+        .batch_execute("SET session_replication_role = replica")
+        .await?;
+    client.execute("UPDATE base_media_attachments SET created_at=now()-interval '36 hours' WHERE public_id=$1", &[&first]).await?;
+    client
+        .batch_execute("SET session_replication_role = DEFAULT")
+        .await?;
+    let room = media
+        .upload_attachment(
+            &mut client,
+            &peer,
+            ticket("3"),
+            upload(
+                "room-made.txt",
+                b"Room made by removing an abandoned draft.\n",
+            ),
+            Rules::default(),
+        )
+        .await;
+    let gone = count(
+        &client,
+        &format!("SELECT count(*) FROM base_media_attachments WHERE public_id='{first}'"),
+    )
+    .await?
+        == 0;
+    println!(
+        "with one draft older than 24 hours, the next upload {} and the abandoned draft is removed: {gone}",
+        if room.is_ok() { "is stored" } else { "is refused" }
+    );
+    if room.is_err() || !gone || count(&client, unretained).await? != 200 {
+        return Err(bilibi_database::Error::Invalid);
+    }
+    let others = count(&client, "SELECT count(*) FROM base_media_attachments WHERE tenant_id=1 AND uploaded_by_id=1 AND state='draft'").await?;
+    println!("Ada's own drafts are not counted or removed: {others} remain");
+
     println!("== audit evidence");
     for row in client.query("SELECT event,auditable_type,actor_type,count(*) FROM base_audit_mutations WHERE auditable_type='base/media/attachment' GROUP BY 1,2,3 ORDER BY 1", &[]).await? {
         println!("mutations: {} {} by {} x{}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, i64>(3));

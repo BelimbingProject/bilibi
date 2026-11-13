@@ -646,6 +646,55 @@ async fn main() -> DbResult<()> {
         );
     }
 
+    println!("== the stream route sends a file as it reads it, 64 at once (#569)");
+    {
+        use tokio::io::AsyncReadExt;
+        let whole = media
+            .read_signed_asset(&**client, png.id, &token)
+            .await
+            .map_err(|_| bilibi_database::Error::Internal)?
+            .bytes;
+        let mut open = Vec::new();
+        let busy = loop {
+            if open.len() > 64 {
+                break None;
+            }
+            match media.open_signed_asset(&**client, png.id, &token).await {
+                Ok(stream) => open.push(stream),
+                Err(error) => break Some(error),
+            }
+        };
+        println!("streams open at once: {}; one more: {busy:?}", open.len());
+        if open.len() != 64 || !matches!(busy, Some(bilibi_media::Error::Busy)) {
+            return Err(bilibi_database::Error::Invalid);
+        }
+        let first = open.pop().ok_or(bilibi_database::Error::Internal)?;
+        let length = first.len;
+        let mut sent = Vec::new();
+        first
+            .into_reader()
+            .read_to_end(&mut sent)
+            .await
+            .map_err(|_| bilibi_database::Error::Internal)?;
+        println!(
+            "a stream yields the stored bytes: {} of {length} (same as a whole read: {})",
+            sent.len(),
+            sent == whole
+        );
+        if sent != whole || length != whole.len() as u64 {
+            return Err(bilibi_database::Error::Invalid);
+        }
+        drop(open);
+        let again = media.open_signed_asset(&**client, png.id, &token).await;
+        println!(
+            "after the readers are dropped a stream opens again: {}",
+            again.is_ok()
+        );
+        if again.is_err() {
+            return Err(bilibi_database::Error::Invalid);
+        }
+    }
+
     println!("== subject owners");
     show(
         "note 1, tenant 1, download",

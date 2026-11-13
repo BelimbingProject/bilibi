@@ -15,7 +15,7 @@ use bilibi_artifacts::{HtmlFuture, HtmlOwner, Operation, Owner, PdfOptions, Refe
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Error, Result};
 use bilibi_party_ids::{OrganisationId, PersonId};
-use bilibi_personal_data::{Erasure, FileRef, KeptReason};
+use bilibi_personal_data::{Erasure, File, FileRef, KeptReason};
 use bilibi_tenancy::{ProofClient, ProofFuture, Scope};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -275,19 +275,31 @@ pub(crate) async fn export(
         let folder = key.replace(['/', '.'], "-");
         let mut files = Vec::with_capacity(refs.len());
         for (index, file) in refs.iter().enumerate() {
-            let read = data
+            let (content_type, bytes) = match data
                 .handler
                 .file(client, scope, &grant, &file.reference)
-                .await?;
-            size += read.bytes.len();
+                .await?
+            {
+                File::Read {
+                    content_type,
+                    bytes,
+                } => (content_type, bytes),
+                // Listed without bytes: a file that has not cleared its
+                // malware check never leaves, and a removed one cannot.
+                File::Withheld(reason) => {
+                    files.push(json!({"name": file.name, "withheld": reason.as_str()}));
+                    continue;
+                }
+            };
+            size += bytes.len();
             if size > limit {
                 return Err(Error::Invalid);
             }
             let path = format!("files/{folder}/{}-{}", index + 1, bundle_name(&file.name));
             zip.start_file(path.as_str(), options)
                 .map_err(|_| Error::Internal)?;
-            zip.write_all(&read.bytes).map_err(|_| Error::Internal)?;
-            files.push(json!({"name": file.name, "path": path, "content_type": read.content_type}));
+            zip.write_all(&bytes).map_err(|_| Error::Internal)?;
+            files.push(json!({"name": file.name, "path": path, "content_type": content_type}));
         }
         stores.push(json!({"store": key, "label": data.label, "records": row.get::<_, Value>(1), "files": files}));
     }

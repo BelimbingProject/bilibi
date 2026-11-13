@@ -11,21 +11,22 @@
 //! `submit_attachments`/`retain_drafts` only change rows and compose into the
 //! owner's own `MutationTransaction`.
 use crate::{
-    audit, storage, upload, Error, Media, NewAsset, Placement, Result, Rules, ScanState, Stored,
-    StreamFile, SubjectAction, Upload,
+    audit, storage, upload, Error, FileStream, Media, NewAsset, Placement, Result, Rules,
+    ScanState, Stored, StreamFile, SubjectAction, Upload,
 };
-use bilibi_database::{Change, Context, MutationTransaction, Principal};
+use bilibi_database::{Change, MutationTransaction};
+use bilibi_personal_data::RecordHolds;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::time::Duration;
 use tokio_postgres::{Client, GenericClient, Row};
 
 /// Never more than this many attachments in one submit or retain.
 const MAX_BIND: usize = 200;
 const CLEANUP_BATCH: i64 = 500;
-const CLEANUP_PRINCIPAL: &str = "media.attachments.cleanup";
 
+mod drafts;
 mod personal_data;
+pub(crate) use drafts::{CleanupJob, DRAFT_HANDLER};
 pub use personal_data::{
     AttachmentErasure, ErasedAttachment, Removal, ASSET_KIND, ATTACHMENT_KIND,
 };
@@ -201,6 +202,12 @@ fn valid_public_id(id: &str) -> bool {
     ulid::Ulid::from_string(id).is_ok_and(|parsed| parsed.to_string() == id)
 }
 
+/// Whether a record hold names the attachment or its asset.
+async fn held(holds: &RecordHolds, row: &Bound) -> Result<bool> {
+    Ok(!holds.records(ATTACHMENT_KIND, &[row.id]).await?.is_empty()
+        || !holds.records(ASSET_KIND, &[row.asset_id]).await?.is_empty())
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Bind {
     Submit,
@@ -256,6 +263,8 @@ impl Media {
             .ok_or(Error::StorageNotConfigured)?;
         // Refused before any bytes are written; registration decides again.
         self.initial_state(&*client, &disk).await?;
+        self.room_for_draft(client, scope.tenant(), &uploader)
+            .await?;
         let key = format!(
             "tenants/{}/attachments/{}",
             scope.tenant(),
@@ -263,6 +272,7 @@ impl Media {
         );
         let roots = self.disks(&*client).await?;
         storage::write(&roots, &disk, &key, &file.bytes).await?;
+        let mut committing = false;
         let result = async {
             let mut tx = self
                 .boundary
@@ -328,11 +338,14 @@ impl Media {
                     })
                 })
                 .await?;
+            committing = true;
             tx.commit().await?;
             Ok(summary)
         }
         .await;
-        if result.is_err() {
+        // A failed commit may still have committed: keep the bytes rather
+        // than leave a draft naming a missing file.
+        if result.is_err() && !committing {
             let _ = storage::delete(&roots, &disk, &key).await;
         }
         result
@@ -504,13 +517,51 @@ impl Media {
     /// (`media.attachment.downloaded`, `media.attachment.download_refused`)
     /// naming the attachment, its subject, the actor and any impersonator,
     /// never the file name or storage key; bytes are returned only once the
-    /// action is recorded.
+    /// action is recorded. The whole file is read into memory once a load
+    /// slot is free; the Web host streams with [`Media::open_attachment`].
     pub async fn download_attachment(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
         public_id: &str,
     ) -> Result<StreamFile> {
+        let (asset, trail) = self.downloadable(client, scope, public_id).await?;
+        let bytes = self
+            .load(&self.disks(client).await?, &asset.disk, &asset.key)
+            .await?;
+        audit_download(client, scope, DOWNLOADED, trail).await?;
+        Ok(StreamFile {
+            bytes,
+            filename: asset
+                .asset
+                .original_filename
+                .unwrap_or_else(|| asset.key.rsplit('/').next().unwrap_or("download").into()),
+            mime_type: asset.asset.mime_type,
+        })
+    }
+    /// [`Media::download_attachment`] opened for the Web host to send as it
+    /// reads: the same owner check, scan rule and audit action, holding a
+    /// stream slot (`Busy` when none is free) and no connection once it
+    /// returns.
+    pub async fn open_attachment(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        public_id: &str,
+    ) -> Result<FileStream> {
+        let (asset, trail) = self.downloadable(client, scope, public_id).await?;
+        let file = self.stream(client, &asset).await?;
+        audit_download(client, scope, DOWNLOADED, trail).await?;
+        Ok(file)
+    }
+    /// The one check of both downloads: the tenant's row, the owner's
+    /// `Download` (a refusal is audited), a private asset, then the scan rule.
+    async fn downloadable(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        public_id: &str,
+    ) -> Result<(Stored, Value)> {
         if !valid_public_id(public_id) {
             return Err(Error::NotFound);
         }
@@ -550,21 +601,13 @@ impl Media {
         }
         // After the owner's answer, so a refused reader learns nothing more.
         self.readable(client, &asset).await?;
-        let bytes = storage::read(&self.disks(client).await?, &asset.disk, &asset.key).await?;
-        audit_download(client, scope, DOWNLOADED, trail).await?;
-        Ok(StreamFile {
-            bytes,
-            filename: asset
-                .asset
-                .original_filename
-                .unwrap_or_else(|| asset.key.rsplit('/').next().unwrap_or("download").into()),
-            mime_type: asset.asset.mime_type,
-        })
+        Ok((asset, trail))
     }
 
     /// Remove a draft its uploader no longer wants. Only the uploader may (the
     /// same account, or the same system principal), only while the owner still
-    /// allows `Discard`, and never submitted evidence.
+    /// allows `Discard`, never submitted evidence, and never a draft a legal
+    /// hold names, on the attachment or on its asset (`Held`).
     pub async fn discard_draft(
         &self,
         client: &mut Client,
@@ -574,6 +617,18 @@ impl Media {
         if !valid_public_id(public_id) {
             return Err(Error::NotFound);
         }
+        let holds = RecordHolds::acquire(scope.tenant()).await?;
+        let discarded = self.discard(client, scope, public_id, &holds).await;
+        holds.release().await?;
+        discarded
+    }
+    async fn discard(
+        &self,
+        client: &mut Client,
+        scope: &Scope,
+        public_id: &str,
+        holds: &RecordHolds,
+    ) -> Result<()> {
         let mut tx = self
             .boundary
             .begin(client, scope.mutation_context("media.attachment.discard"))
@@ -593,6 +648,9 @@ impl Media {
         }
         if row.summary.uploaded_by != uploader {
             return Err(Error::NotUploader);
+        }
+        if held(holds, &row).await? {
+            return Err(Error::Held);
         }
         self.subjects
             .authorize(
@@ -660,85 +718,6 @@ impl Media {
             return Err(Error::CleanupFailed);
         }
         Ok(())
-    }
-
-    /// Remove one tenant's abandoned drafts: unretained, not submitted, older
-    /// than `older_than`. Trusted callers only (an operator command or a
-    /// worker); there is no user to authorize, so the writes are attributed to
-    /// the system principal `media.attachments.cleanup` in the named tenant.
-    /// Each candidate is locked and rechecked, so a draft submitted, retained or
-    /// discarded meanwhile survives.
-    pub async fn cleanup_drafts(
-        &self,
-        client: &mut Client,
-        tenant: i64,
-        older_than: Duration,
-    ) -> Result<Cleanup> {
-        if older_than.is_zero() {
-            return Err(Error::InvalidRules);
-        }
-        let live = client
-            .query_opt(
-                "SELECT 1 FROM tenants WHERE id=$1 AND deleted_at IS NULL",
-                &[&tenant],
-            )
-            .await?;
-        if live.is_none() {
-            return Err(Error::NotFound);
-        }
-        let age = older_than.as_secs_f64();
-        let mut report = Cleanup::default();
-        loop {
-            let candidates = client
-                .query(
-                    "SELECT public_id FROM base_media_attachments WHERE tenant_id=$1 AND state='draft' AND retained_at IS NULL AND created_at < now()-make_interval(secs => $2) ORDER BY id LIMIT $3",
-                    &[&tenant, &age, &CLEANUP_BATCH],
-                )
-                .await?;
-            if candidates.is_empty() {
-                break;
-            }
-            let before = report.removed;
-            for candidate in &candidates {
-                let public_id: String = candidate.get("public_id");
-                let context = Context {
-                    tenant,
-                    actor: Principal {
-                        kind: "system".into(),
-                        id: CLEANUP_PRINCIPAL.into(),
-                    },
-                    impersonator: None,
-                    actor_role: None,
-                    action: "media.attachment.cleanup".into(),
-                    trace_id: uuid::Uuid::new_v4().to_string(),
-                    agent_self_report: None,
-                    client_identity: None,
-                    agent_connection: None,
-                };
-                let mut tx = self.boundary.begin(client, context).await?;
-                let row = tx
-                    .sql()
-                    .query_opt(
-                        &format!("{SELECT} WHERE a.tenant_id=$1 AND a.public_id=$2 AND a.state='draft' AND a.retained_at IS NULL AND a.created_at < now()-make_interval(secs => $3) FOR UPDATE OF a"),
-                        &[&tenant, &public_id, &age],
-                    )
-                    .await?;
-                let Some(row) = row else {
-                    continue;
-                };
-                let file = self.remove_draft(&mut tx, tenant, &bound(&row)?).await?;
-                tx.commit().await?;
-                report.removed += 1;
-                if self.remove_files(client, &[file]).await.is_err() {
-                    report.file_failures += 1;
-                }
-            }
-            // A pass that removed nothing would only see the same rows again.
-            if report.removed == before {
-                break;
-            }
-        }
-        Ok(report)
     }
 }
 
