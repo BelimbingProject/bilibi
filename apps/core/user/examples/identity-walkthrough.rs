@@ -207,7 +207,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("PASS: customer suspension and restoration preserve identity and isolate access");
 
         // #536: one lock notice per run of locks. Two locks in a row for the
-        // viewer (the first lock is made to expire) mail one notice.
+        // viewer (the first lock is made to expire) mail one notice. The dev
+        // mailbox sends only on a development instance; the step-up proofs
+        // below need Production again.
+        bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
         let mailbox = bilibi_mail::Mailbox::new(
             std::env::var("BILIBI_MAIL_DIR")
                 .unwrap_or_else(|_| ".local/mailbox".into())
@@ -245,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let notices = lock_notices(&mailbox, viewer) - before;
         println!("Two sign-in locks in a row mailed {notices} notice(s)");
         assert_eq!(notices, 1);
+        bilibi_walkthrough_fixture::set_instance_role(&db, "production").await?;
 
         // #536: an administrator reads and lifts the lock of a staff account
         // only; a customer account of the same tenant is not one.

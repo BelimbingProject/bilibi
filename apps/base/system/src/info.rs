@@ -167,6 +167,13 @@ pub(super) async fn page(pages: &Pages, scope: &Scope) -> Result<String> {
         _ if !diagnostics.recording => "Disabled (history available)".to_owned(),
         _ => pages.perf.health_status().await,
     };
+    // What the mailer would do with a message now: a dev mailbox outside a
+    // development installation refuses, and this is where an operator sees why.
+    let mail = match tokio::time::timeout(Duration::from_secs(3), pages.mailer.ready()).await {
+        Ok(Ok(())) => Some(pages.mailer.describe()),
+        Ok(Err(bilibi_mail::Error::Config(why))) => Some(format!("Not sending: {why}")),
+        _ => None,
+    };
     let runtime = tokio::runtime::Handle::try_current()
         .ok()
         .map(|handle| handle.metrics());
@@ -256,6 +263,7 @@ pub(super) async fn page(pages: &Pages, scope: &Scope) -> Result<String> {
                 ("Database", text(connected)),
                 ("Cache", text("Settings read directly from PostgreSQL")),
                 ("Queue", queue),
+                ("Mail", mail),
                 ("Performance", text(performance)),
             ],
         )?,

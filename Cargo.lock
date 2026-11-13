@@ -1102,9 +1102,13 @@ name = "bilibi-mail"
 version = "0.2.1"
 dependencies = [
  "ammonia",
+ "bilibi-base",
+ "bilibi-core",
  "bilibi-database",
  "bilibi-module-registry",
  "bilibi-settings",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
  "data-encoding",
  "inventory",
  "jiff",
@@ -1705,6 +1709,7 @@ dependencies = [
  "bilibi-authz",
  "bilibi-database",
  "bilibi-locale",
+ "bilibi-mail",
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-perf",

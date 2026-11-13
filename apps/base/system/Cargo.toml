@@ -12,6 +12,7 @@ bilibi-authz = { path = "../authz" }
 bilibi-database.workspace = true
 bilibi-step-up.workspace = true
 bilibi-locale = { path = "../locale" }
+bilibi-mail.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-perf = { path = "../perf" }
