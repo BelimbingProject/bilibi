@@ -23,7 +23,7 @@ that session is sent back through the page it holds and closed, and the page's
 guard forwards the browser to sign-in with the expired-session message
 (`apps/base/session/README.md`).
 
-The socket boundary is bounded per server by Base Session's operator settings, on `/live` and `/portal/live` alike (`live::Limits`). A session may keep `session.live.sockets_per_session` sockets open (default 16); a portal customer may keep `session.live.sockets_per_customer` across all their sign-ins (default 16). Staff and portal each have an independent `session.live.sockets_total` capacity (default 5,000 each), so portal traffic cannot take staff places. One more upgrade is refused with 429; closing a socket releases its session, account and side places. A session may send `session.live.messages_per_minute` text messages across its sockets (default 240); an excess one is answered with a non-clearing error before it is decoded, so it reaches no route admission, Authz decision, owner or session activity, and a socket that keeps sending past the budget is closed after 100 refusals in a row. Binary upload chunks have their own `session.live.chunks_per_minute` budget (default 6,000); exceeding it closes the sending socket before storage or owner work. Empty chunks and completed-entry replays do no work and never re-run owner refreshes; zero-byte files finish at registration.
+The socket boundary is bounded per server by Base Session's operator settings, on `/live` and `/portal/live` alike (`live::Limits`). A session may keep `session.live.sockets_per_session` sockets open (default 16); a portal customer may keep `session.live.sockets_per_customer` across all their sign-ins (default 16). Staff and portal each have an independent `session.live.sockets_total` capacity (default 5,000 each), so portal traffic cannot take staff places. One more upgrade is refused with 429; closing a socket releases its session, account and side places. A session may send `session.live.messages_per_minute` text messages across its sockets (default 240); an excess one is answered with a non-clearing error before it is decoded, so it reaches no route admission, Authz decision, owner or session activity, and a socket that keeps sending past the budget is closed after 100 refusals in a row. Binary upload chunks have their own `session.live.chunks_per_minute` budget (default 6,000); exceeding it closes the sending socket before storage or owner work. The upload bytes every page on a server holds in memory, staff and portal together, fit `session.live.upload_buffer_bytes` (default 1 GiB): a chunk that would pass it marks its entry `busy`. Empty chunks and completed-entry replays do no work and never re-run owner refreshes; zero-byte files finish at registration.
 
 ## Transport
 
@@ -193,7 +193,11 @@ the browser control does. The browser then sends binary frames of
 socket; each is answered by `{"type":"chunk","id":7,"received":65536,"size":…,"done":false}`
 (no `request_id`), which `live.js` relays as the window event
 `bilibi:upload`. A chunk that does not continue where the last ended, or
-overruns the announced size, marks the entry `interrupted`. A completed or
+overruns the announced size, marks the entry `interrupted`. A chunk the
+server has no memory budget for (`UploadBudget`,
+`session.live.upload_buffer_bytes`) marks it `busy` and gives back what the
+entry held; bytes are also given back when the owner consumes the file, the
+entry is removed or the page closes. A completed or
 refused entry re-renders its owner under the owner's guard; a removal is the
 `upload_cancel` intent (`{"type":"upload_cancel","target":"page","id":7}`).
 Ids are unique per socket, so a frame never reaches another state's entry,
@@ -208,7 +212,7 @@ A spec declared with `UploadSpec::resumable(name, max_file_size)` (issue 141) su
 - The input carries `data-resumable`. The hook hashes each chosen file (SHA-256, in 4 MiB slices), and the `upload` intent carries the hashes by entry ref: `"sha256":{"1":"<64 lowercase hex>"}`. Entries are announced as for any input.
 - The host registers the entries as usual, then places each accepted one (`Uploads::place`). While Media has a staging disk (`media.upload.staging_disk`, `apps/base/media/README.md`), an entry with a hash is staged in a private file bound to the tenant, the account (and impersonating operator), the page service, the input, the size and that hash. Every reply entry carries `received`, the offset to stream from: for a staged entry, the bytes a dropped connection already left there; otherwise 0.
 - The size limit is the spec's own, at most `MAX_RESUMABLE_FILE_SIZE` (512 MiB) and Media's `Staging::limit`: `media.max_bytes`, never below `MAX_FILE_SIZE` (64 MiB). `Uploads::place` refuses a larger file before any byte is sent, by the same figure the staging file checks. Without a staging disk the spec acts as `UploadSpec::new`: bytes in the state, at most 64 MiB.
-- When the last byte arrives the host checks the hash, then hands the bytes to the entry, which holds them in memory until the owner consumes them with `Uploads::consume`, like any other. A first mismatch empties the file and answers `received: 0`, so the browser sends it again; a second marks the entry `interrupted`.
+- When the last byte arrives the host checks the hash, then hands the bytes to the entry, which holds them in memory until the owner consumes them with `Uploads::consume`, like any other; they count against `session.live.upload_buffer_bytes` from then, and a file the budget has no room for is marked `interrupted`. A first mismatch empties the file and answers `received: 0`, so the browser sends it again; a second marks the entry `interrupted`.
 - A submit raised while files are being hashed, or while resumable files wait for the remount, is held like one raised mid-stream. A one-file input announces only its latest choice, and a file over the input's limit is not hashed.
 - After a drop, the hook keeps the files the server still listed. Once the page is remounted, `live.js` raises `bilibi:remounted` right behind the mount intent, and the hook announces them again, which picks up their staged bytes. Choosing the same file again later finds them too, until `media.upload.staging_hours` passes.
 - The staging file goes when its entry does (consumed, removed, replaced, or its state dropped on this socket) and stays when the socket closes. An account keeps at most 20, and its files nobody wrote to within `media.upload.staging_hours` are removed when it stages another and by the `base/media-staging-sweep` schedule.
@@ -304,6 +308,8 @@ text, caret and focus stay; scroll the box and the scroll position stays through
 the same patches; increment inside the island iframe (`/live-reference/island`,
 its own live page) and its count survives every parent patch because the frame
 is keyed by id and never replaced.
+
+`apps/web/examples/live-upload-walkthrough.rs` is the running proof of the upload memory budget (`BILIBI_DISPOSABLE_LIVE_UPLOAD_DEMO=yes`).
 
 `apps/web/examples/live-wake-walkthrough.rs` is the running proof of who a `Change` wakes. With a disposable, migrated `DATABASE_URL` and `BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes`:
 

@@ -63,8 +63,11 @@ const SOCKET_LIMIT: usize = if FRAME_LIMIT > CHUNK + HEADER {
 };
 /// A socket that has not said who it is within this long is closed.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
-/// How often an open socket proves its session and site again.
-const RECHECK: Duration = Duration::from_secs(10);
+/// How often an idle socket proves its session and site again. A frame
+/// proves them when it arrives and a revocation closes the socket at once,
+/// so this only finds a session that ran out, or was ended on another
+/// server, while nobody typed.
+const RECHECK: Duration = Duration::from_secs(60);
 /// A sender may renew, end and reconnect this many times for each session it
 /// may start: the budget of the calls that follow an opened session.
 const RECONNECTS: u32 = 6;
@@ -89,8 +92,15 @@ pub struct Boundary {
     sites: Throttle,
     frames: Throttle,
     sockets: Mutex<Sockets>,
-    /// Bytes of every file announced and not yet handed to its channel.
-    uploading: Mutex<u64>,
+    /// Bytes of every file received and not yet handed to its channel.
+    uploading: Mutex<Uploading>,
+}
+#[derive(Default)]
+struct Uploading {
+    total: u64,
+    /// The same bytes by [`sender`] key, so one address cannot fill
+    /// `visitor.upload_buffer_bytes`.
+    per_sender: HashMap<String, u64>,
 }
 #[derive(Default)]
 struct Sockets {
@@ -99,6 +109,9 @@ struct Sockets {
     /// Open sockets by [`sender`] key, so one address cannot hold every
     /// place of `visitor.sockets_total`.
     per_sender: HashMap<String, u32>,
+    /// Open sockets that said hello, by tenant, channel and site, so one
+    /// site cannot hold every place either.
+    per_site: HashMap<String, u32>,
 }
 impl Boundary {
     pub fn bind(services: &Services) -> bilibi_database::Result<Self> {
@@ -121,27 +134,43 @@ impl Boundary {
         self.channels.get(key).cloned().ok_or(Error::NotFound)
     }
 }
-/// A file's announced size, held against `visitor.upload_buffer_bytes` from
-/// the announcement until the channel has the file or it is dropped.
+/// The bytes of one file in transit, held against
+/// `visitor.upload_buffer_bytes` and its sender's share of it from the chunk
+/// that brought them until the channel has the file or it is dropped. An
+/// announcement holds nothing, so a socket that only announces files cannot
+/// keep other visitors' files out.
 struct Reserved {
     app: App,
+    sender: String,
     bytes: u64,
 }
 impl Reserved {
-    fn take(app: &App, bytes: u64, budget: u64) -> Option<Self> {
-        let mut held = app
+    fn empty(app: &App, sender: &str) -> Self {
+        Self {
+            app: app.clone(),
+            sender: sender.to_owned(),
+            bytes: 0,
+        }
+    }
+    /// Holds `bytes` more, unless the server's budget or the sender's share
+    /// (one file of the size limit) has no room for them.
+    fn grow(&mut self, bytes: u64, policy: &Policy) -> bool {
+        let mut held = self
+            .app
             .visitor
             .uploading
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if held.saturating_add(bytes) > budget {
-            return None;
+        let sender = held.per_sender.get(&self.sender).copied().unwrap_or(0);
+        if held.total.saturating_add(bytes) > policy.upload_buffer_bytes
+            || sender.saturating_add(bytes) > policy.upload_max_bytes
+        {
+            return false;
         }
-        *held += bytes;
-        Some(Self {
-            app: app.clone(),
-            bytes,
-        })
+        held.total += bytes;
+        held.per_sender.insert(self.sender.clone(), sender + bytes);
+        self.bytes += bytes;
+        true
     }
 }
 impl Drop for Reserved {
@@ -152,15 +181,22 @@ impl Drop for Reserved {
             .uploading
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        *held = held.saturating_sub(self.bytes);
+        held.total = held.total.saturating_sub(self.bytes);
+        if let Some(sender) = held.per_sender.get_mut(&self.sender) {
+            *sender = sender.saturating_sub(self.bytes);
+            if *sender == 0 {
+                held.per_sender.remove(&self.sender);
+            }
+        }
     }
 }
-/// One open socket's place, counted against the server and its sender;
-/// dropping it frees both.
+/// One open socket's place, counted against the server and its sender, and
+/// from its hello against its session and its site; dropping it frees them.
 struct Slot {
     app: App,
     sender: String,
     session: Option<String>,
+    site: Option<String>,
 }
 impl Slot {
     fn admit(app: &App, sender: String, policy: &Policy) -> Option<Self> {
@@ -179,25 +215,34 @@ impl Slot {
             app: app.clone(),
             sender,
             session: None,
+            site: None,
         })
     }
-    /// Counts this socket against its session, or refuses at the limit.
-    fn bind(&mut self, session: &str, per_session: u32) -> bool {
+    /// Counts this socket against its session and its site, or refuses at
+    /// either limit.
+    fn bind(&mut self, scope: &VisitorScope, policy: &Policy) -> bool {
+        let site = format!("{}:{}:{}", scope.tenant(), scope.channel(), scope.site());
         let mut sockets = self
             .app
             .visitor
             .sockets
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let held = sockets.per_session.entry(session.to_owned()).or_default();
-        if *held >= per_session {
-            if *held == 0 {
-                sockets.per_session.remove(session);
-            }
+        let in_session = sockets
+            .per_session
+            .get(scope.session())
+            .copied()
+            .unwrap_or(0);
+        let on_site = sockets.per_site.get(&site).copied().unwrap_or(0);
+        if in_session >= policy.sockets_per_session || on_site >= policy.sockets_per_site {
             return false;
         }
-        *held += 1;
-        self.session = Some(session.to_owned());
+        sockets
+            .per_session
+            .insert(scope.session().to_owned(), in_session + 1);
+        sockets.per_site.insert(site.clone(), on_site + 1);
+        self.session = Some(scope.session().to_owned());
+        self.site = Some(site);
         true
     }
 }
@@ -221,6 +266,14 @@ impl Drop for Slot {
                 *held -= 1;
                 if *held == 0 {
                     sockets.per_session.remove(session);
+                }
+            }
+        }
+        if let Some(site) = &self.site {
+            if let Some(held) = sockets.per_site.get_mut(site) {
+                *held -= 1;
+                if *held == 0 {
+                    sockets.per_site.remove(site);
                 }
             }
         }
@@ -531,8 +584,9 @@ struct Receiving {
     bytes: Vec<u8>,
     started: Instant,
     touched: Instant,
-    /// Freed when this is dropped, however the upload ends.
-    _reserved: Reserved,
+    /// The bytes held so far; freed when this is dropped, however the upload
+    /// ends.
+    reserved: Reserved,
 }
 impl Receiving {
     fn deadline(&self) -> Instant {
@@ -610,7 +664,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
     let Ok(policy) = policy(&app).await else {
         return close(&mut socket, "unavailable").await;
     };
-    if !slot.bind(scope.session(), policy.sockets_per_session) {
+    if !slot.bind(&scope, &policy) {
         return close(&mut socket, "rate_limited").await;
     }
     let mut cursor = cursor;
@@ -665,15 +719,12 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
         };
         let reply = match message {
             Some(Ok(Message::Text(text))) => {
-                // The session must still hold, and the site still admit it,
-                // before any frame acts.
-                match authenticate(&app, &token, Some(&origin)).await {
-                    Ok((fresh, _)) => scope = fresh,
-                    Err(_) => return close(&mut socket, "ended").await,
-                }
                 let Ok(policy) = self::policy(&app).await else {
                     return close(&mut socket, "unavailable").await;
                 };
+                // The budget first, as for a chunk below: a frame over it is
+                // refused before the session, the site or the channel is
+                // read, so a flood of them costs the database nothing.
                 if !boundary.frames.allow_among(
                     &format!("frame:{}", scope.session()),
                     policy.messages_per_minute,
@@ -683,26 +734,49 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                     if refusals >= REFUSALS_BEFORE_CLOSE {
                         return close(&mut socket, "rate_limited").await;
                     }
-                    Some(json!({"type": "error", "code": "rate_limited"}))
-                } else {
-                    refusals = 0;
-                    if renewed_at.elapsed() >= Duration::from_secs(policy.session_seconds / 2) {
-                        if let Ok(client) = app.db.get().await {
-                            if let Ok(done) = boundary.visitors.renew(&**client, &scope).await {
-                                renewed_at = Instant::now();
-                                if !send(
-                                    &mut socket,
-                                    json!({"type": "renewed", "expires_in": done.expires_in}),
-                                )
-                                .await
-                                {
-                                    return;
-                                }
+                    if !send(
+                        &mut socket,
+                        json!({"type": "error", "code": "rate_limited"}),
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                refusals = 0;
+                // The session must still hold, and the site still admit it,
+                // before any frame acts.
+                match authenticate(&app, &token, Some(&origin)).await {
+                    Ok((fresh, _)) => scope = fresh,
+                    Err(_) => return close(&mut socket, "ended").await,
+                }
+                if renewed_at.elapsed() >= Duration::from_secs(policy.session_seconds / 2) {
+                    if let Ok(client) = app.db.get().await {
+                        if let Ok(done) = boundary.visitors.renew(&**client, &scope).await {
+                            renewed_at = Instant::now();
+                            if !send(
+                                &mut socket,
+                                json!({"type": "renewed", "expires_in": done.expires_in}),
+                            )
+                            .await
+                            {
+                                return;
                             }
                         }
                     }
-                    frame(&app, &channel, &scope, &policy, &text, &mut receiving).await
                 }
+                let sender = &slot.sender;
+                frame(
+                    &app,
+                    &channel,
+                    &scope,
+                    &policy,
+                    &text,
+                    &mut receiving,
+                    sender,
+                )
+                .await
             }
             Some(Ok(Message::Binary(chunk))) => {
                 let Ok(policy) = self::policy(&app).await else {
@@ -721,7 +795,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                     Ok((fresh, _)) => scope = fresh,
                     Err(_) => return close(&mut socket, "ended").await,
                 }
-                chunked(&channel, &scope, &chunk, &mut receiving).await
+                chunked(&channel, &scope, &policy, &chunk, &mut receiving).await
             }
             Some(Ok(Message::Ping(data))) => {
                 if !put(&mut socket, Message::Pong(data)).await {
@@ -796,6 +870,7 @@ async fn frame(
     policy: &Policy,
     text: &str,
     receiving: &mut Option<Receiving>,
+    sender: &str,
 ) -> Option<Value> {
     if text.len() > FRAME_LIMIT {
         return Some(failure(None, Error::Invalid));
@@ -840,12 +915,6 @@ async fn frame(
             {
                 return Some(failure(Some(id.into()), Error::Invalid));
             }
-            // Every file in flight on this server fits one budget, so open
-            // sockets cannot each hold a file's worth of memory.
-            let Some(reserved) = Reserved::take(app, size as u64, policy.upload_buffer_bytes)
-            else {
-                return Some(json!({"type": "error", "id": id, "code": Refusal::LIMITED.code}));
-            };
             let now = Instant::now();
             *receiving = Some(Receiving {
                 id,
@@ -854,7 +923,7 @@ async fn frame(
                 bytes: Vec::with_capacity(size.min(CHUNK)),
                 started: now,
                 touched: now,
-                _reserved: reserved,
+                reserved: Reserved::empty(app, sender),
             });
             Some(json!({"type": "upload_ready", "id": id}))
         }
@@ -865,10 +934,12 @@ async fn frame(
     }
 }
 /// One binary frame: `[entry id u32][offset u32][bytes]`, in order. The file
-/// reaches the channel only when every byte is here.
+/// reaches the channel only when every byte is here; its bytes are counted
+/// against the memory budget as they arrive ([`Reserved`]).
 async fn chunked(
     channel: &ChannelService,
     scope: &VisitorScope,
+    policy: &Policy,
     frame: &[u8],
     receiving: &mut Option<Receiving>,
 ) -> Option<Value> {
@@ -892,6 +963,13 @@ async fn chunked(
         *receiving = None;
         return Some(failure(Some(id.into()), Error::Invalid));
     }
+    // Every byte in flight on this server fits one budget, and a sender's
+    // bytes one file's worth of it, so open sockets cannot each hold a
+    // file's worth of memory. A file refused here may be sent again.
+    if !file.reserved.grow(bytes.len() as u64, policy) {
+        *receiving = None;
+        return Some(json!({"type": "error", "id": id, "code": Refusal::LIMITED.code}));
+    }
     file.bytes.extend_from_slice(bytes);
     file.touched = Instant::now();
     if file.bytes.len() < file.size {
@@ -903,7 +981,7 @@ async fn chunked(
         bytes: done.bytes,
     };
     // The reservation is held until the channel has taken the file.
-    let _reserved = done._reserved;
+    let _reserved = done.reserved;
     Some(
         match channel.0.receive(scope, Frame::Upload(upload)).await {
             Ok(reply) => ack(Some(id.into()), reply),

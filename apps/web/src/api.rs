@@ -503,9 +503,8 @@ async fn params(request: Request) -> Option<HashMap<String, String>> {
     }
 }
 
-/// The direct peer, or the client a loopback reverse proxy reports: read
-/// `X-Forwarded-For` right to left, skipping loopback hops, and stop at the
-/// first other address. An unparseable hop leaves the peer address.
+/// The client's address as a string: [`client_address`], or `unknown` when
+/// the server was not given connection info.
 pub(crate) fn sender(request: &Request) -> String {
     let peer = request
         .extensions()
@@ -514,28 +513,18 @@ pub(crate) fn sender(request: &Request) -> String {
     client_address(peer, request.headers()).map_or_else(|| "unknown".into(), |ip| ip.to_string())
 }
 
-/// The address behind [`sender`], for callers that hold the peer and the
-/// headers apart (a form handler that cannot take the whole request). `None`
-/// only when the server was not given connection info.
+/// The client's address, for callers that hold the peer and the headers
+/// apart (a form handler that cannot take the whole request). The peer is
+/// the client itself, the client a listed proxy on another machine named
+/// (`proxies::resolve` put it in the peer's place), or a proxy on this
+/// machine, whose `X-Forwarded-For` is then read as
+/// `TrustedProxies::client` describes. `None` only when the server was not
+/// given connection info.
 pub(crate) fn client_address(peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<IpAddr> {
-    let peer = peer?.ip();
-    if !peer.is_loopback() {
-        return Some(peer);
-    }
-    let hops: Vec<&str> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .collect();
-    for hop in hops.into_iter().rev() {
-        match hop.trim().parse::<IpAddr>() {
-            Ok(address) if address.is_loopback() => continue,
-            Ok(address) => return Some(address),
-            Err(_) => break,
-        }
-    }
-    Some(peer)
+    Some(
+        bilibi_base::session::TrustedProxies::default()
+            .client(peer?.ip(), crate::proxies::hops(headers)),
+    )
 }
 
 /// The key a public edge budgets a sender under: its IPv4 address, or the

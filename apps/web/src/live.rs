@@ -48,6 +48,10 @@ type MessageWindows = HashMap<(String, bool), (u64, u32)>;
 pub struct Limits {
     sockets: std::sync::Mutex<Sockets>,
     messages: [std::sync::Mutex<MessageWindows>; 2],
+    /// The upload bytes every page's `Uploads` on this server holds in
+    /// memory, staff and portal together, bounded by
+    /// `session.live.upload_buffer_bytes`.
+    uploads: bilibi_ui::UploadBudget,
 }
 #[derive(Default)]
 struct Sockets {
@@ -94,12 +98,15 @@ pub struct Policy {
     pub messages: u32,
     pub per_customer: u32,
     pub chunks: u32,
+    /// Most upload bytes the server holds in memory (`Limits::uploads`).
+    pub upload_buffer: u64,
 }
 impl Policy {
     pub async fn read(app: &App) -> Result<Self> {
         use bilibi_base::session::{
             LIVE_CHUNKS_PER_MINUTE_KEY, LIVE_MESSAGES_PER_MINUTE_KEY,
             LIVE_SOCKETS_PER_CUSTOMER_KEY, LIVE_SOCKETS_PER_SESSION_KEY, LIVE_SOCKETS_TOTAL_KEY,
+            LIVE_UPLOAD_BUFFER_BYTES_KEY,
         };
         let client = app.db.get().await?;
         let mut values = [0u32; 5];
@@ -119,12 +126,19 @@ impl Policy {
                 .ok_or(Error::Internal)?;
         }
         let [per_session, total, messages, per_customer, chunks] = values;
+        let upload_buffer = app
+            .settings
+            .get_global(&**client, LIVE_UPLOAD_BUFFER_BYTES_KEY)
+            .await?
+            .as_u64()
+            .ok_or(Error::Internal)?;
         Ok(Self {
             per_session,
             total,
             messages,
             per_customer,
             chunks,
+            upload_buffer,
         })
     }
 }
@@ -588,6 +602,9 @@ struct Session<S: Side> {
     /// when its entry does (consumed, removed, replaced or its state
     /// dropped), and stays when the socket does, so a reconnect resumes it.
     staged: HashMap<u64, StagedUpload>,
+    /// The server's count of upload bytes held in memory and the operator's
+    /// limit on it, as read when the socket opened.
+    upload_budget: (bilibi_ui::UploadBudget, u64),
 }
 impl<S: Side> Session<S> {
     async fn scope(&mut self, app: &App, token: &str) -> Result<S::Context> {
@@ -1240,13 +1257,14 @@ impl<S: Side> Session<S> {
         } else {
             None
         };
+        let (budget, limit) = self.upload_budget.clone();
         let uploads = self
             .mounted_mut(target)?
             .state
             .uploads()
             .ok_or(Error::Invalid)?;
         Ok(match finished {
-            Some(bytes) => uploads.complete(id, bytes),
+            Some(bytes) => uploads.complete(id, bytes, &budget, limit),
             None => uploads.staged(id, file.received()),
         })
     }
@@ -1298,6 +1316,7 @@ impl<S: Side> Session<S> {
             // Removed or consumed meanwhile; the hook stops streaming it.
             return Ok(vec![json!({"type":"chunk", "id":id, "error":"unknown"})]);
         };
+        let (budget, limit) = self.upload_budget.clone();
         let uploads = self
             .mounted_mut(&target)?
             .state
@@ -1307,7 +1326,7 @@ impl<S: Side> Session<S> {
             self.stage_chunk(&target, id, offset, &frame[CHUNK_HEADER..])
                 .await?
         } else {
-            uploads.append(id, offset, &frame[CHUNK_HEADER..])
+            uploads.append(id, offset, &frame[CHUNK_HEADER..], &budget, limit)
         };
         match outcome {
             Ok(outcome) => {
@@ -1509,6 +1528,7 @@ pub async fn run<S: Side>(
         address: None,
         uploads: 0,
         staged: HashMap::new(),
+        upload_budget: (app.live.uploads.clone(), policy.upload_buffer),
     };
     // A termination of this socket's session (logout elsewhere, an operator,
     // a credential change) signs this page out at once: the browser is sent

@@ -14,6 +14,7 @@ pub const SESSIONS_PER_SITE_KEY: &str = "visitor.sessions_per_site_per_minute";
 pub const MESSAGES_PER_MINUTE_KEY: &str = "visitor.messages_per_minute";
 pub const SOCKETS_PER_SESSION_KEY: &str = "visitor.sockets_per_session";
 pub const SOCKETS_PER_SENDER_KEY: &str = "visitor.sockets_per_sender";
+pub const SOCKETS_PER_SITE_KEY: &str = "visitor.sockets_per_site";
 pub const SOCKETS_TOTAL_KEY: &str = "visitor.sockets_total";
 pub const UPLOAD_MAX_BYTES_KEY: &str = "visitor.upload_max_bytes";
 pub const UPLOADS_PER_MINUTE_KEY: &str = "visitor.uploads_per_minute";
@@ -99,6 +100,14 @@ setting!(
     "Most visitor connections one network address may keep open at once on each server. An IPv6 address counts with the rest of its /64 network."
 );
 setting!(
+    SOCKETS_PER_SITE_KEY,
+    500,
+    1,
+    1_000_000,
+    "Open visitor connections per site",
+    "Most visitor connections one site may keep open at once on each server. Keep it below the limit per server, so one site cannot take every place."
+);
+setting!(
     SOCKETS_TOTAL_KEY,
     2_000,
     1,
@@ -128,5 +137,5 @@ setting!(
     1_024,
     17_179_869_184u64,
     "Visitor files in transit per server (bytes)",
-    "Most memory each server holds for visitor files that are still arriving. A file announced beyond it is refused until others finish."
+    "Most memory each server holds for visitor files that are still arriving. A file that would go beyond it is refused until others finish. One network address may hold one file's size limit of it."
 );
