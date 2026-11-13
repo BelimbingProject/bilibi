@@ -171,6 +171,19 @@ impl DeleteJob {
         let mut tx = execution
             .begin(&mut client, "core.document.delete.finalize")
             .await?;
+        // Decide with `sql()` first: a write must report a change, so a
+        // document finished or shown again meanwhile writes nothing.
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL FOR UPDATE",
+                &[&tenant, &document],
+            )
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
         if protected {
             restore(&mut tx, tenant, document).await?;
         } else {
