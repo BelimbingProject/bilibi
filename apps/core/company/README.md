@@ -277,6 +277,21 @@ Company is a `base/custom_fields` record type (`company`): an administrator adds
 - **List.** Each active custom field (the first 50, in the order they were defined) is a column the person adds from the column picker, named `cf_<key>`; the arrangement rides in the address (`cols=…`). A column sorts (`sort=cf_<key>`: a number as a number, a date as a date, a pick-list by its code) and filters through the same field filters as contributed fields (text contains or equals; number and date compare; pick-list equals). `list_fields.rs` reads `companies.custom_fields ->> $key` with the key as a bound parameter, never in the statement text, and the sort key is bound only in the page statement so the count statement has no unused parameter. An archived field, or a choice field whose pick-list is not mounted, leaves the picker, the sort and the filters at once; a stale `cols`, `sort` or filter naming it is dropped with a notice.
 - **Not built.** Per-field restrictions, reference fields and required fields (ADR 21).
 
+## Privacy requests
+
+**Companies are personal-data store `core/company.companies`, kind `company`, found only by the request's email or phone and acted on only once the operator confirms them** ([`base/personal_data`](../../base/personal_data/README.md), [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md), #595). A company can be a natural person's business, and its contact fields, `metadata` and custom fields take anything an administrator enters.
+
+| Call | What it does |
+| --- | --- |
+| Locate | Lists every company whose email contains a request email, or whose phone digits contain a request phone's, as a candidate (id, status, created date; no values) |
+| Export | Every stored value of each confirmed company, with its custom fields and legal entity type code |
+| Erase | Clears a confirmed company's email, phone, tax ID, legal name, registration number, website, `metadata` and custom fields; a sole proprietorship (legal entity type `sole_proprietorship`) also gets name `[erased]` and code `erased_<id>`. A company under a legal hold (its own or the person's) is kept |
+
+- **Kept on erasure.** Structure, status, revenue, jurisdiction, activities, departments and relationships, so the records that name the company stay whole. Values an Extension stores for its contributed company fields are that Extension's.
+- **Audit.** Kind `company` declares `*` (migration `core-company-012-personal-data`): custom values are audited under tenant-defined `cf_<key>` keys, so erasure clears every value in the confirmed company's history and keeps which fields changed, when and by whom.
+- **Grid.** `email`, `phone` and `tax_id` are marked personal, so Authz offers mask mode for them.
+- **Walkthrough.** `company-privacy-walkthrough` (`scripts/run-walkthroughs.sh company-privacy`) locates, exports and erases a sole proprietorship and a company holding the person's phone, and leaves an unconfirmed look-alike untouched.
+
 ## Contributed field sorting and filters
 
 The Company list sorts contributed text, date and governed choice fields from their headings. Choice order uses stable codes, while cells retain current labels; missing values sort last and Company ID breaks ties. Only declared Company scalar contributions are eligible, not arbitrary linked or aggregate columns.
