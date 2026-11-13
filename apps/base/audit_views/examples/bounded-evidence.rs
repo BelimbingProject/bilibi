@@ -10,8 +10,12 @@
 //!   steps from a stored place, one verification at a time, and names a
 //!   removed row (#578).
 //!
-//!   BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes DATABASE_URL=... \
-//!     cargo run -p bilibi-audit-views --example bounded-evidence
+//! Run it with:
+//!
+//! ```sh
+//! BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes DATABASE_URL=... \
+//!   cargo run -p bilibi-audit-views --example bounded-evidence
+//! ```
 //!
 //! It writes about 12,000 evidence rows and removes one behind the guard's
 //! back (`session_replication_role`, so the database role must be a
