@@ -127,12 +127,35 @@ async fn main() -> Result<(), Failure> {
         "a word shared by the whole large tenant counts every match within the bounds",
         total(&found) == Some(BULK as u64) && names(&found).len() == 5,
     )?;
+    let expected: Vec<String> = client
+        .query(
+            "SELECT name FROM companies WHERE tenant_id=$1 AND name LIKE 'Bulkfill %' ORDER BY name, id LIMIT 5 OFFSET 10",
+            &[&manager.tenant()],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    let third = registry
+        .call(
+            &**client,
+            &manager,
+            "core.company.list",
+            &json!({"search": "bulkfill", "page": 3, "page_size": 5}),
+        )
+        .await?;
+    prove(
+        "a later page holds the next companies by name",
+        names(&third) == expected,
+    )?;
 
-    // Index: the rows of `companies` one search reads in this transaction,
-    // from PostgreSQL's own per-transaction counters.
+    // Index: the rows and index entries of `companies` one search reads in
+    // this transaction, from PostgreSQL's own per-transaction counters. An
+    // index scan counts its heap fetches on the index, so every index of
+    // `companies` is summed in.
     let mut reader = db.get().await?;
     let tx = reader.transaction().await?;
-    let read = "SELECT pg_stat_get_xact_tuples_returned('companies'::regclass)+pg_stat_get_xact_tuples_fetched('companies'::regclass)";
+    let read = "SELECT sum(pg_stat_get_xact_tuples_returned(oid)+pg_stat_get_xact_tuples_fetched(oid))::bigint FROM (SELECT 'companies'::regclass::oid AS oid UNION ALL SELECT indexrelid FROM pg_index WHERE indrelid='companies'::regclass) relations";
     let before: i64 = tx.query_one(read, &[]).await?.get(0);
     let page = bilibi_company::search(
         &*tx,
@@ -147,7 +170,7 @@ async fn main() -> Result<(), Failure> {
     let rows = rows - before;
     tx.rollback().await?;
     println!(
-        "  search \"zebra\" read {rows} company rows for {} match",
+        "  search \"zebra\" read {rows} company rows and index entries for {} match",
         page.total
     );
     prove(

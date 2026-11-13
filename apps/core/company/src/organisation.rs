@@ -985,7 +985,15 @@ pub async fn search(
         .map(|column| format!("c.{column}"))
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM companies c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id WHERE {filter} ORDER BY c.name, c.id LIMIT $4 OFFSET $5");
+    // With words, page from the indexed matches: ordered by name with a
+    // limit, PostgreSQL would otherwise walk the tenant's name index and test
+    // every company against the words until the page fills.
+    let page = if words.is_some() {
+        format!("WITH matched AS MATERIALIZED (SELECT c.id, c.name FROM companies c WHERE {filter}), page AS (SELECT id FROM matched ORDER BY name, id LIMIT $4 OFFSET $5) SELECT {columns} FROM page JOIN companies c ON c.tenant_id=$1 AND c.id=page.id")
+    } else {
+        format!("SELECT {columns} FROM companies c WHERE {filter} ORDER BY c.name, c.id LIMIT $4 OFFSET $5")
+    };
+    let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM ({page}) c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id ORDER BY c.name, c.id");
     let entries = client
         .query(
             &sql,
