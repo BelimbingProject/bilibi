@@ -153,6 +153,7 @@ WALKTHROUGHS=(
   'web|optional-capabilities|apps/web|optional-capabilities|seed|BILIBI_OPTIONAL_PROOF=disposable|-'
   # Only the composition with nothing mounted; see NOT_RUN for the mounted ones.
   'web|events-unmounted|apps/web|events-reference|seed||-'
+  'web|events-retention|apps/web|events-retention|seed|BILIBI_DISPOSABLE_EVENTS_DEMO=yes|-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'

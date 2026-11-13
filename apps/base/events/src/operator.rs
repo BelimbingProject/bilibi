@@ -1,5 +1,8 @@
 //! Operator reads and replay, in the operator's own tenant.
-use crate::{Events, PRINCIPAL, REPLAY, STEP_UP_REPLAY, VIEW, WORKER};
+use crate::{
+    watermark::{self, Window},
+    Events, PRINCIPAL, REPLAY, STEP_UP_REPLAY, VIEW, WORKER,
+};
 use bilibi_authz::{authorize_key, SystemScope};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::Scope;
@@ -50,18 +53,17 @@ pub struct SubscriberState {
     /// them over.
     pub missed: i64,
     pub first_missed: Option<i64>,
-    /// `missed` stopped at the cap ([`MISSED_CAP`] for each event name it
-    /// reads): there are at least that many.
+    /// The count stopped before the newest event, at [`MISSED_CAP`] or at the
+    /// read's time limit: there are at least `missed`.
     pub missed_more: bool,
-    /// False when the missed events could not be counted within the read's
-    /// time limit; `missed` and `first_missed` then say nothing.
-    pub missed_counted: bool,
 }
-/// The most missed events counted for each event name a subscriber reads.
+/// Counting a subscriber's missed events stops once it has found this many.
 pub const MISSED_CAP: i64 = 10_000;
+/// Events read after the watermark by each statement of the missed count.
+const SCAN: i64 = 2_000;
 /// The longest one statement of [`Events::subscriber_states`] may run, in
 /// milliseconds, and how long the per-subscriber reads may take together
-/// before the rest are left out.
+/// before the latest receipts are left out and the missed counts stop early.
 const STATEMENT_MS: u64 = 5_000;
 const BUDGET: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug)]
@@ -119,9 +121,6 @@ impl Replay {
 const PENDING: &str = "SELECT d.subscriber,count(*),count(*) FILTER (WHERE d.last_error IS NOT NULL),min(d.event_id) FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.delivered_at IS NULL AND e.tenant_id=$1 GROUP BY d.subscriber";
 // One subscriber's latest receipt, newest first through `base_events_delivered`.
 const LAST_DELIVERED: &str = "SELECT d.event_id,(extract(epoch FROM e.recorded_at)*1000000)::bigint,(extract(epoch FROM d.delivered_at)*1000000)::bigint FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.subscriber=$2 AND d.delivered_at IS NOT NULL AND e.tenant_id=$1 ORDER BY d.event_id DESC LIMIT 1";
-// Each event name's missed events in recording order, stopping at the cap,
-// so the first one found for a name is its first missed event.
-const MISSED: &str = "SELECT count(*),min(m.id) FROM unnest($2::text[]) AS n(name) CROSS JOIN LATERAL (SELECT e.id FROM base_events e WHERE e.tenant_id=$1 AND e.name=n.name AND e.erased_at IS NULL AND NOT EXISTS (SELECT 1 FROM base_events_deliveries d WHERE d.event_id=e.id AND d.subscriber=$3) ORDER BY e.id LIMIT $4) m";
 
 /// One read in a savepoint, under the transaction's statement time limit.
 /// `None` when PostgreSQL cancelled it for running past the limit; the
@@ -195,11 +194,13 @@ impl Events {
     /// missed. Needs [`VIEW`].
     ///
     /// No read here is a scan without a bound. Pending figures come from the
-    /// pending rows only. Each statement may run five seconds; the latest
-    /// receipt and the missed count of a subscriber that run longer are left
-    /// out (`last_delivered` is `None`, `missed_counted` is false) instead of
-    /// failing the read, and once those reads have taken ten seconds together
-    /// the remaining ones are left out too.
+    /// pending rows only. Missed events are counted from the subscriber's
+    /// watermark on, [`SCAN`] events a statement, until the newest event,
+    /// [`MISSED_CAP`] missed events or the time limit; stopping early sets
+    /// `missed_more`. Each statement may run five seconds; a latest receipt
+    /// that runs longer is left out (`last_delivered` is `None`) instead of
+    /// failing the read, and so are the remaining ones once these reads have
+    /// taken ten seconds together.
     pub async fn subscriber_states(
         &self,
         client: &mut tokio_postgres::Client,
@@ -226,7 +227,6 @@ impl Events {
                     missed: 0,
                     first_missed: None,
                     missed_more: false,
-                    missed_counted: true,
                 };
                 ((*key).to_owned(), state)
             })
@@ -246,7 +246,6 @@ impl Events {
                     missed: 0,
                     first_missed: None,
                     missed_more: false,
-                    missed_counted: true,
                 });
             state.pending = row.get(1);
             state.failing = row.get(2);
@@ -270,23 +269,34 @@ impl Events {
             if !state.mounted {
                 continue;
             }
-            let counted = if started.elapsed() < BUDGET {
-                bounded(
+            // Every event it reads up to the watermark has a delivery, so
+            // the first missed event is in the first events read after it.
+            let mut after = watermark::read(&tx, tenant, &state.subscriber).await?;
+            loop {
+                let read = bounded(
                     &mut tx,
-                    MISSED,
-                    &[&tenant, &state.events, &state.subscriber, &MISSED_CAP],
+                    watermark::WINDOW,
+                    &[&tenant, &state.events, &state.subscriber, &after, &SCAN],
                 )
-                .await?
-            } else {
-                None
-            };
-            match counted.as_ref().and_then(|rows| rows.first()) {
-                Some(row) => {
-                    state.missed = row.get(0);
-                    state.first_missed = row.get(1);
-                    state.missed_more = state.missed >= MISSED_CAP;
+                .await?;
+                let Some(window) = read
+                    .as_ref()
+                    .and_then(|rows| rows.first())
+                    .map(Window::from_row)
+                else {
+                    state.missed_more = true;
+                    break;
+                };
+                state.missed += window.missed;
+                state.first_missed = state.first_missed.or(window.first_missed);
+                match window.last {
+                    Some(last) if window.read == SCAN => after = last,
+                    _ => break,
                 }
-                None => state.missed_counted = false,
+                if state.missed >= MISSED_CAP || started.elapsed() >= BUDGET {
+                    state.missed_more = true;
+                    break;
+                }
             }
         }
         tx.commit().await?;
