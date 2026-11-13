@@ -6,6 +6,9 @@ use bilibi_database::Error;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
+/// Approvals one bell render reads. The bell lists five and counts up to
+/// this many, then shows `N+`.
+const BELL_APPROVALS: i64 = 10;
 pub(crate) struct ApprovalTodos(pub Arc<Engine>);
 impl bilibi_notifications::TodoSource for ApprovalTodos {
     fn read<'a>(&'a self, scope: &'a Scope) -> bilibi_notifications::TodoFuture<'a> {
@@ -19,31 +22,25 @@ impl bilibi_notifications::TodoSource for ApprovalTodos {
                     Err(error) => return Err(error),
                 }
             }
-            let mut entries = Vec::new();
-            let mut after = None;
-            for _ in 0..5 {
-                let page = match self
-                    .0
-                    .my_approvals(
-                        scope,
-                        &ApprovalQuery {
-                            limit: 100 - entries.len() as i64,
-                            after,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    Ok(page) => page,
-                    Err(Error::Forbidden | Error::Unauthorized) => return Ok(Default::default()),
-                    Err(error) => return Err(error),
-                };
-                entries.extend(page.entries);
-                after = page.next_cursor;
-                if entries.len() == 100 || after.is_none() {
-                    break;
-                }
-            }
+            // One bounded read: the bell shows a handful, and a reader who
+            // may view approvals but decides few of them would otherwise
+            // make every render scan the whole waiting list.
+            let page = match self
+                .0
+                .my_approvals(
+                    scope,
+                    &ApprovalQuery {
+                        limit: BELL_APPROVALS,
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(Error::Forbidden | Error::Unauthorized) => return Ok(Default::default()),
+                Err(error) => return Err(error),
+            };
+            let (entries, after) = (page.entries, page.next_cursor);
             let count = entries.len();
             Ok(bilibi_notifications::TodoList {
                 count,

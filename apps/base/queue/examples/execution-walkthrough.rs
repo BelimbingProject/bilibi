@@ -372,6 +372,75 @@ async fn main() -> Result<()> {
         let _ = stop.send(true);
         return running.await.map_err(|_| Error::Internal)?;
     }
+    if command == "burst" {
+        // One slot with a one-second poll runs a backlog of short jobs without
+        // sleeping between them: the slot sleeps only when nothing is due.
+        // Sleeping after every job would take a second per job; this exits 1
+        // when the backlog is not finished in half that time.
+        const JOBS: u64 = 20;
+        let actor = authentication
+            .authenticate(&**client, 1, 1, String::new())
+            .await?;
+        let mut tx = boundary
+            .begin(&mut client, actor.mutation_context("queue.specimen.burst"))
+            .await?;
+        let mut ids = Vec::new();
+        for _ in 0..JOBS {
+            let job = queue
+                .enqueue_for(
+                    &mut tx,
+                    &actor,
+                    "queue/execution-walkthrough",
+                    json!({"mode":"complete"}),
+                )
+                .await?;
+            ids.push(job.id());
+        }
+        tx.commit().await?;
+        drop(client);
+        let config = Config {
+            concurrency: 1,
+            poll_interval: Duration::from_secs(1),
+            lease_seconds: 30,
+            max_runtime: Duration::from_secs(90),
+        };
+        let executor = Executor::from_services(&services, config)?;
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let started = std::time::Instant::now();
+        let running = tokio::spawn(executor.run(stopped));
+        let limit = Duration::from_secs(JOBS / 2);
+        let finished = loop {
+            let left: i64 = db
+                .get()
+                .await?
+                .query_one(
+                    "SELECT count(*) FROM base_queue_jobs WHERE id=ANY($1) AND state<>'completed'",
+                    &[&ids],
+                )
+                .await?
+                .get(0);
+            if left == 0 {
+                break true;
+            }
+            if started.elapsed() >= limit {
+                println!("burst: {left} of {JOBS} jobs not completed");
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let elapsed = started.elapsed();
+        let _ = stop.send(true);
+        running.await.map_err(|_| Error::Internal)??;
+        println!(
+            "burst: jobs={JOBS} slots=1 poll=1s finished={finished} elapsed_ms={}",
+            elapsed.as_millis()
+        );
+        return if finished {
+            Ok(())
+        } else {
+            Err(Error::Internal)
+        };
+    }
     if command == "inspect" {
         let rows = client.query("SELECT j.id,j.tenant_id,j.state,j.attempt,j.failure_code,j.actor_kind,j.system_principal,count(e.job_id)::bigint AS effects,(SELECT count(*) FROM queue_company_effects c WHERE c.job_id=j.id)::bigint AS company_effects FROM base_queue_jobs j LEFT JOIN queue_execution_effects e ON e.job_id=j.id WHERE j.worker_id='queue/execution-walkthrough' GROUP BY j.id ORDER BY j.id",&[]).await?;
         for row in rows {

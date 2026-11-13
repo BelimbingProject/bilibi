@@ -63,7 +63,10 @@ One failed heartbeat (a busy pool or database) does not end the attempt: the
 handler keeps running while the next beat still falls inside its lease, and is
 dropped before the lease can run out.
 
-Every slot polls once a second, so a poll reads only what it can act on: the
+A slot that ran a job claims the next one at once, so a backlog of short jobs
+runs back to back. A slot sleeps for the poll interval (one second in the Web
+host) only when nothing was due or the store failed. Every claim reads only
+what it can act on: the
 expired leases (`base_queue_expired_leases`) and the due jobs
 (`base_queue_claim`), never the finished ones. Both searches compare with
 `now()`, the claim transaction's start, because a volatile `clock_timestamp()`
@@ -215,6 +218,10 @@ again. With the specimen's three-second lease, the job expires, backs off and
 finishes on attempt two with one effect in `queue_execution_effects`. Ctrl-C
 stops the private executable gracefully. It never drives Herdr or shared app
 processes. The contributed worker/handler is absent from production.
+
+`burst` enqueues 20 short jobs and runs them on one slot with a one-second
+poll. It exits 1 unless all 20 complete within 10 seconds, which a slot that
+slept after every job could not do.
 
 Other enqueue modes: `retry`, `discard`, `cancel`, `panic`, `invalid`,
 `heartbeat`, `timeout`, `late-write`, `fenced-write`, `company-write`, `complete`, `secret`

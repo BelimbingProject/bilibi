@@ -492,10 +492,13 @@ impl Executor {
             // Infrastructure errors do not expose SQL/args or terminate the whole
             // executor; abandoned claims are reconciled by DB lease recovery.
             match store::claim(&self.db, self.config.lease_seconds).await {
+                // A job ran: more may be waiting, so claim again at once. The
+                // slot sleeps only when nothing was due or the store failed.
                 Ok(Some(claim)) => {
-                    if self.execute(claim).await.is_err() {
-                        eprintln!("queue execution infrastructure unavailable");
+                    if self.execute(claim).await.is_ok() {
+                        continue;
                     }
+                    eprintln!("queue execution infrastructure unavailable");
                 }
                 Ok(None) => {}
                 Err(_) => eprintln!("queue claim infrastructure unavailable"),

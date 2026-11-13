@@ -164,6 +164,11 @@ async fn main() -> Result<()> {
                 tokio::join!(engine.deliver_transition(id), engine.deliver_transition(id));
             println!("first={first:?} second={second:?}");
         }
+        "proof-delivery" => {
+            reference::proofs::delivery(&db, &services, &engine, &scope, id).await?
+        }
+        "proof-maintenance" => reference::proofs::maintenance(&db, &engine, &scope).await?,
+        "proof-bell" => reference::proofs::bell(&db, &services, &engine, &scope).await?,
         "maintenance" => println!(
             "maintenance={:?}",
             engine.maintain_workflows(&scope, 100, 30).await?
