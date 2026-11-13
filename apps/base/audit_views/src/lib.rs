@@ -18,6 +18,7 @@ mod extensions;
 mod history;
 mod integrity;
 mod mutations;
+mod period;
 mod present;
 
 use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
@@ -26,12 +27,14 @@ use bilibi_module_registry::{
     contributions::{Access, Embed, EmbedContext, Method, Route, EMBEDS, ROUTES},
     Contribution, Module, Provenance, Service,
 };
+use bilibi_queue::{HandlerBinding, HandlerService, Worker, HANDLERS, WORKERS};
 use bilibi_tenancy::Scope;
 use bilibi_ui::page::PageService;
 use std::sync::Arc;
 
 /// Opens the Audit screens and the dashboard feed.
 pub use extensions::{HistoryKind, HISTORY_KINDS, HISTORY_KINDS_PER_RECORD};
+pub use integrity::VERIFY_WORKER;
 
 pub const LIST: &str = "admin.audit.log.list";
 /// Retains and releases an action. The control is shown only to holders, and
@@ -105,6 +108,11 @@ inventory::submit! {
         operation: "integrity", access: Access::OperatorCapability(LIST), framed: true,
     })
 }
+// The verification the page starts is walked by a queued job, as the operator
+// who asked; each attempt asks the capability again and the job proves the
+// operator itself.
+inventory::submit! { Contribution::new(WORKERS, VERIFY_WORKER, provenance!(), &Worker { max_attempts: 5, validate: integrity::job_arguments }) }
+inventory::submit! { Contribution::new(HANDLERS, VERIFY_WORKER, provenance!(), &HandlerBinding { service: "base/audit_views.verify_job", capability: LIST }) }
 inventory::submit! {
     Contribution::new(ROUTES, "base/audit_views.mutations", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
         method: Method::Get, path: "/audit/mutations", service: "base/audit_views.mutations",
@@ -145,7 +153,7 @@ bilibi_dashboard::contribute!(
 
 inventory::submit! {
     Module { id: MODULE, layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/audit", "base/authz", "base/ui", "base/dashboard", "base/menu", "base/datetime", "base/locale"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/audit", "base/authz", "base/ui", "base/dashboard", "base/menu", "base/datetime", "base/locale", "base/queue"],
         migrations: &[],
         services: &[
             Service { id: "base/audit_views.pages", factory: |services| {
@@ -159,6 +167,16 @@ inventory::submit! {
             Service { id: "base/audit_views.integrity", factory: |services| {
                 Ok(Arc::new(PageService::<Scope, Error>(Arc::new(integrity::Pages {
                     db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+                    boundary: services.get("base/database.mutations")?,
+                    queue: services.get(bilibi_queue::SERVICE)?,
+                    display: services.get("base/datetime.display")?,
+                    locales: services.get("base/locale.locales")?,
+                }))))
+            } },
+            Service { id: "base/audit_views.verify_job", factory: |services| {
+                Ok(Arc::new(HandlerService(Arc::new(integrity::VerifyJob {
+                    db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+                    queue: services.get(bilibi_queue::SERVICE)?,
                 }))))
             } },
             Service { id: "base/audit_views.mutations", factory: |services| {
@@ -193,4 +211,9 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
     service: "base/audit_views.pages",
     contracts: &[],
     pending: bilibi_module_registry::contributions::Pending::Every { reason: "Exporting the action log writes through the Audit Views facade; no contract yet." },
+}) }
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "base/audit_views.integrity", bilibi_module_registry::Provenance { module: "base/audit_views", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
+    service: "base/audit_views.integrity",
+    contracts: &[],
+    pending: bilibi_module_registry::contributions::Pending::Events { events: &["verify"], reason: "Starting a verification and its job writes through the Audit facade; no contract yet." },
 }) }

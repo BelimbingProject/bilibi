@@ -510,6 +510,7 @@ dependencies = [
  "bilibi-locale",
  "bilibi-menu",
  "bilibi-module-registry",
+ "bilibi-queue",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",

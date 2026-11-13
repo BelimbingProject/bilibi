@@ -8,6 +8,7 @@
 //! each store's handler, with a sealed grant only this module issues.
 mod agent;
 mod approval;
+mod audit_actions;
 mod documents;
 mod due;
 mod holds;

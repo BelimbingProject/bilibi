@@ -258,16 +258,14 @@ pub(crate) struct Classes {
     by_key: BTreeMap<&'static str, (&'static str, &'static RecordClass)>,
 }
 impl Classes {
-    /// A contributor must depend on `base/privacy`, so the graph shows which
-    /// modules keep records on a clock.
+    /// A contributor must depend on `base/privacy` (or be it: the audit
+    /// actions class), so the graph shows which modules keep records on a clock.
     pub(crate) fn from_catalog(catalog: &Catalog, modules: &[&Module]) -> RegistryResult<Self> {
         let mut by_key = BTreeMap::new();
         for entry in catalog.entries::<RecordClass>(RECORD_CLASSES)? {
             let module = entry.provenance.module;
-            if !modules
-                .iter()
-                .any(|m| m.id == module && m.dependencies.contains(&"base/privacy"))
-            {
+            let depends = |m: &&Module| m.id == module && m.dependencies.contains(&"base/privacy");
+            if module != "base/privacy" && !modules.iter().any(depends) {
                 return Err(RegistryError::Service(format!(
                     "record class {} comes from {module}, which does not depend on base/privacy",
                     entry.id
