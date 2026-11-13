@@ -6,7 +6,13 @@ use bilibi_database::{Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_module_registry::{Catalog, Consumer, Entry, RegistryError, Services};
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::Value;
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{sync::watch, task::JoinSet};
 
 pub const HANDLERS: &str = "base/queue.handlers";
@@ -204,6 +210,49 @@ struct BoundEnding {
     principal: &'static str,
     capability: &'static str,
 }
+/// The loops an executor runs: its slots and one endings loop.
+#[derive(Clone, Copy)]
+enum Loop {
+    Slot,
+    Endings,
+}
+impl Loop {
+    fn name(self) -> &'static str {
+        match self {
+            Loop::Slot => "execution slot",
+            Loop::Endings => "endings loop",
+        }
+    }
+}
+impl Executor {
+    /// Spawns one loop; `again` first waits a poll interval, so a loop that
+    /// keeps failing is not restarted in a spin.
+    fn start(
+        self: &Arc<Self>,
+        slots: &mut JoinSet<Result<()>>,
+        kinds: &mut HashMap<tokio::task::Id, Loop>,
+        kind: Loop,
+        shutdown: &watch::Receiver<bool>,
+        again: bool,
+    ) {
+        let executor = self.clone();
+        let mut stop = shutdown.clone();
+        let handle = slots.spawn(async move {
+            if again {
+                tokio::select! {
+                    _ = tokio::time::sleep(executor.config.poll_interval) => {}
+                    _ = stop.changed() => return Ok(()),
+                }
+            }
+            match kind {
+                Loop::Slot => executor.slot(stop).await,
+                Loop::Endings => executor.endings(stop).await,
+            }
+        });
+        kinds.insert(handle.id(), kind);
+    }
+}
+
 /// Ended jobs told per poll and process; the rest wait for the next poll.
 const ENDING_BATCH: i64 = 100;
 
@@ -459,30 +508,46 @@ impl Executor {
     /// One loop per slot, bounded by config; each app process runs independently.
     /// Stopping drops in-flight handlers (transactions roll back). Their leases
     /// remain durable and are recovered by a subsequent worker process.
+    /// A slot or the endings loop that ends before shutdown (a panic in
+    /// executor code) is started again after one poll interval, so the
+    /// executor never stops quietly while the process keeps serving (#557).
     pub async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let mut slots = JoinSet::new();
+        let mut kinds = HashMap::new();
         for _ in 0..self.config.concurrency {
-            let executor = self.clone();
-            let stop = shutdown.clone();
-            slots.spawn(async move { executor.slot(stop).await });
+            self.start(&mut slots, &mut kinds, Loop::Slot, &shutdown, false);
         }
-        let executor = self.clone();
-        let stop = shutdown.clone();
-        slots.spawn(async move { executor.endings(stop).await });
+        self.start(&mut slots, &mut kinds, Loop::Endings, &shutdown, false);
         loop {
             if *shutdown.borrow() {
                 break;
             }
             tokio::select! {
                 change = shutdown.changed() => { if change.is_err() || *shutdown.borrow() { break; } }
-                result = slots.join_next() => {
-                    return match result { Some(Ok(result)) => result, _ => Err(Error::Internal) };
+                Some(ended) = slots.join_next_with_id() => {
+                    let (id, stopped) = match &ended {
+                        Ok((id, result)) => (*id, result.is_ok()),
+                        Err(error) => (error.id(), false),
+                    };
+                    let kind = kinds.remove(&id).ok_or(Error::Internal)?;
+                    // A loop returns `Ok` only when it was told to stop.
+                    if stopped || *shutdown.borrow() {
+                        continue;
+                    }
+                    eprintln!("queue {} ended unexpectedly; starting it again", kind.name());
+                    self.start(&mut slots, &mut kinds, kind, &shutdown, true);
                 }
             }
         }
         slots.abort_all();
         while slots.join_next().await.is_some() {}
         Ok(())
+    }
+    /// How long one ending may take: one lease, at most the attempt bound.
+    /// The loop tells endings one at a time, so a stalled owner hook delays
+    /// every other owner's endings by at most this (#557).
+    fn ending_runtime(&self) -> Duration {
+        Duration::from_secs(self.config.lease_seconds as u64).min(self.config.max_runtime)
     }
     async fn slot(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> Result<()> {
         loop {
@@ -538,7 +603,7 @@ impl Executor {
                             let executor = self.clone();
                             let told = tokio::spawn(async move {
                                 tokio::time::timeout(
-                                    executor.config.max_runtime,
+                                    executor.ending_runtime(),
                                     executor.tell(id, tenant, &worker),
                                 )
                                 .await
@@ -741,8 +806,13 @@ impl Executor {
                         beat,
                         store::heartbeat(&self.db,id,&token,self.config.lease_seconds),
                     ).await {
-                        Ok(Ok(true)) => renewed_at = asked,
-                        Ok(Ok(false)) => return Ok(()),
+                        Ok(Ok(store::Beat::Renewed)) => renewed_at = asked,
+                        // The handler's own fenced transaction holds the row
+                        // (#557): the lease cannot be recovered while it does,
+                        // so wait for the next beat. It is not a renewal, so a
+                        // failing beat after it still counts from the last one.
+                        Ok(Ok(store::Beat::Busy)) => {}
+                        Ok(Ok(store::Beat::Lost)) => return Ok(()),
                         // A busy pool or database fails one renewal, not the
                         // attempt: the handler keeps running while the next
                         // beat still falls inside the lease it holds, and is
