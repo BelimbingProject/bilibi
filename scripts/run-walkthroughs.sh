@@ -116,6 +116,7 @@ WALKTHROUGHS=(
   'core|document-pending-merge|apps/core/document|pending-merge-proof|fixture-seed|BILIBI_DOCUMENT_MERGE_PROOF=disposable BILIBI_DOCUMENT_MERGE_ROOT=@/documents|-'
   'core|document-customer-share|apps/core/document|customer-share-walkthrough|fixture-seed|BILIBI_DOCUMENT_CUSTOMER=disposable BILIBI_DOCUMENT_CUSTOMER_ROOT=@/documents|-'
   'core|document-scan-held|apps/core/document|scan-held-proof|fixture-seed|BILIBI_DOCUMENT_SCAN_PROOF=disposable BILIBI_DOCUMENT_SCAN_ROOT=@/documents|-'
+  'core|document-discard-file|apps/core/document|discard-file-proof|fixture-seed|BILIBI_DOCUMENT_DISCARD_PROOF=disposable BILIBI_DOCUMENT_DISCARD_ROOT=@/documents|-'
   'core|geonames|apps/core/geonames|geonames-walkthrough|none|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
   'core|geonames-import|apps/core/geonames|geonames-import-walkthrough|migrate|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'
   'core|geonames-postcodes|apps/core/geonames|geonames-postcodes-walkthrough|migrate|BILIBI_DISPOSABLE_GEONAMES_DEMO=yes|-'

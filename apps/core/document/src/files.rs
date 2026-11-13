@@ -116,24 +116,24 @@ impl SubjectOwner for DocumentFiles {
     }
 }
 
-const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
+pub(crate) const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
 
 /// One ledger row.
-struct Ledger {
-    id: i64,
-    company_id: i64,
+pub(crate) struct Ledger {
+    pub(crate) id: i64,
+    pub(crate) company_id: i64,
     subject: String,
-    artifact_id: Option<String>,
+    pub(crate) artifact_id: Option<String>,
     media_public_id: Option<String>,
     file_name: String,
     content_type: String,
     byte_size: i64,
     sha256: String,
     scan_status: String,
-    state: String,
+    pub(crate) state: String,
     stored_by: i64,
 }
-fn from_row(row: &Row) -> Ledger {
+pub(crate) fn from_row(row: &Row) -> Ledger {
     Ledger {
         id: row.get("id"),
         company_id: row.get("company_id"),
@@ -150,7 +150,7 @@ fn from_row(row: &Row) -> Ledger {
     }
 }
 /// The values audit keeps for a ledger row: no content, no storage path.
-fn audit_values(row: &Ledger) -> Value {
+pub(crate) fn audit_values(row: &Ledger) -> Value {
     json!({
         "artifact_id": row.artifact_id,
         "media_public_id": row.media_public_id,
@@ -182,6 +182,12 @@ impl Owner for DocumentFiles {
                 Operation::Create | Operation::Retain
                     if scope.principal() == Some(crate::scan::PRINCIPAL) =>
                 {
+                    parties
+                        .organisation_name(client, scope, company)
+                        .await?
+                        .ok_or(Error::NotFound)?;
+                }
+                Operation::Delete if scope.principal() == Some(crate::discard::PRINCIPAL) => {
                     parties
                         .organisation_name(client, scope, company)
                         .await?
@@ -269,6 +275,12 @@ impl Owner for DocumentFiles {
                             _ => false,
                         }
                     }
+                }
+                // The cleaner deletes only a file its job already took out of
+                // reach of every write (README, Files and scanning).
+                Operation::Delete if scope.principal() == Some(crate::discard::PRINCIPAL) => {
+                    authorize_proof(client, scope, crate::contributions::DISCARD_SETTLE).await?;
+                    row.state == "discarding"
                 }
                 Operation::Delete => {
                     authorize_proof(client, scope, MANAGE).await?;
@@ -396,6 +408,7 @@ async fn upload_limit(client: &Client, scope: &Scope, settings: &Settings) -> Re
 
 /// Checks the upload, commits its reserved ledger row, stores the bytes
 /// through `base/artifacts` and marks the row stored.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
     client: &mut Client,
     scope: &Scope,
@@ -403,6 +416,7 @@ pub(crate) async fn store(
     artifacts: &Artifacts,
     media: &Media,
     settings: &Settings,
+    queue: &bilibi_queue::Queue,
     upload: Upload<'_>,
 ) -> WriteResult<StoredFile> {
     authorize_proof(&*client, scope, MANAGE).await?;
@@ -472,6 +486,7 @@ pub(crate) async fn store(
             })
         })
         .await?;
+    crate::discard::schedule(queue, &mut tx, tenant, reserved.id).await?;
     tx.commit().await?;
 
     let staged = media
