@@ -160,6 +160,26 @@ pub struct Question {
     pub purpose: String,
 }
 
+/// Many recipients of one elective message, checked together at dispatch
+/// time (`Consent::check_many`): one company, channel and purpose.
+#[derive(Clone, Debug)]
+pub struct Batch {
+    /// The company on whose behalf the message would be sent.
+    pub company_id: i64,
+    pub channel: Channel,
+    pub purpose: String,
+    pub recipients: Vec<Recipient>,
+}
+/// One recipient of a [`Batch`] and the sender's correlation key for it.
+#[derive(Clone, Debug)]
+pub struct Recipient {
+    pub contact: Contact,
+    pub key: String,
+}
+/// A batch checks at most this many recipients, so one transaction's log
+/// insert and audit evidence stay bounded.
+pub const BATCH_MAX: usize = 1000;
+
 /// One consent decision to record: a new version for its person or address,
 /// purpose and channel.
 #[derive(Clone, Debug)]

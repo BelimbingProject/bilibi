@@ -62,11 +62,16 @@ All tables carry `tenant_id` and `company_id`. A subject is either one Core pers
 
 1. An active suppression for the company, person or address (or the address's keyed hash, after an erasure) on the channel returns `suppressed`.
 2. The latest decision for the purpose on the channel applies. If none exists, the purpose decision for `any` applies.
-3. Between person and address decisions, the most recently recorded decision wins. A tie refuses.
-4. A granted decision allows. A withdrawal returns `withdrawn`.
-5. With no decision, `core.consent.default_new_address` chooses `allowed` or `no_consent`.
+3. A withdrawal for `any` recorded at the same time as the channel's decision or later wins over it: a later "stop all marketing" ends every earlier channel grant. A later grant for `any` does not undo an earlier channel withdrawal.
+4. Between person and address decisions, the most recently recorded decision wins. A tie refuses.
+5. A granted decision allows. A withdrawal returns `withdrawn`.
+6. With no decision, `core.consent.default_new_address` chooses `allowed` or `no_consent`.
 
 `check` is a write inside the sender's `MutationTransaction`. The `key` correlates the answer with the sender's delivery record; it is not an idempotency key.
+
+**A sender with many recipients calls `check_many`: one company, channel and purpose, up to `BATCH_MAX` (1,000) recipients, each with its own key.** It authorizes, reads the setting and the tenant's key once, reads decisions and suppressions for every recipient in two queries, and logs every answer in one insert. Answers come back in recipient order. One invalid recipient refuses the whole batch and names it by position.
+
+**A check holds the company shared, not exclusive.** `authorize_work_target` takes the company `FOR KEY SHARE`, which archiving's `FOR UPDATE` waits for, so the status the check judged holds until the sender commits. Concurrent checks and other writes into the company do not wait on it. Recording, suppressing and lifting still hold the company `FOR NO KEY UPDATE`.
 
 ## Facade
 
@@ -75,6 +80,7 @@ The crate root exports `Consent`, its inputs and its result types. Every method 
 | Method | Purpose |
 | --- | --- |
 | `check` | Read and log a fresh eligibility answer at dispatch time |
+| `check_many` | `check` for up to 1,000 recipients of one message, in one pass |
 | `preview` | Show the answer now without logging it |
 | `record` | Add a grant or withdrawal with evidence |
 | `suppress` | Add an active suppression; repeating the same suppression is idempotent |
