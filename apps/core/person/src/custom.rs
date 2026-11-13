@@ -84,13 +84,8 @@ pub(crate) async fn check(
 /// The active fields and this person's values, for agents and pages:
 /// `[{key, label, type, value}]` in the fields' order. An archived field, and
 /// its value, is left out.
-pub(crate) async fn listed(
-    client: &dyn ReadClient,
-    scope: &Scope,
-    values: &Custom,
-) -> Result<Value> {
-    let active = fields()?.active(client, scope, RECORD_TYPE).await?;
-    Ok(Value::Array(
+pub(crate) fn listed(active: &[bilibi_custom_fields::Definition], values: &Custom) -> Value {
+    Value::Array(
         active
             .iter()
             .map(|definition| {
@@ -102,7 +97,15 @@ pub(crate) async fn listed(
                 })
             })
             .collect(),
-    ))
+    )
+}
+/// The tenant's active person fields, in their order: read once per answer
+/// and passed to `listed` for each person (#603).
+pub(crate) async fn active(
+    client: &dyn ReadClient,
+    scope: &Scope,
+) -> Result<Vec<bilibi_custom_fields::Definition>> {
+    fields()?.active(client, scope, RECORD_TYPE).await
 }
 
 /// A custom field's stored value as the SQL type its sort and comparisons

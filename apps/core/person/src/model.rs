@@ -182,7 +182,8 @@ pub fn validate(input: &PersonInput) -> std::result::Result<PersonInput, Vec<Fie
 }
 
 /// Replaces visible identity fields. A masked contact must be absent/null and
-/// is preserved by the owner; a visible null/omitted contact clears its value.
+/// is preserved by the owner; a visible `None` contact clears its value. The
+/// `core.person.update` contract keeps a contact its input omits instead.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Update {
