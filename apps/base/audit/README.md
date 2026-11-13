@@ -9,7 +9,8 @@
 and the diagnostics table `base_audit_capture_failures` (migration
 `006-audit-evidence`). Rows outlive actors and subjects: no foreign keys to
 tenants, accounts or records. PostgreSQL refuses UPDATE, DELETE and TRUNCATE on
-evidence, stamps `recorded_at` from `clock_timestamp()` and fills a missing
+evidence (the only changes it admits are the chain link, approved erasure and
+action retention, below), stamps `recorded_at` from `clock_timestamp()` and fills a missing
 `occurred_at`. The frozen legacy ledgers `audit_mutations` and
 `bilibi_action_commits` were carried over once as `source = 'legacy'` rows and
 receive nothing further.
@@ -82,8 +83,8 @@ quote parameter values or data raised by a function.
 Each command runs on a connection taken out of the pool and closed when it
 ends. A read-only transaction still allows functions with session effects (a
 session advisory lock such as `pg_advisory_lock`, a session setting through
-`set_config`); closing the connection ends them, so one command cannot hold the
-audit chain's commit lock or change the session of the next pooled caller.
+`set_config`); closing the connection ends them, so one command cannot hold a
+tenant's audit chain lock or change the session of the next pooled caller.
 Known gap: the console still runs as the application's database role, so
 functions such as `pg_terminate_backend` are not refused; a SELECT-only role
 for the console is a later change.
@@ -106,14 +107,28 @@ capability/account checks; C10 owns the screen. Both reuse this executor rather
 than running editor SQL themselves.
 
 `src/read.rs` holds the bounded tenant reads the Audit screens use:
-`list_actions` (search, actor type, event family, result, diagnostics, sort,
+`list_actions` (period, search, actor type, event family, result, diagnostics,
 bounded page), `toggle_retained` (the mutable bookmark; the recorded bit never
-changes), `recent_mutations`, `list_mutations` (search, event, sort, bounded
+changes), `recent_mutations`, `list_mutations` (period, search, event, bounded
 page) and `subject_history` (one record's latest mutations under any of its
 kinds). `MutationEntry::withhold` takes a reader's withheld fields out of an
 entry and names them instead. They never ask who may read: this crate sits
 below Authz, so the screens in `base/audit_views` own the capability vocabulary,
 the checks and which fields are withheld.
+
+### List bounds
+
+**Both ledgers only grow, so `list_actions` and `list_mutations` never read a tenant's whole ledger.**
+
+| Bound | Rule |
+| --- | --- |
+| Period | Every query names `[since, until)` by event time; `ActionQuery::default()` and `MutationQuery::default()` read the last 30 days. The tenant timeline index (`tenant_id, occurred_at DESC, id DESC`) serves it |
+| Count | Matches are counted to `MAX_COUNT` (10,000); `more` says there are more. A page beyond the count reads nothing |
+| Order | Event time only, newest or oldest first (`descending`): the one order an index gives. The other sorts were removed |
+| Timeout | The count and the page run in one read-only transaction under a 5 s local statement timeout. A read that outlasts it returns an empty page with `timed_out`, not an error |
+
+- Both take `&mut tokio_postgres::Client`, because the timeout is local to a transaction.
+- `examples/bounded-evidence.rs` (`base/audit_views`) checks each bound.
 
 ## Personal-data erasure
 
@@ -129,16 +144,57 @@ the checks and which fields are withheld.
 - No session setting opens the path: the guard admits a change only while `base_audit_erase_values` runs as the evidence's owner (call stack and `current_user`), and `EXECUTE` is revoked from `PUBLIC`. Every other update, delete and truncate is refused.
 - Audit's own store, `base/audit.history`, exports the evidence history of the subject's person record.
 
+## Action retention
+
+**An action row past its retention period loses its address, URL, browser and payload values; who acted, when and the event stay** (migration `base-audit-011-bounded-evidence`).
+
+| Part | Rule |
+| --- | --- |
+| Period | No default: a company turns the record class `base/privacy.audit_actions` on and sets its days (`apps/base/privacy/README.md`, Retention). Action rows name no company, so they follow the tenant's primary company |
+| Exemption | A retained action (its bookmark on the Actions screen, else the `is_retained` bit recorded with it) is passed over and counted as kept |
+| What goes | `ip_address`, `url`, `user_agent` become NULL and each top-level payload value becomes `[erased]`. `erased_at` says when |
+| What stays | ID, tenant, actor, impersonator, event, time, trace and the payload's keys: the hash chain's facts, so the chain holds |
+| Facade | `erase_actions(tx, &Erasure, cutoff, companies, after, limit)`, sweep grants only, one batch of at most 1,000 rows in ID order |
+| Database | `base_audit_erase_actions` is refused unless the sweep is open in the tenant (`base_audit_erasure_causes`). The guard itself clears the row, so the function can change nothing else; every other update is refused |
+| Ledger | One append-only `base_audit_action_erasures` row per batch: sweep, cutoff, first and last ID, rows erased and kept, actor |
+
+- **Not built:** rows are never removed, so the ledgers still grow. Removing or archiving old rows needs the ledgers partitioned by time and a chain that can end at a partition; that design is open ([issue 579](https://github.com/BelimbingProject/bilibi/issues/579)).
+- `retention-walkthrough` (`base/privacy`) runs it through the scheduled sweep.
+
 ## Hash chain
 
-**Every mutation and action row is linked to the one before it over its ID, tenant, time, actor, event, record and field names; values are excluded, so approved erasure keeps the chain whole.**
+**Every mutation and action row is linked to the one before it in its tenant over its ID, tenant, time, actor, event, record and field names; values are excluded, so approved erasure keeps the chain whole.**
 
 - **Scope of the guarantee:** a removed row, or a changed ID, tenant, time, actor, event, record or field name, is detected. A changed value is not: values are outside the hash so that erasure can clear them, and only the evidence guard (no update outside the erasure functions) protects them.
-- A deferred constraint trigger links each row as its transaction commits, in commit order (advisory lock 841332), so no committed row is ever unlinked; rows from before migration 009 are linked by it.
-- `verify(client)` recomputes both chains and names the first `missing`, `changed` or `tail` break, or `unsealed` when a committed row has no link (its trigger was bypassed).
-- `base/audit_views` offers **Verify audit log** at `/audit/integrity` to platform operators; every check is recorded as `audit.chain.verified`.
+- **One chain per tenant and ledger** (`base_audit_chain_heads`: chain, tenant, last link). Rows of no tenant form chain 0. A commit takes only its own tenant's lock (`pg_advisory_xact_lock(841332, base_audit_chain_key(chain, tenant))`), so tenants do not queue behind each other.
+- **Linked in one pass per commit.** A deferred constraint trigger fires as the transaction commits, so no committed row is ever unlinked. Its first firing for a ledger computes the facts of every row the transaction wrote there, then takes the tenant's lock, links them in ID order and stores the links with one UPDATE; the other firings find their row linked and return.
+- **Heads are numbered** (`born`) in the order chains began, without gaps, so a removed head (a tenant's whole chain) is found, except the newest-born one.
+- Migration 011 linked the rows written before it again, under their tenants.
+- Measured on PostgreSQL 18 with `pgbench` (8 clients over 8 tenants, one mutation and one action row per commit): 275 commits a second before, 735 after; beside one client looping a 5,000-change commit, 15 before (515 ms each), 691 after (12 ms each).
+
+### Verification
+
+**`request_verification` starts one verification; `advance_verification` takes it one bounded step; a queued job in `base/audit_views` drives the steps.**
+
+| Part | Rule |
+| --- | --- |
+| Step | One short transaction (60 s statement timeout): choose the next tenant's chain, or recompute at most `STEP_LINKS` (10,000) links of the current one (`base_audit_verify_range`), or close a ledger with its report |
+| Resume | `base_audit_verifications` stores the ledger, tenant, link and hash the next step starts from. A stopped job resumes there; a repeated job finds nothing to redo |
+| One at a time | A second request while one runs is `Conflict`. A verification with no progress for 30 minutes is closed as `abandoned` by the next request |
+| Breaks | Per ledger, the first of `missing` (a link was removed), `changed` (a row's facts differ from its link), `tail` (the last links were removed), with the tenant, link and row; then `head` (a tenant's whole chain was removed) and `unsealed` (a committed row has no link: its trigger was bypassed) |
+| Result | `whole` or `broken` on the row, and one `audit.chain.verified` action written by the step that finishes it |
+| Snapshot | One range is one statement, so the head it compares is the head of the rows it read. Rows committed while a verification walks are checked when it reaches them |
+
+- The stored row is working state, not evidence, and is written outside the mutation boundary; the request and the result are audited.
+- `base/audit_views` offers **Verify audit log** at `/audit/integrity` to platform operators.
 
 ## Runtime evidence
+
+`examples/bounded-evidence.rs` in `base/audit_views` checks the chain per tenant, the list bounds and verification as a queued job, and fails when one does not hold:
+
+```sh
+BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes cargo run -p bilibi-audit-views --example bounded-evidence
+```
 
 Demonstrated without unit tests on a disposable database upgraded from the
 pre-P5 schema; see Firstmate task data `data/bilibi-p5/` (reset script, proof

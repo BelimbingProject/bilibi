@@ -118,7 +118,7 @@ Recording is a machine measurement on its own pooled connection, outside the cal
 ## Runtime evidence
 
 `examples/integration-walkthrough.rs` runs against a disposable database
-(`BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes`, `DATABASE_URL`) with a local fixture
+(`BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes`, `DATABASE_URL`, after `bilibi-web migrate`: it installs the fixture, which needs the tables) with a local fixture
 server: retained/redacted preview, HTTP error, body limit, streamed download,
 connect failure, timeout, tenant and system incoming rows, every visibility and
 capability gate, audited deletion and payload pruning.

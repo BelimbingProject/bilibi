@@ -207,7 +207,9 @@ The board's Schedule column reads each cron in plain words in the viewer's top-b
 
 Replay any moment with `cargo run -p bilibi-schedule --example schedule-walkthrough -- dst [key instant]`
 (no database). The other modes use a disposable database
-(`BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes`, `DATABASE_URL`, after `bilibi-web migrate`;
+(`BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes`, `DATABASE_URL`, after `bilibi-web migrate`
+and `BILIBI_ENV=development bilibi-web seed-production`, which stores the Dev instance
+role: without it the grant steps fail with `StepUpRequired { reason: "not_enrolled" }`;
 they install the walkthrough fixture); they link a private worker, handler and five definitions that
 production does not have:
 
