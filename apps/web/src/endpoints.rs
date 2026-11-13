@@ -121,11 +121,10 @@ async fn answer(
     path: HashMap<String, String>,
     body: Bytes,
 ) -> std::result::Result<Response, HttpError> {
-    let sender = api::client_address(
+    let sender = api::sender_key(api::client_address(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
-    )
-    .map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    ));
     let per_minute = {
         let client = app.db.get().await.map_err(Error::from)?;
         app.settings

@@ -2,7 +2,10 @@
 //! `base/mail.mailer` service; never open your own SMTP connection or write
 //! message files, which would skip the header validation in `render`. SMTP is used
 //! when `MAIL_HOST` is configured; otherwise the dev mailbox keeps every message
-//! as an `.eml` file so a reset link can be read without a mail server.
+//! as an `.eml` file so a reset link can be read without a mail server. The
+//! registered mailer sends to files only while the stored instance role is
+//! development: elsewhere `deliver` refuses with `Error::Config` naming
+//! `MAIL_HOST`, so no caller records as sent a message that only reached a file.
 //!
 //! Received mail: `parse` reads one message's bytes into its parts (bounces and
 //! complaints included) and `sanitise_html` makes its HTML safe to store and show.
@@ -35,6 +38,9 @@ use bilibi_module_registry::{Module, Service};
 use bilibi_settings::Settings;
 
 pub const SERVICE: &str = "base/mail.mailer";
+/// `base/system`'s stored instance role, read by key: System Info shows this
+/// mailer, so mail cannot depend on that module.
+const INSTANCE_ROLE: &str = "instance.role";
 use std::{future::Future, pin::Pin, sync::Arc};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -86,6 +92,33 @@ impl Mailer {
     pub fn dev_mailbox(&self) -> Option<&Mailbox> {
         self.transport.dev_mailbox()
     }
+    /// Whether `deliver` may send now. SMTP always may. The dev mailbox may
+    /// only on an installation whose stored role is development; elsewhere
+    /// this is `Error::Config` naming `MAIL_HOST`. A standalone mailer (built
+    /// with `new` or `from_env`, not the registered service) reads no role.
+    pub async fn ready(&self) -> Result<()> {
+        if self.transport.dev_mailbox().is_none() {
+            return Ok(());
+        }
+        let Some((db, settings)) = &self.settings else {
+            return Ok(());
+        };
+        let unavailable = || Error::Config("the instance role is unavailable".into());
+        let client = db.get().await.map_err(|_| unavailable())?;
+        let role = settings
+            .get_global(&**client, INSTANCE_ROLE)
+            .await
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(unavailable)?;
+        if role == "development" {
+            Ok(())
+        } else {
+            Err(Error::Config(format!(
+                "set MAIL_HOST to send mail; a {role} installation does not keep mail in files"
+            )))
+        }
+    }
     /// Registered mailers read current installation settings on every render/send.
     /// Standalone mailers use the snapshot passed to `new`.
     pub async fn limits(&self) -> Result<Limits> {
@@ -130,6 +163,7 @@ impl Mailer {
             return Err(Error::Invalid);
         }
         rendered.envelope.smtp()?;
+        self.ready().await?;
         self.transport
             .send_raw(&rendered.envelope, &rendered.bytes)
             .await?;
@@ -140,7 +174,8 @@ impl Mailer {
     }
     /// SMTP when `MAIL_HOST` is set, with every other `MAIL_*` variable then
     /// required; the dev mailbox otherwise. A half-configured relay fails boot
-    /// rather than silently falling back to files.
+    /// rather than silently falling back to files; an unset one boots, and
+    /// [`Mailer::ready`] refuses to send unless the instance is development.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }

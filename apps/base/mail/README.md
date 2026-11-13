@@ -139,8 +139,10 @@ The two installation settings appear under **Settings → Mail** for the server 
 
 | Environment | Transport |
 | --- | --- |
-| `MAIL_HOST` unset | Development mailbox in `BILIBI_MAIL_DIR` (default `.local/mailbox`) |
+| `MAIL_HOST` unset | Development mailbox in `BILIBI_MAIL_DIR` (default `.local/mailbox`); the registered mailer sends to it only on a development installation |
 | `MAIL_HOST` set | SMTP relay with verified TLS |
+
+**Without `MAIL_HOST`, only a development installation keeps mail in files.** The registered mailer reads the stored instance role (`instance.role`, [`base/system`](../system/README.md)) on every send. On Production or Staging, `deliver` returns `Error::Config("set MAIL_HOST to send mail; …")` and writes no file, so a caller records a failure, not a sent message: a password reset withdraws its token, a scheduled report delivery fails. The installation still starts, so an operator can open **System Info**, whose Health card's **Mail** line names the transport or says why nothing is sent. `Mailer::ready()` answers the same question without a message. A standalone `Mailer` (`new`, `from_env`) has no settings and reads no role.
 
 SMTP also requires `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_TLS_MODE` (`starttls` or `implicit_tls`), `MAIL_FROM_NAME` and `MAIL_FROM_ADDRESS`. A half-configured relay refuses boot and names the missing variable. It never falls back to files. The development sender defaults to `Bilibi <noreply@bilibi.localhost>`. The boot log names the transport without credentials.
 
@@ -148,7 +150,7 @@ SMTP also requires `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_TLS_MODE
 
 ## Development mailbox
 
-`mailer.dev_mailbox()` returns `Some(&Mailbox)` only for the active development transport, and `None` for SMTP. **A development-only tool must also require `Instance::resolve(...).role` to be development** (`base/system`): a production installation without `MAIL_HOST` still uses files.
+`mailer.dev_mailbox()` returns `Some(&Mailbox)` only for the active development transport, and `None` for SMTP. **A development-only tool must also require `Instance::resolve(...).role` to be development** (`base/system`): a production installation without `MAIL_HOST` still has a mailbox transport, though it sends nothing to it.
 
 Open the newest `.eml` file in a mail client to see its plain and HTML parts and attachments. Simple plain-text messages retain their decoded (`8bit`) readable copy so reset links can be copied directly. Multipart messages keep their MIME encoding intact. Returned `Sent.bytes` always remain the wire form.
 
@@ -165,6 +167,15 @@ BILIBI_MAIL_DIR=/tmp/bilibi-mail-walkthrough \
 
 The walkthrough prints returned wire bytes, the complete envelope, and validation refusals. Open the stored `.eml` file in a mail client. With a configured local TLS SMTP sink, append `--also-smtp` to send the very same `Rendered` to both transports and confirm `dev_mailbox()` is `None` for SMTP. Compare the saved wire file with the sink’s raw DATA after SMTP dot unstuffing, without added receipt headers. A local certificate must be trusted by the TLS verifier.
 
+Prove that an installation without `MAIL_HOST` keeps mail in files only when it is development, on a freshly migrated disposable database (its stored role is then Production):
+
+```sh
+BILIBI_DISPOSABLE_MAIL_DEMO=yes BILIBI_MAIL_DIR=<private folder> DATABASE_URL=<disposable> \
+  cargo run -p bilibi-mail --locked --example unset-relay-walkthrough
+```
+
+It sends one message under no stored role, then Staging, Development and Production: each but Development fails naming `MAIL_HOST` and writes no file; Development writes one. A half-set relay still refuses to start. `scripts/run-walkthroughs.sh mail-unset-relay` runs it.
+
 Parse received mail from files (the committed fixtures in `examples/inbound/`, and a round-trip message plus refused inputs written to the output directory):
 
 ```sh
@@ -180,6 +191,7 @@ It prints what each message parsed to (a `render` round trip, attachments with a
 - Replace `Transport::send(&lettre::Message)` with `send_raw(&Envelope, &[u8])`. SMTP envelope addresses are now public Mail types.
 - `Mailer::deliver` returns `Sent`; map success to `()` when your facade still returns no value. Archive `Sent.bytes` when required.
 - Pass a resolved `Limits` snapshot as the third argument to standalone `Mailer::new`.
+- A walkthrough or proof that follows an emailed link from the dev mailbox stores the development instance role first (`bilibi_walkthrough_fixture::set_instance_role(&db, "development")`, or a `seed` prepare with `BILIBI_ENV=development`): on a migrate-only database the role is Production and `deliver` refuses.
 
 ## Where to go next
 

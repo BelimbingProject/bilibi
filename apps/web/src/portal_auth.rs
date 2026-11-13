@@ -340,17 +340,12 @@ pub async fn sign_in(
         );
     }
     // Per sender, before any account is looked at, as the staff form does.
-    let sender = api::client_address(
+    let address = api::client_address(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
-    )
-    .map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    );
     let per_minute = app.user.sign_in_per_sender().await?;
-    if !app
-        .api
-        .throttle
-        .allow(&format!("portal-sign-in:{sender}"), per_minute)
-    {
+    if !app.api.admit_person("portal-sign-in", address, per_minute) {
         return refuse(
             SIGN_IN_THROTTLED,
             Vec::new(),
@@ -1236,11 +1231,11 @@ pub async fn register(
     if !(form.name_errors.is_empty() && form.email_errors.is_empty()) {
         return register_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
     }
-    let sender = api::client_address(
+    // Counted per network, as the edge limiters key a sender.
+    let sender = api::sender_key(api::client_address(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
-    )
-    .map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    ));
     match access
         .register(&address, &name, &email, &company, &sender)
         .await

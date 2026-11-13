@@ -43,6 +43,7 @@ struct Pages {
     modules: Arc<Vec<&'static str>>,
     tables: database_tables::DatabaseTables,
     instances: Arc<Instances>,
+    mailer: Arc<bilibi_mail::Mailer>,
 }
 impl Pages {
     async fn authorize(&self, scope: &Scope, capability: &str) -> Result<()> {
@@ -225,7 +226,7 @@ bilibi_menu::contribute!(
 );
 inventory::submit! {
     Module { id: "base/system", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/authz", "base/locale", "base/menu", "base/perf", "base/settings", "base/tenancy", "base/ui", "base/audit", "base/step_up", "base/queue"],
+        dependencies: &["base/module_registry", "base/database", "base/authz", "base/locale", "base/mail", "base/menu", "base/perf", "base/settings", "base/tenancy", "base/ui", "base/audit", "base/step_up", "base/queue"],
         migrations: &[], services: &[
         Service { id: "base/system.install-role", factory: |_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(instance::InstallRole)))) },
         Service { id: SERVICE, factory: |services| {
@@ -243,6 +244,7 @@ inventory::submit! {
             let catalog = Catalog::discover(&modules)?;
             Ok(Arc::new(bilibi_ui::page::PageService::<Scope, Error>(Arc::new(Pages {
                 instances: services.get(SERVICE)?,
+                mailer: services.get(bilibi_mail::SERVICE)?,
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
                 boundary: services.get("base/database.mutations")?,
                 locales: services.get("base/locale.locales")?,
