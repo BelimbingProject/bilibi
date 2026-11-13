@@ -35,7 +35,10 @@ pub(crate) const EXPORT_DEFAULT: i64 = 30;
 pub const CERTIFICATE_YEARS: &str = "privacy.certificate_years";
 pub(crate) const CERTIFICATE_DEFAULT: i64 = 7;
 /// Bump when the certificate's layout changes; recorded as provenance.
-const CERTIFICATE_TEMPLATE: &str = "privacy-certificate-v2";
+const CERTIFICATE_TEMPLATE: &str = "privacy-certificate-v3";
+/// The Artifacts reference kinds of request documents.
+const EXPORT: &str = "export";
+const CERTIFICATE: &str = "certificate";
 
 fn request_id(reference: &Reference) -> Result<i64> {
     reference
@@ -159,6 +162,7 @@ struct StoreLine {
     deleted: i64,
     kept: usize,
     deferred: String,
+    unconfirmed: i64,
 }
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct KeptLine {
@@ -259,10 +263,22 @@ pub(crate) async fn export(
         .ok_or(Error::Internal)? as usize;
     let rows = client
         .query(
-            "SELECT store,records,files FROM base_privacy_request_exports WHERE tenant_id=$1 AND request_id=$2 ORDER BY store",
+            "SELECT e.store,e.records,e.files,coalesce((s.result->>'unconfirmed')::bigint,0) FROM base_privacy_request_exports e \
+             LEFT JOIN base_privacy_request_stores s ON s.tenant_id=e.tenant_id AND s.request_id=e.request_id AND s.store=e.store \
+             WHERE e.tenant_id=$1 AND e.request_id=$2 ORDER BY e.store",
             &[&scope.tenant(), &request.id],
         )
         .await?;
+    // Stores the request ran in whose module is no longer mounted (#561).
+    let unmounted: Vec<String> = client
+        .query(
+            "SELECT store FROM base_privacy_request_stores WHERE tenant_id=$1 AND request_id=$2 AND state='unmounted' ORDER BY store",
+            &[&scope.tenant(), &request.id],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .unix_permissions(0o600);
@@ -270,7 +286,14 @@ pub(crate) async fn export(
     let (mut stores, mut size) = (Vec::with_capacity(rows.len()), 0_usize);
     for row in rows {
         let store: String = row.get(0);
-        let (key, data) = privacy.stores.get(&store).ok_or(Error::Internal)?;
+        let unconfirmed: i64 = row.get(3);
+        let Some((key, data)) = privacy.stores.get(&store) else {
+            // Read before its module was removed: its records are here, its
+            // files can no longer be read through it.
+            stores.push(json!({"store": store, "records": row.get::<_, Value>(1), "files": [],
+                "unconfirmed_matches": unconfirmed, "note": "This store's module is no longer installed; its files could not be read."}));
+            continue;
+        };
         let refs: Vec<FileRef> = serde_json::from_value(row.get(2)).map_err(|_| Error::Internal)?;
         let folder = key.replace(['/', '.'], "-");
         let mut files = Vec::with_capacity(refs.len());
@@ -301,7 +324,8 @@ pub(crate) async fn export(
             zip.write_all(&bytes).map_err(|_| Error::Internal)?;
             files.push(json!({"name": file.name, "path": path, "content_type": content_type}));
         }
-        stores.push(json!({"store": key, "label": data.label, "records": row.get::<_, Value>(1), "files": files}));
+        stores.push(json!({"store": key, "label": data.label, "records": row.get::<_, Value>(1), "files": files,
+            "unconfirmed_matches": unconfirmed}));
     }
     let generated: String = client
         .query_one(
@@ -310,9 +334,11 @@ pub(crate) async fn export(
         )
         .await?
         .get(0);
+    // `unconfirmed_matches`: records found only by an email or phone given
+    // that were not confirmed as the person's, so they are not in the export.
     let bundle = json!({
         "request": request.id, "kind": request.kind.as_str(), "person": request.person.get(),
-        "generated_at": generated, "stores": stores,
+        "generated_at": generated, "stores": stores, "stores_not_installed": unmounted,
     });
     let json = serde_json::to_vec_pretty(&bundle).map_err(|_| Error::Internal)?;
     size += json.len();
@@ -334,7 +360,7 @@ pub(crate) async fn export(
             client,
             Reference {
                 subject: format!("request:{}", request.id),
-                kind: "export".into(),
+                kind: EXPORT.into(),
             },
             &bytes,
             "application/zip",
@@ -419,7 +445,11 @@ pub(crate) async fn certificate(
         };
         certificate.stores.push(StoreLine {
             label: store.label.clone(),
-            state: store.state.clone(),
+            state: match store.state.as_str() {
+                "unmounted" => "not asked: no longer installed".into(),
+                state => state.into(),
+            },
+            unconfirmed: answer.unconfirmed,
             anonymised: count(bilibi_personal_data::Action::Anonymised),
             deleted: count(bilibi_personal_data::Action::Deleted),
             kept: answer.kept.len(),
@@ -471,7 +501,7 @@ pub(crate) async fn certificate(
             client,
             Reference {
                 subject: format!("request:{}", request.id),
-                kind: "certificate".into(),
+                kind: CERTIFICATE.into(),
             },
             &data,
             &options,
@@ -501,9 +531,11 @@ pub(crate) async fn discard_export(
     }
 }
 
-/// Deletes the export of every request about `person`, under the erasure's
-/// grant (an earlier access request may be filed under another company).
-/// Deleting one already deleted is a no-op.
+/// Deletes every export of every request about `person`, under the
+/// erasure's grant (an earlier access request may be filed under another
+/// company): found by each request's Artifacts subject, so an export stored
+/// by a finish attempt that never filed it goes too (#562). Deleting one
+/// already deleted is a no-op.
 pub(crate) async fn delete_exports(
     privacy: &Privacy,
     client: &mut Client,
@@ -511,19 +543,76 @@ pub(crate) async fn delete_exports(
     grant: &Erasure,
     person: PersonId,
 ) -> Result<()> {
-    let rows = client
+    let requests: Vec<i64> = client
         .query(
-            "SELECT id,company_id,export_artifact FROM base_privacy_requests WHERE tenant_id=$1 AND person_id=$2 AND export_artifact IS NOT NULL ORDER BY id",
+            "SELECT id FROM base_privacy_requests WHERE tenant_id=$1 AND person_id=$2 AND kind<>'erasure' ORDER BY id",
             &[&scope.tenant(), &person.get()],
         )
-        .await?;
-    for row in rows {
-        let (id, artifact): (i64, String) = (row.get(0), row.get(2));
-        let company = OrganisationId::new(row.get(1)).map_err(|_| Error::Internal)?;
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    for id in requests {
         let subject = format!("request:{id}");
+        let documents = privacy
+            .artifacts
+            .erasable_documents(&*client, scope, grant, &DOCUMENTS, &subject)
+            .await
+            .map_err(artifact_error)?;
+        for (company, metadata) in documents {
+            if metadata.reference.kind != EXPORT {
+                continue;
+            }
+            match privacy
+                .artifacts
+                .for_erasure(scope, company, &DOCUMENTS, grant, &subject)
+                .delete(client, &metadata.id)
+                .await
+            {
+                Ok(()) | Err(bilibi_artifacts::Error::NotFound) => {}
+                Err(error) => return Err(artifact_error(error)),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The request's live documents of `kind`, filed on it or not.
+async fn request_documents(
+    privacy: &Privacy,
+    client: &Client,
+    scope: &Scope,
+    request: &RequestView,
+    kind: &str,
+) -> Result<Vec<(OrganisationId, String)>> {
+    Ok(privacy
+        .artifacts
+        .subject_documents(
+            client,
+            scope,
+            &DOCUMENTS,
+            &format!("request:{}", request.id),
+        )
+        .await
+        .map_err(artifact_error)?
+        .into_iter()
+        .filter(|(_, metadata)| metadata.reference.kind == kind)
+        .map(|(company, metadata)| (company, metadata.id))
+        .collect())
+}
+
+/// Deletes the exports an earlier finish attempt of `request` stored and
+/// never filed, before another is built.
+pub(crate) async fn delete_unfiled_exports(
+    privacy: &Privacy,
+    client: &mut Client,
+    scope: &Scope,
+    request: &RequestView,
+) -> Result<()> {
+    for (company, artifact) in request_documents(privacy, client, scope, request, EXPORT).await? {
         match privacy
             .artifacts
-            .for_erasure(scope, company, &DOCUMENTS, grant, &subject)
+            .for_owner(scope, company, &DOCUMENTS)
             .delete(client, &artifact)
             .await
         {
@@ -534,8 +623,27 @@ pub(crate) async fn delete_exports(
     Ok(())
 }
 
+/// A certificate an earlier finish attempt of `request` rendered and never
+/// filed: retained, so it is filed instead of rendering another.
+pub(crate) async fn unfiled_certificate(
+    privacy: &Privacy,
+    client: &Client,
+    scope: &Scope,
+    request: &RequestView,
+) -> Result<Option<String>> {
+    Ok(
+        request_documents(privacy, client, scope, request, CERTIFICATE)
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, id)| id),
+    )
+}
+
 /// Removes the tenant's expired exports, company by company, as the
-/// scheduler; a document that will not go stays for the next run.
+/// scheduler; a document that will not go stays for the next run. Every
+/// company any access request was filed under, so an export no request
+/// references any more still expires (#562).
 pub(crate) async fn purge_exports(
     privacy: &Privacy,
     client: &mut Client,
@@ -543,7 +651,7 @@ pub(crate) async fn purge_exports(
 ) -> Result<bool> {
     let companies: Vec<i64> = client
         .query(
-            "SELECT DISTINCT company_id FROM base_privacy_requests WHERE tenant_id=$1 AND export_artifact IS NOT NULL ORDER BY company_id",
+            "SELECT DISTINCT company_id FROM base_privacy_requests WHERE tenant_id=$1 AND kind<>'erasure' ORDER BY company_id",
             &[&scope.tenant()],
         )
         .await?

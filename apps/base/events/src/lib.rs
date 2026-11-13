@@ -18,7 +18,7 @@ mod operator;
 mod privacy;
 pub use privacy::{PersonalEvent, PERSONAL_EVENTS};
 mod web;
-pub use operator::{Delivered, DeliveryState, Replay, ReplayFrom, SubscriberState};
+pub use operator::{Delivered, DeliveryState, Replay, ReplayFrom, SubscriberState, MISSED_CAP};
 
 use bilibi_authz::{
     CapabilityDefinition, SystemPrincipalDefinition, SystemScope, VocabularyContribution,
@@ -306,6 +306,7 @@ inventory::submit! {
         migrations: &[
             ("base-events-001", include_str!("../migrations/001-events.sql")),
             ("base-events-002-erased", include_str!("../migrations/002-erased.sql")),
+            ("base-events-003-delivered-index", include_str!("../migrations/003-delivered-index.sql")),
         ],
         services: &[
             Service { id: SERVICE, factory: |services| Ok(Arc::new(build(services)?)) },

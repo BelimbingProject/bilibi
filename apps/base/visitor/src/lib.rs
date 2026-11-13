@@ -31,6 +31,10 @@ pub use contributions::{
 };
 pub use origin::{parse as parse_origin, MAX_ORIGINS};
 
+/// The embeddable browser client, version 1: one dependency-free script the
+/// host serves at `/visitor/v1/client.js`. A breaking change is a new major
+/// path, so a page that embeds this one keeps working.
+pub const CLIENT_V1: &str = include_str!("../assets/client-v1.js");
 /// The registry service ID of [`Visitors`].
 pub const SERVICE: &str = "base/visitor.sessions";
 /// Every token starts with this, so a visitor token is never mistaken for, or
