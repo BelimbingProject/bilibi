@@ -85,6 +85,7 @@ WALKTHROUGHS=(
   'base|queue|apps/base/queue|queue-walkthrough|migrate|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-;inspect'
   'base|queue-execution|apps/base/queue|execution-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|prepare;inspect'
   'base|queue-retention|apps/base/queue|retention-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-'
+  'base|queue-throughput|apps/base/queue|throughput-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-'
   'base|schedule|apps/base/schedule|schedule-walkthrough|seed|BILIBI_DISPOSABLE_SCHEDULE_DEMO=yes|dst;timing;review;prepare;coalesce;race 2026-06-03T10:00:00Z;overlap;execute 2026-06-04T12:00:10Z;inspect'
   'base|settings|apps/base/settings|settings-walkthrough|operator|BILIBI_DISPOSABLE_SETTINGS_DEMO=yes|-;inspect'
   'base|workflow-owner|apps/base/workflow|owner|migrate|BILIBI_DISPOSABLE_WORKFLOW_DEMO=yes|init;available 4 1;approve 4 1;history 4 1;proof-delivery 4 2;proof-maintenance 4;approval-init 4;proof-bell 4'
