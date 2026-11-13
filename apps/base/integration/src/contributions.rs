@@ -16,6 +16,10 @@ pub const DELETE: &str = "admin.system.outbound-exchange.delete";
 pub const RETENTION_DAYS: &str = "integration.payload_retention_days";
 pub(crate) const RETENTION_DEFAULT: i64 = 30;
 pub(crate) const RETENTION_MAX: i64 = 3650;
+/// Global operator setting: days to keep an exchange at all. Older rows are
+/// deleted by the same daily job, except those a legal hold names.
+pub const EXCHANGE_RETENTION_DAYS: &str = "integration.exchange_retention_days";
+pub(crate) const EXCHANGE_RETENTION_DEFAULT: i64 = 180;
 
 macro_rules! provenance {
     () => {
@@ -42,6 +46,12 @@ inventory::submit! { Contribution::new(DEFINITIONS, RETENTION_DAYS, provenance!(
     minimum: Some(1.0), maximum: Some(RETENTION_MAX as f64), validator: None,
     editor: Some(Editor { group: "Integration", label: "API exchange payload retention (days)",
         help: "Days to keep the saved content of API calls; the call summary stays.", capability: Some(DELETE), reveal_duration_ms: 5_000 }),
+})) }
+inventory::submit! { Contribution::new(DEFINITIONS, EXCHANGE_RETENTION_DAYS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(EXCHANGE_RETENTION_DEFAULT), nullable: false, encrypted: false,
+    minimum: Some(1.0), maximum: Some(RETENTION_MAX as f64), validator: None,
+    editor: Some(Editor { group: "Integration", label: "API exchange retention (days)",
+        help: "Days to keep the record of an API call. Older calls are deleted, except those under a legal hold.", capability: Some(DELETE), reveal_duration_ms: 5_000 }),
 })) }
 // Deleting an exchange is audited with metadata only; these names never carry
 // a second copy of a payload or a raw endpoint into the audit ledger.

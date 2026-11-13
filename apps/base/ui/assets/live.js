@@ -100,6 +100,7 @@
     // was open (or while it was down) follow it in the order they were raised.
     const held = queued.splice(0);
     enqueue(mountIntent(), {loading: true, navigation: !resumed});
+    if (document.hidden) reportVisibility();
     // Hooks that carry work across the drop (resumable uploads) send it now,
     // right behind the remount, which the server answers first.
     if (resumed) window.dispatchEvent(new CustomEvent('bilibi:remounted'));
@@ -149,6 +150,13 @@
       connect();
     }, retryDelay);
   }
+
+  // A tab out of view tells the server, which stops this page's 15-second
+  // refresh until the tab is shown again; the answer to that is a fresh page.
+  function reportVisibility() {
+    if (document.querySelector('[data-live]')) enqueue({type: 'visibility', hidden: document.hidden});
+  }
+  document.addEventListener('visibilitychange', reportVisibility);
 
   // A tab that comes back or a network that returns need not wait out the backoff.
   for (const name of ['online', 'focus']) {
