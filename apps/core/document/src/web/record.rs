@@ -79,6 +79,7 @@ impl Detail {
     pub async fn new(pages: Pages, scope: &Scope, id: i64, framed: bool) -> Result<Self> {
         // The page opens only for a document the reader may see.
         pages.documents.get(scope, id).await?;
+        let uploads = dialog::uploads(pages.documents.upload_limit(scope).await?);
         Ok(Self {
             pages,
             id,
@@ -86,7 +87,7 @@ impl Detail {
             statuses: CommitStates::default(),
             confirm: None,
             dialog: None,
-            uploads: dialog::uploads(),
+            uploads,
             revisions: ListColumns::mount(
                 "document-revisions",
                 vec![

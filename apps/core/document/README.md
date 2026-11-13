@@ -111,7 +111,7 @@ The New document, New revision and Quick add dialogs take the file through one r
 
 - **Progress:** the chosen file's row shows the percentage received while it arrives; Upload (Add document in Quick add) waits until every byte is there.
 - **Resume:** the bytes wait on Media's staging disk (`media.upload.staging_disk`). While the New document dialog is open the list's address carries `new=1`, so the remount after a dropped connection opens it again and the file carries on from the bytes already there. After a reload, or in a dialog the remount does not reopen (New revision, Quick add), choosing the same file again continues it, until `media.upload.staging_hours` passes.
-- **Limit:** the largest file is Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB); `store_file` still applies `core.document.max_upload_bytes` and `artifacts.max_bytes`. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
+- **Limit:** the input is declared with the tenant's effective limit (the smaller of `core.document.max_upload_bytes` and `artifacts.max_bytes`), read when the page opens, so a larger file is refused before its bytes arrive; the host lowers it further to Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB). `store_file` checks the limit again. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
 - **Scan:** a resumed file is stored like any other: `store_file` stages it through Media, and it stays held, unreadable, until the scan calls it clean.
 - **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold.
 
@@ -120,8 +120,11 @@ Internal revisions store the ledger file ID and either a clean Artifact ID or a 
 ## Tenant retention and due documents
 
 Settings › Documents offers **Keep new document files for (days)**
-(`core.document.retention_days`, 0 by default). Zero leaves ordinary Artifact
-expiry and explicit deletion as before. When a tenant chooses a positive period
+(`core.document.retention_days`, 0 by default). With zero, each private file
+revision is kept without an expiry (`Artifacts::keep_in`) when a clean Artifact
+is attached or a pending revision is promoted: it stays readable until its
+document is deleted, whatever the installation's `artifacts.retention_days`
+(which bounds exports, and a file stored but never attached). When a tenant chooses a positive period
 (1–36500 days), every newly attached **private file revision** receives an
 irreversible Base retain-until when a clean Artifact is attached or a pending
 revision is promoted. The owner calls `Artifacts::retain_in` inside the same
@@ -142,6 +145,15 @@ rechecks every revision under lock in delete and merge, so a new hold refuses
 those actions even after the list was read.
 
 The view costs the same few statements however many files it checks: Base asks the owner for `Retain` on each batch of up to 1000 files at once (`Owner::authorize_all`), and Documents answers a manager's batch with one query (each file attached to an undeleted document the reader may manage now). The `document-retention-due` walkthrough counts them.
+
+## Privacy requests
+
+Documents related to a person (a `person` link) are a `base/personal_data` store, `core/document.documents` (ADR 05, `src/privacy.rs`).
+
+- **Locate and export:** an access request finds and exports every such document that is not being deleted, with its revisions, and every clean file, read through `Artifacts::for_disclosure` (the owner's `disclosure_subject` vouches that the file belongs to a revision of a document related to the request's person).
+- **Erase, kept:** a document under a legal hold (on the person or the document), or whose file Base still retains or holds, is kept with that reason. A document also related to another record is that record's too: only its link to the person is removed, and it is reported as shared.
+- **Erase, deleted:** every other document is anonymised in the erasing transaction and marked as deleting with its durable delete job (below). The document's name, link and custom fields, its revisions' names, file names, links, change logs and labels, and its ledger rows' file names read `[erased]`. The job then deletes its files and rows as for any delete, and the certificate counts it deleted.
+- **Audit:** `core.document.document`, `.revision` and `.file` declare their personal fields, so the erasure clears them from earlier audit evidence too.
 
 ## Retention-safe deletion
 
@@ -179,6 +191,7 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | Delete, one or from the list | `core.document.document` updated (marked as deleting) with its queued job, then every row of the document deleted once the files are gone (`System · document-deleter`), or the mark cleared when a hold keeps a file |
 | Upload, discard a stored file | `core.document.file` ledger changes |
 | Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
+| Export CSV | a `core.document.exported` action with the actor, the `filter` the list used, and how many `rows` of how many matches (`total`) the file holds |
 | Refused download or preview | a `core.document.download_refused` action with the actor, `document_id`, `revision` and `reason`: `no_grant`, `grant_ended`, `no_download_permission`, `no_download_capability` or `no_file_access` |
 | Portal download | an `artifacts.read` action as above, its actor the customer (`actor_role` `customer`) |
 | Refused portal download | a `core.document.download_refused` action as the customer with `"portal": true` and `reason` `not_shared` (no share to them, another tenant's or no such document), `share_ended`, `document_expired`, `no_file`, `scan_pending`, `not_clean` or `no_portal_capability` |

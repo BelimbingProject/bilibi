@@ -62,7 +62,11 @@ pub(crate) struct Panel {
 }
 
 impl Panel {
-    pub(crate) fn new(pages: Pages, request: &PageRequest<'_, Scope>) -> Result<Self> {
+    pub(crate) async fn new(
+        pages: Pages,
+        scope: &Scope,
+        request: &PageRequest<'_, Scope>,
+    ) -> Result<Self> {
         let anchor = request.path.get("panel").ok_or(Error::Invalid)?;
         if anchor.is_empty()
             || !anchor
@@ -71,6 +75,7 @@ impl Panel {
         {
             return Err(Error::Invalid);
         }
+        let uploads = dialog::uploads(pages.documents.upload_limit(scope).await?);
         Ok(Self {
             pages,
             record: record(request.operation, request)?,
@@ -87,7 +92,7 @@ impl Panel {
             )
             .map_err(|_| Error::Internal)?,
             quick: None,
-            uploads: dialog::uploads(),
+            uploads,
             notice: None,
         })
     }
