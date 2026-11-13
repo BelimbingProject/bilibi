@@ -9,6 +9,7 @@ mod custom;
 mod customer;
 mod customer_operations;
 mod deletion;
+mod discard;
 mod email;
 mod files;
 mod library;
@@ -490,8 +491,8 @@ impl Documents {
     /// must be one of `core.document.allowed_types` and must match the bytes;
     /// the size must be within `core.document.max_upload_bytes` and the
     /// operator's `artifacts.max_bytes`. Attach the result with `attach`,
-    /// `create` or `add_revision`; a file never attached is removed by the
-    /// cleanup job.
+    /// `create` or `add_revision`; a file still not attached a day later is
+    /// removed by its discard job (`discard.rs`).
     pub async fn store_file(&self, scope: &Scope, upload: Upload<'_>) -> WriteResult<StoredFile> {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let scope = self.fresh(&**client, scope).await?;
@@ -502,6 +503,7 @@ impl Documents {
             &self.artifacts,
             &self.media,
             &self.settings,
+            &self.queue,
             upload,
         )
         .await
@@ -979,8 +981,8 @@ impl Documents {
 
     /// Stores a private copy of the document's latest file under the actor's
     /// company, for `copy`. Like `store_file` it works outside any business
-    /// transaction (the page-write exception for bytes) and the cleanup job
-    /// removes the file if it is never attached. Needs `core.document.manage`
+    /// transaction (the page-write exception for bytes) and its discard job
+    /// removes the file if it is not attached within a day. Needs `core.document.manage`
     /// and the download grant on the source. A link has no file to copy.
     pub async fn copy_file(&self, scope: &Scope, id: i64) -> WriteResult<StoredFile> {
         let mut client = self.db.get().await.map_err(Error::from)?;
@@ -1001,6 +1003,7 @@ impl Documents {
             &self.artifacts,
             &self.media,
             &self.settings,
+            &self.queue,
             Upload {
                 bytes: &file.bytes,
                 file_name: &file.file_name,
@@ -1292,6 +1295,7 @@ inventory::submit! { Module {
         ("core-document-007-scan-held-revisions", include_str!("../migrations/007-scan-held-revisions.sql")),
         ("core-document-008-list-order", include_str!("../migrations/008-list-order.sql")),
         ("core-document-009-customer-shares", include_str!("../migrations/009-customer-shares.sql")),
+        ("core-document-010-file-discard", include_str!("../migrations/010-file-discard.sql")),
         ("core-document-011-personal-data", include_str!("../migrations/011-personal-data.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
@@ -1332,6 +1336,11 @@ inventory::submit! { Module {
     }}, Service { id: scan::ENDED, factory: |s| {
         Ok(Arc::new(bilibi_queue::EndingService(Arc::new(scan::ScanEnded {
             documents: s.get(SERVICE)?,
+        }))))
+    }}, Service { id: discard::HANDLER, factory: |s| {
+        Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(discard::DiscardJob {
+            db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
+            artifacts: s.get("base/artifacts.store")?,
         }))))
     }}, Service { id: deletion::HANDLER, factory: |s| {
         Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(deletion::DeleteJob {

@@ -124,6 +124,7 @@ WALKTHROUGHS=(
   'core|document-pending-merge|apps/core/document|pending-merge-proof|fixture-seed|BILIBI_DOCUMENT_MERGE_PROOF=disposable BILIBI_DOCUMENT_MERGE_ROOT=@/documents|-'
   'core|document-customer-share|apps/core/document|customer-share-walkthrough|fixture-seed|BILIBI_DOCUMENT_CUSTOMER=disposable BILIBI_DOCUMENT_CUSTOMER_ROOT=@/documents|-'
   'core|document-scan-held|apps/core/document|scan-held-proof|fixture-seed|BILIBI_DOCUMENT_SCAN_PROOF=disposable BILIBI_DOCUMENT_SCAN_ROOT=@/documents|-'
+  'core|document-discard-file|apps/core/document|discard-file-proof|fixture-seed|BILIBI_DOCUMENT_DISCARD_PROOF=disposable BILIBI_DOCUMENT_DISCARD_ROOT=@/documents|-'
   'core|document-delete-job|apps/core/document|delete-job-proof|fixture-seed|BILIBI_DOCUMENT_DELETE_PROOF=disposable BILIBI_DOCUMENT_DELETE_ROOT=@/documents|-'
   'core|document-keep-file|apps/core/document|keep-file-proof|fixture-seed|BILIBI_DOCUMENT_KEEP_PROOF=disposable BILIBI_DOCUMENT_KEEP_ROOT=@/documents|-'
   'core|document-retention-due|apps/core/document|retention-due-proof|fixture-seed|BILIBI_DOCUMENT_RETENTION_PROOF=disposable BILIBI_DOCUMENT_RETENTION_ROOT=@/documents|-'
