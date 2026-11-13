@@ -362,20 +362,27 @@ async fn raw(
 
 /// Locks the companies a link names, ascending, each required writable. The
 /// source is the caller's own record (`Archived`/`NotFound`); an archived or
-/// missing organisation target is a refusal of the `target` field.
+/// missing organisation target is a refusal of the `target` field. `retiring`
+/// (end, unlink) accepts one archived side, so a live company can still end
+/// or unlink its link to an archived one; with both sides archived, or a
+/// person target and an archived source, it is `Archived`.
 async fn lock_parties(
     client: &tokio_postgres::Transaction<'_>,
     scope: &Scope,
     source: OrganisationId,
     target: Option<OrganisationId>,
+    retiring: bool,
 ) -> std::result::Result<Option<FieldError>, WriteError> {
     let mut companies = vec![source];
     companies.extend(target);
     companies.sort_unstable();
     companies.dedup();
+    let mut live = false;
     for company in companies {
         match lock_account_company(client, scope, company).await {
-            Ok(_) => {}
+            Ok(_) => live = true,
+            // `require_writable` took the row lock before it read the status.
+            Err(WriteError::Archived) if retiring => {}
             Err(error) if company == source => return Err(error),
             Err(WriteError::Archived) => return Ok(Some(FieldError::new("target", "is archived"))),
             Err(WriteError::NotFound) => {
@@ -383,6 +390,9 @@ async fn lock_parties(
             }
             Err(error) => return Err(error),
         }
+    }
+    if retiring && !live {
+        return Err(WriteError::Archived);
     }
     Ok(None)
 }
@@ -513,6 +523,7 @@ pub async fn assign(
         scope,
         input.source_organisation_id,
         target_organisation,
+        false,
     )
     .await?
     {
@@ -550,13 +561,15 @@ pub struct RelationshipUpdate {
     pub version: i64,
 }
 /// The link a write will change, locked with its companies: reach over the
-/// source or the organisation target, both companies writable, `Stale` on a
-/// version mismatch, `NotFound` once unlinked.
+/// source or the organisation target, both companies writable (one archived
+/// side is enough to end or unlink, `retiring`), `Stale` on a version
+/// mismatch, `NotFound` once unlinked.
 async fn lock_for_write(
     tx: &MutationTransaction<'_>,
     scope: &Scope,
     id: RelationshipId,
     version: i64,
+    retiring: bool,
 ) -> std::result::Result<Relationship, WriteError> {
     let before = raw(tx.sql(), scope.tenant(), id, false)
         .await?
@@ -571,6 +584,7 @@ async fn lock_for_write(
         scope,
         before.source_organisation_id,
         target_organisation,
+        retiring,
     )
     .await?
     {
@@ -667,7 +681,7 @@ pub async fn update(
     id: RelationshipId,
     update: &RelationshipUpdate,
 ) -> std::result::Result<Relationship, WriteError> {
-    let before = lock_for_write(tx, scope, id, update.version).await?;
+    let before = lock_for_write(tx, scope, id, update.version, false).await?;
     write_dates(tx, scope, before, &update.dates).await
 }
 /// Ends a link on `effective_to` (inclusive), keeping its start; the day
@@ -680,7 +694,7 @@ pub async fn end(
     version: i64,
     effective_to: &CalendarDate,
 ) -> std::result::Result<Relationship, WriteError> {
-    let before = lock_for_write(tx, scope, id, version).await?;
+    let before = lock_for_write(tx, scope, id, version, true).await?;
     let dates = EffectiveDates::new(before.dates.from().cloned(), Some(effective_to.clone()))
         .map_err(|_| {
             WriteError::Invalid(vec![FieldError::new(
@@ -698,7 +712,7 @@ pub async fn unlink(
     id: RelationshipId,
     version: i64,
 ) -> std::result::Result<Relationship, WriteError> {
-    let before = lock_for_write(tx, scope, id, version).await?;
+    let before = lock_for_write(tx, scope, id, version, true).await?;
     let tenant = scope.tenant();
     let row_id = before.id.get();
     Ok(tx

@@ -183,7 +183,6 @@ impl ReadHandler for Read {
             let value = match self {
                 Self::Roles => {
                     let include_retired = input["include_retired"].as_bool().unwrap_or(false);
-                    relationship_roles::ensure_defaults_if_empty(&**client, scope.tenant()).await?;
                     let roles = relationship_roles::list(&**client, scope, include_retired).await?;
                     Value::Array(roles.iter().map(|role| role.to_json()).collect())
                 }

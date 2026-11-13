@@ -113,6 +113,7 @@ WALKTHROUGHS=(
   'core|company-relationships|apps/core/company|k5-relationships-walkthrough|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-pickers|apps/core/company|company-picker-proof|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|company-owner-binders|apps/core/company|k15-owner-binders|seed|BILIBI_COMPANY_DEMO=disposable BILIBI_K15_DEMO_ROOT=@/files|-'
+  'core|company-low-findings|apps/core/company|company-low-findings-proof|migrate|BILIBI_COMPANY_DEMO=disposable|-'
   'core|currency|apps/core/currency|currency-walkthrough|seed|BILIBI_CURRENCY_DEMO=disposable|-'
   'core|document-audit|apps/core/document|audit-coverage|fixture-seed|BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=@/documents|-'
   'core|document-export-rows|apps/core/document|export-rows-proof|fixture-seed|BILIBI_DOCUMENT_EXPORT_PROOF=disposable|-'

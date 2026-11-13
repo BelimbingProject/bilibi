@@ -73,9 +73,7 @@ pub use reference_types::{
     Outcome as TypeOutcome, TypeSort, TypeUpdate,
 };
 pub use relationship_roles::{
-    by_code as relationship_role_by_code,
-    ensure_defaults_if_empty as ensure_default_relationship_roles, RelationshipRole,
-    RoleUpdate as RelationshipRoleUpdate,
+    by_code as relationship_role_by_code, RelationshipRole, RoleUpdate as RelationshipRoleUpdate,
 };
 pub use relationships::{
     assign as assign_relationship, current as current_relationship,
@@ -865,17 +863,13 @@ inventory::submit! {
 /// model (`relationship_roles`, `relationships`). Each write is one audited
 /// mutation transaction; a refusal is an outcome, never an `Error`.
 impl CompanyService {
-    /// The tenant's roles. A tenant whose catalog is empty (one created
-    /// by raw SQL after the migration ran, as the walkthrough fixture does)
-    /// first receives the contributed
-    /// defaults by code; an administered catalog is never touched here.
+    /// The tenant's roles, as administered; a read writes nothing.
     pub async fn relationship_roles(
         &self,
         scope: &Scope,
         include_retired: bool,
     ) -> Result<Vec<relationship_roles::RelationshipRole>> {
         let client = self.db.get().await?;
-        relationship_roles::ensure_defaults_if_empty(&**client, scope.tenant()).await?;
         relationship_roles::list(&**client, scope, include_retired).await
     }
     pub async fn relationship_role(

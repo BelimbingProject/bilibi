@@ -33,41 +33,46 @@ struct Current {
     name: String,
     status: String,
 }
-/// Counts over every live company of
-/// the tenant and one company, in one statement and so one snapshot.
+/// What a panel shows, read in one statement and so one snapshot: the
+/// viewer's current company by id, and either the tenant's live company counts
+/// (the strip) or only whether it has any (the card). The card never counts.
 struct Summary {
+    /// Live companies and active ones; the card reads `(1, 0)` when any exists.
     total: i64,
     active: i64,
     company: Option<Current>,
     /// Whether the top bar offers a desk to choose.
     chooses: bool,
 }
-async fn summary(client: &(impl GenericClient + Sync), scope: &Scope) -> Result<Summary> {
+async fn summary(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    counts: bool,
+) -> Result<Summary> {
     let current = scope.current_company().map_or(0, |id| id.get());
+    let totals = if counts {
+        "(SELECT count(*) AS total, count(*) FILTER (WHERE status = 'active') AS active FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL)"
+    } else {
+        "(SELECT count(*) AS total, 0::int8 AS active FROM (SELECT 1 FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL LIMIT 1) one)"
+    };
     let row = client
-        .query_opt(
-            "SELECT id, code, name, legal_name, status, count(*) OVER () AS total, count(*) FILTER (WHERE status = 'active') OVER () AS active FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY id = $2 DESC, id LIMIT 1",
+        .query_one(
+            &format!("SELECT c.id, c.code, c.name, c.legal_name, c.status, t.total, t.active FROM {totals} t LEFT JOIN companies c ON c.tenant_id = $1 AND c.id = $2 AND c.deleted_at IS NULL"),
             &[&scope.tenant(), &current],
         )
         .await?;
-    Ok(match row {
-        None => Summary {
-            total: 0,
-            active: 0,
-            company: None,
-            chooses: false,
-        },
-        Some(row) => Summary {
-            total: row.get(5),
-            active: row.get(6),
-            chooses: scope.current_company().is_some() || reaches_tenant(client, scope).await?,
-            company: (row.get::<_, i64>(0) == current).then(|| Current {
-                id: row.get(0),
-                code: row.get(1),
-                name: display_name(row.get::<_, Option<&str>>(3), row.get(2)),
-                status: row.get(4),
-            }),
-        },
+    let total: i64 = row.get(5);
+    Ok(Summary {
+        total,
+        active: row.get(6),
+        chooses: total > 0
+            && (scope.current_company().is_some() || reaches_tenant(client, scope).await?),
+        company: row.get::<_, Option<i64>>(0).map(|id| Current {
+            id,
+            code: row.get(1),
+            name: display_name(row.get::<_, Option<&str>>(3), row.get(2)),
+            status: row.get(4),
+        }),
     })
 }
 
@@ -83,6 +88,7 @@ impl Cache {
         scope: &Scope,
         args: &PanelArgs,
         link: &str,
+        counts: bool,
     ) -> Result<(&Summary, bool)> {
         let fresh = self
             .read
@@ -90,7 +96,7 @@ impl Cache {
             .is_some_and(|(_, _, at)| args.refresh.is_zero() || at.elapsed() < args.refresh);
         if !fresh {
             let client = db.get().await?;
-            let read = summary(&**client, scope).await?;
+            let read = summary(&**client, scope, counts).await?;
             let linked = allowed(&**client, scope, link).await?;
             self.read = Some((read, linked, Instant::now()));
         }
@@ -144,7 +150,7 @@ impl LiveState<Scope, Error> for Stats {
             only_refresh(&request.input)?;
             let (read, linked) = self
                 .cache
-                .summary(&self.db, request.scope, &self.args, LIST)
+                .summary(&self.db, request.scope, &self.args, LIST, true)
                 .await?;
             let strip = render(&StatStrip {
                 id: "stat-companies",
@@ -197,7 +203,7 @@ impl LiveState<Scope, Error> for CurrentCompany {
             only_refresh(&request.input)?;
             let (read, linked) = self
                 .cache
-                .summary(&self.db, request.scope, &self.args, VIEW)
+                .summary(&self.db, request.scope, &self.args, VIEW, false)
                 .await?;
             let body = match &read.company {
                 None if read.total == 0 => render(
