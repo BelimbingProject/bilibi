@@ -151,6 +151,49 @@ impl<O: Owner> Owned<'_, O> {
         tx.commit().await?;
         Ok(metadata)
     }
+    /// Clears an ordinary document's expiry in the owner's already-open
+    /// mutation, after its record has attached the artifact: the owner keeps
+    /// it until an explicit `Delete` (a library file that its record lists).
+    /// Needs the owner's `Retain` grant, because the global
+    /// `artifacts.retention_days` no longer bounds the document's life. A
+    /// records-grade document already has no expiry and is left as it is.
+    /// Writes an `artifacts.kept` audit action; it is not a retention event,
+    /// so nothing becomes irreversible and `delete` works as before.
+    pub async fn keep_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        id: &str,
+    ) -> Result<crate::Metadata> {
+        let row = self.retainable(tx, id).await?;
+        if row.metadata.expires_at.is_none() {
+            return Ok(row.metadata);
+        }
+        if row.expired {
+            return Err(Error::NotFound);
+        }
+        tx.sql()
+            .execute(
+                "UPDATE base_artifacts SET expires_at=NULL WHERE id=$1",
+                &[&row.key],
+            )
+            .await?;
+        let next = self.fetch(tx, &row.metadata.id).await?;
+        tx.record(Change {
+            kind: "base/artifacts.document".into(),
+            id: row.key,
+            old: evidence(&row),
+            new: evidence(&next),
+        })
+        .await?;
+        self.audit_with(
+            tx,
+            &next,
+            "artifacts.kept",
+            json!({"expires_at": row.metadata.expires_at}),
+        )
+        .await?;
+        Ok(next.metadata)
+    }
     /// Apply the same retention in the owner's already-open mutation, after
     /// its record has attached the artifact. The owner commits both changes
     /// together; Base still authorizes, audits and records the retention event.

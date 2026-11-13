@@ -190,7 +190,7 @@ pub struct Metadata {
     pub content_type: String,
     pub byte_size: i64,
     pub sha256: String,
-    /// Set for an ordinary document; a records-grade one has none.
+    /// Set for an ordinary document; a records-grade or kept one has none.
     pub expires_at: Option<String>,
     pub retain_until: Option<String>,
     pub legal_hold_at: Option<String>,
@@ -1102,7 +1102,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id:"base/artifacts",layer:bilibi_module_registry::Layer::Base,
         dependencies:&["base/audit","base/authz","base/database","base/queue","base/settings","base/tenancy","base/party_ids","base/personal_data"],
-        migrations:&[("base-artifacts-001",include_str!("../migrations/001-artifacts.sql")),("base-artifacts-002",include_str!("../migrations/002-retention.sql"))],
+        migrations:&[("base-artifacts-001",include_str!("../migrations/001-artifacts.sql")),("base-artifacts-002",include_str!("../migrations/002-retention.sql")),("base-artifacts-003-kept",include_str!("../migrations/003-kept.sql"))],
         services:&[Service {id:"base/artifacts.install-policy",factory:|_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy))))},Service {id:"base/artifacts.store",factory:|services| Ok(Arc::new(Artifacts {
             boundary:services.get("base/database.mutations")?, settings:services.get("base/settings.store")?, authentication:services.get("base/tenancy.authentication")?,
             queue:services.get("base/queue.store")?, db:services.get::<Db>("base/database.pool")?.as_ref().clone(),

@@ -441,8 +441,9 @@ pub(crate) struct Store<'s> {
     pub queue: &'s bilibi_queue::Queue,
 }
 impl Store<'_> {
-    /// The tenant rule is captured when each private revision is attached.
-    /// Base owns the irreversible protection and its audit history.
+    /// The tenant rule is captured when each private revision is attached:
+    /// a positive period retains the file, zero keeps it without an expiry
+    /// until the document deletes it. Base owns both and their audit history.
     pub(crate) async fn retain_new_file(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -465,7 +466,15 @@ impl Store<'_> {
             .value
             .as_i64()
             .ok_or(Error::Internal)?;
+        let company = OrganisationId::new(company).map_err(|_| Error::Internal)?;
         if days == 0 {
+            // A library file lives as long as its revision: the installation's
+            // Artifact expiry, meant for exports, never removes it (#582).
+            self.artifacts
+                .for_owner(scope, company, &files::FILES)
+                .keep_in(tx, artifact_id)
+                .await
+                .map_err(files::artifact_error)?;
             return Ok(());
         }
         if !(1..=36500).contains(&days) {
@@ -474,7 +483,6 @@ impl Store<'_> {
         let until = SystemTime::now()
             .checked_add(Duration::from_secs(days as u64 * 86_400))
             .ok_or(Error::Internal)?;
-        let company = OrganisationId::new(company).map_err(|_| Error::Internal)?;
         self.artifacts
             .for_owner(scope, company, &files::FILES)
             .retain_in(
