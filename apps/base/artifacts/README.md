@@ -386,7 +386,7 @@ No unit tests. `examples/artifacts-walkthrough.rs` (A1) and
 of real facade calls, raw-SQL guard attempts and injected DB/filesystem outages,
 with output for manual inspection. They run no assertions and use no test harness.
 
-Run the walkthrough after migrating an isolated database:
+Run the walkthrough after migrating an isolated database (`cargo run -p bilibi-web --locked -- migrate`: the walkthroughs install the fixture, which needs the tables):
 
 ```sh
 export DATABASE_URL=postgres://bilibi@127.0.0.1:55481/bilibi_a1
@@ -402,14 +402,14 @@ control document. The second starts a fresh process, reconciles the failures
 control. Repeat `recover` to see an empty successful batch. Fixture clock and
 failure triggers are confined to the explicitly opted-in disposable database.
 
-`examples/pdf-walkthrough.rs` does the same for PDFs. With only
+`examples/pdf-walkthrough.rs` does the same for PDFs, on a migrated database too. With only
 `BILIBI_PDF_DEMO_OUT=/absolute/dir` it writes the deterministic fixture PDFs and
 prints the renderer refusals (`-- fixtures`); with the disposable-DB variables
 above it also generates, stores and reads back an owner-selected PDF and shows
 unauthorized, cross-tenant, non-PDF and truncated-output refusals leaving no
 artifact behind.
 
-Run the retention walkthrough the same way. It publishes records-grade documents,
+Run the retention walkthrough the same way, on a migrated database. It publishes records-grade documents,
 exercises holds and refusals, tries raw SQL against the guards, then breaks and
 restores storage to show purge retries, an operator hold and recovery. It waits
 about 14 seconds for a short retain-until to pass. `report` prints the durable

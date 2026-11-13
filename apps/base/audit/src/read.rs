@@ -3,13 +3,20 @@
 //! These functions answer "what is recorded", never "who may ask": the caller
 //! (`base/audit_views`) has already proven the capability, because this crate
 //! sits below Authz and cannot ask it. Everything is scoped to the sealed
-//! scope's tenant in SQL; free text reaches SQL only as a bound, escaped pattern
-//! and every sort key is a fixed column name.
+//! scope's tenant in SQL; free text reaches SQL only as a bound, escaped pattern.
+//!
+//! The two lists are bounded four ways, because the ledgers only grow: every
+//! read names a period (the tenant timeline index serves it), the total is
+//! counted only up to [`MAX_COUNT`], the order is time alone (the one order an
+//! index gives) and both statements run under a local statement timeout.
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use serde_json::Value;
-use std::{collections::HashSet, time::SystemTime};
-use tokio_postgres::{types::ToSql, GenericClient, Transaction};
+use std::{
+    collections::HashSet,
+    time::{Duration, SystemTime},
+};
+use tokio_postgres::{error::SqlState, types::ToSql, Client, GenericClient, Row, Transaction};
 
 /// Free-text search is bounded before it reaches SQL.
 pub const MAX_SEARCH: usize = 200;
@@ -17,6 +24,80 @@ pub const MAX_SEARCH: usize = 200;
 pub const MAX_PAGE_SIZE: u64 = 300;
 /// Event families the Actions screen filters by, with the ledger's own names.
 pub const EVENT_FAMILIES: [&str; 6] = ["http", "auth", "console", "database", "queue", "domain"];
+/// A list counts its matches only this far; beyond it the page says there are
+/// more and the reader narrows the period or the filters.
+pub const MAX_COUNT: u64 = 10_000;
+/// Both list statements run under this, in a read-only transaction.
+const READ_BOUNDS: &str = "SET LOCAL statement_timeout = '5s'";
+
+/// The period a list reads when its caller names none: the last 30 days.
+fn default_period() -> (SystemTime, SystemTime) {
+    const DAY: Duration = Duration::from_secs(86_400);
+    let now = SystemTime::now();
+    (now.checked_sub(DAY * 30).unwrap_or(now), now + DAY)
+}
+
+/// What one bounded list read returned.
+struct Listing {
+    rows: Vec<Row>,
+    total: u64,
+    more: bool,
+    timed_out: bool,
+}
+
+/// Counts the matches up to [`MAX_COUNT`] and reads one page, in one read-only
+/// transaction under [`READ_BOUNDS`]. `count` and `page` share `params`; `page`
+/// ends in `LIMIT` and `OFFSET` placeholders numbered after them. A statement
+/// that outlasts the timeout is an empty, `timed_out` listing, not an error:
+/// the screen says so and the reader narrows the search.
+async fn listing(
+    client: &mut Client,
+    count: &str,
+    page: &str,
+    params: &[&(dyn ToSql + Sync)],
+    limit: i64,
+    offset: i64,
+) -> Result<Listing> {
+    let tx = client.build_transaction().read_only(true).start().await?;
+    tx.batch_execute(READ_BOUNDS).await?;
+    let read = async {
+        let counted: i64 = tx.query_one(count, params).await?.get(0);
+        let counted = u64::try_from(counted).unwrap_or(0);
+        let total = counted.min(MAX_COUNT);
+        // An out-of-range page reads nothing: a stale link must not walk the period.
+        let rows = if u64::try_from(offset).unwrap_or(u64::MAX) >= total {
+            Vec::new()
+        } else {
+            let mut all = params.to_vec();
+            all.push(&limit);
+            all.push(&offset);
+            tx.query(page, &all).await?
+        };
+        Ok::<_, tokio_postgres::Error>((rows, total, counted > MAX_COUNT))
+    }
+    .await;
+    match read {
+        Ok((rows, total, more)) => {
+            tx.commit().await?;
+            Ok(Listing {
+                rows,
+                total,
+                more,
+                timed_out: false,
+            })
+        }
+        Err(error) if error.code() == Some(&SqlState::QUERY_CANCELED) => {
+            tx.rollback().await?;
+            Ok(Listing {
+                rows: Vec::new(),
+                total: 0,
+                more: false,
+                timed_out: true,
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 /// Latest oversight reads or fan-out summaries in this tenant only. The
 /// composing consent screen authorizes its own manage/read capability.
@@ -33,38 +114,6 @@ pub async fn oversight_activity(
     Ok(client.query("SELECT payload,occurred_at FROM base_audit_actions WHERE tenant_id=$1 AND event=$2 ORDER BY occurred_at DESC,id DESC LIMIT 20", &[&scope.tenant(),&event]).await?.into_iter().map(|row| (row.get(0),row.get(1))).collect())
 }
 
-/// Sortable action columns. Every order is followed by `id` in the same
-/// direction, so equal values page stably.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ActionSort {
-    OccurredAt,
-    ActorType,
-    Event,
-    Url,
-    TraceId,
-}
-impl ActionSort {
-    pub fn parse(key: &str) -> Option<Self> {
-        Some(match key {
-            "occurred_at" => Self::OccurredAt,
-            "actor_type" => Self::ActorType,
-            "event" => Self::Event,
-            "url" => Self::Url,
-            "trace_id" => Self::TraceId,
-            _ => return None,
-        })
-    }
-    fn column(self) -> &'static str {
-        match self {
-            Self::OccurredAt => "a.occurred_at",
-            Self::ActorType => "a.actor_type",
-            Self::Event => "a.event",
-            Self::Url => "a.url",
-            Self::TraceId => "a.trace_id",
-        }
-    }
-}
-
 /// What the Actions screen asks for. Empty strings mean "any".
 #[derive(Clone, Debug)]
 pub struct ActionQuery {
@@ -77,7 +126,11 @@ pub struct ActionQuery {
     /// Transport noise (Livewire-style updates, event streams, media streams)
     /// is hidden unless asked for; failures always appear.
     pub diagnostics: bool,
-    pub sort: ActionSort,
+    /// The period read, `[since, until)` by event time. The default is the
+    /// last 30 days.
+    pub since: SystemTime,
+    pub until: SystemTime,
+    /// Newest first, or oldest first. Time is the only order.
     pub descending: bool,
     /// One-based.
     pub page: u64,
@@ -85,13 +138,15 @@ pub struct ActionQuery {
 }
 impl Default for ActionQuery {
     fn default() -> Self {
+        let (since, until) = default_period();
         Self {
             search: String::new(),
             actor_type: String::new(),
             event_family: String::new(),
             result: String::new(),
             diagnostics: false,
-            sort: ActionSort::OccurredAt,
+            since,
+            until,
             descending: true,
             page: 1,
             page_size: 25,
@@ -121,7 +176,12 @@ pub struct ActionEntry {
 }
 pub struct ActionPage {
     pub entries: Vec<ActionEntry>,
+    /// The matches in the period, counted up to [`MAX_COUNT`].
     pub total_entries: u64,
+    /// More than [`MAX_COUNT`] match; only the first that many can be paged.
+    pub more: bool,
+    /// The read outlasted its statement timeout and returned nothing.
+    pub timed_out: bool,
 }
 
 /// A mutation as the dashboard's recent-activity feed shows it: what happened
@@ -152,10 +212,11 @@ const STATUS: &str =
     "(CASE WHEN a.payload->>'status' ~ '^[0-9]{1,9}$' THEN (a.payload->>'status')::int ELSE 0 END)";
 const EXIT_CODE: &str = "(CASE WHEN a.payload->>'exit_code' ~ '^-?[0-9]{1,9}$' THEN (a.payload->>'exit_code')::int ELSE 0 END)";
 
-/// One page of the tenant's actions. An out-of-range page returns no entries
-/// with the real total, so the caller can land on the last page.
+/// One page of the tenant's actions in the query's period. An out-of-range
+/// page returns no entries with the counted total, so the caller can land on
+/// the last page.
 pub async fn list_actions(
-    client: &impl GenericClient,
+    client: &mut Client,
     scope: &Scope,
     query: &ActionQuery,
 ) -> Result<ActionPage> {
@@ -169,8 +230,8 @@ pub async fn list_actions(
     }
     let tenant = scope.tenant();
     let pattern = format!("%{}%", escape_like(search));
-    let mut filters = vec!["a.tenant_id=$1".to_owned()];
-    let mut params: Vec<&(dyn ToSql + Sync)> = vec![&tenant];
+    let mut filters = vec!["a.tenant_id=$1 AND a.occurred_at>=$2 AND a.occurred_at<$3".to_owned()];
+    let mut params: Vec<&(dyn ToSql + Sync)> = vec![&tenant, &query.since, &query.until];
     if !search.is_empty() {
         params.push(&pattern);
         let n = params.len();
@@ -215,31 +276,31 @@ pub async fn list_actions(
     let filter = filters.join(" AND ");
     let from =
         "FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id";
-    let total: i64 = client
-        .query_one(&format!("SELECT count(*) {from} WHERE {filter}"), &params)
-        .await?
-        .get(0);
     let direction = if query.descending { "DESC" } else { "ASC" };
     let limit = i64::try_from(query.page_size).map_err(|_| Error::Invalid)?;
     let offset = i64::try_from((query.page - 1).saturating_mul(query.page_size))
         .map_err(|_| Error::Invalid)?;
-    params.push(&limit);
-    params.push(&offset);
-    let rows = client
-        .query(
-            &format!(
-                "SELECT a.id,a.actor_type,a.actor_id,a.actor_role,a.impersonator_id,a.system_principal,a.url,a.event,\
-                        coalesce(a.payload,'{{}}'::jsonb),a.trace_id,coalesce(m.is_retained,a.is_retained),a.occurred_at,a.agent_self_report,a.client_identity \
-                 {from} WHERE {filter} ORDER BY {column} {direction}, a.id {direction} LIMIT ${l} OFFSET ${o}",
-                column = query.sort.column(),
-                l = params.len() - 1,
-                o = params.len(),
-            ),
-            &params,
-        )
-        .await?;
+    let listed = listing(
+        client,
+        &format!(
+            "SELECT count(*) FROM (SELECT 1 {from} WHERE {filter} LIMIT {cap}) counted",
+            cap = MAX_COUNT + 1
+        ),
+        &format!(
+            "SELECT a.id,a.actor_type,a.actor_id,a.actor_role,a.impersonator_id,a.system_principal,a.url,a.event,\
+                    coalesce(a.payload,'{{}}'::jsonb),a.trace_id,coalesce(m.is_retained,a.is_retained),a.occurred_at,a.agent_self_report,a.client_identity \
+             {from} WHERE {filter} ORDER BY a.occurred_at {direction}, a.id {direction} LIMIT ${l} OFFSET ${o}",
+            l = params.len() + 1,
+            o = params.len() + 2,
+        ),
+        &params,
+        limit,
+        offset,
+    )
+    .await?;
     Ok(ActionPage {
-        entries: rows
+        entries: listed
+            .rows
             .iter()
             .map(|row| ActionEntry {
                 id: row.get(0),
@@ -258,7 +319,9 @@ pub async fn list_actions(
                 client_identity: row.get(13),
             })
             .collect(),
-        total_entries: u64::try_from(total).unwrap_or(0),
+        total_entries: listed.total,
+        more: listed.more,
+        timed_out: listed.timed_out,
     })
 }
 
@@ -319,45 +382,17 @@ pub async fn recent_mutations(
         .collect())
 }
 
-/// Sortable mutation columns. Every order is
-/// followed by `id` in the same direction, so equal values page stably.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MutationSort {
-    OccurredAt,
-    ActorType,
-    Event,
-    AuditableType,
-    TraceId,
-}
-impl MutationSort {
-    pub fn parse(key: &str) -> Option<Self> {
-        Some(match key {
-            "occurred_at" => Self::OccurredAt,
-            "actor_type" => Self::ActorType,
-            "event" => Self::Event,
-            "auditable_type" => Self::AuditableType,
-            "trace_id" => Self::TraceId,
-            _ => return None,
-        })
-    }
-    fn column(self) -> &'static str {
-        match self {
-            Self::OccurredAt => "m.occurred_at",
-            Self::ActorType => "m.actor_type",
-            Self::Event => "m.event",
-            Self::AuditableType => "m.auditable_type",
-            Self::TraceId => "m.trace_id",
-        }
-    }
-}
-
 /// What the Data Mutations screen asks for. Empty strings mean "any".
 #[derive(Clone, Debug)]
 pub struct MutationQuery {
     pub search: String,
     /// `created`, `updated`, `deleted`, or empty.
     pub event: String,
-    pub sort: MutationSort,
+    /// The period read, `[since, until)` by event time. The default is the
+    /// last 30 days.
+    pub since: SystemTime,
+    pub until: SystemTime,
+    /// Newest first, or oldest first. Time is the only order.
     pub descending: bool,
     /// One-based.
     pub page: u64,
@@ -365,10 +400,12 @@ pub struct MutationQuery {
 }
 impl Default for MutationQuery {
     fn default() -> Self {
+        let (since, until) = default_period();
         Self {
             search: String::new(),
             event: String::new(),
-            sort: MutationSort::OccurredAt,
+            since,
+            until,
             descending: true,
             page: 1,
             page_size: 25,
@@ -406,7 +443,12 @@ pub struct MutationEntry {
 }
 pub struct MutationPage {
     pub entries: Vec<MutationEntry>,
+    /// The matches in the period, counted up to [`MAX_COUNT`].
     pub total_entries: u64,
+    /// More than [`MAX_COUNT`] match; only the first that many can be paged.
+    pub more: bool,
+    /// The read outlasted its statement timeout and returned nothing.
+    pub timed_out: bool,
 }
 
 impl MutationEntry {
@@ -469,10 +511,10 @@ const MUTATION_COLUMNS: &str =
  m.auditable_type,m.auditable_id,m.subject_name,m.subject_id,m.subject_identifier,m.source,m.event,\
  coalesce(m.old_values,'{}'::jsonb),coalesce(m.new_values,'{}'::jsonb),m.trace_id,m.occurred_at,m.agent_self_report,m.client_identity";
 
-/// One page of the tenant's mutations. An
-/// out-of-range page returns no entries with the real total.
+/// One page of the tenant's mutations in the query's period. An
+/// out-of-range page returns no entries with the counted total.
 pub async fn list_mutations(
-    client: &impl GenericClient,
+    client: &mut Client,
     scope: &Scope,
     query: &MutationQuery,
 ) -> Result<MutationPage> {
@@ -486,8 +528,8 @@ pub async fn list_mutations(
     }
     let tenant = scope.tenant();
     let pattern = format!("%{}%", escape_like(search));
-    let mut filters = vec!["m.tenant_id=$1".to_owned()];
-    let mut params: Vec<&(dyn ToSql + Sync)> = vec![&tenant];
+    let mut filters = vec!["m.tenant_id=$1 AND m.occurred_at>=$2 AND m.occurred_at<$3".to_owned()];
+    let mut params: Vec<&(dyn ToSql + Sync)> = vec![&tenant, &query.since, &query.until];
     if !search.is_empty() {
         params.push(&pattern);
         let n = params.len();
@@ -503,34 +545,32 @@ pub async fn list_mutations(
         filters.push(format!("m.event=${}", params.len()));
     }
     let filter = filters.join(" AND ");
-    let total: i64 = client
-        .query_one(
-            &format!("SELECT count(*) FROM base_audit_mutations m WHERE {filter}"),
-            &params,
-        )
-        .await?
-        .get(0);
     let direction = if query.descending { "DESC" } else { "ASC" };
     let limit = i64::try_from(query.page_size).map_err(|_| Error::Invalid)?;
     let offset = i64::try_from((query.page - 1).saturating_mul(query.page_size))
         .map_err(|_| Error::Invalid)?;
-    params.push(&limit);
-    params.push(&offset);
-    let rows = client
-        .query(
-            &format!(
-                "SELECT {MUTATION_COLUMNS} FROM base_audit_mutations m WHERE {filter} \
-                 ORDER BY {column} {direction}, m.id {direction} LIMIT ${l} OFFSET ${o}",
-                column = query.sort.column(),
-                l = params.len() - 1,
-                o = params.len(),
-            ),
-            &params,
-        )
-        .await?;
+    let listed = listing(
+        client,
+        &format!(
+            "SELECT count(*) FROM (SELECT 1 FROM base_audit_mutations m WHERE {filter} LIMIT {cap}) counted",
+            cap = MAX_COUNT + 1
+        ),
+        &format!(
+            "SELECT {MUTATION_COLUMNS} FROM base_audit_mutations m WHERE {filter} \
+             ORDER BY m.occurred_at {direction}, m.id {direction} LIMIT ${l} OFFSET ${o}",
+            l = params.len() + 1,
+            o = params.len() + 2,
+        ),
+        &params,
+        limit,
+        offset,
+    )
+    .await?;
     Ok(MutationPage {
-        entries: rows.iter().map(MutationEntry::from_row).collect(),
-        total_entries: u64::try_from(total).unwrap_or(0),
+        entries: listed.rows.iter().map(MutationEntry::from_row).collect(),
+        total_entries: listed.total,
+        more: listed.more,
+        timed_out: listed.timed_out,
     })
 }
 

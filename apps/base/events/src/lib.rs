@@ -10,13 +10,17 @@
 //! `domain-events` system principal, at least once, in recording order per
 //! subject, and each subscriber's effects commit with its receipt and audit
 //! in one transaction. Nothing is broadcast in process: the outbox rows are
-//! the source of truth.
+//! the source of truth. A daily job deletes events older than the tenant's
+//! `events.retention_days` once nothing is owed for them (`retention`).
 mod agent;
 mod catalog;
 mod delivery;
 mod operator;
 mod privacy;
 pub use privacy::{PersonalEvent, PERSONAL_EVENTS};
+mod retention;
+pub use retention::RETENTION_DAYS;
+mod watermark;
 mod web;
 pub use operator::{Delivered, DeliveryState, Replay, ReplayFrom, SubscriberState, MISSED_CAP};
 
@@ -142,6 +146,8 @@ pub struct Events {
     boundary: Arc<MutationBoundary>,
     queue: Arc<Queue>,
     step_up: Arc<bilibi_step_up::StepUp>,
+    settings: Arc<bilibi_settings::Settings>,
+    authentication: Arc<bilibi_tenancy::Authentication>,
     /// Event name → (publisher module, current version).
     types: BTreeMap<&'static str, (&'static str, u16)>,
     subscribers: BTreeMap<&'static str, &'static Subscriber>,
@@ -270,6 +276,8 @@ fn build(services: &bilibi_module_registry::Services) -> RegistryResult<Events> 
         boundary: services.get("base/database.mutations")?,
         queue: services.get("base/queue.store")?,
         step_up: services.get(bilibi_step_up::SERVICE)?,
+        settings: services.get("base/settings.store")?,
+        authentication: services.get("base/tenancy.authentication")?,
         types,
         subscribers,
     })
@@ -302,16 +310,23 @@ inventory::submit! { Contribution::new(bilibi_module_registry::contributions::PA
 inventory::submit! {
     Module {
         id: "base/events", layer: Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/step_up", "base/agent_api", "base/ui", "base/menu", "base/datetime", "base/locale", "base/personal_data"],
+        dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/schedule", "base/settings", "base/step_up", "base/agent_api", "base/ui", "base/menu", "base/datetime", "base/locale", "base/personal_data"],
         migrations: &[
             ("base-events-001", include_str!("../migrations/001-events.sql")),
             ("base-events-002-erased", include_str!("../migrations/002-erased.sql")),
             ("base-events-003-delivered-index", include_str!("../migrations/003-delivered-index.sql")),
+            ("base-events-004-retention", include_str!("../migrations/004-retention.sql")),
         ],
         services: &[
             Service { id: SERVICE, factory: |services| Ok(Arc::new(build(services)?)) },
             Service { id: DELIVERY, factory: |services| {
                 Ok(Arc::new(HandlerService(Arc::new(delivery::Delivery { events: services.get(SERVICE)? }))))
+            } },
+            Service { id: retention::SERVICE, factory: |services| {
+                Ok(Arc::new(HandlerService(Arc::new(retention::Retention {
+                    events: services.get(SERVICE)?,
+                    schedule: services.get("base/schedule.store")?,
+                }))))
             } },
             Service { id: "base/events.agent", factory: |services| {
                 if !agent::bind(services.get(SERVICE)?) {

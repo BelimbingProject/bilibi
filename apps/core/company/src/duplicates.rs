@@ -137,6 +137,10 @@ pub async fn create_matches(
     })
 }
 
+/// The longest the matching statement may run for a caller with no
+/// statement timeout of its own.
+const MATCH_TIMEOUT: &str = "1000ms";
+
 async fn find(
     client: &dyn ReadClient,
     scope: &Scope,
@@ -186,7 +190,52 @@ async fn find(
         phone
     };
     let registration: String = keys.get(3);
-    let rows = client.query("WITH names AS (SELECT id FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id IS DISTINCT FROM $2 AND name_tokens && $3::text[] ORDER BY cardinality(ARRAY(SELECT unnest(name_tokens) INTERSECT SELECT unnest($3::text[]))) DESC, id LIMIT 200), exact AS (SELECT id FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id IS DISTINCT FROM $2 AND (($4<>'' AND website_host=$4) OR ($5<>'' AND email_domain=$5) OR ($6<>'' AND phone_digits=$6) OR ($7<>'' AND registration_key=$7)) ORDER BY CASE WHEN $7<>'' AND registration_key=$7 THEN 1.0 WHEN ($4<>'' AND website_host=$4) OR ($5<>'' AND email_domain=$5) THEN 0.9 ELSE 0.85 END DESC,id LIMIT 100) SELECT id,name,status,website_host,email_domain,phone_digits,registration_key FROM companies WHERE tenant_id=$1 AND id IN (SELECT id FROM names UNION SELECT id FROM exact)", &[&scope.tenant(), &query.except_id, &name_tokens, &host, &domain, &phone, &registration]).await?;
+    // A create under `require_reason` runs this inside the tenant lock: a
+    // caller with no statement timeout gets MATCH_TIMEOUT for the matching
+    // statements only, set and restored transaction-locally (a no-op outside
+    // a transaction).
+    let bounded: bool = client
+        .query_opt(
+            "SELECT CASE WHEN current_setting('statement_timeout')='0' THEN set_config('statement_timeout',$1,true) IS NOT NULL ELSE false END",
+            &[&MATCH_TIMEOUT],
+        )
+        .await?
+        .ok_or(Error::Internal)?
+        .get(0);
+    // Name candidates come from bounded, indexed reads only. Each distinct
+    // word takes at most 201 of the tenant's companies in id order, as its
+    // own statement so PostgreSQL plans it with that word's frequency; a
+    // word with more is common ("trading", "services") and picks no
+    // candidate alone. When every word is common, only companies holding
+    // all of them qualify, again at most 200. The overlap sort then runs on
+    // that bounded pool, never on every company sharing one word.
+    const WORD: &str = "SELECT id FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id IS DISTINCT FROM $2 AND name_tokens @> $3::text[] ORDER BY id LIMIT 201";
+    let words: BTreeSet<&String> = name_tokens.iter().collect();
+    let mut pool = BTreeSet::new();
+    let mut common = 0;
+    for word in &words {
+        let ids = client
+            .query(WORD, &[&scope.tenant(), &query.except_id, &vec![*word]])
+            .await?;
+        if ids.len() > 200 {
+            common += 1;
+        } else {
+            pool.extend(ids.iter().map(|row| row.get::<_, i64>(0)));
+        }
+    }
+    if common > 0 && common == words.len() {
+        let ids = client
+            .query(WORD, &[&scope.tenant(), &query.except_id, &name_tokens])
+            .await?;
+        pool.extend(ids.iter().take(200).map(|row| row.get::<_, i64>(0)));
+    }
+    let pool: Vec<i64> = pool.into_iter().collect();
+    let rows = client.query("WITH names AS (SELECT id FROM companies WHERE tenant_id=$1 AND id = ANY($8::bigint[]) ORDER BY cardinality(ARRAY(SELECT unnest(name_tokens) INTERSECT SELECT unnest($3::text[]))) DESC, id LIMIT 200), exact AS (SELECT id FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND id IS DISTINCT FROM $2 AND (($4<>'' AND website_host=$4) OR ($5<>'' AND email_domain=$5) OR ($6<>'' AND phone_digits=$6) OR ($7<>'' AND registration_key=$7)) ORDER BY CASE WHEN $7<>'' AND registration_key=$7 THEN 1.0 WHEN ($4<>'' AND website_host=$4) OR ($5<>'' AND email_domain=$5) THEN 0.9 ELSE 0.85 END DESC,id LIMIT 100) SELECT id,name,status,website_host,email_domain,phone_digits,registration_key FROM companies WHERE tenant_id=$1 AND id IN (SELECT id FROM names UNION SELECT id FROM exact)", &[&scope.tenant(), &query.except_id, &name_tokens, &host, &domain, &phone, &registration, &pool]).await?;
+    if bounded {
+        client
+            .query_opt("SELECT set_config('statement_timeout','0',true)", &[])
+            .await?;
+    }
     let grams = trigrams(&name_tokens.join(" "));
     let mut candidates = Vec::new();
     for row in rows {
