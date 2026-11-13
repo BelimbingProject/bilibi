@@ -341,7 +341,7 @@ impl Pages {
                     .await?,
             ),
             "company_panel" | "person_panel" | "record_panel" => {
-                Box::new(panel::Panel::new(self.shared(), request)?)
+                Box::new(panel::Panel::new(self.shared(), scope, request).await?)
             }
             _ => return Err(Error::NotFound),
         })
@@ -477,6 +477,9 @@ impl Files {
             csv.push_str(&csv_row(&row(d, text, latest.get(&d.id), due.get(&d.id))));
         }
         let partial = total > entries.len();
+        self.0
+            .exported(scope, &filter_of(query), entries.len(), total)
+            .await?;
         if partial {
             csv.push_str(&csv_row(&[format!(
                 "Not complete: the first {} of {total} documents. Narrow the filters and export again for the rest.",

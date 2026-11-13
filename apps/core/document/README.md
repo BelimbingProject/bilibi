@@ -111,7 +111,7 @@ The New document, New revision and Quick add dialogs take the file through one r
 
 - **Progress:** the chosen file's row shows the percentage received while it arrives; Upload (Add document in Quick add) waits until every byte is there.
 - **Resume:** the bytes wait on Media's staging disk (`media.upload.staging_disk`). While the New document dialog is open the list's address carries `new=1`, so the remount after a dropped connection opens it again and the file carries on from the bytes already there. After a reload, or in a dialog the remount does not reopen (New revision, Quick add), choosing the same file again continues it, until `media.upload.staging_hours` passes.
-- **Limit:** the largest file is Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB); `store_file` still applies `core.document.max_upload_bytes` and `artifacts.max_bytes`. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
+- **Limit:** the input is declared with the tenant's effective limit (the smaller of `core.document.max_upload_bytes` and `artifacts.max_bytes`), read when the page opens, so a larger file is refused before its bytes arrive; the host lowers it further to Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB). `store_file` checks the limit again. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
 - **Scan:** a resumed file is stored like any other: `store_file` stages it through Media, and it stays held, unreadable, until the scan calls it clean.
 - **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold.
 
@@ -171,6 +171,7 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | Delete, one or from the list | `core.document.document` updated (marked as deleting), then every row of the document deleted once the files are gone |
 | Upload, discard a stored file | `core.document.file` ledger changes |
 | Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
+| Export CSV | a `core.document.exported` action with the actor, the `filter` the list used, and how many `rows` of how many matches (`total`) the file holds |
 | Refused download or preview | a `core.document.download_refused` action with the actor, `document_id`, `revision` and `reason`: `no_grant`, `grant_ended`, `no_download_permission`, `no_download_capability` or `no_file_access` |
 | Portal download | an `artifacts.read` action as above, its actor the customer (`actor_role` `customer`) |
 | Refused portal download | a `core.document.download_refused` action as the customer with `"portal": true` and `reason` `not_shared` (no share to them, another tenant's or no such document), `share_ended`, `document_expired`, `no_file`, `scan_pending`, `not_clean` or `no_portal_capability` |
