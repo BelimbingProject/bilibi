@@ -156,7 +156,7 @@ impl Reports {
             background,
             ..input.clone()
         };
-        let first = self.run(scope, id, &input).await?;
+        let (first, listing) = self.run_for_file(scope, id, &input).await?;
         let oversight = first.report.definition.oversight;
         let status = first.oversight_status();
         let cohort = first.oversight.clone();
@@ -187,27 +187,42 @@ impl Reports {
                 table.empty = *total == 0;
                 table.headers = columns.iter().map(|c| c.label.clone()).collect();
                 let totals = totals.clone();
-                let pages = (*total as usize).div_ceil((*page_size).max(1));
                 let expected_total = *total;
+                let first_page = (*page_size).max(1);
                 let mut current = Some(first);
-                for page in 0..pages {
-                    let run = match current.take() {
-                        Some(run) => run,
-                        None => {
-                            input.page = page;
-                            self.run(scope, id, &input).await?
-                        }
-                    };
-                    if oversight
-                        && (run.oversight != cohort
-                            || !matches!(&run.result,RunResult::Rows{ total:now,.. } if *now==expected_total))
-                    {
-                        return Err(ReportError::Refused("Oversight access or record counts changed during download. Refresh and download again.".into()));
+                if let Some(listing) = listing {
+                    // The first run read the totals and the first page; the
+                    // rest is keys and cells, a full Grid page at a time.
+                    if let Some(RunResult::Rows { rows, .. }) = current.take().map(|r| r.result) {
+                        push_rows(&mut table, rows);
                     }
-                    if let RunResult::Rows { rows, .. } = run.result {
-                        for (_, cells) in rows {
-                            table.rows.push(cells.iter().map(cell).collect());
-                            table.records += 1;
+                    let mut offset = first_page;
+                    while (offset as i64) < expected_total {
+                        let page = listing.page(&self.db, scope, offset, FILE_PAGE).await?;
+                        if page.total != expected_total {
+                            return Err(changed(background));
+                        }
+                        push_rows(&mut table, page.rows);
+                        offset += FILE_PAGE;
+                    }
+                } else {
+                    let pages = (expected_total as usize).div_ceil(first_page);
+                    for page in 0..pages {
+                        let run = match current.take() {
+                            Some(run) => run,
+                            None => {
+                                input.page = page;
+                                self.run(scope, id, &input).await?
+                            }
+                        };
+                        if oversight
+                            && (run.oversight != cohort
+                                || !matches!(&run.result,RunResult::Rows{ total:now,.. } if *now==expected_total))
+                        {
+                            return Err(ReportError::Refused("Oversight access or record counts changed during download. Refresh and download again.".into()));
+                        }
+                        if let RunResult::Rows { rows, .. } = run.result {
+                            push_rows(&mut table, rows);
                         }
                     }
                 }
@@ -340,6 +355,27 @@ impl Reports {
             .setting(&**client, scope, contributions::QUEUED_ROWS_KEY)
             .await?)
     }
+}
+
+/// Rows a file reads at a time after the first page: Grid's page bound.
+const FILE_PAGE: usize = 100;
+
+fn push_rows(table: &mut Tabled, rows: Vec<(Value, Vec<Value>)>) {
+    for (_, cells) in rows {
+        table.rows.push(cells.iter().map(cell).collect());
+        table.records += 1;
+    }
+}
+
+/// The question matched a different number of records on a later page:
+/// rows were added or removed while the file was read, so it could repeat
+/// or miss one.
+fn changed(background: bool) -> ReportError {
+    ReportError::Refused(if background {
+        "The records changed while this export was prepared. Prepare it again.".into()
+    } else {
+        "The records changed during the download. Download it again.".into()
+    })
 }
 
 fn too_many(total: i64, cap: usize, background: bool) -> ReportError {

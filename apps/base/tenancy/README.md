@@ -68,6 +68,8 @@ Creation requires the tenant's name and primary company name; optional additiona
 
 `Authentication::account_identity(client, scope, account)` supplies live account and Person evidence for a routing or independence check in the scope's tenant. It seals no credential and grants no authority. Callers must still apply company reach, owner visibility and capability checks; never turn this evidence into an acting scope.
 
+`Authentication::live_staff(client, scope, accounts)` is the same evidence for a list: which of the accounts are live staff, in one read (Core User's `ActorVerifier::live_staff`). Use it instead of calling `account_identity` once per account.
+
 `Authentication::reprove` preserves the queued-job channel as well as agent, impersonator and presented 2FA evidence. Refreshing identity must never turn background work into a browser action.
 
 ## Linked party identities and code lookup
