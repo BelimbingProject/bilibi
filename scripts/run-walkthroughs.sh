@@ -66,6 +66,7 @@ WALKTHROUGHS=(
   'base|artifacts-queued-pdf|apps/base/artifacts|queued-pdf-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts BILIBI_PDF_DEMO_OUT=@/out BILIBI_PDF_CHROMIUM=@chromium BILIBI_PDF_QPDF=@qpdf BILIBI_PDF_DEMO_PORT=@port|-'
   'base|artifacts-retention|apps/base/artifacts|retention-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;report'
   'base|audit-actions|apps/base/audit_views|actions-fixture|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
+  'base|audit-bounded-evidence|apps/base/audit_views|bounded-evidence|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-mutations|apps/base/audit_views|mutations-fixture|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-history-kinds|apps/base/audit_views|history-kinds|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-|serve'
   'base|bulk-import|apps/base/bulk_data|import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'

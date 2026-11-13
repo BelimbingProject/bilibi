@@ -4,14 +4,19 @@ pub mod console;
 mod erasure;
 mod privacy;
 mod read;
+mod verification;
 pub use erasure::{
-    due_evidence, erase_deferred, erase_record, holds_values, verify, ChainBreak, ChainReport,
+    due_evidence, erase_actions, erase_deferred, erase_record, holds_values, ActionsErased,
     Cleared, DueEvidence, Minimums,
 };
 pub use read::{
     list_actions, list_mutations, oversight_activity, recent_mutations, subject_history,
-    toggle_retained, ActionEntry, ActionPage, ActionQuery, ActionSort, MutationEntry, MutationPage,
-    MutationQuery, MutationSort, RecentMutation, EVENT_FAMILIES, MAX_PAGE_SIZE, MAX_SEARCH,
+    toggle_retained, ActionEntry, ActionPage, ActionQuery, MutationEntry, MutationPage,
+    MutationQuery, RecentMutation, EVENT_FAMILIES, MAX_COUNT, MAX_PAGE_SIZE, MAX_SEARCH,
+};
+pub use verification::{
+    advance_verification, latest_verification, request_verification, ChainBreak, ChainReport,
+    Verification, STEP_LINKS, VERIFICATION_KIND,
 };
 
 use bilibi_database::{Capture, CaptureFuture, Change, Context, Db, Error, Result};
@@ -598,7 +603,8 @@ inventory::submit! {
             ("base-audit-007-agent-self-report", include_str!("../migrations/007-agent-self-report.sql")),
             ("base-audit-008-client-identity", include_str!("../migrations/008-client-identity.sql")),
             ("base-audit-009-erasure", include_str!("../migrations/009-erasure.sql")),
-            ("base-audit-010-actor-tenant", include_str!("../migrations/010-actor-tenant.sql"))],
+            ("base-audit-010-actor-tenant", include_str!("../migrations/010-actor-tenant.sql")),
+            ("base-audit-011-bounded-evidence", include_str!("../migrations/011-bounded-evidence.sql"))],
         services: &[bilibi_module_registry::Service { id: "base/audit.capture", factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             let capture = Arc::new(AuditCapture::new(RedactionPolicy::from_inventory(), db));

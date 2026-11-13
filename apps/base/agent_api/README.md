@@ -302,6 +302,7 @@ Each gap is a `Pending` declaration in the owning module, with its reason. Remov
 | Service | Why it is pending |
 |---|---|
 | `base/audit_views.pages` | Action-log export writes through the Audit Views facade |
+| `base/audit_views.integrity` (`verify` only) | Starting a verification and its queued job writes through the Audit facade |
 | `base/bulk_data.pages` (`receive` only) | Receiving a CSV stores it as a private artifact and opens its run; Artifacts takes bytes outside a contract, whose input is bounded at 1 MiB |
 | `base/authz.pages` | Roles, field restrictions and two-factor policy; the Users page calls `base/authz_agent` for role assignment |
 | `base/integration.pages` | Exchange actions |
