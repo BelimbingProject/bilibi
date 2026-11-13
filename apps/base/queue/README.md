@@ -63,7 +63,12 @@ One failed heartbeat (a busy pool or database) does not end the attempt: the
 handler keeps running while the next beat still falls inside its lease, and is
 dropped before the lease can run out.
 
-Every slot polls once a second, so a poll reads only what it can act on: the
+A slot that ran a job claims the next at once, so a busy process is not capped at
+one job a second per slot; it waits a poll interval only when it claimed nothing
+(or hit an error). A job that failed waits in the database (`available_at`, the
+retry backoff), so claiming at once never runs it early.
+
+Every slot polls once a second when idle, so a poll reads only what it can act on: the
 expired leases (`base_queue_expired_leases`) and the due jobs
 (`base_queue_claim`), never the finished ones. Both searches compare with
 `now()`, the claim transaction's start, because a volatile `clock_timestamp()`
@@ -239,3 +244,11 @@ disposable specimen DB.
 User job scopes carry `Channel::Job` through `Execution::scope`, `Execution::identity` and live reproof. Passing a job scope directly to an owner facade keeps background restrictions, including Workflow's refusal to approve.
 
 Queue's implementation modules are private. Import `Execution`, `Executor`, `Config`, handlers, observers, endings and job-state types from `bilibi_queue`; use its root `lookup`, `states`, `cancel_for`, `retry_for` and `validate_arguments` APIs. Their authorization and lease rules are unchanged.
+
+## Throughput walkthrough
+
+```sh
+BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example throughput-walkthrough
+```
+
+On a fresh disposable database it runs one slot with a one-second poll interval and proves that 30 quick jobs finish in a fraction of 30 seconds, each exactly once; that an idle queue is polled about once a second rather than spun on; and that a failing job still waits its backoff before its next attempt and is discarded after its last.

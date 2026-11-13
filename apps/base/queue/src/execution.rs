@@ -493,10 +493,15 @@ impl Executor {
             // executor; abandoned claims are reconciled by DB lease recovery.
             match store::claim(&self.db, self.config.lease_seconds).await {
                 Ok(Some(claim)) => {
-                    if self.execute(claim).await.is_err() {
-                        eprintln!("queue execution infrastructure unavailable");
+                    if self.execute(claim).await.is_ok() {
+                        // More jobs may be waiting: claim the next at once. A
+                        // job that failed backs off in the database (its
+                        // `available_at`), so this never claims it again early.
+                        continue;
                     }
+                    eprintln!("queue execution infrastructure unavailable");
                 }
+                // Only an empty queue or an error waits a poll interval.
                 Ok(None) => {}
                 Err(_) => eprintln!("queue claim infrastructure unavailable"),
             }
