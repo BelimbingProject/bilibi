@@ -864,6 +864,38 @@ async fn reconcile(services: &Services, db: &Db) -> Result<()> {
         Ok(claimed) => claimed.job.id(),
         Err(_) => return Err(Error::Internal),
     };
+    // The operator's Run now fans a manual run out to every tenant without
+    // this bound, so a tenant can hold two unfinished manual runs of one key.
+    // The administrator's Run now must still answer `overlap`, not an error.
+    let args: Value = client
+        .query_one("SELECT args FROM base_queue_jobs WHERE id=$1", &[&alive])
+        .await?
+        .get(0);
+    let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
+    let queue = services.get::<Queue>("base/queue.store")?;
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            tenant_admin.mutation_context("schedule.walkthrough.second_run"),
+        )
+        .await?;
+    let second_job = queue
+        .enqueue_for(&mut tx, &tenant_admin, TENANT_WORKER, args)
+        .await?
+        .id();
+    tx.commit().await?;
+    client.execute(
+        "WITH o AS (INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id) VALUES($1,'2026-03-01T00:00:00Z','manual','queued',2,$2) RETURNING id) \
+         INSERT INTO base_schedule_tenant_runs(occurrence_id,key,tenant_id,trigger,status,job_id) SELECT id,$1,2,'manual','queued',$2 FROM o",
+        &[&ALLOW_KEY, &second_job],
+    ).await?;
+    let fourth = schedule
+        .run_now_for_tenant(&mut client, &tenant_admin, ALLOW_KEY, Timestamp::now())
+        .await;
+    check(
+        "with two manual runs unfinished, Run now still answers overlap",
+        matches!(&fourth, Ok(Err(Refusal::Overlap))),
+    )?;
 
     println!("\n== 300 older runs whose job is still waiting, then one whose job is gone");
     client.execute(
