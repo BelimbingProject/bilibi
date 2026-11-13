@@ -343,7 +343,7 @@ Keys in `env` (the service's environment; `README.md` explains each):
 | `BIND_ADDR` | `127.0.0.1:<port>`, where Caddy forwards to; the first free port from 4300 unless you pass `--port` |
 | `DATABASE_URL` | the instance's own database and role on the local cluster |
 | `BILIBI_SETTINGS_KEY`, `BILIBI_USER_SIGNING_KEY`, `BILIBI_MEDIA_SIGNING_KEY` | generated 64-hex-character keys; keep them, losing `BILIBI_SETTINGS_KEY` loses every secret setting and authenticator key |
-| `BILIBI_MAIL_DIR` | `data/mailbox`, until an SMTP relay is set |
+| `BILIBI_MAIL_DIR` | `data/mailbox`, used only by a Dev instance. A Staging or Production instance sends no mail until you add the `MAIL_*` relay variables ([Mail](../apps/base/mail/README.md#choosing-the-transport)); until then every send fails and System Info's Mail line says why |
 | `BILIBI_INSTANCE_DIR` | The instance folder: the program lists and serves releases, and receives bundles under `incoming/` for the installer |
 
 **A proxy on another machine.** The script puts Caddy on the same machine, and Bilibi then sees each person's own address with nothing to set. If you put a load balancer or reverse proxy on another machine in front of Bilibi, add its address or network to **Trusted proxy addresses** in the Session settings (`session.trusted_proxies`, for example `10.0.0.5` or `10.1.0.0/16`). Until you do, everyone counts as the proxy's one address and shares one sign-in limit. List only proxies you run: anyone at a listed address can claim to be any client.

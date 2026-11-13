@@ -30,6 +30,7 @@ pub const EXPORT_ROWS_KEY: &str = "reports.export_rows";
 pub const QUEUED_ROWS_KEY: &str = "reports.queued_export_rows";
 pub const EXPORT_DAYS_KEY: &str = "reports.export_days";
 pub const MAX_SUBSCRIPTIONS_KEY: &str = "reports.max_subscriptions";
+pub const MAX_QUEUED_EXPORTS_KEY: &str = "reports.max_queued_exports";
 pub const STATEMENT_MS_KEY: &str = "reports.statement_ms";
 pub const MAX_COST_KEY: &str = "reports.max_cost";
 pub const QUEUED_STATEMENT_MS_KEY: &str = "reports.queued_statement_ms";
@@ -103,6 +104,16 @@ bound!(
     200,
     "Scheduled reports per person",
     "How many report schedules one person may hold."
+);
+// Every prepared export holds a slot of the installation's one Queue while
+// it runs, so one person's waiting exports are few.
+bound!(
+    MAX_QUEUED_EXPORTS_KEY,
+    3,
+    1,
+    20,
+    "Waiting exports per person",
+    "How many prepared exports one person may have waiting at once; the next is refused until one is ready."
 );
 // Read bounds. The interactive pair defaults to Grid's own bound, so a report
 // on a page is no heavier than a list; prepared exports and deliveries run in

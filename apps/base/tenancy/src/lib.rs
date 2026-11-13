@@ -95,6 +95,31 @@ pub trait ActorVerifier: Send + Sync {
     ) -> ProofFuture<'a, Option<OrganisationId>> {
         Box::pin(async { Ok(None) })
     }
+    /// Which of `accounts` of `tenant` are live staff now, by the standing
+    /// [`ActorVerifier::verify`] applies, in id order. The default asks
+    /// `verify` once per account; Core User answers in one read.
+    fn live_staff<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        tenant: i64,
+        accounts: &'a [i64],
+    ) -> ProofFuture<'a, Vec<i64>> {
+        Box::pin(async move {
+            let mut staff = Vec::new();
+            for &account in accounts {
+                if self
+                    .verify(client, tenant, account)
+                    .await
+                    .is_ok_and(|identity| identity.kind == AccountKind::Staff)
+                {
+                    staff.push(account);
+                }
+            }
+            staff.sort_unstable();
+            staff.dedup();
+            Ok(staff)
+        })
+    }
     /// Re-proves the holder of an authenticated session before a sensitive
     /// read (stored-secret reveal). A verifier that cannot check credentials
     /// keeps this default, which never confirms.
@@ -676,6 +701,24 @@ impl Authentication {
             .get()
             .ok_or(Error::Unauthorized)?
             .verify(client, scope.tenant(), account)
+            .await
+    }
+    /// Which of `accounts` are live staff of the scope's tenant, in id order:
+    /// the same standing as [`Authentication::account_identity`], for a list
+    /// in one read. Evidence only, like `account_identity`.
+    pub async fn live_staff(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        accounts: &[i64],
+    ) -> Result<Vec<i64>> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.verifier
+            .get()
+            .ok_or(Error::Unauthorized)?
+            .live_staff(client, scope.tenant(), accounts)
             .await
     }
     /// Authentication edge only: IDs must come from a durable credential/session.

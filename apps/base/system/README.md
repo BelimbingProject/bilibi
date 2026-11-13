@@ -28,6 +28,9 @@ registry modules with their workspace version, rather than pretending Rust
 has loaded OTP applications. The environment is explicitly the build profile,
 debug means debug assertions, and timezone describes UTC timestamp storage.
 `APP_ORIGIN` follows the Web command's configured origin and default.
+The Health card's Mail line is `Mailer::ready()` (`base/mail`): the
+transport when it can send, or why it cannot, such as a Production
+installation without `MAIL_HOST`.
 
 Unavailable probes stay visible. Disk capacity has no installed portable
 probe. Queue supplies job states but no executor-heartbeat health boundary;

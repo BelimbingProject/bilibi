@@ -169,6 +169,15 @@ impl ActorVerifier for AccountVerifier {
             }
         })
     }
+    /// One read under the same standing rule as the staff search.
+    fn live_staff<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        tenant: i64,
+        accounts: &'a [i64],
+    ) -> ProofFuture<'a, Vec<i64>> {
+        Box::pin(crate::staff_choices::live_staff(client, tenant, accounts))
+    }
     /// The chosen workplace is proved through Core Company's work-access seam:
     /// live and assigned as an explicit desk on this connection. An archived
     /// desk qualifies (read-only); the default desk prefers an unarchived one.

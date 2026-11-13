@@ -76,7 +76,7 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
     if !(accept.contains("application/json") && accept.contains("text/event-stream")) {
         return StatusCode::NOT_ACCEPTABLE.into_response();
     }
-    match allowed(&app, &api::sender(&request)).await {
+    match allowed(&app, api::peer_address(&request)).await {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -193,7 +193,7 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
     )
 }
 
-async fn allowed(app: &App, sender: &str) -> Result<bool, Error> {
+async fn allowed(app: &App, address: Option<std::net::IpAddr>) -> Result<bool, Error> {
     let client = app.db.get().await?;
     let limit = app
         .api
@@ -203,7 +203,7 @@ async fn allowed(app: &App, sender: &str) -> Result<bool, Error> {
         .as_u64()
         .and_then(|limit| u32::try_from(limit).ok())
         .ok_or(Error::Invalid)?;
-    Ok(app.api.throttle.allow(&format!("mcp:{sender}"), limit))
+    Ok(app.api.admit_machine("mcp", address, limit))
 }
 
 /// The bearer challenge names the protected-resource document, so a client

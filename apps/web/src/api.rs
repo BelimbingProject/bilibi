@@ -78,7 +78,12 @@ pub struct Edge {
     pub(crate) records: Arc<bilibi_base::records::Records>,
     integration: Arc<Integration>,
     pub(crate) settings: Arc<Settings>,
-    pub(crate) throttle: Throttle,
+    /// Per-sender minutes of the machine edges: OAuth, MCP, SCIM and the SSO
+    /// back-channel.
+    machines: Throttle,
+    /// Per-sender minutes of people signing in or recovering a password, kept
+    /// apart so a flood of machine requests never crowds out a sign-in key.
+    people: Throttle,
     /// The per-sender budget and refusal counts of unauthenticated traffic.
     pub(crate) gate: crate::api_gate::Gate,
 }
@@ -92,11 +97,39 @@ impl Edge {
             records: services.get(bilibi_base::records::SERVICE)?,
             integration: services.get(bilibi_base::integration::SERVICE)?,
             settings: services.get("base/settings.store")?,
-            throttle: Throttle::default(),
+            machines: Throttle::default(),
+            people: Throttle::default(),
             gate: crate::api_gate::Gate::default(),
         })
     }
+    /// Whether `address` may make another `kind` request this minute on a
+    /// machine edge, keyed by [`sender_key`].
+    pub(crate) fn admit_machine(
+        &self,
+        kind: &str,
+        address: Option<IpAddr>,
+        per_minute: u32,
+    ) -> bool {
+        let key = format!("{kind}:{}", sender_key(address));
+        self.machines.allow_among(&key, per_minute, SENDER_KEYS)
+    }
+    /// The same for a person signing in, recovering a password or starting
+    /// SSO, counted apart from the machine edges.
+    pub(crate) fn admit_person(
+        &self,
+        kind: &str,
+        address: Option<IpAddr>,
+        per_minute: u32,
+    ) -> bool {
+        let key = format!("{kind}:{}", sender_key(address));
+        self.people.allow_among(&key, per_minute, SENDER_KEYS)
+    }
 }
+
+/// Senders each edge limiter counts in one minute, as the visitor edge and
+/// the gate do; a new sender beyond this is refused until the minute ends.
+/// With IPv6 keyed by /64, filling it takes 65,536 networks.
+const SENDER_KEYS: usize = 65_536;
 
 pub fn router(app: App) -> Router<App> {
     let api = Router::new()
@@ -200,11 +233,7 @@ async fn record(State(app): State<App>, mut request: Request, next: Next) -> Res
     // no handler and no row.
     let gate = &app.api.gate;
     let bearer = bearer(request.headers()).is_some();
-    let peer = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(peer)| *peer);
-    let sender = sender_key(client_address(peer, request.headers()));
+    let sender = sender_key(peer_address(&request));
     if let Err(error) = gate.open(&app).await {
         return unavailable(&error).into_response();
     }
@@ -506,11 +535,16 @@ async fn params(request: Request) -> Option<HashMap<String, String>> {
 /// The client's address as a string: [`client_address`], or `unknown` when
 /// the server was not given connection info.
 pub(crate) fn sender(request: &Request) -> String {
+    peer_address(request).map_or_else(|| "unknown".into(), |ip| ip.to_string())
+}
+
+/// [`client_address`] of a whole request.
+pub(crate) fn peer_address(request: &Request) -> Option<IpAddr> {
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    client_address(peer, request.headers()).map_or_else(|| "unknown".into(), |ip| ip.to_string())
+    client_address(peer, request.headers())
 }
 
 /// The client's address, for callers that hold the peer and the headers
@@ -541,17 +575,24 @@ pub(crate) fn sender_key(address: Option<IpAddr>) -> String {
     }
 }
 
-pub(crate) async fn allowed(app: &App, kind: &str, sender: &str) -> Result<bool, Error> {
-    let client = app.db.get().await?;
-    let limit = app
+/// Whether `address` may make another `kind` request this minute on a
+/// machine edge, under `agent_access.oauth_requests_per_minute`.
+pub(crate) async fn allowed(app: &App, kind: &str, address: Option<IpAddr>) -> Result<bool, Error> {
+    Ok(app
         .api
+        .admit_machine(kind, address, oauth_limit(app).await?))
+}
+
+/// `agent_access.oauth_requests_per_minute`.
+pub(crate) async fn oauth_limit(app: &App) -> Result<u32, Error> {
+    let client = app.db.get().await?;
+    app.api
         .settings
         .get_global(&**client, OAUTH_REQUESTS_PER_MINUTE)
         .await?
         .as_u64()
         .and_then(|limit| u32::try_from(limit).ok())
-        .ok_or(Error::Invalid)?;
-    Ok(app.api.throttle.allow(&format!("{kind}:{sender}"), limit))
+        .ok_or(Error::Invalid)
 }
 
 /// Token-endpoint answers are never cached (RFC 6749 section 5.1).
@@ -570,8 +611,7 @@ fn oauth(result: Result<Value, OAuthError>) -> Response {
 /// RFC 7591 registration is intentionally unauthenticated. The same direct
 /// sender attribution and operator-set limiter as the token edge apply.
 async fn register(State(app): State<App>, request: Request) -> Response {
-    let sender = sender(&request);
-    match allowed(&app, "register", &sender).await {
+    match allowed(&app, "register", peer_address(&request)).await {
         Ok(true) => {}
         Ok(false) => return oauth(Err(OAuthError::SlowDown)),
         Err(error) => return oauth(Err(error.into())),
@@ -595,8 +635,7 @@ async fn register(State(app): State<App>, request: Request) -> Response {
 }
 
 async fn device(State(app): State<App>, request: Request) -> Response {
-    let sender = sender(&request);
-    match allowed(&app, "device", &sender).await {
+    match allowed(&app, "device", peer_address(&request)).await {
         Ok(true) => {}
         Ok(false) => return oauth(Err(OAuthError::SlowDown)),
         Err(error) => return oauth(Err(error.into())),
@@ -647,8 +686,7 @@ async fn token(State(app): State<App>, request: Request) -> Response {
         Err(error) => return unavailable(&error).into_response(),
     }
     let client_identity = client_identity(request.headers(), false);
-    let sender = sender(&request);
-    match allowed(&app, "token", &sender).await {
+    match allowed(&app, "token", peer_address(&request)).await {
         Ok(true) => {}
         Ok(false) => return oauth(Err(OAuthError::SlowDown)),
         Err(error) => return oauth(Err(error.into())),

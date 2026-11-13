@@ -407,13 +407,9 @@ pub(crate) async fn recovery_allowed(
     headers: &HeaderMap,
     peer: Option<&Extension<ConnectInfo<SocketAddr>>>,
 ) -> std::result::Result<bool, HttpError> {
-    let sender = api::client_address(peer.map(|Extension(ConnectInfo(peer))| *peer), headers)
-        .map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    let address = api::client_address(peer.map(|Extension(ConnectInfo(peer))| *peer), headers);
     let per_minute = app.user.recovery_per_sender().await?;
-    Ok(app
-        .api
-        .throttle
-        .allow(&format!("recovery:{sender}"), per_minute))
+    Ok(app.api.admit_person("recovery", address, per_minute))
 }
 
 // ---- sign-in -----------------------------------------------------------------
@@ -519,18 +515,13 @@ pub async fn login(
     }
     // Per sender, before any account is looked at, so trying one password
     // across many accounts (or unknown ones) is bounded too. The OAuth and
-    // MCP edges use the same throttle.
+    // MCP edges count apart, so their traffic cannot crowd sign-in out.
     let address = api::client_address(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
     );
-    let sender = address.map_or_else(|| "unknown".into(), |ip| ip.to_string());
     let per_minute = app.user.sign_in_per_sender().await?;
-    if !app
-        .api
-        .throttle
-        .allow(&format!("sign-in:{sender}"), per_minute)
-    {
+    if !app.api.admit_person("sign-in", address, per_minute) {
         form.form_error = SIGN_IN_THROTTLED.into();
         return login_card(
             &app,
@@ -1162,9 +1153,11 @@ pub async fn sso_start(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Query(form): Query<SsoStart>,
 ) -> Result<Response, HttpError> {
-    let sender = api::client_address(peer.map(|Extension(ConnectInfo(peer))| peer), &headers)
-        .map_or_else(|| "unknown".into(), |ip| ip.to_string());
-    if !api::allowed(&app, "sso_start", &sender).await? {
+    let address = api::client_address(peer.map(|Extension(ConnectInfo(peer))| peer), &headers);
+    if !app
+        .api
+        .admit_person("sso_start", address, api::oauth_limit(&app).await?)
+    {
         return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
     }
     let purpose = match form.purpose.as_str() {
@@ -1202,12 +1195,14 @@ pub async fn sso_callback(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, HttpError> {
-    let sender = api::client_address(
+    let address = api::client_address(
         peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
         &headers,
-    )
-    .map_or_else(|| "unknown".into(), |ip| ip.to_string());
-    if !api::allowed(&app, "sso_callback", &sender).await? {
+    );
+    if !app
+        .api
+        .admit_person("sso_callback", address, api::oauth_limit(&app).await?)
+    {
         return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
     }
     let scope = sso_scope(&app, &headers).await?;
@@ -1260,9 +1255,8 @@ pub async fn sso_backchannel(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Form(delivery): Form<LogoutDelivery>,
 ) -> Response {
-    let sender = api::client_address(peer.map(|Extension(ConnectInfo(peer))| peer), &headers)
-        .map_or_else(|| "unknown".into(), |ip| ip.to_string());
-    match api::allowed(&app, "sso_backchannel", &sender).await {
+    let address = api::client_address(peer.map(|Extension(ConnectInfo(peer))| peer), &headers);
+    match api::allowed(&app, "sso_backchannel", address).await {
         Ok(true) => {}
         Ok(false) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),

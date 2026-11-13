@@ -188,6 +188,30 @@ fn subscription(row: &tokio_postgres::Row) -> Subscription {
 }
 
 impl Reports {
+    /// Whether every one of `people` (sorted, without repeats) is live staff
+    /// who holds `reports.view`: only the people named are proved, one
+    /// holder read each and one standing read for them all.
+    async fn can_receive(
+        &self,
+        tx: &MutationTransaction<'_>,
+        scope: &Scope,
+        people: &[i64],
+    ) -> Result<bool, Error> {
+        for &person in people {
+            let holder =
+                bilibi_authz::holder_page(tx.sql(), scope, person.saturating_sub(1), VIEW, 1)
+                    .await?;
+            if holder != [person] {
+                return Ok(false);
+            }
+        }
+        let staff = self
+            .authentication
+            .live_staff(tx.sql(), scope, people)
+            .await?;
+        Ok(staff == people)
+    }
+
     /// The reader's own subscriptions to a report. Needs `reports.schedule`.
     pub async fn subscriptions(&self, scope: &Scope, report: i64) -> Outcome<Vec<Subscription>> {
         let client = self.db.get().await.map_err(Error::from)?;
@@ -226,13 +250,8 @@ impl Reports {
         people.sort_unstable();
         people.dedup();
         if !people.is_empty() {
-            let known: Vec<i64> = self
-                .share_people(scope)
-                .await?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
-            if people.iter().any(|id| !known.contains(id)) {
+            authorize(tx.sql(), scope, crate::SHARE).await?;
+            if !self.can_receive(tx, scope, &people).await? {
                 return Err(ReportError::Invalid(std::collections::BTreeMap::from([(
                     "people".to_owned(),
                     vec!["names someone who cannot run reports".to_owned()],
