@@ -496,6 +496,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         csv.filename == "items-by-cost.csv",
         csv.filename.clone(),
     );
+    // At 10 rows a page the first run reads 10 rows and the file reads the
+    // other 2 as keys and cells only (#555): the same file as one page.
+    client.execute("INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('reports.page_size',0,'global',0,'10',false) ON CONFLICT (key,tenant_id,scope_type,scope_id) DO UPDATE SET value='10'", &[]).await?;
+    let paged = reports
+        .export(&manager, rows_id, &RunInput::default(), Format::Csv)
+        .await;
+    client
+        .execute(
+            "DELETE FROM base_settings WHERE key='reports.page_size' AND tenant_id=0",
+            &[],
+        )
+        .await?;
+    checks.check(
+        "a file read past its first page holds every row once, in the page's order",
+        matches!(&paged, Ok(file) if file.bytes == csv.bytes && file.rows == 12),
+        format!(
+            "{:?}",
+            paged.as_ref().map(|f| f.rows).map_err(|e| e.to_string())
+        ),
+    );
     let exported: Value = client.query_one("SELECT payload FROM base_audit_actions WHERE event='base.reports.exported' ORDER BY id DESC LIMIT 1", &[]).await?.get(0);
     checks.check(
         "the export is audited with its row count, never its data",
@@ -846,6 +866,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 matches!(&stale, Err(ReportError::Refused(m)) if m.contains("changed")),
                 format!("{:?}", stale.map(|f| f.rows)),
             );
+            // Masking a field the file holds retires it too (#554): the key
+            // records a masked column apart from a full one.
+            let contacts = Draft {
+                name: "Contacts with email".into(),
+                description: String::new(),
+                record_type: "persons".into(),
+                kind: Kind::Rows,
+                definition: Definition {
+                    columns: vec!["name".into(), "email".into()],
+                    ..Definition::default()
+                },
+            };
+            let contacts_id = write(&boundary, &db, &manager, "reports.create", async |tx| {
+                reports.create(tx, &manager, &contacts).await
+            })
+            .await?;
+            let made = reports.access(&manager, contacts_id).await?;
+            client
+                .execute(
+                    "UPDATE base_report_exports SET report_id=$2, access=$3 WHERE id=$1",
+                    &[export, &contacts_id, &made],
+                )
+                .await?;
+            let unmasked = reports.exported(&manager, *export).await;
+            client.execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id,mode) VALUES(1,1,'persons','email','mask') ON CONFLICT DO NOTHING", &[]).await?;
+            let now = reports.access(&manager, contacts_id).await?;
+            let masked = reports.exported(&manager, *export).await;
+            client
+                .execute(
+                    "DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=1 AND table_id='persons'",
+                    &[],
+                )
+                .await?;
+            checks.check(
+                "masking a field the file holds changes what its requester may see",
+                made != now && now.ends_with('m'),
+                format!("{made} -> {now}"),
+            );
+            checks.check(
+                "a file made before the mask is refused after it",
+                !matches!(&unmasked, Err(ReportError::Refused(_)))
+                    && matches!(&masked, Err(ReportError::Refused(m)) if m.contains("changed")),
+                format!(
+                    "before {:?}, after {:?}",
+                    unmasked.map(|f| f.rows).map_err(|e| e.to_string()),
+                    masked.map(|f| f.rows).map_err(|e| e.to_string())
+                ),
+            );
+            // One person's waiting exports are few (#551): the default is
+            // three, and the next is refused with a sentence to wait.
+            let already: i64 = client.query_one("SELECT count(*) FROM base_report_exports WHERE tenant_id=1 AND requester_id=1 AND state='queued'", &[]).await?.get(0);
+            let mut waiting: Vec<i64> = Vec::new();
+            let mut refused = None;
+            for _ in 0..10 {
+                let asked = write(
+                    &boundary,
+                    &db,
+                    &manager,
+                    "reports.prepare_export",
+                    async |tx| {
+                        reports
+                            .prepare_export(tx, &manager, rows_id, &BTreeMap::new(), Format::Csv)
+                            .await
+                    },
+                )
+                .await;
+                match asked {
+                    Ok(id) => waiting.push(id),
+                    Err(error) => {
+                        refused = Some(error);
+                        break;
+                    }
+                }
+            }
+            checks.check(
+                "a person's exports past the waiting limit are refused with a sentence to wait",
+                waiting.len() as i64 == (3 - already).max(0)
+                    && matches!(&refused, Some(ReportError::Refused(m)) if m.contains("Wait for one")),
+                format!(
+                    "{already} waiting before, {} accepted, then {:?}",
+                    waiting.len(),
+                    refused.map(|e| e.to_string())
+                ),
+            );
+            client.execute("UPDATE base_queue_jobs SET state='cancelled', cancelled_at=now(), failure_code='walkthrough' WHERE id IN (SELECT job_id FROM base_report_exports WHERE id=ANY($1))", &[&waiting]).await?;
+            client.execute("UPDATE base_report_exports SET state='failed', message='walkthrough', finished_at=now() WHERE id=ANY($1)", &[&waiting]).await?;
         }
         Err(ReportError::Refused(message)) => checks.check(
             "an account with no current workplace is told how to prepare an export",
@@ -929,6 +1035,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reports.subscriptions(&manager, rows_id).await?.is_empty(),
         "",
     );
+    // CC people (#556): the offer is each page of holders proved staff in
+    // one read, and a subscription proves only the people it names.
+    let offered = reports.share_people(&manager).await?;
+    checks.check(
+        "the people offered are staff of the tenant who can run reports",
+        offered.iter().any(|(id, _)| *id == 2) && offered.iter().all(|(id, _)| *id != 5),
+        format!(
+            "{:?}",
+            offered.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        ),
+    );
+    let mut cc = plan.clone();
+    cc.people = vec![2];
+    let named = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &cc).await
+    })
+    .await;
+    let mut stranger = plan.clone();
+    stranger.people = vec![2, 999_999];
+    let unknown = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &stranger).await
+    })
+    .await;
+    checks.check(
+        "a named person who can run reports is accepted, one who cannot refuses the schedule",
+        named.is_ok()
+            && matches!(&unknown, Err(ReportError::Invalid(fields)) if fields.contains_key("people")),
+        format!(
+            "{:?}, {:?}",
+            named.as_ref().map_err(ToString::to_string),
+            unknown.as_ref().map_err(ToString::to_string)
+        ),
+    );
+    if let Ok(subscription) = named {
+        write(
+            &boundary,
+            &db,
+            &manager,
+            "reports.unsubscribe",
+            async |tx| reports.unsubscribe(tx, &manager, subscription, 1).await,
+        )
+        .await?;
+    }
 
     println!("== Totals over every column once, wider than one Grid read, and agent date drills (review of #172)");
     let mut doubled = totals.clone();

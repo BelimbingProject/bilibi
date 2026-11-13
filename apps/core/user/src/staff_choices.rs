@@ -6,7 +6,7 @@ use crate::UserService;
 use bilibi_authz::authorize_key;
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{Catalog, Consumer, Entry, Module, RegistryError};
-use bilibi_security::Scope;
+use bilibi_security::{ProofClient, Scope};
 use std::collections::BTreeSet;
 use tokio_postgres::GenericClient;
 
@@ -114,9 +114,42 @@ pub struct StaffChoice {
 
 /// Live staff only, as `standing` proves them on every sign-in: an active
 /// identity, an active and not SCIM-deactivated account, and a linked Person
-/// that has not been retired. The name test is a word-start match through
-/// `position`, so typed `%` and `_` stay literal and no pattern is built.
-const SEARCH: &str = "SELECT u.id,u.name FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active) AND (u.person_id IS NULL OR EXISTS(SELECT 1 FROM persons p WHERE p.tenant_id=u.tenant_id AND p.id=u.person_id AND p.retired_at IS NULL AND p.system_key IS NULL)) AND ($2='' OR starts_with(lower(u.name),$2) OR position(' '||$2 in lower(u.name))>0) ORDER BY lower(u.name),u.id LIMIT $3";
+/// that has not been retired. Shared by the staff search and
+/// [`live_staff`], so a pick and a proof never disagree.
+macro_rules! live_staff_from {
+    () => {
+        "FROM users u JOIN user_identities i ON i.id=u.identity_id AND i.status='active' AND i.deleted_at IS NULL WHERE u.tenant_id=$1 AND u.kind='staff' AND u.deleted_at IS NULL AND u.status='active' AND NOT EXISTS(SELECT 1 FROM user_scim_users s WHERE s.tenant_id=u.tenant_id AND s.user_id=u.id AND NOT s.active) AND (u.person_id IS NULL OR EXISTS(SELECT 1 FROM persons p WHERE p.tenant_id=u.tenant_id AND p.id=u.person_id AND p.retired_at IS NULL AND p.system_key IS NULL))"
+    };
+}
+/// The name test is a word-start match through `position`, so typed `%` and
+/// `_` stay literal and no pattern is built.
+const SEARCH: &str = concat!(
+    "SELECT u.id,u.name ",
+    live_staff_from!(),
+    " AND ($2='' OR starts_with(lower(u.name),$2) OR position(' '||$2 in lower(u.name))>0) ORDER BY lower(u.name),u.id LIMIT $3"
+);
+const AMONG: &str = concat!(
+    "SELECT COALESCE(array_agg(u.id ORDER BY u.id),'{}'::bigint[]) ",
+    live_staff_from!(),
+    " AND u.id=ANY($2)"
+);
+
+/// Which of `accounts` are live staff of `tenant`, in id order, in one read
+/// (`ActorVerifier::live_staff` for Base owners that route to many accounts).
+pub(crate) async fn live_staff(
+    client: &dyn ProofClient,
+    tenant: i64,
+    accounts: &[i64],
+) -> Result<Vec<i64>> {
+    if tenant <= 0 || accounts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row = client
+        .query_opt(AMONG, &[&tenant, &accounts])
+        .await?
+        .ok_or(Error::Internal)?;
+    Ok(row.get(0))
+}
 
 async fn search(
     assignments: &Assignments,

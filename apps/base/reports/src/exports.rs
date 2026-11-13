@@ -159,6 +159,25 @@ impl Reports {
                 "Oversight results cannot be retained in the parent. Use a live download.".into(),
             ));
         }
+        // Each waiting export takes a Queue slot of the whole installation
+        // when it runs: one person holds only a few at once.
+        let limit = self
+            .setting(tx.sql(), scope, contributions::MAX_QUEUED_EXPORTS_KEY)
+            .await? as i64;
+        let waiting: i64 = tx
+            .sql()
+            .query_one(
+                "SELECT count(*) FROM base_report_exports WHERE tenant_id=$1 AND requester_id=$2 AND state='queued'",
+                &[&scope.tenant(), &scope.user()],
+            )
+            .await
+            .map_err(Error::from)?
+            .get(0);
+        if waiting >= limit {
+            return Err(ReportError::Refused(format!(
+                "You already have {waiting} exports being prepared, the most allowed at once. Wait for one to be ready, then prepare this one."
+            )));
+        }
         let answers: BTreeMap<String, Value> = answers
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
