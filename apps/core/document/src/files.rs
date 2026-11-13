@@ -33,7 +33,7 @@ use bilibi_media::{
     AttachmentSubject, Media, Rules as MediaRules, ScanState as MediaScanState, SubjectAction,
     SubjectOwner, Upload as MediaUpload,
 };
-use bilibi_party_ids::OrganisationId;
+use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{AccountKind, PartyProofs, ProofClient, ProofFuture, ReadClient, Scope};
 use serde_json::{json, Value};
@@ -114,6 +114,20 @@ impl SubjectOwner for DocumentFiles {
             }
         })
     }
+    /// A held upload's Media file belongs to `person` while it is the file of
+    /// a revision of a document related to them (`privacy.rs`): the erasure
+    /// keeps that link until its bytes are removed.
+    fn person_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        person: PersonId,
+        subject_id: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move {
+            crate::privacy::person_file(client, scope.tenant(), person.get(), subject_id).await
+        })
+    }
 }
 
 const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
@@ -178,6 +192,23 @@ impl Owner for DocumentFiles {
     ) -> ProofFuture<'a, bool> {
         Box::pin(async move {
             crate::privacy::person_file(client, grant.tenant(), grant.person().get(), subject).await
+        })
+    }
+    /// An erasure deletes the files of the documents related to the
+    /// request's person (`privacy.rs`).
+    fn erasure_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        grant: &'a bilibi_personal_data::Erasure,
+        subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move {
+            match grant.person() {
+                Some(person) => {
+                    crate::privacy::person_file(client, grant.tenant(), person.get(), subject).await
+                }
+                None => Ok(false),
+            }
         })
     }
     fn authorize<'a>(

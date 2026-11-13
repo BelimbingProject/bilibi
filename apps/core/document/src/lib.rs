@@ -1293,10 +1293,15 @@ inventory::submit! { Module {
         ("core-document-008-list-order", include_str!("../migrations/008-list-order.sql")),
         ("core-document-009-customer-shares", include_str!("../migrations/009-customer-shares.sql")),
         ("core-document-011-personal-data", include_str!("../migrations/011-personal-data.sql")),
+        ("core-document-012-erasure", include_str!("../migrations/012-erasure.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;
-        privacy::bind(s.get("base/artifacts.store")?, s.get("base/queue.store")?)?;
+        privacy::bind(
+            s.get("base/artifacts.store")?,
+            s.get(bilibi_media::SERVICE)?,
+            s.get("base/database.mutations")?,
+        )?;
         let documents = Arc::new(Documents {
             db: s.get::<Db>("base/database.pool")?.as_ref().clone(),
             authentication: s.get("base/tenancy.authentication")?,
