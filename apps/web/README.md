@@ -124,7 +124,7 @@ no missing-record redirect or shell applies.
 targeted panels, URL changes and guarded subscriptions. HTTP-only adapters should
 return `live: false`. F6 owns queued events and retained fragment/iframe lifecycle.
 
-A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
+A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. A wake or 15-second refresh that renders what the browser already holds sends nothing and does not draw the shell, and a tab out of view is not refreshed on the timer. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
 
 # Public endpoints (`src/endpoints.rs`)
 
@@ -156,6 +156,7 @@ inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenan
 
 - `POST /visitor/v1/sessions`, `/session/renew` and `/session/end` take a JSON body sent as `text/plain`, so a browser makes a simple cross-origin request and no preflight. The reply carries `Access-Control-Allow-Origin` for the origin only when it is accepted; every refusal of a credential or site is one `403 {"error":"refused"}`, a bad value `400 invalid`, an exceeded limit `429 rate_limited`.
 - `GET /visitor/v1/live` is a WebSocket that needs an `Origin`. Its first frame (`hello`) carries the token within 10 seconds; the token is never a cookie or a URL. Frames are bounded (32 KiB of JSON, a message 16 KiB, a typing signal 1 KiB, an upload chunk 64 KiB with the staff socket's eight-byte header), counted per session per minute, and each proves the session, the origin and the site again before the channel sees it. A socket rechecks every 10 seconds and closes at once on a staff revocation.
+- `GET /visitor/v1/client.js` serves the embeddable browser client (`bilibi_visitor::CLIENT_V1`, version 1 by its path): one dependency-free script that runs under a strict Content-Security-Policy and is readable by any page (`Cross-Origin-Resource-Policy: cross-origin`, five minutes of caching). `apps/base/visitor/README.md` has its attributes.
 - No cookie, session, CSRF secret or staff route is read or reachable: the token is a `vst_` credential in its own table. A visitor token sent as a cookie, a bearer or a query to any staff, portal, agent or live route proves nothing there.
 - A sender on this edge is its IPv4 address, or the /64 network of its IPv6 address, so one subscriber cannot take a fresh key per request.
 - Limits are `base/visitor`'s operator settings: sessions per sender and per site per minute, frames and files per session per minute, open sockets per session, per sender and in total (apart from the staff and portal sockets'), a file's size and the memory held for files still arriving (a stalled file is dropped after 30 seconds without a chunk).

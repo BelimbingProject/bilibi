@@ -190,9 +190,17 @@ fn snapshot(hold: &Hold) -> Value {
     serde_json::to_value(hold).unwrap_or(Value::Null)
 }
 
+/// How long placing a hold waits for running erasures and sweeps: one may
+/// hold the guard while it removes many files.
+const PLACE_WAIT: &str = "SET LOCAL lock_timeout = '5s'";
+/// Shown when that wait runs out.
+const PLACE_BUSY: &str =
+    "An erasure or retention sweep is running in this tenant. Try again in a minute.";
+
 /// Places a hold in the caller's transaction. A second active hold on the
 /// same target is `Conflict`, however close together the two arrive. The
-/// exclusive guard waits for running erasures and sweeps to commit.
+/// exclusive guard waits for running erasures and sweeps to commit, up to
+/// five seconds, then refuses with [`PLACE_BUSY`].
 pub(crate) async fn place_in(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
@@ -210,11 +218,23 @@ pub(crate) async fn place_in(
         }
     };
     bilibi_authz::authorize_key(tx.sql(), scope, HOLD_MANAGE).await?;
-    tx.sql()
+    tx.sql().batch_execute(PLACE_WAIT).await?;
+    match tx
+        .sql()
         .execute(
             "SELECT pg_advisory_xact_lock($1,$2)",
             &[&GUARD, &tenant_key(scope.tenant())?],
         )
+        .await
+    {
+        Ok(_) => {}
+        Err(error) if error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+            return Err(Error::Refused(PLACE_BUSY.into()));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    tx.sql()
+        .batch_execute("SET LOCAL lock_timeout = DEFAULT")
         .await?;
     let taken = tx
         .sql()

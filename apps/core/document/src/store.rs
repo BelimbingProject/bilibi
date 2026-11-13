@@ -218,6 +218,23 @@ pub(crate) async fn permission(
         .await
 }
 
+/// Whether the actor's own live grant on a document holds download, manage
+/// and share and never ends. Merge needs it on every document it names: the
+/// survivor's creator keeps a full grant with no end, so a merge that moved a
+/// document the actor holds less on into one of theirs would widen their own
+/// access (#584's bounds).
+pub(crate) async fn full_open_grant(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    document: i64,
+) -> Result<bool> {
+    Ok(own_grant(client, scope, document)
+        .await?
+        .is_some_and(|own| {
+            own.can_download && own.can_manage && own.can_share && own.expires_at.is_none()
+        }))
+}
+
 /// The actor's own live grant on a document, which bounds what they can share.
 async fn own_grant(
     client: &dyn ProofClient,

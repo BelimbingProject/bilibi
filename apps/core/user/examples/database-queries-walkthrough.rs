@@ -361,7 +361,7 @@ async fn main() -> Result<()> {
         &queries,
         actor,
         "session advisory lock",
-        "SELECT pg_advisory_lock(841332)",
+        "SELECT pg_advisory_lock(841332, base_audit_chain_key('actions', 1))",
         ConsoleOptions::default(),
         1,
         25,
@@ -370,7 +370,10 @@ async fn main() -> Result<()> {
     let mut free = false;
     for _ in 0..50 {
         free = client
-            .query_one("SELECT pg_try_advisory_xact_lock(841332)", &[])
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock(841332, base_audit_chain_key('actions', 1))",
+                &[],
+            )
             .await?
             .get(0);
         if free {

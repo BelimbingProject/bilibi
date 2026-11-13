@@ -4,7 +4,8 @@
 //! subject in recording order, up to this event, one transaction each: lock
 //! the delivery row, run the subscriber, set the receipt, audit, commit. A
 //! refusal stops that subscriber's walk (later events of the subject wait) and
-//! the job retries with the queue's backoff; other subscribers carry on.
+//! the job retries with the queue's backoff; other subscribers carry on. Each
+//! receipt also moves the subscriber's watermark forward (`watermark`).
 use crate::{Event, Events, Subscriber};
 use bilibi_database::{Change, Error, Result};
 use bilibi_queue::{Execution, Handler, HandlerFuture, Identity, Outcome};
@@ -196,6 +197,7 @@ async fn next(
         return Ok(Step::Refused(id, "unsupported_event_version"));
     }
     let handler = subscriber.handler;
+    let names: Vec<&'static str> = subscriber.events.iter().map(|on| on.event).collect();
     let result = tx
         .mutate(move |sql| {
             Box::pin(async move {
@@ -205,6 +207,8 @@ async fn next(
                     &[&id, &key],
                 )
                 .await?;
+                // With the receipt: the missed count starts at the watermark.
+                crate::watermark::advance(sql, event.tenant, key, &names).await?;
                 changes.push(Change {
                     kind: "base/events.delivery".into(),
                     id,

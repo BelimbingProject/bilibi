@@ -389,6 +389,9 @@ pub struct PageCounts {
     pub page_size: u64,
     pub total_entries: u64,
     pub total_pages: u64,
+    /// The owner stopped counting at `total_entries` (a bounded count over a
+    /// large log): the summary then reads "of 10000+ results".
+    pub more: bool,
 }
 impl PageCounts {
     pub fn new(page: u64, page_size: u64, total_entries: u64) -> Self {
@@ -403,7 +406,13 @@ impl PageCounts {
             page_size,
             total_entries,
             total_pages,
+            more: false,
         }
+    }
+    /// Marks `total_entries` as a count the owner stopped at, when `more`.
+    pub fn or_more(mut self, more: bool) -> Self {
+        self.more = more;
+        self
     }
     pub fn has_prev(&self) -> bool {
         self.total_pages > 0 && self.page > 1
@@ -423,8 +432,9 @@ impl PageCounts {
             .saturating_mul(self.page_size)
             .min(self.total_entries);
         format!(
-            "Showing {first} to {last} of {} results",
-            self.total_entries
+            "Showing {first} to {last} of {}{} results",
+            self.total_entries,
+            if self.more { "+" } else { "" }
         )
     }
     pub fn steps(&self) -> Vec<Option<u64>> {

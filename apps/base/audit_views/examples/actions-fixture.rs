@@ -1,7 +1,9 @@
 //! Deterministic Audit Actions fixture for a disposable, migrated
 //! database; no test harness. It inserts one fixed ledger of 64 actions for a
-//! tenant (default 1) with explicit event times, so the Actions screen reads the
-//! same on every run and against any other implementation fed the same rows:
+//! tenant (default 1) with explicit event times, the newest at 09:00 UTC
+//! yesterday so the whole ledger is inside the screen's default period (the
+//! last 30 days), so the Actions screen reads the same on every run and
+//! against any other implementation fed the same rows:
 //!
 //!   BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes DATABASE_URL=... \
 //!     cargo run -p bilibi-audit-views --example actions-fixture [tenant]
@@ -269,16 +271,16 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::Invalid)?;
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let client = db.get().await?;
+    let mut client = db.get().await?;
     let rows = ledger();
     let total = rows.len();
     for (n, r) in rows.into_iter().enumerate() {
-        // Newest last: one row per 7 minutes ending on 2026-10-14T09:00:00Z.
+        // Newest last: one row per 7 minutes ending at 09:00 UTC yesterday.
         let age = i32::try_from((total - n) * 7 * 60).map_err(|_| Error::Invalid)?;
         let id: i64 = client
             .query_one(
                 "INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,actor_role,impersonator_id,system_principal,url,event,payload,trace_id,is_retained,occurred_at) \
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'2026-10-14T09:00:00Z'::timestamptz - make_interval(secs => $12)) RETURNING id",
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,((date_trunc('day', timezone('UTC', now())) - interval '15 hours') AT TIME ZONE 'UTC') - make_interval(secs => $12)) RETURNING id",
                 &[&tenant, &r.actor.0, &r.actor.1, &r.role, &r.impersonator, &r.principal, &r.url, &r.event, &r.payload, &r.trace, &r.retained, &f64::from(age)],
             )
             .await?
@@ -414,7 +416,7 @@ async fn main() -> Result<()> {
             },
         ),
     ] {
-        let page = list_actions(&**client, &scope, &query).await?;
+        let page = list_actions(&mut client, &scope, &query).await?;
         println!("{label}: {} actions", page.total_entries);
     }
     Ok(())

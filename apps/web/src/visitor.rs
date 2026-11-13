@@ -40,6 +40,7 @@ pub const SESSIONS: &str = "/visitor/v1/sessions";
 pub const RENEW: &str = "/visitor/v1/session/renew";
 pub const END: &str = "/visitor/v1/session/end";
 pub const LIVE: &str = "/visitor/v1/live";
+pub const CLIENT: &str = "/visitor/v1/client.js";
 /// Whether `path` is the visitor edge's: no page or download may claim it.
 pub fn reserved(path: &str) -> bool {
     path == "/visitor" || path.starts_with("/visitor/")
@@ -234,6 +235,27 @@ pub fn router() -> Router<App> {
         .route(RENEW, post(renew))
         .route(END, post(end))
         .route(LIVE, get(upgrade))
+        .route(CLIENT, get(client))
+}
+
+/// The embeddable script, versioned by its path (`v1`). A page on another
+/// origin loads it with a script tag, so it is marked cross-origin readable.
+async fn client() -> Response {
+    let mut response = (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        bilibi_base::visitor::CLIENT_V1,
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("cross-origin"),
+    );
+    response
 }
 
 /// How a request is refused. Every refusal of a credential or a site is the
@@ -683,7 +705,7 @@ async fn run(app: App, mut socket: WebSocket, origin: String, mut slot: Slot) {
                     if refusals >= REFUSALS_BEFORE_CLOSE {
                         return close(&mut socket, "rate_limited").await;
                     }
-                    Some(json!({"type": "error", "code": "rate_limited"}))
+                    Some(json!({"type": "error", "id": named(&text), "code": "rate_limited"}))
                 } else {
                     refusals = 0;
                     if renewed_at.elapsed() >= Duration::from_secs(policy.session_seconds / 2) {
@@ -779,6 +801,18 @@ async fn deliver(
 /// went, so raising `visitor.sockets_total` never starves a new session.
 fn frame_keys(policy: &Policy) -> usize {
     (policy.sockets_total as usize).saturating_mul(6).max(4_096)
+}
+/// The `id` of a message or a file announcement, so a frame refused before
+/// it acts still tells the browser which one was refused.
+fn named(text: &str) -> Option<u64> {
+    if text.len() > FRAME_LIMIT {
+        return None;
+    }
+    match serde_json::from_str::<Inbound>(text).ok()? {
+        Inbound::Message { id, .. } => id,
+        Inbound::Upload { id, .. } => Some(id.into()),
+        _ => None,
+    }
 }
 fn failure(id: Option<u64>, error: Error) -> Value {
     let refusal = Refusal::from(error);
