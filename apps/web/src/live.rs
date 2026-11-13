@@ -360,6 +360,10 @@ enum Event {
         target: String,
         id: u64,
     },
+    /// The tab went out of view or came back (`visibilitychange`). A hidden
+    /// tab's page is not refreshed on the timer; coming back refreshes it at
+    /// once. Transport state only: no page sees it and it is not activity.
+    Visibility { hidden: bool },
 }
 fn decode(text: &str) -> (Option<u64>, Result<Event>) {
     // Separate transport metadata before decoding the strict module intent. Keep
@@ -605,8 +609,65 @@ struct Session<S: Side> {
     /// The server's count of upload bytes held in memory and the operator's
     /// limit on it, as read when the socket opened.
     upload_budget: (bilibi_ui::UploadBudget, u64),
+    /// Set while the timer or a wake renders: nobody is waiting for the
+    /// reply, so a render equal to what the browser holds is not sent.
+    background: bool,
+    /// A digest of what the browser last received for the page body (`page`)
+    /// and for each panel, by target. A sent page forgets the panels', since
+    /// the shell around it carries the shell panels' markup again.
+    sent: HashMap<String, u64>,
+}
+/// A digest of rendered parts, to tell an unchanged render from a new one.
+fn digest(parts: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut hasher);
+    hasher.finish()
+}
+/// What a page body shows and the address state it answers with.
+fn body_digest(body: &LiveBody) -> u64 {
+    let mut query: Vec<(&str, &str)> = body
+        .query
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    query.sort_unstable();
+    let rows = body.rows.to_string();
+    let mut parts = vec![body.html.as_str(), rows.as_str()];
+    for (key, value) in query {
+        parts.push(key);
+        parts.push(value);
+    }
+    digest(&parts)
 }
 impl<S: Side> Session<S> {
+    /// Whether the browser needs `message`. A panel fragment nobody asked for
+    /// that equals what its target already shows is dropped; an unchanged
+    /// page body never becomes a message (`update`).
+    fn changed(&mut self, message: &Value) -> bool {
+        let target = message["target"].as_str().unwrap_or_default();
+        match message["type"].as_str() {
+            Some("fragment") => {
+                let rows = message["rows"].to_string();
+                let digest = digest(&[message["html"].as_str().unwrap_or_default(), rows.as_str()]);
+                let quiet = self.background
+                    && message["redirect"].is_null()
+                    && message.get("url").is_none_or(Value::is_null)
+                    && message["notice"].as_str().is_none_or(str::is_empty)
+                    && message["events"].as_array().is_none_or(Vec::is_empty);
+                if quiet && self.sent.get(target) == Some(&digest) {
+                    return false;
+                }
+                self.sent.insert(target.to_owned(), digest);
+            }
+            // The browser replaced the target with the refusal.
+            Some("error") => {
+                self.sent.remove(target);
+            }
+            _ => {}
+        }
+        true
+    }
     async fn scope(&mut self, app: &App, token: &str) -> Result<S::Context> {
         let page = self.page.as_ref().ok_or(Error::Invalid)?;
         let path = self.path.clone();
@@ -827,6 +888,7 @@ impl<S: Side> Session<S> {
             )
             .await?;
             hold_flash(app, token, &mut body);
+            let moved = body.path.as_deref().is_some_and(|path| path != self.path);
             // A page may move only among its own routes; any other path is a
             // module bug, not a navigation.
             if let Some(path) = body.path.as_deref().filter(|path| *path != self.path) {
@@ -837,7 +899,23 @@ impl<S: Side> Session<S> {
             // Canonicalize child namespaces before the combined URL, but send
             // the parent first so its anchors exist when fragments arrive.
             let fragments = self.sync_panels(app, token, &scope).await?;
-            let mut messages = vec![self.page_message(app, &scope, body).await?];
+            // A timer or wake render whose body is what the browser already
+            // holds sends no page and does not render the shell around it:
+            // the shell is drawn on a mount, a navigation and a person's own
+            // event, and a shell panel follows its own wakes.
+            let digest = body_digest(&body);
+            let unchanged = self.background
+                && !moved
+                && body.redirect.is_none()
+                && body.notice.is_empty()
+                && body.events.is_empty()
+                && self.sent.get("page") == Some(&digest);
+            let mut messages = Vec::new();
+            if !unchanged {
+                messages.push(self.page_message(app, &scope, body).await?);
+                self.sent.clear();
+                self.sent.insert("page".into(), digest);
+            }
             messages.extend(fragments);
             return Ok(messages);
         }
@@ -868,6 +946,34 @@ impl<S: Side> Session<S> {
             message["url"] = json!(self.url());
         }
         Ok(vec![message])
+    }
+    /// The timer's render: the page and its panels, then each shell panel by
+    /// itself when no page went out (a sent page carries the shell, drawn
+    /// again). So a notification another process wrote still reaches the bell
+    /// without the whole shell being rendered for every open tab.
+    async fn refresh(&mut self, app: &App, token: &str) -> Result<Vec<Value>> {
+        let mut messages = self.update(app, token, "page", LiveInput::Refresh).await?;
+        if messages.iter().any(|message| message["type"] == "page") {
+            return Ok(messages);
+        }
+        let ids: Vec<String> = self.shell.keys().cloned().collect();
+        for id in ids {
+            match self.update(app, token, &id, LiveInput::Refresh).await {
+                Ok(fragments) => messages.extend(fragments),
+                Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                // An embed the account lost stops refreshing; the next drawn
+                // shell leaves it out.
+                Err(Error::Forbidden) => {
+                    self.shell.remove(&id);
+                }
+                Err(error) => {
+                    if crate::server_fault(&error) {
+                        eprintln!("error: live shell panel {id} failed to refresh: {error:?}");
+                    }
+                }
+            }
+        }
+        Ok(messages)
     }
     async fn page_message(
         &mut self,
@@ -1455,6 +1561,8 @@ impl<S: Side> Session<S> {
             Event::UploadCancel { target, id } => {
                 self.upload_cancel(app, token, &target, id).await?
             }
+            // Answered by the socket loop; it never reaches a page.
+            Event::Visibility { .. } => return Err(Error::Invalid),
         };
         let scope = S::activity(app, token).await?;
         self.bound(scope)?;
@@ -1529,7 +1637,11 @@ pub async fn run<S: Side>(
         uploads: 0,
         staged: HashMap::new(),
         upload_budget: (app.live.uploads.clone(), policy.upload_buffer),
+        background: false,
+        sent: HashMap::new(),
     };
+    // Whether the browser said its tab is out of view (`Event::Visibility`).
+    let mut hidden = false;
     // A termination of this socket's session (logout elsewhere, an operator,
     // a credential change) signs this page out at once: the browser is sent
     // back through the page it holds, whose guard forwards it to sign-in with
@@ -1545,6 +1657,7 @@ pub async fn run<S: Side>(
         let mut request_id = None;
         let mut target = "page".to_owned();
         let mut history = "replace";
+        session.background = false;
         let result = tokio::select! {
             message = socket.recv() => match message {
                 Some(Ok(Message::Text(text))) => {
@@ -1574,6 +1687,15 @@ pub async fn run<S: Side>(
                     let (id, event) = decode(&text);
                     request_id = id;
                     match event {
+                        Ok(Event::Visibility { hidden: now }) => {
+                            hidden = now;
+                            if now || session.page.is_none() {
+                                Ok(vec![json!({"type":"ack", "target":"page"})])
+                            } else {
+                                // Back in view: the page catches up at once.
+                                session.update(&app, &token, "page", LiveInput::Refresh).await
+                            }
+                        },
                         Ok(event) => {
                             match &event {
                                 Event::Action {target: id, ..} | Event::Upload {target: id, ..} | Event::UploadCancel {target: id, ..} => target = id.clone(),
@@ -1616,14 +1738,17 @@ pub async fn run<S: Side>(
                     Ok(scope) => {
                         let scope = S::scope(&scope);
                         if wake.change.as_ref().is_some_and(|c| c.tenant != scope.tenant() || c.user.is_some_and(|user| user != scope.user())) {continue;}
+                        session.background = true;
                         session.update(&app, &token, &target, LiveInput::Refresh).await
                     },
                     Err(error) => Err(error),
                 }
             },
             _ = refresh.tick() => {
-                if session.page.is_none() {continue;}
-                session.update(&app, &token, "page", LiveInput::Refresh).await
+                // A hidden tab waits: coming back into view refreshes it.
+                if session.page.is_none() || hidden {continue;}
+                session.background = true;
+                session.refresh(&app, &token).await
             },
             terminated = terminations.recv() => {
                 match terminated {
@@ -1641,6 +1766,10 @@ pub async fn run<S: Side>(
         // authorization also returns through the HTTP guard, which sends an
         // ended session to sign-in with its expiry feedback. A step-up the
         // session owes reloads the same way, through the page's address.
+        // A failed render may have counted a page the browser never got.
+        if result.is_err() {
+            session.sent.clear();
+        }
         if session.stale || matches!(&result, Err(Error::Unauthorized)) {
             reload(&mut socket, &session.path).await;
             break;
@@ -1693,6 +1822,9 @@ pub async fn run<S: Side>(
         // After a failed panel is gone, so its entries' staging goes too.
         session.prune_staged().await;
         for message in &mut messages {
+            if !session.changed(message) {
+                continue;
+            }
             message["request_id"] = json!(request_id);
             if message["type"] == "page" || message["type"] == "fragment" {
                 message["history"] = json!(history);

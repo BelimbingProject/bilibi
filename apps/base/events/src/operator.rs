@@ -6,7 +6,8 @@ use bilibi_tenancy::Scope;
 use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use tokio_postgres::GenericClient;
+use std::time::{Duration, Instant};
+use tokio_postgres::{error::SqlState, types::ToSql, GenericClient, Row, Transaction};
 
 /// One event's delivery to one subscriber. `mounted` is false for a
 /// subscriber this build does not compose; its pending rows wait for a replay
@@ -29,7 +30,7 @@ pub struct DeliveryState {
 
 /// One subscriber as the tenant's outbox sees it. A mounted subscriber is
 /// listed even before its first delivery; an unmounted one only while the
-/// tenant holds deliveries for it. The gap is computed when it is read, so it
+/// tenant holds pending deliveries for it. The gap is computed when it is read, so it
 /// shows right after a remount with nothing written at boot.
 #[derive(Clone, Debug)]
 pub struct SubscriberState {
@@ -37,7 +38,8 @@ pub struct SubscriberState {
     pub mounted: bool,
     /// The event names it reads; empty when it is not mounted.
     pub events: Vec<&'static str>,
-    /// The latest event delivered to it.
+    /// The latest event delivered to it; also `None` when that read ran past
+    /// the time limit.
     pub last_delivered: Option<Delivered>,
     /// Deliveries not yet delivered, and how many of them last failed.
     pub pending: i64,
@@ -48,7 +50,20 @@ pub struct SubscriberState {
     /// them over.
     pub missed: i64,
     pub first_missed: Option<i64>,
+    /// `missed` stopped at the cap ([`MISSED_CAP`] for each event name it
+    /// reads): there are at least that many.
+    pub missed_more: bool,
+    /// False when the missed events could not be counted within the read's
+    /// time limit; `missed` and `first_missed` then say nothing.
+    pub missed_counted: bool,
 }
+/// The most missed events counted for each event name a subscriber reads.
+pub const MISSED_CAP: i64 = 10_000;
+/// The longest one statement of [`Events::subscriber_states`] may run, in
+/// milliseconds, and how long the per-subscriber reads may take together
+/// before the rest are left out.
+const STATEMENT_MS: u64 = 5_000;
+const BUDGET: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug)]
 pub struct Delivered {
     pub event_id: i64,
@@ -100,9 +115,35 @@ impl Replay {
     }
 }
 
-const SUBSCRIBERS: &str = "SELECT d.subscriber,count(*) FILTER (WHERE d.delivered_at IS NULL),count(*) FILTER (WHERE d.delivered_at IS NULL AND d.last_error IS NOT NULL),min(e.id) FILTER (WHERE d.delivered_at IS NULL) FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE e.tenant_id=$1 GROUP BY d.subscriber";
-const LAST_DELIVERED: &str = "SELECT DISTINCT ON (d.subscriber) d.subscriber,e.id,(extract(epoch FROM e.recorded_at)*1000000)::bigint,(extract(epoch FROM d.delivered_at)*1000000)::bigint FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE e.tenant_id=$1 AND d.delivered_at IS NOT NULL ORDER BY d.subscriber,e.id DESC";
-const MISSED: &str = "SELECT count(*),min(e.id) FROM base_events e WHERE e.tenant_id=$1 AND e.name=ANY($2) AND e.erased_at IS NULL AND NOT EXISTS (SELECT 1 FROM base_events_deliveries d WHERE d.event_id=e.id AND d.subscriber=$3)";
+// Pending rows only, through the partial index `base_events_pending`.
+const PENDING: &str = "SELECT d.subscriber,count(*),count(*) FILTER (WHERE d.last_error IS NOT NULL),min(d.event_id) FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.delivered_at IS NULL AND e.tenant_id=$1 GROUP BY d.subscriber";
+// One subscriber's latest receipt, newest first through `base_events_delivered`.
+const LAST_DELIVERED: &str = "SELECT d.event_id,(extract(epoch FROM e.recorded_at)*1000000)::bigint,(extract(epoch FROM d.delivered_at)*1000000)::bigint FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE d.subscriber=$2 AND d.delivered_at IS NOT NULL AND e.tenant_id=$1 ORDER BY d.event_id DESC LIMIT 1";
+// Each event name's missed events in recording order, stopping at the cap,
+// so the first one found for a name is its first missed event.
+const MISSED: &str = "SELECT count(*),min(m.id) FROM unnest($2::text[]) AS n(name) CROSS JOIN LATERAL (SELECT e.id FROM base_events e WHERE e.tenant_id=$1 AND e.name=n.name AND e.erased_at IS NULL AND NOT EXISTS (SELECT 1 FROM base_events_deliveries d WHERE d.event_id=e.id AND d.subscriber=$3) ORDER BY e.id LIMIT $4) m";
+
+/// One read in a savepoint, under the transaction's statement time limit.
+/// `None` when PostgreSQL cancelled it for running past the limit; the
+/// transaction carries on.
+async fn bounded(
+    tx: &mut Transaction<'_>,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<Option<Vec<Row>>> {
+    let savepoint = tx.transaction().await?;
+    match savepoint.query(sql, params).await {
+        Ok(rows) => {
+            savepoint.commit().await?;
+            Ok(Some(rows))
+        }
+        Err(error) if error.code() == Some(&SqlState::QUERY_CANCELED) => {
+            savepoint.rollback().await?;
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 fn instant(micros: i64) -> Result<Timestamp> {
     Timestamp::from_microsecond(micros).map_err(|_| Error::Internal)
@@ -152,12 +193,23 @@ impl Events {
     /// Every subscriber of the scope's tenant, sorted by key: whether it is
     /// mounted, the last event delivered to it, what is pending and what it
     /// missed. Needs [`VIEW`].
+    ///
+    /// No read here is a scan without a bound. Pending figures come from the
+    /// pending rows only. Each statement may run five seconds; the latest
+    /// receipt and the missed count of a subscriber that run longer are left
+    /// out (`last_delivered` is `None`, `missed_counted` is false) instead of
+    /// failing the read, and once those reads have taken ten seconds together
+    /// the remaining ones are left out too.
     pub async fn subscriber_states(
         &self,
-        client: &impl GenericClient,
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
     ) -> Result<Vec<SubscriberState>> {
-        authorize_key(client, scope, VIEW).await?;
+        // Decided before the transaction, so a refusal's record is kept.
+        authorize_key(&*client, scope, VIEW).await?;
+        let mut tx = client.transaction().await?;
+        tx.batch_execute(&format!("SET LOCAL statement_timeout = {STATEMENT_MS}"))
+            .await?;
         let tenant = scope.tenant();
         let mut states: BTreeMap<String, SubscriberState> = self
             .subscribers
@@ -173,11 +225,13 @@ impl Events {
                     first_pending: None,
                     missed: 0,
                     first_missed: None,
+                    missed_more: false,
+                    missed_counted: true,
                 };
                 ((*key).to_owned(), state)
             })
             .collect();
-        for row in client.query(SUBSCRIBERS, &[&tenant]).await? {
+        for row in tx.query(PENDING, &[&tenant]).await? {
             let key: String = row.get(0);
             let state = states
                 .entry(key.clone())
@@ -191,27 +245,51 @@ impl Events {
                     first_pending: None,
                     missed: 0,
                     first_missed: None,
+                    missed_more: false,
+                    missed_counted: true,
                 });
             state.pending = row.get(1);
             state.failing = row.get(2);
             state.first_pending = row.get(3);
         }
-        for row in client.query(LAST_DELIVERED, &[&tenant]).await? {
-            if let Some(state) = states.get_mut(row.get::<_, &str>(0)) {
+        let started = Instant::now();
+        for state in states.values_mut() {
+            let last = if started.elapsed() < BUDGET {
+                bounded(&mut tx, LAST_DELIVERED, &[&tenant, &state.subscriber]).await?
+            } else {
+                None
+            };
+            if let Some(row) = last.as_ref().and_then(|rows| rows.first()) {
                 state.last_delivered = Some(Delivered {
-                    event_id: row.get(1),
-                    recorded_at: instant(row.get(2))?,
-                    delivered_at: instant(row.get(3))?,
+                    event_id: row.get(0),
+                    recorded_at: instant(row.get(1))?,
+                    delivered_at: instant(row.get(2))?,
                 });
             }
+            // An unmounted subscriber reads no event name: nothing is missed.
+            if !state.mounted {
+                continue;
+            }
+            let counted = if started.elapsed() < BUDGET {
+                bounded(
+                    &mut tx,
+                    MISSED,
+                    &[&tenant, &state.events, &state.subscriber, &MISSED_CAP],
+                )
+                .await?
+            } else {
+                None
+            };
+            match counted.as_ref().and_then(|rows| rows.first()) {
+                Some(row) => {
+                    state.missed = row.get(0);
+                    state.first_missed = row.get(1);
+                    state.missed_more = state.missed >= MISSED_CAP;
+                }
+                None => state.missed_counted = false,
+            }
         }
-        for state in states.values_mut().filter(|state| state.mounted) {
-            let row = client
-                .query_one(MISSED, &[&tenant, &state.events, &state.subscriber])
-                .await?;
-            state.missed = row.get(0);
-            state.first_missed = row.get(1);
-        }
+        tx.commit().await?;
         Ok(states.into_values().collect())
     }
 

@@ -61,7 +61,7 @@ under its element id (slot `shell.notifications` is `#app-notifications`, the
 bell; `shell.ai` is `#app-ai`, the status bar's AI tag) and drops it when its access is refused. Client payloads cannot
 choose an embed, operation, service, tenant, account or record binding.
 
-Responses are `page` (complete `#app`, canonical URL, notice and row count), `fragment` (one panel's complete root element with its existing ID), or `error` (message, target and clear flag). Accepted user events echo the request ID; background updates use null. A rejected intent with a valid request ID also acknowledges that ID. Canonical query values are encoded by Web, never supplied as a client URL. A mount or Back keeps the browser's address while the page's canonical query only adds values it left out, so a list opened at its bare path stays there; a page that drops or corrects a value the address carries replaces it with the canonical one. After that the URL is written only when the canonical address changes: user navigation/query changes push history, background refresh and history corrections replace it. A popstate that changes only the fragment leaves the page as mounted, since a remount would drop what was typed, so an ordinary `href="#id"` link keeps its native behaviour. A link marked `data-focus-link` (an error summary's link to its field) takes focus to its target instead, opening any closed `details` around it, with no history entry. Browser Back remounts the historical URL, except within a page that owns panel query namespaces (same pathname only) or marks an element `data-history="params"` (the tiled workspace): there a Back or Forward is a `params` update of the mounted state, so the DOM it keeps is reconciled rather than rebuilt. A page inside a workspace frame never adds a history entry: its address changes are replaced, a plain same-origin link click becomes `location.replace`, and `bilibi:location` is raised on its `window` after each address change so the workspace can record where the tile went.
+Responses are `page` (complete `#app`, canonical URL, notice and row count), `fragment` (one panel's complete root element with its existing ID), or `error` (message, target and clear flag). Accepted user events echo the request ID; background updates use null, and one that would repeat what the browser already holds is not sent. A rejected intent with a valid request ID also acknowledges that ID. Canonical query values are encoded by Web, never supplied as a client URL. A mount or Back keeps the browser's address while the page's canonical query only adds values it left out, so a list opened at its bare path stays there; a page that drops or corrects a value the address carries replaces it with the canonical one. After that the URL is written only when the canonical address changes: user navigation/query changes push history, background refresh and history corrections replace it. A popstate that changes only the fragment leaves the page as mounted, since a remount would drop what was typed, so an ordinary `href="#id"` link keeps its native behaviour. A link marked `data-focus-link` (an error summary's link to its field) takes focus to its target instead, opening any closed `details` around it, with no history entry. Browser Back remounts the historical URL, except within a page that owns panel query namespaces (same pathname only) or marks an element `data-history="params"` (the tiled workspace): there a Back or Forward is a `params` update of the mounted state, so the DOM it keeps is reconciled rather than rebuilt. A page inside a workspace frame never adds a history entry: its address changes are replaced, a plain same-origin link click becomes `location.replace`, and `bilibi:location` is raised on its `window` after each address change so the workspace can record where the tile went.
 `page` and `fragment` also carry the owner's `LiveBody.events`, which the
 browser dispatches after patching as `window` events `bilibi:<name>` with the
 pushed detail; the stored-secret reveal uses
@@ -279,8 +279,15 @@ runs a session guard on every open socket of that tenant that subscribes.
 
 A notification is such a `Change` with its recipient: it wakes that account's
 bell panel and `/notifications` state only, never the page underneath. The
-15-second fallback revalidates the page and child panels (and re-renders the
-shell, so a notification another process wrote shows there). Neither notification, subscription nor
+15-second fallback revalidates the page, its child panels and each shell panel
+(so a notification another process wrote shows in the bell). It sends only what
+changed: a page body equal to the one the browser holds sends no `page` and does
+not render the shell, and an unchanged panel sends no `fragment`; a wake follows
+the same rule. The shell is drawn on a mount, a navigation and a person's own
+event. A tab out of view sends `{"type":"visibility","hidden":true}`
+(`live.js`, on `visibilitychange`); the server answers `ack` and stops that
+socket's timer until `hidden` is false, which it answers with a fresh `page`.
+Wakes still reach a hidden tab. Neither notification, subscription nor
 timer refresh records session activity. Only accepted user navigation/events do.
 
 ## Running reference specimen
@@ -315,7 +322,7 @@ is keyed by id and never replaced.
 
     cargo run -p bilibi-web --example live-wake-walkthrough   # every case, exits non-zero on a FAIL
 
-It opens three sockets (two accounts of one tenant, one of another) on a fixture page that counts its refreshes, then announces one person's change, a tenant-wide one, another tenant's, 100 at once and 4,000 in a burst, and last a change for a person whose session has expired (the guard still runs and sends the page back through sign-in).
+It opens three sockets (two accounts of one tenant, one of another) on a fixture page that counts its refreshes, then announces one person's change, a tenant-wide one, another tenant's, 100 at once and 4,000 in a burst, and last a change for a person whose session has expired (the guard still runs and sends the page back through sign-in). It ends on a second fixture page whose body never changes: a wake and the 15-second timer render it and send nothing, a tab reported out of view is not refreshed on the timer, and coming back into view refreshes it at once.
 
 F5 runtime evidence lives outside the repository in the task evidence directory.
 Company list/filter/Back/save, targeted panel identity, subscription wakes,

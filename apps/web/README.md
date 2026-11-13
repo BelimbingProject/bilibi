@@ -124,7 +124,7 @@ no missing-record redirect or shell applies.
 targeted panels, URL changes and guarded subscriptions. HTTP-only adapters should
 return `live: false`. F6 owns queued events and retained fragment/iframe lifecycle.
 
-A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
+A subscription's `Change` wakes only the sockets of its tenant (and of its recipient, when it names one): the host drops any other where the socket hears it, before a session guard or a capability check runs, and merges the wakes waiting for one page or panel into one refresh. A wake or 15-second refresh that renders what the browser already holds sends nothing and does not draw the shell, and a tab out of view is not refreshed on the timer. `apps/web/examples/live-wake-walkthrough.rs` is the running proof (`docs/live-pages.md`, running reference specimen).
 
 # Public endpoints (`src/endpoints.rs`)
 
