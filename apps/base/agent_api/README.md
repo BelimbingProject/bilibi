@@ -58,6 +58,8 @@ call their scoped facade and enforce field restrictions. All direct writes are
 refused. Unsupported writes remain discoverable. Supported `WriteHandler`
 operations use the plan service below, sharing its audited transaction.
 
+Record input properties use the owner’s [record field vocabulary](../ui/README.md#record-field-vocabulary): `fields::EMAIL.input(json!({"maxLength":254}))` supplies the label, type, choices or pick-list and personal-data class. Boot validates the `x-bilibi-field` reference and refuses disagreement, including a property with another key. Limits, required fields, null handling and operation-specific choice subsets stay in the contract. Read queries and write handlers remain separate.
+
 The [schema dialect](src/schema.rs) accepts object/properties/required,
 string/enum/maxLength/format, integer/number/enum/minimum/maximum, boolean and
 array/items, plus title/description and the editor annotations below. Scalar nodes may declare

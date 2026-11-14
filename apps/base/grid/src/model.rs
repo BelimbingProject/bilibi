@@ -11,145 +11,7 @@ const MAX_ID: usize = 64;
 const MAX_LABEL: usize = 120;
 const MAX_SQL: usize = 20_000;
 
-/// Field types a contribution may declare.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FieldType {
-    Integer,
-    Float,
-    Decimal,
-    String,
-    Boolean,
-    Date,
-    DateTime,
-    Enum,
-}
-impl FieldType {
-    /// Whether values order on a number line (bars, bands and heat).
-    pub fn numeric(self) -> bool {
-        matches!(
-            self,
-            Self::Integer | Self::Float | Self::Decimal | Self::Date | Self::DateTime
-        )
-    }
-    /// Whether sum/avg make sense.
-    pub fn number(self) -> bool {
-        matches!(self, Self::Integer | Self::Float | Self::Decimal)
-    }
-    pub fn dated(self) -> bool {
-        matches!(self, Self::Date | Self::DateTime)
-    }
-}
-
-/// What kind of personal data a field holds (ADR 05). The kind shapes a partial
-/// mask and names the field in an audit erasure; `base/privacy` refuses boot
-/// when a table marks one and its module contributes no personal-data handler.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PersonalKind {
-    Name,
-    Email,
-    Phone,
-    Identifier,
-    Date,
-    FreeText,
-}
-impl PersonalKind {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::Email => "email",
-            Self::Phone => "phone",
-            Self::Identifier => "identifier",
-            Self::Date => "date",
-            Self::FreeText => "free_text",
-        }
-    }
-}
-
-/// One value a column can show. `column` is the key the owner's source selects it
-/// under; it defaults to the field id. `hidden` fields exist for links to join on
-/// and never appear as columns. `protected` marks a field no operator may
-/// restrict because the owner's own logic needs every reader to see it. A table's
-/// key, label and time fields, hidden fields and join fields are protected
-/// without saying so.
-#[derive(Clone, Copy, Debug)]
-pub struct Field {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub ty: FieldType,
-    pub column: Option<&'static str>,
-    pub hidden: bool,
-    /// The closed set an enum field takes, which the band lens colours.
-    pub values: &'static [&'static str],
-    pub protected: bool,
-    /// Set when the field holds a person's data; see [`PersonalKind`].
-    pub personal: Option<PersonalKind>,
-    /// Explicit owner classification, required for cross-tenant oversight.
-    /// `personal == None` alone means unknown, not non-personal.
-    pub classified: bool,
-}
-impl Field {
-    pub const fn new(id: &'static str, label: &'static str, ty: FieldType) -> Self {
-        Self {
-            id,
-            label,
-            ty,
-            column: None,
-            hidden: false,
-            values: &[],
-            protected: false,
-            personal: None,
-            classified: false,
-        }
-    }
-    pub const fn choice(
-        id: &'static str,
-        label: &'static str,
-        values: &'static [&'static str],
-    ) -> Self {
-        Self {
-            values,
-            ..Self::new(id, label, FieldType::Enum)
-        }
-    }
-    pub const fn column(self, column: &'static str) -> Self {
-        Self {
-            column: Some(column),
-            ..self
-        }
-    }
-    pub const fn hidden(self) -> Self {
-        Self {
-            hidden: true,
-            ..self
-        }
-    }
-    pub const fn protected(self) -> Self {
-        Self {
-            protected: true,
-            ..self
-        }
-    }
-    pub const fn personal(self, kind: PersonalKind) -> Self {
-        Self {
-            personal: Some(kind),
-            classified: true,
-            ..self
-        }
-    }
-    /// The owner has reviewed this value (including derived/hidden values)
-    /// and determined it contains no person's data. Not the default.
-    pub const fn non_personal(self) -> Self {
-        Self {
-            personal: None,
-            classified: true,
-            ..self
-        }
-    }
-    /// The key of the owner's source this field is read from.
-    pub fn source_key(&self) -> &'static str {
-        self.column.unwrap_or(self.id)
-    }
-}
+use crate::{Field, FieldType};
 
 /// The owner's statement for the rows a scope may read. It is static SQL that the
 /// grid wraps in a subquery, so every hop carries its owner's boundary and the
@@ -549,8 +411,45 @@ impl Installed {
             }
         }
         for table in tables.values() {
+            for field in table.fields() {
+                if let Some(vocabulary) = field.vocabulary {
+                    let canonical =
+                        bilibi_ui::record_field(vocabulary.vocabulary).ok_or_else(|| {
+                            invalid(format!("unknown vocabulary {}", vocabulary.vocabulary))
+                        })?;
+                    let expected = Field::record(*canonical);
+                    if field.id != expected.id
+                        || field.label != expected.label
+                        || field.ty != expected.ty
+                        || field.values != expected.values
+                        || field.picklist != expected.picklist
+                        || field.personal != expected.personal
+                        || field.classified != expected.classified
+                    {
+                        return Err(invalid(format!(
+                            "field {} on {} disagrees with {}",
+                            field.id,
+                            table.id(),
+                            vocabulary.vocabulary
+                        )));
+                    }
+                }
+            }
             for field in &table.record_fields {
                 if let Some(path) = field.column {
+                    if path == field.id
+                        && table.field(path).is_some_and(|column| {
+                            column
+                                .vocabulary
+                                .is_none_or(|reference| reference.vocabulary != field.vocabulary)
+                        })
+                    {
+                        return Err(invalid(format!(
+                            "record field {} on {} must reference its vocabulary",
+                            field.id,
+                            table.id()
+                        )));
+                    }
                     crate::column::resolve(path, table, &|id| tables.get(id)).map_err(|error| {
                         invalid(format!(
                             "record field {} on {}: {error}",

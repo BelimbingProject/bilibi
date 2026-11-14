@@ -14,7 +14,8 @@
 //! aggregate. `count` takes no field; every other aggregate needs one. Parsing is
 //! bounded and total: it never panics, allocates from, or indexes anything by a
 //! client string beyond the catalog's own tables.
-use crate::model::{id_valid, Field, FieldType, Link, LinkKind, Table};
+use crate::model::id_valid;
+use crate::{Field, FieldType, Link, LinkKind, Table};
 use std::fmt;
 
 pub const MAX_SPEC: usize = 160;

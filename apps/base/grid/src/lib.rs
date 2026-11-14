@@ -5,8 +5,10 @@
 //! through `PageColumns`; see `README.md`.
 pub mod catalog;
 pub mod column;
+mod field;
 pub mod lens;
-pub mod model;
+mod model;
+pub use field::{Field, FieldType, PersonalKind};
 mod oversight;
 pub mod page_columns;
 pub mod page_views;
@@ -40,8 +42,8 @@ pub use catalog::{
 };
 pub use column::{Agg, Column, ColumnError, ColumnKind};
 pub use model::{
-    Field, FieldType, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, PersonalKind,
-    RecordFields, Source, Table, TableDecl,
+    id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
+    Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,
 };
 
 #[doc(hidden)]

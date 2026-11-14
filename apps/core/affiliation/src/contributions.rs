@@ -1,7 +1,5 @@
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
-use bilibi_grid::{
-    Field, FieldType, GridContribution, LinkDecl, LinkKind, PersonalKind, Source, TableDecl,
-};
+use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Provenance};
 
 pub const LIST: &str = "admin.affiliation.list";
@@ -61,12 +59,12 @@ static GRID: GridContribution = GridContribution {
         Source::tenant("SELECT id,person_id,organisation_id,title,work_email,work_phone,effective_from,effective_to,unlinked_at,version,created_at,updated_at FROM person_affiliations WHERE tenant_id=$1"), "id", &[
             Field::new("id", "ID", FieldType::Integer).protected(),
             Field::new("person_id", "Person", FieldType::Integer).protected(),
-            Field::new("organisation_id", "Organisation", FieldType::Integer).protected(),
-            Field::new("title", "Role", FieldType::String).protected().personal(PersonalKind::FreeText),
-            Field::new("work_email", "Work email", FieldType::String).personal(PersonalKind::Email),
-            Field::new("work_phone", "Work phone", FieldType::String).personal(PersonalKind::Phone),
-            Field::new("effective_from", "From", FieldType::Date).protected(),
-            Field::new("effective_to", "To", FieldType::Date).protected(),
+            Field::record(crate::web::fields::ORGANISATION_ID).protected(),
+            Field::record(crate::web::fields::TITLE).protected(),
+            Field::record(crate::web::fields::WORK_EMAIL),
+            Field::record(crate::web::fields::WORK_PHONE),
+            Field::record(crate::web::fields::EFFECTIVE_FROM).protected(),
+            Field::record(crate::web::fields::EFFECTIVE_TO).protected(),
             Field::new("unlinked_at", "Unlinked", FieldType::DateTime).protected(),
             Field::new("version", "Version", FieldType::Integer).protected(),
             Field::new("created_at", "Created", FieldType::DateTime).protected(),

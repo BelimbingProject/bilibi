@@ -300,11 +300,11 @@ impl LiveState<Scope, Error> for Reactive {
 }
 
 // Columns extend the list vocabulary.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    CODE: bilibi_ui::RecordField::new("code", "Code"),
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    KIND: bilibi_ui::RecordField::new("kind", "Kind"),
-    IDENTITY: bilibi_ui::RecordField::new("identity", "Identity"),
-    EMAIL: bilibi_ui::RecordField::new("email", "Personal email"),
-    PHONE: bilibi_ui::RecordField::new("phone", "Personal phone"),
+bilibi_ui::record_fields! { "core/person", pub(crate) mod fields {
+    CODE: bilibi_ui::RecordField::new("code", "Code", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Identifier),
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Name),
+    KIND: bilibi_ui::RecordField::new("kind", "Kind", bilibi_ui::RecordFieldType::Enum).choices(&["human", "agent"]),
+    IDENTITY: bilibi_ui::RecordField::new("identity", "Identity", bilibi_ui::RecordFieldType::String),
+    EMAIL: bilibi_ui::RecordField::new("email", "Personal email", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Email),
+    PHONE: bilibi_ui::RecordField::new("phone", "Personal phone", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Phone),
 } }
