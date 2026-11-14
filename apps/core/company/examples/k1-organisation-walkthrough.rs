@@ -228,7 +228,7 @@ async fn main() -> Result<(), Error> {
     let page = bilibi_company::search(client, &viewer, &query).await?;
     for entry in &page.entries {
         println!(
-            "  viewer sees {} email={} (restricted column skipped in search)",
+            "  viewer sees {} email={} (restricted columns are not searched)",
             entry.company.name, entry.company.email
         );
     }

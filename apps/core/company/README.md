@@ -196,7 +196,7 @@ the result returns the Company ID, new version and path for Get readback. The
 field arrives as `{"restricted": true}`. The handlers read through a pool
 bound once by the service factory.
 
-`core.company.list` matches each search word as a prefix of a word in the name, code or legal name, all words required, through the indexed `search_vector` (`core-company-007-search`); email and jurisdiction are not searched. It reads in one read-only transaction under Grid's `BOUNDS` (2 s per statement, 500 ms lock wait), so a search the server cannot finish in time is refused as temporarily unavailable instead of holding a pooled connection. `bilibi_company::search` is the same read on the caller's connection, which sets its own bounds.
+`core.company.list` reads the search text as Base Search does (`bilibi_search::terms`): each word as a prefix of a word in the name, code or legal name, all words required, `"a phrase"` in order and `-word` excluded, and a plain lookup also as PostgreSQL parses the whole text, so `Amazon.com` or `PO-2024-001` typed in full is found. It matches through the indexed `search_vector` (`core-company-007-search`); email and jurisdiction are not searched. It reads in one read-only transaction under Grid's `BOUNDS` (2 s per statement, 500 ms lock wait), so a search the server cannot finish in time is refused as temporarily unavailable instead of holding a pooled connection. `bilibi_company::search` is the same read on the caller's connection, which sets its own bounds.
 
 ## Static Extension-owned fields
 

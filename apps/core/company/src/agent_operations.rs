@@ -629,7 +629,7 @@ fn text() -> Value {
 }
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
-        "search":{"type":"string","maxLength":200,"description":"Words, each matched as the start of a word in the name, code or legal name; all must match."},
+        "search":{"type":"string","maxLength":200,"description":"Words, each matched as the start of a word in the name, code or legal name; all must match. A full name or code with dots, dashes or slashes (amazon.com, PO-2024-001) also matches as typed; \"a phrase\" matches in order and -word excludes."},
         "status":{"type":"string","enum":STATUSES},
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}
