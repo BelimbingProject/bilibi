@@ -189,7 +189,8 @@ pub(crate) async fn custom_locked(
 }
 
 /// Folds `stored` (key to value, `null` clearing) into `current`, returning the
-/// new object and, per changed key, the audit rows `cf_<key>` before and after.
+/// new object and the audit values before and after: the changed keys under
+/// one `custom_fields` key, a personal field erasure clears whole (`privacy`).
 fn custom_merge(
     current: &serde_json::Map<String, Value>,
     stored: &serde_json::Map<String, Value>,
@@ -208,15 +209,22 @@ fn custom_merge(
         if &before == value {
             continue;
         }
-        old.insert(custom_name(key), before);
-        new.insert(custom_name(key), value.clone());
+        old.insert(key.clone(), before);
+        new.insert(key.clone(), value.clone());
         if value.is_null() {
             next.remove(key);
         } else {
             next.insert(key.clone(), value.clone());
         }
     }
-    (next, old, new)
+    let nest = |changed: serde_json::Map<String, Value>| {
+        if changed.is_empty() {
+            changed
+        } else {
+            serde_json::Map::from_iter([("custom_fields".to_owned(), Value::Object(changed))])
+        }
+    };
+    (next, nest(old), nest(new))
 }
 
 /// Stores the checked custom values of a new company as one audited change.

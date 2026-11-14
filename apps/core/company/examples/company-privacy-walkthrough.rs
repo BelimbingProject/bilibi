@@ -3,14 +3,18 @@
 //!
 //! Creates three companies through the Company facade: A, Ada's sole
 //! proprietorship, with her email, tax ID, legal name and a custom "Contact
-//! name"; B, a private limited company with her phone; E, a company whose
-//! email only contains hers, which the operator does not confirm. Requests
-//! name person 1 with Ada's email and phone. Locate must list A, B and E as
-//! candidates; an access request confirming A and B must export exactly
-//! those two; an approved erasure must then clear Ada's values from A and B
-//! and from their audit history, erase A's name and code (a sole
-//! proprietorship's are its owner's) and keep B's, and leave E and its
-//! history alone. Exits non-zero when a check fails.
+//! name"; B, a private limited company with her phone beside its own shared
+//! email, tax ID, registration number, legal name, website and custom value;
+//! E, a company whose email only contains hers, which the operator does not
+//! confirm. Requests name person 1 with Ada's email and phone. Locate must
+//! list A, B and E as candidates, each naming its legal form and which
+//! identifier matched; an access request confirming A and B must export A
+//! whole and only B's name, legal form and matching phone; an approved
+//! erasure must then clear Ada's values from A and B and from their audit
+//! history, erase A's name and code (a sole proprietorship is its owner's),
+//! leave B every business value but her phone, keep the history of fields
+//! that are not personal (status), and leave E and its history alone. Exits
+//! non-zero when a check fails.
 use bilibi_authz::grants::Grants;
 use bilibi_company::{
     CompanyFieldValues, CompanyService, CreateOutcome, NewCompany, SERVICE as COMPANIES,
@@ -225,14 +229,23 @@ async fn main() -> Result<()> {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let workers = tokio::spawn(executor.run(stopped));
 
-    println!("== three companies: A (Ada's sole proprietorship), B (her phone), E (an email that only contains hers)");
-    let sole: i64 = client
-        .query_one(
-            "SELECT id FROM company_legal_entity_types WHERE code='sole_proprietorship'",
-            &[],
-        )
-        .await?
-        .get(0);
+    println!("== three companies: A (Ada's sole proprietorship), B (a business with her phone), E (an email that only contains hers)");
+    let legal_form = |code: &'static str| {
+        let client = &client;
+        async move {
+            Ok::<i64, Box<dyn std::error::Error>>(
+                client
+                    .query_one(
+                        "SELECT id FROM company_legal_entity_types WHERE code=$1",
+                        &[&code],
+                    )
+                    .await?
+                    .get(0),
+            )
+        }
+    };
+    let sole = legal_form("sole_proprietorship").await?;
+    let private_limited = legal_form("private_limited").await?;
     let mut created = Vec::new();
     for (name, new, custom) in [
         (
@@ -249,11 +262,16 @@ async fn main() -> Result<()> {
         (
             "Analytical Engines Sdn Bhd",
             NewCompany {
+                legal_name: Some("Analytical Engines Sdn. Bhd.".into()),
+                legal_entity_type_id: Some(private_limited),
+                tax_id: Some("TX-ENG-1842".into()),
+                registration_number: Some("202601234567".into()),
+                website: Some("https://engines.test".into()),
                 email: Some("accounts@engines.test".into()),
                 phone: Some(PHONE.into()),
                 ..NewCompany::default()
             },
-            None,
+            Some("Accounts desk"),
         ),
         (
             "Lovelace Look-alike Trading",
@@ -292,8 +310,13 @@ async fn main() -> Result<()> {
         .receive(&mut client, &admin, request(RequestKind::Access)?)
         .await?;
     let mut candidates = None;
+    let mut summaries = std::collections::HashMap::new();
     for (store, _, found) in privacy.locate(&client, &admin, access.id).await? {
         if store == STORE {
+            for candidate in &found.candidates {
+                println!("  candidate {}: {}", candidate.id, candidate.summary);
+                summaries.insert(candidate.id.clone(), candidate.summary.clone());
+            }
             let mut ids: Vec<String> = found.candidates.iter().map(|c| c.id.clone()).collect();
             ids.sort();
             println!(
@@ -312,6 +335,17 @@ async fn main() -> Result<()> {
     ensure(
         candidates.as_ref() == Some(&expected),
         "locate lists A, B and E as candidates found by email or phone",
+    )?;
+    let summary = |id: i64| summaries.get(&id.to_string()).cloned().unwrap_or_default();
+    ensure(
+        summary(a).contains("Sole Proprietorship")
+            && summary(a).contains("matched email")
+            && summary(b).contains("Private Limited Company")
+            && summary(b).contains("matched phone")
+            && summaries
+                .values()
+                .all(|s| !s.contains(EMAIL) && !s.contains("6789")),
+        "each candidate names its legal form and which identifier matched, with no values",
     )?;
     let access = privacy
         .verify(
@@ -360,6 +394,16 @@ async fn main() -> Result<()> {
         records["companies"][0]["custom_fields"]["contact_name"] == "Ada Lovelace"
             && records["companies"][0]["tax_id"] == "TX-ADA-1815",
         "A is exported with its tax ID and custom fields",
+    )?;
+    let exported_b = &records["companies"][1];
+    println!("  exported B: {exported_b}");
+    ensure(
+        exported_b["phone"] == PHONE
+            && exported_b["legal_entity_type"] == "private_limited"
+            && exported_b["email"].is_null()
+            && !exported_b.to_string().contains("TX-ENG-1842")
+            && !exported_b.to_string().contains("Accounts desk"),
+        "B, a business, is exported with only her matching phone, not its own email, tax ID or custom fields",
     )?;
 
     println!("== erasure request: person 1, A and B confirmed");
@@ -425,6 +469,38 @@ async fn main() -> Result<()> {
     ensure(
         row(b).await?.0 == "Analytical Engines Sdn Bhd",
         "B keeps its business name",
+    )?;
+    let kept: Value = client
+        .query_one(
+            "SELECT to_jsonb(c) FROM companies c WHERE tenant_id=1 AND id=$1",
+            &[&b],
+        )
+        .await?
+        .get(0);
+    println!(
+        "  B after erasure: email={} phone={} tax_id={} legal_name={} registration_number={} website={} custom_fields={}",
+        kept["email"], kept["phone"], kept["tax_id"], kept["legal_name"], kept["registration_number"], kept["website"], kept["custom_fields"]
+    );
+    ensure(
+        kept["email"] == "accounts@engines.test"
+            && kept["phone"] == ""
+            && kept["tax_id"] == "TX-ENG-1842"
+            && kept["legal_name"] == "Analytical Engines Sdn. Bhd."
+            && kept["registration_number"] == "202601234567"
+            && kept["website"] == "https://engines.test"
+            && kept["custom_fields"]["contact_name"] == "Accounts desk",
+        "B keeps its own email, tax ID, legal name, registration number, website and custom fields; only her phone is cleared",
+    )?;
+    let status_history: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='company' AND auditable_id=$1::bigint::text AND new_values->>'status'='active'",
+            &[&b],
+        )
+        .await?
+        .get(0);
+    ensure(
+        status_history > 0,
+        "B's audit history keeps its status, a field that is not personal",
     )?;
     ensure(
         row(e).await?.2 == "ada@lovelace.test.my"

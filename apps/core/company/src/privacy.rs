@@ -1,19 +1,25 @@
 //! Company's personal-data store (ADR 05, `base/personal_data`, #595). A
 //! company can be a natural person's business (a sole proprietorship), and
-//! its contact fields, free JSON and tenant-defined custom fields take a
-//! person's details. Companies have no link to a person, so they are found
-//! only by the request's email or phone, as candidates the operator confirms.
+//! a business can hold one person's email or phone. Companies have no link
+//! to a person, so they are found only by the request's email or phone, as
+//! candidates the operator confirms; each candidate names its legal form and
+//! which identifier matched, so the operator tells the two apart.
 //!
 //! - **Locate** lists each company whose email holds a request email, or
 //!   whose phone digits hold a request phone's, as a candidate.
-//! - **Export** lists the confirmed companies with every stored value.
-//! - **Erase** clears a confirmed company's email, phone, tax ID, legal name,
-//!   registration number, website, metadata and custom fields, and, for a
-//!   sole proprietorship, its name and code. Its structure, status, revenue,
-//!   jurisdiction, activities and relationships stay, so the records that
-//!   name it stay whole. A company under a legal hold is kept. The company's
-//!   audit history keeps which fields changed and when, not their values
-//!   (`*`: custom fields are audited under tenant-defined `cf_<key>` keys).
+//! - **Export** lists a confirmed sole proprietorship with every stored
+//!   value; any other confirmed company with its name and legal form and only
+//!   the email or phone that matches the request.
+//! - **Erase** clears a confirmed sole proprietorship's email, phone, tax ID,
+//!   legal name, registration number, website, metadata, custom fields, name
+//!   and code. Any other confirmed company belongs to the business: only its
+//!   email or phone that matches the request is cleared, and its identifiers,
+//!   metadata and custom fields stay. Structure, status, revenue,
+//!   jurisdiction, activities and relationships always stay, so the records
+//!   that name it stay whole. A company under a legal hold is kept. The
+//!   company's audit history keeps which fields changed and when, not the
+//!   values of the declared `FIELDS` (custom values are audited under one
+//!   nested `custom_fields` key); amounts and Extension fields keep theirs.
 use bilibi_database::{Change, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_personal_data::{
@@ -26,13 +32,25 @@ use serde_json::{json, Value};
 use tokio_postgres::Client;
 
 const KIND: &str = "company";
-const FIELDS: [&str; 1] = ["*"];
-/// A tenant's companies matching an email pattern (`$2`) or phone digits
-/// pattern (`$3`) of the request (`Subject::patterns`).
-const MATCHES: &str = "tenant_id=$1 AND (email ILIKE ANY($2) OR phone_digits LIKE ANY($3))";
-/// The values erasure clears, as stored.
-const ERASABLE: &str =
-    "email,phone,tax_id,legal_name,registration_number,website,metadata,custom_fields,name,code";
+/// The company's audited fields that can hold a person's data: the values
+/// erasure clears from a sole proprietorship, as stored (custom values are
+/// audited under `custom_fields`, `field_contributions::custom_merge`).
+const FIELDS: [&str; 10] = [
+    "email",
+    "phone",
+    "tax_id",
+    "legal_name",
+    "registration_number",
+    "website",
+    "metadata",
+    "custom_fields",
+    "name",
+    "code",
+];
+/// Whether a company's email matches an email pattern (`$2`), or its phone
+/// digits a phone digits pattern (`$3`), of the request (`Subject::patterns`).
+const EMAIL_MATCH: &str = "coalesce(c.email ILIKE ANY($2),false)";
+const PHONE_MATCH: &str = "coalesce(c.phone_digits LIKE ANY($3),false)";
 
 struct Companies;
 static COMPANIES: Companies = Companies;
@@ -45,10 +63,13 @@ impl Handler for Companies {
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
             let (emails, phones) = subject.patterns();
+            if emails.is_empty() && phones.is_empty() {
+                return Ok(Located::default());
+            }
             let tenant = scope.tenant();
             let count: i64 = client
                 .query_one(
-                    &format!("SELECT count(*) FROM companies WHERE {MATCHES}"),
+                    &format!("SELECT count(*) FROM companies c WHERE c.tenant_id=$1 AND ({EMAIL_MATCH} OR {PHONE_MATCH})"),
                     &[&tenant, &emails, &phones],
                 )
                 .await?
@@ -56,8 +77,11 @@ impl Handler for Companies {
             let rows = client
                 .query(
                     &format!(
-                        "SELECT id,status,deleted_at IS NOT NULL,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') \
-                         FROM companies WHERE {MATCHES} ORDER BY id LIMIT $4"
+                        "SELECT c.id,c.status,c.deleted_at IS NOT NULL,to_char(c.created_at AT TIME ZONE 'UTC','YYYY-MM-DD'), \
+                         coalesce(t.name,'no legal form'),{EMAIL_MATCH},{PHONE_MATCH}, \
+                         EXISTS(SELECT 1 FROM tenant_primary_companies p WHERE p.tenant_id=c.tenant_id AND p.company_id=c.id) \
+                         FROM companies c LEFT JOIN company_legal_entity_types t ON t.id=c.legal_entity_type_id \
+                         WHERE c.tenant_id=$1 AND ({EMAIL_MATCH} OR {PHONE_MATCH}) ORDER BY c.id LIMIT $4"
                     ),
                     &[&tenant, &emails, &phones, &(MAX_CANDIDATES as i64 + 1)],
                 )
@@ -69,11 +93,19 @@ impl Handler for Companies {
                     let id: i64 = row.get(0);
                     let status: String = row.get(1);
                     let deleted = if row.get(2) { ", deleted" } else { "" };
+                    let matched = match (row.get::<_, bool>(5), row.get::<_, bool>(6)) {
+                        (true, true) => "email and phone",
+                        (true, false) => "email",
+                        _ => "phone",
+                    };
+                    // Erasing it clears the workspace's own contact detail.
+                    let own = if row.get(7) { "; this workspace's own company" } else { "" };
                     Candidate {
                         kind: KIND.into(),
                         id: id.to_string(),
                         summary: format!(
-                            "Company {id} ({status}{deleted}), created {}",
+                            "Company {id} ({status}{deleted}), {}, created {}, matched {matched}{own}",
+                            row.get::<_, String>(4),
                             row.get::<_, String>(3)
                         ),
                     }
@@ -104,17 +136,23 @@ impl Handler for Companies {
             if ids.is_empty() {
                 return Ok(Exported::default());
             }
+            let (emails, phones) = subject.patterns();
+            // A sole proprietorship is wholly the person's; a business hands
+            // over only the contact value that is theirs.
             let records: Value = client
                 .query_one(
-                    "SELECT coalesce(json_agg(json_build_object(
+                    &format!("SELECT coalesce(json_agg(CASE WHEN t.code='sole_proprietorship' THEN json_build_object(
                         'id',c.id,'name',c.name,'code',c.code,'status',c.status,'legal_name',c.legal_name,
                         'legal_entity_type',t.code,'registration_number',c.registration_number,'tax_id',c.tax_id,
                         'jurisdiction',c.jurisdiction,'email',c.email,'phone',c.phone,'website',c.website,
                         'scope_activities',c.scope_activities,'metadata',c.metadata,'custom_fields',c.custom_fields,
-                        'created_at',c.created_at,'updated_at',c.updated_at,'deleted_at',c.deleted_at) ORDER BY c.id),'[]'::json)::jsonb
+                        'created_at',c.created_at,'updated_at',c.updated_at,'deleted_at',c.deleted_at)
+                      ELSE json_build_object('id',c.id,'name',c.name,'legal_entity_type',t.code,
+                        'email',CASE WHEN {EMAIL_MATCH} THEN c.email END,'phone',CASE WHEN {PHONE_MATCH} THEN c.phone END) END
+                      ORDER BY c.id),'[]'::json)::jsonb
                      FROM companies c LEFT JOIN company_legal_entity_types t ON t.id=c.legal_entity_type_id
-                     WHERE c.tenant_id=$1 AND c.id=ANY($2)",
-                    &[&scope.tenant(), &ids],
+                     WHERE c.tenant_id=$1 AND c.id=ANY($4)"),
+                    &[&scope.tenant(), &emails, &phones, &ids],
                 )
                 .await?
                 .get(0);
@@ -141,15 +179,18 @@ impl Handler for Companies {
             if ids.is_empty() {
                 return Ok(erased);
             }
+            let (emails, phones) = subject.patterns();
             let rows = tx
                 .sql()
                 .query(
                     &format!(
-                        "SELECT c.id,coalesce(t.code='sole_proprietorship',false),c.version,to_jsonb(c)-'id'-'legal_entity_type_id'-'version' \
-                         FROM (SELECT id,legal_entity_type_id,version,{ERASABLE} FROM companies WHERE tenant_id=$1 AND id=ANY($2) ORDER BY id FOR UPDATE) c \
-                         LEFT JOIN company_legal_entity_types t ON t.id=c.legal_entity_type_id ORDER BY c.id"
+                        "SELECT c.id,coalesce(t.code='sole_proprietorship',false),c.version,to_jsonb(c)-'id'-'legal_entity_type_id'-'version'-'phone_digits', \
+                         {EMAIL_MATCH},{PHONE_MATCH} \
+                         FROM (SELECT id,legal_entity_type_id,version,phone_digits,{} FROM companies WHERE tenant_id=$1 AND id=ANY($4) ORDER BY id FOR UPDATE) c \
+                         LEFT JOIN company_legal_entity_types t ON t.id=c.legal_entity_type_id ORDER BY c.id",
+                        FIELDS.join(",")
                     ),
-                    &[&tenant, &ids],
+                    &[&tenant, &emails, &phones, &ids],
                 )
                 .await?;
             let found: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
@@ -163,14 +204,21 @@ impl Handler for Companies {
                     continue;
                 }
                 let stored: Value = row.get(3);
+                let (email, phone): (bool, bool) = (row.get(4), row.get(5));
                 let erased_code = format!("erased_{id}");
+                // A business keeps all but the matching contact value.
+                let clears = |field: &str| match field {
+                    "email" => sole || email,
+                    "phone" => sole || phone,
+                    _ => sole,
+                };
                 // The values still held: a cleared or already erased one is not.
                 let before: serde_json::Map<String, Value> = stored
                     .as_object()
                     .into_iter()
                     .flatten()
                     .filter(|(field, value)| {
-                        (sole || !matches!(field.as_str(), "name" | "code"))
+                        clears(field)
                             && !value.is_null()
                             && ![json!(""), json!({}), json!(ERASED), json!(erased_code)]
                                 .contains(value)
@@ -184,14 +232,18 @@ impl Handler for Companies {
                     count += 1;
                     continue;
                 }
+                let (email, phone) = (clears("email"), clears("phone"));
                 tx.mutate(move |sql| {
                     Box::pin(async move {
                         let updated: i64 = sql
                             .query_one(
-                                "UPDATE companies SET email='',phone='',tax_id='',legal_name=NULL,registration_number=NULL,website=NULL,metadata=NULL,custom_fields='{}'::jsonb, \
+                                "UPDATE companies SET email=CASE WHEN $5 THEN '' ELSE email END,phone=CASE WHEN $6 THEN '' ELSE phone END, \
+                                 tax_id=CASE WHEN $3 THEN '' ELSE tax_id END,legal_name=CASE WHEN $3 THEN NULL ELSE legal_name END, \
+                                 registration_number=CASE WHEN $3 THEN NULL ELSE registration_number END,website=CASE WHEN $3 THEN NULL ELSE website END, \
+                                 metadata=CASE WHEN $3 THEN NULL ELSE metadata END,custom_fields=CASE WHEN $3 THEN '{}'::jsonb ELSE custom_fields END, \
                                  name=CASE WHEN $3 THEN $4 ELSE name END,code=CASE WHEN $3 THEN 'erased_'||id ELSE code END, \
                                  version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING version",
-                                &[&tenant, &id, &sole, &ERASED],
+                                &[&tenant, &id, &sole, &ERASED, &email, &phone],
                             )
                             .await?
                             .get(0);
