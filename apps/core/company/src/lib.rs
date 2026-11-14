@@ -942,22 +942,40 @@ impl CompanyService {
         scope: &Scope,
         company: bilibi_party::OrganisationId,
         history: bool,
+        search: &str,
         window: relationships::Window,
     ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_company(&**client, scope, &self.directory, company, history, window)
-            .await
+        relationships::list_for_company(
+            &**client,
+            scope,
+            &self.directory,
+            company,
+            history,
+            search,
+            window,
+        )
+        .await
     }
     pub async fn person_relationships(
         &self,
         scope: &Scope,
         person: bilibi_party::PersonId,
         history: bool,
+        search: &str,
         window: relationships::Window,
     ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_person(&**client, scope, &self.directory, person, history, window)
-            .await
+        relationships::list_for_person(
+            &**client,
+            scope,
+            &self.directory,
+            person,
+            history,
+            search,
+            window,
+        )
+        .await
     }
     /// One link on `company`'s page, from its perspective.
     pub async fn company_relationship(

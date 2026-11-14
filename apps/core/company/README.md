@@ -409,7 +409,9 @@ or writing, commits write through the plan's audited transaction. Assign
 input is flat (`source_organisation_id`, `target_kind`, `target_id`,
 `role_id`, optional `effective_from`/`effective_to`); omitted dates are
 unbounded. `core.company.relationship.list` answers a page (`page`,
-`page_size` up to 100, 25 by default) with the total in `meta.page`.
+`page_size` up to 100, 25 by default) with the total in `meta.page`, and
+takes an optional `search` like the relationships page's (below); a refused
+search is a field error on `search`.
 
 ```sh
 BILIBI_COMPANY_DEMO=disposable cargo run -p bilibi-company --example k5-relationships-walkthrough --locked
@@ -429,6 +431,11 @@ the disposable database only. The screens are described under "Relationship scre
 company to 2,001 persons, more than the Principal Directory names in one
 call, and checks that the relationships page, both panels, paging, an edit
 past the first page and the agent list still answer, a page at a time.
+`relationship-search-proof` (same variable) finds links by the other party's
+name on the relationships page and through the agent list: a person linked
+last among 2,001, companies by name or code, an incoming link, LIKE
+characters taken literally, and the refusal for a company linked to 10,001
+people.
 
 ## Relationship screens (K6)
 
@@ -448,7 +455,13 @@ UI (`core/company.relationship_pages`):
   with the related party (a company with its code, or a person), direction,
   the role's label from this company's side, the inclusive dates and the
   status (`active`, `inactive`, `unlinked`). "Show history" brings ended and
-  unlinked links back; a retired role stays visible on its links. "Add
+  unlinked links back; a retired role stays visible on its links. The
+  search box (kept in the address as `search`) keeps the links whose other
+  party's name contains the text: a company's name, legal name or code in
+  SQL, a person's name through the Principal Directory over the people this
+  company links to, matching people in name order. A company linked to more
+  people than the directory searches at once (10,000) says so instead of
+  answering part of the search. "Add
   Relationship" finds a company or a person of the tenant by name with the
   shared `RecordPicker` (Base Records search under the reader's own
   permissions, so the person kind needs Person's read capability), then an

@@ -22,7 +22,7 @@ use crate::{
     organisation,
     relationship_roles::RelationshipRole,
     relationships::Direction,
-    relationships::{Entry, Window},
+    relationships::{Entry, Links, Window},
     CompanyService, FieldError, WriteError, CREATE, LIST, UPDATE, VIEW,
 };
 use askama::Template;
@@ -52,10 +52,10 @@ use bilibi_ui::{
         PageFuture, PageRequest,
     },
     params, ActionLink, Alert, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant,
-    Card, Choice, ConfirmDialog, CreateButton, Field, FlashGroup, FlashMap, FlexRow, FlexTable,
-    Header, Html, IconButton, IconKind, InputKind, ListColumns, ListSpec, ListState, Modal, Page,
-    PageCounts, PageVariant, Pagination, RadioGroup, RecordLink, RecordPicker, RowMode,
-    SectionHeading, StatusKind, TableEmpty,
+    Card, Choice, ConfirmDialog, CreateButton, Field, FilterToolbar, FlashGroup, FlashMap, FlexRow,
+    FlexTable, Header, Html, IconButton, IconKind, InputKind, ListColumns, ListSpec, ListState,
+    Modal, Page, PageCounts, PageVariant, Pagination, RadioGroup, RecordLink, RecordPicker,
+    RowMode, SectionHeading, StatusKind, TableEmpty, ToolbarControl,
 };
 use serde_json::{json, Value};
 use std::{
@@ -1304,6 +1304,18 @@ impl LinksPage {
             .map(|role| Choice::new(role.name, role.id.get().to_string()))
             .collect())
     }
+    async fn links(&self, scope: &Scope) -> Result<Links> {
+        self.shared
+            .company
+            .company_relationships(
+                scope,
+                self.company,
+                self.history,
+                &self.list.search,
+                window(&self.list),
+            )
+            .await
+    }
     async fn draw(&mut self, scope: &Scope, workspace: bool) -> Result<LiveBody> {
         let client = self.shared.db.get().await?;
         let company = organisation::identity(&**client, scope, self.company.get())
@@ -1311,20 +1323,24 @@ impl LinksPage {
             .ok_or(Error::NotFound)?;
         let writable = writable(&**client, scope, self.company.get()).await?;
         let can_update = writable == Writable::Yes;
-        let mut links = self
-            .shared
-            .company
-            .company_relationships(scope, self.company, self.history, window(&self.list))
-            .await?;
+        // A search the owner refuses (too long, or too many linked people to
+        // search by name) shows why in place of the rows.
+        let (mut links, refusal) = match self.links(scope).await {
+            Ok(links) => (links, None),
+            Err(Error::Refused(message)) => (
+                Links {
+                    entries: Vec::new(),
+                    total: 0,
+                },
+                Some(message),
+            ),
+            Err(error) => return Err(error),
+        };
         if self
             .list
             .clamp_to_last_page((links.total as u64).div_ceil(self.list.page_size), true)
         {
-            links = self
-                .shared
-                .company
-                .company_relationships(scope, self.company, self.history, window(&self.list))
-                .await?;
+            links = self.links(scope).await?;
         }
         let entries = &links.entries;
         let title = format!("{} — Relationships", company.display_name);
@@ -1385,6 +1401,24 @@ impl LinksPage {
                 ..SectionHeading::default()
             })?,
         })?;
+        body.push(&render(&FilterToolbar::new(
+            "company-relationships-filters",
+            vec![ToolbarControl::search(
+                "company-relationships-search",
+                "search",
+                "Search relationships",
+                &self.list.search,
+                "Search by company or person name...",
+            )],
+        ))?);
+        if let Some(message) = &refusal {
+            body.push(&render(&Alert {
+                kind: StatusKind::Warning,
+                id: "company-relationships-search-refused",
+                class: "mx-5 mb-4 sm:mx-6",
+                body: Html::text(message),
+            })?);
+        }
         let rows = entries
             .iter()
             .map(|entry| link_row(entry, self.columns.mode(), false, workspace, can_update))
@@ -1394,7 +1428,9 @@ impl LinksPage {
             rows,
             "Company Relationships",
             can_update,
-            if self.history {
+            if !self.list.search.trim().is_empty() {
+                "No relationships match this search."
+            } else if self.history {
                 "No relationships recorded for this company, current or past."
             } else {
                 "No company relationships configured yet."
@@ -1979,13 +2015,13 @@ impl Panel {
             PartyId::Organisation(company) => {
                 self.shared
                     .company
-                    .company_relationships(scope, company, false, window(&self.list))
+                    .company_relationships(scope, company, false, "", window(&self.list))
                     .await
             }
             PartyId::Person(person) => {
                 self.shared
                     .company
-                    .person_relationships(scope, person, false, window(&self.list))
+                    .person_relationships(scope, person, false, "", window(&self.list))
                     .await
             }
         }
