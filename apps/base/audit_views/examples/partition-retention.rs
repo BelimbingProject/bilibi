@@ -281,6 +281,31 @@ async fn main() -> Outcome {
     check("retained actions survive byte-for-byte",yes(&client,"SELECT count(*)=(SELECT count(*) FROM kept_actions) FROM kept_actions k JOIN base_audit_actions a ON a.id=k.id AND a.partition_month='infinity' WHERE md5((to_jsonb(a)-'partition_month')::text)=k.fingerprint").await?)?;
     check("retained mutations survive byte-for-byte",yes(&client,"SELECT count(*)=(SELECT count(*) FROM kept_mutations) FROM kept_mutations k JOIN base_audit_mutations m ON m.id=k.id AND m.partition_month='infinity' WHERE md5((to_jsonb(m)-'partition_month')::text)=k.fingerprint").await?)?;
     check("bookmarks follow retained actions",yes(&client,"SELECT count(*)=1 FROM base_audit_action_metadata WHERE partition_month='infinity' AND is_retained").await?)?;
+    let released: i64 = client
+        .query_one("SELECT min(id) FROM kept_actions", &[])
+        .await?
+        .get(0);
+    let mut tx = boundary
+        .begin(
+            &mut client,
+            admin.mutation_context("audit.action.retention"),
+        )
+        .await?;
+    let flipped = bilibi_audit::toggle_retained(tx.sql(), &admin, released).await?;
+    check(
+        "a protected bookmark can be released",
+        flipped == Some((true, false)),
+    )?;
+    tx.record(bilibi_database::Change {
+        kind: "audit_action_retention".into(),
+        id: released,
+        old: json!({"is_retained":true}),
+        new: json!({"is_retained":false}),
+    })
+    .await?;
+    tx.commit().await?;
+    check("released evidence returns to the current month", client.query_one("SELECT partition_month=date_trunc('month',clock_timestamp() AT TIME ZONE 'UTC')::date FROM base_audit_actions WHERE id=$1", &[&released]).await?.get(0))?;
+    whole(&client).await?;
     for sql in [
         "DELETE FROM base_audit_actions WHERE partition_month='infinity'",
         "DELETE FROM base_audit_mutations WHERE partition_month='infinity'",

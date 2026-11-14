@@ -335,25 +335,13 @@ pub async fn toggle_retained(
     scope: &Scope,
     action_id: i64,
 ) -> Result<Option<(bool, bool)>> {
-    let Some(row) = tx
-        .query_opt(
-            "SELECT coalesce(m.is_retained,a.is_retained),a.partition_month::text FROM base_audit_actions a \
-             LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id AND m.partition_month=a.partition_month \
-             WHERE a.id=$1 AND a.tenant_id=$2 FOR UPDATE OF a",
-            &[&action_id, &scope.tenant()],
+    let row = tx
+        .query_one(
+            "SELECT old_retained,new_retained FROM base_audit_toggle_retained($1,$2)",
+            &[&scope.tenant(), &action_id],
         )
-        .await?
-    else {
-        return Ok(None);
-    };
-    let before: bool = row.get(0);
-    tx.execute(
-        "INSERT INTO base_audit_action_metadata(action_id,is_retained,partition_month) VALUES($1,$2,$3::text::date) \
-         ON CONFLICT (partition_month,action_id) DO UPDATE SET is_retained=EXCLUDED.is_retained",
-        &[&action_id, &!before, &row.get::<_, String>(1)],
-    )
-    .await?;
-    Ok(Some((before, !before)))
+        .await?;
+    Ok(row.get::<_, Option<bool>>(0).zip(row.get(1)))
 }
 
 /// The tenant's latest mutations, newest first.

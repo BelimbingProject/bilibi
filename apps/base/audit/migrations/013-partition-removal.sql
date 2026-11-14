@@ -208,3 +208,34 @@ BEGIN
 END;
 $$;
 REVOKE EXECUTE ON FUNCTION base_audit_remove_partition(text,date,integer,bigint,bigint,text,text) FROM PUBLIC;
+
+-- The mutable bookmark remains the policy; moving a released preserved row
+-- back into the current month makes it eligible for a later partition run.
+-- This function never removes evidence. Cascading the composite FK preserves
+-- the bookmark while PostgreSQL performs the physical row movement.
+CREATE FUNCTION base_audit_toggle_retained(p_tenant bigint, p_id bigint,
+ OUT old_retained boolean, OUT new_retained boolean) RETURNS record LANGUAGE plpgsql AS $$
+DECLARE
+ month date;
+BEGIN
+ PERFORM base_audit_prepare_partitions();
+ SELECT a.partition_month INTO month FROM base_audit_actions a
+   WHERE a.tenant_id=p_tenant AND a.id=p_id FOR UPDATE;
+ IF NOT FOUND THEN RETURN; END IF;
+ -- A fresh statement after the row lock observes a concurrent bookmark
+ -- change that committed while this caller was waiting.
+ SELECT coalesce(b.is_retained,a.is_retained) INTO old_retained
+   FROM base_audit_actions a LEFT JOIN base_audit_action_metadata b
+     ON b.partition_month=a.partition_month AND b.action_id=a.id
+   WHERE a.tenant_id=p_tenant AND a.id=p_id AND a.partition_month=month;
+ new_retained := NOT old_retained;
+ INSERT INTO base_audit_action_metadata(partition_month,action_id,is_retained)
+   VALUES(month,p_id,new_retained)
+   ON CONFLICT (partition_month,action_id) DO UPDATE SET is_retained=EXCLUDED.is_retained;
+ IF month='infinity'::date AND NOT new_retained THEN
+   UPDATE base_audit_actions SET partition_month=date_trunc('month',clock_timestamp() AT TIME ZONE 'UTC')::date
+     WHERE tenant_id=p_tenant AND id=p_id AND partition_month=month;
+ END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION base_audit_toggle_retained(bigint,bigint) FROM PUBLIC;

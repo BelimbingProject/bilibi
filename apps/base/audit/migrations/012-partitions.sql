@@ -107,8 +107,14 @@ CREATE TRIGGER base_audit_partition_checkpoints_truncate BEFORE TRUNCATE ON base
 CREATE OR REPLACE FUNCTION base_audit_evidence_v1() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   ledger text := coalesce(TG_ARGV[0], TG_TABLE_NAME);
+  moving boolean := false;
 BEGIN
   IF ledger IN ('base_audit_mutations', 'base_audit_actions') THEN
+    IF TG_OP = 'UPDATE' THEN moving := NEW.partition_month IS DISTINCT FROM OLD.partition_month;
+    ELSIF TG_OP = 'DELETE' THEN moving := true;
+    ELSIF TG_OP = 'INSERT' THEN moving := NEW.chain_seq IS NOT NULL;
+    END IF;
+    IF moving THEN
     -- Row movement is PostgreSQL's UPDATE, DELETE, INSERT sequence. Only
     -- the fixed removal function can open this path; it moves retained rows
     -- to infinity, never changing their evidence or chain links.
@@ -123,6 +129,23 @@ BEGIN
       ELSIF TG_OP = 'INSERT' AND NEW.partition_month = 'infinity'::date AND NEW.chain_seq IS NOT NULL THEN
         RETURN NEW;
       END IF;
+    END IF;
+    -- Releasing a preserved bookmark relocates, but never removes, the
+    -- evidence. Its values and original recording time remain unchanged;
+    -- the current month gives it a fresh minimum storage period.
+    IF base_audit_within('base_audit_toggle_retained', TG_RELID) THEN
+      IF TG_OP = 'UPDATE' THEN
+        IF OLD.partition_month = 'infinity'::date
+           AND NEW.partition_month = date_trunc('month', clock_timestamp() AT TIME ZONE 'UTC')::date THEN
+          OLD.partition_month := NEW.partition_month;
+          RETURN OLD;
+        END IF;
+      ELSIF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+      ELSIF TG_OP = 'INSERT' AND NEW.chain_seq IS NOT NULL THEN
+        RETURN NEW;
+      END IF;
+    END IF;
     END IF;
     IF TG_OP = 'INSERT' THEN
       IF NEW.partition_month <> date_trunc('month', clock_timestamp() AT TIME ZONE 'UTC')::date

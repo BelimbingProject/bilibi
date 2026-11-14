@@ -167,7 +167,7 @@ the checks and which fields are withheld.
 
 ### Storage and identity
 
-- Both evidence tables use PostgreSQL range partitions on `partition_month`, the first day of the UTC month in which the row was recorded. Event time stays separate: a backdated event cannot expire newly recorded evidence.
+- Both evidence tables use PostgreSQL range partitions on `partition_month`, initially the first day of the UTC month in which the row was recorded. A released protected action returns to the current month, as described below. Event time stays separate: a backdated event cannot expire newly recorded evidence.
 - The primary key is `(partition_month, id)`. One identity sequence per ledger still issues IDs across all partitions. The unique chain index includes `(coalesce(tenant_id, 0), chain_seq, partition_month)`, as PostgreSQL requires the partition key in a partitioned unique index.
 - The bookmark references `(partition_month, action_id)` with `ON UPDATE CASCADE` and `ON DELETE RESTRICT`. Moving a retained row preserves the bookmark and its foreign key.
 - Capture prepares the current and following month before inserting. A removed month cannot be recreated. The special `infinity` partition holds retained evidence and is never eligible for partition removal.
@@ -180,7 +180,7 @@ the checks and which fields are withheld.
 | Period | The global setting `audit.partition_retention_days` has no enabled default. The operator must choose a positive number of days in System Settings before removal is available |
 | Eligibility | The end of the whole UTC month must be at or before now minus the configured days; the current month and the protected partition are always refused |
 | Exemption | An action follows its bookmark when present, otherwise its recorded `is_retained` bit. Mutations have an immutable `is_retained` bit. Retained rows move unchanged, except for the physical partition key, into the protected partition |
-| Released bookmarks | Releasing an action already moved to the protected partition does not remove it. This path removes monthly partitions only; protected evidence stays until a separately designed disposal policy exists |
+| Released bookmarks | Releasing a protected action moves it into the current month, with its original evidence and chain link unchanged. It becomes eligible only after that whole month has passed the configured period |
 | Authority | The public operation requires platform-operator standing and the partition-removal capability, rechecked in its mutation transaction. The database function is executable only by the evidence owner and enforces age, exemptions and chain continuity itself |
 | Ledger | One immutable `base_audit_partition_removals` row records the ledger, month, chosen period, removed and retained counts, operator, reason and trace. Its checkpoints contain only sequence bounds and hashes, never row values |
 
@@ -191,7 +191,7 @@ the checks and which fields are withheld.
 - Verification merges surviving rows with checkpoints in chain order. It checks the incoming checkpoint hash before advancing to the final hash. Removing a checkpoint, changing a surviving fact or losing a tail still breaks verification; removed values cannot be recomputed and are covered by the guarded removal record.
 - A running verification blocks partition removal, so a saved verification cursor never lands inside a newly removed range. A later verification starts from the beginning and follows the checkpoints.
 - The removal transaction locks the selected ledger and bookmark metadata before examining exemptions. It moves only retained rows, removes obsolete bookmark rows, writes the ledger and checkpoints, then drops the old partition. Failure rolls everything back, including the DDL.
-- Direct DELETE and TRUNCATE remain refused on parents and leaves. The only row movement admitted by the evidence guard is the retained-row move inside the removal function. There is no session variable that opens the guard. As with erasure, these guards prevent accidental SQL changes; a database owner who disables triggers or changes functions remains outside this guarantee.
+- Direct DELETE and TRUNCATE remain refused on parents and leaves. The evidence guard admits only the retained-row move inside removal and the return to the current month when a protected bookmark is released. Neither move changes evidence or chain links. There is no session variable that opens the guard. As with erasure, these guards prevent accidental SQL changes; a database owner who disables triggers or changes functions remains outside this guarantee.
 
 ## Hash chain
 
@@ -221,6 +221,13 @@ the checks and which fields are withheld.
 - `base/audit_views` offers **Verify audit log** at `/audit/integrity` to platform operators.
 
 ## Runtime evidence
+
+`examples/partition-retention.rs` in `base/audit_views` loads three historical recording months on a disposable database. It removes two months from both ledgers, verifies every tenant chain in two-item steps, preserves retained evidence and bookmarks, releases a protected bookmark, checks rollback and lock conflicts, and proves that ordinary deletion, truncation and surviving-row tampering cannot pass unnoticed:
+
+```sh
+BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes cargo run -p bilibi-audit-views --example partition-retention
+```
+
 
 `examples/bounded-evidence.rs` in `base/audit_views` checks the chain per tenant, the list bounds and verification as a queued job, and fails when one does not hold:
 
