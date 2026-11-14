@@ -551,14 +551,14 @@ fn assign_schema() -> Value {
         "source_organisation_id":id_schema(),
         "target_kind":{"type":"string","enum":["organisation","person"]},
         "target_id":id_schema(),"role_id":id_schema(),
-        "effective_from":day(),"effective_to":day()
+        "effective_from":crate::web::link_fields::EFFECTIVE_FROM.input(json!({"description":"Inclusive calendar day, YYYY-MM-DD."})),"effective_to":crate::web::link_fields::EFFECTIVE_TO.input(json!({"description":"Inclusive calendar day, YYYY-MM-DD."}))
     }})
 }
 fn update_schema() -> Value {
-    json!({"type":"object","required":["relationship_id","version"],"properties":{"relationship_id":id_schema(),"version":id_schema(),"effective_from":day(),"effective_to":day()}})
+    json!({"type":"object","required":["relationship_id","version"],"properties":{"relationship_id":id_schema(),"version":id_schema(),"effective_from":crate::web::link_fields::EFFECTIVE_FROM.input(json!({"description":"Inclusive calendar day, YYYY-MM-DD."})),"effective_to":crate::web::link_fields::EFFECTIVE_TO.input(json!({"description":"Inclusive calendar day, YYYY-MM-DD."}))}})
 }
 fn end_schema() -> Value {
-    json!({"type":"object","required":["relationship_id","version","effective_to"],"properties":{"relationship_id":id_schema(),"version":id_schema(),"effective_to":day()}})
+    json!({"type":"object","required":["relationship_id","version","effective_to"],"properties":{"relationship_id":id_schema(),"version":id_schema(),"effective_to":crate::web::link_fields::EFFECTIVE_TO.input(json!({"description":"Inclusive calendar day, YYYY-MM-DD."}))}})
 }
 fn unlink_schema() -> Value {
     json!({"type":"object","required":["relationship_id","version"],"properties":{"relationship_id":id_schema(),"version":id_schema()}})

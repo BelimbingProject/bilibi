@@ -1147,9 +1147,21 @@ impl ConnectionsPage {
             )
             .map_err(|_| Error::Internal)?
             .with_record_fields([
-                bilibi_ui::RecordField::new("seen", "Also known as"),
-                bilibi_ui::RecordField::new("self_report", SelfReport::LABEL),
-                bilibi_ui::RecordField::new("client_identity", ClientIdentity::LABEL),
+                bilibi_ui::RecordField::new(
+                    "seen",
+                    "Also known as",
+                    bilibi_ui::RecordFieldType::String,
+                ),
+                bilibi_ui::RecordField::new(
+                    "self_report",
+                    SelfReport::LABEL,
+                    bilibi_ui::RecordFieldType::String,
+                ),
+                bilibi_ui::RecordField::new(
+                    "client_identity",
+                    ClientIdentity::LABEL,
+                    bilibi_ui::RecordFieldType::String,
+                ),
             ]),
             pending: None,
             flash: None,
