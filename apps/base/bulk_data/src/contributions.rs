@@ -1,7 +1,7 @@
 //! Bulk Data's vocabulary, settings, worker and menu entry.
 use crate::{
     export, import, provenance, update, CREATE, EXPORT_MAX_ROWS, FILE_DAYS, MAX_BYTES, MAX_ROWS,
-    UPDATE_MAX_RECORDS, VIEW, WORKER,
+    UNDO_DAYS, UPDATE_MAX_RECORDS, VIEW, WORKER,
 };
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::Contribution;
@@ -47,9 +47,16 @@ inventory::submit! { Contribution::new(DEFINITIONS, FILE_DAYS, provenance!(), &S
     minimum: Some(1.0), maximum: Some(3650.0), validator: None,
     editor: Some(Editor { group: "Bulk data", label: "Days run files are kept", help: "How long an uploaded import file and an exported file are kept. Private documents' own retention (artifacts.retention_days) is the longest either is kept.", capability: None, reveal_duration_ms: 5_000 }),
 })) }
+inventory::submit! { Contribution::new(DEFINITIONS, UNDO_DAYS, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: GLOBAL, default: || json!(7), nullable: false, encrypted: false,
+    minimum: Some(1.0), maximum: Some(365.0), validator: None,
+    editor: Some(Editor { group: "Bulk data", label: "Days an import can be undone", help: "How long a finished import may remove records it created, provided nobody changed them.", capability: None, reveal_duration_ms: 5_000 }),
+})) }
 
 inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: 10, validate: import::arguments }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: import::SERVICE, capability: CREATE }) }
+inventory::submit! { Contribution::new(WORKERS, crate::undo::WORKER, provenance!(), &Worker { max_attempts: 10, validate: crate::undo::arguments }) }
+inventory::submit! { Contribution::new(HANDLERS, crate::undo::WORKER, provenance!(), &HandlerBinding { service: crate::undo::SERVICE, capability: CREATE }) }
 inventory::submit! { Contribution::new(WORKERS, export::WORKER, provenance!(), &Worker { max_attempts: 5, validate: export::arguments }) }
 inventory::submit! { Contribution::new(HANDLERS, export::WORKER, provenance!(), &HandlerBinding { service: export::SERVICE, capability: VIEW }) }
 inventory::submit! { Contribution::new(WORKERS, update::WORKER, provenance!(), &Worker { max_attempts: 10, validate: update::arguments }) }

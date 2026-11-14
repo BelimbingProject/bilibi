@@ -157,6 +157,7 @@ pub(crate) struct Registered {
     pub definition: &'static RecordType,
     pub fields: Vec<Field>,
     pub results: Option<&'static crate::ImportResults>,
+    pub undo: Option<&'static crate::ImportUndo>,
     /// The update contract's field properties.
     pub update_fields: Vec<String>,
     /// The fields a bulk update may set, and every field property of its
@@ -555,6 +556,7 @@ pub(crate) fn register(
                 definition: record,
                 fields,
                 results: None,
+                undo: None,
                 update_fields,
                 bulk_fields,
                 bulk_update_fields,
@@ -575,6 +577,57 @@ pub(crate) fn register(
             return Err(crate::result::invalid(entry));
         }
         registered.results = Some(entry.get::<crate::ImportResults>()?);
+    }
+    let record_entries = catalog.entries::<RecordType>(RECORD_TYPES)?;
+    for entry in catalog.entries::<crate::ImportUndo>(crate::IMPORT_UNDO)? {
+        let undo = crate::undo::check(entry)?;
+        let registered = types
+            .get_mut(entry.id)
+            .ok_or_else(|| crate::undo::invalid(entry, "does not name an import record type"))?;
+        if record_entries
+            .iter()
+            .find(|record| record.id == entry.id)
+            .is_none_or(|record| record.provenance.module != entry.provenance.module)
+        {
+            return Err(crate::undo::invalid(
+                entry,
+                "must name a record type of the same module",
+            ));
+        }
+        let operation = jobs.writable(undo.delete).map_err(|error| {
+            crate::undo::invalid(
+                entry,
+                format!(
+                    "names {}, which a queued job cannot call ({error})",
+                    undo.delete
+                ),
+            )
+        })?;
+        if operation.provenance.module != entry.provenance.module {
+            return Err(crate::undo::invalid(
+                entry,
+                format!("names removal operation {} of another module", undo.delete),
+            ));
+        }
+        let input = properties(&operation.input).ok_or_else(|| {
+            crate::undo::invalid(
+                entry,
+                "names a removal operation whose input has no properties",
+            )
+        })?;
+        if !input.contains_key("run_id")
+            || !input.contains_key(undo.delete_id)
+            || !input.contains_key(undo.delete_version)
+        {
+            return Err(crate::undo::invalid(
+                entry,
+                format!(
+                    "names run_id, id or version properties that {} does not take",
+                    undo.delete
+                ),
+            ));
+        }
+        registered.undo = Some(undo);
     }
     for registered in types.values() {
         for reference in registered.definition.import.references {

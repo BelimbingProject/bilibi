@@ -595,6 +595,56 @@ pub async fn retire(
     crate::publish(tx, scope.tenant(), person.id);
     Ok(person.redact(&masked))
 }
+
+pub(crate) async fn preview_import_undo(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    id: PersonId,
+    version: i64,
+) -> std::result::Result<Person, WriteError> {
+    authorize_key(client, scope, IMPORT).await?;
+    let person = raw(client, scope, id, false).await?;
+    if person.version != version {
+        return Err(Error::Conflict.into());
+    }
+    if person.system_key.is_some() {
+        return Err(WriteError::SystemIdentity);
+    }
+    Ok(person.redact(&fields(client, scope).await?))
+}
+
+/// Remove one untouched Person whose import undo claim is held in the same
+/// transaction. Any record that now refers to it is left in place.
+pub(crate) async fn undo_import(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    id: PersonId,
+    version: i64,
+) -> std::result::Result<(), WriteError> {
+    check_context(tx, scope)?;
+    authorize_key(tx.sql(), scope, IMPORT).await?;
+    let old = raw(tx.sql(), scope, id, true).await?;
+    if old.version != version {
+        return Err(Error::Conflict.into());
+    }
+    if old.system_key.is_some() {
+        return Err(WriteError::SystemIdentity);
+    }
+    let tenant = scope.tenant();
+    tx.mutate(move |sql| Box::pin(async move {
+        match sql.query_opt(&format!("DELETE FROM persons WHERE tenant_id=$1 AND id=$2 AND version=$3 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &version]).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(Error::Conflict),
+            Err(error) if error.code() == Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) => {
+                return Err(Error::refused("Another record now uses this contact, so it was left alone."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(((), vec![Change { kind: "person".into(), id: id.get(), old: old.json(), new: Value::Null }]))
+    })).await?;
+    crate::publish(tx, tenant, id);
+    Ok(())
+}
 pub(crate) fn check_context(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
     let context = tx.context();
     if context.tenant != scope.tenant()

@@ -53,6 +53,9 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/aff
     export: None,
     bulk_update: None,
 }) }
+inventory::submit! { Contribution::new(bilibi_bulk_data::IMPORT_UNDO, "core/affiliation.affiliations", Provenance { module: "core/affiliation", source: file!(), line: line!() }, &bilibi_bulk_data::ImportUndo {
+    delete: "core.affiliation.import.undo", delete_id: "affiliation_id", delete_version: "version", created_version: "version",
+}) }
 
 // Work contacts share the same masking path as API results and audit evidence.
 static GRID: GridContribution = GridContribution {
