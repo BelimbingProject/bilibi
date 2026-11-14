@@ -876,6 +876,7 @@ inventory::submit! {
             ("base-media-004-erasure", include_str!("../migrations/004-erasure.sql")),
             ("base-media-005-system-uploader", include_str!("../migrations/005-system-uploader.sql")),
             ("base-media-006-draft-cap", include_str!("../migrations/006-draft-cap.sql")),
+            ("base-media-007-release-draft", include_str!("../migrations/007-release-draft.sql")),
         ],
         services: &[
             Service { id: "base/media.install-policy", factory: |_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy)))) },

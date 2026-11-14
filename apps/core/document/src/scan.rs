@@ -1,6 +1,10 @@
 //! A held internal revision is a document record before its untrusted bytes
 //! become an Artifact. Queue rechecks the Media verdict as a narrowly declared
 //! system principal; its ending hook gives every pending revision a way out.
+//! While a revision waits, its Media draft is retained, so Media's cleanup of
+//! drafts older than a day cannot take the bytes during a scanner outage;
+//! settling the scan, or its job ending, releases it to that cleanup (a
+//! document is neither deleted nor merged while a scan is pending).
 use crate::store::Store;
 use crate::{Revision, ScanStatus, WriteResult, REVISION_RECORD};
 use bilibi_authz::SystemScope;
@@ -41,6 +45,40 @@ inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker {
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: HANDLER, capability: crate::contributions::SCAN_SETTLE }) }
 inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBinding { service: ENDED, principal: PRINCIPAL, capability: crate::contributions::SCAN_SETTLE }) }
 
+/// Retains (`keep`) or releases the Media draft of revision `revision`'s
+/// held upload. Releasing a draft Media no longer has is nothing to do.
+pub(crate) async fn hold_draft(
+    media: &bilibi_media::Media,
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    revision: i64,
+    keep: bool,
+) -> Result<()> {
+    let held = tx.sql().query(
+        "SELECT f.subject::text,f.media_public_id FROM core_document_revisions r JOIN core_document_files f ON f.tenant_id=r.tenant_id AND f.id=r.file_id WHERE r.tenant_id=$1 AND r.id=$2 AND f.artifact_id IS NULL AND f.media_public_id IS NOT NULL",
+        &[&scope.tenant(), &revision],
+    ).await?;
+    for row in held {
+        let (subject, draft): (String, String) = (row.get(0), row.get(1));
+        let subject = bilibi_media::AttachmentSubject {
+            kind: crate::files::MEDIA_SUBJECT,
+            id: &subject,
+        };
+        let result = if keep {
+            media.retain_drafts(tx, scope, subject, &[&draft]).await
+        } else {
+            media.release_drafts(tx, scope, subject, &[&draft]).await
+        };
+        match result {
+            Ok(_) => {}
+            Err(bilibi_media::Error::AttachmentUnavailable) if !keep => {}
+            Err(bilibi_media::Error::Database(error)) => return Err(error),
+            Err(error) => return Err(Error::Refused(format!("Media draft: {error}"))),
+        }
+    }
+    Ok(())
+}
+
 impl Store<'_> {
     /// Queue a pending revision in the same mutation that attached it, or
     /// notify its uploader and managers that the first verdict holds it.
@@ -77,6 +115,7 @@ impl Store<'_> {
                     old: json!({"scan_job_id":null}), new: json!({"scan_job_id":job}),
                 }]))
             })).await?;
+            hold_draft(self.media, tx, scope, id, true).await?;
         }
         if revision.scan_status != ScanStatus::Clean
             && revision.scan_status != ScanStatus::NotScanned
@@ -254,6 +293,9 @@ impl ScanJob {
                 .await
                 .map_err(|error| Error::Refused(error.to_string()))?;
         }
+        // Released before the file row names its Artifact, while it is still
+        // a held upload; a rollback keeps the draft retained.
+        hold_draft(&self.documents.media, &mut tx, scope, id, false).await?;
         let revised = tx.mutate(move |sql| Box::pin(async move {
             let old = sql.query_opt("SELECT r.* FROM core_document_revisions r WHERE r.tenant_id=$1 AND r.id=$2 AND r.scan_job_id=$3 AND r.scan_status='pending' FOR UPDATE", &[&tenant,&id,&execution.job_id]).await?;
             let Some(old) = old else { return Ok((None, Vec::new())); };
@@ -314,6 +356,7 @@ impl bilibi_queue::Ending for ScanEnded {
                     .store()
                     .notify_scan(tx, scope, &revised, ScanStatus::Failed)
                     .await?;
+                hold_draft(&self.documents.media, tx, scope, id, false).await?;
             }
             Ok(())
         })
