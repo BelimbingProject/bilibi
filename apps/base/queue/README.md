@@ -53,15 +53,27 @@ PostgreSQL `FOR UPDATE SKIP LOCKED` claims serialize across app processes.
 Claims increment the durable attempt before invoking owner code. An expired
 lease is recovered as retryable, or discarded at the attempt limit. Retry delay
 is `min(3600, 2^attempt)` seconds for both owner failure and expired leases.
-Heartbeats renew only a still-live matching token; completion, retry and cancel
-are likewise fenced. A stale executor cannot overwrite a newer claim or a
+Heartbeats renew only a matching token on a job still executing (recovery clears
+the token, so a lease past its time that nobody recovered is still this claim);
+recording an attempt's completion, retry or discard is fenced the same way, and
+an owner's cancel takes the row lock. A stale executor cannot overwrite a newer claim or a
 cancellation. Shutdown drops in-flight futures and leaves their leases for
 recovery. Handler/validator panics, timeouts and invalid results retry within
 the captured attempt budget; infrastructure errors preserve durable recovery.
 Only bounded safe failure codes are stored, never error payloads or arguments.
 One failed heartbeat (a busy pool or database) does not end the attempt: the
 handler keeps running while the next beat still falls inside its lease, and is
-dropped before the lease can run out.
+dropped before the lease can run out. A heartbeat never waits on the job row's
+lock: while the handler's own fenced transaction (`Execution::begin`) holds the
+row, the beat answers "busy" and the attempt goes on, because no claim can
+recover a locked row. It asks again every half second until the fence ends,
+then renews the lease, or finds it recovered and drops the handler before the
+recovered job's backoff (2 s at least) lets another process claim it. So a
+fenced transaction may stay open longer than the lease, within the attempt bound.
+
+`Executor::run` starts a slot or the endings loop again, after one poll interval,
+when it ends before shutdown (a panic in executor code), so the executor never
+stops quietly while the process keeps serving.
 
 A slot that ran a job claims the next at once, so a busy process is not capped at
 one job a second per slot; it waits a poll interval only when it claimed nothing
@@ -144,7 +156,7 @@ caller-supplied audit attribution cannot create execution authority.
 | Failure | An error, panic or timeout rolls back and is tried again with the job backoff (`min(3600, 2^n)` seconds), 25 times, then `ending='failed'`, counted on System Info |
 | Retry | `retry_for` makes the job alive again and clears its ending, so a second ending is told again |
 
-- Each executor runs one endings loop beside its slots, up to 100 jobs a pass; after a full pass in which every job was told it goes straight to the next, otherwise it waits a poll; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
+- Each executor runs one endings loop beside its slots, up to 100 jobs a pass, each ending bounded by one lease (at most the attempt bound), so a stalled owner hook delays the others by at most a lease; after a full pass in which every job was told it goes straight to the next, otherwise it waits a poll; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
 - Move the waiting record to a named state through the owner's normal path (a Workflow edge for a business status), and give people a permission-gated way to run it again. `base/privacy` is the first user: a request job that ends moves the request `running → failed`, as `privacy-monitor`.
 
 ## Retention and the status line
@@ -252,3 +264,11 @@ BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example throughput-
 ```
 
 On a fresh disposable database it runs one slot with a one-second poll interval and proves that 30 quick jobs finish in a fraction of 30 seconds, each exactly once; that an idle queue is polled about once a second rather than spun on; that a failing job still waits its backoff before its next attempt and is discarded after its last; and that 250 cancelled jobs with an ending hook are all told in less than one ten-second poll, the loop going straight from one full batch to the next.
+
+## Lease walkthrough
+
+```sh
+BILIBI_DISPOSABLE_QUEUE_DEMO=yes cargo run -p bilibi-queue --example lease-walkthrough
+```
+
+On a fresh disposable database, with a three-second lease and a sixty-second attempt bound, it proves that a handler whose fenced transaction stays open five seconds completes on its first attempt, and that an owner ending hook that never answers holds up the next job's ending by about one lease (not the attempt bound) and is counted as a failed ending to try again later.

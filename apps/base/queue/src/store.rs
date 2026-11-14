@@ -165,9 +165,37 @@ pub(crate) async fn claim(db: &Db, lease_seconds: i32) -> Result<Option<Claim>> 
     tx.commit().await?;
     Ok(row.map(|row| Claim { row, token }))
 }
-pub(crate) async fn heartbeat(db: &Db, id: i64, token: &str, seconds: i32) -> Result<bool> {
-    Ok(db.get().await?.execute("UPDATE base_queue_jobs SET lease_expires_at=clock_timestamp()+make_interval(secs=>$3::integer),updated_at=clock_timestamp() WHERE id=$1 AND state='executing' AND lease_token=$2 AND lease_expires_at>clock_timestamp()", &[&id,&token,&seconds]).await? == 1)
+/// What a heartbeat found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Beat {
+    /// The lease runs another `seconds` from now.
+    Renewed,
+    /// Another transaction holds the row, and its last committed state is
+    /// still this claim: in practice the handler's own fenced transaction
+    /// (`Execution::begin`). Nobody can recover the lease meanwhile (claims
+    /// skip locked rows), so the attempt goes on and a later beat renews it.
+    Busy,
+    /// The claim was recovered, cancelled or finished: drop the handler.
+    Lost,
 }
+/// Renews a claim without waiting on its row's lock. A matching token on an
+/// executing job is still this claim, even past `lease_expires_at`: recovery
+/// clears the token, so nobody else can be running it.
+pub(crate) async fn heartbeat(db: &Db, id: i64, token: &str, seconds: i32) -> Result<Beat> {
+    let row = db.get().await?.query_one("WITH free AS (SELECT id FROM base_queue_jobs WHERE id=$1 FOR UPDATE SKIP LOCKED), renewed AS (UPDATE base_queue_jobs j SET lease_expires_at=clock_timestamp()+make_interval(secs=>$3::integer),updated_at=clock_timestamp() FROM free f WHERE j.id=f.id AND j.state='executing' AND j.lease_token=$2 RETURNING j.id) SELECT EXISTS(SELECT 1 FROM renewed),EXISTS(SELECT 1 FROM free),EXISTS(SELECT 1 FROM base_queue_jobs WHERE id=$1 AND state='executing' AND lease_token=$2)", &[&id,&token,&seconds]).await?;
+    let (renewed, free, ours): (bool, bool, bool) = (row.get(0), row.get(1), row.get(2));
+    Ok(if renewed {
+        Beat::Renewed
+    } else if !free && ours {
+        Beat::Busy
+    } else {
+        Beat::Lost
+    })
+}
+/// Records an attempt's result while the claim is still this one: a matching
+/// token on an executing job, even past `lease_expires_at` (a fenced
+/// transaction may outlast the lease, #557). Recovery clears the token, so a
+/// recovered claim is refused.
 pub(crate) async fn finish(
     db: &Db,
     id: i64,
@@ -175,7 +203,7 @@ pub(crate) async fn finish(
     state: &str,
     code: Option<&str>,
 ) -> Result<bool> {
-    Ok(db.get().await?.execute("UPDATE base_queue_jobs SET state=$3,failure_code=$4,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp(),available_at=CASE WHEN $3='retryable' THEN clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(attempt,12))::integer)) ELSE available_at END,completed_at=CASE WHEN $3='completed' THEN clock_timestamp() ELSE NULL END,cancelled_at=CASE WHEN $3='cancelled' THEN clock_timestamp() ELSE NULL END,discarded_at=CASE WHEN $3='discarded' THEN clock_timestamp() ELSE NULL END WHERE id=$1 AND state='executing' AND lease_token=$2 AND lease_expires_at>clock_timestamp()", &[&id,&token,&state,&code]).await? == 1)
+    Ok(db.get().await?.execute("UPDATE base_queue_jobs SET state=$3,failure_code=$4,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp(),available_at=CASE WHEN $3='retryable' THEN clock_timestamp()+make_interval(secs=>LEAST(3600,power(2,LEAST(attempt,12))::integer)) ELSE available_at END,completed_at=CASE WHEN $3='completed' THEN clock_timestamp() ELSE NULL END,cancelled_at=CASE WHEN $3='cancelled' THEN clock_timestamp() ELSE NULL END,discarded_at=CASE WHEN $3='discarded' THEN clock_timestamp() ELSE NULL END WHERE id=$1 AND state='executing' AND lease_token=$2", &[&id,&token,&state,&code]).await? == 1)
 }
 
 /// Owner attempts at recording one ended job before Queue stops asking.
