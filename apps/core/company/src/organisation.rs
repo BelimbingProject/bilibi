@@ -975,8 +975,11 @@ pub async fn search(
     authorize_key(client, scope, crate::contributions::LIST).await?;
     let masked = restrictions(client, scope).await?;
     // Words match through the indexed `search_vector` (name, code, legal
-    // name; none of them restrictable), each as a word prefix, all required.
-    let words = search_words(&query.search);
+    // name; none of them restrictable) as Base Search reads them: each word
+    // as a word prefix, all required, and a plain lookup also as PostgreSQL
+    // parses the whole text, so `amazon.com` or `po-2024-001` is found.
+    let terms = bilibi_search::terms(&query.search);
+    let (words, plain) = (terms.query, terms.plain);
     if words.is_none() && !query.search.trim().is_empty() {
         return Ok(SearchPage {
             entries: Vec::new(),
@@ -985,16 +988,16 @@ pub async fn search(
     }
     let filter = format!(
         "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND {}",
-        if words.is_some() {
-            "c.search_vector @@ to_tsquery('simple', $3::text)"
-        } else {
-            "$3::text IS NULL"
+        match (&words, &plain) {
+            (Some(_), Some(_)) => "c.search_vector @@ (to_tsquery('simple', $3::text) || plainto_tsquery('simple', $4::text))",
+            (Some(_), None) => "c.search_vector @@ to_tsquery('simple', $3::text) AND $4::text IS NULL",
+            (None, _) => "$3::text IS NULL AND $4::text IS NULL",
         }
     );
     let total: i64 = client
         .query_one(
             &format!("SELECT count(*) FROM companies c WHERE {filter}"),
-            &[&scope.tenant(), &query.status, &words],
+            &[&scope.tenant(), &query.status, &words, &plain],
         )
         .await?
         .get(0);
@@ -1009,9 +1012,9 @@ pub async fn search(
     // limit, PostgreSQL would otherwise walk the tenant's name index and test
     // every company against the words until the page fills.
     let page = if words.is_some() {
-        format!("WITH matched AS MATERIALIZED (SELECT c.id, c.name FROM companies c WHERE {filter}), page AS (SELECT id FROM matched ORDER BY name, id LIMIT $4 OFFSET $5) SELECT {columns} FROM page JOIN companies c ON c.tenant_id=$1 AND c.id=page.id")
+        format!("WITH matched AS MATERIALIZED (SELECT c.id, c.name FROM companies c WHERE {filter}), page AS (SELECT id FROM matched ORDER BY name, id LIMIT $5 OFFSET $6) SELECT {columns} FROM page JOIN companies c ON c.tenant_id=$1 AND c.id=page.id")
     } else {
-        format!("SELECT {columns} FROM companies c WHERE {filter} ORDER BY c.name, c.id LIMIT $4 OFFSET $5")
+        format!("SELECT {columns} FROM companies c WHERE {filter} ORDER BY c.name, c.id LIMIT $5 OFFSET $6")
     };
     let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM ({page}) c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id ORDER BY c.name, c.id");
     let entries = client
@@ -1021,6 +1024,7 @@ pub async fn search(
                 &scope.tenant(),
                 &query.status,
                 &words,
+                &plain,
                 &query.page_size,
                 &((query.page - 1) * query.page_size),
             ],
@@ -1034,19 +1038,6 @@ pub async fn search(
         })
         .collect();
     Ok(SearchPage { entries, total })
-}
-/// The `tsquery` for `to_tsquery('simple', …)`: each run of letters and
-/// digits, lower-cased, as a required prefix, at most eight. Nothing typed
-/// reaches the query as syntax. `None` when the text holds no word.
-fn search_words(text: &str) -> Option<String> {
-    let words = text
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(8)
-        .map(|word| format!("'{word}':*"))
-        .collect::<Vec<_>>();
-    (!words.is_empty()).then(|| words.join(" & "))
 }
 /// LIKE metacharacters are literal: search is a case-insensitive substring.
 pub fn escape_like(value: &str) -> String {

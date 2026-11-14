@@ -108,6 +108,7 @@ WALKTHROUGHS=(
   'core|affiliation-contact-matching|apps/core/affiliation|contact-matching-walkthrough|none|BILIBI_CONTACT_MATCHING=disposable BILIBI_INSTANCE_DIR=@/instance|seed;-'
   'core|affiliation-operations|apps/core/affiliation|k19-operations-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
   'core|agent-access|apps/core/agent|agent-access-walkthrough|migrate|BILIBI_DISPOSABLE_AGENT_ACCESS_DEMO=yes|-'
+  'core|company-search-punctuation|apps/core/company|search-punctuation|seed|BILIBI_SEARCH_PUNCTUATION=disposable|-'
   'core|company-list-bounds|apps/core/company|company-list-bounds|seed|BILIBI_COMPANY_LIST_BOUNDS=disposable|-'
   'core|company-duplicate-bounds|apps/core/company|company-duplicate-bounds|seed|BILIBI_COMPANY_DUPLICATE_BOUNDS=disposable|-'
   'core|company-caller-reads|apps/core/company|caller-reads-walkthrough|seed|BILIBI_CALLER_READS=disposable|-'
