@@ -156,3 +156,11 @@ inventory::submit! { Contribution::new(DEFINITIONS, crate::TRUSTED_PROXIES_KEY, 
         help: "The addresses or networks of your own reverse proxies or load balancers on other machines, separated by commas. A request from one of them is counted and recorded under the client address it reports. Leave empty when the proxy runs on this machine. List only proxies you run: anyone at a listed address can pretend to be any client.",
         capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
 })) }
+inventory::submit! { Contribution::new(DEFINITIONS, crate::PLACE_DATABASE_PATH_KEY, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::String, scopes: GLOBAL, default: || json!(""), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(Validator { accepts: |value| value.as_str().is_some_and(crate::places::valid_database_path), message: "Leave blank or enter an absolute local file path without control characters" }),
+    editor: Some(Editor { group: "Session", label: "IP place database file",
+        help: "Absolute path to a local city-level MMDB file. Leave blank to record no place.",
+        capability: Some(MANAGE), reveal_duration_ms: 5_000 }),
+})) }

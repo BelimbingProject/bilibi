@@ -59,6 +59,8 @@ mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 ammonia = "4.2.4"
 # Fast substring search (base/mail boundary budget); already in the build through askama and axum.
 memchr = "2.8"
+maxminddb = "0.33.0"
+mmdb-writer = "0.1.0"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 bilibi-web = { path = "apps/web" }
 bilibi-database = { path = "apps/base/database" }

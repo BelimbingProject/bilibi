@@ -202,6 +202,7 @@ WALKTHROUGHS=(
   'web|visitor|apps/web|visitor-walkthrough|migrate|BILIBI_DISPOSABLE_VISITOR_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'
   'web|sign-in-throttle|apps/web|sign-in-throttle-walkthrough|migrate|BILIBI_DISPOSABLE_THROTTLE_DEMO=yes|-'
+  'web|session-place|apps/web|session-place-walkthrough|none|BILIBI_SESSION_PLACE_WALKTHROUGH=disposable BILIBI_SESSION_PLACE_ROOT=@/place|-'
 
   # Each mounts a container from fixtures/containers, rebuilds, runs and unmounts.
   # events-reference: the publisher alone, then both, then the subscriber alone,

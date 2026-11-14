@@ -49,16 +49,18 @@ impl UserService {
         let at = jiff::Timestamp::try_from(device.signed_in_at).map_err(|_| Error::Internal)?;
         let at = display.render(at, Format::DateTime, Precision::Minute).text;
         let ip = device.ip_address.as_deref().unwrap_or("not recorded");
+        let place = device.place.as_deref().unwrap_or("not recorded");
         let message = Message::text(
             Address::new(Some(&name), &address).map_err(|_| Error::Invalid)?,
             "New sign-in to your Bilibi account",
             format!(
                 "Your Bilibi account was signed in from a device it has not used before.\n\n\
-                 Time: {at}\nDevice: {device}\nIP address: {ip}\n\n\
+                 Time: {at}\nDevice: {device}\nIP address: {ip}\nPlace: {place}\n\n\
                  If this was you, you can ignore this email.\n\n\
                  If this wasn't you, change your password now. Then sign that session out in Your sessions:\n\n\
                  {origin}/settings/sessions\n",
                 device = device.device,
+                place = place,
                 origin = self.origin,
             ),
         );
