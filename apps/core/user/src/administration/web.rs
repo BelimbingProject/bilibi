@@ -84,6 +84,7 @@ pub struct Pages {
     pub db: Db,
     pub users: Arc<UserService>,
     pub grants: Arc<bilibi_authz::grants::Grants>,
+    pub records: Arc<bilibi_records::Records>,
     pub views: Arc<PageViews>,
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
@@ -277,10 +278,13 @@ struct CreatedCell<'a> {
 }
 #[derive(Template)]
 #[template(
-    source = r#"<div class="flex items-center justify-end">{{ impersonate }}{{ revoke }}{{ delete }}</div>"#,
+    source = r#"<div class="flex items-center justify-end">{{ add_to }}{{ impersonate }}{{ revoke }}{{ delete }}</div>"#,
     ext = "html"
 )]
 struct Actions {
+    /// "Non-local actions": pages of other modules that take a staff
+    /// account ("Add to team"), offered only when one accepts it.
+    add_to: Html,
     impersonate: Html,
     revoke: Html,
     delete: Html,
@@ -437,7 +441,30 @@ impl Index {
             rendered.mode.as_str(),
         ))
     }
-    fn actions(&self, scope: &Scope, grants: &Grants, user: &Entry) -> Result<Html> {
+    fn actions(
+        &self,
+        scope: &Scope,
+        grants: &Grants,
+        user: &Entry,
+        add_to: &[bilibi_records::AddTo],
+    ) -> Result<Html> {
+        let add_to = if add_to.is_empty() || user.membership == Membership::Invited {
+            Html::EMPTY
+        } else {
+            let key = user.id.to_string();
+            render(&bilibi_ui::AddToMenu::new(
+                format!("user-{}-add-to", user.id),
+                user.name.clone(),
+                add_to
+                    .iter()
+                    .map(|target| bilibi_ui::AddToItem {
+                        label: target.label.into(),
+                        href: target.href(&[bilibi_records::Reference::new("user", key.clone())]),
+                        disabled: None,
+                    })
+                    .collect(),
+            ))?
+        };
         let own = user.id == scope.user();
         let pending = user.membership == Membership::Invited;
         let impersonate = if grants.impersonate && !pending {
@@ -510,6 +537,7 @@ impl Index {
             Html::EMPTY
         };
         render(&Actions {
+            add_to,
             impersonate,
             revoke,
             delete,
@@ -542,6 +570,9 @@ impl Index {
             self.columns.rows = rows;
         }
         let compact = self.columns.mode() == RowMode::Compact;
+        // Where a staff account may go from here ("Add to team"): rows become
+        // draggable and offer "Non-local actions" only when a page accepts one.
+        let add_to = self.pages.records.add_to(scope, "user").await?;
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {
             let Some(user) = page.entries.iter().find(|e| e.id.to_string() == row.key) else {
@@ -610,7 +641,10 @@ impl Index {
                     i: Self::instant(&display, user.created_at)?,
                 })?,
             );
-            row.actions = self.actions(scope, &grants, user)?;
+            if !add_to.is_empty() && user.membership != Membership::Invited {
+                row.record = Some(("user".into(), row.key.clone()));
+            }
+            row.actions = self.actions(scope, &grants, user, &add_to)?;
         }
         let mut actions = Html::EMPTY;
         if grants.create {
@@ -683,7 +717,7 @@ impl Index {
             .sorted(self.list.sort_by.as_deref(), self.list.sort_dir);
         table.caption = "Workspace users";
         table.framed = false;
-        table.actions = grants.delete || grants.impersonate || grants.invite;
+        table.actions = grants.delete || grants.impersonate || grants.invite || !add_to.is_empty();
         if page.entries.is_empty() {
             table.empty = Some(TableEmpty::Content(Html::text("No users found.")));
         }
