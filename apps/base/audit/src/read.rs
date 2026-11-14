@@ -5,7 +5,7 @@
 //! sits below Authz and cannot ask it. Everything is scoped to the sealed
 //! scope's tenant in SQL; free text reaches SQL only as a bound, escaped pattern.
 //!
-//! The two lists are bounded four ways, because the ledgers only grow: every
+//! The two lists are bounded four ways, because the ledgers can be large: every
 //! read names a period (the tenant timeline index serves it), the total is
 //! counted only up to [`MAX_COUNT`], the order is time alone (the one order an
 //! index gives) and both statements run under a local statement timeout.

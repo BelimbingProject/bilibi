@@ -228,7 +228,6 @@ the checks and which fields are withheld.
 BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes cargo run -p bilibi-audit-views --example partition-retention
 ```
 
-
 `examples/bounded-evidence.rs` in `base/audit_views` checks the chain per tenant, the list bounds and verification as a queued job, and fails when one does not hold:
 
 ```sh
