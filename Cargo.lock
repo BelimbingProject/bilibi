@@ -1748,7 +1748,9 @@ dependencies = [
  "askama",
  "bilibi-agent-api",
  "bilibi-authz",
+ "bilibi-base",
  "bilibi-company",
+ "bilibi-core",
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
@@ -1761,10 +1763,13 @@ dependencies = [
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-user",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
  "inventory",
  "jiff",
  "serde",
  "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 

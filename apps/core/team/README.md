@@ -22,7 +22,8 @@ Core stores only these facts. Nothing else is in Core.
 
 ## Safe defaults
 
-- **A team never widens company access.** Changing a team of a company needs work access to that company, and an archived company's teams cannot change. A team grants no capability; the later "mine, my team's or all" rule stays within the companies the reader already reaches ([ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md)).
+- **A team never widens company access.** Reading or changing a team of a company needs work access to that company, and an archived company's teams cannot change. A team without a company is visible to every reader with `teams.view`. A team the reader may not see answers `NotFound`, never `Forbidden`, so it reveals nothing: not its name, company, people or sub-teams. Leads rolled up from a team above that the reader cannot see are not shown. The filter runs in SQL, so paging and counts stay correct ([ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md)).
+- **A team grants no capability yet.** Team roles are the next step of [#681](https://github.com/BelimbingProject/bilibi/issues/681), applied through the one membership path in `members::apply`. The later "mine, my team's or all" rule stays within the companies the reader already reaches.
 - **Sub-teams roll up to the leads above them.** `leads_above` returns the leads of every team above, nearest first, bounded by `MAX_DEPTH`. The record page shows them as "Also led by".
 - **Nothing is cached.** Every read and decision reads membership live, so a change applies at the next check.
 - **Past membership lives in the audit trail.** Each person's join, leave and lead change is one audit entry of kind `team_member` under the team's id, shown in the team's History.
@@ -33,8 +34,8 @@ Resolve `Arc<Teams>` from `bilibi_team::SERVICE` (`core/team.teams`). Every call
 
 | Method | Result |
 | --- | --- |
-| `get`, `list`, `names`, `choices` | Tenant-wide team facts under `teams.view`; lists are bounded |
-| `members`, `leads`, `leads_above`, `member_ids`, `teams_of` | Membership reads under `teams.view` |
+| `get`, `list`, `names`, `choices` | Team facts under `teams.view`, for the teams the reader may see; lists are bounded |
+| `members`, `leads`, `leads_above`, `member_ids`, `teams_of` | Membership reads under `teams.view`, for the teams the reader may see |
 | `preview_create`, `create` | A team and its leads as its first members; `teams.manage` |
 | `preview_update`, `update` | Name, kind, parent team or company, with the version read; `teams.manage` |
 | `plan_members`, `change_members` | Add, remove, or turn a member's lead on or off; `teams.manage` |
@@ -44,7 +45,7 @@ Resolve `Arc<Teams>` from `bilibi_team::SERVICE` (`core/team.teams`). Every call
 
 ## Ports
 
-Domains read teams through [Base Ports](../../base/ports/README.md), so they need no dependency on this module. Both answer under the caller's scope and `teams.view`.
+Domains read teams through [Base Ports](../../base/ports/README.md), so they need no dependency on this module. Both answer under the caller's scope and `teams.view`, and only for teams the caller may see.
 
 | Port | Request | Answer |
 | --- | --- | --- |
@@ -71,8 +72,10 @@ Writes are reviewed safe writes: an agent's plan shows a review card ("Add Aisya
 
 ## Storage
 
-`core_teams` and `core_team_members` (migration `core-team-001-teams`). Every statement binds the tenant. The `teams` Grid table and the `team` record kind (`/teams/{id}`) let lists and references name a team.
+`core_teams` and `core_team_members` (migration `core-team-001-teams`). Every statement binds the tenant. The `teams` Grid table and the `team` record kind (`/teams/{id}`) let lists and references name a team; both show only the teams the reader may see (the Grid source reads the reader's desks).
 
 ## Runtime check
 
 Run `./bilibi start`, sign in, and use `/teams`: create a team with two leads, add members from the dialog and from the Users list's "Add to team", turn a lead off (the last lead's switch is off-limits), remove two members at once, add a sub-team, move a team under its own sub-team (refused), and read the team's History. Check the same with touch (coarse pointer) and at phone width.
+
+`scripts/run-walkthroughs.sh team-reads` runs `examples/team-reads-walkthrough.rs` on a fresh database: a reader with `teams.view` but no desk in a team's company does not see that team in the list, cannot get it or its members, and sees neither its company name nor its people, while a team without a company and a team of a company they work in stay visible.

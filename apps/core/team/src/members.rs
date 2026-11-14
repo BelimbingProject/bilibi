@@ -2,9 +2,8 @@
 //! off) is planned by [`Teams::plan_members`] and written by [`apply`], the
 //! one place a membership row changes, so a later rule (team roles) has one
 //! place to check.
-use crate::facade::{
-    authorize_team, distinct, invalid, load, Checked, Team, Teams, MAX_BATCH, MAX_MEMBERS,
-};
+use crate::access::{authorize_team, load};
+use crate::facade::{distinct, invalid, Checked, Team, Teams, MAX_BATCH, MAX_MEMBERS};
 use crate::MANAGE;
 use bilibi_authz::authorize_key;
 use bilibi_database::{Change, MutationTransaction, Result};

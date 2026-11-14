@@ -28,5 +28,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio-postgres.workspace = true
 
+[dev-dependencies]
+bilibi-base.workspace = true
+bilibi-core.workspace = true
+bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
+bilibi-web = { path = "../../web" }
+tokio.workspace = true
+
 [lints]
 workspace = true

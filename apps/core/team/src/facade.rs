@@ -4,6 +4,7 @@
 //! [`Teams::plan_members`] and written by [`apply`], the one place a
 //! membership row changes, so a later rule (team roles) has one place to
 //! check.
+use crate::access::{authorize_team, load, load_visible, reach, seen};
 use crate::members::{apply, MemberPlan, MemberStep};
 use crate::tree::{parent_refusal, sibling_taken, tree_lock};
 use crate::{KINDS, MANAGE, VIEW};
@@ -49,7 +50,7 @@ pub struct Team {
     pub version: i64,
 }
 impl Team {
-    fn row(row: &Row) -> Self {
+    pub(crate) fn row(row: &Row) -> Self {
         Self {
             id: row.get("id"),
             name: row.get("name"),
@@ -124,7 +125,7 @@ pub struct Teams {
     pub(crate) picklists: Arc<PickLists>,
     pub(crate) authentication: Arc<Authentication>,
 }
-const COLUMNS: &str = "id,name,kind,parent_id,company_id,version";
+pub(crate) const COLUMNS: &str = "id,name,kind,parent_id,company_id,version";
 fn needle(search: &str) -> String {
     format!(
         "%{}%",
@@ -159,7 +160,8 @@ impl Teams {
         id: i64,
     ) -> Result<Team> {
         authorize_key(client, scope, VIEW).await?;
-        load(client, scope, id, false).await
+        let reach = reach(client, scope).await?;
+        load_visible(client, scope, id, &reach).await
     }
     /// One bounded page of the tenant's teams, by name. Kind and parent are
     /// filters on this one list.
@@ -171,11 +173,12 @@ impl Teams {
     ) -> Result<(Vec<TeamRow>, i64)> {
         authorize_key(client, scope, VIEW).await?;
         let needle = needle(query.search);
-        let predicate = "FROM core_teams t WHERE t.tenant_id=$1 AND t.name ILIKE $2 AND ($3='' OR t.kind=$3) AND ($4::bigint IS NULL OR t.parent_id=$4)";
+        let reach = reach(client, scope).await?;
+        let predicate = format!("FROM core_teams t WHERE t.tenant_id=$1 AND t.name ILIKE $2 AND ($3='' OR t.kind=$3) AND ($4::bigint IS NULL OR t.parent_id=$4) AND {}", seen("t", "$5"));
         let total = client
             .query_one(
                 &format!("SELECT count(*) {predicate}"),
-                &[&scope.tenant(), &needle, &query.kind, &query.parent],
+                &[&scope.tenant(), &needle, &query.kind, &query.parent, &reach],
             )
             .await?
             .get(0);
@@ -183,19 +186,21 @@ impl Teams {
             .query(
                 &format!(
                     "SELECT t.id,t.name,t.kind,t.parent_id,t.company_id,t.version, \
-                     (SELECT p.name FROM core_teams p WHERE p.tenant_id=t.tenant_id AND p.id=t.parent_id) AS parent_name, \
+                     (SELECT p.name FROM core_teams p WHERE p.tenant_id=t.tenant_id AND p.id=t.parent_id AND {}) AS parent_name, \
                      (SELECT c.name FROM companies c WHERE c.tenant_id=t.tenant_id AND c.id=t.company_id) AS company_name, \
                      (SELECT count(*) FROM core_team_members m WHERE m.tenant_id=t.tenant_id AND m.team_id=t.id) AS members, \
                      (SELECT count(*) FROM core_team_members m WHERE m.tenant_id=t.tenant_id AND m.team_id=t.id AND m.lead) AS lead_count, \
                      COALESCE((SELECT array_agg(x.name) FROM (SELECT u.name FROM core_team_members m JOIN users u ON u.tenant_id=m.tenant_id AND u.id=m.user_id \
                        WHERE m.tenant_id=t.tenant_id AND m.team_id=t.id AND m.lead ORDER BY lower(u.name),u.id LIMIT 3) x),'{{}}') AS leads \
-                     {predicate} ORDER BY lower(t.name),t.id LIMIT $5 OFFSET $6"
+                     {predicate} ORDER BY lower(t.name),t.id LIMIT $6 OFFSET $7",
+                    seen("p", "$5")
                 ),
                 &[
                     &scope.tenant(),
                     &needle,
                     &query.kind,
                     &query.parent,
+                    &reach,
                     &query.limit.clamp(1, 100),
                     &query.offset.max(0),
                 ],
@@ -223,10 +228,12 @@ impl Teams {
         team: &Team,
     ) -> Result<(Option<String>, Option<String>)> {
         authorize_key(client, scope, VIEW).await?;
+        let reach = reach(client, scope).await?;
+        load_visible(client, scope, team.id, &reach).await?;
         let row = client
             .query_one(
-                "SELECT (SELECT name FROM core_teams WHERE tenant_id=$1 AND id=$2), (SELECT name FROM companies WHERE tenant_id=$1 AND id=$3)",
-                &[&scope.tenant(), &team.parent_id, &team.company_id],
+                &format!("SELECT (SELECT p.name FROM core_teams p WHERE p.tenant_id=$1 AND p.id=$2 AND {}), (SELECT name FROM companies WHERE tenant_id=$1 AND id=$3)", seen("p", "$4")),
+                &[&scope.tenant(), &team.parent_id, &team.company_id, &reach],
             )
             .await?;
         Ok((row.get(0), row.get(1)))
@@ -241,7 +248,8 @@ impl Teams {
         offset: i64,
     ) -> Result<(Vec<Member>, i64)> {
         authorize_key(client, scope, VIEW).await?;
-        load(client, scope, team, false).await?;
+        let reach = reach(client, scope).await?;
+        load_visible(client, scope, team, &reach).await?;
         let total = client
             .query_one(
                 "SELECT count(*) FROM core_team_members WHERE tenant_id=$1 AND team_id=$2",
@@ -266,6 +274,8 @@ impl Teams {
         team: i64,
     ) -> Result<Vec<Member>> {
         authorize_key(client, scope, VIEW).await?;
+        let reach = reach(client, scope).await?;
+        load_visible(client, scope, team, &reach).await?;
         Ok(client
             .query(
                 "SELECT m.user_id,u.name,m.lead,m.added_at FROM core_team_members m JOIN users u ON u.tenant_id=m.tenant_id AND u.id=m.user_id \
@@ -286,14 +296,16 @@ impl Teams {
         team: i64,
     ) -> Result<Vec<LeadAbove>> {
         authorize_key(client, scope, VIEW).await?;
+        let reach = reach(client, scope).await?;
+        load_visible(client, scope, team, &reach).await?;
         Ok(client
             .query(
-                "WITH RECURSIVE up(id,depth) AS (SELECT parent_id,1 FROM core_teams WHERE tenant_id=$1 AND id=$2 AND parent_id IS NOT NULL \
+                &format!("WITH RECURSIVE up(id,depth) AS (SELECT parent_id,1 FROM core_teams WHERE tenant_id=$1 AND id=$2 AND parent_id IS NOT NULL \
                    UNION ALL SELECT t.parent_id,up.depth+1 FROM up JOIN core_teams t ON t.tenant_id=$1 AND t.id=up.id WHERE t.parent_id IS NOT NULL AND up.depth<$3) \
-                 SELECT t.id,t.name,m.user_id,u.name FROM up JOIN core_teams t ON t.tenant_id=$1 AND t.id=up.id \
+                 SELECT t.id,t.name,m.user_id,u.name FROM up JOIN core_teams t ON t.tenant_id=$1 AND t.id=up.id AND {} \
                    JOIN core_team_members m ON m.tenant_id=$1 AND m.team_id=t.id AND m.lead JOIN users u ON u.tenant_id=$1 AND u.id=m.user_id \
-                 ORDER BY up.depth,lower(u.name),m.user_id",
-                &[&scope.tenant(), &team, &(MAX_DEPTH - 1)],
+                 ORDER BY up.depth,lower(u.name),m.user_id", seen("t", "$4")),
+                &[&scope.tenant(), &team, &(MAX_DEPTH - 1), &reach],
             )
             .await?
             .iter()
@@ -313,11 +325,12 @@ impl Teams {
         user: i64,
     ) -> Result<Vec<Membership>> {
         authorize_key(client, scope, VIEW).await?;
+        let reach = reach(client, scope).await?;
         Ok(client
             .query(
-                "SELECT t.id,t.name,t.kind,t.company_id,m.lead FROM core_team_members m JOIN core_teams t ON t.tenant_id=m.tenant_id AND t.id=m.team_id \
-                 WHERE m.tenant_id=$1 AND m.user_id=$2 ORDER BY lower(t.name),t.id LIMIT $3",
-                &[&scope.tenant(), &user, &MAX_CHOICES],
+                &format!("SELECT t.id,t.name,t.kind,t.company_id,m.lead FROM core_team_members m JOIN core_teams t ON t.tenant_id=m.tenant_id AND t.id=m.team_id \
+                 WHERE m.tenant_id=$1 AND m.user_id=$2 AND {} ORDER BY lower(t.name),t.id LIMIT $3", seen("t", "$4")),
+                &[&scope.tenant(), &user, &MAX_CHOICES, &reach],
             )
             .await?
             .iter()
@@ -339,6 +352,8 @@ impl Teams {
         team: i64,
     ) -> Result<Vec<(i64, bool)>> {
         authorize_key(client, scope, VIEW).await?;
+        let reach = reach(client, scope).await?;
+        load_visible(client, scope, team, &reach).await?;
         Ok(client
             .query(
                 "SELECT user_id,lead FROM core_team_members WHERE tenant_id=$1 AND team_id=$2 ORDER BY user_id LIMIT $3",
@@ -356,10 +371,11 @@ impl Teams {
         scope: &Scope,
     ) -> Result<Vec<(i64, String)>> {
         authorize_key(client, scope, VIEW).await?;
+        let reach = reach(client, scope).await?;
         Ok(client
             .query(
-                "SELECT id,name FROM core_teams WHERE tenant_id=$1 ORDER BY lower(name),id LIMIT $2",
-                &[&scope.tenant(), &MAX_CHOICES],
+                &format!("SELECT t.id,t.name FROM core_teams t WHERE t.tenant_id=$1 AND {} ORDER BY lower(t.name),t.id LIMIT $2", seen("t", "$3")),
+                &[&scope.tenant(), &MAX_CHOICES, &reach],
             )
             .await?
             .iter()
@@ -729,48 +745,5 @@ fn member(row: &Row) -> Member {
         name: row.get(1),
         lead: row.get(2),
         added_at: row.get(3),
-    }
-}
-pub(crate) async fn load(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-    id: i64,
-    lock: bool,
-) -> Result<Team> {
-    client
-        .query_opt(
-            &format!(
-                "SELECT {COLUMNS} FROM core_teams WHERE tenant_id=$1 AND id=$2{}",
-                if lock { " FOR UPDATE" } else { "" }
-            ),
-            &[&scope.tenant(), &id],
-        )
-        .await?
-        .as_ref()
-        .map(Team::row)
-        .ok_or(Error::NotFound)
-}
-/// `teams.manage`, and for a team of a company, work access there and a
-/// company that is not archived (`Some` refusal). A team never reaches a
-/// company its manager cannot already work in.
-pub(crate) async fn authorize_team(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-    company: Option<i64>,
-    lock: bool,
-) -> Result<Option<FieldErrors>> {
-    authorize_key(client, scope, MANAGE).await?;
-    let Some(company) = company else {
-        return Ok(None);
-    };
-    bilibi_company::authorize_work_target(client, scope, company, MANAGE).await?;
-    match bilibi_company::require_writable(client, scope, company, lock).await {
-        Ok(_) => Ok(None),
-        Err(bilibi_company::WriteError::Archived) => Ok(Some(invalid(
-            "company_id",
-            "This team's company is archived, so the team cannot change.",
-        ))),
-        Err(bilibi_company::WriteError::Access(error)) => Err(error),
-        Err(_) => Err(Error::NotFound),
     }
 }

@@ -1,5 +1,6 @@
 //! Shared teams: a name, a kind, an optional parent team and company, leads
 //! and members (staff accounts). Contract: README.md.
+mod access;
 mod facade;
 mod members;
 mod operations;

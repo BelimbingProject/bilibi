@@ -21,11 +21,15 @@ impl RecordOwner for TeamRecords {
             let Ok(id) = id.parse::<i64>() else {
                 return Ok(Access::NotFound);
             };
+            let reach = crate::access::reach(client, scope).await?;
             Ok(
                 if client
                     .query_opt(
-                        "SELECT id FROM core_teams WHERE tenant_id=$1 AND id=$2",
-                        &[&scope.tenant(), &id],
+                        &format!(
+                            "SELECT t.id FROM core_teams t WHERE t.tenant_id=$1 AND t.id=$2 AND {}",
+                            crate::access::seen("t", "$3")
+                        ),
+                        &[&scope.tenant(), &id, &reach],
                     )
                     .await?
                     .is_some()
@@ -50,7 +54,7 @@ static GRID: GridContribution = GridContribution {
         "Teams",
         crate::VIEW,
         Source::tenant(
-            "SELECT id,name,kind,parent_id,company_id,version FROM core_teams WHERE tenant_id=$1",
+            "SELECT t.id,t.name,t.kind,t.parent_id,t.company_id,t.version FROM core_teams t WHERE t.tenant_id=$1 AND (t.company_id IS NULL OR EXISTS(SELECT 1 FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id WHERE d.tenant_id=t.tenant_id AND d.company_id=t.company_id AND u.id=$2 AND u.kind='staff'))",
         ),
         "id",
         &[
