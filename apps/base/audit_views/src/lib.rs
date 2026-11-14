@@ -18,7 +18,9 @@ mod extensions;
 mod history;
 mod integrity;
 mod mutations;
+mod partitions;
 mod period;
+pub use partitions::{Partitions, REMOVE, RETENTION_DAYS, SERVICE as PARTITIONS_SERVICE};
 mod present;
 
 use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
@@ -59,7 +61,7 @@ macro_rules! provenance {
 inventory::submit! { Contribution::new(VOCABULARY, MODULE, provenance!(), &VocabularyContribution {
     domains: &[],
     verbs: &[],
-    capabilities: &[CapabilityDefinition::tenant(LIST), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(VIEW)],
+    capabilities: &[CapabilityDefinition::tenant(LIST), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(VIEW), CapabilityDefinition::platform(REMOVE), CapabilityDefinition::platform(partitions::READ)],
     roles: &[
         RoleDefinition { code: "auditor", name: "Auditor", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: &[LIST, MANAGE, VIEW] },
         RoleDefinition { code: "system_viewer", name: "System Viewer", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: &[LIST, VIEW] },
@@ -153,9 +155,12 @@ bilibi_dashboard::contribute!(
 
 inventory::submit! {
     Module { id: MODULE, layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/audit", "base/authz", "base/ui", "base/dashboard", "base/menu", "base/datetime", "base/locale", "base/queue"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/audit", "base/authz", "base/ui", "base/dashboard", "base/menu", "base/datetime", "base/locale", "base/queue", "base/settings", "base/agent_api"],
         migrations: &[],
         services: &[
+            Service { id: partitions::SERVICE, factory: |services| {
+                Ok(partitions::Partitions::install(services.get("base/settings.store")?)?)
+            } },
             Service { id: "base/audit_views.pages", factory: |services| {
                 Ok(Arc::new(PageService::<Scope, Error>(Arc::new(actions::Pages {
                     db: services.get::<Db>("base/database.pool")?.as_ref().clone(),

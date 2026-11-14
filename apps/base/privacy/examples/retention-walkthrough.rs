@@ -644,7 +644,7 @@ async fn main() -> Result<()> {
     // recent one, and one of tenant 2, which did not turn the class on.
     client.batch_execute("INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,ip_address,url,user_agent,event,payload,is_retained,occurred_at) \
         SELECT 1,'user',4,'203.0.113.9','https://bilibi.test/people?email=old@example.test','Firefox','walkthrough.retention',jsonb_build_object('status',200,'email','old@example.test'),n=1,now()-interval '90 days' FROM generate_series(1,230) n; \
-        INSERT INTO base_audit_action_metadata(action_id,is_retained) SELECT max(id),true FROM base_audit_actions WHERE event='walkthrough.retention'; \
+        INSERT INTO base_audit_action_metadata(action_id,is_retained,partition_month) SELECT id,true,partition_month FROM base_audit_actions WHERE event='walkthrough.retention' ORDER BY id DESC LIMIT 1; \
         INSERT INTO base_audit_actions(tenant_id,actor_type,actor_id,ip_address,url,user_agent,event,payload,occurred_at) VALUES \
           (1,'user',4,'203.0.113.9','https://bilibi.test/recent','Firefox','walkthrough.retention.recent','{\"status\":200}',now()-interval '2 days'), \
           (2,'user',5,'203.0.113.9','https://bilibi.test/other','Firefox','walkthrough.retention','{\"status\":200}',now()-interval '90 days');").await?;

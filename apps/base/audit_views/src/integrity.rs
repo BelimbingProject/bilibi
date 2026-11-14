@@ -4,7 +4,7 @@
 //! recomputes every tenant's chains and says where one breaks, including a
 //! committed row with no link.
 //!
-//! The ledgers only grow, so the page never verifies inside its own event: the
+//! The ledgers can be large, so the page never verifies inside its own event: the
 //! press starts one verification (`bilibi_audit::request_verification`) and
 //! enqueues the `base/audit-views-verify` job in the same audited transaction.
 //! The job walks the chains in bounded steps, storing where it is, and hands
@@ -209,7 +209,7 @@ impl Integrity {
             body.push(&render(SectionHeading {
                 title: "Not verified yet",
                 id: "audit-integrity-pending",
-                description: "Verify audit log starts a background check of every tenant's chains.",
+                description: "Start a check to see whether the audit history is intact.",
                 ..SectionHeading::default()
             })?);
             return Ok(body);
@@ -225,7 +225,7 @@ impl Integrity {
             ),
             "whole" => (
                 "The audit log is whole",
-                "Every row is still linked to the one before it.".to_owned(),
+                "The remaining entries and recorded removals passed verification.".to_owned(),
             ),
             "broken" => (
                 "The audit log is broken",
@@ -296,7 +296,7 @@ impl Integrity {
         };
         let header = render(Header {
             title: Html::text("Verify audit log"),
-            subtitle: "Every audit row is linked to the one before it in its tenant by a hash over its ID, time, actor, action, record and field names. Removing a row, or changing any of those, breaks the chain. Values are not in the hash, so approved erasure can clear them; a changed value is not detected here.",
+            subtitle: "Approved erasures and removals preserve this check; changes to saved values are not detected.",
             actions: render(Button {
                 variant: ButtonVariant::Primary,
                 event: "verify",

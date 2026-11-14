@@ -275,7 +275,7 @@ pub async fn list_actions(
     }
     let filter = filters.join(" AND ");
     let from =
-        "FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id";
+        "FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id AND m.partition_month=a.partition_month";
     let direction = if query.descending { "DESC" } else { "ASC" };
     let limit = i64::try_from(query.page_size).map_err(|_| Error::Invalid)?;
     let offset = i64::try_from((query.page - 1).saturating_mul(query.page_size))
@@ -337,8 +337,8 @@ pub async fn toggle_retained(
 ) -> Result<Option<(bool, bool)>> {
     let Some(row) = tx
         .query_opt(
-            "SELECT coalesce(m.is_retained,a.is_retained) FROM base_audit_actions a \
-             LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id \
+            "SELECT coalesce(m.is_retained,a.is_retained),a.partition_month::text FROM base_audit_actions a \
+             LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id AND m.partition_month=a.partition_month \
              WHERE a.id=$1 AND a.tenant_id=$2 FOR UPDATE OF a",
             &[&action_id, &scope.tenant()],
         )
@@ -348,9 +348,9 @@ pub async fn toggle_retained(
     };
     let before: bool = row.get(0);
     tx.execute(
-        "INSERT INTO base_audit_action_metadata(action_id,is_retained) VALUES($1,$2) \
-         ON CONFLICT (action_id) DO UPDATE SET is_retained=EXCLUDED.is_retained",
-        &[&action_id, &!before],
+        "INSERT INTO base_audit_action_metadata(action_id,is_retained,partition_month) VALUES($1,$2,$3::text::date) \
+         ON CONFLICT (partition_month,action_id) DO UPDATE SET is_retained=EXCLUDED.is_retained",
+        &[&action_id, &!before, &row.get::<_, String>(1)],
     )
     .await?;
     Ok(Some((before, !before)))
