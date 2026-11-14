@@ -54,7 +54,7 @@ static GRID: GridContribution = GridContribution {
         "Teams",
         crate::VIEW,
         Source::tenant(
-            "SELECT t.id,t.name,t.kind,t.parent_id,t.company_id,t.version FROM core_teams t WHERE t.tenant_id=$1 AND (t.company_id IS NULL OR EXISTS(SELECT 1 FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id WHERE d.tenant_id=t.tenant_id AND d.company_id=t.company_id AND u.id=$2 AND u.kind='staff'))",
+            "SELECT t.id,t.name,t.kind,(SELECT p.id FROM core_teams p WHERE p.tenant_id=t.tenant_id AND p.id=t.parent_id AND (p.company_id IS NULL OR EXISTS(SELECT 1 FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id WHERE d.tenant_id=p.tenant_id AND d.company_id=p.company_id AND u.id=$2 AND u.kind='staff'))) AS parent_id,t.company_id,t.version FROM core_teams t WHERE t.tenant_id=$1 AND (t.company_id IS NULL OR EXISTS(SELECT 1 FROM user_desks d JOIN users u ON u.tenant_id=d.tenant_id AND u.person_id=d.person_id WHERE d.tenant_id=t.tenant_id AND d.company_id=t.company_id AND u.id=$2 AND u.kind='staff'))",
         ),
         "id",
         &[

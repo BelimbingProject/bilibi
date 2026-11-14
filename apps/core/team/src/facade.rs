@@ -4,7 +4,7 @@
 //! [`Teams::plan_members`] and written by [`apply`], the one place a
 //! membership row changes, so a later rule (team roles) has one place to
 //! check.
-use crate::access::{authorize_team, load, load_visible, reach, seen};
+use crate::access::{authorize_team, load, load_visible, reach, seen, seen_parent};
 use crate::members::{apply, MemberPlan, MemberStep};
 use crate::tree::{parent_refusal, sibling_taken, tree_lock};
 use crate::{KINDS, MANAGE, VIEW};
@@ -185,7 +185,7 @@ impl Teams {
         let rows = client
             .query(
                 &format!(
-                    "SELECT t.id,t.name,t.kind,t.parent_id,t.company_id,t.version, \
+                    "SELECT t.id,t.name,t.kind,{} AS parent_id,t.company_id,t.version, \
                      (SELECT p.name FROM core_teams p WHERE p.tenant_id=t.tenant_id AND p.id=t.parent_id AND {}) AS parent_name, \
                      (SELECT c.name FROM companies c WHERE c.tenant_id=t.tenant_id AND c.id=t.company_id) AS company_name, \
                      (SELECT count(*) FROM core_team_members m WHERE m.tenant_id=t.tenant_id AND m.team_id=t.id) AS members, \
@@ -193,6 +193,7 @@ impl Teams {
                      COALESCE((SELECT array_agg(x.name) FROM (SELECT u.name FROM core_team_members m JOIN users u ON u.tenant_id=m.tenant_id AND u.id=m.user_id \
                        WHERE m.tenant_id=t.tenant_id AND m.team_id=t.id AND m.lead ORDER BY lower(u.name),u.id LIMIT 3) x),'{{}}') AS leads \
                      {predicate} ORDER BY lower(t.name),t.id LIMIT $6 OFFSET $7",
+                    seen_parent("t", "$5"),
                     seen("p", "$5")
                 ),
                 &[

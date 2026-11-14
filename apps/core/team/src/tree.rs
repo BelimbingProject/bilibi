@@ -1,5 +1,6 @@
 //! The tree of teams: one parent each, no loops, at most [`MAX_DEPTH`]
 //! levels, and distinct names among siblings.
+use crate::access::{load_visible, reach};
 use crate::facade::{invalid, FieldErrors, MAX_DEPTH};
 use bilibi_database::{MutationTransaction, Result};
 use bilibi_tenancy::Scope;
@@ -23,6 +24,10 @@ pub(crate) async fn parent_refusal(
     team: Option<i64>,
     parent: i64,
 ) -> Result<Option<FieldErrors>> {
+    let reach = reach(client, scope).await?;
+    if load_visible(client, scope, parent, &reach).await.is_err() {
+        return Ok(Some(invalid("parent_id", "Choose a team from the list.")));
+    }
     // How many levels the parent sits at (1 for a top team), and whether the
     // moving team is among its ancestors.
     let row = client

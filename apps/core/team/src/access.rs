@@ -62,7 +62,8 @@ pub(crate) async fn load_visible(
     client
         .query_opt(
             &format!(
-                "SELECT {COLUMNS} FROM core_teams t WHERE t.tenant_id=$1 AND t.id=$2 AND {}",
+                "SELECT t.id,t.name,t.kind,{} AS parent_id,t.company_id,t.version FROM core_teams t WHERE t.tenant_id=$1 AND t.id=$2 AND {}",
+                seen_parent("t", "$3"),
                 seen("t", "$3")
             ),
             &[&scope.tenant(), &id, reach],
@@ -71,6 +72,14 @@ pub(crate) async fn load_visible(
         .as_ref()
         .map(Team::row)
         .ok_or(Error::NotFound)
+}
+/// The SQL value of team alias `t`'s parent id, or null when the parent is
+/// hidden from the reader (see [`seen`]), so no hidden id leaks.
+pub(crate) fn seen_parent(t: &str, reach: &str) -> String {
+    format!(
+        "(SELECT p.id FROM core_teams p WHERE p.tenant_id={t}.tenant_id AND p.id={t}.parent_id AND {})",
+        seen("p", reach)
+    )
 }
 /// `teams.manage`, and for a team of a company, work access there and a
 /// company that is not archived (`Some` refusal). A team never reaches a

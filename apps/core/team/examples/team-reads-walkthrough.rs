@@ -54,7 +54,7 @@ async fn main() -> Result<(), Failure> {
     db.get()
         .await?
         .batch_execute(
-            "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,1,'teams.view') ON CONFLICT DO NOTHING",
+            "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(1,1,'teams.view'),(1,1,'teams.manage') ON CONFLICT DO NOTHING",
         )
         .await?;
     let admin = login(&app, "admin@example.test").await?;
@@ -223,6 +223,52 @@ async fn main() -> Result<(), Failure> {
     prove(
         "a parent team the reader cannot see is not named",
         teams.names(&**client, &reader, &team).await?.0.is_none(),
+    )?;
+    prove(
+        "a visible team whose parent is hidden reads with no parent id",
+        team.parent_id.is_none()
+            && teams
+                .list(&**client, &reader, &query)
+                .await?
+                .0
+                .iter()
+                .all(|r| r.team.parent_id.is_none())
+            && teams.get(&**client, &admin, open).await?.parent_id == Some(hidden),
+    )?;
+    let refused = |errors: &bilibi_team::FieldErrors| {
+        errors
+            .get("parent_id")
+            .is_some_and(|m| m.iter().any(|m| m == "Choose a team from the list."))
+    };
+    let attempt = teams
+        .preview_create(
+            &**client,
+            &reader,
+            &TeamInput {
+                name: "Under hidden".into(),
+                parent_id: Some(hidden),
+                leads: vec![3],
+                ..TeamInput::default()
+            },
+        )
+        .await?;
+    prove(
+        "a hidden team cannot be chosen as the parent of a new team",
+        attempt.as_ref().is_err_and(refused),
+    )?;
+    let version = teams.get(&**client, &reader, mine).await?.version;
+    let attempt = teams
+        .preview_update(
+            &**client,
+            &reader,
+            mine,
+            version,
+            &serde_json::json!({"parent_id": hidden}),
+        )
+        .await?;
+    prove(
+        "a hidden team cannot be chosen as the new parent of a team",
+        attempt.as_ref().is_err_and(refused),
     )?;
     println!("Team reads stay within the companies the reader works in.");
     Ok(())
