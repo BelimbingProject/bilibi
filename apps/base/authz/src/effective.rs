@@ -19,9 +19,20 @@ pub async fn effective_capabilities(
             .await?
             .allowed);
     }
-    Ok(effective_capabilities_of(client, scope, scope.user())
+    let mut allowed = effective_capabilities_of(client, scope, scope.user())
         .await?
-        .allowed)
+        .allowed;
+    if let Some(impersonator) = scope.impersonator() {
+        let operator = effective_capabilities_in_company(
+            client,
+            scope,
+            impersonator.user(),
+            scope.current_company().map(|id| id.get()),
+        )
+        .await?;
+        allowed.retain(|key| operator.allowed.contains(key));
+    }
+    Ok(allowed)
 }
 
 /// What a named system principal holds in `tenant` right now (SP1): its
