@@ -73,6 +73,19 @@ async fn write(
     Ok(answer["result"].clone())
 }
 
+async fn read(
+    app: &bilibi_web::App,
+    client: &Client,
+    scope: &Scope,
+    key: &str,
+    input: Value,
+) -> Result<Value> {
+    let registry = app
+        .services
+        .get::<bilibi_base::agent_api::Registry>("base/agent_api.registry")?;
+    Ok(registry.call(client, scope, key, &input).await?["result"].clone())
+}
+
 /// The authenticator code for `key` (base32, as enrollment shows it) at
 /// `offset` 30-second steps from now: what the account holder's app shows.
 fn code(key: &str, offset: i64) -> String {
@@ -542,16 +555,29 @@ async fn main() -> Result<()> {
         )
         .await?
         .map_err(|why| format!("contacts upload refused: {why}"))?;
+    let fixed_value = "Ada Manager <ada@example.test>";
+    let personal_mapping = json!({"fields": [
+        {"field": "name", "value": fixed_value}, {"field": "kind", "column": "Kind"},
+        {"field": "email", "column": "E-mail"}
+    ], "source_key": "Ref", "duplicates": "skip"});
+    let saved_mapping = write(
+        &app,
+        &admin_login.token,
+        &admin,
+        "base.bulk_data.mapping.save",
+        json!({"record_type": "core/person.contacts", "name": "Ada fixed value", "mapping": personal_mapping}),
+    )
+    .await?;
+    let saved_mapping_id = saved_mapping["id"]
+        .as_i64()
+        .ok_or("saved mapping returned no ID")?;
     let version = bulk.run(&**client, &admin, ada_import).await?.version;
     write(
         &app,
         &admin_login.token,
         &admin,
         "base.bulk_data.import.start",
-        json!({"run_id": ada_import, "version": version, "mapping": {"fields": [
-            {"field": "name", "column": "Full name"}, {"field": "kind", "column": "Kind"},
-            {"field": "email", "column": "E-mail"}
-        ], "source_key": "Ref", "duplicates": "skip"}}),
+        json!({"run_id": ada_import, "version": version, "mapping": personal_mapping}),
     )
     .await?;
     for _ in 0..120 {
@@ -589,7 +615,7 @@ async fn main() -> Result<()> {
             .await
             .map(|(_, bytes)| String::from_utf8_lossy(&bytes).contains("ada@example.test")),
     );
-    println!("import {ada_import}: rows keyed by Ada's email={keyed}; child file {child_import} uploaded");
+    println!("import {ada_import}: rows keyed by Ada's email={keyed}; fixed personal value and saved mapping stored; child file {child_import} uploaded");
     if keyed != 1 {
         return Err("the import did not record Ada's row before erasure".into());
     }
@@ -1279,19 +1305,42 @@ async fn main() -> Result<()> {
             .query_one(
                 "SELECT r.state, r.erased_for::text, r.cleaned_at IS NOT NULL, r.source_artifact IS NULL, \
                  (SELECT count(*) FROM base_bulk_data_rows w WHERE w.tenant_id=r.tenant_id AND w.run_id=r.id AND (w.source_key IS NOT NULL OR w.message IS NOT NULL)), \
-                 (SELECT count(*) FROM base_artifacts a WHERE a.tenant_id=r.tenant_id AND a.owner_id='base.bulk_data' AND a.subject=r.id::text AND a.deleted_at IS NULL) \
+                 (SELECT count(*) FROM base_artifacts a WHERE a.tenant_id=r.tenant_id AND a.owner_id='base.bulk_data' AND a.subject=r.id::text AND a.deleted_at IS NULL), \
+                 r.file_name, r.header='[]'::jsonb, r.mapping IS NULL \
                  FROM base_bulk_data_runs r WHERE r.tenant_id=1 AND r.id=$1",
                 &[&id],
             )
             .await?;
-        let (cleaned, unlinked, details, files): (bool, bool, i64, i64) =
-            (row.get(2), row.get(3), row.get(4), row.get(5));
+        let (cleaned, unlinked, details, files, file_name, header_empty, mapping_empty): (
+            bool,
+            bool,
+            i64,
+            i64,
+            String,
+            bool,
+            bool,
+        ) = (
+            row.get(2),
+            row.get(3),
+            row.get(4),
+            row.get(5),
+            row.get(6),
+            row.get(7),
+            row.get(8),
+        );
         println!(
-            "import {id}: state={} erased_for={} cleaned={cleaned} file reference dropped={unlinked} rows still holding a key or message={details} live files={files}",
+            "import {id}: state={} erased_for={} cleaned={cleaned} file reference dropped={unlinked} rows still holding a key or message={details} live files={files} file name={file_name} header empty={header_empty} mapping empty={mapping_empty}",
             row.get::<_, String>(0),
             row.get::<_, String>(1)
         );
-        if !cleaned || !unlinked || details != 0 || files != 0 {
+        if !cleaned
+            || !unlinked
+            || details != 0
+            || files != 0
+            || file_name != "[erased]"
+            || !header_empty
+            || !mapping_empty
+        {
             return Err(format!("import {id} still holds data after the erasure").into());
         }
     }
@@ -1305,6 +1354,48 @@ async fn main() -> Result<()> {
     println!("import {ada_import} reads as erased: {erased}");
     if !refused || !erased {
         return Err("the erased import still offers its file".into());
+    }
+    let import_get = read(
+        &app,
+        &client,
+        &admin,
+        "base.bulk_data.import.get",
+        json!({"run_id": ada_import}),
+    )
+    .await?;
+    let mapping_list = read(
+        &app,
+        &client,
+        &admin,
+        "base.bulk_data.mapping.list",
+        json!({"record_type": "core/person.contacts"}),
+    )
+    .await?;
+    println!("import.get after erasure: {import_get}");
+    println!("mapping.list after erasure: {mapping_list}");
+    if import_get["file_name"] != json!("[erased]")
+        || import_get["columns"] != json!([])
+        || !import_get["mapping"].is_null()
+        || import_get.to_string().contains(fixed_value)
+        || mapping_list.to_string().contains(fixed_value)
+        || mapping_list
+            .as_array()
+            .is_none_or(|saved| !saved.is_empty())
+    {
+        return Err("import.get or mapping.list still exposes erased import mapping data".into());
+    }
+    let mapping_deletions: i64 = client
+        .query_one(
+            "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=1 AND auditable_type='base/bulk_data.mapping' AND auditable_id=$1::bigint::text AND event='deleted'",
+            &[&saved_mapping_id],
+        )
+        .await?
+        .get(0);
+    println!("saved mapping {saved_mapping_id}: audited deletions={mapping_deletions}");
+    if mapping_deletions != 1 {
+        return Err(
+            "the saved mapping erasure was not recorded once through MutationBoundary".into(),
+        );
     }
 
     let fresh_export = write(

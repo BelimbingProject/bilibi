@@ -12,7 +12,7 @@
 //! nothing; the rows are blanked and the files deleted after it commits, in
 //! bounded batches, so a tenant with a long import history does not make the
 //! erasure's own transaction long.
-use crate::{files::FILES, BulkData};
+use crate::{files::FILES, store::ERASED_FILE_NAME, BulkData};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_personal_data::{Action, Erased, Erasure, Kept, KeptReason, Progress};
 use bilibi_tenancy::Scope;
@@ -34,7 +34,7 @@ const GUARD_PAUSE: Duration = Duration::from_millis(100);
 const ROW_BATCH: i32 = 5000;
 const CLEAN: &str = "base.bulk_data.erasure.clean";
 const EXPORT_CLEANED: &str = "UPDATE base_bulk_data_exports SET cleaned_at=clock_timestamp(),updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND cleaned_at IS NULL";
-const RUN_CLEANED: &str = "UPDATE base_bulk_data_runs SET cleaned_at=clock_timestamp(),source_artifact=NULL,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND cleaned_at IS NULL";
+const RUN_CLEANED: &str = "UPDATE base_bulk_data_runs SET file_name='[erased]',header='[]'::jsonb,mapping=NULL,cleaned_at=clock_timestamp(),source_artifact=NULL,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND cleaned_at IS NULL";
 
 impl BulkData {
     /// The record types whose import runs can hold a record of this type's
@@ -122,20 +122,57 @@ impl BulkData {
         ).await?.is_some() {
             // A run still working ends here: its file is about to go, and a
             // row recorded after the clean-up would quote it again.
+            let run_types = types.clone();
             tx.mutate(move |sql| Box::pin(async move {
                 let rows = sql.query(
                     "UPDATE base_bulk_data_runs SET erased_for=array_append(erased_for,$3), \
+                     file_name=$4,header='[]'::jsonb,mapping=NULL, \
                      finished_at=CASE WHEN state IN ('previewing','running') THEN clock_timestamp() ELSE finished_at END, \
                      state=CASE WHEN state IN ('previewing','running') THEN 'cancelled' ELSE state END, \
                      version=version+1,updated_at=clock_timestamp() \
                      WHERE tenant_id=$1 AND record_type=ANY($2) AND cleaned_at IS NULL AND NOT ($3=ANY(erased_for)) RETURNING id,state",
-                    &[&tenant, &types, &person],
+                    &[&tenant, &run_types, &person, &ERASED_FILE_NAME],
                 ).await?;
                 Ok(((), rows.iter().map(|row| Change {
                     kind: "base/bulk_data.run".into(), id: row.get(0), old: Value::Null,
                     new: json!({"state":row.get::<_, String>(1),"erased_for":person}),
                 }).collect()))
             })).await?;
+        }
+        // A fixed value has no subject identifier by which it can be matched
+        // safely. Delete every company-shared mapping of the affected types,
+        // and keep its contents out of the erasure's audit evidence.
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT id FROM base_bulk_data_mappings WHERE tenant_id=$1 AND record_type=ANY($2) LIMIT 1",
+                &[&tenant, &types],
+            )
+            .await?
+            .is_some()
+        {
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    let rows = sql
+                        .query(
+                            "DELETE FROM base_bulk_data_mappings WHERE tenant_id=$1 AND record_type=ANY($2) RETURNING id,record_type",
+                            &[&tenant, &types],
+                        )
+                        .await?;
+                    Ok((
+                        (),
+                        rows.iter()
+                            .map(|row| Change {
+                                kind: "base/bulk_data.mapping".into(),
+                                id: row.get(0),
+                                old: json!({"record_type": row.get::<_, String>(1), "saved_mapping": true}),
+                                new: Value::Null,
+                            })
+                            .collect(),
+                    ))
+                })
+            })
+            .await?;
         }
         Ok(())
     }
