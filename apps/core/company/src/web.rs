@@ -1218,7 +1218,7 @@ impl CompanyPage {
                 self.duplicate_reason = get("reason").to_owned();
             }
             "create_company" | "confirm_create_anyway" if self.operation == "create" => {
-                let client = self.db.get().await?;
+                let mut client = self.db.get().await?;
                 bilibi_authz::authorize_key(&**client, scope, crate::CREATE).await?;
                 let anyway = get("type") == "confirm_create_anyway";
                 if !anyway {
@@ -1250,9 +1250,12 @@ impl CompanyPage {
                 }
                 self.errors = errors;
                 let preview = if self.errors.is_empty() {
-                    match crate::preview_create_with_fields(&**client, scope, &new, &company_fields)
-                        .await?
-                    {
+                    // In a transaction, so duplicate matching runs under its timeout.
+                    let raw: &mut tokio_postgres::Client = &mut client;
+                    let tx = raw.transaction().await?;
+                    let previewed =
+                        crate::preview_create_with_fields(&tx, scope, &new, &company_fields).await;
+                    match crate::duplicates::settle(tx, previewed).await? {
                         Ok(preview) => Some(preview),
                         Err(errors) => {
                             self.errors = errors;

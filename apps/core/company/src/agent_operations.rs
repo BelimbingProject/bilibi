@@ -286,14 +286,19 @@ impl ReadHandler for Lookup {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
+            let mut client = db()?.get().await.map_err(bilibi_database::Error::from)?;
             let value = match self {
                 Self::Duplicates => {
                     let query = serde_json::from_value(input.clone())
                         .map_err(|_| bilibi_database::Error::Invalid)?;
-                    serde_json::to_value(
-                        crate::duplicates::duplicates(&**client, scope, &query).await?,
-                    )
+                    // In a transaction, so matching runs under its timeout.
+                    let raw: &mut tokio_postgres::Client = &mut client;
+                    let tx = raw
+                        .transaction()
+                        .await
+                        .map_err(bilibi_database::Error::from)?;
+                    let found = crate::duplicates::duplicates(&tx, scope, &query).await;
+                    serde_json::to_value(crate::duplicates::settle(tx, found).await?)
                 }
                 Self::Hierarchy => serde_json::to_value(
                     crate::hierarchy::hierarchy(
