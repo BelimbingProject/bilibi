@@ -638,7 +638,8 @@ impl Confirming {
         }
     }
     /// Reads store pages until `want` candidates are held, none are left, or
-    /// [`PAGE_READS`] pages were asked for.
+    /// [`PAGE_READS`] pages were asked for. First pages with nothing to show
+    /// are dropped, so what stays pending is a candidate or an unread page.
     async fn fill(
         &mut self,
         privacy: &Privacy,
@@ -694,6 +695,13 @@ impl Confirming {
                     after,
                 });
             }
+        }
+        while matches!(
+            self.pending.front(),
+            Some(Pending::Page { located, .. })
+                if located.candidates.is_empty() && located.next.is_none()
+        ) {
+            self.pending.pop_front();
         }
         Ok(())
     }
