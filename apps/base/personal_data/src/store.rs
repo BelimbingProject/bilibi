@@ -125,25 +125,57 @@ impl Subject {
     }
     /// The confirmed record IDs of one kind that parse as numbers.
     pub fn confirmed_ids(&self, kind: &str) -> Vec<i64> {
-        self.confirmed
-            .iter()
-            .filter(|c| c.kind == kind)
-            .filter_map(|c| c.id.parse().ok())
-            .collect()
+        record_ids(&self.confirmed, kind)
     }
 }
+/// The IDs of `records` of one kind that parse as numbers.
+pub fn record_ids(records: &[Confirmed], kind: &str) -> Vec<i64> {
+    records
+        .iter()
+        .filter(|c| c.kind == kind)
+        .filter_map(|c| c.id.parse().ok())
+        .collect()
+}
 
-/// What a store holds about a subject.
+/// What a store holds about a subject, and one page of the records that
+/// match it only by an identifier.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Located {
+    /// Counted on the first page (`after` is `None`). A later page may leave
+    /// it empty: `base/privacy` reads the counts from the first page only.
     pub kinds: Vec<KindCount>,
     /// Records that match only an identifier, for the operator to confirm one
-    /// by one. Never another person's record: those are only counted.
+    /// by one: at most [`MAX_CANDIDATES`], in the store's own stable order.
+    /// Never another person's record: those are only counted.
     #[serde(default)]
     pub candidates: Vec<Candidate>,
-    /// More candidates exist than were listed.
+    /// Where the next page starts, to pass back to [`Handler::locate`] as
+    /// `after`; `None` on the last page. Opaque to everyone but the store, at
+    /// most [`MAX_CURSOR`] bytes.
     #[serde(default)]
-    pub truncated: bool,
+    pub next: Option<String>,
+}
+impl Located {
+    /// One page from candidates read in the store's order with
+    /// `LIMIT MAX_CANDIDATES + 1`: the first [`MAX_CANDIDATES`], and, when
+    /// more were read, `next` from the last one kept (`cursor`).
+    pub fn page(
+        kinds: Vec<KindCount>,
+        mut candidates: Vec<Candidate>,
+        cursor: impl FnOnce(&Candidate) -> String,
+    ) -> Self {
+        let next = if candidates.len() > MAX_CANDIDATES {
+            candidates.truncate(MAX_CANDIDATES);
+            candidates.last().map(cursor)
+        } else {
+            None
+        };
+        Self {
+            kinds,
+            candidates,
+            next,
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KindCount {
@@ -153,8 +185,24 @@ pub struct KindCount {
     /// Records that match only an identifier.
     pub by_identifier: i64,
 }
-/// The most candidates a store lists for one request.
+/// The most candidates a store lists on one page of [`Handler::locate`], and
+/// the most records `base/privacy` asks [`Handler::confirmable`] about at once.
 pub const MAX_CANDIDATES: usize = 200;
+/// The longest cursor ([`Located::next`]) a store may hand out.
+pub const MAX_CURSOR: usize = 128;
+/// The record ID a cursor holds, for a store whose candidates are in ID order
+/// and whose cursor is the last listed ID: 0 before the first page. A cursor
+/// that is not a positive ID is `Invalid`.
+pub fn after_id(after: Option<&str>) -> Result<i64> {
+    match after {
+        None => Ok(0),
+        Some(after) => after
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or(bilibi_database::Error::Invalid),
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Candidate {
     pub kind: String,
@@ -330,12 +378,33 @@ pub trait Progress: Send + Sync {
 /// files. Every call is idempotent: a retried job that finds the work done
 /// answers the same.
 pub trait Handler: Send + Sync {
+    /// What the store holds about `subject`, with one page of its
+    /// identifier-only candidates: the first page when `after` is `None`,
+    /// otherwise the page after the `next` an earlier page of this store
+    /// handed out. A cursor the store cannot read is `Invalid`; a cursor
+    /// never widens the match, so a forged one only moves the page.
     fn locate<'a>(
         &'a self,
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located>;
+    /// Which of `records` (at most [`MAX_CANDIDATES`]) are, now, candidates
+    /// `locate` lists for `subject` on some page. `base/privacy` confirms
+    /// only these when a request is verified, so a confirmation from any page,
+    /// or from no page at all, is checked against the store's current records
+    /// in the scope's tenant. The default lists no candidates, so it confirms
+    /// none.
+    fn confirmable<'a>(
+        &'a self,
+        _client: &'a Client,
+        _scope: &'a Scope,
+        _subject: &'a Subject,
+        _records: &'a [Confirmed],
+    ) -> HandlerFuture<'a, Vec<Confirmed>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     /// Every record, however many: never a first page. Too much to export is
     /// an error, never a silently shorter export.
     fn export<'a>(

@@ -10,7 +10,7 @@ use crate::{Privacy, MONITOR, REQUEST_APPROVE, REQUEST_FAIL, REQUEST_RECEIVE, RE
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_party_ids::{OrganisationId, PersonId};
-use bilibi_personal_data::{Confirmed, Identifier, Located, Subject, MAX_CANDIDATES};
+use bilibi_personal_data::{Confirmed, Identifier, Located, Subject, MAX_CANDIDATES, MAX_CURSOR};
 use bilibi_tenancy::{Channel, Scope};
 use bilibi_workflow::{
     Contribution as Flowing, Edge, Flow, Guard, Load, Operation, OwnerFuture, Request as Move,
@@ -239,6 +239,23 @@ pub(crate) fn subject_for(request: &RequestView, store: &str) -> Subject {
             })
             .collect(),
     }
+}
+/// The most records one verification confirms, over every store.
+pub(crate) const MAX_CONFIRMED: usize = MAX_CANDIDATES * 4;
+/// A store's page, refused (`Internal`) when the store breaks the page
+/// contract: more than [`MAX_CANDIDATES`], or a cursor longer than
+/// [`MAX_CURSOR`]. A shortened page would skip the records after it.
+fn located(page: Result<Located>) -> Result<Located> {
+    let page = page?;
+    if page.candidates.len() > MAX_CANDIDATES
+        || page
+            .next
+            .as_ref()
+            .is_some_and(|next| next.is_empty() || next.len() > MAX_CURSOR)
+    {
+        return Err(Error::Internal);
+    }
+    Ok(page)
 }
 /// The request's confirmed records, by store.
 pub(crate) async fn confirmed(
@@ -802,9 +819,10 @@ impl Privacy {
         .await
     }
 
-    /// What every mounted store holds about the request's subject, with each
-    /// store's records that match only an email or phone listed one by one,
-    /// for the operator to confirm when verifying.
+    /// What every mounted store holds about the request's subject, with the
+    /// first page of each store's records that match only an email or phone,
+    /// for the operator to confirm when verifying. A store with more answers
+    /// `next`, the cursor [`Privacy::locate_page`] takes.
     pub async fn locate(
         &self,
         client: &Client,
@@ -815,6 +833,37 @@ impl Privacy {
         let mut request = load(client, scope.tenant(), id, false).await?;
         request.confirmed = confirmed(client, scope.tenant(), id).await?;
         self.locate_all(scope, &request).await
+    }
+    /// One store's next page of candidates for the request, after the `next`
+    /// an earlier page of that store answered. A later page carries no counts.
+    /// A store that is not mounted is `NotFound`; a cursor longer than any
+    /// store hands out, or one the store cannot read, is `Invalid`.
+    pub async fn locate_page(
+        &self,
+        client: &Client,
+        scope: &Scope,
+        id: i64,
+        store: &str,
+        after: &str,
+    ) -> Result<Located> {
+        bilibi_authz::authorize_key(client, scope, REQUEST_VIEW).await?;
+        if after.is_empty() || after.len() > MAX_CURSOR {
+            return Err(Error::Invalid);
+        }
+        let mut request = load(client, scope.tenant(), id, false).await?;
+        request.confirmed = confirmed(client, scope.tenant(), id).await?;
+        let (key, data) = self.stores.get(store).ok_or(Error::NotFound)?;
+        let bounded = Bounded::open(&self.db).await?;
+        let found = match bounded.client() {
+            Ok(client) => located(
+                data.handler
+                    .locate(client, scope, &subject_for(&request, key), Some(after))
+                    .await,
+            ),
+            Err(error) => Err(error),
+        };
+        bounded.release().await;
+        found
     }
     /// Every store's locate on one connection of its own, each statement cut
     /// off after [`LOCATE_TIMEOUT`]: a store's identifier match may scan all
@@ -837,23 +886,23 @@ impl Privacy {
     ) -> Result<Vec<(String, String, Located)>> {
         let mut found = Vec::new();
         for (key, _, data) in self.stores.iter() {
-            let mut located = data
+            let page = data
                 .handler
-                .locate(client, scope, &subject_for(request, key))
-                .await?;
-            if located.candidates.len() > MAX_CANDIDATES {
-                located.candidates.truncate(MAX_CANDIDATES);
-                located.truncated = true;
-            }
-            found.push((key.to_owned(), data.label.to_owned(), located));
+                .locate(client, scope, &subject_for(request, key), None)
+                .await;
+            found.push((key.to_owned(), data.label.to_owned(), located(page)?));
         }
         Ok(found)
     }
 
     /// `received → verified`, recording how the requester's identity was
     /// checked and which of the stores' identifier-only candidates the
-    /// operator confirmed are the person's. A confirmation that is not a
-    /// current candidate is `Invalid`; candidates not confirmed are left alone.
+    /// operator confirmed are the person's, from any page of the stores'
+    /// candidates. Each store answers which of them are its candidates now
+    /// ([`bilibi_personal_data::Handler::confirmable`]): one that is not, or
+    /// of a store not mounted, is `Invalid`, so a stale, forged or other
+    /// tenant's record is never confirmed. Candidates not confirmed are left
+    /// alone.
     pub async fn verify(
         &self,
         client: &mut Client,
@@ -884,25 +933,24 @@ impl Privacy {
         confirm: &[ConfirmedRecord],
     ) -> Result<RequestView> {
         let note = text(verification)?;
-        if confirm.len() > MAX_CANDIDATES * 4 {
+        if confirm.len() > MAX_CONFIRMED {
             return Err(Error::Invalid);
         }
-        let request = load(tx.sql(), scope.tenant(), id, false).await?;
+        // Before any store is asked about a record.
+        bilibi_authz::authorize_key(tx.sql(), scope, REQUEST_RECEIVE).await?;
+        let mut request = load(tx.sql(), scope.tenant(), id, false).await?;
+        request.confirmed = confirmed(tx.sql(), scope.tenant(), id).await?;
         let mut confirm: Vec<ConfirmedRecord> = confirm.to_vec();
         confirm.sort();
         confirm.dedup();
         if !confirm.is_empty() {
-            let located = self.locate_all(scope, &request).await?;
-            let listed = |c: &ConfirmedRecord| {
-                located.iter().any(|(store, _, found)| {
-                    *store == c.store
-                        && found
-                            .candidates
-                            .iter()
-                            .any(|candidate| candidate.kind == c.kind && candidate.id == c.id)
-                })
+            let bounded = Bounded::open(&self.db).await?;
+            let proven = match bounded.client() {
+                Ok(client) => self.confirmable(client, scope, &request, &confirm).await,
+                Err(error) => Err(error),
             };
-            if !confirm.iter().all(listed) {
+            bounded.release().await;
+            if !proven? {
                 return Err(Error::Invalid);
             }
         }
@@ -938,6 +986,41 @@ impl Privacy {
             .await?;
         }
         load(tx.sql(), tenant, id, false).await
+    }
+
+    /// Whether every one of `confirm` (sorted, no repeats) is, now, a
+    /// candidate of its mounted store, asking each store at most
+    /// [`MAX_CANDIDATES`] records at a time.
+    async fn confirmable(
+        &self,
+        client: &Client,
+        scope: &Scope,
+        request: &RequestView,
+        confirm: &[ConfirmedRecord],
+    ) -> Result<bool> {
+        for group in confirm.chunk_by(|a, b| a.store == b.store) {
+            let Some((key, data)) = self.stores.get(&group[0].store) else {
+                return Ok(false);
+            };
+            let subject = subject_for(request, key);
+            for chunk in group.chunks(MAX_CANDIDATES) {
+                let asked: Vec<Confirmed> = chunk
+                    .iter()
+                    .map(|c| Confirmed {
+                        kind: c.kind.clone(),
+                        id: c.id.clone(),
+                    })
+                    .collect();
+                let current = data
+                    .handler
+                    .confirmable(client, scope, &subject, &asked)
+                    .await?;
+                if !asked.iter().all(|c| current.contains(c)) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// `verified → approved → running` for an access or portability request,

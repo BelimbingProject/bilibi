@@ -10,9 +10,9 @@
 use bilibi_database::{Change, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_personal_data::{
-    Action, Candidate, Disclosure, Erased, Erasure, Exported, Handler, HandlerFuture, Holds, Kept,
-    KindCount, Located, PersonalData, RecordKind, Subject, ERASED, MAX_CANDIDATES, PERSONAL_DATA,
-    RECORD_KINDS,
+    after_id, record_ids, Action, Candidate, Confirmed, Disclosure, Erased, Erasure, Exported,
+    Handler, HandlerFuture, Holds, Kept, KindCount, Located, PersonalData, RecordKind, Subject,
+    ERASED, MAX_CANDIDATES, PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -35,27 +35,37 @@ impl Handler for Previews {
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let from = after_id(after)?;
             let (emails, phones) = subject.patterns();
             if emails.is_empty() && phones.is_empty() {
                 return Ok(Located::default());
             }
-            let count: i64 = client
-                .query_one(
-                    &format!(
-                        "SELECT count(*) FROM base_integration_exchanges WHERE {}",
-                        matching()
-                    ),
-                    &[&scope.tenant(), &emails, &phones],
-                )
-                .await?
-                .get(0);
+            let mut kinds = Vec::new();
+            if after.is_none() {
+                let count: i64 = client
+                    .query_one(
+                        &format!(
+                            "SELECT count(*) FROM base_integration_exchanges WHERE {}",
+                            matching()
+                        ),
+                        &[&scope.tenant(), &emails, &phones],
+                    )
+                    .await?
+                    .get(0);
+                kinds.push(KindCount {
+                    kind: KIND.into(),
+                    by_person: 0,
+                    by_identifier: count,
+                });
+            }
             let rows = client
                 .query(
                     &format!("SELECT id,direction,system,operation,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI') \
-                     FROM base_integration_exchanges WHERE {} ORDER BY id LIMIT $4", matching()),
-                    &[&scope.tenant(), &emails, &phones, &(MAX_CANDIDATES as i64 + 1)],
+                     FROM base_integration_exchanges WHERE {} AND id>$4 ORDER BY id LIMIT $5", matching()),
+                    &[&scope.tenant(), &emails, &phones, &from, &(MAX_CANDIDATES as i64 + 1)],
                 )
                 .await?;
             let candidates = rows
@@ -73,15 +83,37 @@ impl Handler for Previews {
                     ),
                 })
                 .collect();
-            Ok(Located {
-                kinds: vec![KindCount {
+            Ok(Located::page(kinds, candidates, |last| last.id.clone()))
+        })
+    }
+    fn confirmable<'a>(
+        &'a self,
+        client: &'a Client,
+        scope: &'a Scope,
+        subject: &'a Subject,
+        records: &'a [Confirmed],
+    ) -> HandlerFuture<'a, Vec<Confirmed>> {
+        Box::pin(async move {
+            let (emails, phones) = subject.patterns();
+            let ids = record_ids(records, KIND);
+            if ids.is_empty() || (emails.is_empty() && phones.is_empty()) {
+                return Ok(Vec::new());
+            }
+            Ok(client
+                .query(
+                    &format!(
+                        "SELECT id FROM base_integration_exchanges WHERE {} AND id=ANY($4)",
+                        matching()
+                    ),
+                    &[&scope.tenant(), &emails, &phones, &ids],
+                )
+                .await?
+                .iter()
+                .map(|row| Confirmed {
                     kind: KIND.into(),
-                    by_person: 0,
-                    by_identifier: count,
-                }],
-                candidates,
-                truncated: false,
-            })
+                    id: row.get::<_, i64>(0).to_string(),
+                })
+                .collect())
         })
     }
     fn export<'a>(

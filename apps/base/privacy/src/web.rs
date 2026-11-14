@@ -9,8 +9,8 @@
 //! acts on that held request, never on a client value. A refusal is a flash;
 //! a Step-up refusal goes to the host, which asks for the code and comes back.
 use crate::{
-    ClassView, ConfirmedRecord, Hold, HoldTarget, Privacy, RequestKind, RequestView,
-    RetentionAction, HOLD_MANAGE, REQUEST_APPROVE, REQUEST_RECEIVE, RETENTION_MANAGE,
+    requests::MAX_CONFIRMED, ClassView, ConfirmedRecord, Hold, HoldTarget, Privacy, RequestKind,
+    RequestView, RetentionAction, HOLD_MANAGE, REQUEST_APPROVE, REQUEST_RECEIVE, RETENTION_MANAGE,
 };
 use askama::Template;
 use bilibi_agent_api::{
@@ -38,9 +38,11 @@ use bilibi_ui::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    ops::Range,
     sync::{Arc, LazyLock},
 };
+use tokio_postgres::Client;
 
 pub const REQUESTS_PATH: &str = "/privacy/requests";
 pub const HOLDS_PATH: &str = "/privacy/holds";
@@ -586,16 +588,144 @@ struct StoreRow {
     result: String,
     attempts: i32,
 }
-/// The most identifier-only candidates the verify dialog offers to confirm
-/// (its form must stay within the 64 fields a form event keeps).
+/// The most identifier-only candidates the verify dialog shows at once (its
+/// form must stay within the 64 fields a form event keeps). Previous and Next
+/// move through every store's candidates.
 const MAX_CONFIRM: usize = 60;
+/// The most store pages one move of the verify dialog reads.
+const PAGE_READS: usize = 4;
+/// What the verify dialog has not read yet, in store order.
+enum Pending {
+    /// A store's first page, located with the request page.
+    Page {
+        store: String,
+        label: String,
+        located: Located,
+    },
+    /// The store's page after its `next`.
+    After {
+        store: String,
+        label: String,
+        after: String,
+    },
+}
+/// The verify dialog's candidates, read from the stores a page at a time as
+/// the operator moves on, and the ticks kept on the server: a box on a page
+/// not shown posts nothing and keeps its tick.
+struct Confirming {
+    /// Every candidate read so far, in store order, held here so a forged
+    /// index confirms nothing.
+    candidates: Vec<(ConfirmedRecord, String)>,
+    pending: VecDeque<Pending>,
+    /// The first candidate shown.
+    offset: usize,
+    ticked: BTreeSet<ConfirmedRecord>,
+}
+impl Confirming {
+    fn new(located: &[(String, String, Located)]) -> Self {
+        Self {
+            candidates: Vec::new(),
+            pending: located
+                .iter()
+                .map(|(store, label, located)| Pending::Page {
+                    store: store.clone(),
+                    label: label.clone(),
+                    located: located.clone(),
+                })
+                .collect(),
+            offset: 0,
+            ticked: BTreeSet::new(),
+        }
+    }
+    /// Reads store pages until `want` candidates are held, none are left, or
+    /// [`PAGE_READS`] pages were asked for.
+    async fn fill(
+        &mut self,
+        privacy: &Privacy,
+        client: &Client,
+        scope: &Scope,
+        id: i64,
+        want: usize,
+    ) -> Result<()> {
+        let mut reads = 0;
+        while self.candidates.len() < want && reads < PAGE_READS {
+            let Some(pending) = self.pending.pop_front() else {
+                break;
+            };
+            let (store, label, located) = match pending {
+                Pending::Page {
+                    store,
+                    label,
+                    located,
+                } => (store, label, located),
+                Pending::After {
+                    store,
+                    label,
+                    after,
+                } => {
+                    reads += 1;
+                    match privacy.locate_page(client, scope, id, &store, &after).await {
+                        Ok(located) => (store, label, located),
+                        Err(error) => {
+                            self.pending.push_front(Pending::After {
+                                store,
+                                label,
+                                after,
+                            });
+                            return Err(error);
+                        }
+                    }
+                }
+            };
+            for candidate in located.candidates {
+                self.candidates.push((
+                    ConfirmedRecord {
+                        store: store.clone(),
+                        kind: candidate.kind,
+                        id: candidate.id,
+                    },
+                    format!("{label}: {}", candidate.summary),
+                ));
+            }
+            if let Some(after) = located.next {
+                self.pending.push_front(Pending::After {
+                    store,
+                    label,
+                    after,
+                });
+            }
+        }
+        Ok(())
+    }
+    /// The candidates shown, by index.
+    fn shown(&self) -> Range<usize> {
+        self.offset..(self.offset + MAX_CONFIRM).min(self.candidates.len())
+    }
+    /// Whether Next has more to show.
+    fn more(&self) -> bool {
+        self.candidates.len() > self.offset + MAX_CONFIRM || !self.pending.is_empty()
+    }
+    /// Keeps the ticks of the boxes shown, as the form posted them.
+    fn tick(&mut self, values: &HashMap<String, String>) {
+        for index in self.shown() {
+            let record = &self.candidates[index].0;
+            match values.get(&format!("c{index}")).map(String::as_str) {
+                Some("true") => {
+                    self.ticked.insert(record.clone());
+                }
+                Some(_) => {
+                    self.ticked.remove(record);
+                }
+                None => {}
+            }
+        }
+    }
+}
 enum Dialog {
     Verify {
         values: HashMap<String, String>,
         errors: BTreeMap<String, Vec<String>>,
-        /// The candidates offered, held here so a forged index confirms nothing.
-        candidates: Vec<(ConfirmedRecord, String)>,
-        more: bool,
+        confirming: Confirming,
     },
     /// A reader with restricted fields gives a reason before the export.
     Export {
@@ -608,6 +738,13 @@ enum Dialog {
     },
     Approve,
     RunAgain,
+}
+/// The flash when a store's candidates could not be read just now.
+fn unread() -> (StatusKind, String) {
+    (
+        StatusKind::Warning,
+        "Some stores could not be searched just now. Select Next or Find again to retry.".into(),
+    )
 }
 /// Why a request's background work stopped, in plain words, from its code
 /// (`cancelled_actor_refused`, `discarded_store_failed`, …).
@@ -721,31 +858,55 @@ impl RequestPage {
             "clear-flash" => clear_flash(&mut self.flash, value),
             "locate_again" => self.located = None,
             "open_verify" => {
+                let client = self.pages.db.get().await?;
                 if self.located.is_none() {
-                    let client = self.pages.db.get().await?;
                     self.located = Some(self.pages.privacy.locate(&client, scope, id).await?);
                 }
-                let mut candidates = Vec::new();
-                for (store, label, found) in self.located.iter().flatten() {
-                    for candidate in &found.candidates {
-                        candidates.push((
-                            ConfirmedRecord {
-                                store: store.clone(),
-                                kind: candidate.kind.clone(),
-                                id: candidate.id.clone(),
-                            },
-                            format!("{label}: {}", candidate.summary),
-                        ));
-                    }
+                let mut confirming = Confirming::new(self.located.as_deref().unwrap_or_default());
+                if confirming
+                    .fill(&self.pages.privacy, &client, scope, id, MAX_CONFIRM)
+                    .await
+                    .is_err()
+                {
+                    self.flash = Some(unread());
                 }
-                let more = candidates.len() > MAX_CONFIRM;
-                candidates.truncate(MAX_CONFIRM);
                 self.dialog = Some(Dialog::Verify {
                     values: HashMap::new(),
                     errors: BTreeMap::new(),
-                    candidates,
-                    more,
+                    confirming,
                 })
+            }
+            "verify_ticks" | "verify_next" | "verify_previous" => {
+                let Some(Dialog::Verify {
+                    values, confirming, ..
+                }) = &mut self.dialog
+                else {
+                    return Ok(());
+                };
+                match value["type"].as_str() {
+                    Some("verify_ticks") => {
+                        let posted = params::form_values(value, NOTE_FORM);
+                        confirming.tick(&posted);
+                        if let Some(note) = posted.get("note") {
+                            values.insert("note".into(), note.clone());
+                        }
+                    }
+                    Some("verify_next") => {
+                        let client = self.pages.db.get().await?;
+                        let want = confirming.offset + 2 * MAX_CONFIRM;
+                        if confirming
+                            .fill(&self.pages.privacy, &client, scope, id, want)
+                            .await
+                            .is_err()
+                        {
+                            self.flash = Some(unread());
+                        }
+                        if confirming.candidates.len() > confirming.offset + MAX_CONFIRM {
+                            confirming.offset += MAX_CONFIRM;
+                        }
+                    }
+                    _ => confirming.offset = confirming.offset.saturating_sub(MAX_CONFIRM),
+                }
             }
             "open_export" => {
                 self.dialog = Some(Dialog::Export {
@@ -782,17 +943,20 @@ impl RequestPage {
                 let verify = value["type"] == "verify";
                 let values = params::form_values(value, NOTE_FORM);
                 let note = values.get("note").cloned().unwrap_or_default();
-                let confirm: Vec<&ConfirmedRecord> = match &self.dialog {
-                    Some(Dialog::Verify { candidates, .. }) if verify => candidates
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, _)| {
-                            values.get(&format!("c{index}")).map(String::as_str) == Some("true")
-                        })
-                        .map(|(_, (record, _))| record)
-                        .collect(),
+                let confirm: Vec<ConfirmedRecord> = match &mut self.dialog {
+                    Some(Dialog::Verify { confirming, .. }) if verify => {
+                        confirming.tick(&values);
+                        confirming.ticked.iter().cloned().collect()
+                    }
                     _ => Vec::new(),
                 };
+                if confirm.len() > MAX_CONFIRMED {
+                    self.flash = Some((
+                        StatusKind::Error,
+                        format!("At most {MAX_CONFIRMED} records can be confirmed when verifying. Untick some and try again."),
+                    ));
+                    return Ok(());
+                }
                 let (event, contract, input) = if verify {
                     (
                         "verify",
@@ -833,13 +997,10 @@ impl RequestPage {
                             errors.insert("note".into(), message);
                         }
                         self.dialog = Some(match self.dialog.take() {
-                            Some(Dialog::Verify {
-                                candidates, more, ..
-                            }) if verify => Dialog::Verify {
+                            Some(Dialog::Verify { confirming, .. }) if verify => Dialog::Verify {
                                 values,
                                 errors,
-                                candidates,
-                                more,
+                                confirming,
                             },
                             _ => Dialog::Refuse { values, errors },
                         });
@@ -1309,6 +1470,7 @@ impl RequestPage {
             ..Card::default()
         })?);
         let note_form = |event: &'static str,
+                         change: Option<&'static str>,
                          label: &str,
                          hint: &str,
                          values: &HashMap<String, String>,
@@ -1338,47 +1500,92 @@ impl RequestPage {
                 ..Button::default()
             })?);
             body.push(&render(field)?);
-            render(Form {
-                id: "privacy-note-form",
-                event,
-                body,
-                actions,
-                ..Form::default()
-            })
+            match change {
+                // Every tick is kept as it changes, since Previous and Next
+                // show other boxes; submitting still verifies.
+                Some(change) => Form {
+                    id: "privacy-note-form",
+                    event: change,
+                    change: true,
+                    body,
+                    actions,
+                    ..Form::default()
+                }
+                .submit_event(event)
+                .map_err(|_| Error::Internal),
+                None => render(Form {
+                    id: "privacy-note-form",
+                    event,
+                    body,
+                    actions,
+                    ..Form::default()
+                }),
+            }
         };
         let dialog = match &self.dialog {
             Some(Dialog::Verify {
                 values,
                 errors,
-                candidates,
-                more,
+                confirming,
             }) => {
                 let mut body = Html::EMPTY;
-                if !candidates.is_empty() {
+                let shown = confirming.shown();
+                if !shown.is_empty() {
+                    let paged = confirming.offset > 0 || confirming.more();
+                    let description = if paged {
+                        format!(
+                            "Tick each record that is this person's. Only ticked records are acted on. Showing {} to {}{}; {} ticked.",
+                            shown.start + 1,
+                            shown.end,
+                            if confirming.more() { ", more after these" } else { "" },
+                            confirming.ticked.len()
+                        )
+                    } else {
+                        "Tick each record that is this person's. Only ticked records are acted on."
+                            .to_owned()
+                    };
+                    let mut actions = Html::EMPTY;
+                    if paged {
+                        actions.push(&render(Button {
+                            id: "privacy-verify-previous",
+                            button_type: "button",
+                            event: "verify_previous",
+                            disabled: confirming.offset == 0,
+                            body: Html::text("Previous"),
+                            ..Button::default()
+                        })?);
+                        actions.push(&render(Button {
+                            id: "privacy-verify-next",
+                            button_type: "button",
+                            event: "verify_next",
+                            disabled: !confirming.more(),
+                            body: Html::text("Next"),
+                            ..Button::default()
+                        })?);
+                    }
                     body.push(&render(SectionHeading {
                         title: "Found only by email or phone",
                         id: "privacy-verify-candidates",
-                        description: if *more {
-                            "Tick each record that is this person's. Only ticked records are acted on. More were found than can be listed here; confirm the rest through the agent operation."
-                        } else {
-                            "Tick each record that is this person's. Only ticked records are acted on."
-                        },
+                        description: &description,
+                        actions,
                         ..SectionHeading::default()
                     })?);
-                    for (index, (_, summary)) in candidates.iter().enumerate() {
+                    for index in shown {
+                        let (record, summary) = &confirming.candidates[index];
                         let key = format!("c{index}");
                         body.push(&render(
                             Field::in_form(NOTE_FORM, &key)
                                 .id(format!("privacy-verify-candidate-{index}"))
                                 .kind(InputKind::Checkbox)
                                 .label(summary)
-                                .checked(values.get(&key).map(String::as_str) == Some("true")),
+                                .checked(confirming.ticked.contains(record)),
                         )?);
                     }
                 }
                 // The ticks are part of the form, so they post with the note.
                 let body = note_form(
                     "verify",
+                    Some("verify_ticks"),
                     "How the identity was checked",
                     "For example: matched NRIC against the account holder, in person.",
                     values,
@@ -1440,6 +1647,7 @@ impl RequestPage {
                 flash: Some(flash_map(&self.flash)),
                 body: note_form(
                     "refuse",
+                    None,
                     "Reason",
                     "For example: identity could not be verified.",
                     values,

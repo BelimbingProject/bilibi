@@ -15,9 +15,9 @@ use bilibi_module_registry::{
     Catalog, Consumer, Contribution, Entry, Provenance, RegistryError, Result as RegistryResult,
 };
 use bilibi_personal_data::{
-    Action, Candidate, Disclosure, Erased, Erasure, Exported, Handler, HandlerFuture, Holds, Kept,
-    KindCount, Located, PersonalData, RecordKind, Subject, ERASED, MAX_CANDIDATES, PERSONAL_DATA,
-    RECORD_KINDS,
+    after_id, record_ids, Action, Candidate, Confirmed, Disclosure, Erased, Erasure, Exported,
+    Handler, HandlerFuture, Holds, Kept, KindCount, Located, PersonalData, RecordKind, Subject,
+    ERASED, MAX_CANDIDATES, PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -28,6 +28,9 @@ use std::{
 use tokio_postgres::Client;
 
 pub(crate) const KIND: &str = "base/events.event";
+/// An event holding a requester's email, or a phone's digits however
+/// formatted: `$2` the email patterns, `$3` the phone patterns.
+const MATCHING: &str = "tenant_id=$1 AND (payload::text ILIKE ANY($2) OR regexp_replace(payload::text,'[^0-9]','','g') LIKE ANY($3))";
 const PAGE: i64 = 1000;
 /// More linked events than this is an export too large to bundle.
 const MAX_EXPORT: usize = 100_000;
@@ -126,36 +129,49 @@ impl Handler for Payloads {
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
-            let mut by_person = 0;
-            for (name, declaration) in declared()? {
-                let Some(pointer) = declaration.person else {
-                    continue;
-                };
-                by_person += client
-                    .query_one(
-                        "SELECT count(*) FROM base_events WHERE tenant_id=$1 AND name=$2 AND payload #>> $3::text[] = $4",
-                        &[&scope.tenant(), name, &path(pointer), &subject.person.get().to_string()],
-                    )
-                    .await?
-                    .get::<_, i64>(0);
-            }
+            let from = after_id(after)?;
             let (emails, phones) = subject.patterns();
-            let (mut by_identifier, mut candidates) = (0, Vec::new());
+            let mut kinds = Vec::new();
+            if after.is_none() {
+                let mut by_person = 0;
+                for (name, declaration) in declared()? {
+                    let Some(pointer) = declaration.person else {
+                        continue;
+                    };
+                    by_person += client
+                        .query_one(
+                            "SELECT count(*) FROM base_events WHERE tenant_id=$1 AND name=$2 AND payload #>> $3::text[] = $4",
+                            &[&scope.tenant(), name, &path(pointer), &subject.person.get().to_string()],
+                        )
+                        .await?
+                        .get::<_, i64>(0);
+                }
+                let by_identifier = if emails.is_empty() && phones.is_empty() {
+                    0
+                } else {
+                    client
+                        .query_one(
+                            &format!("SELECT count(*) FROM base_events WHERE {MATCHING}"),
+                            &[&scope.tenant(), &emails, &phones],
+                        )
+                        .await?
+                        .get(0)
+                };
+                kinds.push(KindCount {
+                    kind: KIND.into(),
+                    by_person,
+                    by_identifier,
+                });
+            }
+            let mut candidates = Vec::new();
             if !emails.is_empty() || !phones.is_empty() {
-                let matching = "tenant_id=$1 AND (payload::text ILIKE ANY($2) OR regexp_replace(payload::text,'[^0-9]','','g') LIKE ANY($3))";
-                by_identifier = client
-                    .query_one(
-                        &format!("SELECT count(*) FROM base_events WHERE {matching}"),
-                        &[&scope.tenant(), &emails, &phones],
-                    )
-                    .await?
-                    .get(0);
                 candidates = client
                     .query(
-                        &format!("SELECT id,name,to_char(recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI') FROM base_events WHERE {matching} ORDER BY id LIMIT $4"),
-                        &[&scope.tenant(), &emails, &phones, &(MAX_CANDIDATES as i64 + 1)],
+                        &format!("SELECT id,name,to_char(recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI') FROM base_events WHERE {MATCHING} AND id>$4 ORDER BY id LIMIT $5"),
+                        &[&scope.tenant(), &emails, &phones, &from, &(MAX_CANDIDATES as i64 + 1)],
                     )
                     .await?
                     .iter()
@@ -166,15 +182,34 @@ impl Handler for Payloads {
                     })
                     .collect();
             }
-            Ok(Located {
-                kinds: vec![KindCount {
+            Ok(Located::page(kinds, candidates, |last| last.id.clone()))
+        })
+    }
+    fn confirmable<'a>(
+        &'a self,
+        client: &'a Client,
+        scope: &'a Scope,
+        subject: &'a Subject,
+        records: &'a [Confirmed],
+    ) -> HandlerFuture<'a, Vec<Confirmed>> {
+        Box::pin(async move {
+            let (emails, phones) = subject.patterns();
+            let ids = record_ids(records, KIND);
+            if ids.is_empty() || (emails.is_empty() && phones.is_empty()) {
+                return Ok(Vec::new());
+            }
+            Ok(client
+                .query(
+                    &format!("SELECT id FROM base_events WHERE {MATCHING} AND id=ANY($4)"),
+                    &[&scope.tenant(), &emails, &phones, &ids],
+                )
+                .await?
+                .iter()
+                .map(|row| Confirmed {
                     kind: KIND.into(),
-                    by_person,
-                    by_identifier,
-                }],
-                candidates,
-                truncated: false,
-            })
+                    id: row.get::<_, i64>(0).to_string(),
+                })
+                .collect())
         })
     }
     fn export<'a>(

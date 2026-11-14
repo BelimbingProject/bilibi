@@ -4,8 +4,12 @@
 //!
 //! - the request page locates once per mounted page, again only on Find
 //!   again (#565);
-//! - matches left unconfirmed past the candidate cap are counted on the
-//!   store's answer and in `export.json` (#564);
+//! - matches left unconfirmed are counted on the store's answer and in
+//!   `export.json` (#564);
+//! - 250 event payloads holding an email page past 200 by the events store's
+//!   cursor; the verify dialog moves past its 60 across two stores and keeps
+//!   every tick; verify confirms records from any page and refuses a stale,
+//!   forged or other tenant's one (#564);
 //! - a finish attempt that stored its export and failed to file it leaves no
 //!   second copy, and an erasure deletes an export no request references;
 //!   a certificate rendered by a failed attempt is filed, not rendered again
@@ -24,8 +28,8 @@ use bilibi_database::{pool, Error, MutationBoundary, Result as DbResult};
 use bilibi_module_registry::{Contribution, Module, Provenance};
 use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_personal_data::{
-    Candidate, Disclosure, Erased, Erasure, Exported, Handler, HandlerFuture, Holds, Identifier,
-    KindCount, Located, PersonalData, Subject, PERSONAL_DATA,
+    after_id, Candidate, Confirmed, Disclosure, Erased, Erasure, Exported, Handler, HandlerFuture,
+    Holds, Identifier, KindCount, Located, PersonalData, Subject, MAX_CANDIDATES, PERSONAL_DATA,
 };
 use bilibi_privacy::{ConfirmedRecord, HoldTarget, NewRequest, Privacy, RequestKind, RequestView};
 use bilibi_settings::{Settings, Target};
@@ -78,29 +82,49 @@ impl Handler for Probe {
         _client: &'a Client,
         _scope: &'a Scope,
         subject: &'a Subject,
+        after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
             LOCATES.fetch_add(1, Ordering::SeqCst);
+            let from = after_id(after)? as usize;
             let matches = if subject.identifiers.is_empty() {
                 0
             } else {
                 MATCHES
             };
-            Ok(Located {
-                kinds: vec![KindCount {
+            let kinds = vec![KindCount {
+                kind: KIND.into(),
+                by_person: 0,
+                by_identifier: matches as i64,
+            }];
+            let candidates = (from + 1..=matches)
+                .take(MAX_CANDIDATES + 1)
+                .map(|n| Candidate {
                     kind: KIND.into(),
-                    by_person: 0,
-                    by_identifier: matches as i64,
-                }],
-                candidates: (1..=matches)
-                    .map(|n| Candidate {
-                        kind: KIND.into(),
-                        id: n.to_string(),
-                        summary: format!("Probe record {n}"),
-                    })
-                    .collect(),
-                truncated: false,
-            })
+                    id: n.to_string(),
+                    summary: format!("Probe record {n}"),
+                })
+                .collect();
+            Ok(Located::page(kinds, candidates, |last| last.id.clone()))
+        })
+    }
+    fn confirmable<'a>(
+        &'a self,
+        _client: &'a Client,
+        _scope: &'a Scope,
+        subject: &'a Subject,
+        records: &'a [Confirmed],
+    ) -> HandlerFuture<'a, Vec<Confirmed>> {
+        Box::pin(async move {
+            Ok(records
+                .iter()
+                .filter(|r| !subject.identifiers.is_empty() && r.kind == KIND)
+                .filter(|r| {
+                    r.id.parse::<usize>()
+                        .is_ok_and(|n| (1..=MATCHES).contains(&n))
+                })
+                .cloned()
+                .collect())
         })
     }
     fn export<'a>(
@@ -127,6 +151,447 @@ impl Handler for Probe {
     ) -> HandlerFuture<'a, Erased> {
         Box::pin(async { Ok(Erased::default()) })
     }
+}
+
+// ------------------------------------------------------------ #564 paging
+
+const EVENTS: &str = "base/events.payloads";
+const EVENT: &str = "base/events.event";
+/// Records `n` events in `tenant` whose payload holds `email`.
+async fn contact_events(client: &Client, tenant: i64, n: i64, email: &str) -> Result<Vec<i64>> {
+    Ok(client
+        .query(
+            "INSERT INTO base_events(tenant_id,publisher,name,version,subject,event_key,payload,trace_id) \
+             SELECT $1,'walkthrough','walkthrough.contact_logged',1,'contact:'||g,'paging-'||$3||'-'||g,jsonb_build_object('from',$3::text,'n',g),'walkthrough' \
+             FROM generate_series(1,$2::bigint) g RETURNING id",
+            &[&tenant, &n, &email],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect())
+}
+fn event(id: i64) -> ConfirmedRecord {
+    ConfirmedRecord {
+        store: EVENTS.into(),
+        kind: EVENT.into(),
+        id: id.to_string(),
+    }
+}
+fn probe(n: usize) -> ConfirmedRecord {
+    ConfirmedRecord {
+        store: STORE.into(),
+        kind: KIND.into(),
+        id: n.to_string(),
+    }
+}
+/// The opening tag of the element with `id` in `html`.
+fn tag<'a>(html: &'a str, id: &str) -> Option<&'a str> {
+    let at = html.find(&format!("id=\"{id}\""))?;
+    let start = html[..at].rfind('<')?;
+    let end = at + html[at..].find('>')?;
+    Some(&html[start..=end])
+}
+/// Whether a tag carries the `disabled` attribute (its classes name
+/// `disabled:` variants too).
+fn disabled(tag: &str) -> bool {
+    tag.contains(" disabled ") || tag.contains(" disabled>") || tag.contains(" disabled/")
+}
+fn ticked(html: &str, index: usize) -> bool {
+    tag(html, &format!("privacy-verify-candidate-{index}")).is_some_and(|t| t.contains(" checked"))
+}
+/// The candidate boxes the verify dialog shows, by index.
+fn boxes(html: &str) -> Vec<usize> {
+    html.match_indices("id=\"privacy-verify-candidate-")
+        .filter_map(|(at, found)| {
+            let rest = &html[at + found.len()..];
+            rest[..rest.find('"')?].parse().ok()
+        })
+        .collect()
+}
+async fn event_input(
+    live: &mut Box<dyn bilibi_ui::page::LiveState<Scope, Error>>,
+    account: &Account,
+    event: Value,
+) -> Result<String> {
+    Ok(live
+        .update(LiveRequest {
+            scope: &account.scope,
+            credential: &account.token,
+            input: LiveInput::Event(&event),
+        })
+        .await?
+        .html)
+}
+
+/// #564: a store's candidates page past 200 by an opaque cursor, the verify
+/// dialog moves past its 60 across stores and keeps every tick, and verify
+/// confirms a record from any page only when its store says it is a
+/// candidate now: never a stale, forged or other tenant's record.
+async fn paging(
+    app: &bilibi_web::App,
+    privacy: &Privacy,
+    client: &mut Client,
+    receiver: &Account,
+) -> Result<()> {
+    println!("== #564: 250 event payloads hold the requester's email; the dialog pages");
+    let email = "pat-paging@example.test";
+    let pat = new_person(client, "Pat Paging", email).await?;
+    let ids = contact_events(client, 1, 250, email).await?;
+    let request = receive(
+        privacy,
+        client,
+        &receiver.scope,
+        RequestKind::Access,
+        pat,
+        email,
+    )
+    .await?;
+    let pages = app
+        .services
+        .get::<PageService<Scope, Error>>("base/privacy.pages")?;
+    let path = HashMap::from([("id".to_owned(), request.id.to_string())]);
+    let query = HashMap::new();
+    let Some(mut live) = pages
+        .0
+        .mount(PageRequest {
+            operation: "request",
+            scope: Some(&receiver.scope),
+            path: &path,
+            query: &query,
+            body: &[],
+            framed: false,
+        })
+        .await?
+    else {
+        return Err("the request page is not live".into());
+    };
+    // Every event's candidates come first (stores in key order), then the
+    // probe's: 500 candidates over two stores.
+    let html = event_input(&mut live, receiver, json!({"type": "open_verify"})).await?;
+    check(
+        boxes(&html) == (0..60).collect::<Vec<_>>(),
+        &format!(
+            "the dialog shows the first 60 candidates: {:?}",
+            boxes(&html).len()
+        ),
+    )?;
+    check(
+        tag(&html, "privacy-verify-next").is_some_and(|t| !disabled(t))
+            && !html.contains("confirm the rest through the agent operation"),
+        "the dialog offers Next, not the agent operation, for the rest",
+    )?;
+    event_input(
+        &mut live,
+        receiver,
+        json!({"type": "verify_ticks", "note[c0]": "true", "note[c59]": "true", "note[c1]": "false", "note[c900]": "true"}),
+    )
+    .await?;
+    let mut html = String::new();
+    for _ in 0..4 {
+        html = event_input(&mut live, receiver, json!({"type": "verify_next"})).await?;
+    }
+    check(
+        boxes(&html) == (240..300).collect::<Vec<_>>(),
+        &format!(
+            "four Nexts show candidates 241 to 300, across the two stores: {:?}..{:?}",
+            boxes(&html).first(),
+            boxes(&html).last()
+        ),
+    )?;
+    check(
+        html.contains("Showing 241 to 300, more after these; 2 ticked."),
+        "the dialog says where it is and counts the ticks made on other pages",
+    )?;
+    event_input(
+        &mut live,
+        receiver,
+        json!({"type": "verify_ticks", "note[c245]": "true", "note[c250]": "true", "note[c299]": "true", "note[note]": "Matched NRIC at the counter"}),
+    )
+    .await?;
+    for _ in 0..4 {
+        html = event_input(&mut live, receiver, json!({"type": "verify_next"})).await?;
+    }
+    check(
+        boxes(&html) == (480..500).collect::<Vec<_>>()
+            && tag(&html, "privacy-verify-next").is_some_and(disabled),
+        &format!(
+            "the last page shows candidates 481 to 500 and Next is off: {:?}..{:?}",
+            boxes(&html).first(),
+            boxes(&html).last()
+        ),
+    )?;
+    for _ in 0..8 {
+        html = event_input(&mut live, receiver, json!({"type": "verify_previous"})).await?;
+    }
+    check(
+        boxes(&html) == (0..60).collect::<Vec<_>>()
+            && ticked(&html, 0)
+            && ticked(&html, 59)
+            && !ticked(&html, 1),
+        "Previous returns to the first page with its ticks kept",
+    )?;
+    html = event_input(
+        &mut live,
+        receiver,
+        json!({"type": "verify", "note[c0]": "true", "note[c59]": "true", "note[note]": "Matched NRIC at the counter"}),
+    )
+    .await?;
+    let verified = privacy
+        .request(&*client, &receiver.scope, request.id)
+        .await?;
+    let want = vec![
+        event(ids[0]),
+        event(ids[59]),
+        event(ids[245]),
+        probe(1),
+        probe(50),
+    ];
+    let mut got = verified.confirmed.clone();
+    got.sort();
+    let mut sorted = want.clone();
+    sorted.sort();
+    check(
+        verified.status == "verified" && got == sorted,
+        &format!(
+            "Verify confirms the five ticked in two views of the dialog, among them event {} (past the first 200) and the probe's 50 (past the first 60 of its store) (status {}, confirmed {})",
+            ids[245],
+            verified.status,
+            got.len()
+        ),
+    )?;
+    check(!html.contains("privacy-verify-modal"), "the dialog closed")?;
+
+    println!("== #564: locate pages by an opaque cursor; verify proves each record now");
+    let email = "quinn-paging@example.test";
+    let quinn = new_person(client, "Quinn Paging", email).await?;
+    let ids = contact_events(client, 1, 250, email).await?;
+    let other_tenant = contact_events(client, 2, 5, email).await?;
+    let unrelated = contact_events(client, 1, 1, "someone-else@example.test").await?;
+    let request = receive(
+        privacy,
+        client,
+        &receiver.scope,
+        RequestKind::Access,
+        quinn,
+        email,
+    )
+    .await?;
+    let first = privacy
+        .locate(&*client, &receiver.scope, request.id)
+        .await?;
+    let events = &first
+        .iter()
+        .find(|(store, _, _)| store == EVENTS)
+        .ok_or("the events store did not answer")?
+        .2;
+    check(
+        events.candidates.len() == 200
+            && events.kinds.iter().map(|k| k.by_identifier).sum::<i64>() == 250,
+        &format!(
+            "the first page lists 200 of 250 matched (listed {}, next {:?})",
+            events.candidates.len(),
+            events.next
+        ),
+    )?;
+    let after = events
+        .next
+        .clone()
+        .ok_or("the events store gave no next page")?;
+    let second = privacy
+        .locate_page(&*client, &receiver.scope, request.id, EVENTS, &after)
+        .await?;
+    let listed: Vec<i64> = events
+        .candidates
+        .iter()
+        .chain(&second.candidates)
+        .filter_map(|c| c.id.parse().ok())
+        .collect();
+    check(
+        second.candidates.len() == 50 && second.next.is_none() && second.kinds.is_empty() && listed == ids,
+        &format!(
+            "the next page lists the other 50 and is the last; together exactly the 250, none of tenant 2's (page {}, next {:?})",
+            second.candidates.len(),
+            second.next
+        ),
+    )?;
+    let long = "9".repeat(129);
+    for (cursor, store, what) in [
+        ("not-a-cursor", EVENTS, "an unreadable cursor"),
+        ("0", EVENTS, "a cursor before any record"),
+        (
+            long.as_str(),
+            EVENTS,
+            "a cursor longer than any store hands out",
+        ),
+    ] {
+        let refused = privacy
+            .locate_page(&*client, &receiver.scope, request.id, store, cursor)
+            .await;
+        check(
+            matches!(refused, Err(Error::Invalid)),
+            &format!("{what} is Invalid: {:?}", refused.err()),
+        )?;
+    }
+    let unknown = privacy
+        .locate_page(
+            &*client,
+            &receiver.scope,
+            request.id,
+            "wt_none/none.records",
+            "1",
+        )
+        .await;
+    check(
+        matches!(unknown, Err(Error::NotFound)),
+        &format!("a store not mounted is NotFound: {:?}", unknown.err()),
+    )?;
+
+    // The event 220 stops matching after it was listed.
+    client
+        .execute(
+            "UPDATE base_events SET payload=jsonb_build_object('n',0) WHERE id=$1",
+            &[&ids[220]],
+        )
+        .await?;
+    let refusals = [
+        (
+            vec![event(ids[210]), event(ids[220])],
+            "a record listed on page 2 that no longer matches (stale)",
+        ),
+        (
+            vec![event(other_tenant[0])],
+            "another tenant's event holding the same email",
+        ),
+        (
+            vec![event(unrelated[0])],
+            "an event that never matched (forged)",
+        ),
+        (
+            vec![event(ids[230]), probe(MATCHES + 1)],
+            "a record past the probe's last",
+        ),
+        (
+            vec![ConfirmedRecord {
+                store: "wt_none/none.records".into(),
+                kind: EVENT.into(),
+                id: ids[0].to_string(),
+            }],
+            "a store not mounted",
+        ),
+        (
+            (1..=801).map(probe).collect(),
+            "801 records, more than one verification confirms",
+        ),
+    ];
+    for (confirm, what) in refusals {
+        let refused = verify(privacy, client, &receiver.scope, &request, &confirm).await;
+        let invalid = refused
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<Error>())
+            .is_some_and(|e| matches!(e, Error::Invalid));
+        check(invalid, &format!("verify refuses {what} as Invalid"))?;
+    }
+    let still = privacy
+        .request(&*client, &receiver.scope, request.id)
+        .await?;
+    check(
+        still.status == "received" && still.confirmed.is_empty(),
+        "a refused verify confirms nothing",
+    )?;
+    let mut confirm: Vec<ConfirmedRecord> = ids
+        .iter()
+        .filter(|id| **id != ids[220])
+        .map(|id| event(*id))
+        .collect();
+    confirm.extend((201..=MATCHES).map(probe));
+    verify(privacy, client, &receiver.scope, &request, &confirm).await?;
+    let verified = privacy
+        .request(&*client, &receiver.scope, request.id)
+        .await?;
+    check(
+        verified.status == "verified" && verified.confirmed.len() == 249 + 50,
+        &format!(
+            "verify confirms 249 events and the probe's 201 to 250, all past one page (confirmed {})",
+            verified.confirmed.len()
+        ),
+    )?;
+
+    println!("== #564: Consent's candidates, one per address, page by rank and ID");
+    const CONSENT: &str = "core/consent.consent";
+    let ria = new_person(client, "Ria Rank", "ria-rank@example.test").await?;
+    // 230 checks of numbers holding the digits the requester gave, each its
+    // own address, so its own candidate.
+    client
+        .execute(
+            "INSERT INTO core_consent_log(tenant_id,company_id,address,channel,purpose,key,at,outcome,caller) \
+             SELECT 1,1,'wa:6012777888'||g,'messaging','walkthrough','paging-'||g,clock_timestamp(),'allowed','walkthrough' \
+             FROM generate_series(1,230) g",
+            &[],
+        )
+        .await?;
+    let request = privacy
+        .receive(
+            client,
+            &receiver.scope,
+            NewRequest {
+                kind: RequestKind::Access,
+                person: ria,
+                identifiers: vec![Identifier::Phone("+60 12-777 888".into())],
+                company: OrganisationId::new(1)?,
+            },
+        )
+        .await?;
+    let first = privacy
+        .locate(&*client, &receiver.scope, request.id)
+        .await?;
+    let consent = &first
+        .iter()
+        .find(|(store, _, _)| store == CONSENT)
+        .ok_or("the consent store did not answer")?
+        .2;
+    let after = consent
+        .next
+        .clone()
+        .ok_or("the consent store gave no next page")?;
+    let rest = privacy
+        .locate_page(&*client, &receiver.scope, request.id, CONSENT, &after)
+        .await?;
+    let all: Vec<ConfirmedRecord> = consent
+        .candidates
+        .iter()
+        .chain(&rest.candidates)
+        .map(|c| ConfirmedRecord {
+            store: CONSENT.into(),
+            kind: c.kind.clone(),
+            id: c.id.clone(),
+        })
+        .collect();
+    let distinct: std::collections::BTreeSet<_> = all.iter().collect();
+    check(
+        consent.candidates.len() == 200
+            && after.starts_with("3:")
+            && rest.candidates.len() == 30
+            && rest.next.is_none()
+            && distinct.len() == 230,
+        &format!(
+            "230 addresses page as 200 and 30 after cursor {after} (next {:?}), each once",
+            rest.next
+        ),
+    )?;
+    verify(privacy, client, &receiver.scope, &request, &all).await?;
+    let verified = privacy
+        .request(&*client, &receiver.scope, request.id)
+        .await?;
+    check(
+        verified.confirmed.len() == 230,
+        &format!(
+            "verify confirms all 230 consent candidates from both pages (confirmed {})",
+            verified.confirmed.len()
+        ),
+    )?;
+    Ok(())
 }
 
 // ----------------------------------------------------------------- helpers
@@ -543,11 +1008,11 @@ async fn main() -> Result<()> {
         .map(|(_, _, found)| found)
         .ok_or("the probe store did not answer locate")?;
     check(
-        probe.candidates.len() == 200 && probe.truncated,
+        probe.candidates.len() == 200 && probe.next.is_some(),
         &format!(
-            "{MATCHES} matches are listed as the first 200 (listed {}, truncated {})",
+            "{MATCHES} matches are listed as a first page of 200 (listed {}, next {:?})",
             probe.candidates.len(),
-            probe.truncated
+            probe.next
         ),
     )?;
     let confirm: Vec<ConfirmedRecord> = ["1", "2", "3"]
@@ -588,6 +1053,8 @@ async fn main() -> Result<()> {
             entry["unconfirmed_matches"]
         ),
     )?;
+
+    paging(&app, &privacy, &mut client, &second).await?;
 
     println!("== #562: a finish attempt that fails to file its export leaves no second copy");
     let eve = new_person(&client, "Eve Unfiled", "eve-unfiled@example.test").await?;
