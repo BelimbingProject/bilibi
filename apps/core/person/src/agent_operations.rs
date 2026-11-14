@@ -81,6 +81,12 @@ fn version(input: &Value) -> bilibi_agent_api::Result<i64> {
         .filter(|v| *v > 0)
         .ok_or(Error::Invalid.into())
 }
+fn run_id(input: &Value) -> bilibi_agent_api::Result<i64> {
+    input["run_id"]
+        .as_i64()
+        .filter(|id| *id > 0)
+        .ok_or(Error::Invalid.into())
+}
 fn invalid(error: WriteError) -> bilibi_agent_api::Error {
     match error {
         WriteError::Backend(Error::NotFound) => bilibi_agent_api::Error::NotFound,
@@ -202,6 +208,7 @@ enum Write {
     Create,
     Update,
     Retire,
+    ImportUndo,
 }
 impl WriteHandler for Write {
     fn creates(&self) -> Option<bilibi_agent_api::CreatedRecord> {
@@ -281,6 +288,40 @@ impl WriteHandler for Write {
                     .map_err(invalid)?;
                     json!({"summary":"Retire person; retain identity and history", "person_id":old.id, "version":old.version})
                 }
+                Self::ImportUndo => {
+                    let (run, person, version) = (run_id(input)?, id(input)?, version(input)?);
+                    let service = persons()?;
+                    let old = if let Some(tx) = client.transaction() {
+                        service
+                            .bulk
+                            .preview_undo(
+                                tx,
+                                scope,
+                                "core/person.contacts",
+                                run,
+                                &person.get().to_string(),
+                                version,
+                            )
+                            .await?;
+                        identity::preview_import_undo(tx, scope, person, version).await
+                    } else {
+                        let pooled = service.db.get().await.map_err(Error::from)?;
+                        service
+                            .bulk
+                            .preview_undo(
+                                &**pooled,
+                                scope,
+                                "core/person.contacts",
+                                run,
+                                &person.get().to_string(),
+                                version,
+                            )
+                            .await?;
+                        identity::preview_import_undo(&**pooled, scope, person, version).await
+                    }
+                    .map_err(invalid)?;
+                    json!({"summary":"Remove the unchanged contact created by this import", "person_id":old.id, "version":old.version})
+                }
             };
             Ok(value.into())
         })
@@ -304,6 +345,26 @@ impl WriteHandler for Write {
                 Self::Retire => {
                     crate::step_up::retire(scope, id(input)?).await?;
                     identity::retire(tx, scope, id(input)?, version(input)?).await
+                }
+                Self::ImportUndo => {
+                    let (run, person, version) = (run_id(input)?, id(input)?, version(input)?);
+                    persons()?
+                        .bulk
+                        .claim_undo(
+                            tx,
+                            scope,
+                            "core/person.contacts",
+                            run,
+                            &person.get().to_string(),
+                            version,
+                        )
+                        .await?;
+                    identity::undo_import(tx, scope, person, version)
+                        .await
+                        .map_err(invalid)?;
+                    return Ok(Output::Data(
+                        json!({"person_id":person.get(),"removed":true}).into(),
+                    ));
                 }
             }
             .map_err(invalid)?;
@@ -349,8 +410,14 @@ fn update_schema() -> Value {
 fn retire_schema() -> Value {
     json!({"type":"object","required":["person_id","version"],"properties":{"person_id":id_schema(),"version":id_schema()}})
 }
+fn import_undo_schema() -> Value {
+    json!({"type":"object","required":["run_id","person_id","version"],"properties":{"run_id":id_schema(),"person_id":id_schema(),"version":id_schema()}})
+}
 fn one_output() -> Value {
     json!({"type":"object","description":"Person fixed Core code and identity/contact facts; hidden contacts read as {\"restricted\":true}; custom lists the tenant's active custom fields as {key, label, type, value}. No credentials or grants."})
+}
+fn import_undo_output() -> Value {
+    json!({"type":"object","description":"The removed contact id and removed=true."})
 }
 fn many_output() -> Value {
     json!({"type":"array","description":"Bounded Person identities with contacts redacted under your current role restrictions."})
@@ -363,6 +430,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/person.agent", Provena
         Operation { key:"core.person.create", title:"Create a person", summary:"Generate a fixed tenant-unique Core code and record a human or agent contact without creating an account, credentials, employment or grants.", keywords:&["contact","add","human","agent"], capability:CREATE, input:create_schema, output:one_output, handler:Handler::SafeWrite(&Write::Create),channels:Channels::Every,step_up:&[] },
         Operation { key:"core.person.update", title:"Update a person", summary:"Replace identity and visible contact facts using the current version.", keywords:&["contact","edit"], capability:UPDATE, input:update_schema, output:one_output, handler:Handler::SafeWrite(&Write::Update),channels:Channels::Every,step_up:&[] },
         Operation { key:"core.person.retire", title:"Retire a person", summary:"Retain the contact and history while refusing new identity bindings. Protected system identities cannot retire.", keywords:&["contact","archive"], capability:RETIRE, input:retire_schema, output:one_output, handler:Handler::SafeWrite(&Write::Retire),channels:Channels::Every,step_up:&[crate::step_up::RETIRE] },
+        Operation { key:"core.person.import.undo", title:"Remove an imported person", summary:"Remove an unchanged contact created by an import that is currently being undone. Referenced contacts are left in place.", keywords:&["contact","import","undo"], capability:IMPORT, input:import_undo_schema, output:import_undo_output, handler:Handler::SafeWrite(&Write::ImportUndo),channels:Channels::Every,step_up:&[] },
     ],
     guides: &[Guide { key:"core.person", title:"Contacts and personal details", summary:"Identity, duplicate candidates, agents and optional account binding without People.", keywords:&["contact","human","agent","account"], capability:LIST,
         body:"Postal addresses are saved and linked through core.address, not a scalar field here. Search address or read guide core.address. Use core.address.company.list or core.address.person.list to find existing addresses; create_and_attach or attach links an office, billing or other address to its company or contact. Use one ordered plan for new companies, contacts, affiliations and addresses, with {\"$ref\":\"1.id\"} for the record created by step 1; review_entries accepts operations for linked steps.\n\nEach Person has one fixed Core code. Propose a short code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit source-spelled connectors bin, binti, a/l, a/p, s/o and d/o; append _2, _3 and so on for collisions within 12 characters. The person may choose another, longer code. The create preview and every read return code; core.person.list searches and sorts by code. Renaming or retiring never changes or frees it. Do not send code in update inputs.\n\nA Person is a human or agent identity with optional personal email and phone, independent of any company, employment or login account. Search with core.person.list and core.person.duplicates before creating; duplicate email and name are allowed and never imply the same person. Duplicate lookup matches exact case-insensitive trimmed name/email or exact trimmed phone and includes retired records. It never probes a contact field you may not see.\n\nCreate through a dry run and explicit review before the write. Employee numbers, employment lifecycle, account IDs, grants and reserved system keys are refused. Agent kind grants no login or capability. The operator explicitly provisions the protected platform-orchestrator identity through its owner API, never by a magic numeric ID.\n\nUpdate sends person_id, current version and identity (name, kind, optional email/phone). An empty string clears a visible contact; an omitted contact, visible or hidden, is kept as stored. A hidden contact must be omitted. Read results mark hidden contacts as restricted. Retirement retains identity/history and prevents new account bindings.\n\nCustom fields are the tenant's own person fields (read them with base.custom_fields.list, record type person). Reads return custom as {key, label, type, value} for the active fields. core.person.create and core.person.update take custom as a list of {key, value}: text, a number as a decimal string, a date as YYYY-MM-DD, a choice as its pick-list code, or null to clear. Update changes only the keys you send; the others are kept. A key that is not an active field is refused on cf_<key>. Optional account links belong to User and require a live Person; Person creation never creates a link. Desks separately grant staff workplace access. Work contacts and dated company affiliations belong to Affiliation: record a namecard contact (a new person and their company position at once) with core.affiliation.contact.create, and affiliate an existing person with core.affiliation.create. Business roles toward a company (customer, prospect, vendor) are core.company.relationship.assign with target_kind person. Never invent an employee number, employment status or login from a namecard; HR belongs to People, which is not needed for contacts." }],

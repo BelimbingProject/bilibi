@@ -197,7 +197,7 @@ inventory::submit! {
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             CHANGES.set(broadcast::channel(128).0).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate affiliation change sender".into()))?;
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
-            agent_operations::bind(db.clone(), services.get("base/tenancy.parties")?)?;
+            agent_operations::bind(db.clone(), services.get("base/tenancy.parties")?, services.get(bilibi_bulk_data::SERVICE)?)?;
             Ok(Arc::new(AffiliationService {
                 db,
                 mutations: services.get("base/database.mutations")?,

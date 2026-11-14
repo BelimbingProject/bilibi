@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Agents:** claude-code/opus-5.5 (author)
 **Scope:** How background work reads and writes business records (`base/agent_api` job caller), and how a module lets people import, export and update its records in bulk (`base/bulk_data`)
-**Last Updated:** 2026-10-30
+**Last Updated:** 2026-11-14
 
 > Source: [issue 133](https://github.com/BelimbingProject/bilibi/issues/133). Belimbing has no bulk import. ADR 01 defines the four doors; this record adds a fifth.
 
@@ -38,6 +38,8 @@ No agent approval round-trip occurs: the person reviewed the job when they start
 
 **7. Lists tick rows on the server.** `FlexTable` takes an optional `Selection` (a tick per row, one for the page, a bar that counts them, offers every matching row and carries the page's bulk actions); the page keeps the ticked ids and sends them, or its filters, to the contracts.
 
+**8. An owner may let people undo created records for a limited time.** The owner contributes `ImportUndo` with a version-fenced removal operation. Bulk Data stores the version returned for each created record, then calls that operation through the job door. The operation claims the matching import row inside the same audited transaction before deleting the owner record. It removes only records from that run that nobody changed; version conflicts and owner refusals stay in place and are listed on the run. The operator sets the window with `bulk_data.import_undo_days`. Erasing a run clears the stored versions, stops an active undo and permanently refuses another undo.
+
 ## Rejected alternatives
 
 - **Each module calls its own facade from a job.** It skips the schema, capability and preview that make agent, page and job writes agree, which is ADR 01's point.
@@ -49,4 +51,4 @@ No agent approval round-trip occurs: the person reviewed the job when they start
 
 - Receiving the file is not a contract yet: Artifacts takes bytes on a plain connection and a plan's input is bounded at 1 MiB, so the Imports page's `receive` event is a listed allowance (`Pending::Events`). Agents work on runs their person uploaded until agent-supplied files land.
 - A row written by a job is attributed to the person, not to an agent connection that started the run; the run's own start is attributed as it happened.
-- Undo within a window, step-up at the start of a run, agent-supplied files and scheduled exports are later phases of issue 133. No Core record has an owner yet, so owner reassignment is proven through the same path on Core Person's kind, not on an owner field.
+- Step-up at the start of a run, agent-supplied files and scheduled exports are later phases of issue 133. No Core record has an owner yet, so owner reassignment is proven through the same path on Core Person's kind, not on an owner field.

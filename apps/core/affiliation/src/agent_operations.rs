@@ -25,10 +25,15 @@ use std::{
 struct Bound {
     db: Db,
     proofs: Arc<PartyProofs>,
+    bulk: Arc<bilibi_bulk_data::BulkData>,
 }
 static BOUND: OnceLock<Bound> = OnceLock::new();
-pub fn bind(db: Db, proofs: Arc<PartyProofs>) -> bilibi_module_registry::Result<()> {
-    BOUND.set(Bound { db, proofs }).map_err(|_| {
+pub fn bind(
+    db: Db,
+    proofs: Arc<PartyProofs>,
+    bulk: Arc<bilibi_bulk_data::BulkData>,
+) -> bilibi_module_registry::Result<()> {
+    BOUND.set(Bound { db, proofs, bulk }).map_err(|_| {
         bilibi_module_registry::RegistryError::Service("duplicate affiliation agent binding".into())
     })
 }
@@ -208,6 +213,7 @@ enum Write {
     Update,
     End,
     Unlink,
+    ImportUndo,
 }
 impl WriteHandler for Write {
     fn creates(&self) -> Option<bilibi_agent_api::CreatedRecord> {
@@ -369,6 +375,29 @@ impl WriteHandler for Write {
                     .map_err(not_found)?;
                     json!({"summary":"Unlink an affiliation; the dated record is retained and refuses further edits","before":record(before).encode()})
                 }
+                Self::ImportUndo => {
+                    let (run, affiliation, version) = (
+                        positive(input, "run_id")?,
+                        id(input)?,
+                        positive(input, "version")?,
+                    );
+                    bound
+                        .bulk
+                        .preview_undo(
+                            client,
+                            scope,
+                            "core/affiliation.affiliations",
+                            run,
+                            &affiliation.get().to_string(),
+                            version,
+                        )
+                        .await?;
+                    let before =
+                        identity::preview_write(client, scope, affiliation, version, IMPORT)
+                            .await
+                            .map_err(not_found)?;
+                    json!({"summary":"Remove the unchanged affiliation created by this import","before":record(before).encode()})
+                }
             };
             Ok(value.into())
         })
@@ -415,6 +444,26 @@ impl WriteHandler for Write {
                 }
                 Self::Unlink => {
                     identity::unlink(tx, scope, id(input)?, positive(input, "version")?).await
+                }
+                Self::ImportUndo => {
+                    let (run, affiliation, version) = (
+                        positive(input, "run_id")?,
+                        id(input)?,
+                        positive(input, "version")?,
+                    );
+                    bound()?
+                        .bulk
+                        .claim_undo(
+                            tx,
+                            scope,
+                            "core/affiliation.affiliations",
+                            run,
+                            &affiliation.get().to_string(),
+                            version,
+                        )
+                        .await?;
+                    identity::undo_import(tx, scope, affiliation, version).await?;
+                    return Ok(json!({"affiliation_id":affiliation.get(),"removed":true}).into());
                 }
             }
             .map_err(shape)?;
@@ -478,8 +527,14 @@ fn end_schema() -> Value {
 fn unlink_schema() -> Value {
     json!({"type":"object","required":["affiliation_id","version"],"properties":{"affiliation_id":id_schema(),"version":id_schema()}})
 }
+fn import_undo_schema() -> Value {
+    json!({"type":"object","required":["run_id","affiliation_id","version"],"properties":{"run_id":id_schema(),"affiliation_id":id_schema(),"version":id_schema()}})
+}
 fn one_output() -> Value {
     json!({"type":"object","description":"One affiliation: person_id, organisation_id, title, work contacts, inclusive effective_from/effective_to, unlinked_at and version. A hidden work contact reads as {\"restricted\":true}."})
+}
+fn import_undo_output() -> Value {
+    json!({"type":"object","description":"The removed affiliation id and removed=true."})
 }
 fn many_output() -> Value {
     json!({"type":"array","description":"Bounded affiliations with work contacts redacted under your current role restrictions."})
@@ -493,6 +548,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/affiliation.agent", Pr
         Operation { key:"core.affiliation.update", title:"Update an affiliation", summary:"Replace the title, visible work contacts and dates using the current version; person and organisation never change.", keywords:&["affiliation","edit","title","dates"], capability:UPDATE, input:update_schema, output:one_output, handler:Handler::SafeWrite(&Write::Update),channels:Channels::Every,step_up:&[] },
         Operation { key:"core.affiliation.end", title:"End an affiliation", summary:"Set the inclusive end date; identity, contacts and history are kept.", keywords:&["affiliation","end","leave"], capability:UPDATE, input:end_schema, output:one_output, handler:Handler::SafeWrite(&Write::End),channels:Channels::Every,step_up:&[] },
         Operation { key:"core.affiliation.unlink", title:"Unlink an affiliation", summary:"Retain the dated record while refusing further edits and binding proofs. Never deletes.", keywords:&["affiliation","unlink","remove"], capability:UNLINK, input:unlink_schema, output:one_output, handler:Handler::SafeWrite(&Write::Unlink),channels:Channels::Every,step_up:&[] },
+        Operation { key:"core.affiliation.import.undo", title:"Remove an imported affiliation", summary:"Remove an unchanged affiliation created by an import that is currently being undone. Referenced affiliations are left in place.", keywords:&["affiliation","import","undo"], capability:IMPORT, input:import_undo_schema, output:import_undo_output, handler:Handler::SafeWrite(&Write::ImportUndo),channels:Channels::Every,step_up:&[] },
     ],
     guides: &[Guide { key:"core.affiliation", title:"Work affiliations", summary:"Dated person-to-organisation positions with work contacts, independent of accounts and People employment.", keywords:&["affiliation","work","contact","organisation","person","employment"], capability:LIST,
         body:"Postal addresses are saved and linked through core.address, not a scalar field here. Search address or read guide core.address. Use core.address.company.list or core.address.person.list to find existing addresses; create_and_attach or attach links an office, billing or other address to its company or contact. Use one ordered plan for new companies, contacts, affiliations and addresses, with {\"$ref\":\"1.id\"} for the record created by step 1; review_entries accepts operations for linked steps.\n\nAn affiliation links one Person to one Organisation for a dated position: optional title, work email and work phone, and inclusive effective_from/effective_to calendar dates (YYYY-MM-DD); a missing bound is open. A person may hold several affiliations at once, including several positions at one organisation. Work contacts never replace personal contacts (core.person.*), and no affiliation creates a login, grant or employment: People owns Employment and points at an affiliation with our own company.\n\nFor a namecard (vendor or customer contact), search core.company.list, core.person.list and core.person.duplicates first; create or reuse the company and assign its role with core.company.relationship.assign. A new person and their position are one write, core.affiliation.contact.create (name, organisation_id, optional title, work_email, work_phone and dates); an existing person gets core.affiliation.create. List with core.affiliation.list by person_id or organisation_id; add on=YYYY-MM-DD to keep only affiliations in effect that day, and include_unlinked=true to see retained unlinked records. Create, update, end and unlink go through a dry run and explicit review before the write. Update sends affiliation_id, the current version and the replacement title, work_email, work_phone, effective_from and effective_to; an omitted or empty visible contact clears it, and a hidden contact (read as restricted) must be omitted and is preserved. The person and organisation of an affiliation never change: create another affiliation to move someone. End sets effective_to; unlink keeps the record read-only. Archived companies and retired or protected system persons refuse new or changed affiliations." }],

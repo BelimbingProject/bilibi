@@ -724,6 +724,114 @@ async fn main() -> Result<(), Failure> {
         );
     }
 
+    println!("\n== undo removes only untouched records the import created");
+    let undo_run = admin
+        .upload(
+            "core/person.contacts",
+            "undo.csv",
+            &csv(
+                header,
+                [
+                    "U1,Undo One,human,undo.one@import.test,".into(),
+                    "U2,Undo Two,human,undo.two@import.test,".into(),
+                    "U3,Undo Three,human,undo.three@import.test,".into(),
+                ],
+            ),
+        )
+        .await
+        .map_err(|error| format!("undo scenario upload: {error}"))?;
+    let imported = admin
+        .pass("base.bulk_data.import.start", undo_run, &mapping)
+        .await
+        .map_err(|error| format!("undo scenario import: {error}"))?;
+    let changed = sql
+        .query_one(
+            "SELECT id,version FROM persons WHERE tenant_id=1 AND email='undo.two@import.test'",
+            &[],
+        )
+        .await
+        .map_err(|error| format!("undo scenario edit: {error}"))?;
+    admin
+        .write(
+            "core.person.update",
+            json!({
+                "person_id": changed.get::<_, i64>(0),
+                "version": changed.get::<_, i64>(1),
+                "identity": {"name":"Undo Two, edited", "kind":"human", "email":"undo.two@import.test"}
+            }),
+        )
+        .await
+        .map_err(|error| format!("undo scenario edit: {error}"))?;
+    admin
+        .write(
+            "base.bulk_data.import.undo",
+            json!({"run_id":undo_run,"version":imported.version}),
+        )
+        .await
+        .map_err(|error| format!("undo scenario start: {error}"))?;
+    let undone = admin.settle(undo_run).await;
+    println!(
+        "undo: state {}, {} removed, {} edited, {} other errors",
+        undone.state.as_str(),
+        undone.undo.removed,
+        undone.undo.edited,
+        undone.undo.error
+    );
+    let left: Vec<String> = sql
+        .query(
+            "SELECT email FROM persons WHERE tenant_id=1 AND email LIKE 'undo.%@import.test' ORDER BY email",
+            &[],
+        )
+        .await?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    let listed = admin
+        .read(
+            "base.bulk_data.import.rows",
+            json!({"run_id":undo_run,"pass":"run","undo":"left","page_size":100}),
+        )
+        .await?;
+    println!("records left: {left:?}; listed undo refusals: {listed}");
+    if undone.state != bilibi_bulk_data::RunState::Undone
+        || undone.undo.removed != 2
+        || undone.undo.edited != 1
+        || undone.undo.error != 0
+        || left != ["undo.two@import.test"]
+        || listed.as_array().is_none_or(|rows| rows.len() != 1)
+    {
+        return Err("import undo removed or reported the wrong records".into());
+    }
+
+    let expired = admin
+        .upload(
+            "core/person.contacts",
+            "expired-undo.csv",
+            &csv(
+                header,
+                ["E1,Expired Undo,human,expired.undo@import.test,".into()],
+            ),
+        )
+        .await?;
+    let expired_run = admin
+        .pass("base.bulk_data.import.start", expired, &mapping)
+        .await?;
+    sql.execute(
+        "UPDATE base_bulk_data_runs SET finished_at=clock_timestamp()-interval '8 days' WHERE tenant_id=1 AND id=$1",
+        &[&expired],
+    )
+    .await?;
+    let refused = admin
+        .write(
+            "base.bulk_data.import.undo",
+            json!({"run_id":expired,"version":expired_run.version}),
+        )
+        .await;
+    println!("expired undo: {refused:?}");
+    if refused.is_ok() {
+        return Err("an import was undone after the configured period".into());
+    }
+
     println!("\n== a check cancelled and started again: the first job records nothing more");
     // Issue 600: the first check's job is still working through the file
     // when the check is cancelled and started again with another mapping.

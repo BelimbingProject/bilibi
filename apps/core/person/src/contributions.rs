@@ -101,6 +101,9 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::RECORD_TYPES, "core/per
         fields: &["kind"],
     }),
 }) }
+inventory::submit! { Contribution::new(bilibi_bulk_data::IMPORT_UNDO, "core/person.contacts", Provenance { module: "core/person", source: file!(), line: line!() }, &bilibi_bulk_data::ImportUndo {
+    delete: "core.person.import.undo", delete_id: "person_id", delete_version: "version", created_version: "version",
+}) }
 
 // Core has a contact directory, with no employee-type or employment controls.
 macro_rules! page {

@@ -175,6 +175,8 @@ fn status(run: &Run) -> Result<Html> {
         (RunState::Previewed, _) => Badge::status(BadgeKind::Neutral, "Checked"),
         (RunState::Running, _) => Badge::status(BadgeKind::Plain, "Importing"),
         (RunState::Completed, _) => Badge::status(BadgeKind::Success, "Imported"),
+        (RunState::Undoing, _) => Badge::status(BadgeKind::Plain, "Undoing"),
+        (RunState::Undone, _) => Badge::status(BadgeKind::Neutral, "Undo finished"),
         (RunState::Cancelled, _) => Badge::status(BadgeKind::Warning, "Cancelled"),
     })
 }
@@ -291,6 +293,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
         ("preview", "base.bulk_data.import.preview"),
         ("start", "base.bulk_data.import.start"),
         ("cancel", "base.bulk_data.import.cancel"),
+        ("undo", "base.bulk_data.import.undo"),
         ("save_mapping", "base.bulk_data.mapping.save"),
         ("cancel_update", "base.bulk_data.update.cancel"),
     ],

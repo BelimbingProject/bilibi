@@ -128,7 +128,8 @@ impl BulkData {
                     "UPDATE base_bulk_data_runs SET erased_for=array_append(erased_for,$3), \
                      file_name=$4,header='[]'::jsonb,mapping=NULL, \
                      finished_at=CASE WHEN state IN ('previewing','running') THEN clock_timestamp() ELSE finished_at END, \
-                     state=CASE WHEN state IN ('previewing','running') THEN 'cancelled' ELSE state END, \
+                     undo_finished_at=CASE WHEN state='undoing' THEN clock_timestamp() ELSE undo_finished_at END, \
+                     state=CASE WHEN state IN ('previewing','running','undoing') THEN 'cancelled' ELSE state END, \
                      version=version+1,updated_at=clock_timestamp() \
                      WHERE tenant_id=$1 AND record_type=ANY($2) AND cleaned_at IS NULL AND NOT ($3=ANY(erased_for)) RETURNING id,state",
                     &[&tenant, &run_types, &person, &ERASED_FILE_NAME],
@@ -313,7 +314,7 @@ impl BulkData {
             let holds = client
                 .query_opt(
                     "SELECT 1 FROM base_bulk_data_rows WHERE tenant_id=$1 AND run_id=$2 AND row_number>$3 AND row_number<=$4 \
-                     AND (source_key IS NOT NULL OR message IS NOT NULL) LIMIT 1",
+                     AND (source_key IS NOT NULL OR message IS NOT NULL OR record_version IS NOT NULL OR undo_message IS NOT NULL) LIMIT 1",
                     &[&tenant, &run, &from, &to],
                 )
                 .await?
@@ -330,9 +331,9 @@ impl BulkData {
                 Box::pin(async move {
                     let cleared = sql
                         .execute(
-                            "UPDATE base_bulk_data_rows SET source_key=NULL,message=NULL \
+                            "UPDATE base_bulk_data_rows SET source_key=NULL,message=NULL,record_version=NULL,undo_message=NULL \
                              WHERE tenant_id=$1 AND run_id=$2 AND row_number>$3 AND row_number<=$4 \
-                             AND (source_key IS NOT NULL OR message IS NOT NULL)",
+                             AND (source_key IS NOT NULL OR message IS NOT NULL OR record_version IS NOT NULL OR undo_message IS NOT NULL)",
                             &[&tenant, &run, &from, &to],
                         )
                         .await?;
