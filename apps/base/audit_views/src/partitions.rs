@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 
 pub const READ: &str = "admin.audit.partition.view";
-pub const REMOVE: &str = "admin.audit.partition.remove";
+pub const REMOVE: &str = "admin.audit.partition.delete";
 pub const RETENTION_DAYS: &str = "audit.partition_retention_days";
 pub const SERVICE: &str = "base/audit_views.partitions";
 const MODULE: &str = "base/audit_views";
