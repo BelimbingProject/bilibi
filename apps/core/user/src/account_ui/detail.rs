@@ -550,7 +550,6 @@ impl Detail {
         records: &[bilibi_authz::roles::RoleAssignment],
         providers: &[RoleSummary],
     ) -> Result<Html> {
-        let companies = self.pages.grants.visible_companies(client, scope).await?;
         let mut rows = Vec::new();
         for record in records {
             let key = format!(
@@ -563,7 +562,9 @@ impl Detail {
                     .unwrap_or_default()
             );
             let company = match record.bounds.company_id {
-                Some(id) if companies.contains(&id) => bilibi_company::Directory
+                // A grant's company need not own a role, so name it directly:
+                // `lookup` answers every live company of the tenant.
+                Some(id) => bilibi_company::Directory
                     .lookup(
                         client,
                         scope,
@@ -572,7 +573,6 @@ impl Detail {
                     .await?
                     .map(|c| c.name)
                     .unwrap_or_else(|| format!("Company {id}")),
-                Some(id) => format!("Company {id}"),
                 None => "Every assigned workplace".into(),
             };
             let mut row = FlexRow::new(&key)

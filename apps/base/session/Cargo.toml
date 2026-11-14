@@ -24,6 +24,7 @@ bilibi-tenancy = { path = "../tenancy" }
 bilibi-ui.workspace = true
 inventory.workspace = true
 jiff.workspace = true
+maxminddb.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.1"
 tokio.workspace = true

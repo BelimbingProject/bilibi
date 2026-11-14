@@ -21,6 +21,7 @@ mod scan;
 mod signing;
 mod staging;
 mod storage;
+mod streams;
 mod upload;
 mod web;
 
@@ -33,7 +34,7 @@ pub use quarantine::{
     QuarantinePage, QuarantineQuery, QuarantinedFile, MANAGE as QUARANTINE_MANAGE,
     VIEW as QUARANTINE_VIEW,
 };
-pub use response::{Delivery, StreamFile};
+pub use response::{Delivery, FileStream, StreamFile};
 pub use scan::{ScanFacts, ScanFuture, ScanState, Scanner, Verdict, PRINCIPAL, SCAN};
 pub use signing::Signer;
 pub use staging::{StagedUpload, Staging, StagingRequest};
@@ -43,14 +44,13 @@ pub use upload::{Rules, Upload};
 use bilibi_database::{Change, Context, Db, MutationBoundary, MutationTransaction};
 use bilibi_module_registry::{Catalog, Service};
 use bilibi_notifications::NotificationBoundary;
+use bilibi_personal_data::RecordHolds;
 use bilibi_queue::{HandlerBinding, HandlerService, Queue, Worker, HANDLERS, WORKERS};
 use bilibi_settings::Settings;
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::{json, Value};
-use std::{
-    sync::{Arc, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 use tokio_postgres::{Client, GenericClient};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,6 +126,12 @@ pub enum Error {
     NotPurgeable,
     #[error("The file's contents were purged")]
     Purged,
+    #[error("Too many files are being sent right now; try again shortly")]
+    Busy,
+    #[error("Too many unsubmitted files; submit or remove some first")]
+    TooManyDrafts,
+    #[error("A legal hold keeps this file")]
+    Held,
     #[error(transparent)]
     Database(#[from] bilibi_database::Error),
     #[error("Database unavailable")]
@@ -225,11 +231,6 @@ fn stored(row: &tokio_postgres::Row) -> Stored {
 fn audit(row: &Stored) -> Value {
     json!({"kind":row.asset.kind,"parent_id":row.asset.parent_id,"disk":row.disk,"original_filename":row.asset.original_filename,"mime_type":row.asset.mime_type,"file_size":row.asset.file_size,"private":row.private,"scan_state":row.asset.scan_state.as_str()})
 }
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
 
 pub struct Media {
     db: Db,
@@ -242,6 +243,9 @@ pub struct Media {
     authentication: Arc<Authentication>,
     /// The installation's one malware scanner, bound by an Extension (`scan.rs`).
     scanner: OnceLock<Arc<dyn scan::Scanner>>,
+    /// Stream slots and whole-file load slots (`streams.rs`).
+    streams: Arc<Semaphore>,
+    loads: Semaphore,
 }
 impl Media {
     async fn setting(&self, client: &(impl GenericClient + Sync), key: &str) -> Result<Value> {
@@ -703,6 +707,7 @@ impl Media {
     ) -> Result<Asset> {
         let roots = self.disks(&*client).await?;
         storage::write(&roots, place.disk, place.key, bytes).await?;
+        let mut committing = false;
         let result = async {
             let action = if derivative_of.is_some() {
                 "media.derive"
@@ -720,11 +725,15 @@ impl Media {
                         .await?
                 }
             };
+            committing = true;
             tx.commit().await?;
             Ok(asset)
         }
         .await;
-        if result.is_err() {
+        // A failed commit may still have committed on the server: keep the
+        // bytes, so a row never names a missing file (an orphan file is the
+        // smaller fault).
+        if result.is_err() && !committing {
             let _ = storage::delete(&roots, place.disk, place.key).await;
         }
         result
@@ -732,8 +741,21 @@ impl Media {
 
     /// Delete an asset and its derivatives. Rows commit first so a rollback can
     /// never strand live references; a file that then fails to delete reports
-    /// `CleanupFailed` and needs operator reconciliation.
+    /// `CleanupFailed` and needs operator reconciliation. A legal hold on any
+    /// asset of the tree refuses it (`Held`).
     pub async fn delete_asset(&self, client: &mut Client, scope: &Scope, id: i64) -> Result<()> {
+        let holds = RecordHolds::acquire(scope.tenant()).await?;
+        let deleted = self.delete_tree(client, scope, id, &holds).await;
+        holds.release().await?;
+        deleted
+    }
+    async fn delete_tree(
+        &self,
+        client: &mut Client,
+        scope: &Scope,
+        id: i64,
+        holds: &RecordHolds,
+    ) -> Result<()> {
         let mut tx = self
             .boundary
             .begin(client, scope.mutation_context("media.delete"))
@@ -771,6 +793,9 @@ impl Media {
             tree.extend(rows.iter().map(stored));
         }
         let ids: Vec<i64> = tree.iter().map(|row| row.asset.id).collect();
+        if !holds.records(ASSET_KIND, &ids).await?.is_empty() {
+            return Err(Error::Held);
+        }
         let changes: Vec<Change> = tree
             .iter()
             .rev()
@@ -801,94 +826,6 @@ impl Media {
         Ok(())
     }
 
-    /// Safe HTTP(S) link for an `external` asset, else a signed stream path.
-    pub async fn display_url(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        id: i64,
-    ) -> Result<String> {
-        let row = self.public(client, scope, id).await?;
-        if row.disk == EXTERNAL {
-            let url = row
-                .asset
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get("public_url"))
-                .and_then(Value::as_str);
-            return url
-                .filter(|url| safe_external_url(url))
-                .map(str::to_owned)
-                .ok_or(Error::InvalidExternalUrl);
-        }
-        self.stream_url(client, scope, id).await
-    }
-    /// Relative path with an expiring token. It authorizes this one public
-    /// asset for its issued lifetime and is separate from private downloads.
-    pub async fn stream_url(
-        &self,
-        client: &(impl GenericClient + Sync),
-        scope: &Scope,
-        id: i64,
-    ) -> Result<String> {
-        self.tenant_stream_url(client, scope.tenant(), id).await
-    }
-    /// [`Media::stream_url`] for a page with no session, such as a portal
-    /// sign-in card. The caller takes `tenant` from its own record (the portal
-    /// site an address names), never from the request, and `id` from the same
-    /// record; another tenant's asset is `NotFound`.
-    pub async fn tenant_stream_url(
-        &self,
-        client: &(impl GenericClient + Sync),
-        tenant: i64,
-        id: i64,
-    ) -> Result<String> {
-        let row = self.fetch(client, tenant, id).await?;
-        if self.private_tree(client, id).await? {
-            return Err(Error::PrivateAsset);
-        }
-        if row.disk == EXTERNAL {
-            return Err(Error::SourceNotStored);
-        }
-        self.readable(client, &row).await?;
-        let ttl = self
-            .setting(client, "media.stream_ttl_seconds")
-            .await?
-            .as_u64()
-            .ok_or(Error::InvalidRules)?;
-        let token = self.signer.sign(id, row.tenant, now() + ttl)?;
-        Ok(format!("/media/assets/{id}/stream?token={token}"))
-    }
-    /// The unauthenticated edge. The token alone proves permission; the row,
-    /// the tenant it carries and the private-tree rule are rechecked here.
-    pub async fn read_signed_asset(
-        &self,
-        client: &(impl GenericClient + Sync),
-        id: i64,
-        token: &str,
-    ) -> Result<StreamFile> {
-        let claims = self.signer.verify(id, token, now())?;
-        let row = self.fetch(client, claims.tenant, id).await?;
-        if self.private_tree(client, id).await? {
-            return Err(Error::PrivateAsset);
-        }
-        if row.disk == EXTERNAL {
-            return Err(Error::SourceNotStored);
-        }
-        // Rechecked at every read: a link issued while the file was clean
-        // stops working if it is rescanned and quarantined.
-        self.readable(client, &row).await?;
-        let bytes = storage::read(&self.disks(client).await?, &row.disk, &row.key).await?;
-        Ok(StreamFile {
-            bytes,
-            filename: row
-                .asset
-                .original_filename
-                .unwrap_or_else(|| row.key.rsplit('/').next().unwrap_or("download").into()),
-            mime_type: row.asset.mime_type,
-        })
-    }
-
     /// Ask the registered owner of `subject` whether this scope may `action` it.
     pub async fn authorize_subject(
         &self,
@@ -902,21 +839,6 @@ impl Media {
             .authorize(client, scope, subject, action, subject_id)
             .await
     }
-}
-
-fn safe_external_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    let Some(rest) = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    url.len() <= 2048
-        && !authority.is_empty()
-        && !authority.contains('@')
-        && url.bytes().all(|b| b.is_ascii_graphic())
 }
 
 // Erasure clears the evidence of both records (ADR 05); only the asset's
@@ -953,6 +875,7 @@ inventory::submit! {
             ("base-media-003", include_str!("../migrations/003-scan.sql")),
             ("base-media-004-erasure", include_str!("../migrations/004-erasure.sql")),
             ("base-media-005-system-uploader", include_str!("../migrations/005-system-uploader.sql")),
+            ("base-media-006-draft-cap", include_str!("../migrations/006-draft-cap.sql")),
         ],
         services: &[
             Service { id: "base/media.install-policy", factory: |_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(install::InstallPolicy)))) },
@@ -969,6 +892,8 @@ inventory::submit! {
                     notifications: services.get("base/notifications.sink")?,
                     authentication: services.get("base/tenancy.authentication")?,
                     scanner: OnceLock::new(),
+                    streams: Arc::new(Semaphore::new(streams::MAX_STREAMS)),
+                    loads: Semaphore::new(streams::MAX_LOADS),
                 }))
             }},
             Service { id: scan::HANDLER, factory: |services| {
@@ -979,6 +904,13 @@ inventory::submit! {
             }},
             Service { id: staging::HANDLER, factory: |services| {
                 Ok(Arc::new(HandlerService(Arc::new(staging::Sweep {
+                    schedule: services.get("base/schedule.store")?,
+                    media: services.get(SERVICE)?,
+                    db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
+                }))))
+            }},
+            Service { id: attachments::DRAFT_HANDLER, factory: |services| {
+                Ok(Arc::new(HandlerService(Arc::new(attachments::CleanupJob {
                     schedule: services.get("base/schedule.store")?,
                     media: services.get(SERVICE)?,
                     db: services.get::<Db>("base/database.pool")?.as_ref().clone(),

@@ -1,13 +1,21 @@
 {#- The Audit Actions screen. The
-    toolbar, table and pager are rendered by src/actions.rs through the shared
-    models; this file lays them out. -#}
+    toolbar, period filter, table and pager are rendered by src/actions.rs
+    through the shared models; this file lays them out. The filter region
+    mounts the BrowserTimeZone hook so local-mode calendar days follow the
+    browser zone. -#}
 {%- import "components.html" as ui -%}
 {%- import "feedback.html" as feedback -%}
 <div data-shared-ui>
 {% call feedback::flash_group(messages=flash) %}{% endcall %}
 {% call ui::page() %}
-{% call ui::header(subtitle="See what people and systems did, newest first.") %}Audit Actions{% endcall %}
+{% call ui::header(subtitle="See what people and systems did in a period, newest first.") %}Audit Actions{% endcall %}
+<div id="actions-filter-region" data-hook="BrowserTimeZone" class="mb-2 flex flex-wrap items-start gap-3">
 {{ toolbar|safe }}
+{{ period|safe }}
+</div>
+{% if let Some(error) = range_error %}<p id="actions-range-error" role="alert" class="mb-2 text-sm text-danger-ink">{{ error }}</p>{% endif %}
+{% if timed_out %}<p id="actions-timed-out" role="alert" class="mb-2 text-sm text-danger-ink">This search took too long and was stopped. Choose a shorter period or narrower filters.</p>{% endif %}
+{% if more %}<p id="actions-more" class="mb-2 text-xs text-ink-muted">More than 10,000 actions match. The pages cover the first 10,000; choose a shorter period or narrower filters to reach the rest.</p>{% endif %}
 {% if hide_diagnostics %}<p class="mt-2 text-xs text-ink-muted">Routine background traffic is hidden, but failures still show; choose Show Diagnostics to see everything.</p>{% endif %}
 {{ table|safe }}
 {{ pagination|safe }}

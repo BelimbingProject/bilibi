@@ -822,7 +822,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/schedule", Provenance {
 inventory::submit! {
     Module { id: "base/schedule", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/settings", "base/locale", "base/datetime", "base/ui", "base/menu"],
-        migrations: &[("base-schedule-001", include_str!("../migrations/001-schedule.sql")), ("base-schedule-002", include_str!("../migrations/002-schedule-occurrences.sql")), ("base-schedule-003-schedule-timing", include_str!("../migrations/003-schedule-timing.sql")), ("base-schedule-004-tenant-runs", include_str!("../migrations/004-tenant-runs.sql"))],
+        migrations: &[("base-schedule-001", include_str!("../migrations/001-schedule.sql")), ("base-schedule-002", include_str!("../migrations/002-schedule-occurrences.sql")), ("base-schedule-003-schedule-timing", include_str!("../migrations/003-schedule-timing.sql")), ("base-schedule-004-tenant-runs", include_str!("../migrations/004-tenant-runs.sql")), ("base-schedule-005-reconcile-indexes", include_str!("../migrations/005-reconcile-indexes.sql"))],
         services: &[Service { id: "base/schedule.store", factory: |services| {
             let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
             let queue = services.get::<Queue>("base/queue.store")?;

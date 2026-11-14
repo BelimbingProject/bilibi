@@ -7,6 +7,10 @@
 //! over the field catalog's record types), so the list never shows a value the
 //! record's own page would not.
 //!
+//! The list reads one period at a time (`period::ListPeriod`, the last 30 days
+//! by default), counts its matches only up to `bilibi_audit::MAX_COUNT` and
+//! orders by time alone, because the ledger can be large.
+//!
 //! The table streams up to 300 rows. Rendering every old and new value inline
 //! made each row about 15 KB in the source, so a row's details cell paints the
 //! field summary and builds the diff only while the row is open; the values
@@ -14,9 +18,13 @@
 //! data-changing button: `aria-expanded` follows the open state, a second
 //! activation closes it, and click-away is not a close, so a reader selecting
 //! text in the diff keeps it.
-use crate::{diff, present};
+use crate::{
+    diff,
+    period::{Changed, ListPeriod},
+    present,
+};
 use askama::Template;
-use bilibi_audit::{MutationEntry, MutationPage, MutationQuery, MutationSort, MAX_PAGE_SIZE};
+use bilibi_audit::{MutationEntry, MutationPage, MutationQuery, MAX_PAGE_SIZE};
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy};
 use bilibi_locale::Locales;
@@ -36,21 +44,16 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, LazyLock},
+    time::SystemTime,
 };
 
 const PAGE_SIZES: [u64; 4] = [25, 50, 100, 300];
 
-/// `occurred_at` opens descending, every other column
-/// ascending; the page-size key is `page_size`.
+/// `occurred_at` is the only order (newest first, or oldest first); the
+/// page-size key is `page_size`.
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     ListSpec {
-        sortable: BTreeMap::from([
-            ("occurred_at".into(), SortDir::Desc),
-            ("actor_type".into(), SortDir::Asc),
-            ("event".into(), SortDir::Asc),
-            ("auditable_type".into(), SortDir::Asc),
-            ("trace_id".into(), SortDir::Asc),
-        ]),
+        sortable: BTreeMap::from([("occurred_at".into(), SortDir::Desc)]),
         default_sort: Some("occurred_at".into()),
         page_sizes: PAGE_SIZES.to_vec(),
         page_size_param: "page_size".into(),
@@ -74,14 +77,11 @@ fn builtins() -> Vec<BuiltinColumn> {
     occurred.kind = ColumnType::Datetime;
     vec![
         occurred,
-        sortable(BuiltinColumn::new("actor_type", "Actor"), "actor_type"),
-        sortable(BuiltinColumn::new("event", "Event"), "event"),
-        sortable(
-            BuiltinColumn::new("auditable_type", "Subject"),
-            "auditable_type",
-        ),
+        BuiltinColumn::new("actor_type", "Actor"),
+        BuiltinColumn::new("event", "Event"),
+        BuiltinColumn::new("auditable_type", "Subject"),
         BuiltinColumn::new("details", "Details"),
-        sortable(BuiltinColumn::new("trace_id", "Trace"), "trace_id"),
+        BuiltinColumn::new("trace_id", "Trace"),
         BuiltinColumn::new("agent_self_report", SelfReport::LABEL),
         BuiltinColumn::new("client_identity", ClientIdentity::LABEL),
     ]
@@ -93,6 +93,17 @@ pub(crate) struct Pages {
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
 }
+impl Pages {
+    /// The reader's clock and date format.
+    async fn display(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<DisplayContext> {
+        let locale = self.locales.resolve(client, scope, None).await?.locale;
+        self.display.display(client, scope, None, locale).await
+    }
+}
 
 /// What the last read returned, kept so a column-arrangement press or a
 /// details toggle redraws without another query. The entries are as stored:
@@ -101,11 +112,14 @@ pub(crate) struct Pages {
 struct Shown {
     page: MutationPage,
     display: DisplayContext,
+    /// Why the chosen range lists nothing, when it cannot be resolved.
+    range_error: Option<&'static str>,
 }
 
 pub(crate) struct Mutations {
     pages: Pages,
     list: ListState,
+    period: ListPeriod,
     columns: ListColumns,
     /// The rows whose diff is open.
     open: HashSet<i64>,
@@ -183,6 +197,7 @@ impl Mutations {
         Ok(Self {
             pages,
             list: parse(query)?,
+            period: ListPeriod::new("mutations-period", query),
             columns: ListColumns::mount("mutations-table", builtins())
                 .map_err(|_| Error::Internal)?,
             open: HashSet::new(),
@@ -190,17 +205,13 @@ impl Mutations {
         })
     }
 
-    fn query(&self) -> MutationQuery {
+    fn query(&self, since: SystemTime, until: SystemTime) -> MutationQuery {
         MutationQuery {
             search: self.list.search.clone(),
             event: self.list.filters["event"].clone(),
-            sort: self
-                .list
-                .sort_by
-                .as_deref()
-                .and_then(MutationSort::parse)
-                .unwrap_or(MutationSort::OccurredAt),
-            descending: self.list.sort_dir == Some(SortDir::Desc),
+            since,
+            until,
+            descending: self.list.sort_dir != Some(SortDir::Asc),
             page: self.list.page,
             page_size: self.list.page_size.min(MAX_PAGE_SIZE),
         }
@@ -209,24 +220,19 @@ impl Mutations {
     /// Reads the page and the reader's clock. An out-of-range page lands on
     /// the last real page instead of an empty one with no pager.
     async fn load(&mut self, scope: &Scope) -> Result<()> {
-        let client = self.pages.db.get().await?;
-        let locale = self
-            .pages
-            .locales
-            .resolve(&**client, scope, None)
-            .await?
-            .locale;
-        let display = self
-            .pages
-            .display
-            .display(&**client, scope, None, locale)
-            .await?;
-        let mut page = bilibi_audit::list_mutations(&**client, scope, &self.query()).await?;
-        if self
-            .list
-            .clamp_to_last_page(page.total_entries.div_ceil(self.list.page_size), true)
+        let mut client = self.pages.db.get().await?;
+        let display = self.pages.display(&**client, scope).await?;
+        let (since, until, range_error) = self.period.resolve(&display);
+        let mut page =
+            bilibi_audit::list_mutations(&mut client, scope, &self.query(since, until)).await?;
+        // A read that timed out has no total to clamp against.
+        if !page.timed_out
+            && self
+                .list
+                .clamp_to_last_page(page.total_entries.div_ceil(self.list.page_size), true)
         {
-            page = bilibi_audit::list_mutations(&**client, scope, &self.query()).await?;
+            page =
+                bilibi_audit::list_mutations(&mut client, scope, &self.query(since, until)).await?;
         }
         // The rows changed: ListColumns forgets an unfinished add box, and an
         // open diff belongs to a row no longer shown.
@@ -234,7 +240,11 @@ impl Mutations {
             .load(&page.entries, |mutation| mutation.id.to_string());
         let ids: HashSet<i64> = page.entries.iter().map(|entry| entry.id).collect();
         self.open.retain(|id| ids.contains(id));
-        self.shown = Some(Shown { page, display });
+        self.shown = Some(Shown {
+            page,
+            display,
+            range_error,
+        });
         Ok(())
     }
 
@@ -249,7 +259,7 @@ impl Mutations {
             withhold(&**client, scope, &mut entries).await?;
         }
         let form = self.list.filters_form();
-        let toolbar = render(FilterToolbar::new(
+        let mut toolbar = FilterToolbar::new(
             "mutations-filters",
             vec![
                 ToolbarControl::search(
@@ -272,7 +282,9 @@ impl Mutations {
                     ]),
                 ),
             ],
-        ))?;
+        );
+        toolbar.class = "mb-0 min-w-0 flex-1";
+        let toolbar = render(toolbar)?;
         let mut rows = Vec::new();
         for mutation in &entries {
             rows.push(row(
@@ -290,10 +302,12 @@ impl Mutations {
         table.caption = "Data mutations";
         if shown.page.total_entries == 0 {
             let narrowed = !(self.list.search.is_empty() && self.list.filters["event"].is_empty());
-            table.empty = Some(TableEmpty::Content(Html::text(if narrowed {
-                "No mutation logs match the current filters."
+            table.empty = Some(TableEmpty::Content(Html::text(if shown.page.timed_out {
+                "Nothing to show: the search was stopped before it finished."
+            } else if narrowed {
+                "No data changes in this period match the filters."
             } else {
-                "No mutation logs found."
+                "No data changes in this period. Choose a longer period to see earlier ones."
             })));
         }
         let pagination = render(Pagination::new(
@@ -307,6 +321,10 @@ impl Mutations {
         ))?;
         MutationsView {
             toolbar,
+            period: render(self.period.filter.clone())?,
+            range_error: shown.range_error,
+            timed_out: shown.page.timed_out,
+            more: shown.page.more,
             table: render(table)?,
             pagination,
         }
@@ -319,6 +337,10 @@ impl Mutations {
 #[template(path = "mutations.html")]
 struct MutationsView {
     toolbar: Html,
+    period: Html,
+    range_error: Option<&'static str>,
+    timed_out: bool,
+    more: bool,
     table: Html,
     pagination: Html,
 }
@@ -571,7 +593,10 @@ impl LiveState<Scope, Error> for Mutations {
             let mut requery = true;
             match request.input {
                 LiveInput::Refresh => {}
-                LiveInput::Params(values) => self.list = parse(values)?,
+                LiveInput::Params(values) => {
+                    self.list = parse(values)?;
+                    self.period.read(values);
+                }
                 LiveInput::Event(event) => {
                     let get = |key: &str| event.get(key).and_then(Value::as_str);
                     match get("type") {
@@ -609,14 +634,28 @@ impl LiveState<Scope, Error> for Mutations {
                             }
                             requery = false;
                         }
-                        _ => return Err(Error::Invalid),
+                        Some("browser_timezone") => self.period.browser_timezone(get("timezone")),
+                        Some(kind) => {
+                            let display = {
+                                let client = self.pages.db.get().await?;
+                                self.pages.display(&**client, request.scope).await?
+                            };
+                            match self.period.event(kind, event, &display)? {
+                                Some(Changed::Applied) => self.list.put_page(Some("1")),
+                                Some(Changed::Control) => requery = false,
+                                None => return Err(Error::Invalid),
+                            }
+                        }
+                        None => return Err(Error::Invalid),
                     }
                 }
             }
             let html = self.view(request.scope, requery).await?;
+            let mut query = self.list.to_params();
+            query.extend(self.period.url());
             Ok(LiveBody {
                 html,
-                query: self.list.to_params(),
+                query,
                 ..LiveBody::default()
             })
         })

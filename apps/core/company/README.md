@@ -91,7 +91,7 @@ The dashboard's Companies strip and Current company card follow `current_company
 | `status` | Stored lifecycle state: `active`, `pending`, `suspended` or `archived` |
 | `archived` | `true` exactly when `status == "archived"`; retained for existing readers |
 
-All four directory methods (`in_scope`, `selectable`, `target`, `lookup`) carry the status. They retain their existing tenant, capability and reach rules. `selectable` excludes archived companies but still includes pending and suspended companies when otherwise permitted. Status grants no authority and does not change account eligibility.
+All the naming directory methods (`in_scope`, `named`, `selectable`, `target`, `lookup`) carry the status. They retain their existing tenant, capability and reach rules. `selectable` excludes archived companies but still includes pending and suspended companies when otherwise permitted. Status grants no authority and does not change account eligibility.
 
 Domains that need an active-company chooser can carry `summary.status` through their own summary and filter with `summary.status == "active"`. Keep authorization at the existing directory or owner boundary; do not query Company's tables. This Platform change supplies the status only; each Domain owns its chooser policy.
 
@@ -152,8 +152,11 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
 - `bilibi_company::Directory` is Tenancy's `OrganisationDirectory` (K15), bound
   beside it: the companies a Base picker may offer (`in_scope`: every live
   company, archived flagged; `selectable`: the unarchived ones the actor may
-  target with a capability, current company or tenant-wide) and `target`, the
-  `authorize_target` rule on the sealed proof connection. The settings
+  target with a capability, current company or tenant-wide, filtered in SQL
+  so an actor without the tenant-wide reach reads only its current company),
+  `named`: the live ones among given ids (Authz asks only about the companies
+  that own a role), and `target`, the `authorize_target` rule on the sealed
+  proof connection. The settings
   editor's company picker and the Authz role create picker read it; Base
   never queries `companies`. Migration `006-authz-role-owner` contributes the
   scoped foreign key behind Authz's `roles.company_id`.
@@ -192,6 +195,8 @@ the result returns the Company ID, new version and path for Get readback. The
 `core.company` guide documents both. A restricted
 field arrives as `{"restricted": true}`. The handlers read through a pool
 bound once by the service factory.
+
+`core.company.list` matches each search word as a prefix of a word in the name, code or legal name, all words required, through the indexed `search_vector` (`core-company-007-search`); email and jurisdiction are not searched. It reads in one read-only transaction under Grid's `BOUNDS` (2 s per statement, 500 ms lock wait), so a search the server cannot finish in time is refused as temporarily unavailable instead of holding a pooled connection. `bilibi_company::search` is the same read on the caller's connection, which sets its own bounds.
 
 ## Static Extension-owned fields
 
@@ -376,9 +381,9 @@ Directory.
 is to the target) and confers no capability; it is never an Authz role. The
 contributed defaults (`vendor`, `customer`, `prospect`, `partner`) are
 reconciled **by code** into each tenant: the migration does it for existing
-tenants, provisioning for new ones, and `CompanyService::relationship_roles`
-for a tenant whose catalog is still empty (the walkthrough fixture creates its
-tenants after the migration). An administered role is never overwritten; no default
+tenants and provisioning for new ones (an audited change per role when Core
+Tenant creates the tenant); a read never writes, and the walkthrough fixture
+inserts its tenants' defaults itself. An administered role is never overwritten; no default
 has a fixed id. Codes are trimmed, lower-cased, 1–64 characters of letters,
 digits, `_`, `-` and `.`, unique within the tenant under an advisory lock.
 `create` needs `admin.company.create`; `update` (a rename: id and code never
@@ -401,7 +406,13 @@ the last day, `unlink` sets `unlinked_at`: every row stays as history and
 of a link may administer it; a person target confers nothing.
 Each entry carries the link, its direction from the listed party, the other
 party's name and the label from that party's side (`name` outgoing,
-`inverse_name` incoming), sorted by other party then label. Refusals are
+`inverse_name` incoming). Both lists read one page (`Window`, at most
+`MAX_PAGE_SIZE` = 300 links) with the party's total, ordered in SQL by the
+other company's name, then label, then id; links to persons, which only
+Person names, follow the companies by label and id. Only the persons of the
+page are named, so a party with any number of links stays readable.
+`read_for_company` reads one link by id from a company's side, for the
+page's edit, end and unlink. Refusals are
 `Outcome::Refused` field errors; `Stale`, `NotFound` (including an unlinked
 link) and `Archived` are `WriteError`s.
 
@@ -412,7 +423,8 @@ are reviewed safe writes: previews share the owner's checks without locking
 or writing, commits write through the plan's audited transaction. Assign
 input is flat (`source_organisation_id`, `target_kind`, `target_id`,
 `role_id`, optional `effective_from`/`effective_to`); omitted dates are
-unbounded.
+unbounded. `core.company.relationship.list` answers a page (`page`,
+`page_size` up to 100, 25 by default) with the total in `meta.page`.
 
 ```sh
 BILIBI_COMPANY_DEMO=disposable cargo run -p bilibi-company --example k5-relationships-walkthrough --locked
@@ -427,6 +439,11 @@ unlinking with history, an edit from the target's side, the agent reads and
 the reviewed assign/create commits with replay refusal, then bounded audit
 counts. It creates persons and companies with `K5`/`k5_`/`wt_` prefixes in
 the disposable database only. The screens are described under "Relationship screens (K6)".
+
+`relationship-scale-proof` (`BILIBI_COMPANY_DEMO=disposable`) links one
+company to 2,001 persons, more than the Principal Directory names in one
+call, and checks that the relationships page, both panels, paging, an edit
+past the first page and the agent list still answer, a page at a time.
 
 ## Relationship screens (K6)
 
@@ -447,10 +464,11 @@ UI (`core/company.relationship_pages`):
   the role's label from this company's side, the inclusive dates and the
   status (`active`, `inactive`, `unlinked`). "Show history" brings ended and
   unlinked links back; a retired role stays visible on its links. "Add
-  Relationship" chooses a company or a person of the tenant, an unretired
-  role and optional dates, validating as values change so the picker
-  follows the kind; a person picker needs `admin.person.list`, which the
-  form says when the reader lacks it. Edit changes only the dates, so
+  Relationship" finds a company or a person of the tenant by name with the
+  shared `RecordPicker` (Base Records search under the reader's own
+  permissions, so the person kind needs Person's read capability), then an
+  unretired role and optional dates. The radio switches the kind and clears
+  the choice; no list of every company or person is loaded. Edit changes only the dates, so
   ending a link is setting its last day; Unlink confirms and keeps the row
   as history. Every opening and write asks `bilibi_company::authorize_target`
   and `require_writable` again; a denial, an archived company (either
@@ -472,7 +490,11 @@ UI (`core/company.relationship_pages`):
 The pages hold no client-chosen version: edits, unlinks and retirements
 carry the version of the row read when the dialog opened, so a concurrent
 change is refused as stale rather than overwritten. Rows keep the K5 order
-(other party, then label); none of these tables sorts.
+(other company, then label; persons after); none of these tables sorts.
+The page and both panels show 25 links at a time under the shared
+`Pagination` (25, 50, 100 or 300 rows); the page keeps its page in the
+address, a panel in its own state. Edit, End and Unlink read only the link
+they act on.
 
 The relationship table and its record panels also offer **Effective From** and **Effective To** as separate columns. Their labels come from the date editor’s shared record fields. The default Effective Period column stays in place.
 
@@ -637,7 +659,7 @@ A candidate's score is its best matching fact:
 | Phone digits, at least seven | 0.85 |
 | Name after removing configured words | Trigram intersection divided by union |
 
-Name comparison runs in Rust over at most 200 rows preselected by overlapping indexed name tokens, the rows sharing the most tokens with the query first. Exact-key candidates are selected separately, so the name bound cannot hide a registration match. Results sort by descending score, then ID, at or above the threshold; `limit` is 1–100, default 10. Public email domains such as Gmail never count as an email match.
+Name comparison runs in Rust over at most 200 rows preselected by indexed name tokens, the rows sharing the most tokens with the query first. Each query word reads at most 201 of the tenant's companies holding it, in ID order; a word more than 200 companies hold (such as "trading") picks no candidate alone, so the read never sorts every company sharing one common word. When every word is that common, only companies holding all of them qualify, the lowest 200 IDs. A caller with no statement timeout of its own runs the matching statement under 1 second, set and restored on its transaction, so a create under `require_reason` never holds the tenant lock longer on matching. Exact-key candidates are selected separately, so the name bound cannot hide a registration match. Results sort by descending score, then ID, at or above the threshold; `limit` is 1–100, default 10. Public email domains such as Gmail never count as an email match.
 
 Create Company shows candidates below the form. **Use existing** opens the record; **Create anyway** submits the form's current values and opens a confirmation for the reason. `NewCompany::create_anyway` carries `CreateAnyway { candidate_ids, reason }` for pages, agent writes and other module callers. The reason is trimmed and must contain 1–500 characters. The create's audit `Change` records the reason and IDs under `create_anyway`; this read-only context does not become a company scalar field.
 
@@ -647,7 +669,7 @@ The create path checks under `admin.company.create`, not `admin.company.list`. `
 
 ## Company hierarchies
 
-**Use `CompanyService::hierarchy(scope, id)` or `core.company.hierarchy` to read relatives.** Both require `admin.company.view`, use current Company's tenant-wide read visibility, and return id, name, status, level and `parent_id`, so a caller can draw the tree (`None` at the root; outside the list when the limit cut the chain). Ancestors are root first and keep their true depth from the root; when the limit cuts the chain, the nearest ancestors stay with their real levels and `truncated` is set. Descendant levels count the requested company as level 1. The read caps traversal at the tenant's depth limit and the returned relatives at 1,000 nodes, with `truncated` when more exist. The requested company is not repeated in either list. The record page links its parent chain, starting with “… N higher levels” when the limit hid some.
+**Use `CompanyService::hierarchy(scope, id)` or `core.company.hierarchy` to read relatives.** Both require `admin.company.view`, use current Company's tenant-wide read visibility, and return id, name, status, level and `parent_id`, so a caller can draw the tree (`None` at the root; outside the list when the limit cut the chain). Ancestors are root first and keep their true depth from the root; when the limit cuts the chain, the nearest ancestors stay with their real levels and `truncated` is set. Descendant levels count the requested company as level 1. The read caps traversal at the tenant's depth limit and the returned relatives at 1,000 nodes, with `truncated` when more exist. The requested company is not repeated in either list. The record page links its parent chain, starting with “… N higher levels” when the limit hid some. The Parent Company fact and the create form choose a parent with the shared `RecordPicker`: typing searches the tenant's companies through Base Records under the reader's permissions, and the record page saves the choice (or Remove parent) through `save_fact` at the current version. Neither page loads a list of every company; the owner still authorizes, locks and cycle-checks the chosen parent.
 
 Every ordinary create with a parent and every parent edit shares the tenant lock and the same hierarchy checks. A loop returns `Parent company cannot be one of its own subsidiaries.` The new parent's chain depth plus the moving company's subtree height must fit the limit. The default refusal is `Parent company would make the company tree deeper than 10 levels.` Existing deep trees can remain or become shallower; a move is refused only if it increases depth beyond the limit. `save_fact` returns `WriteError::Invalid` with these field messages, preserving the inline draft.
 

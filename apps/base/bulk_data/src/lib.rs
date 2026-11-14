@@ -535,7 +535,7 @@ impl BulkData {
         limit: i64,
     ) -> Result<(Vec<RowResult>, i64)> {
         let run = self.run(client, scope, run).await?;
-        store::rows(
+        let (mut rows, total) = store::rows(
             client,
             scope.tenant(),
             run.id,
@@ -544,7 +544,16 @@ impl BulkData {
             offset.max(0),
             limit.clamp(1, 100),
         )
-        .await
+        .await?;
+        if run.erased {
+            // Blank from the moment the run is marked, not only once the
+            // erasure's clean-up has reached these rows.
+            for row in &mut rows {
+                row.source_key = None;
+                row.message = None;
+            }
+        }
+        Ok((rows, total))
     }
     /// Mappings saved for a record type in the current workplace; with a
     /// header, only those whose columns the file has.
@@ -1147,6 +1156,7 @@ inventory::submit! { bilibi_module_registry::Module {
         ("base-bulk-data-003-updates", include_str!("../migrations/003-updates.sql")),
         ("base-bulk-data-004-export-erasure", include_str!("../migrations/004-export-erasure.sql")),
         ("base-bulk-data-005-import-results", include_str!("../migrations/005-import-results.sql")),
+        ("base-bulk-data-006-import-erasure", include_str!("../migrations/006-import-erasure.sql")),
     ],
     services: &[
         bilibi_module_registry::Service { id: SERVICE, factory: |services| {

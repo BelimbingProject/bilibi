@@ -347,10 +347,13 @@ impl Panel {
                         .iter()
                         .find(|c| c.purpose == purpose.value && c.channel == channel)
                 };
-                let current = find(*channel);
-                // With no decision of its own, a channel follows the
-                // purpose's any-channel decision, as `check` does.
-                let inherited = current.is_none().then(|| find(Channel::Any)).flatten();
+                let any = find(Channel::Any).filter(|_| *channel != Channel::Any);
+                // A channel follows the purpose's any-channel decision when it
+                // has none of its own, or when that decision is a withdrawal
+                // recorded since, as `check` does.
+                let current = find(*channel)
+                    .filter(|c| !any.is_some_and(|a| !a.granted && a.recorded_at >= c.recorded_at));
+                let inherited = current.is_none().then_some(any).flatten();
                 let (text, hint) = match (current, inherited) {
                     (Some(c), _) => (
                         Self::read_text(Some(c), standing.default),

@@ -20,7 +20,7 @@ Use `Authentication` and `Scope` from `src/lib.rs` for authenticated identity. R
 
 ## Organisation summaries
 
-`OrganisationDirectory` and `PartyProofs` return `NamedOrganisation` with `id`, display `name`, full `status` and the existing `archived` flag. Core Company populates both status fields through the same scoped directory reads. See [Core Company's public summary contract](../../core/company/README.md#public-company-summaries) for lifecycle values, authorization, chooser policies and custom directory updates.
+`OrganisationDirectory` and `PartyProofs` return `NamedOrganisation` with `id`, display `name`, full `status` and the existing `archived` flag. `PartyProofs::organisations_named(client, scope, ids)` (`OrganisationDirectory::named`) names only the live companies among the given ids, for a caller that holds ids and must not read every company of the tenant. Core Company populates both status fields through the same scoped directory reads. See [Core Company's public summary contract](../../core/company/README.md#public-company-summaries) for lifecycle values, authorization, chooser policies and custom directory updates.
 
 **`PartyProofs::primary_organisation(client, scope)` names the tenant's live primary company** (Company's `OrganisationDirectory::primary`, defaulting to none): the company whose settings govern records that belong to no one company, such as a retention sweep's.
 

@@ -30,7 +30,7 @@ use std::{collections::HashMap, sync::Arc};
 
 #[derive(Template)]
 #[template(
-    source = r#"<div id="app-user-session-security" class="mb-3 border-b border-line pb-3">{% if first %}<p id="app-user-previous-sign-in">No earlier sign-in on record</p>{% else %}<p id="app-user-previous-sign-in" class="break-words"><span class="text-muted">Previous sign-in:</span> {{ at|safe }} · {{ device }}{% if !ip.is_empty() %} · <span class="text-muted">IP address</span> <span class="tabular-nums">{{ ip }}</span>{% endif %}</p>{% endif %}<a id="app-user-sessions" href="/settings/sessions" class="mt-1 inline-flex items-center gap-1 text-link hover:underline">Your sessions</a></div>"#,
+    source = r#"<div id="app-user-session-security" class="mb-3 border-b border-line pb-3">{% if first %}<p id="app-user-previous-sign-in">No earlier sign-in on record</p>{% else %}<p id="app-user-previous-sign-in" class="break-words"><span class="text-muted">Previous sign-in:</span> {{ at|safe }} · {{ device }}{% if !ip.is_empty() %} · <span class="text-muted">IP address</span> <span class="tabular-nums">{{ ip }}</span>{% endif %}{% if !place.is_empty() %} · {{ place }}{% endif %}</p>{% endif %}<a id="app-user-sessions" href="/settings/sessions" class="mt-1 inline-flex items-center gap-1 text-link hover:underline">Your sessions</a></div>"#,
     ext = "html"
 )]
 struct AccountSessionSecurity {
@@ -38,13 +38,14 @@ struct AccountSessionSecurity {
     at: Html,
     device: String,
     ip: String,
+    place: String,
 }
 
 fn account_session_security(
     previous: Option<bilibi_base::session::PreviousSignIn>,
     display: &bilibi_base::datetime::DisplayContext,
 ) -> Result<Html> {
-    let (first, at, device, ip) = match previous {
+    let (first, at, device, ip, place) = match previous {
         Some(previous) => {
             let at =
                 jiff::Timestamp::try_from(previous.signed_in_at).map_err(|_| Error::Internal)?;
@@ -69,15 +70,23 @@ fn account_session_security(
                 .map_err(|_| Error::Internal)?,
                 bilibi_base::session::client_name(previous.user_agent.as_deref()),
                 previous.ip_address.unwrap_or_default(),
+                previous.place.unwrap_or_default(),
             )
         }
-        None => (true, Html::EMPTY, String::new(), String::new()),
+        None => (
+            true,
+            Html::EMPTY,
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
     };
     Html::render(&AccountSessionSecurity {
         first,
         at,
         device,
         ip,
+        place,
     })
     .map_err(|_| Error::Internal)
 }

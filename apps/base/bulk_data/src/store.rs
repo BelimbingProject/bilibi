@@ -142,11 +142,18 @@ pub struct Run {
     /// The job working on the run ended without finishing it: its person
     /// lost access, or it failed every attempt. Cancel to start again.
     pub stopped: bool,
+    /// An owner erased a person whose data this run's file or row details
+    /// could hold: the file is gone (or about to go) and each row's source
+    /// key and message are blank. Outcomes and record ids stay.
+    pub erased: bool,
     pub(crate) next_row: i32,
     pub(crate) source: Option<String>,
 }
 
-pub(crate) const COLUMNS: &str = "id,record_type,company_id,file_name,source_artifact,header,row_count,mapping,state,pass,next_row,job_id,trace_id,version,floor(extract(epoch FROM created_at))::bigint AS created,floor(extract(epoch FROM updated_at))::bigint AS updated,floor(extract(epoch FROM finished_at))::bigint AS finished";
+/// The only file name an erased import run exposes.
+pub(crate) const ERASED_FILE_NAME: &str = "[erased]";
+
+pub(crate) const COLUMNS: &str = "id,record_type,company_id,file_name,source_artifact,header,row_count,mapping,state,pass,next_row,job_id,trace_id,version,floor(extract(epoch FROM created_at))::bigint AS created,floor(extract(epoch FROM updated_at))::bigint AS updated,floor(extract(epoch FROM finished_at))::bigint AS finished,cardinality(erased_for)>0 AS erased";
 
 pub(crate) fn instant(seconds: i64) -> Timestamp {
     Timestamp::from_second(seconds).unwrap_or(Timestamp::UNIX_EPOCH)
@@ -154,19 +161,32 @@ pub(crate) fn instant(seconds: i64) -> Timestamp {
 
 impl Run {
     pub(crate) fn from_row(row: &Row) -> Result<Self> {
-        let header: Value = row.get("header");
-        let mapping: Option<Value> = row.get("mapping");
+        let erased: bool = row.get("erased");
+        let header = if erased {
+            Vec::new()
+        } else {
+            serde_json::from_value(row.get("header")).map_err(|_| Error::Internal)?
+        };
+        let mapping = if erased {
+            None
+        } else {
+            row.get::<_, Option<Value>>("mapping")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| Error::Internal)?
+        };
         Ok(Self {
             id: row.get("id"),
             record_type: row.get("record_type"),
             company: row.get("company_id"),
-            file_name: row.get("file_name"),
-            header: serde_json::from_value(header).map_err(|_| Error::Internal)?,
+            file_name: if erased {
+                ERASED_FILE_NAME.to_owned()
+            } else {
+                row.get("file_name")
+            },
+            header,
             row_count: row.get("row_count"),
-            mapping: mapping
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|_| Error::Internal)?,
+            mapping,
             state: RunState::parse(row.get("state"))?,
             pass: row
                 .get::<_, Option<&str>>("pass")
@@ -181,8 +201,14 @@ impl Run {
             preview: Counts::default(),
             run: Counts::default(),
             stopped: false,
+            erased,
             next_row: row.get("next_row"),
-            source: row.get("source_artifact"),
+            // Not offered once erased, even while the bytes wait for clean-up.
+            source: if erased {
+                None
+            } else {
+                row.get("source_artifact")
+            },
         })
     }
 
@@ -201,6 +227,7 @@ impl Run {
             "columns": self.header,
             "rows": self.row_count,
             "state": if self.stopped { "stopped" } else { self.state.as_str() },
+            "erased": self.erased,
             "pass": self.pass.map(Pass::as_str),
             "progress": self.next_row,
             "mapping": self.mapping,
@@ -347,7 +374,8 @@ pub(crate) async fn list(
 }
 
 /// The person's completed runs of these record types in this company:
-/// the parents a child import may name.
+/// the parents a child import may name. A run an erasure cleaned keeps no
+/// source keys, so it is not offered.
 pub(crate) async fn completed(
     client: &impl GenericClient,
     scope: &Scope,
@@ -357,7 +385,7 @@ pub(crate) async fn completed(
     let types: Vec<String> = record_types.iter().map(|key| (*key).to_owned()).collect();
     client
         .query(
-            &format!("SELECT {COLUMNS} FROM base_bulk_data_runs WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 AND record_type=ANY($4) AND state='completed' ORDER BY id DESC LIMIT 50"),
+            &format!("SELECT {COLUMNS} FROM base_bulk_data_runs WHERE tenant_id=$1 AND started_by=$2 AND company_id=$3 AND record_type=ANY($4) AND state='completed' AND cardinality(erased_for)=0 ORDER BY id DESC LIMIT 50"),
             &[&scope.tenant(), &scope.user(), &company, &types],
         )
         .await?

@@ -1,12 +1,15 @@
 //! Legal entity types and department types: two global reference catalogs with
 //! no tenant column. Reads take any connection; writes take the sealed scope,
-//! check `admin.company.create`, `.update` or `.delete` at the moment of the
-//! call and record each row through the caller's mutation transaction.
+//! check `admin.company.create`, `.update` or `.delete` held in the platform
+//! operator's tenant at the moment of the call (`authorize_operator`: the
+//! catalogs are every tenant's, so the route's operator check is not enough
+//! for a Domain or agent calling the facade) and record each row through the
+//! caller's mutation transaction.
 use crate::{
     contributions::{CREATE, DELETE, UPDATE},
     FieldError, WriteError,
 };
-use bilibi_authz::authorize_key;
+use bilibi_authz::authorize_operator;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::Scope;
 use serde::{Deserialize, Serialize};
@@ -292,7 +295,7 @@ pub async fn create_legal_entity_type(
     scope: &Scope,
     new: &NewType,
 ) -> Result<Outcome<LegalEntityType>> {
-    authorize_key(tx.sql(), scope, CREATE).await?;
+    authorize_operator(tx.sql(), scope, CREATE).await?;
     let mut errors = Vec::new();
     let code = validate_code(&mut errors, &new.code);
     let name = validate_name(&mut errors, &new.name);
@@ -322,7 +325,7 @@ pub async fn create_department_type(
     scope: &Scope,
     new: &NewType,
 ) -> Result<Outcome<DepartmentType>> {
-    authorize_key(tx.sql(), scope, CREATE).await?;
+    authorize_operator(tx.sql(), scope, CREATE).await?;
     let mut errors = Vec::new();
     let code = validate_code(&mut errors, &new.code);
     let name = validate_name(&mut errors, &new.name);
@@ -380,7 +383,7 @@ pub async fn update_legal_entity_type(
     id: i64,
     update: &TypeUpdate,
 ) -> std::result::Result<Outcome<LegalEntityType>, WriteError> {
-    authorize_key(tx.sql(), scope, UPDATE).await?;
+    authorize_operator(tx.sql(), scope, UPDATE).await?;
     let row = lock_version(
         tx.sql(),
         "company_legal_entity_types",
@@ -416,7 +419,7 @@ pub async fn update_department_type(
     id: i64,
     update: &TypeUpdate,
 ) -> std::result::Result<Outcome<DepartmentType>, WriteError> {
-    authorize_key(tx.sql(), scope, UPDATE).await?;
+    authorize_operator(tx.sql(), scope, UPDATE).await?;
     let row = lock_version(
         tx.sql(),
         "company_department_types",
@@ -500,7 +503,7 @@ pub async fn delete_legal_entity_type(
     scope: &Scope,
     id: i64,
 ) -> std::result::Result<(), WriteError> {
-    authorize_key(tx.sql(), scope, DELETE).await?;
+    authorize_operator(tx.sql(), scope, DELETE).await?;
     let row = tx
         .sql()
         .query_opt(
@@ -546,7 +549,7 @@ pub async fn delete_department_type(
     scope: &Scope,
     id: i64,
 ) -> std::result::Result<(), WriteError> {
-    authorize_key(tx.sql(), scope, DELETE).await?;
+    authorize_operator(tx.sql(), scope, DELETE).await?;
     let row = tx
         .sql()
         .query_opt(

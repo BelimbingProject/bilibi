@@ -20,14 +20,18 @@ use tokio_postgres::GenericClient;
 mod contributions;
 mod ended;
 mod expiry;
+mod places;
+mod proxies;
 mod sign_ins;
 mod web;
 pub use contributions::{
     LIFETIME_KEY, LIST, LIVE_CHUNKS_PER_MINUTE_KEY, LIVE_MESSAGES_PER_MINUTE_KEY,
-    LIVE_SOCKETS_PER_CUSTOMER_KEY, LIVE_SOCKETS_PER_SESSION_KEY, LIVE_SOCKETS_TOTAL_KEY, MANAGE,
-    TOUCH_KEY,
+    LIVE_SOCKETS_PER_CUSTOMER_KEY, LIVE_SOCKETS_PER_SESSION_KEY, LIVE_SOCKETS_TOTAL_KEY,
+    LIVE_UPLOAD_BUFFER_BYTES_KEY, MANAGE, TOUCH_KEY,
 };
 pub use ended::{EndNotice, Ended, Ending, NoticeFuture, TenantProof};
+pub use places::DATABASE_PATH_KEY as PLACE_DATABASE_PATH_KEY;
+pub use proxies::{TrustedProxies, TRUSTED_PROXIES_KEY};
 use sign_ins::SIGN_IN_HISTORY_DAYS;
 pub use sign_ins::{
     client_name, NewDevice, PreviousSignIn, SignInAlertRecord, SignInExport, SignInRecord,
@@ -108,6 +112,7 @@ pub struct SessionClient {
 struct OwnSummary {
     id: String,
     ip_address: Option<String>,
+    place: Option<String>,
     user_agent: Option<String>,
     signed_in_at: SystemTime,
     last_activity: SystemTime,
@@ -121,6 +126,7 @@ impl OwnSummary {
 struct OwnTermination {
     id: String,
     ip_address: Option<String>,
+    place: Option<String>,
     user_agent: Option<String>,
     signed_in_at: String,
     last_activity: String,
@@ -133,6 +139,7 @@ pub struct Summary {
     pub tenant: i64,
     pub user_id: i64,
     pub ip_address: Option<String>,
+    pub place: Option<String>,
     pub user_agent: Option<String>,
     /// Seconds since the last recorded activity.
     pub idle_seconds: i64,
@@ -258,6 +265,7 @@ pub trait CredentialRevoker: Send + Sync {
 pub struct Sessions {
     authentication: Arc<Authentication>,
     settings: Arc<Settings>,
+    places: places::PlaceLookup,
     terminations: broadcast::Sender<Terminated>,
     factors: Option<Arc<bilibi_step_up::StepUp>>,
     credential_revokers: RwLock<BTreeMap<&'static str, Arc<dyn CredentialRevoker>>>,
@@ -268,6 +276,7 @@ impl Sessions {
         let (terminations, _) = broadcast::channel(256);
         Self {
             authentication,
+            places: places::PlaceLookup::new(settings.clone()),
             settings,
             terminations,
             factors: None,
@@ -480,7 +489,7 @@ impl Sessions {
         let policy = self.policy(client).await?;
         Ok(client
             .query(
-                "SELECT id,ip_address,user_agent,signed_in_at,last_activity FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $3::double precision) ORDER BY last_activity DESC,id",
+                "SELECT id,ip_address,place,user_agent,signed_in_at,last_activity FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $3::double precision) ORDER BY last_activity DESC,id",
                 &[&scope.tenant(), &scope.user(), &(policy.idle_seconds as f64)],
             )
             .await?
@@ -488,9 +497,10 @@ impl Sessions {
             .map(|row| OwnSummary {
                 id: row.get(0),
                 ip_address: row.get(1),
-                user_agent: row.get(2),
-                signed_in_at: row.get(3),
-                last_activity: row.get(4),
+                place: row.get(2),
+                user_agent: row.get(3),
+                signed_in_at: row.get(4),
+                last_activity: row.get(5),
             })
             .collect())
     }
@@ -519,7 +529,7 @@ impl Sessions {
         };
         let total: i64 = client
             .query_one(
-                "SELECT count(*) FROM sessions WHERE ended_reason IS NULL AND ($1::text IS NULL OR ip_address ILIKE $1 OR user_agent ILIKE $1)",
+                "SELECT count(*) FROM sessions WHERE ended_reason IS NULL AND ($1::text IS NULL OR ip_address ILIKE $1 OR place ILIKE $1 OR user_agent ILIKE $1)",
                 &[&search],
             )
             .await?
@@ -535,7 +545,7 @@ impl Sessions {
             (SortBy::UserAgent, false) => "user_agent ASC NULLS LAST, id ASC",
         };
         let sql = format!(
-            "SELECT id,tenant_id,user_id,ip_address,user_agent,floor(extract(epoch FROM now()-last_activity))::bigint FROM sessions WHERE ended_reason IS NULL AND ($1::text IS NULL OR ip_address ILIKE $1 OR user_agent ILIKE $1) ORDER BY {order} LIMIT $2 OFFSET $3"
+            "SELECT id,tenant_id,user_id,ip_address,place,user_agent,floor(extract(epoch FROM now()-last_activity))::bigint FROM sessions WHERE ended_reason IS NULL AND ($1::text IS NULL OR ip_address ILIKE $1 OR place ILIKE $1 OR user_agent ILIKE $1) ORDER BY {order} LIMIT $2 OFFSET $3"
         );
         let limit = query.page_size as i64;
         let offset = query.page.saturating_sub(1).saturating_mul(query.page_size) as i64;
@@ -548,8 +558,9 @@ impl Sessions {
                     tenant: row.get(1),
                     user_id: row.get(2),
                     ip_address: row.get(3),
-                    user_agent: row.get(4),
-                    idle_seconds: row.get::<_, i64>(5).max(0),
+                    place: row.get(4),
+                    user_agent: row.get(5),
+                    idle_seconds: row.get::<_, i64>(6).max(0),
                 })
                 .collect(),
             total_entries: total.max(0) as u64,
@@ -818,6 +829,7 @@ inventory::submit! {
             ("base-session-007-sign-in-devices", include_str!("../migrations/007-sign-in-devices.sql")),
             ("base-session-008-ended-reason", include_str!("../migrations/008-ended-reason.sql")),
             ("base-session-009-token-digest", include_str!("../migrations/009-token-digest.sql")),
+            ("base-session-010-sign-in-place", include_str!("../migrations/010-sign-in-place.sql")),
         ],
         services: &[
             bilibi_module_registry::Service { id: "base/session.sessions", factory: |services| Ok(Arc::new(Sessions::new(services.get("base/tenancy.authentication")?, services.get("base/settings.store")?).with_factors(services.get(bilibi_step_up::SERVICE)?))) },

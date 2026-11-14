@@ -111,17 +111,29 @@ The New document, New revision and Quick add dialogs take the file through one r
 
 - **Progress:** the chosen file's row shows the percentage received while it arrives; Upload (Add document in Quick add) waits until every byte is there.
 - **Resume:** the bytes wait on Media's staging disk (`media.upload.staging_disk`). While the New document dialog is open the list's address carries `new=1`, so the remount after a dropped connection opens it again and the file carries on from the bytes already there. After a reload, or in a dialog the remount does not reopen (New revision, Quick add), choosing the same file again continues it, until `media.upload.staging_hours` passes.
-- **Limit:** the largest file is Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB); `store_file` still applies `core.document.max_upload_bytes` and `artifacts.max_bytes`. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
+- **Limit:** the input is declared with the tenant's effective limit (the smaller of `core.document.max_upload_bytes` and `artifacts.max_bytes`), read when the page opens, so a larger file is refused before its bytes arrive; the host lowers it further to Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB). `store_file` checks the limit again. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
 - **Scan:** a resumed file is stored like any other: `store_file` stages it through Media, and it stays held, unreadable, until the scan calls it clean.
 - **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold.
 
 Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
+### Files never attached
+
+A file stored but never attached (a dialog cancelled, a file replaced, a create refused, a dropped connection, a copy refused) is removed a day after it was stored.
+
+- Storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
+- The job runs as the system principal `document-file-cleaner`, which holds only `core.document.discard.settle` (a standing grant). A file attached by then is left alone.
+- Otherwise the job moves the ledger row to `discarding`, which no write can attach ("is not a file you stored"), deletes its Artifact, then removes the row. Each step is audited as `System · document-file-cleaner`; a failed step retries with Queue's backoff.
+- A held upload's staged bytes stay Media's: its draft cleanup removes them.
+
 ## Tenant retention and due documents
 
 Settings › Documents offers **Keep new document files for (days)**
-(`core.document.retention_days`, 0 by default). Zero leaves ordinary Artifact
-expiry and explicit deletion as before. When a tenant chooses a positive period
+(`core.document.retention_days`, 0 by default). With zero, each private file
+revision is kept without an expiry (`Artifacts::keep_in`) when a clean Artifact
+is attached or a pending revision is promoted: it stays readable until its
+document is deleted, whatever the installation's `artifacts.retention_days`
+(which bounds exports, and a file stored but never attached). When a tenant chooses a positive period
 (1–36500 days), every newly attached **private file revision** receives an
 irreversible Base retain-until when a clean Artifact is attached or a pending
 revision is promoted. The owner calls `Artifacts::retain_in` inside the same
@@ -141,11 +153,30 @@ for an explicit reviewed deletion; nothing is deleted automatically. Base still
 rechecks every revision under lock in delete and merge, so a new hold refuses
 those actions even after the list was read.
 
+The view costs the same few statements however many files it checks: Base asks the owner for `Retain` on each batch of up to 1000 files at once (`Owner::authorize_all`), and Documents answers a manager's batch with one query (each file attached to an undeleted document the reader may manage now). The `document-retention-due` walkthrough counts them.
+
+## Privacy requests
+
+Documents related to a person (a `person` link) are a `base/personal_data` store, `core/document.documents` (ADR 05, `src/privacy.rs`).
+
+- **Locate and export:** locate counts every such document, one being deleted too. An access request exports each one not being deleted, with its revisions, and every clean file, read through `Artifacts::for_disclosure` (the owner's `disclosure_subject` vouches that the file belongs to a revision of a document related to the request's person).
+- **Erase, kept:** a document under a privacy hold (on the person, the document, one of its revisions or file ledger rows, or a held upload's Media file), or whose file Base still retains or holds, is kept with that reason. A document also related to another record is that record's too: only its link to the person is removed, and it is reported as shared.
+- **Erase, deleted:** every other document is anonymised in the erasing transaction, the Media files of its held uploads (pending, quarantined, failed or unscanned: bytes that never became an Artifact) become tombstones through `Media::erase_attachments`, and it is marked as erased (`erased_at`, with `deleting_at`). The document's name, link and custom fields, its revisions' names, file names, links, change logs and labels, and its ledger rows' file names read `[erased]`.
+- **After the erasure:** the store's `after_erase` removes those Media files' bytes, then deletes each erased document's Artifacts under the erasure grant and its rows, and the certificate counts it deleted. The person link stays until then, because Media (`person_subject`) and Artifacts (`erasure_subject`) ask it whose the files are. A hold or retention placed after the erasure keeps the document, anonymised, shown again, and the certificate says kept with that reason. The delete job leaves an erased document to the erasure, including one whose delete was confirmed before.
+- **Notifications:** the followers' notice of a new revision names neither the document nor the change log, because no erasure reaches a notification.
+- **Audit:** `core.document.document`, `.revision` and `.file` declare their personal fields, so the erasure clears them from earlier audit evidence too.
+
 ## Retention-safe deletion
 
 Deleting a document first checks every revision's file. If any revision is retained or under legal hold, `preview_delete` and `delete` refuse with `Retained` or `LegalHold` before anything changes (the check reads the Artifacts rows `FOR SHARE` inside the commit, so a hold placed meanwhile waits). The document stays readable with its complete revision history.
 
-Otherwise `delete` marks the document as deleting while preserving the document, every revision, every file-ledger row, every link, every mark and every access grant. After that transaction commits, `Artifacts::delete_batch` locks and checks the complete revision set again before it tombstones any file, and metadata is removed only after every Artifact accepts deletion and every ledger row is safely removed. That finalization first clears incoming document relations with audited changes. Repeating `delete` at the current version retries an interrupted byte or metadata finalization; a document already being deleted skips the first check, because it is unreadable and its retry is the batch check.
+Otherwise `delete` marks the document as deleting while preserving the document, every revision, every file-ledger row, every link, every mark and every access grant, and in the same transaction queues a durable `core/document-delete` job, so a deleting document always has its job and a restart loses nothing.
+
+- The job runs as the system principal `document-deleter`, which holds only `core.document.deletion.settle` (a standing grant) and may delete only the attached files of a document already being deleted.
+- `Artifacts::delete_batch` locks and checks the complete revision set again before it tombstones any file. Metadata is removed only after every Artifact accepts deletion: that finalization first clears incoming document relations with audited changes, then removes the revisions, ledger rows, links, marks, grants and customer shares.
+- A failed attempt retries with Queue's backoff (30 attempts, about a day). A job that ends without finishing queues the next one an hour later while the document is still deleting.
+- A hold or retention placed after the delete committed makes the batch refuse: the job then clears the deleting mark (an audited `core.document.document` change), so the document is readable again with its complete history.
+- Repeating `delete` on a deleting document queues another job; a job finding the document gone or no longer deleting does nothing.
 
 ### Delete from the list
 
@@ -168,9 +199,10 @@ Every action that changes or reads a document leaves audited evidence, so there 
 | Email them a link | `core.document.email` created, then updated when it is sent, failed, suppressed or rate limited |
 | Favourite, Follow | `core.document.mark` created or updated (the reader's own flags) |
 | Merge | the survivor's revisions, links, access and marks created or updated; every source's rows deleted |
-| Delete, one or from the list | `core.document.document` updated (marked as deleting), then every row of the document deleted once the files are gone |
+| Delete, one or from the list | `core.document.document` updated (marked as deleting) with its queued job, then every row of the document deleted once the files are gone (`System · document-deleter`), or the mark cleared when a hold keeps a file |
 | Upload, discard a stored file | `core.document.file` ledger changes |
 | Download, Preview | an `artifacts.read` action on the file, `owner_id` `core.document`, with the actor |
+| Export CSV | a `core.document.exported` action with the actor, the `filter` the list used, and how many `rows` of how many matches (`total`) the file holds |
 | Refused download or preview | a `core.document.download_refused` action with the actor, `document_id`, `revision` and `reason`: `no_grant`, `grant_ended`, `no_download_permission`, `no_download_capability` or `no_file_access` |
 | Portal download | an `artifacts.read` action as above, its actor the customer (`actor_role` `customer`) |
 | Refused portal download | a `core.document.download_refused` action as the customer with `"portal": true` and `reason` `not_shared` (no share to them, another tenant's or no such document), `share_ended`, `document_expired`, `no_file`, `scan_pending`, `not_clean` or `no_portal_capability` |

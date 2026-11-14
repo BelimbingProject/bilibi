@@ -74,14 +74,12 @@ pub use reference_types::{
     Outcome as TypeOutcome, TypeSort, TypeUpdate,
 };
 pub use relationship_roles::{
-    by_code as relationship_role_by_code,
-    ensure_defaults_if_empty as ensure_default_relationship_roles, RelationshipRole,
-    RoleUpdate as RelationshipRoleUpdate,
+    by_code as relationship_role_by_code, RelationshipRole, RoleUpdate as RelationshipRoleUpdate,
 };
 pub use relationships::{
     assign as assign_relationship, current as current_relationship,
-    Direction as RelationshipDirection, Entry as RelationshipEntry, Relationship,
-    RelationshipUpdate,
+    Direction as RelationshipDirection, Entry as RelationshipEntry, Links as RelationshipLinks,
+    Relationship, RelationshipUpdate, Window as RelationshipWindow,
 };
 
 /// Company-scoped Media image shown by the authenticated shell.
@@ -855,7 +853,7 @@ inventory::submit! {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, views: services.get(bilibi_grid::PAGE_VIEWS)?, datetime: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, picklists: services.get(bilibi_picklists::SERVICE)?, records: services.get(bilibi_records::SERVICE)?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, record_panels: web::record_panels()?,
             })))) },
             bilibi_module_registry::Service { id: web::relationships::SERVICE, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::relationships::RelationshipPages {
-                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, persons: services.get(bilibi_person::SERVICE)?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, records: services.get(bilibi_records::SERVICE)?,
                 contracts: services.get(bilibi_agent_api::page::SERVICE)?,
             })))) },
         ],
@@ -866,17 +864,13 @@ inventory::submit! {
 /// model (`relationship_roles`, `relationships`). Each write is one audited
 /// mutation transaction; a refusal is an outcome, never an `Error`.
 impl CompanyService {
-    /// The tenant's roles. A tenant whose catalog is empty (one created
-    /// by raw SQL after the migration ran, as the walkthrough fixture does)
-    /// first receives the contributed
-    /// defaults by code; an administered catalog is never touched here.
+    /// The tenant's roles, as administered; a read writes nothing.
     pub async fn relationship_roles(
         &self,
         scope: &Scope,
         include_retired: bool,
     ) -> Result<Vec<relationship_roles::RelationshipRole>> {
         let client = self.db.get().await?;
-        relationship_roles::ensure_defaults_if_empty(&**client, scope.tenant()).await?;
         relationship_roles::list(&**client, scope, include_retired).await
     }
     pub async fn relationship_role(
@@ -949,18 +943,32 @@ impl CompanyService {
         scope: &Scope,
         company: bilibi_party::OrganisationId,
         history: bool,
-    ) -> Result<Vec<relationships::Entry>> {
+        window: relationships::Window,
+    ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_company(&**client, scope, &self.directory, company, history).await
+        relationships::list_for_company(&**client, scope, &self.directory, company, history, window)
+            .await
     }
     pub async fn person_relationships(
         &self,
         scope: &Scope,
         person: bilibi_party::PersonId,
         history: bool,
-    ) -> Result<Vec<relationships::Entry>> {
+        window: relationships::Window,
+    ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_person(&**client, scope, &self.directory, person, history).await
+        relationships::list_for_person(&**client, scope, &self.directory, person, history, window)
+            .await
+    }
+    /// One link on `company`'s page, from its perspective.
+    pub async fn company_relationship(
+        &self,
+        scope: &Scope,
+        company: bilibi_party::OrganisationId,
+        id: bilibi_party::RelationshipId,
+    ) -> Result<relationships::Entry> {
+        let client = self.db.get().await?;
+        relationships::read_for_company(&**client, scope, &self.directory, company, id).await
     }
     pub async fn relationship(
         &self,
@@ -1051,7 +1059,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
     service: "core/company.pages",
     contracts: &[("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update")],
     pending: bilibi_module_registry::contributions::Pending::Events {
-        events: &["save_field", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
-        reason: "Built-in facts, activities, lifecycle and Company create still write through their owner facade.",
+        events: &["save_field", "pick_parent", "remove_parent", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
+        reason: "Built-in facts (the parent picker included), activities, lifecycle and Company create still write through their owner facade.",
     },
 }) }

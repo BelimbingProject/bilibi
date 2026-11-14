@@ -17,27 +17,39 @@ cycle. The screens sit above both. The audit capabilities (`admin.audit.log.list
 
 ## Actions (`/audit/actions`)
 
-Newest first. Search (event, URL, actor role, trace, actor type, payload text),
+Newest first, one period at a time. Search (event, URL, actor role, trace, actor type, payload text),
 event family (HTTP, Authentication, Console, SQL console, Queue, Domain),
 result (Failures, Retained), diagnostic traffic (hidden by default; failures
 still show) and actor type narrow the list in SQL; the URL keeps every filter,
-the sort and `page_size`, so Back and reload restore the view. The table is the
-shared FlexTable over `ListColumns` (reorder, remove, row height). The
-screen has no period filter, so there is none here.
+the period, the order and `page_size`, so Back and reload restore the view. The table is the
+shared FlexTable over `ListColumns` (reorder, remove, row height).
+
+### Period and bounds (both lists)
+
+**The ledgers can be large, so a list reads one period and never the tenant's whole ledger.**
+
+| Part | Rule |
+| --- | --- |
+| Period | The shared `bilibi_datetime::PeriodFilter` beside the toolbar; the last 30 days unless the reader chooses another. `src/period.rs` keeps its URL keys (`period`, `from`, `to`) and the browser zone for local mode |
+| Count | Counted to 10,000 (`bilibi_audit::MAX_COUNT`). Beyond it the page says so and asks for a shorter period or narrower filters |
+| Order | Occurred only, newest or oldest first. Sorting by actor, event, subject, URL or trace was removed: no index serves it at ledger size; use the filters and search |
+| Timeout | A search that outlasts 5 s is stopped; the page says so and lists nothing |
+
+The facade rules are in `apps/base/audit/README.md` (List bounds).
 
 `admin.audit.log.list` guards the route and every live event.
 `admin.audit.log.manage` decides whether the bookmark control is drawn, and the
-write asks it again: a grant removed after the page opened flashes a refusal
-instead of changing the row. Retaining flips a bookmark in
+write asks it again inside its own transaction: a grant removed after the page opened flashes a refusal
+instead of changing the row. A retained action is also exempt from action retention (`apps/base/audit/README.md`). Retaining flips a bookmark in
 `base_audit_action_metadata`; the recorded `is_retained` bit is evidence and
 never changes. Each flip is itself an audited write
 (`audit.action.retention`, mutation kind `audit_action_retention`).
 
 ## Data Mutations (`/audit/mutations`)
 
-Newest first. Search (record kind, event, subject name/identifier/id, trace,
+Newest first, one period at a time (Period and bounds, above). Search (record kind, event, subject name/identifier/id, trace,
 actor role and type) and the event (Created, Updated, Deleted) narrow the list
-in SQL; the URL keeps the search, the filter, the sort and `page_size`. The
+in SQL; the URL keeps the search, the filter, the period, the order and `page_size`. The
 table is the shared FlexTable over `ListColumns`. Each row's Details cell names
 the changed fields (at most four, then a count) and opens the field diff on a
 press: the values stay on the server until the row is open, as in the source.
@@ -117,7 +129,7 @@ shows an em dash without reading. The open control goes to `/audit/mutations`.
 ## Running it
 
 `examples/actions-fixture.rs` inserts a fixed 64-action ledger (every actor kind
-and event family, each result, diagnostic traffic, one bookmark) into a
+and event family, each result, diagnostic traffic, one bookmark), ending at 09:00 UTC yesterday so it is inside the default period, into a
 disposable tenant and prints what each filter returns; see its header. Then open
 `/audit/actions` as an account holding the capability (the fixture `admin`).
 
@@ -132,6 +144,20 @@ show the same way); open `/companies/1` and press History for the trail.
 
 Actions, Data Mutations and record history show "Client identity" separately from "Model (as reported)". Both are evidence; neither replaces the account attribution or grants permissions.
 
+`examples/bounded-evidence.rs` checks the chain per tenant, the list bounds and verification as a queued job; it fails when one does not hold.
+
 ## Verify audit log
 
-**`/audit/integrity` (platform operators with `admin.audit.log.list`) recomputes both evidence chains and says where one breaks, including a committed row with no link** (ADR 05; `base/audit` README, Hash chain). Rows are linked as they commit, so there is nothing to seal first. Each check is recorded as `audit.chain.verified`.
+**`/audit/integrity` (platform operators with `admin.audit.log.list`) starts a background verification of every tenant's evidence chains and shows the latest one: running, whole, or where it breaks** (ADR 05; `base/audit` README, Hash chain and Verification).
+
+| Part | Rule |
+| --- | --- |
+| Press | Starts one verification and enqueues the `base/audit-views-verify` job in one audited transaction (`audit.chain.verify`). While one runs, a second press says so |
+| Job | Runs as the operator who pressed; each attempt asks `admin.audit.log.list` again and proves the operator. It steps the verification (`bilibi_audit::advance_verification`) and hands over to a fresh job after five minutes, so no attempt is long |
+| Page | Shows the latest verification on every draw; the live fallback refresh (15 s) brings progress and the result without a press |
+| Result | Per ledger: rows checked and tenant chains, or the break with its tenant, link and row. Recorded as `audit.chain.verified` |
+| Stopped | A verification with no progress for 30 minutes shows as stopped once a new one is started |
+
+## Partition removal
+
+Platform operators with `admin.audit.partition.delete` set `audit.partition_retention_days` in System Settings, list months through `base.audit_views.partitions`, then review and commit `base.audit_views.partition.remove` with the ledger, month and a reason. The preview shows how many rows will go and how many retained rows will stay. The operation rechecks the capability and the configured period in its audited transaction; a running verification blocks removal. Storage, checkpoints and the exemption are defined in [Audit](../audit/README.md#partition-retention).

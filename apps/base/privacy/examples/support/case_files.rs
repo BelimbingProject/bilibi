@@ -275,16 +275,10 @@ impl Handler for Cases {
     ) -> HandlerFuture<'a, File> {
         Box::pin(async move {
             let (case, public_id) = reference.split_once(':').ok_or(Error::NotFound)?;
-            let file = media()?
+            media()?
                 .disclosed_attachment(&*client, scope, grant, self::subject(case), public_id)
                 .await
-                .map_err(media_error)?;
-            Ok(File {
-                content_type: file
-                    .mime_type
-                    .unwrap_or_else(|| "application/octet-stream".into()),
-                bytes: file.bytes,
-            })
+                .map_err(media_error)
         })
     }
     fn erase<'a>(

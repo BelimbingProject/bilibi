@@ -142,35 +142,7 @@ pub async fn decide_in_company(
     if let Some(principal) = scope.principal() {
         return system_decision(client, scope.tenant(), Some(principal), key).await;
     }
-    let decision = match vocabulary()?.capabilities.get(key) {
-        None => Decision::deny("denied_unknown_capability"),
-        Some(cap) => {
-            let live = client
-                .query_opt(LIVE_TENANT_SQL, &[&scope.tenant()])
-                .await?
-                .is_some();
-            if !live {
-                Decision::deny("denied_invalid_actor_context")
-            } else if !cap.definition.admits(scope.actor().kind()) {
-                Decision::deny("denied_audience")
-            } else if cap.definition.is_platform() && !is_operator(client, scope.tenant()).await? {
-                Decision::deny("denied_platform_scope")
-            } else {
-                let row = client
-                    .query_one(
-                        GRANTS_SQL,
-                        &[
-                            &scope.tenant(),
-                            &scope.user(),
-                            &key,
-                            &company.filter(|_| cap.definition.company_scoped),
-                        ],
-                    )
-                    .await?;
-                judge(&row, cap.definition.audience == Audience::Portal)
-            }
-        }
-    };
+    let decision = user_decision(client, scope, key, company).await?;
     log(client, scope.tenant(), scope.user(), None, key, decision).await?;
     Ok(decision)
 }
@@ -246,16 +218,28 @@ async fn user_decision_proof(
     key: &str,
     company: Option<i64>,
 ) -> Result<Decision> {
+    user_decision(&Proof(client), scope, key, company).await
+}
+/// One live user decision on either database connection shape. An
+/// impersonated scope is the intersection of the viewed account and the
+/// operator for the same company. A direct deny on either account therefore
+/// wins, even when the other account has a direct allow or grant-all role.
+async fn user_decision(
+    client: &impl Reader,
+    scope: &Scope,
+    key: &str,
+    company: Option<i64>,
+) -> Result<Decision> {
     Ok(match vocabulary()?.capabilities.get(key) {
         None => Decision::deny("denied_unknown_capability"),
         Some(cap) => {
             let live = client
-                .query_opt(LIVE_TENANT_SQL, &[&scope.tenant()])
+                .one(LIVE_TENANT_SQL, &[&scope.tenant()])
                 .await?
                 .is_some();
             let operator = !cap.definition.is_platform()
                 || client
-                    .query_opt(OPERATOR_SQL, &[&scope.tenant()])
+                    .one(OPERATOR_SQL, &[&scope.tenant()])
                     .await?
                     .is_some();
             if !live {
@@ -266,7 +250,7 @@ async fn user_decision_proof(
                 Decision::deny("denied_platform_scope")
             } else {
                 let row = client
-                    .query_opt(
+                    .one(
                         GRANTS_SQL,
                         &[
                             &scope.tenant(),
@@ -277,7 +261,28 @@ async fn user_decision_proof(
                     )
                     .await?
                     .ok_or(Error::Internal)?;
-                judge(&row, cap.definition.audience == Audience::Portal)
+                let viewed = judge(&row, cap.definition.audience == Audience::Portal);
+                match scope.impersonator() {
+                    None => viewed,
+                    Some(impersonator) => {
+                        let row = client
+                            .one(
+                                GRANTS_SQL,
+                                &[
+                                    &scope.tenant(),
+                                    &impersonator.user(),
+                                    &key,
+                                    &company.filter(|_| cap.definition.company_scoped),
+                                ],
+                            )
+                            .await?
+                            .ok_or(Error::Internal)?;
+                        intersection(
+                            viewed,
+                            judge(&row, cap.definition.audience == Audience::Portal),
+                        )
+                    }
+                }
             }
         }
     })
@@ -321,6 +326,19 @@ fn judge(row: &tokio_postgres::Row, portal: bool) -> Decision {
         Decision::allow("role_capability")
     } else {
         Decision::deny("denied_missing_capability")
+    }
+}
+/// Both identities must allow the capability. Preserve an explicit denial as
+/// the reason even when the other identity also lacks the capability.
+fn intersection(viewed: Decision, impersonator: Decision) -> Decision {
+    if viewed.reason == "denied_explicitly" || impersonator.reason == "denied_explicitly" {
+        Decision::deny("denied_explicitly")
+    } else if !viewed.allowed {
+        viewed
+    } else if !impersonator.allowed {
+        impersonator
+    } else {
+        viewed
     }
 }
 /// Whether `tenant` is the live, marked platform-operator tenant. Platform
@@ -639,7 +657,9 @@ pub async fn restrictions_for(
     if scope.principal().is_some() {
         return Ok(client.query("SELECT DISTINCT field_id FROM field_restrictions WHERE tenant_id=$1 AND table_id=$2",&[&scope.tenant(),&table]).await?.iter().map(|row|row.get(0)).collect());
     }
-    Ok(client.query("SELECT DISTINCT f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=$2 AND f.table_id=$3",&[&scope.tenant(),&scope.user(),&table]).await?.iter().map(|row|row.get(0)).collect())
+    let mut users = vec![scope.user()];
+    users.extend(scope.impersonator().map(|operator| operator.user()));
+    Ok(client.query("SELECT DISTINCT f.field_id FROM field_restrictions f JOIN effective_principal_roles p ON p.tenant_id=f.tenant_id AND p.role_id=f.role_id WHERE f.tenant_id=$1 AND p.user_id=ANY($2) AND f.table_id=$3",&[&scope.tenant(),&users,&table]).await?.iter().map(|row|row.get(0)).collect())
 }
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/authz",layer:bilibi_module_registry::Layer::Base,

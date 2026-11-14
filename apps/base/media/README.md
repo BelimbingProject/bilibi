@@ -58,7 +58,8 @@ refuse with `MimeDetectionUnavailable` instead of trusting the client.
   a transaction you might roll back around a file write.
 - `delete_asset` commits the row deletions first (tree, children first), then
   removes files. A file that cannot be removed reports `CleanupFailed`; the
-  operator reconciles the disk.
+  operator reconciles the disk. A legal hold (`base/privacy`) on any asset of the tree refuses it (`Held`).
+- A write whose registration fails removes the new file again, unless the failure was the commit itself: the server may have committed, so the file stays rather than leave a row naming a missing file.
 - Every row is tenant-scoped through the sealed `Scope`; another tenant's id is
   `NotFound`. Audit records name the asset but never its storage key or metadata.
 
@@ -101,7 +102,7 @@ Every stored file carries a scan state; only a readable one is ever served. Deci
 
 ### Reads and owners
 
-- `stream_url`, `display_url`, `read_signed_asset`, `put_derivative_bytes`, `register_derivative` and `download_attachment` refuse a file that is not readable: `ScanPending`, `Quarantined`, `ScanFailed` or `NotScanned`. `download_attachment` asks the owner first, so a refused reader learns nothing more.
+- `stream_url`, `display_url`, `read_signed_asset`, `open_signed_asset`, `put_derivative_bytes`, `register_derivative`, `download_attachment`, `open_attachment` and `disclosed_attachment` (as `File::Withheld`) refuse a file that is not readable: `ScanPending`, `Quarantined`, `ScanFailed` or `NotScanned`. `download_attachment` asks the owner first, so a refused reader learns nothing more.
 - The Web host answers those with `423 Locked` ("File not available").
 - `Asset.scan_state` and `Attachment.scan_state` say where a file is; show "Checking file…" while `Pending`. `inspect_attachment(client, scope, public_id)` returns the current private attachment metadata and verdict after the subject owner allows `Inspect`, without opening bytes or granting a tenant-wide quarantine view. `Media::scanning()` says whether a scanner is bound.
 - A `pending` draft may be submitted and stays unreadable until clean; an `infected` draft cannot be submitted (`Quarantined`). Discard and draft cleanup work as before.
@@ -126,6 +127,7 @@ Purge never deletes bytes inside the manager's transaction:
 1. `purge` commits `purge_requested_at` as an audited `Change` together with the `base/media-purge` job. From then nobody can open or rescan the file. Any failure before that commit (audit, queue, commit) leaves the row and the bytes as they were.
 2. The job runs as system principal `media-purger`, which holds `media.file.purge` in every tenant through a standing grant. Under its fenced lease and the row's lock it removes the bytes, then records `bytes_purged_at` as an audited `Change`. Bytes already gone count as removed, so a retry after a lost record finishes the removal.
 3. A failed removal retries with Queue's backoff for about an hour (12 attempts). The file then stays purging, unreadable, and a repeat purge queues the removal again. Once the bytes are gone a repeat is a no-op. A tenant that denies `media-purger` keeps purged bytes on disk.
+4. A legal hold on the file (`base/media/asset`) or on its attachment (`base/media/attachment`) keeps the bytes: the job ends `legal_hold`, the file stays purging and unreadable, and a purge repeated after the hold is released removes them.
 
 An impersonated session cannot rescan or purge: Queue refuses to enqueue for an impersonator.
 
@@ -147,6 +149,19 @@ A live file input declared with `UploadSpec::resumable` keeps its chunks in a st
 - An account keeps at most 20 staging files: opening another removes the account's files nobody wrote to within `media.upload.staging_hours`, then its least recently written.
 - The `base/media-staging-sweep` schedule runs hourly once an operator enables it on the Schedule board (and grants `scheduler` its `EXECUTE`, `apps/base/schedule/README.md`). It removes every staging file nobody wrote to within `media.upload.staging_hours`, in every tenant. Files on a disk the setting no longer names are left for the operator.
 - Staging files are transport, not records: nothing about them is audited, and they are never scanned. The bytes reach an owner only through `Uploads::consume`, and whatever the owner stores goes through the usual checks and scan.
+
+## Reading bytes back
+
+**The Web host's two media routes send a file as they read it; anything that needs the whole file waits for a load slot** (issue 569).
+
+| Call | For | Bound |
+| --- | --- | --- |
+| `open_signed_asset(client, id, token)`, `open_attachment(client, scope, public_id)` | The Web host's stream and attachment routes | A `FileStream`: the file opened, its `len`, `delivery(private)` and `into_reader()`. At most 64 open at once; one more is `Busy`, which the host answers `503` with `Retry-After: 1`. The slot is freed when the reader drops |
+| `read_signed_asset`, `download_attachment`, `disclosed_attachment`, the scan job | An owner that needs the bytes in memory (an image in a PDF, an export, a scanner) | At most 4 whole files in memory at once; the next waits |
+
+- The checks are the same either way (one code path each): the token or the owner's `Download`, the private-tree rule, the scan rule, and the download audit action before anything is returned.
+- The host takes the pooled connection for the checks only; it is back in the pool before the first byte is sent, and the response carries `content-length`.
+- The scan job measures the stored file before reading it: one larger than the scanner's `max_bytes` is never read.
 
 ## Signed streams
 
@@ -188,12 +203,12 @@ Attachments are files a user, or a module's background job, adds to *someone els
 
 | Call | Takes | What it does |
 |---|---|---|
-| `upload_attachment(&mut client, scope, subject, Upload, Rules)` | plain connection | Owner `Upload` check, size/libmagic/allowlist checks (`Rules` may only narrow `media.max_bytes` and `media.attachment_allowed_types`), private write to `media.attachment_disk`, owner `Upload` check again inside the registering transaction, then a draft with a fresh ULID. A failed registration deletes the file. |
+| `upload_attachment(&mut client, scope, subject, Upload, Rules)` | plain connection | Owner `Upload` check, size/libmagic/allowlist checks (`Rules` may only narrow `media.max_bytes` and `media.attachment_allowed_types`), the draft cap (below), private write to `media.attachment_disk`, owner `Upload` check again inside the registering transaction, then a draft with a fresh ULID. A failed registration deletes the file. |
 | `submit_attachments(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Locks the rows in id order, requires every id to exist in this tenant and belong to this subject, asks the owner for `Submit`, then marks drafts submitted. Repeating it changes nothing and adds no audit row. |
 | `retain_drafts(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Same checks with `Retain`; sets `retained_at` so cleanup spares the draft. Submitted rows pass through. |
-| `download_attachment(&client, scope, public_id)` | any client | Tenant-scoped lookup, owner `Download` check, then the bytes. Each delivery records the audit action `media.attachment.downloaded` and each owner refusal `media.attachment.download_refused` (with a reason code): attachment public id, subject, actor and any impersonator, never the file name or storage key. Bytes are returned only after the action is recorded, so a download that cannot be audited is refused. Send them with `StreamFile::delivery(true)`: private files always download as `application/octet-stream`. |
-| `discard_draft(&mut client, scope, public_id)` | plain connection | Uploader only (the same account, or the same system principal), drafts only, owner `Discard` check; commits the row deletions, then removes the file (`CleanupFailed` if it cannot). |
-| `cleanup_drafts(&mut client, tenant, older_than)` | plain connection | Trusted callers only. Removes that tenant's unretained drafts older than the age, re-locking and rechecking each. Attributed to system principal `media.attachments.cleanup`. |
+| `download_attachment(&client, scope, public_id)` / `open_attachment` | any client | Tenant-scoped lookup, owner `Download` check, then the bytes (`open_attachment`: opened for streaming, see Reading bytes back). Each delivery records the audit action `media.attachment.downloaded` and each owner refusal `media.attachment.download_refused` (with a reason code): attachment public id, subject, actor and any impersonator, never the file name or storage key. Bytes are returned only after the action is recorded, so a download that cannot be audited is refused. Send them with `StreamFile::delivery(true)`: private files always download as `application/octet-stream`. |
+| `discard_draft(&mut client, scope, public_id)` | plain connection | Uploader only (the same account, or the same system principal), drafts only, not while a legal hold names the attachment or its asset (`Held`), owner `Discard` check; commits the row deletions, then removes the file (`CleanupFailed` if it cannot). |
+| `cleanup_drafts(&mut client, tenant, older_than)` | plain connection | Trusted callers only. Removes that tenant's unretained drafts older than the age, re-locking and rechecking each and passing over any a legal hold names (on the attachment or its asset). Attributed to system principal `media.attachments.cleanup`. |
 
 Every id is a request, never proof: a public id from another tenant is
 `NotFound`, malformed or lowercased ids are `NotFound`, and the owner is asked
@@ -210,10 +225,17 @@ bytes needs a plain connection, as in M1.
 
 The Web host serves `GET /media/attachments/{public_id}` for a signed-in
 session only (no session redirects to `/login`; not found and wrong tenant are
-404; an owner refusal is 403). It never uses signed links. Remove abandoned
-drafts for one tenant with the host command, which has no automatic schedule:
+404; an owner refusal is 403). It never uses signed links.
 
-    bilibi-web media-cleanup --tenant ID [--hours POSITIVE_INTEGER]   # default 24
+### Abandoned drafts
+
+**Unsubmitted drafts cannot fill the disk** (issue 570).
+
+- An uploader (an account, or a system principal) keeps at most 200 unretained drafts per tenant: one submit binds at most 200. At the cap an upload first removes that uploader's own drafts older than 24 hours, then refuses with `TooManyDrafts` before any bytes are written. Concurrent uploads by the same uploader may pass the cap together.
+- The `base/media-draft-cleanup` schedule (hourly, each tenant) removes every tenant's unretained drafts older than 24 hours through `cleanup_drafts`. Like every Base schedule it runs once an operator reviews and enables it on the Schedule board and the tenant allows scheduled work (`apps/base/schedule/README.md`, Per-tenant reach).
+- Remove one tenant's now with the host command:
+
+      bilibi-web media-cleanup --tenant ID [--hours POSITIVE_INTEGER]   # default 24
 
 ### Stored by a system principal
 
@@ -235,9 +257,9 @@ drafts for one tenant with the host command, which has no automatic schedule:
 - A grant reaches a subject when its kind is in some store's `person_subjects` and its ID is the request's person, or when its registered owner answers `SubjectOwner::person_subject` yes for that person: a record about a person (a case) whose ID is not a person ID. A sweep grant names no person: it reaches a subject only when its registered owner answers `SubjectOwner::swept_subject` yes, that is, the owner's own retention sweep erased that record.
 - The owner vouches for the whole subject, never one file: yes reaches every attachment filed under it. Answer yes only when every file under that subject belongs to the grant's person. If one record holds different people's files, file each person's attachments under a separate subject (for example, a note) that the owner can vouch for. The default answers no.
 - The owner answers from its own live record on the caller's connection (inside the erasure's transaction for `erase_attachments`), for `scope`'s tenant. A held erasure may resume much later, and `remove_erased_bytes` asks again after commit: keep the subject linked to the person until no hold keeps any of its files and their bytes are removed.
-- `disclosed_attachments` / `disclosed_attachment` (with `Disclosure`): every live attachment of the subject and its bytes, for an export; the subject's owner is not asked to authorize (only, for a subject that is not a person ID, whether it is the person's).
+- `disclosed_attachments` / `disclosed_attachment` (with `Disclosure`): every live attachment of the subject and its bytes, for an export; the subject's owner is not asked to authorize (only, for a subject that is not a person ID, whether it is the person's). `disclosed_attachment` returns `bilibi_personal_data::File`: a file that is not readable (pending, infected, failed, purged, or unscanned under `required`) is `File::Withheld(NotCleared)` and one whose bytes are gone `File::Withheld(Missing)`, which the bundle lists instead of failing (issue 567). A disk that cannot be read is still an error, never a shorter export.
 - `erase_attachments(tx, scope, &Erasure, subject, &Holds)`: each attachment no hold names, on the attachment or on its asset, becomes a tombstone and its asset row goes, through `base_media_erase_attachment` (the only path the guard admits). The asset's change records `original_filename` as `[erased]`; the caller clears both kinds' evidence (`base/media/attachment`, `base/media/asset`). `erased_by` names the user, or is empty when a system principal erased (owed cleanup after a hold). The asset kind's personal field is declared in `base_personal_data_kinds` by this migration.
-- `remove_erased_bytes(client, scope, &Erasure, subject)`: one file per transaction, claimed under its row lock, removed and recorded once; `Removal.more` says files remain.
+- `remove_erased_bytes(client, scope, &Erasure, subject)`: one file per transaction, in id order, claimed under its row lock, removed and recorded once; `Removal.more` says files remain. A file that will not go is passed over for the rest of the call, so later files still go, and the call then answers `CleanupFailed`.
 - **Retention sweeps** (`base/privacy` record classes): the owner's sweeper marks its record swept, then calls `erase_attachments` in the sweep's transaction (holds on an attachment or its asset keep it, as for a request), returning the erased attachment and asset rows as `ErasedRecord`s so their evidence is cleared. Its `Sweeper::after_sweep` then calls `remove_swept_bytes(client, scope, &Erasure, kind)`: under the sweep grant only, it removes the bytes of erased files of that kind's subjects whose owner answers `swept_subject` yes, through `remove_erased_bytes`, at most one batch per call (`more` says call again); a subject the owner does not vouch for is left for its own request. `swept_subject` answers from the owner's live record, so keep the record marked swept until no hold keeps any of its files and their bytes are removed.
 - `count_attachments` counts a subject's files for a reader its owner allows.
 - An erased row never changes again. `ImmutableAttachment` still refuses every other update or delete.
@@ -255,7 +277,7 @@ owner is the `walkthrough.ticket` rows in a `walkthrough_tickets` table the
 example creates in the disposable database. Run it like `media-walkthrough`
 below (adding `media.attachment_disk` is done for you); it prints outcomes for
 uploads, ULIDs, rejected files, tenant and owner rechecks, submit, retain,
-discard, immutability and audit, checks that a delivery (also one made while impersonating) and an owner refusal each record their download action without naming the file, and finishes by printing ids. Then
+discard, immutability and audit, checks that a delivery (also one made while impersonating) and an owner refusal each record their download action without naming the file, checks that an uploader's 201st unsubmitted draft is refused until one of their drafts is older than 24 hours (which the next upload then removes), and finishes by printing ids. Then
 `-- serve` (with `APP_ORIGIN` and `BIND_ADDR`) runs the real host with the
 fixture owner registered: sign in with the walkthrough fixture accounts and fetch
 `/media/attachments/{id}`, or change the ticket row with `psql` and watch the
@@ -270,7 +292,9 @@ and `BILIBI_MEDIA_DEMO_ROOT` (a scratch directory the command makes `0700`), the
 run `cargo run -p bilibi-media --locked --example media-walkthrough`. It appoints
 tenant 1 operator, stores a PNG and a note, shows rejected active-content,
 oversize, empty and unsafe uploads, derivative and private-tree rules, tenant
-isolation, token refusals and subject owners, and prints signed paths. Start the
+isolation, token refusals and subject owners, checks that 64 streams open at
+once, a 65th is `Busy`, a stream yields exactly the stored bytes and a
+dropped reader frees its slot, and prints signed paths. Start the
 app with the same signing key and `curl` those paths; run again with
 `-- delete <id>` for a separate-process delete. It is a demonstration, not a
 test harness; its fixture subject owner lives only in the example executable.

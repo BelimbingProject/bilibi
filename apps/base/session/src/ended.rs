@@ -256,7 +256,7 @@ impl Sessions {
         }
         let idle = self.policy(tx.sql()).await?.idle_seconds as f64;
         let Some(row) = tx.sql().query_opt(
-            "SELECT tenant_id,user_id,impersonator_id,ip_address,user_agent,last_activity::text,expires_at<=now() OR last_activity<=now()-make_interval(secs => $2::double precision) FROM sessions WHERE id=$1 AND ended_reason IS NULL FOR UPDATE",
+            "SELECT tenant_id,user_id,impersonator_id,ip_address,place,user_agent,last_activity::text,expires_at<=now() OR last_activity<=now()-make_interval(secs => $2::double precision) FROM sessions WHERE id=$1 AND ended_reason IS NULL FOR UPDATE",
             &[&id, &idle],
         ).await? else {
             return Ok(Termination::NotFound);
@@ -264,7 +264,7 @@ impl Sessions {
         let tenant: i64 = row.get(0);
         let user: i64 = row.get(1);
         let account = row.get::<_, Option<i64>>(2).unwrap_or(user);
-        let reason = if row.get(6) {
+        let reason = if row.get(7) {
             Ending::Expired
         } else {
             Ending::Terminated
@@ -272,8 +272,9 @@ impl Sessions {
         let old = json!({
             "tenant_id": tenant, "user_id": user,
             "ip_address": row.get::<_, Option<String>>(3),
-            "user_agent": row.get::<_, Option<String>>(4),
-            "last_activity": row.get::<_, String>(5), "payload": "[redacted]",
+            "place": row.get::<_, Option<String>>(4),
+            "user_agent": row.get::<_, Option<String>>(5),
+            "last_activity": row.get::<_, String>(6), "payload": "[redacted]",
         });
         let now = Self::records_now(tx, tenant);
         let marked = (reason == Ending::Terminated).then_some(reason.as_str());
@@ -327,7 +328,7 @@ impl Sessions {
                 Box::pin(async move {
                     let rows = sql
                         .query(
-                            "DELETE FROM sessions WHERE tenant_id=$1 RETURNING id,user_id,impersonator_id,ip_address,user_agent,signed_in_at::text,last_activity::text",
+                            "DELETE FROM sessions WHERE tenant_id=$1 RETURNING id,user_id,impersonator_id,ip_address,place,user_agent,signed_in_at::text,last_activity::text",
                             &[&tenant],
                         )
                         .await?;
@@ -343,9 +344,10 @@ impl Sessions {
                                 "tenant_id": tenant, "user_id": user,
                                 "impersonator_id": row.get::<_, Option<i64>>(2),
                                 "ip_address": row.get::<_, Option<String>>(3),
-                                "user_agent": row.get::<_, Option<String>>(4),
-                                "signed_in_at": row.get::<_, Option<String>>(5),
-                                "last_activity": row.get::<_, String>(6), "payload": "[redacted]",
+                                "place": row.get::<_, Option<String>>(4),
+                                "user_agent": row.get::<_, Option<String>>(5),
+                                "signed_in_at": row.get::<_, Option<String>>(6),
+                                "last_activity": row.get::<_, String>(7), "payload": "[redacted]",
                             }),
                             new: json!({"ended_by_tenant_suspension": true}),
                         });
@@ -385,15 +387,16 @@ impl Sessions {
         let user = scope.user();
         let id = id.to_owned();
         let Some(row) = tx.sql().query_opt(
-            "SELECT ip_address,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND impersonator_id IS NULL AND ended_reason IS NULL FOR UPDATE",
+            "SELECT ip_address,place,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND impersonator_id IS NULL AND ended_reason IS NULL FOR UPDATE",
             &[&tenant, &user, &id],
         ).await? else {
             return Ok(Termination::NotFound);
         };
         let ip: Option<String> = row.get(0);
-        let agent: Option<String> = row.get(1);
-        let signed_in: String = row.get(2);
-        let activity: String = row.get(3);
+        let place: Option<String> = row.get(1);
+        let agent: Option<String> = row.get(2);
+        let signed_in: String = row.get(3);
+        let activity: String = row.get(4);
         let ended = id.clone();
         tx.mutate(move |sql| Box::pin(async move {
             sql.execute(
@@ -402,7 +405,7 @@ impl Sessions {
             ).await?;
             Ok(((), vec![Change {
                 kind: "session".into(), id: user,
-                old: json!({"tenant_id":tenant,"user_id":user,"ip_address":ip,"user_agent":agent,"signed_in_at":signed_in,"last_activity":activity,"payload":"[redacted]"}),
+                old: json!({"tenant_id":tenant,"user_id":user,"ip_address":ip,"place":place,"user_agent":agent,"signed_in_at":signed_in,"last_activity":activity,"payload":"[redacted]"}),
                 new: json!({"ended_by_account":true}),
             }]))
         })).await?;
@@ -436,7 +439,7 @@ impl Sessions {
         let current = current.to_owned();
         let policy = self.policy(tx.sql()).await?;
         let rows = tx.sql().query(
-            "SELECT id,ip_address,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id<>$3 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $4::double precision) FOR UPDATE",
+            "SELECT id,ip_address,place,user_agent,signed_in_at::text,last_activity::text FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND id<>$3 AND impersonator_id IS NULL AND expires_at>now() AND last_activity>now()-make_interval(secs => $4::double precision) FOR UPDATE",
             &[&tenant, &user, &current, &(policy.idle_seconds as f64)],
         ).await?;
         if rows.is_empty() {
@@ -447,9 +450,10 @@ impl Sessions {
             .map(|row| OwnTermination {
                 id: row.get(0),
                 ip_address: row.get(1),
-                user_agent: row.get(2),
-                signed_in_at: row.get(3),
-                last_activity: row.get(4),
+                place: row.get(2),
+                user_agent: row.get(3),
+                signed_in_at: row.get(4),
+                last_activity: row.get(5),
             })
             .collect();
         let ids: Vec<String> = metadata.iter().map(|row| row.id.clone()).collect();
@@ -469,6 +473,7 @@ impl Sessions {
                             "tenant_id": tenant,
                             "user_id": user,
                             "ip_address": row.ip_address.clone(),
+                            "place": row.place.clone(),
                             "user_agent": row.user_agent.clone(),
                             "signed_in_at": row.signed_in_at.clone(),
                             "last_activity": row.last_activity.clone(),

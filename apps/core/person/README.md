@@ -2,7 +2,7 @@
 
 `PersonService` (`core/person.persons`) and the transaction APIs the crate root exports from the private `src/identity.rs` (`read_person`, `search_persons`, `preview_person`, `preview_person_with_code`, `create_person`, `create_person_with_code`, `preview_update_person`, `update_person`, `lock_for_account_binding`, `account_standing`) own `persons`. They use K0's `PersonInput`, `PersonKind` and `PersonId`; an identity is never an employee or login account. Core works with People absent. `/contacts` and `/contacts/{id}` provide the capability-gated directory and inline record/contact editor. Creating a contact opens a dialog on the list; `/contacts/new` redirects there with that dialog open. The earlier `/persons` addresses answer with a permanent redirect to the Contacts addresses (`Moved` contributions in `src/contributions.rs`).
 
-Every person has a fixed Core `code`, unique within their tenant, including retired identities. The default uses up to 12 characters from whole name words, omitting source-spelled connectors bin, binti, a/l, a/p, s/o and d/o. It truncates the first word only when needed to fit the limit. For example, `Kam Pui Yue` becomes `kam_pui_yue` and `Muhammad Hafiz bin Ismail` becomes `muhammad`. If the suggestion is taken, it adds `_2`, `_3` and so on within 12 characters. A name without ASCII slug characters starts with `person`. The form suggests a code while the name is entered, and the person can replace it with a code up to 255 characters, including an imported code. If they clear the field, Bilibi chooses the code. Updates cannot change a code. `preview_person_with_code` and `create_person_with_code` accept an optional explicit code and the person's custom field values, while `preview_person` and `create_person` use the default code and set none. Preview reserves nothing; creation checks availability under a tenant lock. Renames and retirement retain the code, and a database trigger refuses a code edit. Contacts and global search find a person by code. Downstream records should display this Core code rather than assign a customer or supplier code.
+Every person has a fixed Core `code`, unique within their tenant, including retired identities. The default uses up to 12 characters from whole name words, omitting source-spelled connectors bin, binti, a/l, a/p, s/o and d/o. It truncates the first word only when needed to fit the limit. For example, `Kam Pui Yue` becomes `kam_pui_yue` and `Muhammad Hafiz bin Ismail` becomes `muhammad`. If the suggestion is taken, it adds `_2`, `_3` and so on within 12 characters: the number after the highest one taken with that base, found in one index probe per suffix length however many people share the base, so a gap left below it is not reused. A name without ASCII slug characters starts with `person`. The form suggests a code while the name is entered, and the person can replace it with a code up to 255 characters, including an imported code. If they clear the field, Bilibi chooses the code. Updates cannot change a code. `preview_person_with_code` and `create_person_with_code` accept an optional explicit code and the person's custom field values, while `preview_person` and `create_person` use the default code and set none. Preview reserves nothing; creation checks availability under a tenant lock. Renames and retirement retain the code, and a database trigger refuses a code edit. Contacts and global search find a person by code. Downstream records should display this Core code rather than assign a customer or supplier code.
 
 The module migration creates tenant-scoped bigint identities, fixed codes, personal
 email/phone, explicit human/agent kind, version and creation/change metadata.
@@ -14,7 +14,7 @@ Names are trimmed and contain 1–160 characters; optional email/phone are trimm
 and blank becomes null. Email permits the source's `local@domain` shape, forbids
 whitespace/control characters and is limited to 254 UTF-8 bytes; phone has a
 64-character limit. Email/name are deliberately non-unique. `duplicates` matches
-exact normalized name/email (case insensitive) or trimmed phone, bounds results
+exact normalized name/email (case insensitive) or trimmed phone, also by the canonical key `core_person_phone_key` when both numbers carry an explicit `+` or `00` international prefix, bounds results
 to 1–100, can exclude an existing ID and includes retired identities. It proposes
 candidates without choosing, merging or linking them.
 
@@ -34,9 +34,12 @@ restricted contact criterion to avoid existence probes. A read model's
 The same catalog maps restrictions to Person audit evidence.
 
 `update` replaces visible identity/contact fields and requires the expected
-version. A missing/null/blank visible contact clears it. A restricted contact
+version. A null/blank visible contact clears it. A restricted contact
 must be missing/null/blank and is preserved, so an editor can rename a person
-without learning or erasing hidden data. Row locks serialize writes; stale
+without learning or erasing hidden data. `core.person.update` (pages, agents,
+imports) keeps a contact its input leaves out, visible or not, and clears one
+only for `""`: a plan built while the contact was hidden keeps it even when
+the restriction is lifted before the plan commits. Row locks serialize writes; stale
 versions fail. `retire` retains the identity, contacts and history while refusing
 new edits/proofs/bindings. It is independent of People employment lifecycle.
 
@@ -188,6 +191,10 @@ BILIBI_PERSON_DEMO=disposable cargo run -p bilibi-person --example person-custom
 ```
 
 On a fresh disposable database, `BILIBI_PERSON_PROOF=disposable cargo run -p bilibi-person --example person-duplicates --locked` proves caller-transaction visibility and rollback, tenant separation, live denial/reproof, restrictions/masking and the original bounds. It exhausts a single-connection pool and calls the actual registered duplicate read handler with an `OperationClient` exposing that transaction, including its custom-field projection. It also calls the registered duplicate read through `Registry::call` on the bare transaction; that generic adapter need not expose `transaction()` for the duplicate read to retain its connection.
+
+`BILIBI_PERSON_PROOF=disposable cargo run -p bilibi-person --example person-code-allocation --locked` proves the default code's cost on a fresh disposable database, each line `ok` or `FAIL`: with 20,000 contacts sharing the base of `Muhammad Hafiz bin Ismail`, the preview suggests `muhamm_20001` and reads only a handful of contact rows, creates take `_20001` and `_20002`, the last one-digit suffix is followed by the first two-digit one, and an upper-case or zero-padded code is not taken for a suffix.
+
+`BILIBI_PERSON_PROOF=disposable cargo run -p bilibi-person --example person-contact-integrity --locked` proves three contact findings of #603 through the registered operations on a fresh disposable database, each line `ok` or `FAIL`: `core.person.list` reads the field definitions once for 30 contacts, `core.person.duplicates` finds `+60 12-345 6789` from `0060123456789` but guesses no country for a national number, and an update planned while email and phone were withheld keeps both after the restriction is lifted, while `""` still clears a visible contact.
 
 ## Person screens and record panels (K8)
 

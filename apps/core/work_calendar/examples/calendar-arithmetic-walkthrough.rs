@@ -8,7 +8,7 @@ use bilibi_agent_api::{
 };
 use bilibi_database::{pool, Error};
 use bilibi_tenancy::{ProofFuture, Scope};
-use bilibi_work_calendar::{TimeError, Timetable, WorkCalendars, SERVICE};
+use bilibi_work_calendar::{changed_instants, TimeError, Timetable, WorkCalendars, SERVICE};
 use jiff::{civil::Date, SignedDuration, Timestamp};
 use serde_json::{json, Value};
 use std::fmt::Debug;
@@ -842,6 +842,62 @@ async fn main() -> Result<(), Failure> {
             .err()
             .map(|e| e.to_string()),
         Some(Error::Invalid.to_string()),
+    )?;
+    // A change can move business time only inside `changed_instants`, even
+    // at the edges of the zones: UTC+14 open all day, and UTC-12 with a
+    // period that runs to almost the end of the next day.
+    for (code, timezone, period) in [
+        ("arithmetic-east", "Pacific/Kiritimati", "00:00-24:00"),
+        ("arithmetic-west", "Etc/GMT+12", "23:59-23:58"),
+    ] {
+        write(&plans, &browser, &scope, "core.work_calendar.create",
+            json!({"code":code,"name":code,"timezone":timezone,"effective_from":"2025-01-01","week":crate::week(&[period],true)})).await?;
+        let (window_from, window_to) = (date("2026-11-01"), date("2026-11-30"));
+        let before = calendars
+            .timetable(&scope, code, window_from, window_to)
+            .await?;
+        let day = date("2026-11-15");
+        write(&plans, &browser, &scope, "core.work_calendar.exception.add",
+            json!({"code":code,"version":1,"starts_on":day.to_string(),"name":"Closed","type":"off"})).await?;
+        let after = calendars
+            .timetable(&scope, code, window_from, window_to)
+            .await?;
+        let (start, end) = changed_instants(Some(day), Some(day));
+        let (start, end) = (start.ok_or("no start")?, end.ok_or("no end")?);
+        let (first, last) = (at("2026-11-02T00:00:00Z"), at("2026-11-28T00:00:00Z"));
+        let elapsed = |table: &Timetable, a, b| table.elapsed(a, b);
+        check(
+            &format!("{timezone}: business time before the bound is unchanged"),
+            elapsed(&after, first, start),
+            elapsed(&before, first, start),
+        )?;
+        check(
+            &format!("{timezone}: business time after the bound is unchanged"),
+            elapsed(&after, end, last),
+            elapsed(&before, end, last),
+        )?;
+        let inside = (elapsed(&before, start, end)?, elapsed(&after, start, end)?);
+        check(
+            &format!("{timezone}: the closed day's whole opening lies inside the bound"),
+            inside.0 - inside.1,
+            match period {
+                "00:00-24:00" => hours(24),
+                _ => hours(24) - SignedDuration::from_mins(1),
+            },
+        )?;
+    }
+    check(
+        "an open-ended change has open bounds",
+        changed_instants(None, None),
+        (None, None),
+    )?;
+    check(
+        "the bounds are midnight UTC the day before and three days after",
+        changed_instants(Some(date("2026-11-15")), Some(date("2026-11-16"))),
+        (
+            Some(at("2026-11-14T00:00:00Z")),
+            Some(at("2026-11-19T00:00:00Z")),
+        ),
     )?;
     println!("PASS complete: signed budgets and working-day instants through Core owner contracts");
     Ok(())

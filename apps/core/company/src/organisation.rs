@@ -207,17 +207,20 @@ fn named(row: &tokio_postgres::Row) -> Result<NamedOrganisation> {
         archived,
     })
 }
+/// The live companies of the tenant, or only those among `ids`, without the
+/// archived ones when `unarchived`; the filter runs in SQL.
 async fn named_in_scope(
     client: &dyn ProofClient,
     scope: &Scope,
     ids: Option<Vec<i64>>,
+    unarchived: bool,
 ) -> Result<Vec<NamedOrganisation>> {
     // The proof connection answers one row; a tenant's companies arrive as
     // one JSON array of tenant-scoped rows, never as client input.
     let rows: serde_json::Value = client
         .query_opt(
-            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2))",
-            &[&scope.tenant(), &ids],
+            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2)) AND NOT ($3 AND status=$4)",
+            &[&scope.tenant(), &ids, &unarchived, &ARCHIVED],
         )
         .await?
         .map(|row| row.get(0))
@@ -302,7 +305,21 @@ impl OrganisationDirectory for Directory {
         client: &'a dyn ProofClient,
         scope: &'a Scope,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
-        Box::pin(named_in_scope(client, scope, None))
+        Box::pin(named_in_scope(client, scope, None, false))
+    }
+    fn named<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        ids: &'a [OrganisationId],
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
+        Box::pin(async move {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let ids = ids.iter().map(|id| id.get()).collect();
+            named_in_scope(client, scope, Some(ids), false).await
+        })
     }
     fn selectable<'a>(
         &'a self,
@@ -316,14 +333,17 @@ impl OrganisationDirectory for Directory {
             }
             let tenant_wide = scope.principal().is_some()
                 || decide_proof(client, scope, TENANT_WIDE).await?.allowed;
-            Ok(named_in_scope(client, scope, None)
-                .await?
-                .into_iter()
-                .filter(|company| {
-                    !company.archived
-                        && (tenant_wide || reaches_without_tenant_wide(scope, company.id.get()))
-                })
-                .collect())
+            // Without the tenant-wide reach only the current company is
+            // selectable, so only it is read.
+            let ids = if tenant_wide {
+                None
+            } else {
+                match scope.current_company() {
+                    Some(company) => Some(vec![company.get()]),
+                    None => return Ok(Vec::new()),
+                }
+            };
+            named_in_scope(client, scope, ids, true).await
         })
     }
     fn target<'a>(
@@ -394,7 +414,7 @@ impl OrganisationDirectory for Directory {
                 .map(OrganisationId::get)
                 .collect();
             // Archived desks stay listed, flagged, so their records can be read.
-            named_in_scope(client, scope, Some(ids)).await
+            named_in_scope(client, scope, Some(ids), false).await
         })
     }
 }
@@ -907,9 +927,11 @@ pub async fn preview_create_with_fields(
     Ok(Ok(CreatePreview { company, matches }))
 }
 
-/// One bounded page of the administration index: search over name, code, legal name, email
-/// and jurisdiction, skipping a restricted column, with each row's parent
-/// name and whether it is the tenant's primary company.
+/// One page of companies: search words over name, code and legal name
+/// through the indexed `search_vector`, with each row's parent name and
+/// whether it is the tenant's primary company. The caller sets the
+/// statement bounds of its connection (`core.company.list` reads under
+/// Grid's `BOUNDS`).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SearchQuery {
@@ -952,20 +974,27 @@ pub async fn search(
     }
     authorize_key(client, scope, crate::contributions::LIST).await?;
     let masked = restrictions(client, scope).await?;
-    let columns = ["name", "code", "legal_name", "email", "jurisdiction"]
-        .into_iter()
-        .filter(|column| !masked.contains(*column))
-        .map(|column| format!("c.{column} ILIKE $3"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let pattern = format!("%{}%", escape_like(query.search.trim()));
+    // Words match through the indexed `search_vector` (name, code, legal
+    // name; none of them restrictable), each as a word prefix, all required.
+    let words = search_words(&query.search);
+    if words.is_none() && !query.search.trim().is_empty() {
+        return Ok(SearchPage {
+            entries: Vec::new(),
+            total: 0,
+        });
+    }
     let filter = format!(
-        "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND ($3='%%' OR {columns})"
+        "c.tenant_id=$1 AND c.deleted_at IS NULL AND ($2='' OR c.status=$2) AND {}",
+        if words.is_some() {
+            "c.search_vector @@ to_tsquery('simple', $3::text)"
+        } else {
+            "$3::text IS NULL"
+        }
     );
     let total: i64 = client
         .query_one(
             &format!("SELECT count(*) FROM companies c WHERE {filter}"),
-            &[&scope.tenant(), &query.status, &pattern],
+            &[&scope.tenant(), &query.status, &words],
         )
         .await?
         .get(0);
@@ -976,14 +1005,22 @@ pub async fn search(
         .map(|column| format!("c.{column}"))
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM companies c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id WHERE {filter} ORDER BY c.name, c.id LIMIT $4 OFFSET $5");
+    // With words, page from the indexed matches: ordered by name with a
+    // limit, PostgreSQL would otherwise walk the tenant's name index and test
+    // every company against the words until the page fills.
+    let page = if words.is_some() {
+        format!("WITH matched AS MATERIALIZED (SELECT c.id, c.name FROM companies c WHERE {filter}), page AS (SELECT id FROM matched ORDER BY name, id LIMIT $4 OFFSET $5) SELECT {columns} FROM page JOIN companies c ON c.tenant_id=$1 AND c.id=page.id")
+    } else {
+        format!("SELECT {columns} FROM companies c WHERE {filter} ORDER BY c.name, c.id LIMIT $4 OFFSET $5")
+    };
+    let sql = format!("SELECT {columns},p.name AS parent_name,(t.company_id IS NOT NULL) AS is_primary FROM ({page}) c LEFT JOIN companies p ON p.tenant_id=c.tenant_id AND p.id=c.parent_id AND p.deleted_at IS NULL LEFT JOIN tenant_primary_companies t ON t.tenant_id=c.tenant_id AND t.company_id=c.id ORDER BY c.name, c.id");
     let entries = client
         .query(
             &sql,
             &[
                 &scope.tenant(),
                 &query.status,
-                &pattern,
+                &words,
                 &query.page_size,
                 &((query.page - 1) * query.page_size),
             ],
@@ -997,6 +1034,19 @@ pub async fn search(
         })
         .collect();
     Ok(SearchPage { entries, total })
+}
+/// The `tsquery` for `to_tsquery('simple', …)`: each run of letters and
+/// digits, lower-cased, as a required prefix, at most eight. Nothing typed
+/// reaches the query as syntax. `None` when the text holds no word.
+fn search_words(text: &str) -> Option<String> {
+    let words = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(8)
+        .map(|word| format!("'{word}':*"))
+        .collect::<Vec<_>>();
+    (!words.is_empty()).then(|| words.join(" & "))
 }
 /// LIKE metacharacters are literal: search is a case-insensitive substring.
 pub fn escape_like(value: &str) -> String {

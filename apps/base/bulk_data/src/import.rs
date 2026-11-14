@@ -312,7 +312,7 @@ impl Work<'_> {
         }
         let rows = client
             .query(
-                "SELECT r.record_id FROM base_bulk_data_rows r JOIN base_bulk_data_runs p ON p.tenant_id=r.tenant_id AND p.id=r.run_id WHERE r.tenant_id=$1 AND r.run_id=$2 AND r.pass='run' AND r.source_key=$3 AND r.record_id IS NOT NULL AND p.started_by=$4 AND p.company_id=$5 AND p.state='completed' LIMIT 2",
+                "SELECT r.record_id FROM base_bulk_data_rows r JOIN base_bulk_data_runs p ON p.tenant_id=r.tenant_id AND p.id=r.run_id WHERE r.tenant_id=$1 AND r.run_id=$2 AND r.pass='run' AND r.source_key=$3 AND r.record_id IS NOT NULL AND p.started_by=$4 AND p.company_id=$5 AND p.state='completed' AND cardinality(p.erased_for)=0 LIMIT 2",
                 &[&self.scope.tenant(), &parent, &key, &self.scope.user(), &self.company],
             )
             .await?;
@@ -406,14 +406,18 @@ fn id_value(field: &Field, id: String) -> std::result::Result<Option<Value>, Str
 }
 
 /// Locks the run (no counts: `store::lock`); may this pass still record?
+/// Only for the job the run names: a pass cancelled and started again has a
+/// new job, and the old one may still hold rows planned with the mapping it
+/// began with.
 async fn current(
     tx: &MutationTransaction<'_>,
     scope: &Scope,
     run: i64,
     pass: Pass,
+    job: i64,
 ) -> Result<Option<Run>> {
     let run = store::lock(tx.sql(), scope, run).await?;
-    Ok((run.state.working() && run.pass == Some(pass)).then_some(run))
+    Ok((run.state.working() && run.pass == Some(pass) && run.job_id == Some(job)).then_some(run))
 }
 
 async fn record(
@@ -447,7 +451,7 @@ impl BulkData {
         let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
         let run = store::load(&*client, &scope, id, false).await?;
-        if !run.state.working() || run.pass != Some(pass) {
+        if !run.state.working() || run.pass != Some(pass) || run.job_id != Some(execution.job_id) {
             return Ok(());
         }
         let registered = self
@@ -540,7 +544,7 @@ impl BulkData {
         let mut tx = execution
             .begin(client, "base.bulk_data.import.check")
             .await?;
-        let Some(run) = current(&tx, scope, work.run, work.pass).await? else {
+        let Some(run) = current(&tx, scope, work.run, work.pass, execution.job_id).await? else {
             return Ok(false);
         };
         let first = results.first().map_or(0, |result| result.row - 1);
@@ -574,7 +578,10 @@ impl BulkData {
         let mut tx = execution
             .begin(client, "base.bulk_data.import.continue")
             .await?;
-        if current(&tx, scope, id, pass).await?.is_none() {
+        if current(&tx, scope, id, pass, execution.job_id)
+            .await?
+            .is_none()
+        {
             return Ok(());
         }
         let job = self
@@ -609,7 +616,7 @@ impl BulkData {
         let mut tx = execution
             .begin(client, "base.bulk_data.import.finish")
             .await?;
-        let Some(old) = current(&tx, scope, id, pass).await? else {
+        let Some(old) = current(&tx, scope, id, pass, execution.job_id).await? else {
             return Ok(());
         };
         let state = match pass {
@@ -746,7 +753,9 @@ impl Work<'_> {
             _ => "base.bulk_data.import.row",
         };
         let mut tx = self.execution.begin(client, action).await?;
-        let Some(run) = current(&tx, &self.scope, self.run, self.pass).await? else {
+        let Some(run) =
+            current(&tx, &self.scope, self.run, self.pass, self.execution.job_id).await?
+        else {
             return Ok(false);
         };
         if run.next_row >= row {
@@ -827,7 +836,14 @@ impl Work<'_> {
                                 .execution
                                 .begin(client, "base.bulk_data.import.row")
                                 .await?;
-                            let Some(run) = current(&tx, &self.scope, self.run, self.pass).await?
+                            let Some(run) = current(
+                                &tx,
+                                &self.scope,
+                                self.run,
+                                self.pass,
+                                self.execution.job_id,
+                            )
+                            .await?
                             else {
                                 return Ok(false);
                             };

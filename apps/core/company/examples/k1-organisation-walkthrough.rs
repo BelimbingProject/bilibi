@@ -234,6 +234,10 @@ async fn main() -> Result<(), Error> {
     }
 
     println!("== legal entity types");
+    // The catalogs are global: only the platform operator's tenant writes them.
+    client
+        .batch_execute("INSERT INTO platform_operator(tenant_id) VALUES(1) ON CONFLICT DO NOTHING")
+        .await?;
     let llp = companies
         .create_legal_entity_type(
             &manager,

@@ -75,9 +75,9 @@ All HTTP calls are `POST` with `Content-Type: text/plain` and a JSON body, so a 
 | `error` | A refused frame (`refused`, `invalid`, `rate_limited`, `unavailable`), with the `id` of the message or file announcement it refuses; the socket stays open |
 | `closed` | `{reason: "refused" \| "ended" \| "rate_limited" \| "unavailable"}`, then the socket closes |
 
-A text frame is at most 32 KiB and a binary frame one chunk with its header (64 KiB + 8 bytes); a larger frame ends the socket without a `closed` frame. An announced file's size is held against `visitor.upload_buffer_bytes` until the channel has the file or it is dropped; an announcement beyond it is answered `rate_limited` and may be sent again. A peer that does not take a frame within 10 seconds is disconnected.
+A text frame is at most 32 KiB and a binary frame one chunk with its header (64 KiB + 8 bytes); a larger frame ends the socket without a `closed` frame. A file's bytes are held against `visitor.upload_buffer_bytes` from the chunk that brings them until the channel has the file or it is dropped; an announcement holds nothing. One sender may hold one file's size limit (`visitor.upload_max_bytes`) of that budget across all its sockets. A chunk beyond either is answered `{"type":"error","id":…,"code":"rate_limited"}`, the file is dropped, and it may be sent again. A peer that does not take a frame within 10 seconds is disconnected.
 
-Before any frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A socket also rechecks every 10 seconds, and a revocation of its session or its subject closes it at once.
+A frame is first counted against the session's budget; one over it is answered `rate_limited` and reads nothing. Before a counted frame acts the host proves the token and origin again and asks the channel for the site again; a session that no longer holds closes the socket with `ended`. A revocation of its session or its subject on this server closes a socket at once. An idle socket rechecks every 60 seconds, which finds a session that ran out, or was ended on another server, while nobody typed.
 
 ## The browser client
 
@@ -115,12 +115,13 @@ Platform capability `admin.system.visitor.manage`; group Visitor in the settings
 | `visitor.messages_per_minute` | 60 | Frames per session; the 100th refusal in a row closes the socket |
 | `visitor.sockets_per_session` | 3 | Open sockets per session, per server |
 | `visitor.sockets_per_sender` | 20 | Open sockets per network address, per server, whatever the session, so one address cannot hold every place of `visitor.sockets_total`; an upgrade over it is refused `429` |
+| `visitor.sockets_per_site` | 500 | Open sockets per site, per server, counted from the socket's `hello`; keep it below `visitor.sockets_total`, so one site cannot hold every place. A `hello` over it closes the socket with `rate_limited` |
 | `visitor.sockets_total` | 2,000 | Open visitor sockets per server; staff and portal sockets have their own places |
 | `visitor.upload_max_bytes` | 5 MiB | A file's size; Media's own limit can only be smaller |
 | `visitor.uploads_per_minute` | 6 | Files per session |
-| `visitor.upload_buffer_bytes` | 256 MiB | Memory each server holds for visitor files still arriving, whatever the number of sockets; keep it at or above the file size limit |
+| `visitor.upload_buffer_bytes` | 256 MiB | Memory each server holds for visitor files still arriving, whatever the number of sockets; keep it at or above the file size limit. One sender holds at most one file size limit of it |
 
-Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address, or the /64 network of its IPv6 address, which one subscriber usually holds whole. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session and per-sender socket counters grow with `visitor.sockets_total`. A changed setting applies within two seconds.
+Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address, or the /64 network of its IPv6 address, which one subscriber usually holds whole. A server counts at most 65,536 sender addresses a minute and refuses a new one beyond that; its per-session, per-sender and per-site socket counters grow with `visitor.sockets_total`. Behind a reverse proxy on another machine, list the proxy in `session.trusted_proxies` (Base Session), or every visitor counts as the proxy's one address. A changed setting applies within two seconds.
 
 ## Staff side
 
@@ -133,4 +134,4 @@ Counts are per server, as the HTTP throttles' are. A sender is its IPv4 address,
     cargo run -p bilibi-web --example visitor-walkthrough           # prepare: every case, exits non-zero on a FAIL
     cargo run -p bilibi-web --example visitor-walkthrough -- serve  # the host for a browser, with a staff control address
 
-`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget and a stalled file, rate limits, open sockets per sender (an IPv6 /64 counts as one), renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.
+`prepare` plays a browser by hand against the real host: each refused origin, a session over the socket with messages, typing, a clean and an infected file (stored through Media by a declared principal and settled by the scan), a file of several 64 KiB chunks, an oversize file and a broken chunk, the in-transit budget (an announcement holds nothing, one sender's share) and a stalled file, rate limits (a frame over its budget reads no session; an idle socket is not rechecked every 10 seconds), open sockets per sender (an IPv6 /64 counts as one) and per site, senders behind a proxy on another machine before and after it is listed, renewal, expiry, a revoked session and its socket, an origin removed from a site, another tenant's visitor, and a visitor token sent as a cookie, a bearer and over every live socket to staff, portal and agent routes. The file's header lists `serve`'s addresses.

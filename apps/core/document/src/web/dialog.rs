@@ -42,18 +42,18 @@ struct FormView<'a> {
     body: Html,
 }
 
-/// The uploads a page that offers the dialogs declares at mount. The file
-/// input is resumable: its chunks wait on Media's staging disk, so a dropped
-/// connection or a reload carries on from the bytes already there, up to
-/// Media's staging limit (`docs/live-pages.md`, Resumable uploads).
-pub fn uploads() -> Uploads {
-    Uploads::new([
-        UploadSpec::resumable(UPLOAD, bilibi_ui::upload::MAX_RESUMABLE_FILE_SIZE).accept(
-            FILE_TYPES
-                .iter()
-                .map(|(extension, _)| format!(".{extension}")),
-        ),
-    ])
+/// The uploads a page that offers the dialogs declares at mount, with the
+/// tenant's upload limit (`Documents::upload_limit`) so a larger file is
+/// refused before its bytes arrive. The file input is resumable: its chunks
+/// wait on Media's staging disk, so a dropped connection or a reload carries
+/// on from the bytes already there, up to Media's staging limit
+/// (`docs/live-pages.md`, Resumable uploads).
+pub fn uploads(limit: u64) -> Uploads {
+    Uploads::new([UploadSpec::resumable(UPLOAD, limit).accept(
+        FILE_TYPES
+            .iter()
+            .map(|(extension, _)| format!(".{extension}")),
+    )])
 }
 
 /// The posted field each contract input path refuses.

@@ -28,12 +28,12 @@ use crate::{
 use bilibi_artifacts::{Artifacts, Operation, Owner, Reference};
 use bilibi_audit::{record_action, Attribution};
 use bilibi_authz::{authorize_proof, holds_proof};
-use bilibi_database::{Change, Error, MutationBoundary, Result};
+use bilibi_database::{Change, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_media::{
     AttachmentSubject, Media, Rules as MediaRules, ScanState as MediaScanState, SubjectAction,
     SubjectOwner, Upload as MediaUpload,
 };
-use bilibi_party_ids::OrganisationId;
+use bilibi_party_ids::{OrganisationId, PersonId};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{AccountKind, PartyProofs, ProofClient, ProofFuture, ReadClient, Scope};
 use serde_json::{json, Value};
@@ -114,26 +114,40 @@ impl SubjectOwner for DocumentFiles {
             }
         })
     }
+    /// A held upload's Media file belongs to `person` while it is the file of
+    /// a revision of a document related to them (`privacy.rs`): the erasure
+    /// keeps that link until its bytes are removed.
+    fn person_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        person: PersonId,
+        subject_id: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move {
+            crate::privacy::person_file(client, scope.tenant(), person.get(), subject_id).await
+        })
+    }
 }
 
-const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
+pub(crate) const COLUMNS: &str = "id,company_id,subject::text AS subject,artifact_id,media_public_id,file_name,content_type,byte_size,sha256,scan_status,state,stored_by";
 
 /// One ledger row.
-struct Ledger {
-    id: i64,
-    company_id: i64,
+pub(crate) struct Ledger {
+    pub(crate) id: i64,
+    pub(crate) company_id: i64,
     subject: String,
-    artifact_id: Option<String>,
+    pub(crate) artifact_id: Option<String>,
     media_public_id: Option<String>,
     file_name: String,
     content_type: String,
     byte_size: i64,
     sha256: String,
     scan_status: String,
-    state: String,
+    pub(crate) state: String,
     stored_by: i64,
 }
-fn from_row(row: &Row) -> Ledger {
+pub(crate) fn from_row(row: &Row) -> Ledger {
     Ledger {
         id: row.get("id"),
         company_id: row.get("company_id"),
@@ -150,7 +164,7 @@ fn from_row(row: &Row) -> Ledger {
     }
 }
 /// The values audit keeps for a ledger row: no content, no storage path.
-fn audit_values(row: &Ledger) -> Value {
+pub(crate) fn audit_values(row: &Ledger) -> Value {
     json!({
         "artifact_id": row.artifact_id,
         "media_public_id": row.media_public_id,
@@ -168,6 +182,35 @@ impl Owner for DocumentFiles {
     fn owner_id(&self) -> &'static str {
         ARTIFACT_OWNER
     }
+    /// An access export reads the files of the documents related to the
+    /// request's person (`privacy.rs`).
+    fn disclosure_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        grant: &'a bilibi_personal_data::Disclosure,
+        subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move {
+            crate::privacy::person_file(client, grant.tenant(), grant.person().get(), subject).await
+        })
+    }
+    /// An erasure deletes the files of the documents related to the
+    /// request's person (`privacy.rs`).
+    fn erasure_subject<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        grant: &'a bilibi_personal_data::Erasure,
+        subject: &'a str,
+    ) -> ProofFuture<'a, bool> {
+        Box::pin(async move {
+            match grant.person() {
+                Some(person) => {
+                    crate::privacy::person_file(client, grant.tenant(), person.get(), subject).await
+                }
+                None => Ok(false),
+            }
+        })
+    }
     fn authorize<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -181,6 +224,15 @@ impl Owner for DocumentFiles {
             match operation {
                 Operation::Create | Operation::Retain
                     if scope.principal() == Some(crate::scan::PRINCIPAL) =>
+                {
+                    parties
+                        .organisation_name(client, scope, company)
+                        .await?
+                        .ok_or(Error::NotFound)?;
+                }
+                Operation::Delete
+                    if scope.principal() == Some(crate::discard::PRINCIPAL)
+                        || scope.principal() == Some(crate::deletion::PRINCIPAL) =>
                 {
                     parties
                         .organisation_name(client, scope, company)
@@ -270,9 +322,28 @@ impl Owner for DocumentFiles {
                         }
                     }
                 }
+                // The cleaner deletes only a file its job already took out of
+                // reach of every write (README, Files and scanning).
+                Operation::Delete if scope.principal() == Some(crate::discard::PRINCIPAL) => {
+                    authorize_proof(client, scope, crate::contributions::DISCARD_SETTLE).await?;
+                    row.state == "discarding"
+                }
                 Operation::Delete => {
-                    authorize_proof(client, scope, MANAGE).await?;
+                    let deleter = scope.principal() == Some(crate::deletion::PRINCIPAL);
+                    authorize_proof(
+                        client,
+                        scope,
+                        if deleter {
+                            crate::contributions::DELETION_SETTLE
+                        } else {
+                            MANAGE
+                        },
+                    )
+                    .await?;
                     match row.state.as_str() {
+                        // The deleter only ever finishes a delete a person
+                        // confirmed: an attached file of a deleting document.
+                        "reserved" | "stored" if deleter => false,
                         "reserved" | "stored" => own,
                         "attached" => client
                             .query_opt(
@@ -316,6 +387,59 @@ impl Owner for DocumentFiles {
                 Operation::Purge => false,
             };
             if allowed {
+                Ok(())
+            } else {
+                Err(Error::Forbidden)
+            }
+        })
+    }
+    /// A manager's `Retain` on a set (the Retention due list reads every
+    /// managed file) is one query: each file attached to an undeleted
+    /// document this person may manage now. Anything else is asked one by one.
+    fn authorize_all<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        company: OrganisationId,
+        operation: Operation,
+        references: &'a [Reference],
+    ) -> ProofFuture<'a, ()> {
+        Box::pin(async move {
+            if operation != Operation::Retain || scope.principal().is_some() {
+                for reference in references {
+                    Owner::authorize(self, client, scope, company, operation, Some(reference))
+                        .await?;
+                }
+                return Ok(());
+            }
+            let parties = PARTIES.get().ok_or(Error::Forbidden)?;
+            parties.organisation(client, scope, company).await?;
+            authorize_proof(client, scope, MANAGE).await?;
+            store::reader(client, scope).await?;
+            let mut subjects = references
+                .iter()
+                .map(|reference| {
+                    (reference.kind == FILE_KIND)
+                        .then(|| uuid::Uuid::parse_str(&reference.subject).ok())
+                        .flatten()
+                        .map(|subject| subject.to_string())
+                        .ok_or(Error::NotFound)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            subjects.sort_unstable();
+            subjects.dedup();
+            let managed: i64 = client
+                .query_opt(
+                    "SELECT count(*) FROM core_document_files f WHERE f.tenant_id=$1 AND f.company_id=$2 AND f.subject=ANY($3::text[]::uuid[]) AND f.state='attached'
+                       AND EXISTS (SELECT 1 FROM core_document_revisions r JOIN core_documents d ON d.tenant_id=r.tenant_id AND d.id=r.document_id
+                         JOIN core_document_access a ON a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$4 AND a.can_manage AND (a.expires_at IS NULL OR a.expires_at > now())
+                         WHERE r.tenant_id=f.tenant_id AND r.artifact_id=f.artifact_id AND d.deleting_at IS NULL)",
+                    &[&scope.tenant(), &company.get(), &subjects, &scope.user()],
+                )
+                .await?
+                .ok_or(Error::Internal)?
+                .get(0);
+            if usize::try_from(managed).ok() == Some(subjects.len()) {
                 Ok(())
             } else {
                 Err(Error::Forbidden)
@@ -379,7 +503,11 @@ fn media_error(error: bilibi_media::Error) -> WriteError {
 }
 
 /// The upload limit: the tenant's, never above the operator's.
-async fn upload_limit(client: &Client, scope: &Scope, settings: &Settings) -> Result<u64> {
+pub(crate) async fn upload_limit(
+    client: &Client,
+    scope: &Scope,
+    settings: &Settings,
+) -> Result<u64> {
     let tenant = settings
         .get(client, scope, Target::Tenant, MAX_UPLOAD_BYTES)
         .await?
@@ -396,6 +524,7 @@ async fn upload_limit(client: &Client, scope: &Scope, settings: &Settings) -> Re
 
 /// Checks the upload, commits its reserved ledger row, stores the bytes
 /// through `base/artifacts` and marks the row stored.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
     client: &mut Client,
     scope: &Scope,
@@ -403,6 +532,7 @@ pub(crate) async fn store(
     artifacts: &Artifacts,
     media: &Media,
     settings: &Settings,
+    queue: &bilibi_queue::Queue,
     upload: Upload<'_>,
 ) -> WriteResult<StoredFile> {
     authorize_proof(&*client, scope, MANAGE).await?;
@@ -472,6 +602,7 @@ pub(crate) async fn store(
             })
         })
         .await?;
+    crate::discard::schedule(queue, &mut tx, tenant, reserved.id).await?;
     tx.commit().await?;
 
     let staged = media
@@ -698,31 +829,21 @@ pub(crate) async fn attached_document(
     Ok(row.map(|row| row.get(0)))
 }
 
-/// Removes metadata only after every Artifact has accepted deletion. Until
-/// this commits, the document and its full revision history remain available
-/// to retention and legal-hold checks.
+/// Removes metadata only after every Artifact has accepted deletion, in the
+/// deletion job's transaction (`deletion.rs`). Until this commits, the
+/// document and its full revision history remain available to retention and
+/// legal-hold checks. A document no longer deleting (finished meanwhile) is
+/// left alone.
 pub(crate) async fn finalize_document_delete(
-    client: &mut Client,
-    scope: &Scope,
-    boundary: &MutationBoundary,
+    tx: &mut MutationTransaction<'_>,
+    tenant: i64,
     document: i64,
 ) -> Result<()> {
-    authorize_proof(&*client, scope, MANAGE).await?;
-    if !store::permission(&*client, scope, document, "manage").await? {
-        return Err(Error::Forbidden);
-    }
-    let mut tx = boundary
-        .begin(
-            client,
-            scope.mutation_context("core.document.delete.finalize"),
-        )
-        .await?;
-    let tenant = scope.tenant();
     tx.mutate(move |sql| Box::pin(async move {
-        let row = sql.query_opt(
+        let Some(row) = sql.query_opt(
             "SELECT name,version FROM core_documents WHERE tenant_id=$1 AND id=$2 AND deleting_at IS NOT NULL FOR UPDATE",
             &[&tenant, &document],
-        ).await?.ok_or(Error::NotFound)?;
+        ).await? else { return Ok(((), Vec::new())); };
         let mut changes = Vec::new();
         for row in sql.query(
             "DELETE FROM core_document_marks WHERE tenant_id=$1 AND document_id=$2 RETURNING id,user_id,favourite,following",
@@ -775,8 +896,7 @@ pub(crate) async fn finalize_document_delete(
         sql.execute("DELETE FROM core_documents WHERE tenant_id=$1 AND id=$2", &[&tenant, &document]).await?;
         changes.push(Change { kind: crate::RECORD.into(), id: document, old: json!({"name":row.get::<_,String>(0),"version":row.get::<_,i64>(1),"deleting":true}), new: json!({}) });
         Ok(((), changes))
-    })).await?;
-    tx.commit().await
+    })).await
 }
 
 /// Deletes unattached files from `base/artifacts`, then their ledger rows.
