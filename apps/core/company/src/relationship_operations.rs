@@ -196,6 +196,7 @@ impl ReadHandler for Read {
                         page: input["page"].as_i64().unwrap_or(1).max(1),
                         page_size: input["page_size"].as_i64().unwrap_or(25).clamp(1, 100),
                     };
+                    let search = bilibi_agent_api::text_field(input, "search");
                     let links = match (input["company_id"].as_i64(), input["person_id"].as_i64()) {
                         (Some(company), None) => {
                             let company =
@@ -206,6 +207,7 @@ impl ReadHandler for Read {
                                 &bound.directory,
                                 company,
                                 history,
+                                &search,
                                 window,
                             )
                             .await
@@ -218,13 +220,18 @@ impl ReadHandler for Read {
                                 &bound.directory,
                                 person,
                                 history,
+                                &search,
                                 window,
                             )
                             .await
                         }
                         _ => return Err(Error::Invalid.into()),
                     }
-                    .map_err(not_found)?;
+                    .map_err(|error| match error {
+                        // Too long, or too many linked people to search by name.
+                        Error::Refused(message) => bilibi_agent_api::invalid("search", message),
+                        other => not_found(other),
+                    })?;
                     return Ok(Output::Page(Page {
                         entries: record(Value::Array(
                             links.entries.iter().map(|entry| entry.to_json()).collect(),
@@ -531,6 +538,7 @@ fn links_schema() -> Value {
     json!({"type":"object","properties":{
         "company_id":id_schema(),"person_id":id_schema(),
         "include_history":{"type":"boolean","description":"Also ended and unlinked links."},
+        "search":{"type":"string","maxLength":200,"description":"Only links whose other party's name contains this: a company's name, legal name or code, or a person's name."},
         "page":{"type":"integer","minimum":1,"description":"Page to read, from 1."},
         "page_size":{"type":"integer","minimum":1,"maximum":100,"description":"Links per page, 25 by default."}
     }})
@@ -575,7 +583,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "core/company.relationships.
         Operation { key: "core.company.relationship_role.create", title: "Create a relationship role", summary: "Add a role to your tenant's catalog with a stable code, a name and its inverse. Confers no access.", keywords: &["role", "catalog", "add"], capability: CREATE, input: create_role_schema, output: role_output, handler: Handler::SafeWrite(&Write::CreateRole), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship_role.update", title: "Rename a relationship role", summary: "Change a role's name and inverse name; its id, code and every link stay.", keywords: &["role", "rename"], capability: UPDATE, input: update_role_schema, output: role_output, handler: Handler::SafeWrite(&Write::UpdateRole), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship_role.retire", title: "Retire a relationship role", summary: "Stop new assignments of a role; existing links and history are kept.", keywords: &["role", "retire", "archive"], capability: UPDATE, input: retire_role_schema, output: role_output, handler: Handler::SafeWrite(&Write::RetireRole), channels: Channels::Every, step_up: &[] },
-        Operation { key: "core.company.relationship.list", title: "List relationships", summary: "One page of the links on a company's page (outgoing and incoming) or on a person's page, current by default; meta.page.total counts them all.", keywords: &["vendor", "customer", "partner", "supplier", "contact", "links"], capability: VIEW, input: links_schema, output: links_output, handler: Handler::Read(&Read::Links), channels: Channels::Every, step_up: &[] },
+        Operation { key: "core.company.relationship.list", title: "List relationships", summary: "One page of the links on a company's page (outgoing and incoming) or on a person's page, current by default, optionally narrowed by a search on the other party's name; meta.page.total counts them all.", keywords: &["vendor", "customer", "partner", "supplier", "contact", "links"], capability: VIEW, input: links_schema, output: links_output, handler: Handler::Read(&Read::Links), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship.get", title: "Read a relationship", summary: "One link by id, from its source company's perspective.", keywords: &["link", "relationship"], capability: VIEW, input: link_schema, output: link_output, handler: Handler::Read(&Read::Link), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship.assign", title: "Assign a relationship role", summary: "Link a company to an organisation or person under a role, with optional inclusive dates. Roles may overlap; an exact duplicate is refused.", keywords: &["vendor", "customer", "prospect", "partner", "link", "add"], capability: UPDATE, input: assign_schema, output: link_output, handler: Handler::SafeWrite(&Write::Assign), channels: Channels::Every, step_up: &[] },
         Operation { key: "core.company.relationship.update", title: "Change relationship dates", summary: "Replace a link's effective dates using its current version.", keywords: &["link", "dates", "edit"], capability: UPDATE, input: update_schema, output: link_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },

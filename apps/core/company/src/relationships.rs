@@ -179,14 +179,107 @@ fn select(filter: &str) -> String {
 /// The most links one page holds. Every person on a page is named in one
 /// Principal Directory call, so a page stays far below its ceiling.
 pub const MAX_PAGE_SIZE: i64 = 300;
+/// The most linked people a search can name: the Principal Directory's
+/// ceiling. A company linked to more is refused a search, never given a
+/// partial one.
+const MAX_SEARCHED_PEOPLE: usize = bilibi_principal_directory::MAX_CEILING;
 /// One page of `filter` (its page size `$4`, its offset `$5`) in the order a
 /// party's page reads: the other company's name, then the label, then id.
 /// `outgoing` is true on the rows whose source is the listed party. A person
 /// target has no name here (Person names it), so links to people follow the
-/// companies, by label and then in the order they were made.
+/// companies, by label and then in the order they were made; under a search
+/// they follow in the name order the Principal Directory gave.
+///
+/// A search (`$7`, an escaped ILIKE pattern) keeps the links whose other
+/// company's name, legal name or code contains it, and the links to the
+/// people of `$6`, the linked people whose names matched.
 fn page_of(filter: &str, outgoing: &str) -> String {
-    format!("{} ORDER BY lower(CASE WHEN {outgoing} THEN COALESCE(NULLIF(btrim(o.legal_name),''),o.name) ELSE COALESCE(NULLIF(btrim(s.legal_name),''),s.name) END) NULLS LAST,lower(CASE WHEN {outgoing} THEN t.name ELSE t.inverse_name END),r.id LIMIT $4 OFFSET $5", select(filter))
+    let matches = |c: &str| {
+        format!("({c}.name ILIKE $7 OR COALESCE({c}.legal_name,'') ILIKE $7 OR COALESCE({c}.code,'') ILIKE $7)")
+    };
+    format!(
+        "{} AND ($7::text IS NULL OR CASE WHEN {outgoing} THEN (r.target_person_id=ANY($6::bigint[]) OR {}) ELSE {} END) ORDER BY lower(CASE WHEN {outgoing} THEN COALESCE(NULLIF(btrim(o.legal_name),''),o.name) ELSE COALESCE(NULLIF(btrim(s.legal_name),''),s.name) END) NULLS LAST,array_position($6::bigint[],r.target_person_id),lower(CASE WHEN {outgoing} THEN t.name ELSE t.inverse_name END),r.id LIMIT $4 OFFSET $5",
+        select(filter),
+        matches("o"),
+        matches("s")
+    )
 }
+/// What narrows a party's links besides its page: `history` adds ended and
+/// unlinked links; under a search, `pattern` is the escaped text and
+/// `persons` the linked people whose names matched it.
+struct Narrow {
+    history: bool,
+    persons: Option<Vec<i64>>,
+    pattern: Option<String>,
+}
+impl Narrow {
+    /// `persons` reads the people `party` links to (`$1` tenant, `$2` party,
+    /// `$3` history, `$4` limit), only when there is a search; `None` when
+    /// the party links to no one.
+    async fn new(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        directory: &PrincipalDirectory,
+        party: i64,
+        history: bool,
+        search: &str,
+        persons: Option<&str>,
+    ) -> Result<Self> {
+        let search = search.trim();
+        if search.is_empty() {
+            return Ok(Self {
+                history,
+                persons: None,
+                pattern: None,
+            });
+        }
+        if search.chars().count() > MAX_SEARCH {
+            return Err(Error::refused(format!(
+                "Search for at most {MAX_SEARCH} characters."
+            )));
+        }
+        let limit = MAX_SEARCHED_PEOPLE as i64 + 1;
+        let candidates = match persons {
+            Some(sql) => client
+                .query(sql, &[&scope.tenant(), &party, &history, &limit])
+                .await?
+                .iter()
+                .map(|row| PrincipalRef::new(PrincipalKind::Person, row.get(0)))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| Error::Internal)?,
+            None => Vec::new(),
+        };
+        if candidates.len() > MAX_SEARCHED_PEOPLE {
+            return Err(Error::refused(format!(
+                "This company is linked to more than {MAX_SEARCHED_PEOPLE} people, too many to search by name. Page through the list instead."
+            )));
+        }
+        let persons = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            directory
+                .rank(
+                    client,
+                    scope,
+                    &candidates,
+                    &Query::default().search(search).ceiling(MAX_SEARCHED_PEOPLE),
+                )
+                .await
+                .map_err(|_| Error::Internal)?
+                .named
+                .iter()
+                .map(|named| named.principal.id())
+                .collect()
+        };
+        Ok(Self {
+            history,
+            persons: Some(persons),
+            pattern: Some(format!("%{}%", organisation::escape_like(search))),
+        })
+    }
+}
+/// The longest search text, the Principal Directory's own limit.
+const MAX_SEARCH: usize = 200;
 /// One page of a party's links and how many links the party has in all.
 #[derive(Clone, Debug)]
 pub struct Links {
@@ -212,7 +305,7 @@ async fn links(
     directory: &PrincipalDirectory,
     party: PartyId,
     sql: &str,
-    history: bool,
+    narrow: Narrow,
     window: Window,
 ) -> Result<Links> {
     let id = match party {
@@ -220,14 +313,41 @@ async fn links(
         PartyId::Person(id) => id.get(),
     };
     let (limit, offset) = window.bounds();
+    let Narrow {
+        history,
+        persons,
+        pattern,
+    } = narrow;
     let rows = client
-        .query(sql, &[&scope.tenant(), &id, &history, &limit, &offset])
+        .query(
+            sql,
+            &[
+                &scope.tenant(),
+                &id,
+                &history,
+                &limit,
+                &offset,
+                &persons,
+                &pattern,
+            ],
+        )
         .await?;
     let total = match rows.first() {
         Some(row) => row.get("total"),
         // A page past the end still says how many links there are.
         None if offset > 0 => client
-            .query(sql, &[&scope.tenant(), &id, &history, &1_i64, &0_i64])
+            .query(
+                sql,
+                &[
+                    &scope.tenant(),
+                    &id,
+                    &history,
+                    &1_i64,
+                    &0_i64,
+                    &persons,
+                    &pattern,
+                ],
+            )
             .await?
             .first()
             .map_or(0, |row| row.get("total")),
@@ -316,50 +436,84 @@ async fn entries(
     Ok(entries)
 }
 
+/// Current links only, unless `$3` asks for history too.
+const CURRENT: &str =
+    "($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))";
 /// One page of the links on a company's page: outgoing where it is the
 /// source and incoming where it is the target, under `admin.company.view`.
-/// `history` adds ended and unlinked links. A missing or cross-tenant
-/// company is `NotFound`.
+/// `history` adds ended and unlinked links. A non-blank `search` keeps the
+/// links whose other party's name contains it: a company's name, legal name
+/// or code, or a person's name as the Principal Directory gives it. A
+/// company linked to more people than the directory can search is refused
+/// (`Error::Refused`). A missing or cross-tenant company is `NotFound`.
 pub async fn list_for_company(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
     directory: &PrincipalDirectory,
     company: OrganisationId,
     history: bool,
+    search: &str,
     window: Window,
 ) -> Result<Links> {
     authorize_key(client, scope, VIEW).await?;
     organisation::require_live(client, scope, company.get()).await?;
+    let narrow = Narrow::new(
+        client,
+        scope,
+        directory,
+        company.get(),
+        history,
+        search,
+        Some(&format!("SELECT DISTINCT r.target_person_id FROM company_relationships r WHERE r.tenant_id=$1 AND r.source_organisation_id=$2 AND r.target_person_id IS NOT NULL AND {CURRENT} LIMIT $4")),
+    )
+    .await?;
     links(
         client,
         scope,
         directory,
         PartyId::Organisation(company),
-        &page_of("(r.source_organisation_id=$2 OR r.target_organisation_id=$2) AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))", "r.source_organisation_id=$2"),
-        history,
+        &page_of(
+            &format!("(r.source_organisation_id=$2 OR r.target_organisation_id=$2) AND {CURRENT}"),
+            "r.source_organisation_id=$2",
+        ),
+        narrow,
         window,
     )
     .await
 }
 /// One page of the links on a person's page: every company that relates to
-/// the person, under `admin.company.view`. The person's own identity is not
-/// read here; a caller shows the page under Person's own capability.
+/// the person, under `admin.company.view`. A non-blank `search` keeps the
+/// companies whose name, legal name or code contains it. The person's own
+/// identity is not read here; a caller shows the page under Person's own
+/// capability.
 pub async fn list_for_person(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
     directory: &PrincipalDirectory,
     person: PersonId,
     history: bool,
+    search: &str,
     window: Window,
 ) -> Result<Links> {
     authorize_key(client, scope, VIEW).await?;
+    // Only companies link to a person, so no person is searched for.
+    let narrow = Narrow::new(
+        client,
+        scope,
+        directory,
+        person.get(),
+        history,
+        search,
+        None,
+    )
+    .await?;
     links(
         client,
         scope,
         directory,
         PartyId::Person(person),
-        &page_of("r.target_person_id=$2 AND ($3 OR (r.unlinked_at IS NULL AND (r.effective_to IS NULL OR r.effective_to>=CURRENT_DATE)))", "false"),
-        history,
+        &page_of(&format!("r.target_person_id=$2 AND {CURRENT}"), "false"),
+        narrow,
         window,
     )
     .await
