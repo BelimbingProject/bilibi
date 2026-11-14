@@ -4,7 +4,7 @@
 //! [`Teams::plan_members`] and written by [`apply`], the one place a
 //! membership row changes, so a later rule (team roles) has one place to
 //! check.
-use crate::access::{authorize_team, load, load_visible, reach, seen, seen_parent};
+use crate::access::{authorize_team, hide_parent, load, load_visible, reach, seen, seen_parent};
 use crate::members::{apply, MemberPlan, MemberStep};
 use crate::tree::{parent_refusal, sibling_taken, tree_lock};
 use crate::{KINDS, MANAGE, VIEW};
@@ -538,6 +538,19 @@ impl Teams {
         version: i64,
         patch: &Value,
     ) -> Result<Checked<Team>> {
+        match self.plan_update(client, scope, id, version, patch).await? {
+            Ok(team) => Ok(Ok(hide_parent(client, scope, team).await?)),
+            Err(errors) => Ok(Err(errors)),
+        }
+    }
+    async fn plan_update(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        id: i64,
+        version: i64,
+        patch: &Value,
+    ) -> Result<Checked<Team>> {
         authorize_key(client, scope, MANAGE).await?;
         let before = load(client, scope, id, false).await?;
         if let Some(refusal) = authorize_team(client, scope, before.company_id, false).await? {
@@ -653,7 +666,7 @@ impl Teams {
             return Ok(Err(refusal));
         }
         let mut after = match self
-            .preview_update(tx.sql(), scope, id, version, patch)
+            .plan_update(tx.sql(), scope, id, version, patch)
             .await?
         {
             Ok(v) => v,
@@ -695,7 +708,7 @@ impl Teams {
                 })
             })
             .await?;
-        Ok(Ok(saved))
+        Ok(Ok(hide_parent(tx.sql(), scope, saved).await?))
     }
     /// Checks a membership change without writing: who it adds, removes or
     /// makes lead, and who it leaves alone because it already holds.

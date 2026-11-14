@@ -270,6 +270,40 @@ async fn main() -> Result<(), Failure> {
         "a hidden team cannot be chosen as the new parent of a team",
         attempt.as_ref().is_err_and(refused),
     )?;
+    let version = teams.get(&**client, &reader, open).await?.version;
+    let preview = teams
+        .preview_update(
+            &**client,
+            &reader,
+            open,
+            version,
+            &serde_json::json!({"name": "Company 2 crew"}),
+        )
+        .await?;
+    prove(
+        "a rename under a hidden parent does not answer for hidden siblings and hides the parent id",
+        preview.as_ref().is_ok_and(|t| t.parent_id.is_none() && t.name == "Company 2 crew"),
+    )?;
+    let mut tx = boundary
+        .begin(&mut client, reader.mutation_context("walkthrough.team"))
+        .await?;
+    let saved = teams
+        .update(
+            &mut tx,
+            &reader,
+            open,
+            version,
+            &serde_json::json!({"name": "Open crew renamed"}),
+        )
+        .await?
+        .map_err(|errors| format!("rename under hidden parent: {errors:?}"))?;
+    tx.commit().await?;
+    prove(
+        "a rename that keeps a hidden parent saves, returns no parent id and keeps the stored parent",
+        saved.parent_id.is_none()
+            && saved.name == "Open crew renamed"
+            && teams.get(&**client, &admin, open).await?.parent_id == Some(hidden),
+    )?;
     println!("Team reads stay within the companies the reader works in.");
     Ok(())
 }

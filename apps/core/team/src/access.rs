@@ -105,3 +105,25 @@ pub(crate) async fn authorize_team(
         Err(_) => Err(Error::NotFound),
     }
 }
+/// Clears `team.parent_id` when the parent is hidden from the reader, so a
+/// write result leaks no hidden id.
+pub(crate) async fn hide_parent(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    mut team: Team,
+) -> Result<Team> {
+    if team.parent_id.is_some() {
+        let reach = reach(client, scope).await?;
+        team.parent_id = client
+            .query_opt(
+                &format!(
+                    "SELECT p.id FROM core_teams p WHERE p.tenant_id=$1 AND p.id=$2 AND {}",
+                    seen("p", "$3")
+                ),
+                &[&scope.tenant(), &team.parent_id, &reach],
+            )
+            .await?
+            .map(|row| row.get(0));
+    }
+    Ok(team)
+}

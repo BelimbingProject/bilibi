@@ -1,6 +1,6 @@
 //! The tree of teams: one parent each, no loops, at most [`MAX_DEPTH`]
 //! levels, and distinct names among siblings.
-use crate::access::{load_visible, reach};
+use crate::access::{load_visible, reach, seen};
 use crate::facade::{invalid, FieldErrors, MAX_DEPTH};
 use bilibi_database::{MutationTransaction, Result};
 use bilibi_tenancy::Scope;
@@ -77,10 +77,14 @@ pub(crate) async fn sibling_taken(
     parent: Option<i64>,
     name: &str,
 ) -> Result<bool> {
+    let reach = reach(client, scope).await?;
     Ok(client
         .query_opt(
-            "SELECT 1 FROM core_teams WHERE tenant_id=$1 AND coalesce(parent_id,0)=coalesce($2::bigint,0) AND lower(name)=lower($3) AND id<>$4",
-            &[&scope.tenant(), &parent, &name, &team.unwrap_or(0)],
+            &format!(
+                "SELECT 1 FROM core_teams t WHERE t.tenant_id=$1 AND coalesce(t.parent_id,0)=coalesce($2::bigint,0) AND lower(t.name)=lower($3) AND t.id<>$4 AND {}",
+                seen("t", "$5")
+            ),
+            &[&scope.tenant(), &parent, &name, &team.unwrap_or(0), &reach],
         )
         .await?
         .is_some())
