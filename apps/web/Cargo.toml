@@ -43,6 +43,7 @@ futures-core.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
+mmdb-writer.workspace = true
 tokio-tungstenite.workspace = true
 bilibi-mail.workspace = true
 bilibi-notifications.workspace = true

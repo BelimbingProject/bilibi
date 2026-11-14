@@ -49,6 +49,24 @@ const DENIED: &str = "You do not have permission to terminate sessions.";
 const CURRENT: &str = "You cannot terminate your current session.";
 const USER_AGENT_SHOWN: usize = 80;
 
+#[derive(Template)]
+#[template(
+    source = r#"<span class="block tabular-nums text-ink-muted">{{ address }}</span>{% if let Some(place) = place %}<span class="block text-xs text-ink-subtle">{{ place }}</span>{% endif %}"#,
+    ext = "html"
+)]
+struct AddressCell<'a> {
+    address: &'a str,
+    place: Option<&'a str>,
+}
+
+fn address_cell(address: Option<&str>, place: Option<&str>) -> Html {
+    Html::render(&AddressCell {
+        address: address.unwrap_or("—"),
+        place,
+    })
+    .expect("address cell template")
+}
+
 /// The query names (`search`, `sort`, `dir`, `page`, `per_page`), with
 /// defaults left out of the URL as its `sessions_path/1` does.
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
@@ -416,7 +434,7 @@ impl Index {
                 "search",
                 "Search sessions",
                 &form["search"],
-                "Search by IP address or user agent...",
+                "Search by IP address, place or user agent...",
             )],
         ))?;
         if self.rows_changed {
@@ -449,10 +467,7 @@ impl Index {
                 .slot("user_id", Html::text(&user_label(session, &names)))
                 .slot(
                     "ip_address",
-                    Html::raw(format!(
-                        "<span class=\"tabular-nums text-ink-muted\">{}</span>",
-                        Html::text(session.ip_address.as_deref().unwrap_or("—"))
-                    )),
+                    address_cell(session.ip_address.as_deref(), session.place.as_deref()),
                 )
                 .slot(
                     "user_agent",
@@ -799,6 +814,12 @@ impl Own {
                         .unwrap_or_default()
                         .to_lowercase()
                         .contains(&query)
+                    || row
+                        .place
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query)
             })
             .cloned()
             .collect();
@@ -830,10 +851,7 @@ impl Own {
                 .slot("device", Html::text(&device))
                 .slot(
                     "ip_address",
-                    Html::raw(format!(
-                        "<span class=\"tabular-nums text-ink-muted\">{}</span>",
-                        Html::text(session.ip_address.as_deref().unwrap_or("—"))
-                    )),
+                    address_cell(session.ip_address.as_deref(), session.place.as_deref()),
                 )
                 .slot(
                     "status",
@@ -906,7 +924,7 @@ impl Own {
                 "search",
                 "Search sessions",
                 &form["search"],
-                "Search by device or IP address…",
+                "Search by device, IP address or place…",
             )],
         ))?;
         let other_count = self.rows.iter().filter(|row| row.id != current).count();

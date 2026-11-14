@@ -25,6 +25,7 @@ pub(crate) const SIGN_IN_HISTORY_DAYS: i32 = 90;
 pub struct PreviousSignIn {
     pub signed_in_at: SystemTime,
     pub ip_address: Option<String>,
+    pub place: Option<String>,
     pub user_agent: Option<String>,
 }
 
@@ -37,6 +38,7 @@ pub struct SignInRecord {
     pub signed_in_at: String,
     pub device: String,
     pub ip_address: Option<String>,
+    pub place: Option<String>,
     pub user_agent: Option<String>,
     /// RFC 3339, UTC: when the retention sweep deletes the record.
     pub retained_until: String,
@@ -67,6 +69,7 @@ pub struct NewDevice {
     /// The `client_name` label, for example "Chrome on Windows".
     pub device: String,
     pub ip_address: Option<String>,
+    pub place: Option<String>,
     pub signed_in_at: SystemTime,
 }
 
@@ -139,7 +142,7 @@ impl Sessions {
     /// impersonated session records no history and is never new.
     pub async fn describe(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         token: &str,
         ip_address: Option<&str>,
         user_agent: Option<&str>,
@@ -158,11 +161,12 @@ impl Sessions {
             })
             .filter(|agent| !agent.is_empty());
         let device = client_name(agent.as_deref());
+        let place = self.places.find(client, ip.as_deref()).await;
         let id = crate::session_id(token);
         client
             .execute(
-                "UPDATE sessions SET ip_address=$2,user_agent=$3 WHERE id=$1",
-                &[&id, &ip, &agent],
+                "UPDATE sessions SET ip_address=$2,place=$3,user_agent=$4 WHERE id=$1",
+                &[&id, &ip, &place, &agent],
             )
             .await?;
         // The history reads share the statement's snapshot, so they see only
@@ -170,12 +174,12 @@ impl Sessions {
         let Some(row) = client
             .query_opt(
                 "WITH s AS (SELECT tenant_id,user_id,signed_in_at FROM sessions WHERE id=$1 AND impersonator_id IS NULL), \
-                 added AS (INSERT INTO session_sign_ins(tenant_id,user_id,signed_in_at,ip_address,user_agent,device) SELECT tenant_id,user_id,signed_in_at,$2,$3,$4 FROM s RETURNING signed_in_at) \
+                 added AS (INSERT INTO session_sign_ins(tenant_id,user_id,signed_in_at,ip_address,place,user_agent,device) SELECT tenant_id,user_id,signed_in_at,$2,$3,$4,$5 FROM s RETURNING signed_in_at) \
                  SELECT added.signed_in_at, \
                  EXISTS(SELECT 1 FROM session_sign_ins h JOIN s ON h.tenant_id=s.tenant_id AND h.user_id=s.user_id), \
-                 EXISTS(SELECT 1 FROM session_sign_ins h JOIN s ON h.tenant_id=s.tenant_id AND h.user_id=s.user_id AND h.device=$4) \
+                 EXISTS(SELECT 1 FROM session_sign_ins h JOIN s ON h.tenant_id=s.tenant_id AND h.user_id=s.user_id AND h.device=$5) \
                  FROM added",
-                &[&id, &ip, &agent, &device],
+                &[&id, &ip, &place, &agent, &device],
             )
             .await?
         else {
@@ -185,6 +189,7 @@ impl Sessions {
         Ok((seen_before && !device_seen).then(|| NewDevice {
             device,
             ip_address: ip,
+            place,
             signed_in_at: row.get(0),
         }))
     }
@@ -200,14 +205,15 @@ impl Sessions {
         holder(scope)?;
         Ok(client
             .query_opt(
-                "SELECT signed_in_at,ip_address,user_agent FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at<(SELECT signed_in_at FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf=$3 AND impersonator_id IS NULL) ORDER BY signed_in_at DESC,id DESC LIMIT 1",
+                "SELECT signed_in_at,ip_address,place,user_agent FROM session_sign_ins WHERE tenant_id=$1 AND user_id=$2 AND signed_in_at<(SELECT signed_in_at FROM sessions WHERE tenant_id=$1 AND user_id=$2 AND csrf=$3 AND impersonator_id IS NULL) ORDER BY signed_in_at DESC,id DESC LIMIT 1",
                 &[&scope.tenant(), &scope.user(), &scope.csrf],
             )
             .await?
             .map(|row| PreviousSignIn {
                 signed_in_at: row.get(0),
                 ip_address: row.get(1),
-                user_agent: row.get(2),
+                place: row.get(2),
+                user_agent: row.get(3),
             }))
     }
 
@@ -279,7 +285,7 @@ impl Sessions {
         grant.check(scope)?;
         let sign_ins = client
             .query(
-                "SELECT user_id,to_char(signed_in_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),device,ip_address,user_agent,\
+                "SELECT user_id,to_char(signed_in_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),device,ip_address,place,user_agent,\
                  to_char((signed_in_at+make_interval(days => $3::int)) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
                  FROM session_sign_ins WHERE tenant_id=$1 AND user_id=ANY($2) AND signed_in_at>=now()-make_interval(days => $3::int) \
                  ORDER BY user_id,signed_in_at DESC,id DESC",
@@ -292,8 +298,9 @@ impl Sessions {
                 signed_in_at: row.get(1),
                 device: row.get(2),
                 ip_address: row.get(3),
-                user_agent: row.get(4),
-                retained_until: row.get(5),
+                place: row.get(4),
+                user_agent: row.get(5),
+                retained_until: row.get(6),
             })
             .collect();
         let alerts = client

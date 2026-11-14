@@ -163,7 +163,8 @@ impl Handler for Accounts {
                         .map(|sign_in| {
                             json!({
                                 "signed_in_at": sign_in.signed_in_at, "device": sign_in.device,
-                                "ip_address": sign_in.ip_address, "user_agent": sign_in.user_agent,
+                                "ip_address": sign_in.ip_address, "place": sign_in.place,
+                                "user_agent": sign_in.user_agent,
                                 "retained_until": sign_in.retained_until,
                             })
                         })
