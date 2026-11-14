@@ -200,9 +200,9 @@ fn plural(value: usize, one: &str, many: &str) -> String {
 }
 
 // Belimbing DatabaseTables Show metadata; tab contents are nested collections.
-bilibi_ui::record_fields! { pub(super) mod fields {
-    TABLE: bilibi_ui::RecordField::new("table", "Table"),
-    MODULE: bilibi_ui::RecordField::new("module", "Module"),
-    MIGRATION: bilibi_ui::RecordField::new("migration", "Migration"),
-    COLUMNS: bilibi_ui::RecordField::new("column_count", "Columns"),
+bilibi_ui::record_fields! { "base/system", pub(super) mod fields {
+    TABLE: bilibi_ui::RecordField::new("table", "Table", bilibi_ui::RecordFieldType::String),
+    MODULE: bilibi_ui::RecordField::new("module", "Module", bilibi_ui::RecordFieldType::String),
+    MIGRATION: bilibi_ui::RecordField::new("migration", "Migration", bilibi_ui::RecordFieldType::String),
+    COLUMNS: bilibi_ui::RecordField::new("column_count", "Columns", bilibi_ui::RecordFieldType::Integer),
 } }

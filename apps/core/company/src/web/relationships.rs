@@ -1039,10 +1039,7 @@ impl LiveState<Scope, Error> for RolesPage {
 // A company's relationships, and the Relationships card of a record page.
 
 // The date editor also supplies the panel's columns.
-bilibi_ui::record_fields! { mod link_fields {
-    EFFECTIVE_FROM: bilibi_ui::RecordField::new("effective_from", "Effective From"),
-    EFFECTIVE_TO: bilibi_ui::RecordField::new("effective_to", "Effective To"),
-} }
+use super::link_fields;
 
 /// The built-ins; the first names the related party, which the party
 /// model lets be a person.

@@ -431,11 +431,11 @@ fn date_schema() -> Value {
 }
 fn facts() -> serde_json::Map<String, Value> {
     json!({
-        "title":{"type":"string","maxLength":160},
-        "work_email":{"type":"string","maxLength":254},
-        "work_phone":{"type":"string","maxLength":64},
-        "effective_from":date_schema(),
-        "effective_to":date_schema()
+        "title":crate::web::fields::TITLE.input(json!({"maxLength":160})),
+        "work_email":crate::web::fields::WORK_EMAIL.input(json!({"maxLength":254})),
+        "work_phone":crate::web::fields::WORK_PHONE.input(json!({"maxLength":64})),
+        "effective_from":crate::web::fields::EFFECTIVE_FROM.input(json!({})),
+        "effective_to":crate::web::fields::EFFECTIVE_TO.input(json!({}))
     })
     .as_object()
     .cloned()
@@ -443,7 +443,7 @@ fn facts() -> serde_json::Map<String, Value> {
 }
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
-        "person_id":id_schema(),"organisation_id":id_schema(),
+        "person_id":id_schema(),"organisation_id":crate::web::fields::ORGANISATION_ID.input(json!({"minimum":1})),
         "include_unlinked":{"type":"boolean"},"on":date_schema(),
         "page":{"type":"integer","minimum":1,"maximum":1000000},"page_size":{"type":"integer","minimum":1,"maximum":100}
     }})
@@ -454,13 +454,19 @@ fn get_schema() -> Value {
 fn create_schema() -> Value {
     let mut properties = facts();
     properties.insert("person_id".into(), id_schema());
-    properties.insert("organisation_id".into(), id_schema());
+    properties.insert(
+        "organisation_id".into(),
+        crate::web::fields::ORGANISATION_ID.input(json!({"minimum":1})),
+    );
     json!({"type":"object","required":["person_id","organisation_id"],"properties":properties})
 }
 fn contact_schema() -> Value {
     let mut properties = facts();
     properties.insert("name".into(), json!({"type":"string","maxLength":160}));
-    properties.insert("organisation_id".into(), id_schema());
+    properties.insert(
+        "organisation_id".into(),
+        crate::web::fields::ORGANISATION_ID.input(json!({"minimum":1})),
+    );
     json!({"type":"object","required":["name","organisation_id"],"properties":properties})
 }
 fn contact_output() -> Value {
@@ -473,7 +479,7 @@ fn update_schema() -> Value {
     json!({"type":"object","required":["affiliation_id","version"],"properties":properties})
 }
 fn end_schema() -> Value {
-    json!({"type":"object","required":["affiliation_id","version","effective_to"],"properties":{"affiliation_id":id_schema(),"version":id_schema(),"effective_to":date_schema()}})
+    json!({"type":"object","required":["affiliation_id","version","effective_to"],"properties":{"affiliation_id":id_schema(),"version":id_schema(),"effective_to":crate::web::fields::EFFECTIVE_TO.input(json!({}))}})
 }
 fn unlink_schema() -> Value {
     json!({"type":"object","required":["affiliation_id","version"],"properties":{"affiliation_id":id_schema(),"version":id_schema()}})

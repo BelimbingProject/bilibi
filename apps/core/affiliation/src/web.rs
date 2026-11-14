@@ -1338,11 +1338,11 @@ fn changed(error: &ContractError) -> bool {
 }
 
 // Columns extend the list vocabulary.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    ORGANISATION_ID: bilibi_ui::RecordField::new("organisation_id", "Company").path("work.company.name:list"),
-    TITLE: bilibi_ui::RecordField::new("title", "Role").path("work.title:list"),
-    WORK_EMAIL: bilibi_ui::RecordField::new("work_email", "Work email").path("work.work_email:list"),
-    WORK_PHONE: bilibi_ui::RecordField::new("work_phone", "Work phone").path("work.work_phone:list"),
-    EFFECTIVE_FROM: bilibi_ui::RecordField::new("effective_from", "From").excluded("Nested affiliation dates"),
-    EFFECTIVE_TO: bilibi_ui::RecordField::new("effective_to", "To").excluded("Nested affiliation dates"),
+bilibi_ui::record_fields! { "core/affiliation", pub(crate) mod fields {
+    ORGANISATION_ID: bilibi_ui::RecordField::new("organisation_id", "Company", bilibi_ui::RecordFieldType::Integer).path("work.company.name:list"),
+    TITLE: bilibi_ui::RecordField::new("title", "Role", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::FreeText).path("work.title:list"),
+    WORK_EMAIL: bilibi_ui::RecordField::new("work_email", "Work email", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Email).path("work.work_email:list"),
+    WORK_PHONE: bilibi_ui::RecordField::new("work_phone", "Work phone", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Phone).path("work.work_phone:list"),
+    EFFECTIVE_FROM: bilibi_ui::RecordField::new("effective_from", "From", bilibi_ui::RecordFieldType::Date).excluded("Nested affiliation dates"),
+    EFFECTIVE_TO: bilibi_ui::RecordField::new("effective_to", "To", bilibi_ui::RecordFieldType::Date).excluded("Nested affiliation dates"),
 } }

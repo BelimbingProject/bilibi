@@ -4,9 +4,7 @@
 //! chained one-link after a many-link, an enum, decimals, dates, a timestamp and a restrictable
 //! field (`reference_items.unit_cost`). A role granted [`READ`] may read them;
 //! no product role carries it, the walkthrough fixture's roles do.
-use crate::model::{
-    Field, FieldType::*, GridContribution, LinkDecl, LinkKind::*, Source, TableDecl,
-};
+use crate::{Field, FieldType::*, GridContribution, LinkDecl, LinkKind::*, Source, TableDecl};
 use bilibi_authz::{CapabilityDefinition as C, VocabularyContribution, VOCABULARY};
 
 pub const READ: &str = "grid.reference.view";

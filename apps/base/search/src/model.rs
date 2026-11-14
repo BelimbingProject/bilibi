@@ -175,13 +175,10 @@ pub(crate) fn validate(entries: &[Entry]) -> Result<()> {
             .chain(decl.prefix.iter().copied())
             .chain(decl.state.map(|state| state.field))
             .chain(decl.updated);
-        if !bilibi_grid::model::id_valid(decl.table) {
+        if !bilibi_grid::id_valid(decl.table) {
             return Err(invalid(at, format!("invalid table id {}", decl.table)));
         }
-        if let Some(field) = fields
-            .clone()
-            .find(|field| !bilibi_grid::model::id_valid(field))
-        {
+        if let Some(field) = fields.clone().find(|field| !bilibi_grid::id_valid(field)) {
             return Err(invalid(at, format!("invalid field id {field}")));
         }
         if decl.subtitle.len() > MAX_SUBTITLE || decl.prefix.len() > MAX_PREFIX {

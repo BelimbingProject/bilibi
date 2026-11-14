@@ -77,12 +77,12 @@ static GRID: bilibi_grid::GridContribution = bilibi_grid::GridContribution {
     tables: &[bilibi_grid::TableDecl::new("users", "Users", LIST,
         bilibi_grid::Source::tenant("SELECT u.id,u.name,i.email,i.email_verified_at,u.created_at,u.updated_at,u.person_id FROM users u JOIN user_identities i ON i.id=u.identity_id WHERE u.tenant_id=$1 AND u.deleted_at IS NULL AND u.kind='staff'"), "id", &[
             bilibi_grid::Field::new("id", "ID", bilibi_grid::FieldType::Integer),
-            bilibi_grid::Field::new("name", "Name", bilibi_grid::FieldType::String),
-            bilibi_grid::Field::new("email", "Email", bilibi_grid::FieldType::String),
-            bilibi_grid::Field::new("email_verified_at", "Email verified", bilibi_grid::FieldType::DateTime),
-            bilibi_grid::Field::new("created_at", "Created", bilibi_grid::FieldType::DateTime),
-            bilibi_grid::Field::new("updated_at", "Updated", bilibi_grid::FieldType::DateTime),
-            bilibi_grid::Field::new("person_id", "Person", bilibi_grid::FieldType::Integer).hidden(),
+            bilibi_grid::Field::record(crate::record_fields::NAME),
+            bilibi_grid::Field::record(crate::record_fields::EMAIL),
+            bilibi_grid::Field::record(crate::record_fields::EMAIL_VERIFIED_AT),
+            bilibi_grid::Field::record(crate::record_fields::CREATED_AT),
+            bilibi_grid::Field::record(crate::record_fields::UPDATED_AT),
+            bilibi_grid::Field::record(crate::record_fields::PERSON_ID).hidden(),
         ]).label_field("name").time_field("created_at").record_types(&["user"])],
     links: &[
         bilibi_grid::LinkDecl::on("person", "Person", bilibi_grid::LinkKind::One, "users", "person_id", "persons", "id"),

@@ -313,19 +313,19 @@ impl WriteHandler for Write {
 }
 fn identity_schema() -> Value {
     json!({"type":"object","required":["name","kind"],"properties":{
-        "name":{"type":"string","maxLength":160},"kind":{"type":"string","enum":["human","agent"]},
-        "email":{"type":"string","maxLength":254},"phone":{"type":"string","maxLength":64}
+        "name":crate::web::fields::NAME.input(json!({"maxLength":160})),"kind":crate::web::fields::KIND.input(json!({})),
+        "email":crate::web::fields::EMAIL.input(json!({"maxLength":254})),"phone":crate::web::fields::PHONE.input(json!({"maxLength":64}))
     }})
 }
 fn create_schema() -> Value {
     let mut schema = identity_schema();
     schema["properties"]["custom"] = custom::schema();
-    schema["properties"]["code"] = json!({"type":"string","maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit source-spelled connectors bin, binti, a/l, a/p, s/o and d/o; add _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."});
+    schema["properties"]["code"] = crate::web::fields::CODE.input(json!({"maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit source-spelled connectors bin, binti, a/l, a/p, s/o and d/o; add _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."}));
     schema
 }
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
-        "search":{"type":"string","maxLength":255},"kind":{"type":"string","enum":["human","agent"]},
+        "search":{"type":"string","maxLength":255},"kind":crate::web::fields::KIND.input(json!({})),
         "sort":{"type":"string","maxLength":43,"description":"name, code, kind, state or created_at, or cf_<key> to sort by an active custom field (number as a number, date as a date; empty last)."},"descending":{"type":"boolean"},
         "custom":{"type":"array","description":"Conditions on custom field values, all of which hold: op contains (text), eq (text or choice code), gte or lte (number or date). A key that is not an active field, or a value the field cannot hold, is refused.","items":{"type":"object","required":["key","op","value"],"properties":{"key":{"type":"string","maxLength":40},"op":{"type":"string","enum":["contains","eq","gte","lte"]},"value":{"type":"string","maxLength":256}}}},
         "include_retired":{"type":"boolean"},"page":{"type":"integer","minimum":1,"maximum":1000000},"page_size":{"type":"integer","minimum":1,"maximum":300}
@@ -339,7 +339,7 @@ fn get_schema() -> Value {
 }
 fn duplicate_schema() -> Value {
     json!({"type":"object","properties":{
-        "name":{"type":"string","maxLength":160},"email":{"type":"string","maxLength":254},"phone":{"type":"string","maxLength":64},
+        "name":crate::web::fields::NAME.input(json!({"maxLength":160})),"email":crate::web::fields::EMAIL.input(json!({"maxLength":254})),"phone":crate::web::fields::PHONE.input(json!({"maxLength":64})),
         "except_id":id_schema(),"limit":{"type":"integer","minimum":1,"maximum":100}
     }})
 }

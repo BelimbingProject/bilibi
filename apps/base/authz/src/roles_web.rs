@@ -855,11 +855,11 @@ impl LiveState<Scope, Error> for RoleCreate {
 }
 
 // Role facts, shared with the roles list columns.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    CODE: bilibi_ui::RecordField::new("code", "Code"),
-    SCOPE: bilibi_ui::RecordField::new("is_system", "Scope"),
-    COMPANY: bilibi_ui::RecordField::new("company_id", "Owning company"),
-    GRANT_ALL: bilibi_ui::RecordField::new("grant_all", "Grants all capabilities"),
-    DESCRIPTION: bilibi_ui::RecordField::new("description", "Description").excluded("Long text"),
+bilibi_ui::record_fields! { "base/authz", pub(crate) mod fields {
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    CODE: bilibi_ui::RecordField::new("code", "Code", bilibi_ui::RecordFieldType::String),
+    SCOPE: bilibi_ui::RecordField::new("is_system", "Scope", bilibi_ui::RecordFieldType::Boolean),
+    COMPANY: bilibi_ui::RecordField::new("company_id", "Owning company", bilibi_ui::RecordFieldType::String),
+    GRANT_ALL: bilibi_ui::RecordField::new("grant_all", "Grants all capabilities", bilibi_ui::RecordFieldType::Boolean),
+    DESCRIPTION: bilibi_ui::RecordField::new("description", "Description", bilibi_ui::RecordFieldType::String).excluded("Long text"),
 } }

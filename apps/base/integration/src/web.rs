@@ -818,25 +818,25 @@ impl Page<Scope, Error> for Pages {
 }
 
 // Metadata facts, shared with the list columns.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    DIRECTION: bilibi_ui::RecordField::new("direction", "Direction"),
-    OPERATION: bilibi_ui::RecordField::new("operation", "Operation"),
-    METHOD: bilibi_ui::RecordField::new("method", "Method"),
-    ENDPOINT: bilibi_ui::RecordField::new("endpoint", "Endpoint"),
-    OUTCOME: bilibi_ui::RecordField::new("outcome", "Outcome"),
-    STATUS: bilibi_ui::RecordField::new("status", "HTTP status").excluded("The default Status column shows it"),
-    DURATION_MS: bilibi_ui::RecordField::new("duration_ms", "Duration").excluded("The default Duration (ms) column shows it"),
-    OCCURRED_AT: bilibi_ui::RecordField::new("occurred_at", "Time"),
-    TENANT: bilibi_ui::RecordField::new("tenant", "Tenant"),
-    OWNER: bilibi_ui::RecordField::new("owner", "Owner"),
-    USER_ID: bilibi_ui::RecordField::new("user_id", "Person"),
-    IMPERSONATOR: bilibi_ui::RecordField::new("impersonator", "Impersonator"),
-    CONNECTION: bilibi_ui::RecordField::new("connection", "Connection"),
-    AGENT: bilibi_ui::RecordField::new("agent", "Agent"),
-    RUN: bilibi_ui::RecordField::new("run", "Run"),
-    CLIENT_IDENTITY: bilibi_ui::RecordField::new("client_identity", bilibi_tenancy::ClientIdentity::LABEL),
-    SELF_REPORT: bilibi_ui::RecordField::new("self_report", bilibi_tenancy::SelfReport::LABEL),
-    ERROR: bilibi_ui::RecordField::new("error", "Error"),
+bilibi_ui::record_fields! { "base/integration", pub(crate) mod fields {
+    DIRECTION: bilibi_ui::RecordField::new("direction", "Direction", bilibi_ui::RecordFieldType::String),
+    OPERATION: bilibi_ui::RecordField::new("operation", "Operation", bilibi_ui::RecordFieldType::String),
+    METHOD: bilibi_ui::RecordField::new("method", "Method", bilibi_ui::RecordFieldType::String),
+    ENDPOINT: bilibi_ui::RecordField::new("endpoint", "Endpoint", bilibi_ui::RecordFieldType::String),
+    OUTCOME: bilibi_ui::RecordField::new("outcome", "Outcome", bilibi_ui::RecordFieldType::String),
+    STATUS: bilibi_ui::RecordField::new("status", "HTTP status", bilibi_ui::RecordFieldType::Integer).excluded("The default Status column shows it"),
+    DURATION_MS: bilibi_ui::RecordField::new("duration_ms", "Duration", bilibi_ui::RecordFieldType::Integer).excluded("The default Duration (ms) column shows it"),
+    OCCURRED_AT: bilibi_ui::RecordField::new("occurred_at", "Time", bilibi_ui::RecordFieldType::DateTime),
+    TENANT: bilibi_ui::RecordField::new("tenant", "Tenant", bilibi_ui::RecordFieldType::String),
+    OWNER: bilibi_ui::RecordField::new("owner", "Owner", bilibi_ui::RecordFieldType::String),
+    USER_ID: bilibi_ui::RecordField::new("user_id", "Person", bilibi_ui::RecordFieldType::Integer),
+    IMPERSONATOR: bilibi_ui::RecordField::new("impersonator", "Impersonator", bilibi_ui::RecordFieldType::String),
+    CONNECTION: bilibi_ui::RecordField::new("connection", "Connection", bilibi_ui::RecordFieldType::String),
+    AGENT: bilibi_ui::RecordField::new("agent", "Agent", bilibi_ui::RecordFieldType::String),
+    RUN: bilibi_ui::RecordField::new("run", "Run", bilibi_ui::RecordFieldType::String),
+    CLIENT_IDENTITY: bilibi_ui::RecordField::new("client_identity", bilibi_tenancy::ClientIdentity::LABEL, bilibi_ui::RecordFieldType::String),
+    SELF_REPORT: bilibi_ui::RecordField::new("self_report", bilibi_tenancy::SelfReport::LABEL, bilibi_ui::RecordFieldType::String),
+    ERROR: bilibi_ui::RecordField::new("error", "Error", bilibi_ui::RecordFieldType::String),
 } }
 
 fn exchange_facts(
