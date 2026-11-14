@@ -14,6 +14,8 @@ const OPERATOR: i64 = 1;
 const TARGET: i64 = 7;
 const IMPERSONATE: &str = "admin.user.impersonate";
 const NEW_CAPABILITY: &str = "admin.authz.role.update";
+const RESTRICTED_TABLE: &str = "companies";
+const RESTRICTED_FIELD: &str = "walkthrough_field";
 const REVOKED_CAPABILITY: &str = "companies.view";
 
 // The fixture manager may enter impersonation, but does not hold the stronger
@@ -160,5 +162,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("PASS: a capability revoked from the operator is refused immediately");
+
+    let role: i64 = client
+        .query_one(
+            "SELECT role_id FROM effective_principal_roles WHERE tenant_id=$1 AND user_id=$2 AND role_id NOT IN (SELECT role_id FROM effective_principal_roles WHERE tenant_id=$1 AND user_id=$3) ORDER BY role_id LIMIT 1",
+            &[&impersonated.tenant(), &OPERATOR, &TARGET],
+        )
+        .await?
+        .get(0);
+    client
+        .execute(
+            "INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES($1,$2,$3,$4)",
+            &[&impersonated.tenant(), &role, &RESTRICTED_TABLE, &RESTRICTED_FIELD],
+        )
+        .await?;
+    assert!(
+        !bilibi_authz::restrictions_for(&**client, &administrator, RESTRICTED_TABLE)
+            .await?
+            .contains(RESTRICTED_FIELD)
+    );
+    assert!(
+        bilibi_authz::restrictions_for(&**client, &impersonated, RESTRICTED_TABLE)
+            .await?
+            .contains(RESTRICTED_FIELD)
+    );
+    println!("PASS: a field the operator is restricted from stays restricted while impersonating");
     Ok(())
 }
