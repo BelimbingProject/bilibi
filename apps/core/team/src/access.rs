@@ -7,19 +7,24 @@ use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use tokio_postgres::GenericClient;
 
+/// The team a write changes, with its stored parent. A team the writer may
+/// not see is `NotFound`, as for a read, so a write by id reveals nothing
+/// about a hidden team either.
 pub(crate) async fn load(
     client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: i64,
     lock: bool,
 ) -> Result<Team> {
+    let reach = reach(client, scope).await?;
     client
         .query_opt(
             &format!(
-                "SELECT {COLUMNS} FROM core_teams WHERE tenant_id=$1 AND id=$2{}",
+                "SELECT {COLUMNS} FROM core_teams t WHERE t.tenant_id=$1 AND t.id=$2 AND {}{}",
+                seen("t", "$3"),
                 if lock { " FOR UPDATE" } else { "" }
             ),
-            &[&scope.tenant(), &id],
+            &[&scope.tenant(), &id, &reach],
         )
         .await?
         .as_ref()

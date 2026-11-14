@@ -1,7 +1,8 @@
 //! The Teams operation contracts. The team page, the "Add to team" action
 //! and agents all call these; writes are reviewed safe writes.
 use crate::{
-    facade::invalid, Checked, MemberChange, MemberPlan, TeamInput, TeamQuery, Teams, MANAGE, VIEW,
+    facade::invalid, Checked, MemberChange, MemberPlan, RolePlan, TeamInput, TeamQuery, Teams,
+    MANAGE, STEP_UP_ROLE, VIEW,
 };
 use bilibi_agent_api::{
     json::{Data, Output},
@@ -21,6 +22,8 @@ pub(crate) const UPDATE: &str = "core.team.update";
 pub(crate) const ADD_MEMBERS: &str = "core.team.add_members";
 pub(crate) const REMOVE_MEMBERS: &str = "core.team.remove_members";
 pub(crate) const SET_LEAD: &str = "core.team.set_lead";
+pub(crate) const ADD_ROLE: &str = "core.team.add_role";
+pub(crate) const REMOVE_ROLE: &str = "core.team.remove_role";
 struct Bound {
     db: Db,
     teams: Arc<Teams>,
@@ -88,6 +91,9 @@ fn member_change(op: &Write, v: &Value) -> bilibi_agent_api::Result<MemberChange
 fn plan_json(plan: &MemberPlan) -> Value {
     json!({"team_id":plan.team.id,"team":plan.team.name,"changes":plan.steps,"unchanged":plan.unchanged})
 }
+fn role_json(plan: &RolePlan) -> Value {
+    json!({"team_id":plan.team.id,"team":plan.team.name,"company_id":plan.team.company_id,"role_id":plan.role.id,"role":plan.role.name,"given":plan.attach,"members":plan.members})
+}
 fn output(v: Value) -> Output {
     Output::Data(Data::restricted(v, &HashSet::new()))
 }
@@ -150,7 +156,8 @@ impl ReadHandler for Read {
                         )
                         .await?;
                     let (_, members) = b.teams.members(client, scope, team_id, 1, 0).await?;
-                    json!({"team":team,"leads":leads,"leads_above":above,"members":members,
+                    let roles = b.teams.roles(client, scope, team_id).await?;
+                    json!({"team":team,"leads":leads,"leads_above":above,"members":members,"roles":roles,
                         "sub_teams":subs.iter().map(|s|json!({"id":s.team.id,"name":s.team.name})).collect::<Vec<_>>(),"sub_team_total":sub_total})
                 }
                 Self::Members => {
@@ -172,6 +179,8 @@ enum Write {
     Add,
     Remove,
     Lead,
+    AddRole,
+    RemoveRole,
 }
 impl WriteHandler for Write {
     fn creates(&self) -> Option<bilibi_agent_api::CreatedRecord> {
@@ -226,6 +235,20 @@ impl WriteHandler for Write {
                     )?;
                     json!({"summary":plan.summary(),"after":plan_json(&plan)})
                 }
+                Self::AddRole | Self::RemoveRole => {
+                    let plan = checked(
+                        t.plan_role(
+                            client,
+                            scope,
+                            id(input, "team_id")?,
+                            id(input, "role_id")?,
+                            matches!(self, Self::AddRole),
+                            false,
+                        )
+                        .await?,
+                    )?;
+                    json!({"summary":plan.summary(),"after":role_json(&plan)})
+                }
             };
             Ok(value.into())
         })
@@ -265,6 +288,21 @@ impl WriteHandler for Write {
                     value["summary"] = json!(plan.done());
                     value
                 }
+                Self::AddRole | Self::RemoveRole => {
+                    let plan = checked(
+                        t.change_role(
+                            tx,
+                            scope,
+                            id(input, "team_id")?,
+                            id(input, "role_id")?,
+                            matches!(self, Self::AddRole),
+                        )
+                        .await?,
+                    )?;
+                    let mut value = role_json(&plan);
+                    value["summary"] = json!(plan.done());
+                    value
+                }
             };
             Ok(output(value))
         })
@@ -291,11 +329,17 @@ fn members_change_schema() -> Value {
 fn lead_schema() -> Value {
     json!({"type":"object","required":["team_id","user_id","lead"],"properties":{"team_id":{"type":"integer","minimum":1},"user_id":{"type":"integer","minimum":1},"lead":{"type":"boolean"}}})
 }
+fn role_schema() -> Value {
+    json!({"type":"object","required":["team_id","role_id"],"properties":{"team_id":{"type":"integer","minimum":1},"role_id":{"type":"integer","minimum":1,"description":"An authorization role id (base.authz_agent.role.list)."}}})
+}
 fn result_schema() -> Value {
     json!({"type":"object","description":"The team, its members or leads, a bounded list, or the membership changes made."})
 }
 macro_rules! op {
     ($key:expr,$title:literal,$summary:literal,$cap:expr,$schema:ident,$handler:expr) => {
+        op!($key, $title, $summary, $cap, $schema, $handler, &[])
+    };
+    ($key:expr,$title:literal,$summary:literal,$cap:expr,$schema:ident,$handler:expr,$step_up:expr) => {
         Operation {
             key: $key,
             title: $title,
@@ -306,7 +350,7 @@ macro_rules! op {
             output: result_schema,
             handler: $handler,
             channels: Channels::Every,
-            step_up: &[],
+            step_up: $step_up,
         }
     };
 }
@@ -316,9 +360,11 @@ inventory::submit! {Contribution::new(DEFINITIONS,"core/team.agent",crate::prove
         op!("core.team.get","Read a team","A team's facts, its leads, the leads of the teams above it, its sub-teams and how many members it has.",VIEW,get_schema,Handler::Read(&Read::Get)),
         op!("core.team.members","List a team's members","One page of a team's members, leads first.",VIEW,members_schema,Handler::Read(&Read::Members)),
         op!(CREATE,"Create a team","Create a team with one or more leads, an optional parent team and an optional company.",MANAGE,create_schema,Handler::SafeWrite(&Write::Create)),
-        op!(UPDATE,"Update a team","Rename a team or change its kind, parent team or company, using the version read.",MANAGE,update_schema,Handler::SafeWrite(&Write::Update)),
-        op!(ADD_MEMBERS,"Add people to a team","Add staff to a team. People already in it are left as they are.",MANAGE,members_change_schema,Handler::SafeWrite(&Write::Add)),
+        op!(UPDATE,"Update a team","Rename a team or change its kind, parent team or company, using the version read. Moving a team that gives roles to another company gives them there: role-update permission and step-up.",MANAGE,update_schema,Handler::SafeWrite(&Write::Update),&[STEP_UP_ROLE]),
+        op!(ADD_MEMBERS,"Add people to a team","Add staff to a team. People already in it are left as they are. New members hold the team's roles, so adding people to a team that gives roles needs role-update permission, every permission those roles give, and step-up.",MANAGE,members_change_schema,Handler::SafeWrite(&Write::Add),&[STEP_UP_ROLE]),
         op!(REMOVE_MEMBERS,"Remove people from a team","Remove members from a team. A team keeps at least one lead.",MANAGE,members_change_schema,Handler::SafeWrite(&Write::Remove)),
         op!(SET_LEAD,"Make a member a lead, or not","Turn a member's lead role on or off. A team keeps at least one lead.",MANAGE,lead_schema,Handler::SafeWrite(&Write::Lead)),
+        op!(ADD_ROLE,"Give a team a role","Members hold the role's permissions while they are in the team, in the team's company only when it has one. Needs role-update permission, every permission the role gives, and step-up. Never a full-access role.",MANAGE,role_schema,Handler::SafeWrite(&Write::AddRole),&[STEP_UP_ROLE]),
+        op!(REMOVE_ROLE,"Take a role away from a team","Members lose the role's permissions at their next action, unless they hold it another way. Needs role-update permission and step-up.",MANAGE,role_schema,Handler::SafeWrite(&Write::RemoveRole),&[STEP_UP_ROLE]),
     ],guides:&[],
 })}

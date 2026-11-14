@@ -1,7 +1,10 @@
 //! The create dialog, the add-members review (also opened by a drop or by
-//! "Add to team"), the remove confirmation, and the record's write events.
-//! Each write calls its operation contract.
-use super::{form_values, render, summary, text, AddDraft, CreateDraft, Picker, State};
+//! "Add to team"), the remove confirmation, the role dialog and its
+//! take-away confirmation, and the record's write events. Each write calls
+//! its operation contract.
+use super::{
+    form_values, render, summary, text, AddDraft, CreateDraft, Picker, Record, RoleDraft, State,
+};
 use crate::{operations, MANAGE};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
@@ -189,6 +192,81 @@ pub(super) fn remove(state: &State) -> Result<Html> {
         cancel_event: "cancel_remove",
     })
 }
+/// "Add role": the roles the reader may give, with what giving one means.
+pub(super) fn add_role(record: &Record, d: &RoleDraft) -> Result<Html> {
+    let team = &record.team.name;
+    let mut body = summary("team-role", &d.errors)?;
+    let mut actions = button("Cancel", "close_role")?;
+    if record.role_choices.is_empty() {
+        body.push(&render(EmptyState::missing(
+            "No role you can give",
+            "You can give a team only a role whose permissions you hold yourself. A full-access role goes to a person, never a team.",
+        ))?);
+    } else {
+        let hint = match &record.company_name {
+            Some(company) if record.team.company_id.is_some() => format!(
+                "Members hold the role's permissions in {company} only, for as long as they are in {team}. People added later get it too."
+            ),
+            _ => format!(
+                "Members hold the role's permissions for as long as they are in {team}. People added later get it too."
+            ),
+        };
+        body.push(&render(
+            Combobox::new("team-role-role-id", "role[role_id]")
+                .label("Role")
+                .value(d.role.clone())
+                .options(
+                    record
+                        .role_choices
+                        .iter()
+                        .map(|r| Choice::new(&r.name, r.id.to_string()))
+                        .collect(),
+                )
+                .placeholder("Choose a role")
+                .hint(hint)
+                .errors(errors(&d.errors, "role_id")),
+        )?);
+        actions.push(&submit("Give role", "Giving…")?);
+    }
+    let title = format!("Give {team} a role");
+    render(Modal {
+        id: "team-role-dialog",
+        title: &title,
+        cancel_event: "close_role",
+        body: render(Form {
+            id: "team-role",
+            event: "add_role",
+            body,
+            actions,
+            ..Form::default()
+        })?,
+        ..Modal::default()
+    })
+}
+/// The take-away confirmation: who loses what, and when.
+pub(super) fn remove_role(record: &Record, role: i64) -> Result<Html> {
+    let name = record
+        .roles
+        .iter()
+        .find(|r| r.id == role)
+        .map(|r| r.name.as_str())
+        .unwrap_or("this role");
+    let consequence = format!("Take {name} away from {}?", record.team.name);
+    let detail = match record.member_total {
+        0 => "Nobody is in the team yet, so nobody loses anything now.".to_owned(),
+        1 => "Its member loses the role's permissions at their next action, unless they hold the role another way.".to_owned(),
+        n => format!("Its {n} members lose the role's permissions at their next action, unless they hold the role another way."),
+    };
+    render(ConfirmDialog {
+        id: "team-role-remove-dialog",
+        consequence: &consequence,
+        detail: &detail,
+        confirm: "Take away",
+        working: "Taking away…",
+        confirm_event: "confirm_remove_role",
+        cancel_event: "cancel_remove_role",
+    })
+}
 
 impl State {
     fn picker_mut(&mut self) -> Option<&mut Picker> {
@@ -236,6 +314,10 @@ impl State {
             "remove_one",
             "remove_selected",
             "confirm_remove",
+            "role_open",
+            "add_role",
+            "remove_role",
+            "confirm_remove_role",
         ];
         if writes.contains(&event) && !self.can_create {
             self.refuse("You do not have permission to change teams.");
@@ -451,6 +533,66 @@ impl State {
                 }
             }
             "cancel_remove" => self.removing.clear(),
+            "role_open" => {
+                self.create = None;
+                self.add = None;
+                self.role_add = Some(RoleDraft::default());
+            }
+            "close_role" => self.role_add = None,
+            "add_role" => {
+                let id = self.id.ok_or(Error::Invalid)?;
+                let values = form_values(v, "role")?;
+                let Some(mut draft) = self.role_add.take() else {
+                    return Ok(());
+                };
+                draft.role = values.get("role_id").cloned().unwrap_or_default();
+                let Ok(role) = draft.role.trim().parse::<i64>() else {
+                    draft.errors =
+                        [("role_id".to_owned(), vec!["Choose a role.".to_owned()])].into();
+                    self.role_add = Some(draft);
+                    return Ok(());
+                };
+                match self
+                    .submit(
+                        scope,
+                        credential,
+                        "add_role",
+                        operations::ADD_ROLE,
+                        json!({"team_id":id,"role_id":role}),
+                    )
+                    .await?
+                {
+                    Ok(result) => self.flash = Some((StatusKind::Success, done(&result["result"]))),
+                    Err(fields) => {
+                        draft.errors = fields;
+                        self.role_add = Some(draft);
+                    }
+                }
+            }
+            "remove_role" => {
+                if let Ok(role) = text(v, "role").parse::<i64>() {
+                    self.role_removing = Some(role);
+                }
+            }
+            "cancel_remove_role" => self.role_removing = None,
+            "confirm_remove_role" => {
+                let id = self.id.ok_or(Error::Invalid)?;
+                let Some(role) = self.role_removing.take() else {
+                    return Ok(());
+                };
+                if let Ok(result) = self
+                    .submit(
+                        scope,
+                        credential,
+                        "confirm_remove_role",
+                        operations::REMOVE_ROLE,
+                        json!({"team_id":id,"role_id":role}),
+                    )
+                    .await?
+                {
+                    self.flash = Some((StatusKind::Success, done(&result["result"])));
+                }
+            }
             "confirm_remove" => {
                 let id = self.id.ok_or(Error::Invalid)?;
                 let users = std::mem::take(&mut self.removing);
@@ -480,6 +622,9 @@ impl State {
         }
         Ok(())
     }
+}
+fn done(result: &Value) -> String {
+    result["summary"].as_str().unwrap_or("Saved").to_owned() + "."
 }
 fn added_message(result: &Value) -> String {
     let mut message = result["summary"]

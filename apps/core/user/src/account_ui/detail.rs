@@ -549,6 +549,7 @@ impl Detail {
         can_edit: bool,
         records: &[bilibi_authz::roles::RoleAssignment],
         providers: &[RoleSummary],
+        groups: &[bilibi_authz::roles::GroupAssignment],
     ) -> Result<Html> {
         let mut rows = Vec::new();
         for record in records {
@@ -625,6 +626,47 @@ impl Detail {
                     .slot("state", Html::text("Managed by sign-in provider")),
             );
         }
+        // A role held through a team says which team, unless the team is one
+        // the reader may not see (a company they do not work in): then only
+        // that it comes from one. Its company is the role's scope.
+        let reach: Vec<i64> = if groups.is_empty() {
+            Vec::new()
+        } else {
+            bilibi_company::Directory
+                .reachable(client, scope)
+                .await?
+                .into_iter()
+                .map(|c| c.id.get())
+                .collect()
+        };
+        for held in groups {
+            let company = match held.company_id {
+                Some(id) => bilibi_company::Directory
+                    .lookup(
+                        client,
+                        scope,
+                        bilibi_party_ids::OrganisationId::new(id).map_err(|_| Error::Invalid)?,
+                    )
+                    .await?
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| format!("Company {id}")),
+                None => "Every assigned workplace".into(),
+            };
+            let state = if held.company_id.is_none_or(|id| reach.contains(&id)) {
+                format!("Via {} {}", held.source, held.label)
+            } else {
+                format!("Via a {} in a company you do not work in", held.source)
+            };
+            rows.push(
+                FlexRow::new(format!(
+                    "{}-{}-{}",
+                    held.source, held.group_id, held.role.id
+                ))
+                .slot("role", Html::text(&held.role.name))
+                .slot("company", Html::text(&company))
+                .slot("state", Html::text(&state)),
+            );
+        }
         let mut table = FlexTable::new(
             "user-role-assignments",
             self.assignment_columns.flex_columns(),
@@ -646,6 +688,7 @@ impl Detail {
             bilibi_authz::effective_capabilities_of(&**client, scope, user).await?;
         let assignments = bilibi_authz::roles::assignments(&**client, scope, user).await?;
         let providers = bilibi_authz::roles::provider_assignments(&**client, scope, user).await?;
+        let groups = bilibi_authz::roles::group_assignments(&**client, scope, user).await?;
         let actor = bilibi_authz::effective_capabilities_of(&**client, scope, scope.user()).await?;
         let companies = self
             .pages
@@ -870,7 +913,7 @@ impl Detail {
         let heading = render(&SectionHeading {
             id: "user-roles-heading",
             title: "Roles & Permissions",
-            count: Some(assignments.len() + providers.len()),
+            count: Some(assignments.len() + providers.len() + groups.len()),
             description:
                 "Roles set what this user can do; effective permissions show the combined result.",
             ..SectionHeading::default()
@@ -884,6 +927,7 @@ impl Detail {
                     loaded.can_edit_roles(),
                     &assignments,
                     &providers,
+                    &groups,
                 )
                 .await?,
             assignment_fields: if loaded.can_edit_roles() {

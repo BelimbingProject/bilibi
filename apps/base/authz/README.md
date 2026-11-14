@@ -1,6 +1,6 @@
 # Authorization owner contract
 
-**Use it for:** declaring capabilities, checking them, roles and grants, and masking fields some readers must not see.
+**Use it for:** declaring capabilities, checking them, roles and grants (including roles a group you own, such as a team, gives its members), and masking fields some readers must not see.
 
 **Not for:** role tables, permission flags in code or `is admin` checks of your own.
 
@@ -204,9 +204,29 @@ Keep provider-managed roles separate from administrator assignments.
 
 `Grants::configure_identity_roles_in` authorizes and audits a company-scoped source's complete role bound, using ordinary role-update capability and Step-up checks. `apply_identity_roles_in` can then apply only roles in that stored bound for an account proved to belong to the policy's company. Both use the caller's `MutationTransaction`; the identity owner supplies verified claims or provisioned memberships and calls the latter after proving the account live. Narrowing a bound removes obsolete grants immediately.
 
-Automatic memberships live in `authz_identity_roles`, while manual memberships remain in `principal_roles`. `effective_principal_roles` combines them for decisions, masking, role displays, agent reach and shared-layout eligibility. Use the Authz read APIs or that view for effective memberships. Never write the view or delete manual assignments to reflect a provider group change. Direct denies retain precedence over both kinds of role grant.
+Automatic memberships live in `authz_identity_roles`, while manual memberships remain in `principal_roles`; group memberships are under "Group roles". `effective_principal_roles` combines them for decisions, masking, role displays, agent reach and shared-layout eligibility. Use the Authz read APIs or that view for effective memberships. Never write the view or delete manual assignments to reflect a provider group change. Direct denies retain precedence over both kinds of role grant.
 
 `Grants::revoke_identity_source_roles_in` removes only one authenticated system identity source's automatic grants, even when the target account is frozen. Its caller proves the source credential; the system attribution must name that same source. It cannot add grants or touch manual roles.
+
+## Group roles
+
+A group another module owns (a Core team) can carry roles; its members hold them while they are members. Authz keeps the group's label, company, roles and members in `authz_groups`, `authz_group_roles` and `authz_group_members` (migration `base-authz-016-group-roles`). The owner writes them only through `Grants`, inside its own `MutationTransaction`, so Base never reads the owner's tables.
+
+| Method | What it does |
+| --- | --- |
+| `set_group_role_in`, `validate_group_role` | Give or take away one role of a group |
+| `set_group_members_in`, `validate_group_members` | Apply a membership change: additions and removals |
+| `sync_group_in`, `validate_group_move` | Record a new name or company |
+| `group_role_choices` | The roles this actor may give a group in a company now, for a picker |
+| `grants::group_roles`, `roles::group_assignments` | The roles a group carries; the roles an account holds through groups |
+
+- A `Group { source, id, label, company }` names the group: `source` is the owner's noun ("team"), `label` its name now.
+- **A grant check guards every widening.** Giving a role, adding a member to a group that carries roles, and moving such a group to another company each need `admin.authz.role.update`, every permission the roles give in the group's company (the subset rule of `validate_assignment`) and step-up `base.authz.principal_role.set`. Taking a role away needs role-update permission and step-up. Removing a member is never checked: it only narrows.
+- **Never grant-all, never engagement.** A group cannot carry a full-access role or an engagement role, and `effective_principal_roles` ignores one that became so later.
+- **Company scope (ADR 20).** A group with a company grants its roles there only (`company_id` on the effective row), so its roles may hold only keys that support company scope.
+- **Live.** Decisions read the rows; there is no cache, job or sign-in step.
+- **Explainable.** `effective_principal_roles` and `authz_roles_for` carry `via` ("team Line 2 crew"; null for manual and provider memberships). A decision only a group's role allowed logs reason `group_role_capability` with `via`, and the decision log shows it.
+- Direct denies win over group roles, as over every other grant.
 
 ## Restrictions on a caller's read connection
 

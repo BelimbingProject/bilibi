@@ -1,5 +1,6 @@
-//! A team's record page: its facts read first and edit in place, then its
-//! members (add, remove several at once, lead on or off) and sub-teams.
+//! A team's record page: its facts read first and edit in place, with the
+//! roles it gives its members, then its members (add, remove several at
+//! once, lead on or off) and sub-teams.
 use super::{list, permitted, render, Pages, Record, State, SUB_LIMIT};
 use crate::MANAGE;
 use askama::Template;
@@ -11,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tokio_postgres::GenericClient;
 
 const AUDIT_LIST: &str = "admin.audit.log.list";
+/// Authz's role-update capability: giving a team a role is a grant change.
+const ROLE_UPDATE: &str = "admin.authz.role.update";
 
 pub(super) fn member_columns() -> Vec<BuiltinColumn> {
     vec![
@@ -95,6 +98,13 @@ pub(super) async fn read(
     }
     let leads = teams.leads(client, scope, id).await?;
     let above = teams.leads_above(client, scope, id).await?;
+    let roles = teams.roles(client, scope, id).await?;
+    let can_manage_roles = can_change && held.contains(ROLE_UPDATE);
+    let role_choices = if can_manage_roles {
+        teams.role_choices(client, scope, &team).await?
+    } else {
+        Vec::new()
+    };
     let history = held.contains(AUDIT_LIST)
         || permitted(bilibi_authz::authorize_key(client, scope, AUDIT_LIST).await)?;
     Ok(Record {
@@ -108,6 +118,9 @@ pub(super) async fn read(
         inactive,
         leads,
         above,
+        roles,
+        role_choices,
+        can_manage_roles,
         can_change,
         archived,
         companies,
@@ -216,6 +229,11 @@ fn facts(state: &State, record: &Record) -> Result<Html> {
             ..Fact::default()
         },
     ];
+    items.push(Fact {
+        title: "Roles",
+        id: "team-roles",
+        value: roles(record)?,
+    });
     if !record.above.is_empty() {
         let above: Vec<String> = record
             .above
@@ -236,6 +254,67 @@ fn facts(state: &State, record: &Record) -> Result<Html> {
         })?,
         ..Card::default()
     })
+}
+/// The shared cluster of a fact's parts, on one wrapping line.
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::cluster(parts=parts) %}{% endcall %}"#,
+    ext = "html"
+)]
+struct Cluster {
+    parts: Vec<Html>,
+}
+/// One role with its remove button.
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::removable(label=label, button=button, strong=true) %}{% endcall %}"#,
+    ext = "html"
+)]
+struct Removable<'a> {
+    label: &'a str,
+    button: Html,
+}
+/// The roles the team gives its members, each with its remove button for a
+/// reader who may change them, then "+ Add role".
+fn roles(record: &Record) -> Result<Html> {
+    let mut parts = Vec::new();
+    for role in &record.roles {
+        if record.can_manage_roles {
+            let label = format!("Take {} away from the team", role.name);
+            let id = format!("team-role-{}-remove", role.id);
+            let id_value = role.id.to_string();
+            let button = render(IconButton {
+                id: &id,
+                kind: IconKind::Danger,
+                title: &label,
+                event: "remove_role",
+                name: "role",
+                value: &id_value,
+                ..IconButton::new("delete", &label)
+            })?;
+            parts.push(render(Removable {
+                label: &role.name,
+                button,
+            })?);
+        } else {
+            parts.push(Html::text(&role.name));
+        }
+    }
+    if record.roles.is_empty() {
+        parts.push(Html::text("—"));
+    } else if let Some(company) = record.team.company_id.and(record.company_name.as_ref()) {
+        parts.push(Html::text(&format!("in {company} only")));
+    }
+    if record.can_manage_roles {
+        parts.push(render(Button {
+            id: "team-add-role",
+            button_type: "button",
+            event: "role_open",
+            body: Html::text("+ Add role"),
+            ..Button::default()
+        })?);
+    }
+    render(Cluster { parts })
 }
 fn members(state: &State, record: &Record) -> Result<Html> {
     let added = &record.added;

@@ -268,10 +268,10 @@ fn row(display: &DisplayContext, log: &DecisionLogSummary) -> Result<FlexRow> {
         })?,
         render(TextCell {
             class: "font-mono text-xs text-ink-muted",
-            text: if log.reason.is_empty() {
-                "—"
-            } else {
-                &log.reason
+            text: &match (log.reason.as_str(), &log.via) {
+                ("", _) => "—".to_owned(),
+                (reason, Some(via)) => format!("{reason} (via {via})"),
+                (reason, None) => reason.to_owned(),
             },
         })?,
         render(TextCell {

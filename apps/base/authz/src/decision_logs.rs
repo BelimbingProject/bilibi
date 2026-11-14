@@ -109,6 +109,9 @@ pub struct DecisionLogSummary {
     pub resource_id: Option<String>,
     pub allowed: bool,
     pub reason: String,
+    /// Where an allowing role came from ("team Line 2 crew"), when only a
+    /// group's role allowed it.
+    pub via: Option<String>,
     pub occurred_at: SystemTime,
 }
 
@@ -140,7 +143,7 @@ pub async fn list(
         params.push(&pattern);
         let n = params.len();
         filters.push(format!(
-            "(capability ILIKE ${n} OR reason ILIKE ${n} OR resource_type ILIKE ${n} OR resource_id ILIKE ${n} OR principal_type ILIKE ${n} OR system_principal ILIKE ${n})"
+            "(capability ILIKE ${n} OR reason ILIKE ${n} OR resource_type ILIKE ${n} OR resource_id ILIKE ${n} OR principal_type ILIKE ${n} OR system_principal ILIKE ${n} OR via ILIKE ${n})"
         ));
     }
     if let Some(allowed) = query.allowed.as_ref() {
@@ -164,7 +167,7 @@ pub async fn list(
     let rows = client
         .query(
             &format!(
-                "SELECT id,principal_type,user_id,acting_for_user_id,system_principal,capability,resource_type,resource_id,allowed,reason,created_at \
+                "SELECT id,principal_type,user_id,acting_for_user_id,system_principal,capability,resource_type,resource_id,allowed,reason,created_at,via \
                  FROM authz_decision_log WHERE {filter} ORDER BY {column} {direction} NULLS LAST, id {direction} LIMIT ${l} OFFSET ${o}",
                 column = query.sort.column(),
                 l = params.len() - 1,
@@ -192,6 +195,7 @@ pub async fn list(
                     allowed: row.get(8),
                     reason: row.get(9),
                     occurred_at: row.get(10),
+                    via: row.get(11),
                 }
             })
             .collect(),
