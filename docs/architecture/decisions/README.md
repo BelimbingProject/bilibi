@@ -3,7 +3,7 @@
 **Document Type:** Index of architecture decision records
 **Status:** Active
 **Scope:** Decisions that shape Bilibi's architecture
-**Last Updated:** 2026-11-05
+**Last Updated:** 2026-11-14
 
 Each record states one decision, its context and its consequences. The architecture overview is [`../README.md`](../README.md).
 
@@ -107,6 +107,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [08 Currencies as Core master data, and conversion always names its rate](./08-currencies-as-core-master-data.md) | Accepted; implemented |
 | [11 Record references across modules](./11-record-references.md) | Proposed |
 | [21 Tenant-defined custom fields stay "lite" and live in the owner's row](./21-tenant-defined-custom-fields.md) | Accepted; implemented |
+| [28 Tenant customisation is data on shared servers; customer code needs its own server](./28-tenant-customisation-is-data-on-shared-servers.md) | Accepted |
 | [22 Shared products in Core, selling rules in Domains](./22-shared-products-in-core.md) | Accepted |
 | [23 Shared documents in Core, business workflows in Domains](./23-shared-documents-in-core.md) | Accepted |
 | [24 Shared activities in Core, private by default, reminded in the same module](./24-shared-activities-in-core.md) | Accepted; implemented |
