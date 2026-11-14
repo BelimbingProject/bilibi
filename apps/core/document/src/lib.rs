@@ -481,6 +481,7 @@ impl Documents {
             activities: &self.activities,
             artifacts: &self.artifacts,
             queue: &self.queue,
+            media: &self.media,
         }
     }
 
@@ -494,10 +495,12 @@ impl Documents {
     /// `create` or `add_revision`; a file still not attached a day later is
     /// removed by its discard job (`discard.rs`).
     pub async fn store_file(&self, scope: &Scope, upload: Upload<'_>) -> WriteResult<StoredFile> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
-        let scope = self.fresh(&**client, scope).await?;
+        let scope = {
+            let client = self.db.get().await.map_err(Error::from)?;
+            self.fresh(&**client, scope).await?
+        };
         files::store(
-            &mut client,
+            &self.db,
             &scope,
             &self.boundary,
             &self.artifacts,
@@ -996,8 +999,9 @@ impl Documents {
             document.revision,
         )
         .await?;
+        drop(client);
         files::store(
-            &mut client,
+            &self.db,
             &scope,
             &self.boundary,
             &self.artifacts,

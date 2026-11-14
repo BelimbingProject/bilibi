@@ -206,6 +206,7 @@ Attachments are files a user, or a module's background job, adds to *someone els
 | `upload_attachment(&mut client, scope, subject, Upload, Rules)` | plain connection | Owner `Upload` check, size/libmagic/allowlist checks (`Rules` may only narrow `media.max_bytes` and `media.attachment_allowed_types`), the draft cap (below), private write to `media.attachment_disk`, owner `Upload` check again inside the registering transaction, then a draft with a fresh ULID. A failed registration deletes the file. |
 | `submit_attachments(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Locks the rows in id order, requires every id to exist in this tenant and belong to this subject, asks the owner for `Submit`, then marks drafts submitted. Repeating it changes nothing and adds no audit row. |
 | `retain_drafts(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Same checks with `Retain`; sets `retained_at` so cleanup spares the draft. Submitted rows pass through. |
+| `release_drafts(&mut tx, scope, subject, ids)` | owner's `MutationTransaction` | Same checks with `Retain`; clears `retained_at`, so cleanup removes the draft once it is older than 24 hours. For a draft the owner kept only while it needed it (a held upload until its scan settles). Unretained and submitted rows pass through. |
 | `download_attachment(&client, scope, public_id)` / `open_attachment` | any client | Tenant-scoped lookup, owner `Download` check, then the bytes (`open_attachment`: opened for streaming, see Reading bytes back). Each delivery records the audit action `media.attachment.downloaded` and each owner refusal `media.attachment.download_refused` (with a reason code): attachment public id, subject, actor and any impersonator, never the file name or storage key. Bytes are returned only after the action is recorded, so a download that cannot be audited is refused. Send them with `StreamFile::delivery(true)`: private files always download as `application/octet-stream`. |
 | `discard_draft(&mut client, scope, public_id)` | plain connection | Uploader only (the same account, or the same system principal), drafts only, not while a legal hold names the attachment or its asset (`Held`), owner `Discard` check; commits the row deletions, then removes the file (`CleanupFailed` if it cannot). |
 | `cleanup_drafts(&mut client, tenant, older_than)` | plain connection | Trusted callers only. Removes that tenant's unretained drafts older than the age, re-locking and rechecking each and passing over any a legal hold names (on the attachment or its asset). Attributed to system principal `media.attachments.cleanup`. |
@@ -219,7 +220,7 @@ or update path: the API refuses (`ImmutableAttachment`), a database trigger
 refuses raw writes, and the asset foreign key refuses removing the bytes.
 Audit records name the binding, never filename, key or bytes.
 
-`submit_attachments` and `retain_drafts` compose into the owner's business
+`submit_attachments`, `retain_drafts` and `release_drafts` compose into the owner's business
 transaction, so a rollback undoes the binding. Everything that writes or removes
 bytes needs a plain connection, as in M1.
 
