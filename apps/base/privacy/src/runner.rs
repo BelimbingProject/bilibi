@@ -449,7 +449,7 @@ async fn unconfirmed(
     if subject.identifiers.is_empty() {
         return Ok(0);
     }
-    let located = handler.locate(client, scope, subject).await?;
+    let located = handler.locate(client, scope, subject, None).await?;
     let matched: i64 = located.kinds.iter().map(|k| k.by_identifier).sum();
     Ok((matched - subject.confirmed.len() as i64).max(0))
 }

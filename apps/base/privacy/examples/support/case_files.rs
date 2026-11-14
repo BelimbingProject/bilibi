@@ -190,6 +190,7 @@ impl Handler for Cases {
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        _after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
             let (own, _) = cases(client, scope, subject.person).await?;

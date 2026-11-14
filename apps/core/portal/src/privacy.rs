@@ -8,9 +8,9 @@
 use bilibi_database::{Change, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_personal_data::{
-    Action, Candidate, Disclosure, Erased, ErasedRecord, Erasure, Exported, Handler, HandlerFuture,
-    Holds, Identifier, Kept, KindCount, Located, PersonalData, RecordKind, Subject, MAX_CANDIDATES,
-    PERSONAL_DATA, RECORD_KINDS,
+    after_id, record_ids, Action, Candidate, Confirmed, Disclosure, Erased, ErasedRecord, Erasure,
+    Exported, Handler, HandlerFuture, Holds, Identifier, Kept, KindCount, Located, PersonalData,
+    RecordKind, Subject, MAX_CANDIDATES, PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_privacy::{Companies, Sweeper, Swept};
 use bilibi_tenancy::Scope;
@@ -20,6 +20,11 @@ use tokio_postgres::{Client, GenericClient};
 
 pub(crate) const KIND: &str = "portal.registration";
 const FIELDS: [&str; 3] = ["name", "email", "company_name"];
+/// The requests whose confirmation link was used with an email the requester
+/// gave (`$2`), on no invitation linked to a person: the candidates.
+const CANDIDATES: &str = "customer_registrations r LEFT JOIN customer_invitations i \
+     ON i.tenant_id=r.tenant_id AND i.id=r.invitation_id \
+     WHERE r.tenant_id=$1 AND r.verified_at IS NOT NULL AND r.email=ANY($2) AND i.person_id IS NULL";
 
 pub(crate) fn emails(subject: &Subject) -> Vec<String> {
     subject
@@ -60,37 +65,42 @@ impl Handler for Registrations {
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let from = after_id(after)?;
             let emails = emails(subject);
-            let counts = client
-                .query_one(
-                    "SELECT count(*) FILTER (WHERE i.person_id=$2), \
-                     count(*) FILTER (WHERE r.verified_at IS NOT NULL AND r.email=ANY($3) AND i.person_id IS DISTINCT FROM $2) \
-                     FROM customer_registrations r LEFT JOIN customer_invitations i \
-                     ON i.tenant_id=r.tenant_id AND i.id=r.invitation_id WHERE r.tenant_id=$1",
-                    &[&scope.tenant(), &subject.person.get(), &emails],
-                )
-                .await?;
+            let mut kinds = Vec::new();
+            if after.is_none() {
+                let counts = client
+                    .query_one(
+                        "SELECT count(*) FILTER (WHERE i.person_id=$2), \
+                         count(*) FILTER (WHERE r.verified_at IS NOT NULL AND r.email=ANY($3) AND i.person_id IS DISTINCT FROM $2) \
+                         FROM customer_registrations r LEFT JOIN customer_invitations i \
+                         ON i.tenant_id=r.tenant_id AND i.id=r.invitation_id WHERE r.tenant_id=$1",
+                        &[&scope.tenant(), &subject.person.get(), &emails],
+                    )
+                    .await?;
+                kinds.push(KindCount {
+                    kind: KIND.into(),
+                    by_person: counts.get(0),
+                    by_identifier: counts.get(1),
+                });
+            }
             let rows = if emails.is_empty() {
                 Vec::new()
             } else {
                 client
                     .query(
-                        "SELECT r.id,CASE WHEN r.decision IS NOT NULL THEN r.decision ELSE 'waiting' END, \
+                        &format!("SELECT r.id,CASE WHEN r.decision IS NOT NULL THEN r.decision ELSE 'waiting' END, \
                          to_char(r.created_at AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI') \
-                         FROM customer_registrations r LEFT JOIN customer_invitations i \
-                         ON i.tenant_id=r.tenant_id AND i.id=r.invitation_id \
-                         WHERE r.tenant_id=$1 AND r.verified_at IS NOT NULL AND r.email=ANY($2) \
-                         AND i.person_id IS NULL ORDER BY r.id LIMIT $3",
-                        &[&scope.tenant(), &emails, &(MAX_CANDIDATES as i64 + 1)],
+                         FROM {CANDIDATES} AND r.id>$3 ORDER BY r.id LIMIT $4"),
+                        &[&scope.tenant(), &emails, &from, &(MAX_CANDIDATES as i64 + 1)],
                     )
                     .await?
             };
-            let truncated = rows.len() > MAX_CANDIDATES;
             let candidates = rows
                 .iter()
-                .take(MAX_CANDIDATES)
                 .map(|row| Candidate {
                     kind: KIND.into(),
                     id: row.get::<_, i64>(0).to_string(),
@@ -102,18 +112,36 @@ impl Handler for Registrations {
                     ),
                 })
                 .collect();
-            Ok(Located {
-                kinds: vec![KindCount {
-                    kind: KIND.into(),
-                    by_person: counts.get(0),
-                    by_identifier: counts.get(1),
-                }],
-                candidates,
-                truncated,
-            })
+            Ok(Located::page(kinds, candidates, |last| last.id.clone()))
         })
     }
-
+    fn confirmable<'a>(
+        &'a self,
+        client: &'a Client,
+        scope: &'a Scope,
+        subject: &'a Subject,
+        records: &'a [Confirmed],
+    ) -> HandlerFuture<'a, Vec<Confirmed>> {
+        Box::pin(async move {
+            let emails = emails(subject);
+            let ids = record_ids(records, KIND);
+            if ids.is_empty() || emails.is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(client
+                .query(
+                    &format!("SELECT r.id FROM {CANDIDATES} AND r.id=ANY($3)"),
+                    &[&scope.tenant(), &emails, &ids],
+                )
+                .await?
+                .iter()
+                .map(|row| Confirmed {
+                    kind: KIND.into(),
+                    id: row.get::<_, i64>(0).to_string(),
+                })
+                .collect())
+        })
+    }
     fn export<'a>(
         &'a self,
         client: &'a Client,

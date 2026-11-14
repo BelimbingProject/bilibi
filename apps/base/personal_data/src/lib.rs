@@ -10,10 +10,10 @@ mod store;
 pub use grant::{Cause, Disclosure, Erasure, Issuer, Reveal};
 pub use holds::{bind_holds, HoldSession, HoldSource, Holds, RecordHolds};
 pub use store::{
-    module_key, Action, Candidate, Confirmed, Deferral, Erased, ErasedRecord, Exported, File,
-    FileRef, Handler, HandlerFuture, Identifier, Kept, KeptReason, KindAction, KindCount, Located,
-    PersonalData, Progress, RecordKind, Stores, Subject, Withheld, ERASED, MAX_CANDIDATES,
-    PERSONAL_DATA, RECORD_KINDS,
+    after_id, module_key, record_ids, Action, Candidate, Confirmed, Deferral, Erased, ErasedRecord,
+    Exported, File, FileRef, Handler, HandlerFuture, Identifier, Kept, KeptReason, KindAction,
+    KindCount, Located, PersonalData, Progress, RecordKind, Stores, Subject, Withheld, ERASED,
+    MAX_CANDIDATES, MAX_CURSOR, PERSONAL_DATA, RECORD_KINDS,
 };
 
 use bilibi_module_registry::{Consumer, Layer, Module};

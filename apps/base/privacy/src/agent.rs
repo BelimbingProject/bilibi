@@ -100,10 +100,29 @@ impl ReadHandler for Read {
                     json!({"request": request_json(&privacy.request(&**client, scope, id(input, "id")?).await?)})
                 }
                 Self::Locate => {
-                    let found = privacy.locate(&client, scope, id(input, "id")?).await?;
+                    let request = id(input, "id")?;
+                    let found = match (input["store"].as_str(), input["after"].as_str()) {
+                        (None, None) => privacy.locate(&client, scope, request).await?,
+                        (Some(store), Some(after)) => {
+                            let page = privacy
+                                .locate_page(&client, scope, request, store, after)
+                                .await?;
+                            let label = privacy
+                                .stores()
+                                .find(|(key, _)| *key == store)
+                                .map_or("", |(_, label)| label);
+                            vec![(store.to_owned(), label.to_owned(), page)]
+                        }
+                        _ => {
+                            return Err(bilibi_agent_api::invalid(
+                                "after",
+                                "must be given with store, as a store's next",
+                            ))
+                        }
+                    };
                     json!({"stores": found.iter().map(|(store, label, located)| json!({
                         "store": store, "label": label, "kinds": located.kinds,
-                        "candidates": located.candidates, "truncated": located.truncated,
+                        "candidates": located.candidates, "next": located.next,
                     })).collect::<Vec<_>>()})
                 }
                 Self::Holds => {
@@ -382,6 +401,11 @@ fn retention_list_schema() -> Value {
 fn id_schema() -> Value {
     json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1}}})
 }
+fn locate_schema() -> Value {
+    json!({"type":"object","required":["id"],"properties":{"id":{"type":"integer","minimum":1},
+        "store":{"type":"string","maxLength":200,"description":"With after: read only this store's next page of candidates"},
+        "after":{"type":"string","maxLength":bilibi_personal_data::MAX_CURSOR,"description":"The store's next from an earlier page"}}})
+}
 fn receive_schema() -> Value {
     json!({"type":"object","required":["kind","person_id","company_id"],"properties":{
         "kind":{"type":"string","enum":["access","portability","erasure"]},
@@ -395,7 +419,7 @@ fn verify_schema() -> Value {
         "id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":0},
         "verification":{"type":"string","maxLength":1000,"description":"How the requester's identity was checked"},
         "confirm":{"type":"array","items":{"type":"object","required":["store","kind","id"],"properties":{"store":{"type":"string"},"kind":{"type":"string"},"id":{"type":"string"}}},
-            "description":"The candidates from base.privacy.request.locate that are this person's records; only these, and records linked to the person, are acted on"}}})
+            "description":"The candidates from any page of base.privacy.request.locate that are this person's records, at most 800; only these, and records linked to the person, are acted on. Each store checks them again when the request is verified"}}})
 }
 fn approve_schema() -> Value {
     json!({"type":"object","required":["id","version"],"properties":{"id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":0}}})
@@ -434,7 +458,7 @@ fn request_output() -> Value {
     json!({"type":"object","description":"One request with each store's answer."})
 }
 fn locate_output() -> Value {
-    json!({"type":"object","description":"Per store and record kind: records linked to the person, and records matched only by an email or phone the request carries, each listed as a candidate to confirm when verifying."})
+    json!({"type":"object","description":"Per store and record kind: records linked to the person, and records matched only by an email or phone the request carries, each listed as a candidate to confirm when verifying, at most 200 per store and page. A store with more answers next: read its next page with store and after (a later page carries no counts)."})
 }
 fn holds_output() -> Value {
     json!({"type":"object","description":"Legal holds, active first: target, reason, who placed and released it."})
@@ -483,7 +507,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/privacy", Provenance {
     operations: &[
         read!("base.privacy.request.list", "List data-subject requests", "This tenant's access, portability and erasure requests with their progress.", REQUEST_VIEW, list_schema, requests_output, &Read::Requests),
         read!("base.privacy.request.get", "Read a data-subject request", "One request and each store's answer.", REQUEST_VIEW, id_schema, request_output, &Read::Request),
-        read!("base.privacy.request.locate", "Find a request's personal data", "What every store holds about the request's person, including matches found only by email or phone, which verifying confirms.", REQUEST_VIEW, id_schema, locate_output, &Read::Locate),
+        read!("base.privacy.request.locate", "Find a request's personal data", "What every store holds about the request's person, including matches found only by email or phone, which verifying confirms.", REQUEST_VIEW, locate_schema, locate_output, &Read::Locate),
         read!("base.privacy.hold.list", "List legal holds", "One page of this tenant's legal holds on people and records, active first, with the total.", HOLD_VIEW, holds_schema, holds_output, &Read::Holds),
         Operation {
             key: "base.privacy.field.reveal",
@@ -508,5 +532,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/privacy", Provenance {
         write!("base.privacy.hold.release", "Release a legal hold", "Release an active legal hold; the next erasure or sweep acts on what it kept.", HOLD_MANAGE, release_schema, &Write::ReleaseHold, &[]),
     ],
     guides: &[Guide { key: "base.privacy", title: "Data-subject requests", summary: "Answer a person's access or erasure request in every store.", keywords: &["privacy", "pdpa", "gdpr", "erasure", "access request", "legal hold"], capability: REQUEST_VIEW,
-        body: "Record the request with base.privacy.request.receive (kind, person_id, company_id, and the emails or phones the person gave). Read base.privacy.request.locate to see what every store holds; records found only by email or phone are listed as candidates. Record how the person's identity was checked with base.privacy.request.verify, passing in confirm only the candidates that are this person's; nothing else found only by an identifier is touched. A person with privacy.request.approve, or you as their agent, then approves an access or portability request with base.privacy.request.approve. An erasure is sent for approval with base.privacy.erasure.submit and decided on Waiting for my approval or with base.privacy.erasure.decide, by someone independent of it: not the data subject or any account linked to them, not whoever received or verified it, and never while impersonating. Each decision asks for that person's Step-up code: when a commit answers step_up_required, ask them for their current authenticator code. A rejected or recalled erasure returns to whoever received it, to send again or refuse. Running answers each store in the background; read base.privacy.request.get until status is completed. A store that fails is retried and the request shows late; once its retries run out, or its approver can no longer run it, the request becomes failed with a failure code, and a person who may approve runs it again with base.privacy.request.run_again. Legal holds (base.privacy.hold.place) keep what they name through erasure; the certificate lists every store, what was kept and why." }],
+        body: "Record the request with base.privacy.request.receive (kind, person_id, company_id, and the emails or phones the person gave). Read base.privacy.request.locate to see what every store holds; records found only by email or phone are listed as candidates, 200 per store and page (a store with more answers next; pass it as after, with store, for its next page). Record how the person's identity was checked with base.privacy.request.verify, passing in confirm only the candidates that are this person's; nothing else found only by an identifier is touched. A person with privacy.request.approve, or you as their agent, then approves an access or portability request with base.privacy.request.approve. An erasure is sent for approval with base.privacy.erasure.submit and decided on Waiting for my approval or with base.privacy.erasure.decide, by someone independent of it: not the data subject or any account linked to them, not whoever received or verified it, and never while impersonating. Each decision asks for that person's Step-up code: when a commit answers step_up_required, ask them for their current authenticator code. A rejected or recalled erasure returns to whoever received it, to send again or refuse. Running answers each store in the background; read base.privacy.request.get until status is completed. A store that fails is retried and the request shows late; once its retries run out, or its approver can no longer run it, the request becomes failed with a failure code, and a person who may approve runs it again with base.privacy.request.run_again. Legal holds (base.privacy.hold.place) keep what they name through erasure; the certificate lists every store, what was kept and why." }],
 }) }

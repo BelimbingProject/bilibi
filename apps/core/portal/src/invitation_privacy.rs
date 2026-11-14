@@ -24,6 +24,7 @@ impl Handler for Invitations {
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        _after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
             let emails = crate::privacy::emails(subject);

@@ -14,9 +14,9 @@ use crate::{CURRENT_RECORD, DECISION_RECORD, LOG_RECORD, SUPPRESSION_RECORD};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance, RegistryError};
 use bilibi_personal_data::{
-    Action, Candidate, Disclosure, Erased, ErasedRecord, Erasure, Exported, Handler, HandlerFuture,
-    Holds, Identifier, Kept, KindCount, Located, PersonalData, RecordKind, Subject, ERASED,
-    MAX_CANDIDATES, PERSONAL_DATA, RECORD_KINDS,
+    Action, Candidate, Confirmed, Disclosure, Erased, ErasedRecord, Erasure, Exported, Handler,
+    HandlerFuture, Holds, Identifier, Kept, KindCount, Located, PersonalData, RecordKind, Subject,
+    ERASED, MAX_CANDIDATES, PERSONAL_DATA, RECORD_KINDS,
 };
 use bilibi_settings::Settings;
 use bilibi_tenancy::{ReadClient, Scope};
@@ -179,6 +179,102 @@ async fn confirmed_addresses(
         .collect())
 }
 
+/// One candidate per address: its first decision, suppression or check row
+/// (`rank` 1, 2 or 3, then `id`), with the address's row counts per rank, the
+/// date it was first seen and whether it is an email. Binds `$1` tenant, `$2`
+/// emails, `$3` phone digit patterns.
+fn grouped() -> String {
+    format!("WITH m AS ( \
+     SELECT address,1 AS rank,id,recorded_at AS at FROM core_consent_decisions WHERE tenant_id=$1 AND {MATCH} \
+     UNION ALL SELECT address,2,id,suppressed_at FROM core_consent_suppressions WHERE tenant_id=$1 AND {MATCH} \
+     UNION ALL SELECT address,3,id,at FROM core_consent_log WHERE tenant_id=$1 AND {MATCH}), \
+     g AS (SELECT (array_agg(rank ORDER BY rank,id))[1] AS rank,(array_agg(id ORDER BY rank,id))[1] AS id, \
+     count(*) FILTER (WHERE rank=1) AS decisions,count(*) FILTER (WHERE rank=2) AS suppressions, \
+     count(*) FILTER (WHERE rank=3) AS checks,to_char(min(at) AT TIME ZONE 'UTC','YYYY-MM-DD') AS since, \
+     bool_or(strpos(address,'@')>0) AS email FROM m GROUP BY address)")
+}
+fn kind_of(rank: i32) -> &'static str {
+    match rank {
+        1 => DECISION_RECORD,
+        2 => SUPPRESSION_RECORD,
+        _ => LOG_RECORD,
+    }
+}
+fn rank_of(kind: &str) -> Option<i32> {
+    match kind {
+        DECISION_RECORD => Some(1),
+        SUPPRESSION_RECORD => Some(2),
+        LOG_RECORD => Some(3),
+        _ => None,
+    }
+}
+/// A page cursor is the last listed candidate's `rank:id`; before the first
+/// page, `(0, 0)`.
+fn cursor(after: Option<&str>) -> Result<(i32, i64)> {
+    let Some(after) = after else {
+        return Ok((0, 0));
+    };
+    after
+        .split_once(':')
+        .and_then(|(rank, id)| Some((rank.parse().ok()?, id.parse().ok()?)))
+        .filter(|(rank, id): &(i32, i64)| (1..=3).contains(rank) && *id > 0)
+        .ok_or(Error::Invalid)
+}
+fn next(last: &Candidate) -> String {
+    format!("{}:{}", rank_of(&last.kind).unwrap_or(3), last.id)
+}
+/// The candidates after `(rank, from)`, one per address, the summary counting
+/// its rows without showing the address; at most one more than a page.
+async fn groups(
+    client: &Client,
+    tenant: i64,
+    emails: &[String],
+    phones: &[String],
+    rank: i32,
+    from: i64,
+) -> Result<Vec<Candidate>> {
+    if emails.is_empty() && phones.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(client
+        .query(
+            &format!(
+                "{} SELECT rank,id,decisions,suppressions,checks,since,email FROM g \
+                 WHERE (rank,id)>($4,$5) ORDER BY rank,id LIMIT $6",
+                grouped()
+            ),
+            &[
+                &tenant,
+                &emails,
+                &phones,
+                &rank,
+                &from,
+                &(MAX_CANDIDATES as i64 + 1),
+            ],
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            let what = if row.get::<_, bool>(6) {
+                "an email address"
+            } else {
+                "a phone number or handle"
+            };
+            Candidate {
+                kind: kind_of(row.get(0)).into(),
+                id: row.get::<_, i64>(1).to_string(),
+                summary: format!(
+                    "Consent for {what}: {} decisions, {} suppressions, {} checks since {} UTC",
+                    row.get::<_, i64>(2),
+                    row.get::<_, i64>(3),
+                    row.get::<_, i64>(4),
+                    row.get::<_, String>(5)
+                ),
+            }
+        })
+        .collect())
+}
+
 struct Store;
 static STORE: Store = Store;
 impl Handler for Store {
@@ -187,11 +283,17 @@ impl Handler for Store {
         client: &'a Client,
         scope: &'a Scope,
         subject: &'a Subject,
+        after: Option<&'a str>,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let (rank, from) = cursor(after)?;
             let tenant = scope.tenant();
             let person = subject.person.get();
             let (emails, phones) = identifiers(subject);
+            if after.is_some() {
+                let candidates = groups(client, tenant, &emails, &phones, rank, from).await?;
+                return Ok(Located::page(Vec::new(), candidates, next));
+            }
             let counts = client
                 .query_one(
                     &format!(
@@ -228,52 +330,43 @@ impl Handler for Store {
                     ..Located::default()
                 });
             }
-            // One candidate per address, named by its first row; the summary
-            // counts its rows without showing the address.
-            let rows = client
+            let candidates = groups(client, tenant, &emails, &phones, rank, from).await?;
+            Ok(Located::page(kinds, candidates, next))
+        })
+    }
+    fn confirmable<'a>(
+        &'a self,
+        client: &'a Client,
+        scope: &'a Scope,
+        subject: &'a Subject,
+        records: &'a [Confirmed],
+    ) -> HandlerFuture<'a, Vec<Confirmed>> {
+        Box::pin(async move {
+            let (emails, phones) = identifiers(subject);
+            let asked: Vec<(i32, i64)> = records
+                .iter()
+                .filter_map(|record| Some((rank_of(&record.kind)?, record.id.parse().ok()?)))
+                .collect();
+            if asked.is_empty() || (emails.is_empty() && phones.is_empty()) {
+                return Ok(Vec::new());
+            }
+            let (ranks, ids): (Vec<i32>, Vec<i64>) = asked.into_iter().unzip();
+            Ok(client
                 .query(
                     &format!(
-                        "WITH m AS ( \
-                         SELECT address,1 AS rank,id,recorded_at AS at FROM core_consent_decisions WHERE tenant_id=$1 AND {MATCH} \
-                         UNION ALL SELECT address,2,id,suppressed_at FROM core_consent_suppressions WHERE tenant_id=$1 AND {MATCH} \
-                         UNION ALL SELECT address,3,id,at FROM core_consent_log WHERE tenant_id=$1 AND {MATCH}) \
-                         SELECT (array_agg(rank ORDER BY rank,id))[1],(array_agg(id ORDER BY rank,id))[1], \
-                         count(*) FILTER (WHERE rank=1),count(*) FILTER (WHERE rank=2),count(*) FILTER (WHERE rank=3), \
-                         to_char(min(at) AT TIME ZONE 'UTC','YYYY-MM-DD'),bool_or(strpos(address,'@')>0) \
-                         FROM m GROUP BY address ORDER BY 1,2 LIMIT $4"
+                        "{} SELECT g.rank,g.id FROM g JOIN unnest($4::int[],$5::bigint[]) c(rank,id) \
+                         ON c.rank=g.rank AND c.id=g.id",
+                        grouped()
                     ),
-                    &[&tenant, &emails, &phones, &(MAX_CANDIDATES as i64 + 1)],
+                    &[&scope.tenant(), &emails, &phones, &ranks, &ids],
                 )
-                .await?;
-            let truncated = rows.len() > MAX_CANDIDATES;
-            let candidates = rows
+                .await?
                 .iter()
-                .take(MAX_CANDIDATES)
-                .map(|row| {
-                    let kind = match row.get::<_, i32>(0) {
-                        1 => DECISION_RECORD,
-                        2 => SUPPRESSION_RECORD,
-                        _ => LOG_RECORD,
-                    };
-                    let what = if row.get::<_, bool>(6) { "an email address" } else { "a phone number or handle" };
-                    Candidate {
-                        kind: kind.into(),
-                        id: row.get::<_, i64>(1).to_string(),
-                        summary: format!(
-                            "Consent for {what}: {} decisions, {} suppressions, {} checks since {} UTC",
-                            row.get::<_, i64>(2),
-                            row.get::<_, i64>(3),
-                            row.get::<_, i64>(4),
-                            row.get::<_, String>(5)
-                        ),
-                    }
+                .map(|row| Confirmed {
+                    kind: kind_of(row.get(0)).into(),
+                    id: row.get::<_, i64>(1).to_string(),
                 })
-                .collect();
-            Ok(Located {
-                kinds,
-                candidates,
-                truncated,
-            })
+                .collect())
         })
     }
 

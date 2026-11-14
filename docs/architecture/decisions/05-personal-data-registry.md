@@ -46,7 +46,7 @@ Without a shared contract, each Domain (a CRM first) would build its own export,
 **Every handler takes a sealed `Scope` and a `Subject`, and Base needs no Core dependency.**
 
 - `Subject` is a `bilibi_party_ids::PersonId` plus listed identifiers (email, phone). It never carries free text from the requester.
-- `locate` returns counts per record kind, split into matches by Person and matches only by identifier.
+- `locate` returns counts per record kind, split into matches by Person and matches only by identifier, and one page of the identifier-only matches, with the store's own cursor for the next page. `confirmable` answers which of given records are such matches now, so a confirmation from any page is checked when the request is verified.
 - `export` returns JSON plus file references (media and artifact IDs). Base resolves the files; the handler never copies bytes.
 - `erase` anonymises in place, or deletes records with no business value, and returns counts per record kind plus records kept, each with a reason (`legal_hold`, `retained_until`, `legal_minimum`, `deferred`) and a date when known.
 - Every call is idempotent: a retried job that finds work already done returns the same counts.
