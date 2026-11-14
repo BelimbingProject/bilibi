@@ -41,6 +41,21 @@ The live socket limits are operator settings here too, read by Web's live transp
 
 `session.trusted_proxies` (default empty) lists the addresses or networks of the operator's own reverse proxies on other machines, separated by commas (`10.0.0.5, 10.1.0.0/16`). `TrustedProxies` parses it and answers which client a connection is from: a listed proxy's, or this machine's, `X-Forwarded-For` is believed, read right to left past trusted hops; any other peer is the client itself. The setting refuses a list that is not addresses or that names every address (`/0`). Web resolves every request through it (`apps/web/README.md`, Client address).
 
+## Rough place from an IP address
+
+**A sign-in records a rough city and country only when the operator supplies a local city-level MMDB file.** `describe` looks up the client address once, stores the result on the session and sign-in history, and never looks it up again while drawing a page. The reader stays in memory and reloads after the file size or modification time changes. This keeps page reads cheap and makes each sign-in retain the answer from the database version used at that time.
+
+No database file, an unreadable or invalid file, a missing address, a private or loopback address, or an address with no matching record leaves the place empty. None of these cases prevents sign-in. Bilibi makes no network request to find or update a place.
+
+### Supply and update the file
+
+1. Obtain a city-level database in MaxMind DB (`.mmdb`) format. [GeoLite City](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/) is one free option.
+2. Put the extracted `.mmdb` file where the Bilibi service can read it, such as `/opt/bilibi/<instance>/data/geoip/GeoLite2-City.mmdb`. Do not put an account ID or licence key in Bilibi.
+3. Open **Administration → System → Settings**, find **IP place database file** under **Session**, and enter the absolute path. Leave it blank to turn place lookup off.
+4. Update the file outside Bilibi with the database provider's updater, then replace the old file atomically. New sign-ins use the replacement without a restart; places already stored do not change.
+
+The `maxminddb` Rust reader is ISC-licensed. The database remains under the provider's separate terms and is not bundled with Bilibi. MaxMind's [GeoLite End User License Agreement](https://www.maxmind.com/en/geolite/eula) incorporates Creative Commons Attribution-ShareAlike 4.0, requires attribution, and requires old GeoLite databases to be removed on its stated schedule. Follow the current licence and update rules for whichever database you supply.
+
 ## Impersonation
 
 `sessions.impersonator_id` names the operator behind an impersonated session
@@ -81,10 +96,10 @@ The list is platform-global, like `count`, because the store is not
 tenant-owned; it reads only metadata and never a payload. A session marked ended (below) is left out of both. Each row names its
 user through `base/principal_directory`: a user in the operator's tenant shows
 their name, one outside it shows `User <id>`, so no name crosses a tenant
-boundary. The user column sorts by `user_id`. Search matches the IP address or
+boundary. The user column sorts by `user_id`. Search matches the IP address, place or
 user agent recorded once at sign-in by `describe` (the host passes the proxy's
 `X-Forwarded-For`/`X-Real-IP` and `User-Agent`; a direct connection records no
-address). `sessions.signed_in_at` records admission time and has the same retention as the session row. `describe` also appends the sign-in (time, address, user agent and its device label) to `session_sign_ins`, keyed by tenant and user, which `previous_sign_in` reads for the latest sign-in before the current session; it survives sign-out, expiry and "sign out everywhere else", and the expiry sweep deletes rows older than 90 days. The UI says "No earlier sign-in on record" when none is found; the place of a sign-in is not resolved. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
+address). `sessions.signed_in_at` records admission time and has the same retention as the session row. `describe` also appends the sign-in (time, address, place, user agent and its device label) to `session_sign_ins`, keyed by tenant and user, which `previous_sign_in` reads for the latest sign-in before the current session; it survives sign-out, expiry and "sign out everywhere else", and the expiry sweep deletes rows older than 90 days. The UI says "No earlier sign-in on record" when none is found. Rows and termination requests are keyed by a digest of the session id (`Summary::key`), never by the bearer token.
 
 The dashboard entry `base-dashboard-session-stats` (embed `session.dashboard-stats`,
 slot `dashboard.sessions`) shows the open count, reading only while
@@ -92,7 +107,7 @@ slot `dashboard.sessions`) shows the open count, reading only while
 
 ## Your sessions
 
-`/settings/sessions` lists only the signed-in person's active staff sessions. Each row shows the device label derived from the user agent, IP address, sign-in time, last activity and whether it is this device. There is no platform geo-IP lookup, so the page and account popup show the IP address and do not guess a city. The account popup shows the previous sign-in from `session_sign_ins` (time, device, IP address), or "No earlier sign-in on record".
+`/settings/sessions` lists only the signed-in person's active staff sessions. Each row shows the device label derived from the user agent, IP address, rough place when one was recorded, sign-in time, last activity and whether it is this device. The account popup shows the previous sign-in from `session_sign_ins` (time, device, IP address and place), or "No earlier sign-in on record".
 
 An impersonating operator, agent bearer or system principal cannot open the page or read the previous-sign-in summary. A row command sends only `OwnSummary::key`; the mounted page keeps the stored id, and the mutation locks and deletes only a row with the sealed scope's tenant and user. The current session has no sign-out command. **Sign out everywhere else** excludes it.
 
@@ -107,7 +122,7 @@ An impersonating operator, agent bearer or system principal cannot open the page
 | Not new | The first sign-in on record (nothing to compare), an impersonated session, and a portal customer's sign-in (the portal has no Your sessions page) |
 | Limit | `claim_new_device_alert(tx, scope, device)` claims one email per account, device and UTC day in `session_sign_in_alerts` and audits it (`session_sign_in_alert`, action `user.new_device_sign_in_email`). A repeat sign-in is not new anyway, so the claim only matters for sign-ins that race |
 | Timing | The web host calls `UserService::alert_new_device` after `describe`; it runs in the background, so a failure is logged and never delays or fails the sign-in |
-| Content | Time, device and IP address, a link to `/settings/sessions` and "If this wasn't you, change your password". No secret, and no link that signs anything out by itself |
+| Content | Time, device, IP address and recorded place, a link to `/settings/sessions` and "If this wasn't you, change your password". No secret, and no link that signs anything out by itself |
 
 - Someone using the same browser and system as the account holder is not detected; the label is coarse on purpose, so a browser update does not raise an email.
 - A device unused for 90 days counts as new again, because the history is pruned. After every row is pruned, the next sign-in counts as the first and sends nothing.
@@ -167,11 +182,11 @@ The same sweep deletes `session_sign_ins` rows more than 90 days after the sign-
 
 ## Sign-in history and privacy
 
-**A person's erasure does not delete their sign-in history; the 90-day sweep does.** Each record holds the sign-in time, device label, IP address and user agent. The new-device email claims (`session_sign_in_alerts`: account, device label, day) also stay through erasure, but the sweep deletes them after one to two days, far sooner than the history.
+**A person's erasure does not delete their sign-in history; the 90-day sweep does.** Each record holds the sign-in time, device label, IP address, rough place and user agent. The new-device email claims (`session_sign_in_alerts`: account, device label, day) also stay through erasure, but the sweep deletes them after one to two days, far sooner than the history.
 
 | Event | What happens to `session_sign_ins` | Why |
 | --- | --- | --- |
-| Personal-data export | `Sessions::sign_in_history` lists the person's records (time, device, address, user agent, and when the sweep deletes each) and any held new-device email claims in `core/user.accounts`, under each account | A person may see what we hold about them |
+| Personal-data export | `Sessions::sign_in_history` lists the person's records (time, device, address, place, user agent, and when the sweep deletes each) and any held new-device email claims in `core/user.accounts`, under each account | A person may see what we hold about them |
 | Personal-data erasure | Records stay. `Sessions::sign_in_retained_until` lets Core User report them on the certificate as kept (`session.sign_in_history`) until the newest one's 90-day end | They are security evidence: they show where and when an account was used, which an investigation of account takeover needs after the owner is gone |
 | 90 days after a sign-in | The expiry sweep deletes the record | The retention is short and fixed, so nothing is kept longer than the evidence is useful |
 
@@ -190,3 +205,5 @@ sign-in at once, and the row disappears. Your own row carries the Current badge
 and no terminate control.
 
 `Sessions::with_factors(step_up)` wires the factor registry; the production service factory does this. A standalone fixture that constructs `Sessions::new` must wire it before calling `revoke`, or revocation fails closed. Factor hooks retain enrollment and lockouts while clearing pending challenges and method-owned proof. A delegated-credential owner registers one `CredentialRevoker` during service installation; its hook receives the trusted account and caller's SQL transaction and returns every affected record as a `Change`. The [Step-up lifecycle contract](../step_up/README.md#factor-lifecycle) is authoritative for factors; `CredentialRevoker` is the account-wide reset seam for other credentials.
+
+The executable walkthrough creates a tiny local MMDB file with one public address, records that place on the session and history, and proves that private, unknown and missing-file cases stay empty without failing the sign-in. Run it through `bash scripts/run-walkthroughs.sh session-place` on a disposable database.
