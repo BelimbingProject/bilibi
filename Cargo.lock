@@ -500,6 +500,7 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "axum",
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",
@@ -511,6 +512,7 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-queue",
+ "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",
  "bilibi-walkthrough-fixture",

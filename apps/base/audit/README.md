@@ -118,7 +118,7 @@ the checks and which fields are withheld.
 
 ### List bounds
 
-**Both ledgers only grow, so `list_actions` and `list_mutations` never read a tenant's whole ledger.**
+**Both ledgers can be large, so `list_actions` and `list_mutations` never read a tenant's whole ledger.**
 
 | Bound | Rule |
 | --- | --- |
@@ -158,18 +158,50 @@ the checks and which fields are withheld.
 | Database | `base_audit_erase_actions` is refused unless the sweep is open in the tenant (`base_audit_erasure_causes`). The guard itself clears the row, so the function can change nothing else; every other update is refused |
 | Ledger | One append-only `base_audit_action_erasures` row per batch: sweep, cutoff, first and last ID, rows erased and kept, actor |
 
-- **Not built:** rows are never removed, so the ledgers still grow. Removing or archiving old rows needs the ledgers partitioned by time and a chain that can end at a partition; that design is open ([issue 579](https://github.com/BelimbingProject/bilibi/issues/579)).
+- Whole-row removal follows the partition policy below; clearing personal values and removing evidence are separate operations.
 - `retention-walkthrough` (`base/privacy`) runs it through the scheduled sweep.
+
+## Partition retention
+
+**An operator can remove a whole expired month from either ledger while retained rows stay readable and the chain still verifies.** For example, removing January moves bookmarked actions to the protected partition, records the removed chain ranges, and drops the January table in the same transaction.
+
+### Storage and identity
+
+- Both evidence tables use PostgreSQL range partitions on `partition_month`, initially the first day of the UTC month in which the row was recorded. A released protected action returns to the current month, as described below. Event time stays separate: a backdated event cannot expire newly recorded evidence.
+- The primary key is `(partition_month, id)`. One identity sequence per ledger still issues IDs across all partitions. The unique chain index includes `(coalesce(tenant_id, 0), chain_seq, partition_month)`, as PostgreSQL requires the partition key in a partitioned unique index.
+- The bookmark references `(partition_month, action_id)` with `ON UPDATE CASCADE` and `ON DELETE RESTRICT`. Moving a retained row preserves the bookmark and its foreign key.
+- Capture prepares the current and following month before inserting. A removed month cannot be recreated. The special `infinity` partition holds retained evidence and is never eligible for partition removal.
+- This pre-production schema replacement drops the old evidence and chain heads in a new migration. It does not convert existing rows; development and walkthrough databases are disposable.
+
+### Period and exemptions
+
+| Part | Rule |
+| --- | --- |
+| Period | The global setting `audit.partition_retention_days` has no enabled default. The operator must choose a positive number of days in System Settings before removal is available |
+| Eligibility | The end of the whole UTC month must be at or before now minus the configured days; the current month and the protected partition are always refused |
+| Exemption | An action follows its bookmark when present, otherwise its recorded `is_retained` bit. Mutations have an immutable `is_retained` bit. Retained rows move unchanged, except for the physical partition key, into the protected partition |
+| Released bookmarks | Releasing a protected action moves it into the current month, with its original evidence and chain link unchanged. It becomes eligible only after that whole month has passed the configured period |
+| Authority | The public operation requires platform-operator standing and the partition-removal capability, rechecked in its mutation transaction. The database function is executable only by the evidence owner and enforces age, exemptions and chain continuity itself |
+| Ledger | One immutable `base_audit_partition_removals` row records the ledger, month, chosen period, removed and retained counts, operator, reason and trace. Its checkpoints contain only sequence bounds and hashes, never row values |
+
+### Checkpoints and guards
+
+- Rows link in commit order, which can cross a recording-month boundary. The removal ledger therefore records every contiguous removed range for each tenant: the sequence before the range and its hash, the final sequence and hash, and the number of rows removed.
+- Before removal, each row in the partition must have a valid link, including the incoming link from the preceding live row or checkpoint. A broken or unsealed partition refuses the whole transaction.
+- Verification merges surviving rows with checkpoints in chain order. It checks the incoming checkpoint hash before advancing to the final hash. Removing a checkpoint, changing a surviving fact or losing a tail still breaks verification; removed values cannot be recomputed and are covered by the guarded removal record.
+- A running verification blocks partition removal, so a saved verification cursor never lands inside a newly removed range. A later verification starts from the beginning and follows the checkpoints.
+- The removal transaction locks the selected ledger and bookmark metadata before examining exemptions. It moves only retained rows, removes obsolete bookmark rows, writes the ledger and checkpoints, then drops the old partition. Failure rolls everything back, including the DDL.
+- Direct DELETE and TRUNCATE remain refused on parents and leaves. The evidence guard admits only the retained-row move inside removal and the return to the current month when a protected bookmark is released. Neither move changes evidence or chain links. There is no session variable that opens the guard. As with erasure, these guards prevent accidental SQL changes; a database owner who disables triggers or changes functions remains outside this guarantee.
 
 ## Hash chain
 
 **Every mutation and action row is linked to the one before it in its tenant over its ID, tenant, time, actor, event, record and field names; values are excluded, so approved erasure keeps the chain whole.**
 
-- **Scope of the guarantee:** a removed row, or a changed ID, tenant, time, actor, event, record or field name, is detected. A changed value is not: values are outside the hash so that erasure can clear them, and only the evidence guard (no update outside the erasure functions) protects them.
+- **Scope of the guarantee:** an unrecorded removal, or a changed ID, tenant, time, actor, event, record or field name, is detected. A changed value is not: values are outside the hash so that erasure can clear them, and only the evidence guard (no update outside the erasure functions) protects them.
 - **One chain per tenant and ledger** (`base_audit_chain_heads`: chain, tenant, last link). Rows of no tenant form chain 0. A commit takes only its own tenant's lock (`pg_advisory_xact_lock(841332, base_audit_chain_key(chain, tenant))`), so tenants do not queue behind each other.
 - **Linked in one pass per commit.** A deferred constraint trigger fires as the transaction commits, so no committed row is ever unlinked. Its first firing for a ledger computes the facts of every row the transaction wrote there, then takes the tenant's lock, links them in ID order and stores the links with one UPDATE; the other firings find their row linked and return.
 - **Heads are numbered** (`born`) in the order chains began, without gaps, so a removed head (a tenant's whole chain) is found, except the newest-born one.
-- Migration 011 linked the rows written before it again, under their tenants.
+- The partition replacement starts fresh evidence chains; later partition removal preserves the heads and bridges removed ranges with checkpoints.
 - Measured on PostgreSQL 18 with `pgbench` (8 clients over 8 tenants, one mutation and one action row per commit): 275 commits a second before, 735 after; beside one client looping a 5,000-change commit, 15 before (515 ms each), 691 after (12 ms each).
 
 ### Verification
@@ -189,6 +221,12 @@ the checks and which fields are withheld.
 - `base/audit_views` offers **Verify audit log** at `/audit/integrity` to platform operators.
 
 ## Runtime evidence
+
+`examples/partition-retention.rs` in `base/audit_views` loads three historical recording months on a disposable database. It removes two months from both ledgers, verifies every tenant chain in two-item steps, preserves retained evidence and bookmarks, releases a protected bookmark, checks rollback and lock conflicts, and proves that ordinary deletion, truncation and surviving-row tampering cannot pass unnoticed:
+
+```sh
+BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes cargo run -p bilibi-audit-views --example partition-retention
+```
 
 `examples/bounded-evidence.rs` in `base/audit_views` checks the chain per tenant, the list bounds and verification as a queued job, and fails when one does not hold:
 

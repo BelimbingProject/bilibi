@@ -26,7 +26,7 @@ shared FlexTable over `ListColumns` (reorder, remove, row height).
 
 ### Period and bounds (both lists)
 
-**The ledgers only grow, so a list reads one period and never the tenant's whole ledger.**
+**The ledgers can be large, so a list reads one period and never the tenant's whole ledger.**
 
 | Part | Rule |
 | --- | --- |
@@ -157,3 +157,7 @@ Actions, Data Mutations and record history show "Client identity" separately fro
 | Page | Shows the latest verification on every draw; the live fallback refresh (15 s) brings progress and the result without a press |
 | Result | Per ledger: rows checked and tenant chains, or the break with its tenant, link and row. Recorded as `audit.chain.verified` |
 | Stopped | A verification with no progress for 30 minutes shows as stopped once a new one is started |
+
+## Partition removal
+
+Platform operators with `admin.audit.partition.delete` set `audit.partition_retention_days` in System Settings, list months through `base.audit_views.partitions`, then review and commit `base.audit_views.partition.remove` with the ledger, month and a reason. The preview shows how many rows will go and how many retained rows will stay. The operation rechecks the capability and the configured period in its audited transaction; a running verification blocks removal. Storage, checkpoints and the exemption are defined in [Audit](../audit/README.md#partition-retention).

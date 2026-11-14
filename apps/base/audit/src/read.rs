@@ -5,7 +5,7 @@
 //! sits below Authz and cannot ask it. Everything is scoped to the sealed
 //! scope's tenant in SQL; free text reaches SQL only as a bound, escaped pattern.
 //!
-//! The two lists are bounded four ways, because the ledgers only grow: every
+//! The two lists are bounded four ways, because the ledgers can be large: every
 //! read names a period (the tenant timeline index serves it), the total is
 //! counted only up to [`MAX_COUNT`], the order is time alone (the one order an
 //! index gives) and both statements run under a local statement timeout.
@@ -275,7 +275,7 @@ pub async fn list_actions(
     }
     let filter = filters.join(" AND ");
     let from =
-        "FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id";
+        "FROM base_audit_actions a LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id AND m.partition_month=a.partition_month";
     let direction = if query.descending { "DESC" } else { "ASC" };
     let limit = i64::try_from(query.page_size).map_err(|_| Error::Invalid)?;
     let offset = i64::try_from((query.page - 1).saturating_mul(query.page_size))
@@ -335,25 +335,13 @@ pub async fn toggle_retained(
     scope: &Scope,
     action_id: i64,
 ) -> Result<Option<(bool, bool)>> {
-    let Some(row) = tx
-        .query_opt(
-            "SELECT coalesce(m.is_retained,a.is_retained) FROM base_audit_actions a \
-             LEFT JOIN base_audit_action_metadata m ON m.action_id=a.id \
-             WHERE a.id=$1 AND a.tenant_id=$2 FOR UPDATE OF a",
-            &[&action_id, &scope.tenant()],
+    let row = tx
+        .query_one(
+            "SELECT old_retained,new_retained FROM base_audit_toggle_retained($1,$2)",
+            &[&scope.tenant(), &action_id],
         )
-        .await?
-    else {
-        return Ok(None);
-    };
-    let before: bool = row.get(0);
-    tx.execute(
-        "INSERT INTO base_audit_action_metadata(action_id,is_retained) VALUES($1,$2) \
-         ON CONFLICT (action_id) DO UPDATE SET is_retained=EXCLUDED.is_retained",
-        &[&action_id, &!before],
-    )
-    .await?;
-    Ok(Some((before, !before)))
+        .await?;
+    Ok(row.get::<_, Option<bool>>(0).zip(row.get(1)))
 }
 
 /// The tenant's latest mutations, newest first.
