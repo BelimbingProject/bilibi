@@ -11,10 +11,10 @@
 # w7-workflow-reference, person-contact-panel, upload-resume-proof), the ones
 # that need something a person or another run supplies (sso-walkthrough,
 # delivery-walkthrough, import-results-walkthrough, owner-agent-standing,
-# step-up-reference), and the compositions that need a fixture container
-# mounted and a rebuild (session-ended-walkthrough, and the mounted runs of
-# events-reference and ports-reference). The script fails while an example is
-# in neither list.
+# step-up-reference). The compositions that need a fixture container mounted
+# and a rebuild (session-ended-walkthrough, and the mounted runs of
+# events-reference and ports-reference) are in WALKTHROUGHS too, in the fifth
+# group, `mounted`. The script fails while an example is in neither list.
 #
 # Known failures: the script's KNOWN_FAILURES list names the walkthroughs
 # that fail on main today, each with its issue (#614 to #624 when the list was
@@ -28,12 +28,29 @@
 # would more than double the wait of ci.yml's one job. `Run the walkthroughs`
 # is the one stable check for branch protection.
 #
+# The fifth group, `mounted`, is its own job on a self-hosted runner only, never
+# a GitHub-hosted one: it mounts a reference container from fixtures/containers
+# under apps/domains, rebuilds (not --locked) and runs events-reference (the
+# publisher alone, both, the subscriber alone, on one database), ports-reference
+# and session-ended-walkthrough, then unmounts. The script puts the checkout
+# back after each, and the `Unmount` step again if the run was cancelled. The
+# job touches nothing else on the host: no package, sysctl or disk clean-up
+# (the hosted groups' steps would change a machine that is not disposable), and
+# its PostgreSQL is a service container on a port Docker picks. A pull request
+# from a fork does not run it, because it would run that fork's code on the
+# self-hosted machine; nothing then proves the mounted compositions for that
+# change, and `Run the walkthroughs` says so. While no runner with the labels
+# below is online the job stays queued and `Run the walkthroughs` stays pending.
+# The runner needs Docker, rustup, Python 3, Git and the PostgreSQL client
+# (`psql`); the job installs nothing.
+#
 # A pull request that cannot affect the build (docs, and the other paths
 # scripts/compatibility.py treats as harmless) passes without building.
 #
 # Started by hand, it can run this branch's script against another branch or
 # pull request head (`ref`), with lines for walkthroughs that branch adds
-# (`extra`), or only some walkthroughs (`only`).
+# (`extra`), or only some walkthroughs (`only`). The mounted job takes `only`
+# but not the others: it runs this branch, so a run given `ref` skips it.
 name: Walkthroughs
 
 on:
@@ -206,10 +223,94 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The compositions that mount a reference container: self-hosted only. See
+  # the header for what the runner must have and what this job never does.
+  mounted:
+    name: Walkthroughs (mounted)
+    needs: decide
+    if: >-
+      needs.decide.outputs.affected == 'true' &&
+      inputs.ref == '' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 90
+
+    env:
+      # Debug info dominates compile and link time, and the walkthroughs do not read it.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: bilibi
+          POSTGRES_PASSWORD: bilibi
+          POSTGRES_USER: bilibi
+        # Docker picks the host port: another job on this machine may hold 5432.
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U bilibi"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check the runner has the programs this job uses
+        run: |
+          missing=''
+          for program in cargo git psql python3 rustup; do
+            command -v "$program" >/dev/null || missing="$missing $program"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::The self-hosted runner lacks:$missing"
+            exit 1
+          fi
+      - run: rustup show active-toolchain || rustup toolchain install
+      # The mounted builds are other graphs than the hosted groups' (they add the
+      # mounted crates), so this job reads the web group's cache and never saves.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          prefix-key: v1-walkthroughs
+          shared-key: debug
+          cache-workspace-crates: true
+          save-if: false
+
+      - name: Run the mounted walkthroughs
+        env:
+          DATABASE_URL: postgres://bilibi:bilibi@localhost:${{ job.services.postgres.ports['5432'] }}/bilibi
+          WALKTHROUGH_GROUP: mounted
+          WALKTHROUGH_LOGS: ${{ runner.temp }}/walkthrough-logs-mounted
+          ONLY: ${{ inputs.only }}
+        run: |
+          # shellcheck disable=SC2086 # one walkthrough name per word
+          scripts/run-walkthroughs.sh $ONLY
+
+      # The script restores the checkout when it ends, however it ends; a
+      # cancelled job may not have let it. Scoped to the fixture containers.
+      - name: Unmount the fixture containers
+        if: always()
+        run: scripts/run-walkthroughs.sh --unmount
+
+      - name: Keep the walkthrough output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: walkthrough-logs-mounted
+          path: ${{ runner.temp }}/walkthrough-logs-mounted
+          if-no-files-found: ignore
+          retention-days: 14
+
   # One stable check for branch protection, independent of the groups.
   required:
     name: Run the walkthroughs
-    needs: [decide, walkthroughs]
+    needs: [decide, walkthroughs, mounted]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -219,16 +320,24 @@ jobs:
           DECIDED: ${{ needs.decide.result }}
           AFFECTED: ${{ needs.decide.outputs.affected }}
           RAN: ${{ needs.walkthroughs.result }}
+          MOUNTED: ${{ needs.mounted.result }}
+          # The mounted job is skipped, by design, for these two.
+          NOT_MOUNTED: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.ref != '' }}
         run: |
           if [ "$DECIDED" = success ] && [ "$AFFECTED" = false ]; then
             echo 'No changed file can affect a walkthrough. Passing without building.' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if [ "$DECIDED" = success ] && [ "$RAN" = success ]; then
+          if [ "$DECIDED" = success ] && [ "$RAN" = success ] && [ "$MOUNTED" = success ]; then
             echo 'Every walkthrough passed.' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          message='A walkthrough failed, a known failure now passes and must leave the known list, or an example is not listed. Read the failing Walkthroughs (group) job; scripts/run-walkthroughs.sh runs the same thing locally.'
+          if [ "$DECIDED" = success ] && [ "$RAN" = success ] && [ "$MOUNTED" = skipped ] && [ "$NOT_MOUNTED" = true ]; then
+            echo '::warning::The mounted walkthroughs did not run: this is a fork pull request or a run given a ref, and they run only on this repository'"'"'s self-hosted runner.'
+            echo 'The hosted walkthroughs passed. The mounted ones (events, ports, session-ended) did not run for this change.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          message='A walkthrough failed, a known failure now passes and must leave the known list, or an example is not listed. Read the failing Walkthroughs (group) job; the mounted group has its own job; scripts/run-walkthroughs.sh runs the same thing locally.'
           echo "::error::$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1

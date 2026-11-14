@@ -12,8 +12,9 @@
 #   scripts/run-walkthroughs.sh               every walkthrough in WALKTHROUGHS
 #   scripts/run-walkthroughs.sh visitor p6    only the named ones
 #   scripts/run-walkthroughs.sh --check       only check that every example is listed
+#   scripts/run-walkthroughs.sh --unmount     remove any fixture container left mounted
 #
-# WALKTHROUGH_GROUP=base|privacy|core|web runs one group (CI runs them side by side).
+# WALKTHROUGH_GROUP=base|privacy|core|web|mounted runs one group (CI runs them side by side).
 # WALKTHROUGH_EXTRA holds extra WALKTHROUGHS lines, one per line, for a branch
 # whose new walkthrough is not listed yet. WALKTHROUGH_ALLOW_MISSING=1 skips a
 # listed example an older checkout does not have. The workflow sets both when
@@ -57,6 +58,21 @@ cd "$root"
 # steps: the argument lists of the processes to run in order on the one
 #   database, separated by `;`. `-` is a run without arguments. `@/x` and @model as above.
 # kind: `serve` for a walkthrough that ends by serving the app (see above).
+#
+# The `mounted` group runs the compositions that need a reference container
+# from fixtures/containers mounted under apps/domains and the workspace rebuilt.
+# It changes this checkout, so it refuses to start unless the checkout is
+# unmounted and its composition files are unmodified, and it puts everything
+# back when it ends, however it ends. Besides the argument lists, its steps hold:
+#   @mount:NAME      copy fixtures/containers/NAME to apps/domains, check the copy
+#                    is identical to its source, run discover-modules.py, check
+#                    the composition names it, and rebuild the example (no
+#                    --locked: the mounted crates join Cargo.lock)
+#   @unmount:NAME    remove that copy, discover again, check the composition no
+#                    longer names it, and rebuild the example
+#   @expect:TEXT     the previous step printed TEXT (the example names what it
+#                    linked, so this proves the build holds the mounted module)
+#   @absent:TEXT     the previous step did not print TEXT
 WALKTHROUGHS=(
   'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|agent-write|apps/base/agent_api|write-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
@@ -165,7 +181,7 @@ WALKTHROUGHS=(
   'web|scheduled-owner-catalog|apps/web|scheduled-owner-reference|none||catalog'
   'web|optional-capabilities-catalogs|apps/web|optional-capabilities|none||--catalogs'
   'web|optional-capabilities|apps/web|optional-capabilities|seed|BILIBI_OPTIONAL_PROOF=disposable|-'
-  # Only the composition with nothing mounted; see NOT_RUN for the mounted ones.
+  # Only the composition with nothing mounted; the `mounted` group runs the others.
   'web|events-unmounted|apps/web|events-reference|seed||-'
   'web|events-retention|apps/web|events-retention|seed|BILIBI_DISPOSABLE_EVENTS_DEMO=yes|-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
@@ -186,6 +202,14 @@ WALKTHROUGHS=(
   'web|visitor|apps/web|visitor-walkthrough|migrate|BILIBI_DISPOSABLE_VISITOR_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'
   'web|sign-in-throttle|apps/web|sign-in-throttle-walkthrough|migrate|BILIBI_DISPOSABLE_THROTTLE_DEMO=yes|-'
+
+  # Each mounts a container from fixtures/containers, rebuilds, runs and unmounts.
+  # events-reference: the publisher alone, then both, then the subscriber alone,
+  # in this order on one database (its unmounted run is events-unmounted above).
+  'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:event_publisher/receiving;@absent:event_subscriber/payables;@mount:event_subscriber;-;@expect:event_publisher/receiving;@expect:event_subscriber/payables;@unmount:event_publisher;-;@expect:event_subscriber/payables;@absent:event_publisher/receiving'
+  'mounted|ports-mounted|apps/web|ports-reference|none||@mount:port_reference;-;@expect:port_reference/orders'
+  # `end`, then `deliver` in a new process: the notices outlive the first one.
+  'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'
 )
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
@@ -211,10 +235,6 @@ NOT_RUN=(
   'apps/web|import-results-walkthrough|its case file is private and not in the repository'
   'apps/web|owner-agent-standing|needs OAuth tokens a person obtains from the running /api/v1 edge'
   'apps/web|step-up-reference|needs the cookie of a signed-in browser session'
-  # It needs a fixture container mounted and the workspace rebuilt for each
-  # composition (fixtures/containers). So do the mounted compositions of
-  # events-reference and ports-reference, whose unmounted runs are above.
-  'apps/web|session-ended-walkthrough|needs fixtures/containers/session_listener mounted'
 )
 
 # Walkthroughs that fail on main today, each with the issue that tracks it:
@@ -271,6 +291,24 @@ check_lists() {
     echo "::error::scripts/run-walkthroughs.sh lists ${stale%%|*}/examples/${stale#*|}, which does not exist" >&2
     status=1
   done < <(comm -13 <(echo "$found") <(echo "$listed"))
+  # A mount names a fixture container, and only the mounted group mounts.
+  for entry in "${WALKTHROUGHS[@]}"; do
+    IFS='|' read -r group name _ _ _ _ steps _ <<<"$entry"
+    [[ $steps == *@mount:* || $steps == *@unmount:* ]] || continue
+    if [[ $group != mounted ]]; then
+      echo "::error::$name mounts a container but is in the $group group, not mounted" >&2
+      status=1
+    fi
+    IFS=';' read -ra runs <<<"$steps"
+    for run in "${runs[@]}"; do
+      [[ $run == @mount:* || $run == @unmount:* ]] || continue
+      container=${run#*:}
+      if [[ ! $container =~ ^[a-z][a-z0-9_]*$ || ! -f fixtures/containers/$container/bilibi.container.toml ]]; then
+        echo "::error::$name mounts $container, which is not a container of fixtures/containers" >&2
+        status=1
+      fi
+    done
+  done
   for entry in "${KNOWN_FAILURES[@]}"; do
     name=${entry%%|*}
     for run in "${WALKTHROUGHS[@]}"; do
@@ -292,6 +330,44 @@ known_issue() {
   return 0
 }
 
+# Fixture containers are mounted under apps/domains, which Git ignores, so the
+# only tracked changes a mount makes are the generated composition and Cargo.lock.
+mount_root=apps/domains
+# Tracked files changed by mounting; refused modified before the first mount.
+composition_files() {
+  git status --porcelain --untracked-files=no
+}
+
+# Mounted containers left in apps/domains that are not the Platform's own.
+foreign_mounts() {
+  git status --porcelain --ignored -- apps/domains apps/extensions | sed -n 's/^!! //p'
+}
+
+# Removes the named fixture containers, regenerates the composition and
+# restores Cargo.lock. Nothing else is removed: a name has to be a folder of
+# fixtures/containers.
+unmount_fixtures() {
+  local name removed=0
+  for name in "$@"; do
+    [[ $name =~ ^[a-z][a-z0-9_]*$ && -d fixtures/containers/$name && -e $mount_root/$name ]] || continue
+    rm -rf -- "${mount_root:?}/$name"
+    removed=1
+  done
+  if [[ $removed == 1 ]]; then
+    python3 scripts/discover-modules.py || return 1
+    git checkout -- Cargo.lock || return 1
+  fi
+}
+
+if [[ ${1:-} == --unmount ]]; then
+  fixture_names=()
+  for fixture_folder in fixtures/containers/*/; do
+    fixture_names+=("$(basename "$fixture_folder")")
+  done
+  unmount_fixtures "${fixture_names[@]}"
+  echo 'No fixture container is left mounted'
+  exit 0
+fi
 if [[ ${1:-} == --check ]]; then
   check_lists
   echo "Every example is listed: ${#WALKTHROUGHS[@]} runs, ${#NOT_RUN[@]} examples not run"
@@ -354,6 +430,113 @@ if [[ ${#entries[@]} -eq 0 ]]; then
   echo 'No walkthrough matches' >&2
   exit 1
 fi
+
+# The mounted group changes the checkout. Refuse to start on one that is not
+# plainly the Platform's own, so cleanup never discards anything that is not ours.
+mounted_run=0
+for entry in "${entries[@]}"; do
+  IFS='|' read -r group _ <<<"$entry"
+  [[ $group == mounted ]] && mounted_run=1
+done
+if [[ $mounted_run == 1 ]]; then
+  if [[ -n $(foreign_mounts) ]]; then
+    echo "The mounted group needs nothing mounted under apps/domains or apps/extensions; found:" >&2
+    foreign_mounts >&2
+    exit 1
+  fi
+  if [[ -n $(composition_files) ]]; then
+    echo 'The mounted group restores Cargo.lock and the composition, so it needs a checkout with no tracked change:' >&2
+    composition_files >&2
+    exit 1
+  fi
+fi
+
+# The containers this run has mounted, one per line: the cleanup removes these
+# and nothing else. Written before a copy is made, so a run killed half way
+# through a mount is still cleaned up.
+mounts="$work/mounts"
+: >"$mounts"
+
+# Puts the checkout back as it was: unmounts what this run mounted and proves
+# nothing mounted and no tracked file changed remain. It runs after every
+# mounted walkthrough and when the script ends, however it ends.
+restore_checkout() {
+  [[ $mounted_run == 1 ]] || return 0
+  local names=() failed=0
+  [[ -s $mounts ]] && mapfile -t names <"$mounts"
+  if [[ ${#names[@]} -gt 0 ]]; then
+    unmount_fixtures "${names[@]}" || failed=1
+    : >"$mounts"
+  fi
+  if [[ -n $(foreign_mounts) || -n $(composition_files) ]] || ! python3 scripts/discover-modules.py --check; then
+    echo "::error::The checkout was not restored: a mount or a tracked change is left" >&2
+    foreign_mounts >&2
+    composition_files >&2
+    failed=1
+  fi
+  return $failed
+}
+finish() {
+  local status=$?
+  trap - EXIT INT TERM
+  restore_checkout || status=1
+  exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Mounts a fixture container and rebuilds the example with it, in the Platform
+# root. Cargo adds the mounted crates to Cargo.lock, so the build is not --locked.
+rebuild_example() {
+  local example=$1
+  # A binary left by an earlier composition must not be mistaken for this one.
+  rm -f "$target/debug/examples/$example" "$target/debug/examples/${example//-/_}"-*
+  cargo build -p "$package" --example "$example"
+  [[ -x $target/debug/examples/$example ]] || {
+    echo "The build left no $example" >&2
+    return 1
+  }
+}
+mount_container() {
+  local name=$1 example=$2
+  (
+    cd "$root"
+    if [[ ! $name =~ ^[a-z][a-z0-9_]*$ || ! -d fixtures/containers/$name ]]; then
+      echo "$name is not a container of fixtures/containers" >&2
+      exit 1
+    fi
+    if [[ -e $mount_root/$name ]]; then
+      echo "$mount_root/$name already exists: not mounting over it" >&2
+      exit 1
+    fi
+    echo "-- mount: $name"
+    echo "$name" >>"$mounts"
+    cp -r "fixtures/containers/$name" "$mount_root/"
+    # The mounted source is the committed fixture, byte for byte.
+    diff -r "fixtures/containers/$name" "$mount_root/$name"
+    python3 scripts/discover-modules.py
+    grep -qF "(\"$name/" apps/domains/src/lib.rs || {
+      echo "The composition does not name $name after mounting it" >&2
+      exit 1
+    }
+    rebuild_example "$example"
+  )
+}
+unmount_container() {
+  local name=$1 example=$2
+  (
+    cd "$root"
+    echo "-- unmount: $name"
+    unmount_fixtures "$name"
+    sed -i "/^$name\$/d" "$mounts"
+    if [[ -e $mount_root/$name ]] || grep -qF "(\"$name/" apps/domains/src/lib.rs; then
+      echo "$name is still mounted after unmounting it" >&2
+      exit 1
+    fi
+    rebuild_example "$example"
+  )
+}
 
 # records-equivalence proves a pinned composition, which the build compiles in.
 # Pinning refuses a checkout with uncommitted changes; the other walkthroughs
@@ -454,6 +637,28 @@ run_one() {
     IFS=';' read -ra runs <<<"$steps"
     last=$((${#runs[@]} - 1))
     for index in "${!runs[@]}"; do
+      # Mount, unmount and the checks of what the last step printed.
+      case "${runs[$index]}" in
+        # Not in a `||` list: set -e would then be off inside the function.
+        @mount:*) mount_container "${runs[$index]#@mount:}" "$example" ;;
+        @unmount:*) unmount_container "${runs[$index]#@unmount:}" "$example" ;;
+        @expect:*)
+          if ! grep -qF -- "${runs[$index]#@expect:}" "$dir/step.out"; then
+            echo "The last step did not print: ${runs[$index]#@expect:}" >&2
+            exit 1
+          fi
+          echo "-- printed: ${runs[$index]#@expect:}"
+          ;;
+        @absent:*)
+          if grep -qF -- "${runs[$index]#@absent:}" "$dir/step.out"; then
+            echo "The last step printed: ${runs[$index]#@absent:}" >&2
+            exit 1
+          fi
+          echo "-- not printed: ${runs[$index]#@absent:}"
+          ;;
+        *) ;;
+      esac
+      case "${runs[$index]}" in @mount:* | @unmount:* | @expect:* | @absent:*) continue ;; esac
       argv=()
       for word in ${runs[$index]}; do
         case "$word" in
@@ -464,10 +669,15 @@ run_one() {
         esac
       done
       echo "-- step: $example ${argv[*]}"
+      mark=$(wc -c <"$log")
       if [[ $kind == serve && $index == "$last" ]]; then
         exec "$target/debug/examples/$example" "${argv[@]}"
       fi
-      "$target/debug/examples/$example" "${argv[@]}" || exit $?
+      status=0
+      "$target/debug/examples/$example" "${argv[@]}" || status=$?
+      # What this step printed, for the checks after it.
+      tail -c "+$((mark + 1))" "$log" >"$dir/step.out"
+      [[ $status == 0 ]] || exit "$status"
     done
   ) >"$log" 2>&1 &
   pid=$!
@@ -522,14 +732,18 @@ for folder in "${folders[@]}"; do
   package=$(package_of "$folder")
   examples=()
   for entry in "${entries[@]}"; do
-    IFS='|' read -r _ _ entry_folder example _ <<<"$entry"
+    IFS='|' read -r entry_group _ entry_folder example _ <<<"$entry"
     [[ $entry_folder == "$folder" ]] || continue
+    # A mounted composition is built when it is mounted, not before.
+    [[ $entry_group == mounted ]] && continue
     [[ " ${examples[*]} " == *" --example $example "* ]] || examples+=(--example "$example")
   done
-  step "Build the walkthroughs of $folder ($package)"
-  cargo build --locked -p "$package" "${examples[@]}"
+  if [[ ${#examples[@]} -gt 0 ]]; then
+    step "Build the walkthroughs of $folder ($package)"
+    cargo build --locked -p "$package" "${examples[@]}"
+  fi
   for entry in "${entries[@]}"; do
-    IFS='|' read -r _ name entry_folder example prepare environment steps kind <<<"$entry"
+    IFS='|' read -r entry_group name entry_folder example prepare environment steps kind <<<"$entry"
     [[ $entry_folder == "$folder" ]] || continue
     step "Walkthrough: $name ($folder/examples/$example)"
     if [[ $steps == *@model* && ! -f $model ]]; then
@@ -542,6 +756,12 @@ for folder in "${folders[@]}"; do
     started=$SECONDS
     run_one "$name" "$example" "$prepare" "$environment" "${steps:--}" "${kind:-}"
     elapsed=$((SECONDS - started))
+    if [[ $entry_group == mounted ]]; then
+      # Whatever the verdict, the next walkthrough starts unmounted. A checkout
+      # that cannot be restored ends the run: nothing after it can be trusted.
+      restore_checkout || exit 1
+      [[ -n ${WALKTHROUGH_KEEP:-} ]] || rm -f "$target/debug/examples/$example" "$target/debug/examples/${example//-/_}"-*
+    fi
     issue=$(known_issue "$name")
     if [[ $verdict == pass && -n $issue ]]; then
       echo "::error title=Walkthrough $name passes::remove its line from KNOWN_FAILURES in scripts/run-walkthroughs.sh (issue #$issue)"
@@ -591,5 +811,6 @@ if [[ ${#failed[@]} -gt 0 ]]; then
   printf 'Failed walkthroughs: %s\nLogs: %s\n' "${failed[*]}" "$logs" >&2
   status=1
 fi
+restore_checkout || status=1
 [[ $status == 0 ]] && rm -rf "$work"
 exit $status
