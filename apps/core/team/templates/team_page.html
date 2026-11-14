@@ -1,0 +1,12 @@
+{% import "components.html" as ui %}
+{% import "feedback.html" as feedback %}
+{% import "workspace.html" as workspace %}
+<div data-shared-ui>
+{% call feedback::flash_group(messages=flash) %}{% endcall %}
+{% call ui::page(id="teams-page", variant=variant) %}
+{% if !record_id.is_empty() %}{% call workspace::announce(kind="core/team",record_id=record_id) %}{% endcall %}{% endif %}
+{{ header }}
+{% call ui::stack(parts=sections,wide=true) %}{% endcall %}
+{{ dialog }}
+{% endcall %}
+</div>
