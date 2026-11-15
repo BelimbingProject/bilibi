@@ -255,6 +255,8 @@ pub enum InputKind {
     File,
     Hidden,
     Checkbox,
+    /// An on/off form value, using the shared Toggle.
+    Switch,
     Select,
     Textarea,
 }
@@ -278,6 +280,7 @@ impl InputKind {
             Self::File => "file",
             Self::Hidden => "hidden",
             Self::Checkbox => "checkbox",
+            Self::Switch => "switch",
             Self::Select => "select",
             Self::Textarea => "textarea",
         }
@@ -285,6 +288,10 @@ impl InputKind {
 
     pub fn is_hidden(&self) -> bool {
         matches!(self, Self::Hidden)
+    }
+
+    pub fn is_switch(&self) -> bool {
+        matches!(self, Self::Switch)
     }
 
     pub fn is_checkbox(&self) -> bool {
@@ -731,9 +738,11 @@ impl Field {
             return LabelPlacement::Above;
         }
         match self.kind {
-            InputKind::Checkbox | InputKind::Hidden | InputKind::Color | InputKind::File => {
-                LabelPlacement::Above
-            }
+            InputKind::Switch
+            | InputKind::Checkbox
+            | InputKind::Hidden
+            | InputKind::Color
+            | InputKind::File => LabelPlacement::Above,
             InputKind::Select if self.multiple => LabelPlacement::Above,
             InputKind::Select
             | InputKind::Textarea

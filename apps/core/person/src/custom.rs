@@ -132,10 +132,20 @@ pub(crate) fn condition(
     use bilibi_custom_fields::Kind;
     let value = filter.value.trim();
     match (definition.kind, filter.op.as_str()) {
-        (Kind::Text, "contains") if !value.is_empty() && value.chars().count() <= 256 => Some(
-            format!("position(lower(${index}::text) in lower({expression}))>0"),
-        ),
-        (Kind::Text | Kind::Choice, "eq") if !value.is_empty() && value.chars().count() <= 256 => {
+        (Kind::Text | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email, "contains")
+            if !value.is_empty() && value.chars().count() <= 256 =>
+        {
+            Some(format!(
+                "position(lower(${index}::text) in lower({expression}))>0"
+            ))
+        }
+        (Kind::Boolean, "eq") if matches!(value, "true" | "false") => {
+            Some(format!("{expression}=${index}::text"))
+        }
+        (
+            Kind::Text | Kind::Choice | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email,
+            "eq",
+        ) if !value.is_empty() && value.chars().count() <= 256 => {
             Some(format!("{expression}=${index}::text"))
         }
         (Kind::Number, "gte" | "lte") if bilibi_custom_fields::valid_number(value) => {

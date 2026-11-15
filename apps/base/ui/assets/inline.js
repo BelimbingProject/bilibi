@@ -131,9 +131,10 @@
       // A date's named input is the hidden value; its typed box shows it.
       const dateBox = this.editor().querySelector('[data-hook="DateInput"]');
       dateBox?.dispatchEvent(new CustomEvent('bilibi:date-value', {detail: {value: input.value}}));
+      this.editor().querySelector('[data-hook="SwitchInput"]')?.dispatchEvent(new Event('bilibi:switch-value'));
       this.updated();
       if (!autofocus) return;
-      const focus = this.editor().querySelector('[role="combobox"]') || dateBox?.querySelector('[data-role="input"]') || input;
+      const focus = this.editor().querySelector('[role="combobox"], [role="switch"]') || dateBox?.querySelector('[data-role="input"]') || input;
       focus.focus();
       if (focus.select) {
         if (value !== undefined || atEnd) focus.setSelectionRange(focus.value.length, focus.value.length);

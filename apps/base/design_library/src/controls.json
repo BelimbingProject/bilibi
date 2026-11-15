@@ -186,8 +186,8 @@
     "kind": "input",
     "form": "sample",
     "key": "checkbox_field",
-    "type": "checkbox",
-    "label": "Enable synchronization"
+    "type": "switch",
+    "label": "Synchronization"
   },
   "component-radio-group": {
     "kind": "radio_group",

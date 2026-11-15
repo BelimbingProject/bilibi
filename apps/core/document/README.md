@@ -71,7 +71,7 @@ On a migrated, fixture-holding, seeded disposable database (as for the audit cov
 
 ## Custom fields
 
-Documents is a `base/custom_fields` record type (`document`): an administrator adds text, number, date and pick-list fields without a release (ADR 21). Values live in `core_documents.custom_fields`, checked with `CustomFields::validate_locked` in the same write as every other change.
+Documents is a `base/custom_fields` record type (`document`): an administrator adds the scalar field types offered by Base Custom Fields without a release (ADR 21). Values live in `core_documents.custom_fields`, checked with `CustomFields::validate_locked` in the same write as every other change.
 
 - **Page:** the active fields show as facts that edit in place (`save_custom_field`, through `core.document.update`).
 - **Agents:** `core.document.create` and `.update` (inside `patch`) take `custom` as `{key, value}` pairs; `core.document.get` returns `custom` as `{key, label, type, value}` for the active fields. Find keys with `base.custom_fields.list`.

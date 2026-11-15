@@ -155,13 +155,53 @@ impl CustomFields {
         lock: Option<&Transaction<'_>>,
     ) -> Result<std::result::Result<(), String>> {
         Ok(match definition.kind {
-            Kind::Text => {
+            Kind::Text | Kind::LongText => {
                 if text.chars().count() > max_text {
                     Err(format!("must be at most {max_text} characters"))
                 } else if text.chars().any(|c| c.is_control() && c != '\n') {
                     Err("must not contain control characters".into())
                 } else {
                     Ok(())
+                }
+            }
+            Kind::Boolean if matches!(text, "true" | "false") => Ok(()),
+            Kind::Boolean => Err("must be true (yes) or false (no)".into()),
+            Kind::Email => {
+                let shaped = text.split_once('@').is_some_and(|(local, domain)| {
+                    !local.is_empty()
+                        && !domain.is_empty()
+                        && !domain.contains('@')
+                        && domain.split('.').all(|part| !part.is_empty())
+                });
+                if text.len() <= 254
+                    && shaped
+                    && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+                {
+                    Ok(())
+                } else {
+                    Err("must be an email address of at most 254 bytes".into())
+                }
+            }
+            Kind::Phone => {
+                if text.chars().count() <= 64
+                    && text.chars().any(|c| c.is_ascii_digit())
+                    && !text.chars().any(char::is_control)
+                {
+                    Ok(())
+                } else {
+                    Err("must be a phone number of at most 64 characters".into())
+                }
+            }
+            Kind::Link => {
+                if text.chars().count() <= max_text
+                    && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+                    && url::Url::parse(text).is_ok_and(|uri| {
+                        matches!(uri.scheme(), "http" | "https") && uri.host_str().is_some()
+                    })
+                {
+                    Ok(())
+                } else {
+                    Err("must be a full http or https link within the text length limit".into())
                 }
             }
             Kind::Number if valid_number(text) => Ok(()),

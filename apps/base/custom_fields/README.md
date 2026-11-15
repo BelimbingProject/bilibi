@@ -4,7 +4,7 @@
 
 **Not for:** a field-definitions table, page or operation of your own, or values your logic branches on (keep those in code).
 
-Typed fields (text, number, date, pick-list) a tenant administrator adds to the records of a module that opts in, without a release. The decision and the rejected alternatives are in [ADR 21](../../../docs/architecture/decisions/21-tenant-defined-custom-fields.md).
+Typed fields (text, number, date, pick-list, yes/no, long text, link, phone and email) a tenant administrator adds to the records of a module that opts in, without a release. The decision and the rejected alternatives are in [ADR 21](../../../docs/architecture/decisions/21-tenant-defined-custom-fields.md).
 
 - **This module owns the definitions, not the values.** A record's owner keeps values in its own row and checks them in its own write.
 - **A tenant that defines no fields, or a module that does not opt in, sees no change.**
@@ -42,11 +42,12 @@ Three steps in the owning module.
 | Rule | Detail |
 | --- | --- |
 | Key | A lower-case letter, then letters, digits and `_`, at most 40. Fixed at creation, unique per tenant and record type, **never reused**, not even by an archived field. |
-| Type | `text`, `number`, `date` or `choice`. Fixed at creation. |
-| Stored value | Text as a JSON string; number as an exact decimal string, never a float; date as `YYYY-MM-DD`; choice as the pick-list value's code. |
+| Type | `text`, `number`, `date`, `choice`, `boolean`, `long_text`, `link`, `phone` or `email`. Fixed at creation. |
+| Stored value | Text as a JSON string; number as an exact decimal string, never a float; date as `YYYY-MM-DD`; choice as the pick-list value's code; yes/no as `"true"` or `"false"`; the other kinds as strings. |
 | Choice | Names a standalone tenant pick-list that carries no capability of its own (`choice_lists()`); renaming, retiring and translating values happen in Pick-lists. |
 | Archive, not delete | An archived field leaves forms, columns and agents; its values stay on records; restoring brings it back. |
 | Value checks | `CustomFields::validate` (reviewed preview, on a read connection) and `validate_locked` (the owner's write transaction) check a patch of key to value against the active fields and return the values as they will be stored. An empty or null value clears a key; a key that is not an active field is refused; text is limited (`base.custom_fields.max_text_length`, default 1,000), a number is up to 18 digits and 6 decimals, a date is `YYYY-MM-DD`, a pick-list code must be an active choice unless the record already holds it. |
+| Additional checks | Long text uses the tenant text length limit and a multiline editor. A link must be an absolute HTTP or HTTPS URL within that limit. Phone requires at least one digit, permits extensions and dialing punctuation, and refuses control characters (up to 64 characters); email requires an address up to 254 bytes. Yes/no uses an on/off form switch and accepts only `"true"` or `"false"`; null clears any field. |
 | Limit | Active fields per record type: tenant setting `base.custom_fields.max_fields` (default 50, 1–200). Archived fields do not count, restoring one is refused at the limit. |
 | Audit | Each definition write is one `custom_field` change with before and after. |
 | Capabilities | `base.custom-fields.view` reads definitions; `base.custom-fields.manage` defines, renames, archives and restores. |
@@ -69,4 +70,4 @@ Each write is a reviewed safe write: the preview runs the facade's checks withou
 
 ## Storage
 
-`base_custom_fields` (migration `base-custom_fields-001-definitions`): one row per tenant, record type and key. Every statement binds the tenant.
+`base_custom_fields` (migrations `base-custom_fields-001-definitions`, `base-custom_fields-002-more-types`): one row per tenant, record type and key. Every statement binds the tenant.

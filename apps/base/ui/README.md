@@ -8,6 +8,8 @@
 
 Use the typed models exported by the crate or their Askama macros; [`DESIGN.md`](../../../DESIGN.md) sets the design rules and [`AGENTS.md`](AGENTS.md) records the recurring mistakes. The DOM uses Bilibi's floating labels.
 
+`Field::kind(InputKind::Switch)` uses the shared Toggle for a form boolean, posting `"true"` or `"false"` through a hidden input. It also works inside `InlineChoice`; the owner keeps its usual save contract. Disabled and readonly switches cannot change the value.
+
 Single selects and multi-selects share the 16 px outline chevron and right alignment. Single selects retain native keyboard and popup behaviour; multi-row selects have no dropdown chevron.
 
 Multi-selects show the inset label and selected count above removable chips inside one field. The default keeps chips on one line with “…” for hidden selections; `.wrap_chips()` lets the field grow onto multiple lines. The empty prompt defaults to “Select options…”. Removal uses the checkbox's normal change event; `.chips(event)` can retain an owner's explicit remove event. Every selection remains available in the dropdown, including chips hidden by overflow.

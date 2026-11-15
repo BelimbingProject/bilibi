@@ -36,15 +36,36 @@ pub enum Kind {
     Date,
     /// A code of a standalone tenant pick-list (`Definition::picklist`).
     Choice,
+    /// Yes or no, stored as the stable text true or false.
+    Boolean,
+    LongText,
+    Link,
+    Phone,
+    Email,
 }
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Text, Kind::Number, Kind::Date, Kind::Choice];
+    pub const ALL: [Kind; 9] = [
+        Kind::Text,
+        Kind::Number,
+        Kind::Date,
+        Kind::Choice,
+        Kind::Boolean,
+        Kind::LongText,
+        Kind::Link,
+        Kind::Phone,
+        Kind::Email,
+    ];
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
             Self::Number => "number",
             Self::Date => "date",
             Self::Choice => "choice",
+            Self::Boolean => "boolean",
+            Self::LongText => "long_text",
+            Self::Link => "link",
+            Self::Phone => "phone",
+            Self::Email => "email",
         }
     }
     pub fn label(self) -> &'static str {
@@ -53,6 +74,11 @@ impl Kind {
             Self::Number => "Number",
             Self::Date => "Date",
             Self::Choice => "Pick-list",
+            Self::Boolean => "Yes/no",
+            Self::LongText => "Long text",
+            Self::Link => "Link",
+            Self::Phone => "Phone",
+            Self::Email => "Email",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -366,10 +392,7 @@ impl CustomFields {
         let (label, help) = text(&mut errors, &input.label, &input.help);
         let kind = Kind::parse(input.kind.trim());
         if kind.is_none() {
-            errors.push(FieldError::new(
-                "kind",
-                "choose text, number, date or choice",
-            ));
+            errors.push(FieldError::new("kind", "choose a supported field type"));
         }
         let picklist = input
             .picklist
