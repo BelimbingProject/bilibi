@@ -11,6 +11,25 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 for step in 10-packages 20-rust 30-postgresql; do
     bash "scripts/setup-steps/$step.sh"
 done
+# The programs the walkthroughs call, as CI installs them (walkthroughs.yml): qpdf
+# protects PDFs and pdftotext reads privacy exports back.
+(
+    # shellcheck source=scripts/lib/install.sh
+    source scripts/lib/install.sh
+    if apt_install qpdf poppler-utils; then
+        installed 'walkthrough tools'
+    else
+        present 'walkthrough tools'
+    fi
+)
+# .agents/resume points WALKTHROUGH_CHROMIUM at agent-browser's Chrome for Testing.
+# Without a Chrome the walkthroughs that print PDFs cannot run; the rest still do.
+if ! compgen -G "$HOME/.agent-browser/browsers/chrome-*/chrome" >/dev/null &&
+    ! command -v chromium >/dev/null && ! command -v chromium-browser >/dev/null &&
+    ! command -v google-chrome >/dev/null; then
+    echo "warning: no Chrome found; these walkthroughs will not run:" \
+        "$(grep -o "^  '[^']*@chromium" scripts/run-walkthroughs.sh | cut -d'|' -f2 | paste -sd' ')" >&2
+fi
 # shellcheck disable=SC1091
 source "$HOME/.cargo/env"
 python3 scripts/install-platform-hook.py --warn

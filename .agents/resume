@@ -50,6 +50,13 @@ cat >"$env_file" <<ENV
 [ -f "\$HOME/.cargo/env" ] && . "\$HOME/.cargo/env"
 export DATABASE_URL='$database_url'
 ENV
+# The PDF and privacy walkthroughs drive a Chrome, as CI does with the runner's.
+# An orb has no chromium on PATH but agent-browser's Chrome for Testing; its
+# directory names the version, so look it up on every wake.
+chrome=$(compgen -G "$HOME/.agent-browser/browsers/chrome-*/chrome" | sort -V | tail -n 1 || true)
+if [[ -n $chrome ]]; then
+    echo "export WALKTHROUGH_CHROMIUM=\"\${WALKTHROUGH_CHROMIUM:-$chrome}\"" >>"$env_file"
+fi
 for rc in "$HOME/.bashrc" "$HOME/.profile"; do
     grep -qF "$env_file" "$rc" 2>/dev/null || printf '\n[ -f "%s" ] && . "%s"\n' "$env_file" "$env_file" >>"$rc"
 done
