@@ -42,13 +42,24 @@ pub struct RecordFactValue {
     pub value: String,
 }
 
+const MAX_FACTS_PER_KIND: usize = 8;
+
 fn validate_facts(entries: &[Entry]) -> RegistryResult<()> {
+    let mut per_kind = BTreeMap::<&str, usize>::new();
     for entry in entries {
         let fact = entry.get::<RecordFact>()?;
         if fact.record_kind.is_empty() || !port_name(entry.provenance.module, fact.port) {
             return Err(RegistryError::Contribution(format!(
                 "invalid record fact {}",
                 entry.id
+            )));
+        }
+        let count = per_kind.entry(fact.record_kind).or_default();
+        *count += 1;
+        if *count > MAX_FACTS_PER_KIND {
+            return Err(RegistryError::Contribution(format!(
+                "record fact {} exceeds {MAX_FACTS_PER_KIND} facts for record kind {}",
+                entry.id, fact.record_kind
             )));
         }
     }
@@ -210,7 +221,8 @@ impl Ports {
         }
         Ok(Self { providers, facts })
     }
-    /// Read at most eight facts concurrently, omitting failures and timeouts.
+    /// Read every fact for `kind` concurrently (boot allows at most eight per
+    /// kind), omitting failures and timeouts.
     /// Each provider receives a separate read-only transaction with a database
     /// statement timeout; pool acquisition and all calls share the deadline.
     pub async fn record_facts(
@@ -226,7 +238,6 @@ impl Ports {
             .facts
             .iter()
             .filter(|fact| fact.record_kind == kind)
-            .take(8)
             .map(|fact| async move {
                 tokio::time::timeout(Duration::from_millis(100), async {
                     let mut client = db.get().await.ok()?;
