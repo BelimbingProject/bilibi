@@ -774,7 +774,7 @@
       this.paintChips = () => {
         const row = this.el.querySelector("[data-chip-row]")
         if (!row || !row.clientWidth) return
-        const chips = [...row.querySelectorAll("[data-selected-chip]")]
+        const chips = [...row.querySelectorAll("[data-selected-chip]")].filter(chip => !chip.hidden)
         const marker = row.querySelector("[data-chip-overflow]")
         const gap = parseFloat(getComputedStyle(row).columnGap) || 0
         const widths = chips.map(chip => chip.getBoundingClientRect().width)
@@ -822,6 +822,21 @@
         input.dispatchEvent(new Event("change", {bubbles: true}))
         this.trigger.focus()
       }
+      // A tick shows or hides its server-rendered chip and the count at once,
+      // also where no server render follows (an inline editor, a plain form).
+      this.followTick = event => {
+        const box = event.target
+        if (!(box instanceof HTMLInputElement) || box.type !== "checkbox") return
+        const chip = [...this.el.querySelectorAll("[data-selected-chip]")].find(item => item.dataset.selectedChip === box.value)
+        if (chip && chip.hidden === box.checked) chip.hidden = !box.checked
+        const ticked = [...this.el.querySelectorAll('input[type="checkbox"]')].filter(item => item.checked).length
+        const count = this.el.querySelector("[data-selected-count]")
+        if (count && count.textContent !== `(${ticked} selected)`) count.textContent = `(${ticked} selected)`
+        const placeholder = this.el.querySelector("[data-chip-placeholder]")
+        if (placeholder && placeholder.hidden !== ticked > 0) placeholder.hidden = ticked > 0
+        this.scheduleChips()
+      }
+      this.el.addEventListener("change", this.followTick)
       this.el.addEventListener("click", this.removeChip)
       this.chipResize = new ResizeObserver(this.scheduleChips)
       this.chipResize.observe(this.el)
@@ -833,6 +848,7 @@
       this.chipResize.disconnect()
       cancelAnimationFrame(this.chipFrame)
       this.el.removeEventListener("click", this.removeChip)
+      this.el.removeEventListener("change", this.followTick)
     },
   }
 

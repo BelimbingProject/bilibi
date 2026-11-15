@@ -43,21 +43,47 @@
       listen(this.el, 'focusout', () => {
         queueMicrotask(() => {
           if (!this.active || this.editor()?.contains(document.activeElement)) return;
-          if (this.choice) this.cancel(false);
+          // Several choices are ticked one by one: leaving the editor commits them.
+          if (this.choice && !this.ticks()) this.cancel(false);
           else this.commit(false);
         });
       });
       listen(this.el, 'change', (event) => {
         // A date's picker has no name: the DateInput hook has already copied
         // the chosen day into the named hidden value.
-        if ((this.choice || this.date) && this.active && (event.target.name === this.el.dataset.field || (this.date && event.target.matches('[data-date-picker]')))) this.commit(true);
+        if ((this.choice || this.date) && !this.ticks() && this.active && (event.target.name === this.el.dataset.field || (this.date && event.target.matches('[data-date-picker]')))) this.commit(true);
       });
       this.updated();
       if (this.el.dataset.initialEdit === 'true') this.start(undefined, false, this.el.dataset.autofocus !== 'false');
     },
     destroyed() { this.abort.abort(); },
     editor() { return this.el.querySelector('[data-role="editor"]'); },
+    // A several-choices editor is a MultiSelect named `<field>[]`: its value
+    // is the ticked codes joined by commas (a code never holds one).
+    ticks() {
+      if (!this.choice) return null;
+      const name = `${this.el.dataset.field}[]`;
+      const boxes = [...(this.editor()?.querySelectorAll('input[type="checkbox"]') || [])].filter((box) => box.name === name);
+      return boxes.length || this.editor()?.querySelector('[data-hook="MultiSelect"]') ? boxes : null;
+    },
     control() {
+      const ticks = this.ticks();
+      if (ticks) {
+        return {
+          get value() { return ticks.filter((box) => box.checked).map((box) => box.value).join(','); },
+          set value(text) {
+            const codes = String(text || '').split(',');
+            for (const box of ticks) {
+              if (box.checked !== codes.includes(box.value)) {
+                box.checked = codes.includes(box.value);
+                box.dispatchEvent(new Event('change', {bubbles: true}));
+              }
+            }
+          },
+          setAttribute: () => {}, removeAttribute: () => {},
+          focus: () => this.editor().querySelector('[aria-expanded]')?.focus(),
+        };
+      }
       return [...(this.editor()?.querySelectorAll('[name]') || [])].find((input) => input.name === this.el.dataset.field);
     },
     trigger() { return this.el.querySelector('[data-role="trigger"]'); },

@@ -7,6 +7,7 @@
 mod declaration;
 mod definitions;
 mod operations;
+mod present;
 mod values;
 mod web;
 
@@ -14,7 +15,8 @@ pub use declaration::{RecordType, LABEL_MAX, RECORD_TYPES, RECORD_TYPE_MAX};
 pub use definitions::{
     Checked, CustomFields, Definition, FieldError, FieldUpdate, Kind, NewField, HELP_MAX, KEY_MAX,
 };
-pub use values::{valid_date, valid_number};
+pub use present::{codes_value, picked};
+pub use values::{codes_of, valid_date, valid_number};
 #[doc(hidden)]
 pub use {
     bilibi_module_registry::{Contribution, Provenance},
@@ -117,6 +119,7 @@ fn build(
     Ok(CustomFields {
         record_types,
         picklists: services.get(bilibi_picklists::SERVICE)?,
+        records: services.get(bilibi_records::SERVICE)?,
         settings: services.get("base/settings.store")?,
     })
 }
@@ -124,8 +127,8 @@ fn build(
 inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/ui", "base/audit", "base/agent_api", "base/menu"],
-        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql"))],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
+        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let fields = Arc::new(build(services)?);

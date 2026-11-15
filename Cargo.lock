@@ -821,6 +821,7 @@ dependencies = [
  "bilibi-menu",
  "bilibi-module-registry",
  "bilibi-picklists",
+ "bilibi-records",
  "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",

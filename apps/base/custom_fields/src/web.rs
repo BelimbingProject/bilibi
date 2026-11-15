@@ -262,6 +262,9 @@ impl Index {
                 if !text("picklist").is_empty() {
                     input["picklist"] = json!(text("picklist"));
                 }
+                if !text("target").is_empty() {
+                    input["target"] = json!(text("target"));
+                }
                 let result = self
                     .pages
                     .contracts
@@ -524,8 +527,13 @@ impl Index {
                 .fields
                 .record_type(&definition.record_type)
                 .map_or(definition.record_type.as_str(), |record| record.label);
-            let kind = match (&definition.picklist, compact) {
-                (Some(list), false) => format!("{} · {list}", definition.kind.label()),
+            let kind = match (&definition.picklist, &definition.target, compact) {
+                (Some(list), _, false) => format!("{} · {list}", definition.kind.label()),
+                (_, Some(target), false) => format!(
+                    "{} · {}",
+                    definition.kind.label(),
+                    pages.fields.records().kind_label(target)
+                ),
                 _ => definition.kind.label().to_owned(),
             };
             let mut row = FlexRow::new(row_id(definition))
@@ -737,8 +745,25 @@ impl Index {
                         .collect(),
                 )
                 .value(value("picklist"))
-                .hint("Only for a Pick-list field: the values people choose from.")
+                .hint("Only for a Pick-list or Several choices field: the values people choose from.")
                 .errors(errors("picklist")),
+        )?);
+        body.push(&render(
+            Field::in_form("field", "target")
+                .id("custom-field-new-target")
+                .label("Kind of record")
+                .kind(InputKind::Select)
+                .prompt("Choose…")
+                .options(
+                    fields
+                        .reference_kinds()
+                        .into_iter()
+                        .map(|(key, label)| Choice::new(label, key))
+                        .collect(),
+                )
+                .value(value("target"))
+                .hint("Only for a Record field: what it points at. It never changes.")
+                .errors(errors("target")),
         )?);
         body.push(&render(
             Field::in_form("field", "help")

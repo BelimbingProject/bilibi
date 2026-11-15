@@ -14,6 +14,7 @@ bilibi-database.workspace = true
 bilibi-menu.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-picklists.workspace = true
+bilibi-records.workspace = true
 bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true

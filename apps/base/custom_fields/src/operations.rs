@@ -69,6 +69,7 @@ fn new_field(input: &Value) -> NewField {
         help: input["help"].as_str().map(str::to_owned),
         kind: bilibi_agent_api::text_field(input, "kind"),
         picklist: input["picklist"].as_str().map(str::to_owned),
+        target: input["target"].as_str().map(str::to_owned),
     }
 }
 fn update(input: &Value) -> bilibi_agent_api::Result<FieldUpdate> {
@@ -108,6 +109,7 @@ impl ReadHandler for Read {
                     json!({
                         "record_types": bound.fields.record_types().map(|record| json!({"id": record.id, "label": record.label})).collect::<Vec<_>>(),
                         "pick_lists": bound.fields.choice_lists().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
+                        "record_kinds": bound.fields.reference_kinds().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
                     })
                 }
                 Self::List => to_json(
@@ -280,7 +282,8 @@ fn define_schema() -> Value {
     properties["record_type"] = record_type_schema();
     properties["key"] = key_schema();
     properties["kind"] = json!({"type":"string","enum":Kind::ALL.map(Kind::as_str),"description":"What the field holds; it never changes. A number is kept exactly as written."});
-    properties["picklist"] = json!({"type":"string","maxLength":128,"description":"For a choice field, the pick-list key from base.custom_fields.record_types; omit for any other kind."});
+    properties["picklist"] = json!({"type":"string","maxLength":128,"description":"For a choice or choices field, the pick-list key from base.custom_fields.record_types; omit for any other kind."});
+    properties["target"] = json!({"type":"string","maxLength":128,"description":"For a reference field, the kind of record it points at, a record_kinds key from base.custom_fields.record_types; omit for any other kind."});
     json!({"type":"object","required":["record_type","key","label","kind"],"properties":properties})
 }
 fn update_schema() -> Value {
@@ -294,19 +297,19 @@ fn status_schema() -> Value {
     json!({"type":"object","required":["record_type","key","version"],"properties":{"record_type":record_type_schema(),"key":key_schema(),"version":version_schema()}})
 }
 fn record_types_output() -> Value {
-    json!({"type":"object","description":"record_types (id and label) that offer custom fields, and pick_lists (key and label) a choice field may use."})
+    json!({"type":"object","description":"record_types (id and label) that offer custom fields, pick_lists (key and label) a choice or choices field may use, and record_kinds (key and label) a reference field may point at."})
 }
 fn list_output() -> Value {
-    json!({"type":"array","description":"The tenant's fields: id, record_type, key, label, help, kind, picklist, position, archived_on and version."})
+    json!({"type":"array","description":"The tenant's fields: id, record_type, key, label, help, kind, picklist, target, position, archived_on and version."})
 }
 fn field_output() -> Value {
-    json!({"type":"object","description":"A field: id, record_type, key, label, help, kind, picklist, position, archived_on and version."})
+    json!({"type":"object","description":"A field: id, record_type, key, label, help, kind, picklist, target, position, archived_on and version."})
 }
 
 const MODULE: &str = "base/custom_fields";
 inventory::submit! { Contribution::new(DEFINITIONS, "base/custom_fields.agent", Provenance { module: MODULE, source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: "base.custom_fields.record_types", title: "List the records that take custom fields", summary: "The kinds of record whose organisation can add its own fields, and the pick-lists a choice field may use.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: record_types_schema, output: record_types_output, handler: Handler::Read(&Read::RecordTypes), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.custom_fields.record_types", title: "List the records that take custom fields", summary: "The kinds of record whose organisation can add its own fields, the pick-lists a choice field may use and the kinds of record a reference field may point at.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: record_types_schema, output: record_types_output, handler: Handler::Read(&Read::RecordTypes), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.list", title: "List custom fields", summary: "The organisation's own fields on a kind of record, with their key, type, label and status; archived ones on request.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.define", title: "Add a custom field", summary: "Add a typed custom field to a kind of record. Its key and type never change.", keywords: &["custom", "field", "attribute", "add", "create"], capability: MANAGE, input: define_schema, output: field_output, handler: Handler::SafeWrite(&Write::Define), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.update", title: "Change a custom field", summary: "Rename a field or rewrite its help text using its current version; its key and type never change.", keywords: &["custom", "field", "rename", "help"], capability: MANAGE, input: update_schema, output: field_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },
@@ -314,5 +317,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/custom_fields.agent", 
         Operation { key: "base.custom_fields.restore", title: "Restore a custom field", summary: "Bring an archived field back with the values its records kept.", keywords: &["custom", "field", "restore", "unarchive"], capability: MANAGE, input: status_schema, output: field_output, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
     ],
     guides: &[Guide { key: "base.custom_fields", title: "Custom fields", summary: "How an organisation adds its own fields to records: types, stable keys, pick-lists and archiving.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW,
-        body: "A custom field is a typed value an organisation adds to a kind of record, such as a Segment on a company, without a software release. Find the kinds of record that take them, and the pick-lists a choice field may use, with base.custom_fields.record_types; read the fields with base.custom_fields.list.\n\nA field has a stable key (a lower-case letter, then letters, digits and underscores), a label, optional help text and a type: text, number, date, pick-list, yes/no, long text, link, phone or email. The key and the type never change and a key is never reused, even after the field is archived, so decide them with care. A number is kept exactly as written. A pick-list field stores the code of a value from one of the organisation's pick-lists. Yes/no stores true or false as text. Long text uses a multiline editor. Links must start with http:// or https://. Phone and email fields check their values before saving.\n\nArchive a field with base.custom_fields.archive rather than deleting it: forms, columns and agents stop showing it and records keep their values, and base.custom_fields.restore brings it back. Updates, archives and restorations need the version you read. A record type may have a limited number of active fields, set by the organisation's administrators. Defining and changing fields needs base.custom-fields.manage; reading them needs base.custom-fields.view. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
+        body: "A custom field is a typed value an organisation adds to a kind of record, such as a Segment on a company, without a software release. Find the kinds of record that take them, and the pick-lists a choice field may use, with base.custom_fields.record_types; read the fields with base.custom_fields.list.\n\nA field has a stable key (a lower-case letter, then letters, digits and underscores), a label, optional help text and a type: text, number, date, pick-list (choice), several choices (choices), yes/no, long text, link, phone, email or record (reference). The key and the type never change and a key is never reused, even after the field is archived, so decide them with care. A number is kept exactly as written. A pick-list field stores the code of a value from one of the organisation's pick-lists; a several-choices field stores a list of such codes. Yes/no stores true or false as text. A record field points at one record of a fixed kind (its target, such as company) and stores that record's id; a record the person cannot see is refused when chosen and shown as unavailable when held. Long text uses a multiline editor. Links must start with http:// or https://. Phone and email fields check their values before saving.\n\nArchive a field with base.custom_fields.archive rather than deleting it: forms, columns and agents stop showing it and records keep their values, and base.custom_fields.restore brings it back. Updates, archives and restorations need the version you read. A record type may have a limited number of active fields, set by the organisation's administrators. Defining and changing fields needs base.custom-fields.manage; reading them needs base.custom-fields.view. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operations." }],
 }) }
