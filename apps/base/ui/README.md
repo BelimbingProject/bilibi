@@ -20,7 +20,7 @@ Page headers include a pin for the current address in signed-in pages, including
 
 ## Phone lists and header actions
 
-Header `IconButton`s show their existing labels below 640 px or on coarse pointers. FlexTable row links grow to at least 44 × 44 px in either mode.
+Header action labels and row-link touch targets follow [DESIGN.md’s record-page](../../../DESIGN.md#record-pages) and [list rules](../../../DESIGN.md#lists).
 
 Declare a list’s phone order with `.phone_columns(&["number", "status", "date"])` on `FlexTable::new(...)`, using the visible columns’ exact `spec` values. Below 640 px, matching columns move first in that order; missing specs are ignored and unlisted columns retain their current order. The browser moves headings and cells together, including after live patches, and restores the server’s arrangement at desktop width. The default is empty, preserving every existing list’s column order and saved settings.
 
