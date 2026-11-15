@@ -360,10 +360,10 @@ fn list_schema() -> Value {
 }
 fn site_schema() -> Value {
     json!({"type":"object","required":["address","title"],"properties":{
-        "address":{"type":"string","maxLength":63,"description":"The portal address segment, such as acme: lowercase letters, digits and inner hyphens. Customers sign in at /portal/sign-in/{address}."},
-        "title":{"type":"string","maxLength":120,"description":"The name customers see on the portal and in its emails."},
-        "enabled":{"type":"boolean","description":"Turn the portal on or off. Leave it out to keep it as it is; a new site starts off. While off, its pages answer 404 and no invitation is sent or redeemed."},
-        "registration":{"type":"boolean","description":"Let people ask for an account at /portal/register/{address}; staff approve each request. Leave it out to keep it as it is; off by default."},
+        "address":crate::web::fields::ADDRESS.input(json!({"maxLength":63,"description":"The portal address segment, such as acme: lowercase letters, digits and inner hyphens. Customers sign in at /portal/sign-in/{address}."})),
+        "title":crate::web::fields::TITLE.input(json!({"maxLength":120,"description":"The name customers see on the portal and in its emails."})),
+        "enabled":crate::web::fields::ENABLED.input(json!({"description":"Turn the portal on or off. Leave it out to keep it as it is; a new site starts off. While off, its pages answer 404 and no invitation is sent or redeemed."})),
+        "registration":crate::web::fields::REGISTRATION.input(json!({"description":"Let people ask for an account at /portal/register/{address}; staff approve each request. Leave it out to keep it as it is; off by default."})),
         "logo_asset_id":{"type":"integer","minimum":1,"description":"A PNG, JPEG, GIF or WebP image already stored in Media as this workspace's own, shown on the portal's pages. Leave it out to keep the logo."},
         "remove_logo":{"type":"boolean","description":"Remove the logo."},
         "version":{"type":"integer","minimum":1,"description":"The version you read; a site changed since is refused."},
@@ -371,10 +371,10 @@ fn site_schema() -> Value {
 }
 fn invite_schema() -> Value {
     json!({"type":"object","required":["person_id","name","email"],"properties":{
-        "person_id":{"type":"integer","minimum":1,"description":"The Person the customer signs in as."},
-        "affiliation_id":{"type":"integer","minimum":1,"description":"For a business customer, the Person's affiliation (and so the company) it signs in through. Leave it out for a private individual."},
-        "name":{"type":"string","maxLength":255,"description":"The account name; the customer may change it when accepting."},
-        "email":{"type":"string","maxLength":254,"description":"Where the invitation goes; the customer's sign-in address."},
+        "person_id":crate::web::fields::PERSON.input(json!({"minimum":1,"description":"The Person the customer signs in as."})),
+        "affiliation_id":crate::web::fields::AFFILIATION.input(json!({"minimum":1,"description":"For a business customer, the Person's affiliation (and so the company) it signs in through. Leave it out for a private individual."})),
+        "name":crate::web::fields::NAME.input(json!({"maxLength":255,"description":"The account name; the customer may change it when accepting."})),
+        "email":crate::web::fields::EMAIL.input(json!({"maxLength":254,"description":"Where the invitation goes; the customer's sign-in address."})),
     }})
 }
 fn revoke_schema() -> Value {
@@ -386,8 +386,8 @@ fn account_json(account: &bilibi_user::CustomerAccount) -> Value {
 fn approve_schema() -> Value {
     json!({"type":"object","required":["id","person_id"],"properties":{
         "id":{"type":"integer","minimum":1,"description":"The request's id, from core.portal.registration.list."},
-        "person_id":{"type":"integer","minimum":1,"description":"The Person the customer signs in as: match or create it with the person operations first."},
-        "affiliation_id":{"type":"integer","minimum":1,"description":"For a business customer, the Person's affiliation with its company. Leave it out for a private individual."},
+        "person_id":crate::web::fields::PERSON.input(json!({"minimum":1,"description":"The Person the customer signs in as: match or create it with the person operations first."})),
+        "affiliation_id":crate::web::fields::AFFILIATION.input(json!({"minimum":1,"description":"For a business customer, the Person's affiliation with its company. Leave it out for a private individual."})),
     }})
 }
 fn reject_schema() -> Value {

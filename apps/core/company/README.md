@@ -155,10 +155,14 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
   target with a capability, current company or tenant-wide, filtered in SQL
   so an actor without the tenant-wide reach reads only its current company),
   `named`: the live ones among given ids (Authz asks only about the companies
-  that own a role), and `target`, the `authorize_target` rule on the sealed
-  proof connection. The settings
-  editor's company picker and the Authz role create picker read it; Base
-  never queries `companies`. Migration `006-authz-role-owner` contributes the
+  that own a role), `find`: the unarchived ones whatever the actor's reach,
+  for a write that proves its company itself (a role's owner), and `target`,
+  the `authorize_target` rule on the sealed proof connection. `selectable` and
+  `find` take an `OrganisationSearch` (text over name, legal name and code,
+  optional ids, a limit) applied in SQL, so a picker reads at most one page of
+  companies, never every company of the tenant. The settings editor's company
+  picker, the Authz role create and grant pickers, the privacy request picker
+  and the account and desk pickers read it; Base never queries `companies`. Migration `006-authz-role-owner` contributes the
   scoped foreign key behind Authz's `roles.company_id`.
 - `files` (K15) is the private-file owner: the Media attachment subject
   `core.company` and the Artifacts owner `core.company` (`bilibi_company::FILES`).
@@ -196,7 +200,7 @@ the result returns the Company ID, new version and path for Get readback. The
 field arrives as `{"restricted": true}`. The handlers read through a pool
 bound once by the service factory.
 
-`core.company.list` matches each search word as a prefix of a word in the name, code or legal name, all words required, through the indexed `search_vector` (`core-company-007-search`); email and jurisdiction are not searched. It reads in one read-only transaction under Grid's `BOUNDS` (2 s per statement, 500 ms lock wait), so a search the server cannot finish in time is refused as temporarily unavailable instead of holding a pooled connection. `bilibi_company::search` is the same read on the caller's connection, which sets its own bounds.
+`core.company.list` reads the search text as Base Search does (`bilibi_search::terms`): each word as a prefix of a word in the name, code or legal name, all words required, `"a phrase"` in order and `-word` excluded, and a plain lookup also as PostgreSQL parses the whole text, so `Amazon.com` or `PO-2024-001` typed in full is found. It matches through the indexed `search_vector` (`core-company-007-search`); email and jurisdiction are not searched. It reads in one read-only transaction under Grid's `BOUNDS` (2 s per statement, 500 ms lock wait), so a search the server cannot finish in time is refused as temporarily unavailable instead of holding a pooled connection. `bilibi_company::search` is the same read on the caller's connection, which sets its own bounds.
 
 ## Static Extension-owned fields
 
@@ -424,7 +428,9 @@ or writing, commits write through the plan's audited transaction. Assign
 input is flat (`source_organisation_id`, `target_kind`, `target_id`,
 `role_id`, optional `effective_from`/`effective_to`); omitted dates are
 unbounded. `core.company.relationship.list` answers a page (`page`,
-`page_size` up to 100, 25 by default) with the total in `meta.page`.
+`page_size` up to 100, 25 by default) with the total in `meta.page`, and
+takes an optional `search` like the relationships page's (below); a refused
+search is a field error on `search`.
 
 ```sh
 BILIBI_COMPANY_DEMO=disposable cargo run -p bilibi-company --example k5-relationships-walkthrough --locked
@@ -444,6 +450,11 @@ the disposable database only. The screens are described under "Relationship scre
 company to 2,001 persons, more than the Principal Directory names in one
 call, and checks that the relationships page, both panels, paging, an edit
 past the first page and the agent list still answer, a page at a time.
+`relationship-search-proof` (same variable) finds links by the other party's
+name on the relationships page and through the agent list: a person linked
+last among 2,001, companies by name or code, an incoming link, LIKE
+characters taken literally, and the refusal for a company linked to 10,001
+people.
 
 ## Relationship screens (K6)
 
@@ -463,7 +474,13 @@ UI (`core/company.relationship_pages`):
   with the related party (a company with its code, or a person), direction,
   the role's label from this company's side, the inclusive dates and the
   status (`active`, `inactive`, `unlinked`). "Show history" brings ended and
-  unlinked links back; a retired role stays visible on its links. "Add
+  unlinked links back; a retired role stays visible on its links. The
+  search box (kept in the address as `search`) keeps the links whose other
+  party's name contains the text: a company's name, legal name or code in
+  SQL, a person's name through the Principal Directory over the people this
+  company links to, matching people in name order. A company linked to more
+  people than the directory searches at once (10,000) says so instead of
+  answering part of the search. "Add
   Relationship" finds a company or a person of the tenant by name with the
   shared `RecordPicker` (Base Records search under the reader's own
   permissions, so the person kind needs Person's read capability), then an
@@ -659,7 +676,7 @@ A candidate's score is its best matching fact:
 | Phone digits, at least seven | 0.85 |
 | Name after removing configured words | Trigram intersection divided by union |
 
-Name comparison runs in Rust over at most 200 rows preselected by indexed name tokens, the rows sharing the most tokens with the query first. Each query word reads at most 201 of the tenant's companies holding it, in ID order; a word more than 200 companies hold (such as "trading") picks no candidate alone, so the read never sorts every company sharing one common word. When every word is that common, only companies holding all of them qualify, the lowest 200 IDs. A caller with no statement timeout of its own runs the matching statement under 1 second, set and restored on its transaction, so a create under `require_reason` never holds the tenant lock longer on matching. Exact-key candidates are selected separately, so the name bound cannot hide a registration match. Results sort by descending score, then ID, at or above the threshold; `limit` is 1–100, default 10. Public email domains such as Gmail never count as an email match.
+Name comparison runs in Rust over at most 200 rows preselected by indexed name tokens, the rows sharing the most tokens with the query first. The eight longest distinct query words each read at most 201 of the tenant's companies holding it, in ID order; a word more than 200 companies hold (such as "trading") picks no candidate alone, so the read never sorts every company sharing one common word. When two or more words are that common, or every word is, the companies holding all the common words join the candidates too, the lowest 200 IDs, so a misspelt word beside common ones ("Zenith Trading Services" for an existing "Zenth Trading Services") still finds its company. Matching runs at most ten statements: one per word read, one for the companies holding every common word, and one that scores the candidates. A caller with no statement timeout of its own runs each under 1 second, set and restored on its transaction, so a create under `require_reason` holds the tenant lock for matching for at most 10 seconds in the worst case. The timeout applies only inside a transaction: `CompanyService::duplicates` and `create_matches`, `core.company.duplicates`, the create page and the `core.company.create` preview each run matching in one. A caller of the crate-root `duplicates`, `create_matches` or `preview_create` on an autocommit connection sets its own `statement_timeout` or opens a transaction. Exact-key candidates are selected separately, so the name bound cannot hide a registration match. Results sort by descending score, then ID, at or above the threshold; `limit` is 1–100, default 10. Public email domains such as Gmail never count as an email match.
 
 Create Company shows candidates below the form. **Use existing** opens the record; **Create anyway** submits the form's current values and opens a confirmation for the reason. `NewCompany::create_anyway` carries `CreateAnyway { candidate_ids, reason }` for pages, agent writes and other module callers. The reason is trimmed and must contain 1–500 characters. The create's audit `Change` records the reason and IDs under `create_anyway`; this read-only context does not become a company scalar field.
 

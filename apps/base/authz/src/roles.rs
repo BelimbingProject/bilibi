@@ -88,11 +88,11 @@ pub struct RoleDetails {
     pub principals: Vec<i64>,
 }
 
-const SUMMARY: &str = "r.id,r.name,r.code,r.description,r.is_system,r.grant_all,r.company_id,\
+pub(crate) const SUMMARY: &str = "r.id,r.name,r.code,r.description,r.is_system,r.grant_all,r.company_id,\
  (SELECT count(*) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),\
  (SELECT count(DISTINCT user_id) FROM effective_principal_roles p WHERE p.tenant_id=r.tenant_id AND p.role_id=r.id)";
 
-fn summary(row: &tokio_postgres::Row) -> RoleSummary {
+pub(crate) fn summary(row: &tokio_postgres::Row) -> RoleSummary {
     RoleSummary {
         id: row.get(0),
         name: row.get(1),
@@ -216,6 +216,39 @@ pub async fn provider_assignments(
 ) -> Result<Vec<RoleSummary>> {
     let rows = client.query(&format!("SELECT DISTINCT {SUMMARY} FROM roles r JOIN authz_identity_roles p ON p.tenant_id=r.tenant_id AND p.role_id=r.id WHERE p.tenant_id=$1 AND p.user_id=$2 ORDER BY r.name,r.id"), &[&scope.tenant(),&user]).await?;
     Ok(rows.iter().map(summary).collect())
+}
+/// A role one account holds because it belongs to a group (a Core team)
+/// that carries it: "via team Line 2 crew".
+#[derive(Clone, Debug)]
+pub struct GroupAssignment {
+    pub role: RoleSummary,
+    /// The group owner's noun ("team").
+    pub source: String,
+    pub group_id: i64,
+    /// The group's name as its owner last recorded it.
+    pub label: String,
+    /// The group's company: the role applies there only. `None` is tenant-wide.
+    pub company_id: Option<i64>,
+}
+/// The roles an account holds through its groups, one row per group and role.
+/// Like [`provider_assignments`], kept apart from manual assignments; the
+/// caller decides whether the reader may see each group's name.
+pub async fn group_assignments(
+    client: &impl GenericClient,
+    scope: &Scope,
+    user: i64,
+) -> Result<Vec<GroupAssignment>> {
+    let rows = client.query(&format!("SELECT {SUMMARY},o.source,o.group_id,o.label,o.company_id FROM authz_group_members m JOIN authz_groups o ON o.tenant_id=m.tenant_id AND o.source=m.source AND o.group_id=m.group_id JOIN authz_group_roles g ON g.tenant_id=m.tenant_id AND g.source=m.source AND g.group_id=m.group_id JOIN roles r ON r.tenant_id=g.tenant_id AND r.id=g.role_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND NOT r.grant_all AND NOT r.requires_engagement ORDER BY r.name,r.id,o.label,o.group_id"), &[&scope.tenant(),&user]).await?;
+    Ok(rows
+        .iter()
+        .map(|row| GroupAssignment {
+            role: summary(row),
+            source: row.get(9),
+            group_id: row.get(10),
+            label: row.get(11),
+            company_id: row.get(12),
+        })
+        .collect())
 }
 /// The capabilities each listed role grants, keyed by role id, for the
 /// escalation guard an assigning screen applies (a role is grantable only by

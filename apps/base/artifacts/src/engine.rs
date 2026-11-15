@@ -44,7 +44,11 @@ pub(crate) struct Config {
     pub binary: String,
     pub format: String,
     pub background: bool,
+    /// The render, from the browser's first answer to the printed PDF.
     pub timeout: Duration,
+    /// The browser's start, until it answers its first command: a cold start
+    /// (its files read from a slow disk) must not use up the render's time (#707).
+    pub launch_timeout: Duration,
     pub max_bytes: usize,
 }
 pub(crate) enum Source {
@@ -75,10 +79,7 @@ pub(crate) fn executable(name: &str) -> Result<PathBuf> {
 
 pub(crate) async fn print(config: &Config, source: Source) -> Result<Vec<u8>> {
     let binary = executable(&config.binary)?;
-    let deadline = Instant::now() + config.timeout;
-    timeout_at(deadline, run(&binary, config, source))
-        .await
-        .map_err(|_| Error::PdfTimeout)?
+    run(&binary, config, source).await
 }
 
 /// Owns the browser process group and its profile directory.
@@ -213,6 +214,10 @@ struct Cdp {
     cap: usize,
     next: u64,
     policy: Policy,
+    /// Every read and write waits until this: the start limit until the
+    /// browser first answers, then the render limit. Kept here rather than
+    /// in a wrapping future, so the render's deep future stays one future.
+    deadline: Instant,
 }
 impl Cdp {
     async fn write(&mut self, method: &str, params: Value, session: Option<&str>) -> Result<u64> {
@@ -223,7 +228,9 @@ impl Cdp {
         }
         let mut bytes = serde_json::to_vec(&message).map_err(|_| Error::PdfFailed)?;
         bytes.push(0);
-        self.tx.write_all(&bytes).await?;
+        timeout_at(self.deadline, self.tx.write_all(&bytes))
+            .await
+            .map_err(|_| Error::PdfTimeout)??;
         Ok(self.next)
     }
     async fn message(&mut self) -> Result<Value> {
@@ -237,7 +244,9 @@ impl Cdp {
                 return Err(Error::PdfFailed);
             }
             let mut chunk = [0u8; 65536];
-            let read = self.rx.read(&mut chunk).await?;
+            let read = timeout_at(self.deadline, self.rx.read(&mut chunk))
+                .await
+                .map_err(|_| Error::PdfTimeout)??;
             if read == 0 {
                 return Err(Error::PdfFailed);
             }
@@ -323,6 +332,7 @@ async fn run(binary: &Path, config: &Config, source: Source) -> Result<Vec<u8>> 
             )
         }
     };
+    let start = Instant::now() + config.launch_timeout;
     let (_browser, tx, rx) = Browser::launch(binary, &network)?;
     let mut cdp = Cdp {
         tx,
@@ -340,6 +350,7 @@ async fn run(binary: &Path, config: &Config, source: Source) -> Result<Vec<u8>> 
             loaded: false,
             status: None,
         },
+        deadline: start,
     };
     let (_, width, height) = *PAPER
         .iter()
@@ -348,6 +359,8 @@ async fn run(binary: &Path, config: &Config, source: Source) -> Result<Vec<u8>> 
     let target = cdp
         .call("Target.createTarget", json!({"url":"about:blank"}), None)
         .await?;
+    // The browser answered: the render's own time starts now.
+    cdp.deadline = Instant::now() + config.timeout;
     let attached = cdp
         .call(
             "Target.attachToTarget",

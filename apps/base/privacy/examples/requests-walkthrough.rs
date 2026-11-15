@@ -1304,7 +1304,7 @@ async fn main() -> Result<()> {
         let row = client
             .query_one(
                 "SELECT r.state, r.erased_for::text, r.cleaned_at IS NOT NULL, r.source_artifact IS NULL, \
-                 (SELECT count(*) FROM base_bulk_data_rows w WHERE w.tenant_id=r.tenant_id AND w.run_id=r.id AND (w.source_key IS NOT NULL OR w.message IS NOT NULL)), \
+                 (SELECT count(*) FROM base_bulk_data_rows w WHERE w.tenant_id=r.tenant_id AND w.run_id=r.id AND (w.source_key IS NOT NULL OR w.message IS NOT NULL OR w.record_version IS NOT NULL OR w.undo_message IS NOT NULL)), \
                  (SELECT count(*) FROM base_artifacts a WHERE a.tenant_id=r.tenant_id AND a.owner_id='base.bulk_data' AND a.subject=r.id::text AND a.deleted_at IS NULL), \
                  r.file_name, r.header='[]'::jsonb, r.mapping IS NULL \
                  FROM base_bulk_data_runs r WHERE r.tenant_id=1 AND r.id=$1",
@@ -1329,7 +1329,7 @@ async fn main() -> Result<()> {
             row.get(8),
         );
         println!(
-            "import {id}: state={} erased_for={} cleaned={cleaned} file reference dropped={unlinked} rows still holding a key or message={details} live files={files} file name={file_name} header empty={header_empty} mapping empty={mapping_empty}",
+            "import {id}: state={} erased_for={} cleaned={cleaned} file reference dropped={unlinked} rows still holding import or undo details={details} live files={files} file name={file_name} header empty={header_empty} mapping empty={mapping_empty}",
             row.get::<_, String>(0),
             row.get::<_, String>(1)
         );
@@ -1354,6 +1354,20 @@ async fn main() -> Result<()> {
     println!("import {ada_import} reads as erased: {erased}");
     if !refused || !erased {
         return Err("the erased import still offers its file".into());
+    }
+    let erased_run = bulk.run(&**client, &admin, ada_import).await?;
+    let erased_undo = write(
+        &app,
+        &admin_login.token,
+        &admin,
+        "base.bulk_data.import.undo",
+        json!({"run_id":ada_import,"version":erased_run.version}),
+    )
+    .await;
+    let erased_undo_allowed = erased_undo.is_ok();
+    show("undo the erased import", erased_undo);
+    if erased_undo_allowed {
+        return Err("the erased import could be undone".into());
     }
     let import_get = read(
         &app,

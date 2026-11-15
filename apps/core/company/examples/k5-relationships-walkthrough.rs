@@ -526,7 +526,7 @@ async fn main() -> Result<(), Error> {
         "source company page",
         summary(
             &companies
-                .company_relationships(&manager, source, false, FIRST_PAGE)
+                .company_relationships(&manager, source, false, "", FIRST_PAGE)
                 .await?
                 .entries,
         ),
@@ -535,7 +535,7 @@ async fn main() -> Result<(), Error> {
         "supplier page (incoming, inverse labels)",
         summary(
             &companies
-                .company_relationships(&manager, supplier, false, FIRST_PAGE)
+                .company_relationships(&manager, supplier, false, "", FIRST_PAGE)
                 .await?
                 .entries,
         ),
@@ -544,7 +544,7 @@ async fn main() -> Result<(), Error> {
         "person page",
         summary(
             &companies
-                .person_relationships(&manager, contact.id, false, FIRST_PAGE)
+                .person_relationships(&manager, contact.id, false, "", FIRST_PAGE)
                 .await?
                 .entries,
         ),
@@ -552,14 +552,14 @@ async fn main() -> Result<(), Error> {
     show(
         "viewer reads the same page",
         companies
-            .company_relationships(&viewer, source, false, FIRST_PAGE)
+            .company_relationships(&viewer, source, false, "", FIRST_PAGE)
             .await
             .map(|links| links.entries.len()),
     );
     show(
         "other tenant cannot read the company",
         companies
-            .company_relationships(&other, source, false, FIRST_PAGE)
+            .company_relationships(&other, source, false, "", FIRST_PAGE)
             .await
             .map(|links| links.entries.len()),
     );
@@ -633,7 +633,7 @@ async fn main() -> Result<(), Error> {
         "existing link keeps the retired role",
         summary(
             &companies
-                .company_relationships(&manager, source, false, FIRST_PAGE)
+                .company_relationships(&manager, source, false, "", FIRST_PAGE)
                 .await?
                 .entries,
         )
@@ -688,7 +688,7 @@ async fn main() -> Result<(), Error> {
         "ended link still on the current page",
         summary(
             &companies
-                .company_relationships(&manager, source, false, FIRST_PAGE)
+                .company_relationships(&manager, source, false, "", FIRST_PAGE)
                 .await?
                 .entries,
         )
@@ -712,7 +712,7 @@ async fn main() -> Result<(), Error> {
         "history view",
         summary(
             &companies
-                .company_relationships(&manager, source, true, FIRST_PAGE)
+                .company_relationships(&manager, source, true, "", FIRST_PAGE)
                 .await?
                 .entries,
         ),
@@ -721,7 +721,7 @@ async fn main() -> Result<(), Error> {
         "person history",
         summary(
             &companies
-                .person_relationships(&manager, contact.id, true, FIRST_PAGE)
+                .person_relationships(&manager, contact.id, true, "", FIRST_PAGE)
                 .await?
                 .entries,
         ),

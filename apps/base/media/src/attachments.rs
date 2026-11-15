@@ -212,6 +212,7 @@ async fn held(holds: &RecordHolds, row: &Bound) -> Result<bool> {
 enum Bind {
     Submit,
     Retain,
+    Release,
 }
 
 impl Media {
@@ -376,6 +377,19 @@ impl Media {
         self.bind(tx, scope, subject, public_ids, Bind::Retain)
             .await
     }
+    /// Undo `retain_drafts` once the owner no longer needs a draft, so
+    /// abandoned-draft cleanup removes it as usual. Same checks with
+    /// `Retain`; unretained and submitted attachments pass through.
+    pub async fn release_drafts(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        subject: AttachmentSubject<'_>,
+        public_ids: &[&str],
+    ) -> Result<Vec<Attachment>> {
+        self.bind(tx, scope, subject, public_ids, Bind::Release)
+            .await
+    }
     async fn bind(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -413,7 +427,7 @@ impl Media {
         }
         let action = match operation {
             Bind::Submit => SubjectAction::Submit,
-            Bind::Retain => SubjectAction::Retain,
+            Bind::Retain | Bind::Release => SubjectAction::Retain,
         };
         self.subjects
             .authorize(tx.sql(), scope, subject.kind, action, subject.id)
@@ -432,7 +446,11 @@ impl Media {
             .iter()
             .filter(|row| {
                 row.summary.state == AttachmentState::Draft
-                    && (operation == Bind::Submit || row.summary.retained_at.is_none())
+                    && match operation {
+                        Bind::Submit => true,
+                        Bind::Retain => row.summary.retained_at.is_none(),
+                        Bind::Release => row.summary.retained_at.is_some(),
+                    }
             })
             .collect();
         if changing.is_empty() {
@@ -449,6 +467,7 @@ impl Media {
                 let statement = match operation {
                     Bind::Submit => "UPDATE base_media_attachments SET state='submitted',submitted_at=now(),updated_at=now() WHERE id=ANY($1)",
                     Bind::Retain => "UPDATE base_media_attachments SET retained_at=now(),updated_at=now() WHERE id=ANY($1)",
+                    Bind::Release => "UPDATE base_media_attachments SET retained_at=NULL,updated_at=now() WHERE id=ANY($1)",
                 };
                 sql.execute(statement, &[&row_ids]).await?;
                 let updated = sql

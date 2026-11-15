@@ -28,11 +28,20 @@ pub struct Terms {
     /// A `LIKE` pattern for the prefix fields when the text is a plain
     /// lookup (no phrase, no exclusion): the whole text, lower-cased.
     pub prefix: Option<String>,
+    /// The text for `plainto_tsquery('simple', …)` when it is a plain lookup:
+    /// PostgreSQL's parser keeps `amazon.com`, `abc-123` or `acme/west` as
+    /// the stored vector does, so the whole name or code typed is found even
+    /// where [`Terms::query`]'s letters-and-digits words miss it. Match
+    /// `vector @@ (to_tsquery('simple', query) || plainto_tsquery('simple', plain))`.
+    pub plain: Option<String>,
 }
 
-/// Reads a query. Words are runs of letters and digits, lower-cased, so
-/// `%`, quotes, `&|!:*` and the like never reach the `tsquery` as syntax: a
-/// hostile query matches literally or not at all, and never errors.
+/// Read what a person typed into a safe `tsquery` and plain-lookup text.
+///
+/// Words are runs of letters and digits, lower-cased, so `%`, quotes,
+/// `&|!:*` and the like never reach the `tsquery` as syntax: a hostile query
+/// matches literally or not at all, and never errors.
+/// Shared helper: `let terms = bilibi_search::terms(&query.search);`
 pub fn terms(text: &str) -> Terms {
     let text: String = text.trim().chars().take(MAX_TEXT).collect();
     let text = text.trim_end().to_owned();
@@ -85,11 +94,15 @@ pub fn terms(text: &str) -> Terms {
             .collect::<Vec<_>>()
             .join(" & ")
     });
-    let prefix = (plain && query.is_some()).then(|| format!("{}%", like(&text.to_lowercase())));
+    let plain = (plain && query.is_some()).then(|| text.clone());
+    let prefix = plain
+        .as_ref()
+        .map(|text| format!("{}%", like(&text.to_lowercase())));
     Terms {
         text,
         query,
         prefix,
+        plain,
     }
 }
 
@@ -183,7 +196,12 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
     let decl = kind.decl;
     let key = column(table, table.key()).expect("grid keeps the key field");
     let vector = column(table, decl.vector).expect("checked hidden vector field");
-    let query = "to_tsquery('simple', $3::text)";
+    // A plain lookup also matches the text as PostgreSQL parses it ($5).
+    let query = if prefix {
+        "(to_tsquery('simple', $3::text) || plainto_tsquery('simple', $5::text))"
+    } else {
+        "to_tsquery('simple', $3::text)"
+    };
     let (state, inactive) = match decl
         .state
         .and_then(|state| Some((state, column(table, state.field)?)))
@@ -227,14 +245,15 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
 }
 
 // Binds the reader as each owner's source expects ($1 tenant, $2 user), the
-// tsquery ($3) and the prefix pattern ($4), which every statement references.
+// tsquery ($3), the prefix pattern ($4) and the plain text ($5), which every
+// statement references.
 fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool) -> String {
     let branches = planned
         .iter()
         .map(|kind| branch(kind, limit, prefix))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
-    format!("WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix), hits AS ({branches})")
+    format!("WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain), hits AS ({branches})")
 }
 
 // Equal ranks read newest first, then by name, as a person scans them.
@@ -258,15 +277,15 @@ pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool) -> Stri
 }
 
 /// A results page: how many records each kind matched (up to
-/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$5` names or of
-/// every kind when it is empty, `$6` rows from `$7`, grouped as the search box
+/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$6` names or of
+/// every kind when it is empty, `$7` rows from `$8`, grouped as the search box
 /// groups them, so a kind's group continues on the next page. One row carries
 /// the counts even when the page is empty.
 pub fn page(planned: &[Planned<'_>], prefix: bool) -> String {
     format!(
-        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $6::bigint OFFSET $7::bigint) page ON true",
+        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $7::bigint OFFSET $8::bigint) page ON true",
         hits(planned, MAX_KIND_HITS, prefix),
-        grouped(" WHERE ($5::text = '' OR kind = $5::text)"),
+        grouped(" WHERE ($6::text = '' OR kind = $6::text)"),
         COLUMNS
             .split(", ")
             .map(|name| format!("page.{name}"))

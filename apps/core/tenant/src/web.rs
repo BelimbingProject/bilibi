@@ -57,15 +57,15 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 });
 
 // The Add Tenant dialog is the only tenant view; the list and dialog share these labels.
-bilibi_ui::record_fields! { mod fields {
-    ID: bilibi_ui::RecordField::new("id", "ID"),
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    PARENT: bilibi_ui::RecordField::new("parent", "Parent tenant"),
-    SUB_TENANTS: bilibi_ui::RecordField::new("sub_tenants", "Sub-tenants"),
-    STATUS: bilibi_ui::RecordField::new("status", "Status"),
-    SUSPENSION: bilibi_ui::RecordField::new("suspension", "Suspension"),
-    PRIMARY_COMPANY: bilibi_ui::RecordField::new("primary_company", "Primary company").excluded("Entered when the tenant is created; no tenant view reads it back"),
-    ADDITIONAL_COMPANIES: bilibi_ui::RecordField::new("additional_companies", "Additional companies").excluded("A list of companies, not a scalar tenant field"),
+bilibi_ui::record_fields! { "core/tenant", pub(crate) mod fields {
+    ID: bilibi_ui::RecordField::new("id", "ID", bilibi_ui::RecordFieldType::Integer),
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    PARENT: bilibi_ui::RecordField::new("parent_id", "Parent tenant", bilibi_ui::RecordFieldType::Integer).path("parent"),
+    SUB_TENANTS: bilibi_ui::RecordField::new("sub_tenants", "Sub-tenants", bilibi_ui::RecordFieldType::Integer),
+    STATUS: bilibi_ui::RecordField::new("status", "Status", bilibi_ui::RecordFieldType::String),
+    SUSPENSION: bilibi_ui::RecordField::new("suspension", "Suspension", bilibi_ui::RecordFieldType::String),
+    PRIMARY_COMPANY: bilibi_ui::RecordField::new("primary_company", "Primary company", bilibi_ui::RecordFieldType::String).excluded("Entered when the tenant is created; no tenant view reads it back"),
+    ADDITIONAL_COMPANIES: bilibi_ui::RecordField::new("additional_companies", "Additional companies", bilibi_ui::RecordFieldType::Array).excluded("A list of companies, not a scalar tenant field"),
 } }
 
 fn builtin(field: bilibi_ui::RecordField) -> BuiltinColumn {

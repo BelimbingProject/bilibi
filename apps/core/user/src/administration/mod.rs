@@ -149,6 +149,7 @@ pub(crate) fn service(
                 .clone(),
             users: services.get("core/user.accounts")?,
             grants: services.get("base/authz.grants")?,
+            records: services.get(bilibi_records::SERVICE)?,
             views: services.get(bilibi_grid::PAGE_VIEWS)?,
             display: services.get("base/datetime.display")?,
             locales: services.get("base/locale.locales")?,

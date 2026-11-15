@@ -195,6 +195,7 @@ impl Artifacts {
         };
         let format = get("pdf.paper.format").await?;
         let seconds = get("pdf.render_timeout_seconds").await?.as_u64();
+        let launch = get("pdf.launch_timeout_seconds").await?.as_u64();
         let max = get("artifacts.max_bytes").await?.as_u64();
         Ok(engine::Config {
             binary: get("pdf.chromium.binary")
@@ -209,6 +210,11 @@ impl Artifacts {
                 .unwrap_or(true),
             timeout: Duration::from_secs(
                 seconds
+                    .filter(|s| (1..=600).contains(s))
+                    .ok_or(Error::Policy)?,
+            ),
+            launch_timeout: Duration::from_secs(
+                launch
                     .filter(|s| (1..=600).contains(s))
                     .ok_or(Error::Policy)?,
             ),

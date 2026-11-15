@@ -826,7 +826,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/company",layer:bilibi_module_registry::Layer::Core,
         dependencies:&["base/database","base/security","base/ui","base/notifications","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/personal_data","core/party","core/geonames","core/person"],
-        migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql"))],
+        migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql")), ("core-company-013-search-trigram",include_str!("../migrations/013-search-trigram.sql"))],
         services: &[
             bilibi_module_registry::Service { id: SERVICE, factory: |services| {
                 let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
@@ -943,22 +943,40 @@ impl CompanyService {
         scope: &Scope,
         company: bilibi_party::OrganisationId,
         history: bool,
+        search: &str,
         window: relationships::Window,
     ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_company(&**client, scope, &self.directory, company, history, window)
-            .await
+        relationships::list_for_company(
+            &**client,
+            scope,
+            &self.directory,
+            company,
+            history,
+            search,
+            window,
+        )
+        .await
     }
     pub async fn person_relationships(
         &self,
         scope: &Scope,
         person: bilibi_party::PersonId,
         history: bool,
+        search: &str,
         window: relationships::Window,
     ) -> Result<relationships::Links> {
         let client = self.db.get().await?;
-        relationships::list_for_person(&**client, scope, &self.directory, person, history, window)
-            .await
+        relationships::list_for_person(
+            &**client,
+            scope,
+            &self.directory,
+            person,
+            history,
+            search,
+            window,
+        )
+        .await
     }
     /// One link on `company`'s page, from its perspective.
     pub async fn company_relationship(

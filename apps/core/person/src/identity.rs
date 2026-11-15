@@ -75,12 +75,17 @@ pub async fn search(
     // A hidden email/phone must not act as an existence oracle through search.
     let email = !masked.contains("email");
     let phone = !masked.contains("phone");
-    // Work data follows owner-contributed Grid paths so
-    // Person never reads affiliation/company tables or bypasses their masking.
-    let work = if needle.is_empty() {
-        "SELECT NULL::bigint WHERE $2::bigint IS NULL".to_owned()
-    } else {
-        bilibi_grid::query::text_search_sql(
+    type Arg = Box<dyn tokio_postgres::types::ToSql + Sync + Send>;
+    let mut args: Vec<Arg> = vec![Box::new(scope.tenant())];
+    let mut predicate = "tenant_id=$1".to_owned();
+    // A term is a top-level `id IN (..)`, never an OR beside the other
+    // conditions, so the planner reads only the matching contacts through the
+    // trigram indexes (migration 008) instead of every contact of the tenant.
+    if !needle.is_empty() {
+        // Work data follows owner-contributed Grid paths so Person never
+        // reads affiliation/company tables or bypasses their masking. Its
+        // statement binds $1 tenant, $2 actor and $3 the term.
+        let work = bilibi_grid::query::text_search_sql(
             client,
             scope,
             "persons",
@@ -91,19 +96,28 @@ pub async fn search(
                 "work.company.name:list",
             ],
         )
-        .await?
-    };
-    type Arg = Box<dyn tokio_postgres::types::ToSql + Sync + Send>;
-    let mut args: Vec<Arg> = vec![
-        Box::new(scope.tenant()),
-        Box::new(scope.user()),
-        Box::new(needle.clone()),
-        Box::new(query.include_retired),
-        Box::new(kind),
-        Box::new(email),
-        Box::new(phone),
-    ];
-    let mut predicate = format!("tenant_id=$1 AND ($4 OR retired_at IS NULL) AND ($5::text IS NULL OR kind=$5) AND ($3='' OR position($3 in lower(name))>0 OR position($3 in lower(code))>0 OR ($6 AND position($3 in lower(email))>0) OR ($7 AND position($3 in lower(phone))>0) OR id IN ({work}))");
+        .await?;
+        let pattern = format!(
+            "%{}%",
+            needle
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        args.push(Box::new(scope.user()));
+        args.push(Box::new(needle.clone()));
+        args.push(Box::new(email));
+        args.push(Box::new(phone));
+        args.push(Box::new(pattern));
+        predicate.push_str(&format!(" AND id IN (SELECT id FROM persons WHERE tenant_id=$1 AND (lower(name) LIKE $6 OR lower(code) LIKE $6 OR ($4 AND lower(email) LIKE $6) OR ($5 AND lower(phone) LIKE $6)) UNION ALL {work})"));
+    }
+    args.push(Box::new(query.include_retired));
+    let retired = args.len();
+    args.push(Box::new(kind));
+    let kind = args.len();
+    predicate.push_str(&format!(
+        " AND (${retired} OR retired_at IS NULL) AND (${kind}::text IS NULL OR kind=${kind})"
+    ));
     // Custom field conditions and sort name active fields only; each key and
     // value is a bound parameter. An unknown or archived field, an operator
     // that does not suit it or a value it cannot hold is refused.
@@ -594,6 +608,56 @@ pub async fn retire(
     })).await?;
     crate::publish(tx, scope.tenant(), person.id);
     Ok(person.redact(&masked))
+}
+
+pub(crate) async fn preview_import_undo(
+    client: &(impl GenericClient + Sync),
+    scope: &Scope,
+    id: PersonId,
+    version: i64,
+) -> std::result::Result<Person, WriteError> {
+    authorize_key(client, scope, IMPORT).await?;
+    let person = raw(client, scope, id, false).await?;
+    if person.version != version {
+        return Err(Error::Conflict.into());
+    }
+    if person.system_key.is_some() {
+        return Err(WriteError::SystemIdentity);
+    }
+    Ok(person.redact(&fields(client, scope).await?))
+}
+
+/// Remove one untouched Person whose import undo claim is held in the same
+/// transaction. Any record that now refers to it is left in place.
+pub(crate) async fn undo_import(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    id: PersonId,
+    version: i64,
+) -> std::result::Result<(), WriteError> {
+    check_context(tx, scope)?;
+    authorize_key(tx.sql(), scope, IMPORT).await?;
+    let old = raw(tx.sql(), scope, id, true).await?;
+    if old.version != version {
+        return Err(Error::Conflict.into());
+    }
+    if old.system_key.is_some() {
+        return Err(WriteError::SystemIdentity);
+    }
+    let tenant = scope.tenant();
+    tx.mutate(move |sql| Box::pin(async move {
+        match sql.query_opt(&format!("DELETE FROM persons WHERE tenant_id=$1 AND id=$2 AND version=$3 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &version]).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(Error::Conflict),
+            Err(error) if error.code() == Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) => {
+                return Err(Error::refused("Another record now uses this contact, so it was left alone."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(((), vec![Change { kind: "person".into(), id: id.get(), old: old.json(), new: Value::Null }]))
+    })).await?;
+    crate::publish(tx, tenant, id);
+    Ok(())
 }
 pub(crate) fn check_context(tx: &MutationTransaction<'_>, scope: &Scope) -> Result<()> {
     let context = tx.context();

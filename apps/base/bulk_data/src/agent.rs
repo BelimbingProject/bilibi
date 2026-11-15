@@ -142,6 +142,7 @@ impl ReadHandler for Read {
                         })).collect::<Vec<_>>(),
                         "restricted": info.restricted,
                         "matches": info.matches,
+                        "undo": info.undo,
                     })).collect())))
                 }
                 Self::List => {
@@ -179,6 +180,7 @@ impl ReadHandler for Read {
                         .and_then(Pass::parse)
                         .unwrap_or(Pass::Run);
                     let outcome = input["outcome"].as_str().and_then(Outcome::parse);
+                    let undo = input["undo"].as_str();
                     let (rows, total) = bulk
                         .rows(
                             client,
@@ -186,6 +188,7 @@ impl ReadHandler for Read {
                             id(input, "run_id")?,
                             pass,
                             outcome,
+                            undo,
                             (page - 1) * size,
                             size,
                         )
@@ -264,6 +267,7 @@ enum Write {
     Preview,
     Start,
     Cancel,
+    Undo,
     SaveMapping,
     DeleteMapping,
     Export,
@@ -284,6 +288,10 @@ impl Write {
                 mapping: mapping(input)?,
             },
             Self::Cancel => Action::Cancel {
+                run: id(input, "run_id")?,
+                version: id(input, "version")?,
+            },
+            Self::Undo => Action::Undo {
                 run: id(input, "run_id")?,
                 version: id(input, "version")?,
             },
@@ -418,6 +426,7 @@ fn rows_schema() -> Value {
         "run_id": id_schema(),
         "pass": {"type": "string", "enum": ["preview", "run"]},
         "outcome": {"type": "string", "enum": ["create", "update", "action", "skip", "error"]},
+        "undo": {"type": "string", "enum": ["left", "removed", "edited", "error"], "description": "After undo: records left behind, removed, edited or not removable."},
         "page": {"type": "integer", "minimum": 1, "maximum": 100000},
         "page_size": {"type": "integer", "minimum": 1, "maximum": 100}
     }})
@@ -509,6 +518,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/bulk_data.agent", prov
         Operation { key: "base.bulk_data.import.preview", title: "Check an import", summary: "Map a run's columns and check every row against the record type's own rules in the background, writing nothing. Replaces an earlier check's results.", keywords: &["import", "dry run", "validate"], capability: CREATE, input: pass_schema, output: run_output, handler: Handler::SafeWrite(&Write::Preview), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.start", title: "Run an import", summary: "Map a run's columns and import its rows in the background, each through the record type's own write contract as you.", keywords: &["import", "csv", "load"], capability: CREATE, input: pass_schema, output: run_output, handler: Handler::SafeWrite(&Write::Start), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.import.cancel", title: "Stop an import", summary: "Stop a check or an import that is working. Rows already written stay and are listed.", keywords: &["import", "cancel", "stop"], capability: CREATE, input: cancel_schema, output: run_output, handler: Handler::SafeWrite(&Write::Cancel), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.bulk_data.import.undo", title: "Undo an import", summary: "Within the configured period, remove records this finished import created and nobody changed. Changed or otherwise protected records stay and are listed.", keywords: &["import", "undo", "remove", "rollback"], capability: CREATE, input: cancel_schema, output: run_output, handler: Handler::SafeWrite(&Write::Undo), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.mapping.save", title: "Save an import mapping", summary: "Save a mapping by name for a record type, shared in your company and offered when a file's header has its columns. Saving a name again replaces it.", keywords: &["import", "mapping", "template"], capability: CREATE, input: save_schema, output: list_output, handler: Handler::SafeWrite(&Write::SaveMapping), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.export.get", title: "Read an export", summary: "One of your CSV exports: what it reads, its state, the rows it holds or why it failed, and the download path once ready.", keywords: &["export", "csv", "download"], capability: VIEW, input: export_get_schema, output: export_output, handler: Handler::Read(&Read::Export), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.bulk_data.export.start", title: "Export a list to CSV", summary: "Take a list's filtered records, with the columns it shows, out to a CSV file in the background, read as you: a field restricted for you is blank. Needs the record type's export capability.", keywords: &["export", "csv", "download", "list"], capability: VIEW, input: export_schema, output: export_output, handler: Handler::SafeWrite(&Write::Export), channels: Channels::Every, step_up: &[] },

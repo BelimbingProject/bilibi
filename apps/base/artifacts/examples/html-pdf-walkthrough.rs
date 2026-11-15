@@ -1,7 +1,9 @@
 //! Manual running-service walkthrough for the A4 HTML PDF engine and the
 //! single-use signed `/pdf/render/{token}` route. Explicit disposable DB only:
 //! it starts the real Axum app on a local port, drives real Chromium, and prints
-//! what happened for inspection. No assertions or test harness.
+//! what happened for inspection. One check exits non-zero: a browser that
+//! starts slowly still prints, because the render timeout counts from its
+//! first answer and its start has its own limit (#707).
 //!
 //! Needs `BILIBI_PDF_DEMO_OUT` (output directory), `BILIBI_PDF_CHROMIUM`
 //! (absolute path of a sandbox-capable Chromium/Chrome), optional
@@ -547,14 +549,38 @@ async fn main() -> Result<()> {
             .await
             .map(|m| m.id),
     );
+    // A cold start (the browser's files read from a slow disk): 7 s before
+    // the browser runs, longer than the 5 s the render itself may take.
+    let cold = out.join("cold-start.sh");
+    std::fs::write(
+        &cold,
+        format!("#!/bin/sh\nsleep 7\nexec '{chromium}' \"$@\"\n"),
+    )?;
+    std::fs::set_permissions(&cold, std::fs::Permissions::from_mode(0o700))?;
+    configure("pdf.chromium.binary", json!(cold.display().to_string())).await??;
+    configure("pdf.render_timeout_seconds", json!(5)).await??;
+    let started = std::time::Instant::now();
+    let printed = documents
+        .render_inline(&mut client, reference(), &json!({}))
+        .await
+        .map(|m| m.id);
+    let elapsed = started.elapsed().as_secs_f32();
+    show(
+        "browser that takes 7 s to start (5 s render limit)",
+        printed.as_ref(),
+    );
+    println!("returned after {elapsed:.1}s");
+    if printed.is_err() {
+        return Err("a slow browser start used up the render timeout (#707)".into());
+    }
     let slow = out.join("hang.sh");
     std::fs::write(&slow, "#!/bin/sh\nsleep 60\n")?;
     std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o700))?;
     configure("pdf.chromium.binary", json!(slow.display().to_string())).await??;
-    configure("pdf.render_timeout_seconds", json!(2)).await??;
+    configure("pdf.launch_timeout_seconds", json!(2)).await??;
     let started = std::time::Instant::now();
     show(
-        "browser that never answers (2 s limit)",
+        "browser that never answers (2 s start limit)",
         documents
             .render_inline(&mut client, reference(), &json!({}))
             .await
@@ -562,6 +588,7 @@ async fn main() -> Result<()> {
     );
     println!("returned after {:.1}s", started.elapsed().as_secs_f32());
     configure("pdf.chromium.binary", json!(chromium)).await??;
+    configure("pdf.launch_timeout_seconds", json!(60)).await??;
     configure("pdf.render_timeout_seconds", json!(30)).await??;
     println!(
         "probe hits across all refusals: {}",

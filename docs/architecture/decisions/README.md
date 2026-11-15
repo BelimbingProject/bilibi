@@ -3,7 +3,7 @@
 **Document Type:** Index of architecture decision records
 **Status:** Active
 **Scope:** Decisions that shape Bilibi's architecture
-**Last Updated:** 2026-11-14
+**Last Updated:** 2026-11-15
 
 Each record states one decision, its context and its consequences. The architecture overview is [`../README.md`](../README.md).
 
@@ -98,6 +98,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | Record | Status |
 | --- | --- |
 | [06 Record search at query time, in the owner's source](./06-query-time-record-search.md) | Proposed |
+| [29 PostgreSQL's `pg_trgm` extension is allowed](./29-pg-trgm-is-allowed.md) | Accepted |
 
 ### Data
 

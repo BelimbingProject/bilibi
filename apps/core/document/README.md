@@ -105,6 +105,8 @@ Documents is a `base/custom_fields` record type (`document`): an administrator a
 
 A declared `document-scanner` Queue job rechecks a pending attachment under the owner-scoped Media inspection grant. Only a clean verdict copies bytes to an Artifact and makes the revision downloadable; an infected, failed or unscanned verdict settles its status without publishing bytes. Queue's ending hook marks any still-pending revision failed if the job is cancelled or discarded. The uploader and current document managers receive notices when a file is held and when its verdict settles. List, record, agent and CSV views show the status; file links, preview and download work only for clean internal revisions. A direct download rechecks this state. Copying a file document requires a clean latest revision. Merge preserves each moved revision's file/status and its queued job continues to target the revision ID. Deletion waits for pending scans to settle, then removes held ledger rows after Base checks every published Artifact; Media's draft cleanup owns remaining staged bytes.
 
+While a revision's scan is pending, its Media draft is retained (`Media::retain_drafts`, in the transaction that attaches the file), so Media's cleanup of drafts older than a day keeps the bytes through a long scanner outage and the scan can still settle. Settling the scan, or its job ending, releases the draft (`Media::release_drafts`) to that cleanup; a document is neither deleted nor merged while a scan is pending. `store_file` holds no pooled connection while it waits up to 30 seconds for a quick verdict: it takes one only for each look. Proof: `apps/core/document/examples/scan-wait-proof.rs` (`document-scan-wait`).
+
 ### Upload progress and resume
 
 The New document, New revision and Quick add dialogs take the file through one resumable input (`UploadSpec::resumable`), so a large upload shows its progress and survives a dropped connection; the contract is `docs/live-pages.md` (Resumable uploads) and `apps/base/media/README.md` (Resumable uploads).
@@ -119,9 +121,11 @@ Internal revisions store the ledger file ID and either a clean Artifact ID or a 
 
 ### Files never attached
 
-A file stored but never attached (a dialog cancelled, a file replaced, a create refused, a dropped connection, a copy refused) is removed a day after it was stored.
+A file stored but never attached is removed at once when the dialog lets go of it, and otherwise a day after it was stored.
 
-- Storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
+- The New document, Quick add and New revision dialogs discard the file they hold (`Documents::discard_files`) when another upload replaces it or the dialog is closed (`close_modal`, `close_quick`, listed beside `upload` as page writes outside a contract). A file a refused create keeps stays, so the person can try again.
+
+- Every other case (a tab closed, a dropped connection, a refused copy, a discard that failed) waits for the job: storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
 - The job runs as the system principal `document-file-cleaner`, which holds only `core.document.discard.settle` (a standing grant). A file attached by then is left alone.
 - Otherwise the job moves the ledger row to `discarding`, which no write can attach ("is not a file you stored"), deletes its Artifact, then removes the row. Each step is audited as `System · document-file-cleaner`; a failed step retries with Queue's backoff.
 - A held upload's staged bytes stay Media's: its draft cleanup removes them.

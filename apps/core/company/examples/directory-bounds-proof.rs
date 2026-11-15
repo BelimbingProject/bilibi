@@ -16,6 +16,11 @@ use bilibi_authz::{
 };
 use bilibi_tenancy::{PartyProofs, Scope};
 use std::collections::BTreeSet;
+
+/// Every company the call may offer: these checks count them all.
+fn every() -> bilibi_tenancy::OrganisationSearch<'static> {
+    bilibi_tenancy::OrganisationSearch::text("").limit(usize::MAX)
+}
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -174,7 +179,7 @@ async fn main() -> Result<(), Error> {
 
     println!("== the directory's selectable companies");
     let offered = parties
-        .selectable_organisations(client, &admin, SETTINGS_MANAGE)
+        .selectable_organisations(client, &admin, SETTINGS_MANAGE, every())
         .await?;
     let names = bound(&offered);
     checks.check(
@@ -198,7 +203,7 @@ async fn main() -> Result<(), Error> {
     client.execute(deny, &[&tenant, &manager.user()]).await?;
     client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES($1,$2,'admin.company.tenant-wide.manage',false)", &[&tenant, &manager.user()]).await?;
     let managed: Vec<i64> = parties
-        .selectable_organisations(client, &manager, bilibi_company::UPDATE)
+        .selectable_organisations(client, &manager, bilibi_company::UPDATE, every())
         .await?
         .iter()
         .map(|c| c.id.get())

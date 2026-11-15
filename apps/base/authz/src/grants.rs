@@ -1,4 +1,6 @@
 //! Authenticated grant writes and explicit authoritative system-role reconciliation.
+#[path = "group_roles.rs"]
+mod group_roles;
 #[path = "identity_roles.rs"]
 mod identity_roles;
 use crate::step_up;
@@ -11,6 +13,7 @@ use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::{PartyProofs, Scope};
+pub use group_roles::{group_roles, Group};
 use serde_json::json;
 use std::sync::Arc;
 use tokio_postgres::{GenericClient, Transaction};
@@ -112,16 +115,18 @@ impl Grants {
             .map(|company| company.id.get())
             .collect())
     }
-    /// Company choices for an administrator granting a scoped role. Target
+    /// Company choices for an administrator granting a scoped role, as many
+    /// as `search` asks for. Target
     /// validation repeats the directory proof on the saving transaction.
     pub async fn assignable_companies(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
+        search: bilibi_tenancy::OrganisationSearch<'_>,
     ) -> Result<Vec<bilibi_tenancy::NamedOrganisation>> {
         authorize_key(client, scope, "admin.authz.role.update").await?;
         self.parties
-            .selectable_organisations(client, scope, "admin.authz.role.update")
+            .selectable_organisations(client, scope, "admin.authz.role.update", search)
             .await
     }
     fn known(&self, key: &str) -> Result<()> {

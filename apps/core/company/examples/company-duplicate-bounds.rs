@@ -19,6 +19,7 @@ type Failure = Box<dyn std::error::Error>;
 
 const BULK: i64 = 100_000;
 const ACME: i64 = 2_000_001;
+const ZENTH: i64 = 2_000_002;
 /// The company rows and index entries a transaction has read so far, from
 /// PostgreSQL's own per-transaction counters. An index scan counts its heap
 /// fetches on the index, so every index of `companies` is summed in.
@@ -86,6 +87,20 @@ async fn main() -> Result<(), Failure> {
             &[&manager.tenant(), &ACME],
         )
         .await?;
+    // #656: "services" is common too, and one company holds both common
+    // words beside a distinctive one.
+    client
+        .execute(
+            "INSERT INTO companies(id,tenant_id,name,code,status) SELECT 2100000+n,$1,'Filler Services '||n,'filler_services_'||n,'active' FROM generate_series(1,300) n",
+            &[&manager.tenant()],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO companies(id,tenant_id,name,code,status) VALUES ($2,$1,'Zenth Trading Services','zenth_trading','active')",
+            &[&manager.tenant(), &ZENTH],
+        )
+        .await?;
     client.batch_execute("ANALYZE companies").await?;
     println!("  inserted {BULK} companies in {:?}", started.elapsed());
 
@@ -146,6 +161,34 @@ async fn main() -> Result<(), Failure> {
             .any(|c| c.id == ACME && c.matched_facts == ["website"]),
     )?;
 
+    // #656: a misspelt distinctive word beside two common words.
+    let (found, rows) = measured(raw, &manager, &named("Zenith Trading Services")).await?;
+    prove(
+        "a misspelt word beside two common words still finds its company first, from a bounded pool",
+        found.first().is_some_and(|c| c.id == ZENTH) && rows < 5_000,
+    )?;
+    // #656: a name of many distinct words reads at most eight of them, counted
+    // as scans of the name-token index on one transaction.
+    let tx = raw.transaction().await?;
+    let scans = "SELECT pg_stat_get_xact_numscans('companies_name_tokens'::regclass)";
+    let before: i64 = tx.query_one(scans, &[]).await?.get(0);
+    duplicates(
+        &tx,
+        &manager,
+        &named("Qa Qbb Qccc Qdddd Qeeeee Qffffff Qggggggg Qhhhhhhhh Qiiiiiiiii Qjjjjjjjjjj Qkkkkkkkkkkk Qllllllllllll"),
+    )
+    .await?;
+    let after: i64 = tx.query_one(scans, &[]).await?.get(0);
+    tx.rollback().await?;
+    println!(
+        "  a twelve-word name scanned the name-token index {} times",
+        after - before
+    );
+    prove(
+        "a twelve-word name reads candidates for at most eight words",
+        (1..=8).contains(&(after - before)),
+    )?;
+
     // The statement timeout is set for the matching statement only, and only
     // for a caller without one of its own.
     let tx = raw.transaction().await?;
@@ -185,6 +228,34 @@ async fn main() -> Result<(), Failure> {
     }
     prove(
         "matching blocked on a locked table ends at its statement timeout, not when the lock ends",
+        matches!(waited, Ok(Err(_))) && elapsed < Duration::from_secs(3),
+    )?;
+
+    // #656: the service's own pooled read is bounded too, not only a caller
+    // already in a transaction.
+    let companies = app
+        .services
+        .get::<bilibi_company::CompanyService>(bilibi_company::SERVICE)?;
+    let mut holder = db.get().await?;
+    let lock = holder.transaction().await?;
+    lock.batch_execute("LOCK TABLE companies IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let started = Instant::now();
+    let waited = tokio::time::timeout(
+        Duration::from_secs(5),
+        companies.duplicates(&manager, &named("Acme Trading")),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    lock.rollback().await?;
+    drop(holder);
+    match &waited {
+        Ok(Err(error)) => println!("  service refused after {elapsed:?}: {error}"),
+        Ok(Ok(found)) => println!("  service answered after {elapsed:?}: {}", found.len()),
+        Err(_) => println!("  service still waiting after {elapsed:?}"),
+    }
+    prove(
+        "CompanyService::duplicates on its own connection ends at the statement timeout too",
         matches!(waited, Ok(Err(_))) && elapsed < Duration::from_secs(3),
     )?;
 

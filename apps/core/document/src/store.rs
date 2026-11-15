@@ -439,6 +439,7 @@ pub(crate) struct Store<'s> {
     pub activities: &'s Activities,
     pub artifacts: &'s bilibi_artifacts::Artifacts,
     pub queue: &'s bilibi_queue::Queue,
+    pub media: &'s bilibi_media::Media,
 }
 impl Store<'_> {
     /// The tenant rule is captured when each private revision is attached:
