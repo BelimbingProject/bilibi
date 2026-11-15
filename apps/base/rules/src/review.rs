@@ -481,10 +481,25 @@ impl Rules {
         }
         // The approver's own authority: approving never delegates more.
         let grid = bilibi_grid::installed()?;
-        let mut needed: Vec<&str> = grid
+        let mut needed: std::collections::BTreeSet<&str> = grid
             .table(offered.definition.table)
-            .map(|table| vec![table.capability()])
+            .map(|table| std::collections::BTreeSet::from([table.capability()]))
             .unwrap_or_default();
+        if let Some(root) = grid.table(offered.definition.table) {
+            for path in definition.fields() {
+                if let Ok(column) = bilibi_grid::column::resolve(&path, root, &|id| grid.table(id))
+                {
+                    needed.extend(
+                        column
+                            .hops
+                            .iter()
+                            .filter_map(|hop| grid.table(hop.to()))
+                            .map(|table| table.capability()),
+                    );
+                }
+            }
+        }
+        let authority = bilibi_authz::effective_grants(client, scope).await?;
         needed.extend(
             definition
                 .actions
@@ -495,6 +510,11 @@ impl Rules {
         for key in needed {
             if !bilibi_authz::decide(client, scope, key).await?.allowed {
                 problems.push(("version".into(), format!("you may not do what this rule does yourself ({key}), so you cannot approve it")));
+            } else if !authority.reaches(key, bilibi_authz::Reach::All) {
+                problems.push((
+                    "version".into(),
+                    format!("you need access to all records for {key} to approve this rule"),
+                ));
             }
         }
         // The principal reads every field the conditions name; a restricted or

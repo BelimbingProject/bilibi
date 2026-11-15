@@ -1229,5 +1229,105 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
             check(allowed == expected, "each direct, edge and chained access predicate distinguishes absence from denied reach");
         }
     }
+    drop(client);
+    let grants = proof.services.get::<Grants>("base/authz.grants")?;
+    for key in ["admin.rules.approve", "rule-cases.case.flag"] {
+        grants
+            .set_direct(
+                &one,
+                2,
+                key,
+                Some(bilibi_authz::grants::Direct::Allow(
+                    bilibi_authz::Reach::All,
+                )),
+            )
+            .await?;
+    }
+    let broad = json!({"name": "Flag amounts across owners", "trigger": OPENED,
+        "conditions": [{"field": "amount", "op": "gt", "value": "0"}],
+        "actions": [{"operation": "rule_cases.cases.flag", "input": "{}"}],
+        "examples": [{"facts": json!({"amount": "1.00"}).to_string(), "expect": "match"}]});
+    let (broad_rule, broad_version) = proof.draft(&one, broad).await?;
+    for reach in [bilibi_authz::Reach::Own, bilibi_authz::Reach::Team] {
+        grants
+            .set_direct(
+                &one,
+                2,
+                "rule-cases.case.view",
+                Some(bilibi_authz::grants::Direct::Allow(reach)),
+            )
+            .await?;
+        let reviewed = proof
+            .review(
+                &viewer,
+                "base.rules.approve",
+                json!({"rule_id": broad_rule, "version": broad_version}),
+            )
+            .await;
+        check(
+            reviewed.to_string().contains("access to all records"),
+            "approval review explains that partial record reach cannot authorize tenant-wide reads",
+        );
+        check(
+            proof
+                .approve(&viewer, broad_rule, broad_version)
+                .await
+                .is_err_and(|why| why.contains("access to all records")),
+            "an approver limited to Own or Team cannot delegate reads of other owners' cases",
+        );
+    }
+    grants
+        .set_direct(
+            &one,
+            2,
+            "rule-cases.case.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
+        .await?;
+    check(
+        proof
+            .approve(&viewer, broad_rule, broad_version)
+            .await
+            .is_ok(),
+        "an approver with All reach can approve the same rule",
+    );
+    proof
+        .switch(&viewer, broad_rule, false)
+        .await
+        .map_err(|_| Error::Internal)?;
+    grants
+        .set_direct(
+            &one,
+            2,
+            "rule-cases.case.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::Own,
+            )),
+        )
+        .await?;
+    check(
+        proof.switch(&viewer, broad_rule, true).await.is_err(),
+        "Own reach cannot switch tenant-wide automation back on",
+    );
+    grants
+        .set_direct(
+            &one,
+            2,
+            "rule-cases.case.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
+        .await?;
+    check(
+        proof.switch(&viewer, broad_rule, true).await.is_ok(),
+        "All reach can switch the approved rule back on",
+    );
+    proof
+        .switch(&one, broad_rule, false)
+        .await
+        .map_err(|_| Error::Internal)?;
     Ok(())
 }
