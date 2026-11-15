@@ -502,6 +502,13 @@ pub async fn stats<S: AsRef<str>>(
 /// contribute no matches. Only catalog identifiers enter the returned SQL.
 /// Many-links search every value before list-cell truncation or aggregation.
 /// The caller owns its statement timeout and pagination, as for its own search.
+///
+/// Each path matches from its end: the rows whose field holds the term, then
+/// back through each link to the root keys they reach, all unioned. Nothing is
+/// correlated to a root row, so a search reads the rows that match (through a
+/// trigram index where the owner declares one) rather than testing every root
+/// row (#589). The term is a substring match, `LIKE` with `%`, `_` and `\`
+/// escaped, as `position` was.
 pub async fn text_search_sql(
     client: &impl tokio_postgres::GenericClient,
     scope: &Scope,
@@ -513,7 +520,7 @@ pub async fn text_search_sql(
     }
     let catalog = Catalog::for_scope(client, scope).await?;
     let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
-    let mut predicates = Vec::new();
+    let mut matches = Vec::new();
     for spec in specs {
         let Ok(column) = catalog.resolve(root, spec) else {
             continue;
@@ -525,23 +532,64 @@ pub async fn text_search_sql(
         let Some(f) = column.field.filter(|f| f.ty == crate::FieldType::String) else {
             continue;
         };
-        let predicate = match walk(&catalog, root, &column) {
-            Some(w) => format!(
-                "EXISTS (SELECT 1 {} AND position($3::text in lower({}))>0)",
-                w.suffix,
-                field(&w.alias, w.table, f.id)
-            ),
-            None => format!("position($3::text in lower({}))>0", field("r", root, f.id)),
-        };
-        predicates.push(predicate);
+        matches.push(matching_keys(&catalog, root, &column, f.id));
     }
+    let key = field("r", root, root.key());
     // Reference both scope parameters even for sources that only use tenant.
-    let predicate = if predicates.is_empty() {
+    let predicate = if matches.is_empty() {
         "false".into()
     } else {
-        predicates.join(" OR ")
+        format!("{key} IN ({})", matches.join(" UNION ALL "))
     };
-    Ok(format!("SELECT {} FROM {} r CROSS JOIN (SELECT $1::bigint AS tenant, $2::bigint AS usr) actor WHERE ({predicate})", field("r", root, root.key()), source(root)))
+    Ok(format!("SELECT {key} FROM {} r CROSS JOIN (SELECT $1::bigint AS tenant, $2::bigint AS usr) actor WHERE {predicate}", source(root)))
+}
+
+/// The keys of `root` rows whose `column` path reaches a row whose field
+/// `field_id` holds the term ($3), built from the matching rows backwards.
+fn matching_keys(catalog: &Catalog, root: &Table, column: &Column, field_id: &str) -> String {
+    let links: Vec<&Link> = column
+        .hops
+        .iter()
+        .chain(column.many.iter())
+        .chain(column.tail.iter())
+        .collect();
+    let tables: Vec<&Table> = std::iter::once(root)
+        .chain(
+            links
+                .iter()
+                .map(|l| catalog.table(l.to()).expect("resolved target")),
+        )
+        .collect();
+    let last = tables[tables.len() - 1];
+    let mut keys = format!(
+        "SELECT {} FROM {} m WHERE lower({}) LIKE '%' || replace(replace(replace($3::text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'",
+        field("m", last, last.key()),
+        source(last),
+        field("m", last, field_id)
+    );
+    for (i, link) in links.iter().enumerate().rev() {
+        let (parent, target) = (tables[i], tables[i + 1]);
+        let p = field("p", parent, parent.key());
+        keys = match link.decl.join {
+            Join::On {
+                from_field,
+                to_field,
+            } => format!(
+                "SELECT {p} FROM {} p WHERE {} IN (SELECT {} FROM {} t WHERE {} IN ({keys}))",
+                source(parent),
+                field("p", parent, from_field),
+                field("t", target, to_field),
+                source(target),
+                field("t", target, target.key())
+            ),
+            Join::Edge(edge) => format!(
+                "SELECT {p} FROM {} p WHERE {p} IN (SELECT e.from_key FROM ({}) e WHERE e.to_key IN ({keys}))",
+                source(parent),
+                edge.sql
+            ),
+        };
+    }
+    keys
 }
 
 /// A masked column's cell: each listed value, or the one value, as its

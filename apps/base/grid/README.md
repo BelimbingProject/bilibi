@@ -224,7 +224,7 @@ A table that claims an audit kind in `record_types` and names a `label_field` ca
 
 ## Searching related text
 
-`query::text_search_sql(client, scope, root, paths)` builds a membership subquery for an owner's paginated search and count. Execute it immediately under the same scope, binding tenant, user and normalized search text to `$1`, `$2` and `$3`. The owner retains its pagination and statement timeout. Paths resolve against a fresh catalog; unavailable tables and restricted fields contribute no matches. Many-links search every text value before cell truncation, so a value beyond the displayed rollup still matches.
+`query::text_search_sql(client, scope, root, paths)` builds a membership subquery for an owner's paginated search and count. Execute it immediately under the same scope, binding tenant, user and normalized search text to `$1`, `$2` and `$3`. The owner retains its pagination and statement timeout. Paths resolve against a fresh catalog; unavailable tables and restricted fields contribute no matches. Many-links search every text value before cell truncation, so a value beyond the displayed rollup still matches. Each path matches from its end, uncorrelated: the rows whose field contains the term (`lower(field) LIKE '%term%'`, with `%`, `_` and `\` taken literally), then back through each link to the root keys they reach. A search therefore reads the rows that match, through a trigram index when the field's owner declares one (ADR 06), never every root row. Index a searched text field with `gin (lower(field) gin_trgm_ops)`.
 
 ## Lenses (G3)
 
