@@ -290,6 +290,7 @@ impl State {
         if let Some(query) = self.initial_query.take() {
             self.columns.from_params(scope, &query).await?;
         }
+        self.columns.refresh_views(scope).await?;
         let connection = self.pages.db.get().await?;
         let client = &**connection;
         let locale = self
@@ -480,15 +481,27 @@ impl State {
                 self.reload = true;
             }
             "grid" | "grid_subs" => {
-                let params = params::string_values_checked(v, params::FIELD_LIMIT)
-                    .map_err(Error::refused)?;
+                let query = self.list.to_params();
+                let params = PageColumns::event_values(v)?;
                 let columns = if text(v, "type") == "grid" {
                     &mut self.columns
                 } else {
                     &mut self.sub_columns
                 };
                 if matches!(
-                    columns.handle(scope, &params).await?,
+                    columns
+                        .handle(
+                            scope,
+                            &params,
+                            bilibi_grid::ViewCaller {
+                                contracts: &self.pages.contracts,
+                                credential,
+                                service: "core/team.pages",
+                                event: text(v, "type"),
+                                query,
+                            }
+                        )
+                        .await?,
                     bilibi_grid::Outcome::Patch
                 ) {
                     self.reload = true;

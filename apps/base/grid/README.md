@@ -1,6 +1,6 @@
 # Grid catalog, page projections, lenses and page columns (G1–G4)
 
-**Use it for:** declaring your tables so lists get pickable columns, lenses and saved arrangements; reports and search read the same catalog.
+**Use it for:** declaring your tables so lists get pickable columns, lenses and saved arrangements, named list views people share with everyone or a role; reports and search read the same catalog.
 
 **Not for:** a column picker or per-list join code of your own.
 
@@ -307,18 +307,11 @@ The page holds one `PageColumns` in its live state and:
    rows' keys as JSON scalars and the request's `DisplayContext`;
 4. renders `flex_table(id, rows)` over `rows` (a clone of
    `PageColumns::rows`, each row's slots filled for the built-in ids);
-5. delegates its `grid` event to `handle(scope, values)`: after
+5. delegates its `grid` event to `handle(scope, values, caller)`: after
    `Outcome::Patch` it loads again and returns the merged query; `Sort(key)`
    is a built-in's sort for the page's `ListState`; `Update` re-renders.
 
-`View` is what a person arranged, as one value that round-trips through the
-URL (`cols`, `lens`, `z`, `since`; defaults left out) and the stored JSON
-(`columns`, `lenses`, `zoom`, `since`). An address that carries any of those
-keys wins over memory, so a shared link shows what its sender saw and changes
-nobody's memory until the reader arranges something. An address that carries
-none opens the page the way the account left it (`PageViews::fetch`, read
-afresh every time, never from a copy held in the page), and as the page's own
-columns when the account arranged nothing.
+`View` is what a person arranged, as one value that round-trips through the URL (`cols`, `lens`, `z`, `since`) and the stored JSON (`columns`, `lenses`, `zoom`, `since`). An address that carries any of those keys wins over memory, so a shared link shows what its sender saw and changes nobody's memory until the reader arranges something. An address that carries none opens the page the way the account left it (`PageViews::fetch`, read afresh every time, never from a copy held in the page), and as the page's own columns when the account arranged nothing. `View::to_params` omits defaults; `PageColumns::params` preserves a row-height marker for explicit URL arrangements so canonicalization keeps the address authoritative even at the defaults.
 
 `PageViews` keeps the arrangement per account and per page in the
 user-scoped `ui.grid.page_columns` setting, one `{page, view}` entry per
@@ -359,3 +352,16 @@ memory alone. Reset forgets the page. The restriction switch restricts
 `unit_cost` for the signed-in account's roles and lifts it again, so a walked
 `unit_cost` column disappears from the table, the address and the add box
 while restricted.
+
+## Shared list views (#686)
+
+A person saves the list they see as a named view (columns, lenses, row height, change-since date, and the page's own sort, search and filters) and shares it with everyone or a role. The primary table that restores `PageColumns::from_params` gets the strip of views above its table and, for readers with sharing permission, the save form in the notch; do not build a second saved-filters feature.
+
+- **A view is a link, not access.** It is stored as JSON in `base_grid_shared_views` (+ `base_grid_shared_view_roles`) and opened as `?<query>` on the page's own address (`SharedView::query`), so the page applies the reader's own grants, field restrictions and reach, prunes what they may not see, and leaves their remembered arrangement alone (an address that names the arrangement wins, as for any shared link). The row height is always named so a view with the page's own columns still wins over a reader's memory.
+- **The page's own query** comes from the host's current canonical server state when the queued save is processed (`ViewCaller::query`), so preceding filter and sort events are included even while their response is in flight. `clean_params` omits Grid and pagination keys and rejects unsupported sizes without truncation; the page restores the saved query through its existing params handling.
+- **Who sees one:** its owner, everyone when shared that way, or the holders of a shared role (`effective_principal_roles`). Saving a view needs `grid.views.share`; the owner always sees their saved views. A tenant-wide role assignment receives the view in every company; an assignment limited to one company receives it only while that company is selected. Owners can delete their own views after losing sharing permission; deleting another owner’s view requires `grid.views.share`. Deletion asks for confirmation in the strip; at most 100 views per page per tenant and one name per page, whatever its case. The save transaction serializes both checks and insertion per tenant/page.
+- **Writes** go through the mutation boundary (`PageViews::save_shared`, `delete_shared`) and are audited as kind `grid.shared_view`. Pages and agents call `base.grid.view.save` and `base.grid.view.delete` through the normal audited operation transaction. Each host declares both contracts for its Grid event in `PAGE_WRITES` and supplies `ViewCaller` with its page service, event, session credential, canonical query and `PageContracts`.
+
+Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls.
+
+The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, and saving filters after queued changes.

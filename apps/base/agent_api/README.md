@@ -21,6 +21,8 @@ read operations on write capabilities, and impersonation capabilities (`*.impers
 Titles have a 120-character limit, summaries 500, guide bodies 8 KiB. Registry
 entries retain source provenance and materialized schemas.
 
+A safe-write operation may declare `capability: SIGNED_IN` for owner-authorized self-service. It is discoverable by authenticated accounts without a capability grant; its preview and commit must prove ownership of the target, or authorize the capability required for another owner's target. System principals are refused. Discovery, plans, page submissions and jobs apply the same admission. All other capability strings must name declared vocabulary keys.
+
 Two more contract properties, both checked at boot:
 
 | Field | Meaning |

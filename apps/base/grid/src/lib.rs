@@ -14,18 +14,21 @@ pub mod page_columns;
 pub mod page_views;
 pub mod query;
 pub mod reference;
+mod shared_views;
 mod summary;
 pub mod view;
+mod view_operations;
 pub use lens::{Lens, Range};
 pub use oversight::{
     ChildResult, OversightData, OversightQueries, OversightResult, OversightSpec, OVERSIGHT_QUERIES,
 };
-pub use page_columns::{Outcome, PageColumns};
+pub use page_columns::{Outcome, PageColumns, ViewCaller};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
     project, project_lenses, project_within, scalar_expression, scalar_join, stats, Lenses,
     Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS, MAX_ESTIMATED_COST,
 };
+pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
 pub use summary::{
     page_keys, summarize, Bounds, Bucket, Filter, Grouping, KeyPage, Line, Measure, PageSpec,
     Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS,
@@ -168,11 +171,12 @@ inventory::submit! { Consumer::new::<GridContribution>(TABLES, "base/grid", |ent
 inventory::submit! {
     Module {
         id: "base/grid", layer: Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data", "base/agent_api"],
         migrations: &[
             ("base-grid-001", include_str!("../migrations/001-reference.sql")),
             ("base-grid-002", include_str!("../migrations/002-reference-recorded-at.sql")),
             ("base-grid-003-reference-tasks", include_str!("../migrations/003-reference-tasks.sql")),
+            ("base-grid-004-shared-views", include_str!("../migrations/004-shared-views.sql")),
         ],
         services: &[Service { id: PAGE_VIEWS, factory: page_views::service }, Service { id: OVERSIGHT_QUERIES, factory: oversight::service }],
     }

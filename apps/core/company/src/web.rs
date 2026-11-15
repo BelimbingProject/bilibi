@@ -585,6 +585,7 @@ impl CompanyPage {
         values
     }
     async fn draw(&mut self, scope: &Scope) -> Result<LiveBody> {
+        self.columns.refresh_views(scope).await?;
         let mut client = self.db.get().await?;
         let masked = crate::field_contributions::effective_restrictions(&**client, scope).await?;
         let html = match self.operation {
@@ -776,14 +777,22 @@ impl CompanyPage {
         let get = |key| value.get(key).and_then(Value::as_str).unwrap_or("");
         match get("type") {
             "grid" if self.operation == "list" => {
-                let values = value
-                    .as_object()
-                    .ok_or(Error::Invalid)?
-                    .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.into())))
-                    .collect();
-                if let bilibi_grid::page_columns::Outcome::Sort(field) =
-                    self.columns.handle(scope, &values).await?
+                let query = self.query();
+                let values = PageColumns::event_values(value)?;
+                if let bilibi_grid::page_columns::Outcome::Sort(field) = self
+                    .columns
+                    .handle(
+                        scope,
+                        &values,
+                        bilibi_grid::ViewCaller {
+                            contracts: &self.contracts,
+                            credential,
+                            service: "core/company.pages",
+                            event: "grid",
+                            query,
+                        },
+                    )
+                    .await?
                 {
                     self.sort(&field)?;
                 }

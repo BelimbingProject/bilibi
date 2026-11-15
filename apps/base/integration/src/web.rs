@@ -97,6 +97,7 @@ pub struct Pages {
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
     pub views: Arc<PageViews>,
+    pub contracts: Arc<bilibi_agent_api::page::PageContracts>,
 }
 
 impl Pages {
@@ -374,6 +375,7 @@ impl Index {
     }
 
     async fn render(&mut self, scope: &Scope) -> Result<String> {
+        self.columns.refresh_views(scope).await?;
         let client = self.pages.db.get().await?;
         let display = self.pages.context(&**client, scope).await?;
         let clock = display.clock(self.browser_zone.as_deref(), Timestamp::now());
@@ -495,7 +497,7 @@ impl Index {
         view.render().map_err(|_| Error::Internal)
     }
 
-    async fn event(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+    async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         let kind = get("type").ok_or(Error::Invalid)?;
         match kind {
@@ -511,6 +513,7 @@ impl Index {
                 self.reload = true;
             }
             "grid" => {
+                let query = self.query();
                 // No column sorts: the log stays newest first. A changed
                 // arrangement is already remembered; the rows load again
                 // under it.
@@ -518,8 +521,14 @@ impl Index {
                     .columns
                     .handle(
                         scope,
-                        &params::string_values_checked(value, params::FIELD_LIMIT)
-                            .map_err(Error::refused)?,
+                        &PageColumns::event_values(value)?,
+                        bilibi_grid::ViewCaller {
+                            contracts: &self.pages.contracts,
+                            credential,
+                            service: "base/integration.pages",
+                            event: "grid",
+                            query,
+                        },
                     )
                     .await?
                 {
@@ -569,7 +578,9 @@ impl LiveState<Scope, Error> for Index {
                     self.open(request.scope, values).await?;
                     self.reload = true;
                 }
-                LiveInput::Event(value) => self.event(request.scope, value).await?,
+                LiveInput::Event(value) => {
+                    self.event(request.scope, request.credential, value).await?
+                }
             }
             let html = self.render(request.scope).await?;
             Ok(LiveBody {

@@ -240,6 +240,7 @@ pub struct Reports {
     mutations: Arc<bilibi_database::MutationBoundary>,
     mailer: Arc<bilibi_mail::Mailer>,
     directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
+    labels: Arc<bilibi_labels::Labels>,
     /// The public origin emailed links point at (`APP_ORIGIN`).
     origin: String,
     builtins: Vec<&'static Builtin>,
@@ -634,11 +635,17 @@ impl Reports {
     ) -> Outcome<Vec<(String, String)>> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
+        let words = self.labels.labels(&**client, scope).await?;
         drop(client);
         let catalog = self.catalog(scope, oversight, false).await?;
         let mut types: Vec<_> = catalog
             .tables()
-            .map(|table| (table.id().to_owned(), table.label().to_owned()))
+            .map(|table| {
+                (
+                    table.id().to_owned(),
+                    words.record(table.id(), table.label()),
+                )
+            })
             .collect();
         types.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(types)
@@ -649,6 +656,7 @@ impl Reports {
     pub async fn record_sources(&self, scope: &Scope) -> Outcome<Vec<RecordSource>> {
         let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, VIEW).await?;
+        let words = self.labels.labels(&**client, scope).await?;
         drop(client);
         let catalog = self.catalog(scope, false, false).await?;
         let mut sources: Vec<_> = catalog
@@ -657,7 +665,7 @@ impl Reports {
                 let (area, area_label) = area_of(table.owner);
                 RecordSource {
                     id: table.id().to_owned(),
-                    label: table.label().to_owned(),
+                    label: words.record(table.id(), table.label()),
                     area,
                     area_label,
                 }
@@ -1437,7 +1445,7 @@ fn line(out: &mut String, fields: impl IntoIterator<Item = String>) {
 inventory::submit! {
     bilibi_module_registry::Module {
         id: "base/reports", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/settings", "base/datetime", "base/grid", "base/agent_api", "base/ui", "base/menu", "base/locale", "base/dashboard", "base/artifacts", "base/queue", "base/notifications", "base/party_ids", "base/schedule", "base/mail", "base/records", "base/principal_directory", "base/labels"],
         migrations: &MIGRATIONS,
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let reports = Arc::new(Reports {
@@ -1453,6 +1461,7 @@ inventory::submit! {
                 mutations: services.get("base/database.mutations")?,
                 mailer: services.get("base/mail.mailer")?,
                 directory: services.get("base/principal_directory.directory")?,
+                labels: services.get(bilibi_labels::SERVICE)?,
                 origin: std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into()).trim_end_matches('/').to_owned(),
                 builtins: builtin::validate(bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?.entries::<Builtin>(BUILTINS)?)?,
             });

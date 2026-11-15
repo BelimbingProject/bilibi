@@ -798,6 +798,44 @@ pub struct FlexTable<'a> {
     pub empty: Option<TableEmpty>,
     /// Row ticks and the selection bar; `None` draws neither.
     pub selection: Option<Selection>,
+    /// The saved views strip and the save form; `None` draws neither.
+    pub views: Option<ViewsBar>,
+}
+
+/// One saved list view on the views strip: a link to the page's own address
+/// with the view's query, so the page applies the reader's own access.
+#[derive(Clone, Debug)]
+pub struct ViewLink {
+    pub id: i64,
+    pub name: String,
+    /// The view's query string, without the leading `?`.
+    pub query: String,
+    /// Whom it is shared with, in words, for its tooltip.
+    pub audience: String,
+    /// The reader saved it, so may delete it.
+    pub deletable: bool,
+}
+
+/// The saved views of a list: the strip of views to open, the save form in
+/// the notch, and the state of a delete awaiting its confirmation.
+#[derive(Clone, Debug, Default)]
+pub struct ViewsBar {
+    pub links: Vec<ViewLink>,
+    /// Whether the reader may share a view; the form then asks with whom.
+    pub can_share: bool,
+    /// The roles a view may be shared with, by name.
+    pub roles: Vec<(i64, String)>,
+    /// The view whose delete awaits the reader's confirmation.
+    pub confirming: Option<i64>,
+    /// What the last save or delete said, when it was refused.
+    pub notice: Option<String>,
+}
+
+impl ViewsBar {
+    /// Whether this view's delete awaits the reader's confirmation.
+    pub fn confirming_link(&self, link: &ViewLink) -> bool {
+        self.confirming == Some(link.id)
+    }
 }
 
 impl<'a> FlexTable<'a> {
@@ -824,6 +862,7 @@ impl<'a> FlexTable<'a> {
             actions: false,
             empty: None,
             selection: None,
+            views: None,
         }
     }
 

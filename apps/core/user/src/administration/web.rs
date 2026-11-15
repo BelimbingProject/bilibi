@@ -86,6 +86,7 @@ pub struct Pages {
     pub grants: Arc<bilibi_authz::grants::Grants>,
     pub records: Arc<bilibi_records::Records>,
     pub views: Arc<PageViews>,
+    pub contracts: Arc<bilibi_agent_api::page::PageContracts>,
     pub display: Arc<DisplayPolicy>,
     pub locales: Arc<Locales>,
 }
@@ -544,6 +545,7 @@ impl Index {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        self.columns.refresh_views(scope).await?;
         let grants = self.grants(scope).await?;
         let companies = self.visible_companies(scope).await?;
         let mut page = {
@@ -776,6 +778,15 @@ impl Index {
             ..bilibi_ui::Page::default()
         })?
         .to_string();
+        let query = self.query();
+        Ok(LiveBody {
+            html,
+            query,
+            rows,
+            ..LiveBody::default()
+        })
+    }
+    fn query(&self) -> HashMap<String, String> {
         let mut query = self.list.to_params();
         if !self.role_ids.is_empty() {
             query.insert(
@@ -791,19 +802,14 @@ impl Index {
             query.insert(MEMBERSHIP.into(), membership.database_value().into());
         }
         query.extend(self.columns.params());
-        Ok(LiveBody {
-            html,
-            query,
-            rows,
-            ..LiveBody::default()
-        })
+        query
     }
     fn listed(&self, value: &Value) -> Option<&Entry> {
         let id = params::positive_id(value.get("id").and_then(Value::as_str))
             .or_else(|| value.get("id").and_then(Value::as_i64))?;
         self.listed.iter().find(|entry| entry.id == id)
     }
-    async fn handle(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+    async fn handle(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         match event(value)? {
             "filters" => {
                 let filters = params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
@@ -831,12 +837,19 @@ impl Index {
                     .next_sort(value.get("sort").and_then(Value::as_str).unwrap_or(""));
             }
             "grid" => {
+                let query = self.query();
                 if let Outcome::Sort(key) = self
                     .columns
                     .handle(
                         scope,
-                        &params::string_values_checked(value, params::FIELD_LIMIT)
-                            .map_err(Error::refused)?,
+                        &PageColumns::event_values(value)?,
+                        bilibi_grid::ViewCaller {
+                            contracts: &self.pages.contracts,
+                            credential,
+                            service: super::SERVICE,
+                            event: "grid",
+                            query,
+                        },
                     )
                     .await?
                 {
@@ -958,7 +971,10 @@ impl LiveState<Scope, Error> for Index {
                     self.read_params(query);
                     self.columns.from_params(request.scope, query).await?;
                 }
-                LiveInput::Event(value) => self.handle(request.scope, value).await?,
+                LiveInput::Event(value) => {
+                    self.handle(request.scope, request.credential, value)
+                        .await?
+                }
             }
             self.view(request.scope).await
         })

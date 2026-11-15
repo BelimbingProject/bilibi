@@ -23,7 +23,7 @@ pub const SERVICE: &str = "core/person.pages";
 // Every write these pages make is a Person contract (ADR 01).
 inventory::submit! { bilibi_module_registry::Contribution::new(PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/person", source: file!(), line: line!() }, &PageWrites {
     service: SERVICE,
-    contracts: &[("create", "core.person.create"), ("save_field", "core.person.update"), ("save_custom_field", "core.person.update"), ("retire", "core.person.retire"),
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("create", "core.person.create"), ("save_field", "core.person.update"), ("save_custom_field", "core.person.update"), ("retire", "core.person.retire"),
         ("reveal", "base.privacy.field.reveal"), ("export", "base.bulk_data.export.start"), ("export_selected", "base.bulk_data.export.start"), ("bulk_update", "base.bulk_data.update.start")],
     pending: Pending::None,
 }) }
@@ -190,21 +190,6 @@ fn id(values: &HashMap<String, String>) -> Result<PersonId> {
 }
 fn render(template: impl Template) -> Result<Html> {
     Html::render(&template).map_err(|_| Error::Internal)
-}
-fn values(event: &Value) -> HashMap<String, String> {
-    event
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            let value = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                _ => return None,
-            };
-            Some((key.clone(), value))
-        })
-        .collect()
 }
 fn event(event: &Value) -> Result<&str> {
     event

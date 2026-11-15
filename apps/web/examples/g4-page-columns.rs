@@ -98,10 +98,12 @@ struct Item {
 struct Pages {
     db: Db,
     views: Arc<PageViews>,
+    contracts: Arc<bilibi_base::agent_api::page::PageContracts>,
 }
 
 struct State {
     db: Db,
+    contracts: Arc<bilibi_base::agent_api::page::PageContracts>,
     list: ListState,
     columns: PageColumns,
     mode: Mode,
@@ -131,6 +133,7 @@ impl State {
     async fn new(pages: &Pages, query: &HashMap<String, String>) -> Result<Self> {
         Ok(Self {
             db: pages.db.clone(),
+            contracts: pages.contracts.clone(),
             list: parse(query)?,
             columns: PageColumns::mount(pages.views.clone(), ROOT, builtins())
                 .map_err(|_| Error::Internal)?,
@@ -369,24 +372,6 @@ impl State {
     }
 }
 
-/// The event payload's values as strings, the shape every flex op is read in.
-fn values(event: &Value) -> HashMap<String, String> {
-    event
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            let text = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                Value::Bool(flag) => flag.to_string(),
-                _ => return None,
-            };
-            Some((key.clone(), text))
-        })
-        .collect()
-}
-
 impl Page<Scope, Error> for Pages {
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {
@@ -425,9 +410,24 @@ impl LiveState<Scope, Error> for State {
                     self.columns.from_params(scope, values).await?;
                 }
                 LiveInput::Event(event) => {
+                    let query = self.query();
                     let get = |key: &str| event.get(key).and_then(Value::as_str);
                     match get("type") {
-                        Some("grid") => match self.columns.handle(scope, &values(event)).await? {
+                        Some("grid") => match self
+                            .columns
+                            .handle(
+                                scope,
+                                &PageColumns::event_values(event)?,
+                                grid::ViewCaller {
+                                    contracts: &self.contracts,
+                                    credential: request.credential,
+                                    service: "extensions/g4_page_columns.pages",
+                                    event: "grid",
+                                    query,
+                                },
+                            )
+                            .await?
+                        {
                             Outcome::Sort(key) => {
                                 if !self.list.next_sort(&key) {
                                     return Err(Error::Invalid);
@@ -456,6 +456,7 @@ impl LiveState<Scope, Error> for State {
                     }
                 }
             }
+            self.columns.refresh_views(scope).await?;
             if reload {
                 self.load(scope).await?;
             }
@@ -471,11 +472,12 @@ impl LiveState<Scope, Error> for State {
 
 inventory::submit! {
     Module {id: "extensions/g4_page_columns", layer: Layer::Extensions,
-        dependencies: &["base/ui", "base/grid", "base/database"], migrations: &[], services: &[Service {
+        dependencies: &["base/ui", "base/grid", "base/database", "base/agent_api"], migrations: &[], services: &[Service {
             id: "extensions/g4_page_columns.pages",
             factory: |services| Ok(Arc::new(PageService::<Scope, Error>(Arc::new(Pages {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
                 views: services.get::<PageViews>(PAGE_VIEWS)?,
+                contracts: services.get(bilibi_base::agent_api::page::SERVICE)?,
             })))),
         }],
     }
@@ -512,4 +514,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     Ok(())
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "extensions/g4_page_columns.pages", Provenance {module:"extensions/g4_page_columns", source:file!(), line:line!()}, &bilibi_module_registry::contributions::PageWrites {
+        service: "extensions/g4_page_columns.pages",
+        contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete")],
+        pending: bilibi_module_registry::contributions::Pending::Events { events: &["restrict"], reason: "Walkthrough field restrictions use the Authz facade." },
+    })
 }
