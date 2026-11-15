@@ -74,7 +74,32 @@
         const original = [...cells]
         cells.sort((a, b) => (this.phone.matches ? Number(a.dataset.phoneRank) - Number(b.dataset.phoneRank) : 0) || Number(a.dataset.columnIndex) - Number(b.dataset.columnIndex))
         if (cells.every((cell, index) => cell === original[index])) continue
+        const active = document.activeElement
+        const focused = cells.some(cell => cell.contains(active))
+        const scroll = []
+        const start = focused ? active.selectionStart : null
+        const finish = focused ? active.selectionEnd : null
+        const direction = focused ? active.selectionDirection : null
+        const selection = focused && active.isContentEditable ? window.getSelection() : null
+        const range = selection?.rangeCount ? {
+          anchor: selection.anchorNode, anchorOffset: selection.anchorOffset,
+          focus: selection.focusNode, focusOffset: selection.focusOffset,
+        } : null
+        if (focused) {
+          for (let el = active; el; el = el.parentElement) {
+            scroll.push({el, top: el.scrollTop, left: el.scrollLeft})
+          }
+        }
         for (const cell of cells) row.insertBefore(cell, end)
+        if (focused && active.isConnected) {
+          active.focus({preventScroll: true})
+          if (typeof start === 'number') active.setSelectionRange(start, finish, direction)
+          if (range) selection.setBaseAndExtent(range.anchor, range.anchorOffset, range.focus, range.focusOffset)
+          for (const {el, top, left} of scroll) {
+            if (el.scrollTop !== top) el.scrollTop = top
+            if (el.scrollLeft !== left) el.scrollLeft = left
+          }
+        }
       }
     },
 
