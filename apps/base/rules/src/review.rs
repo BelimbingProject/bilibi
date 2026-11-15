@@ -6,7 +6,7 @@
 use crate::catalog::OfferedTrigger;
 use crate::definition::{self, Definition, Example, Problems};
 use crate::store::Rules;
-use crate::{ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, APPROVE, MANAGE};
+use crate::{ACTIVE_PER_TRIGGER, APPROVE, MANAGE};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_grid::{Catalog, FieldType};
 use bilibi_tenancy::Scope;
@@ -189,13 +189,16 @@ impl Rules {
             &mut review,
             &mut problems,
         )?;
-        let most = self.limit(client, scope, ACTIONS_PER_RUN).await?;
-        if definition.actions.len() as i64 > most {
-            problems.push((
-                "actions".into(),
-                format!("at most {most} actions per run are allowed"),
-            ));
-        }
+        problems.extend(
+            self.check_limits(
+                client,
+                scope,
+                definition,
+                draft.examples.len(),
+                trigger.definition.version,
+            )
+            .await?,
+        );
         review.problems = problems;
         Ok(review)
     }
@@ -472,13 +475,16 @@ impl Rules {
             &mut review,
             &mut problems,
         )?;
-        let most = self.limit(client, scope, ACTIONS_PER_RUN).await?;
-        if definition.actions.len() as i64 > most {
-            problems.push((
-                "actions".into(),
-                format!("at most {most} actions per run are allowed"),
-            ));
-        }
+        problems.extend(
+            self.check_limits(
+                client,
+                scope,
+                &definition,
+                draft.examples.len(),
+                offered.definition.version,
+            )
+            .await?,
+        );
         // The approver's own authority: approving never delegates more.
         let grid = bilibi_grid::installed()?;
         let mut needed: std::collections::BTreeSet<&str> = grid

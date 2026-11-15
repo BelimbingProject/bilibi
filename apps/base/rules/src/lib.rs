@@ -67,6 +67,14 @@ pub const RUNS_PER_MINUTE: &str = "rules.runs_per_minute";
 /// Most rules switched on for one trigger in a tenant.
 pub const ACTIVE_PER_TRIGGER: &str = "rules.active_per_trigger";
 
+pub(crate) const CONDITIONS: &str = "rules.conditions";
+pub(crate) const RULE_ACTIONS: &str = "rules.actions";
+pub(crate) const EXAMPLES: &str = "rules.examples";
+pub(crate) const VALUES_PER_LIST: &str = "rules.values_per_list";
+pub(crate) const FACTS_READ: &str = "rules.facts_read";
+pub(crate) const MAX_ATTEMPTS: &str = "rules.max_attempts";
+const ATTEMPT_CEILING: i32 = 25;
+
 pub(crate) const WORKER: &str = "base/rules-run";
 pub(crate) const SUBSCRIBER: &str = "base/rules.triggers";
 pub(crate) const PAGES: &str = "base/rules.pages";
@@ -132,7 +140,20 @@ inventory::submit! { Contribution::new(DEFINITIONS, RUNS_PER_MINUTE, provenance!
 inventory::submit! { Contribution::new(DEFINITIONS, ACTIVE_PER_TRIGGER, provenance!(), &limit(
 "Rules per trigger", "The most rules that may be switched on for one trigger.", || json!(20), 100.0)) }
 
-inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: 25, validate: run::arguments }) }
+inventory::submit! { Contribution::new(DEFINITIONS, CONDITIONS, provenance!(), &limit(
+"Conditions per rule", "The most conditions one rule may contain.", || json!(definition::MAX_CONDITIONS), definition::MAX_CONDITIONS as f64)) }
+inventory::submit! { Contribution::new(DEFINITIONS, RULE_ACTIONS, provenance!(), &limit(
+"Actions per rule", "The most actions one rule may contain. Actions per run also applies.", || json!(definition::MAX_ACTIONS), definition::MAX_ACTIONS as f64)) }
+inventory::submit! { Contribution::new(DEFINITIONS, EXAMPLES, provenance!(), &limit(
+"Examples per rule", "The most examples one rule version may contain.", || json!(definition::MAX_EXAMPLES), definition::MAX_EXAMPLES as f64)) }
+inventory::submit! { Contribution::new(DEFINITIONS, VALUES_PER_LIST, provenance!(), &limit(
+"Values per condition list", "The most values in one condition's list of choices.", || json!(definition::MAX_CHOICES), definition::MAX_CHOICES as f64)) }
+inventory::submit! { Contribution::new(DEFINITIONS, FACTS_READ, provenance!(), &limit(
+"Facts read per rule", "The most distinct field paths read for one rule, including the record version.", || json!(definition::MAX_FACTS), definition::MAX_FACTS as f64)) }
+inventory::submit! { Contribution::new(DEFINITIONS, MAX_ATTEMPTS, provenance!(), &limit(
+"Attempts per rules job", "The most attempts allowed for a rules job, including its first attempt. Waiting runs are refused when this budget is exhausted.", || json!(ATTEMPT_CEILING), ATTEMPT_CEILING as f64)) }
+
+inventory::submit! { Contribution::new(WORKERS, WORKER, provenance!(), &Worker { max_attempts: ATTEMPT_CEILING, validate: run::arguments }) }
 inventory::submit! { Contribution::new(HANDLERS, WORKER, provenance!(), &HandlerBinding { service: RUNNER, capability: RUN }) }
 inventory::submit! { Contribution::new(ENDINGS, WORKER, provenance!(), &EndingBinding { service: SETTLED, principal: PRINCIPAL, capability: SETTLE }) }
 inventory::submit! { Contribution::new(bilibi_events::SUBSCRIBERS, SUBSCRIBER, provenance!(), &bilibi_events::Subscriber {

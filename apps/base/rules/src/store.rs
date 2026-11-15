@@ -3,7 +3,10 @@
 //! here. Writing a rule is `review.rs`.
 use crate::catalog::{OfferedAction, OfferedTrigger, Offers};
 use crate::definition;
-use crate::{ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, CHAIN_DEPTH, VIEW};
+use crate::{
+    ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, CHAIN_DEPTH, CONDITIONS, EXAMPLES, FACTS_READ,
+    MAX_ATTEMPTS, RULE_ACTIONS, VALUES_PER_LIST, VIEW,
+};
 use bilibi_agent_api::job::JobContracts;
 use bilibi_authz::{SystemAuthentication, SystemScope};
 use bilibi_database::{Db, Error, Result};
@@ -174,6 +177,47 @@ impl Rules {
             .value
             .as_i64()
             .ok_or(Error::Invalid)
+    }
+
+    pub(crate) async fn check_limits(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        definition: &definition::Definition,
+        examples: usize,
+        version_field: &str,
+    ) -> Result<definition::Problems> {
+        let mut problems = Vec::new();
+        for (field, count, key) in [
+            ("conditions", definition.conditions.len(), CONDITIONS),
+            ("actions", definition.actions.len(), RULE_ACTIONS),
+            ("actions", definition.actions.len(), ACTIONS_PER_RUN),
+            ("examples", examples, EXAMPLES),
+            (
+                "conditions",
+                definition.fact_fields(version_field).len(),
+                FACTS_READ,
+            ),
+        ] {
+            let most = self.limit(client, scope, key).await?;
+            if count as i64 > most {
+                problems.push((field.into(), format!("at most {most} are allowed by {key}")));
+            }
+        }
+        let most = self.limit(client, scope, VALUES_PER_LIST).await?;
+        for (i, condition) in definition.conditions.iter().enumerate() {
+            if condition
+                .value
+                .as_array()
+                .is_some_and(|values| values.len() as i64 > most)
+            {
+                problems.push((
+                    format!("conditions.{i}.value"),
+                    format!("at most {most} values per list are allowed"),
+                ));
+            }
+        }
+        Ok(problems)
     }
 
     /// The `rules` principal sealed in the scope's tenant, as runs see it.
@@ -586,8 +630,12 @@ impl Rules {
                 "actions_per_run": self.limit(client, scope, ACTIONS_PER_RUN).await?,
                 "chain_depth": self.limit(client, scope, CHAIN_DEPTH).await?,
                 "active_per_trigger": self.limit(client, scope, ACTIVE_PER_TRIGGER).await?,
-                "conditions": definition::MAX_CONDITIONS,
-                "examples": definition::MAX_EXAMPLES,
+                "conditions": self.limit(client, scope, CONDITIONS).await?,
+                "actions": self.limit(client, scope, RULE_ACTIONS).await?,
+                "examples": self.limit(client, scope, EXAMPLES).await?,
+                "values_per_list": self.limit(client, scope, VALUES_PER_LIST).await?,
+                "facts_read": self.limit(client, scope, FACTS_READ).await?,
+                "max_attempts": self.limit(client, scope, MAX_ATTEMPTS).await?,
             },
         }))
     }

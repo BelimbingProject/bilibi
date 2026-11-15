@@ -13,6 +13,7 @@ pub(crate) const MAX_CONDITIONS: usize = 20;
 pub(crate) const MAX_ACTIONS: usize = 10;
 pub(crate) const MAX_EXAMPLES: usize = 10;
 pub(crate) const MAX_CHOICES: usize = 50;
+pub(crate) const MAX_FACTS: usize = MAX_CONDITIONS + 1;
 const MAX_TEXT: usize = 500;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,6 +293,14 @@ impl Definition {
             Match::Any => outcomes.is_empty() || outcomes.iter().any(|o| *o),
         };
         (matched, outcomes)
+    }
+
+    pub(crate) fn fact_fields(&self, version: &str) -> Vec<String> {
+        let mut fields = self.fields();
+        if !fields.iter().any(|field| field == version) {
+            fields.push(version.to_owned());
+        }
+        fields
     }
 
     /// The fields the conditions read, each once, in order.

@@ -16,7 +16,7 @@
 //!    retry after a crash finds the receipt and does nothing twice.
 use crate::definition::Definition;
 use crate::store::Rules;
-use crate::{ACTIONS_PER_RUN, CHAIN_DEPTH, RUNS_PER_MINUTE};
+use crate::{CHAIN_DEPTH, MAX_ATTEMPTS, RUNS_PER_MINUTE};
 use bilibi_authz::SystemScope;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_events::{Event, Handoff, On, Subscribe, SubscriberFuture};
@@ -133,9 +133,28 @@ impl Handler for Worker {
             let Some(event) = args.get("event_id").and_then(Value::as_i64) else {
                 return Outcome::Cancel("invalid_event_reference");
             };
+            let maximum = async {
+                let scope = execution.scope().ok_or(Error::Forbidden)?;
+                let client = self.rules.db.get().await?;
+                self.rules.limit(&**client, scope, MAX_ATTEMPTS).await
+            }
+            .await;
+            let maximum = match maximum {
+                Ok(maximum) => maximum,
+                Err(Error::Unauthorized | Error::Forbidden) => {
+                    return Outcome::Cancel("actor_refused")
+                }
+                Err(_) => return Outcome::Retry("rules_unavailable"),
+            };
+            if i64::from(execution.attempt) > maximum {
+                return Outcome::Cancel("attempt_limit");
+            }
             match self.event(execution, event).await {
                 Ok(()) => Outcome::Completed,
                 Err(Error::Unauthorized | Error::Forbidden) => Outcome::Cancel("actor_refused"),
+                Err(_) if i64::from(execution.attempt) >= maximum => {
+                    Outcome::Cancel("attempt_limit")
+                }
                 Err(_) => Outcome::Retry("rules_unavailable"),
             }
         })
@@ -165,10 +184,9 @@ impl Worker {
         let tenant = execution.tenant();
         let rules = &self.rules;
         let client = rules.db.get().await?;
-        let (depth, per_minute, actions) = (
+        let (depth, per_minute) = (
             rules.limit(&**client, &scope, CHAIN_DEPTH).await?,
             rules.limit(&**client, &scope, RUNS_PER_MINUTE).await?,
-            rules.limit(&**client, &scope, ACTIONS_PER_RUN).await?,
         );
         let runs: Vec<Run> = client.query(
             "SELECT id,rule_id,version_id,event_id,subject,depth,state FROM base_rule_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
@@ -218,24 +236,17 @@ impl Worker {
             }
             tx.commit().await?;
             drop(client);
-            self.run(execution, &scope, run, depth, actions).await?;
+            self.run(execution, &scope, run, depth).await?;
         }
         Ok(())
     }
 
-    async fn run(
-        &self,
-        execution: &Execution,
-        scope: &Scope,
-        run: Run,
-        depth: i64,
-        actions: i64,
-    ) -> Result<()> {
+    async fn run(&self, execution: &Execution, scope: &Scope, run: Run, depth: i64) -> Result<()> {
         let rules = &self.rules;
         let tenant = scope.tenant();
         let mut client = rules.db.get().await?;
         let row = client.query_opt(
-            "SELECT r.trigger,r.active_version_id,r.disabled_at IS NOT NULL,v.definition,v.catalog_digest,r.needs_review FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2",
+            "SELECT r.trigger,r.active_version_id,r.disabled_at IS NOT NULL,v.definition,v.catalog_digest,r.needs_review,v.examples FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2",
             &[&tenant, &run.rule, &run.version],
         ).await?.ok_or(Error::NotFound)?;
         let (trigger, active, off): (String, Option<i64>, bool) =
@@ -275,8 +286,6 @@ impl Worker {
             Some(Stop::Refused("rule_off"))
         } else if active != Some(run.version) {
             Some(Stop::Refused("stale_version"))
-        } else if definition.actions.len() as i64 > actions {
-            Some(Stop::Refused("action_limit"))
         } else {
             None
         };
@@ -284,6 +293,25 @@ impl Worker {
             return self.finish(execution, &mut client, &run, stop, None).await;
         }
         let offered = rules.trigger(&trigger).ok_or(Error::Invalid)?;
+        let limits = rules
+            .check_limits(
+                &**client,
+                scope,
+                &definition,
+                row.get::<_, Value>(6).as_array().map_or(0, Vec::len),
+                offered.definition.version,
+            )
+            .await?;
+        if !limits.is_empty() {
+            let code = if limits.iter().any(|(field, _)| field == "actions") {
+                "action_limit"
+            } else {
+                "rule_limit"
+            };
+            return self
+                .finish(execution, &mut client, &run, Stop::Refused(code), None)
+                .await;
+        }
         // Facts and the decision are kept once taken, so a retry after a
         // crash acts on what was decided, never on a second reading.
         let (facts, outcomes) = if run.state == "matched" {
@@ -298,8 +326,7 @@ impl Worker {
                 saved.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
             )
         } else {
-            let mut fields = definition.fields();
-            fields.push(offered.definition.version.into());
+            let fields = definition.fact_fields(offered.definition.version);
             let read = rules
                 .read_facts(
                     &**client,
@@ -484,7 +511,7 @@ impl Worker {
         };
         input[action.definition.version] = json!(expected);
         let scope = rules.principal(tx.sql(), tenant).await?;
-        let version = tx.sql().query_one("SELECT r.trigger,v.definition,v.catalog_digest FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2", &[&tenant, &run.rule, &run.version]).await?;
+        let version = tx.sql().query_one("SELECT r.trigger,v.definition,v.catalog_digest,v.examples FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2", &[&tenant, &run.rule, &run.version]).await?;
         let trigger: String = version.get(0);
         let definition = Definition::parse(&version.get::<_, Value>(1), &mut Vec::new())
             .ok_or(Error::Invalid)?;
@@ -493,8 +520,25 @@ impl Worker {
             return Ok(Acted::Stopped("catalog_changed"));
         }
         let trigger = rules.trigger(&trigger).ok_or(Error::Invalid)?;
-        let mut fields = definition.fields();
-        fields.push(trigger.definition.version.into());
+        let limits = rules
+            .check_limits(
+                tx.sql(),
+                &scope,
+                &definition,
+                version.get::<_, Value>(3).as_array().map_or(0, Vec::len),
+                trigger.definition.version,
+            )
+            .await?;
+        if !limits.is_empty() {
+            let code = if limits.iter().any(|(field, _)| field == "actions") {
+                "action_limit"
+            } else {
+                "rule_limit"
+            };
+            tx.rollback().await?;
+            return Ok(Acted::Stopped(code));
+        }
+        let fields = definition.fact_fields(trigger.definition.version);
         if let Err(code) = rules
             .read_facts(
                 tx.sql(),

@@ -52,7 +52,9 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | `stale_version`, `rule_off` | The rule changed before the run acted |
 | `read_refused`, `restricted_field` | The principal may not read the record or a condition's field |
 | `subject_unavailable` | The record is gone or out of reach |
-| `action_limit` | The run is over the tenant's action limit |
+| `action_limit` | The rule is over the configured action count or actions-per-run limit |
+| `rule_limit` | The rule is over a configured size or fact limit |
+| `attempt_limit` | The job exhausted its configured attempt budget; waiting runs are refused |
 | `actor_refused` | Queue refused the principal (a suspended tenant, a withdrawn grant); told through Queue's `EndingBinding` |
 | `catalog_changed` | Installed fields, trigger bindings or action schemas changed, or an owner was unmounted; draft and approve a new version |
 | `record_changed` | Skipped: the record changed after the rule matched |
@@ -79,8 +81,14 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | `rules.chain_depth` | 3 | 1–10 | Rules in a row one first change may start (the causal-chain budget) |
 | `rules.runs_per_minute` | 60 | 1–10,000 | Runs one tenant starts in a minute; more wait for a later minute, so a burst never holds the shared queue |
 | `rules.active_per_trigger` | 20 | 1–100 | Rules switched on for one trigger |
+| `rules.conditions` | 20 | 1–20 | Conditions in a rule |
+| `rules.actions` | 10 | 1–10 | Actions in a rule; `rules.actions_per_run` also applies |
+| `rules.examples` | 10 | 1–10 | Examples stored on a rule version |
+| `rules.values_per_list` | 50 | 1–50 | Values in one condition list |
+| `rules.facts_read` | 21 | 1–21 | Distinct condition field paths and the record version |
+| `rules.max_attempts` | 25 | 1–25 | Attempts per rules job, including the first |
 
-Fixed by the record's shape: 20 conditions, 10 actions, 10 examples, 50 values in a list.
+The definition's hard ceilings stay fixed; settings can lower them. The facts budget counts distinct condition paths plus the bound record version (once). Draft review, approval, switch-on and execution apply the current size and fact limits, including before each outstanding action. Queue keeps a hard ceiling of 25 attempts; the rules worker allows the configured number of attempts, including the first, and cancels with `attempt_limit` when exhausted. Queue's existing ending hook refuses any waiting runs.
 
 The chain follows causes, not traces: the worker names its run as the cause of the action's transaction (`Events::cause`), Events stores it on every event recorded there (`Event::cause`), and the next run's depth is its cause's plus one. Independent events of one import keep depth 1.
 

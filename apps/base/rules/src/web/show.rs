@@ -49,6 +49,8 @@ fn reason(code: &str) -> &'static str {
         "chain_budget" => "Stopped: another rule started it, and the chain reached the limit of rules in a row.",
         "rule_off" => "Not run: the rule was switched off.",
         "stale_version" => "Not run: a newer version was approved after this event, so this one no longer runs.",
+        "rule_limit" => "Not run: the rule exceeds a configured size or fact limit in System Settings.",
+        "attempt_limit" => "Not run: the rules job reached its configured attempt limit.",
         "action_limit" => "Not run: it has more actions than allowed per run.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
         "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",

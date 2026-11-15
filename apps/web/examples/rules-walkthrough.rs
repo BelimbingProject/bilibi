@@ -500,6 +500,31 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         proof.approve(&one, r2, v2).await.is_err(),
         "tenant 1 cannot approve tenant 2's rule",
     );
+    let limited_draft = urgent_rule("Condition budget proof", "priority-desk", "1000");
+    let (limited_rule, limited_version) = proof.draft(&one, limited_draft.clone()).await?;
+    proof.setting(&one, "rules.conditions", json!(1)).await?;
+    let client = proof.db.get().await?;
+    let limits = proof.rules.vocabulary(&**client, &one).await?;
+    check(
+        limits["limits"]["conditions"] == json!(1),
+        "the vocabulary reports the lowered condition budget",
+    );
+    drop(client);
+    check(
+        proof
+            .write(&one, "base.rules.draft", limited_draft)
+            .await
+            .is_err_and(|why| why.contains("rules.conditions")),
+        "a lowered condition budget refuses a larger draft",
+    );
+    check(
+        proof
+            .approve(&one, limited_rule, limited_version)
+            .await
+            .is_err_and(|why| why.contains("rules.conditions")),
+        "approval enforces a condition budget lowered after drafting",
+    );
+    proof.setting(&one, "rules.conditions", json!(20)).await?;
     let a = proof
         .open(&one, 1, "Server down", "urgent", "1500.00")
         .await?;
@@ -1329,5 +1354,51 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         .switch(&one, broad_rule, false)
         .await
         .map_err(|_| Error::Internal)?;
+    proof.setting(&one, "rules.facts_read", json!(1)).await?;
+    let fact_limited = proof
+        .open(&one, 1, "Lowered fact budget", "urgent", "6000.00")
+        .await?;
+    proof.settled().await?;
+    let fact_receipts = proof.receipts(fact_limited).await?;
+    check(
+        !fact_receipts.is_empty()
+            && fact_receipts
+                .iter()
+                .all(|run| run.1 == "refused" && run.2.as_deref() == Some("rule_limit")),
+        "a lowered fact budget refuses already-approved rules at runtime",
+    );
+    check(
+        proof.case(fact_limited).await? == (None, 0, 0),
+        "the fact budget stops effects before reading condition facts",
+    );
+    proof.setting(&one, "rules.facts_read", json!(21)).await?;
+    proof
+        .setting(&one, "rules.runs_per_minute", json!(1))
+        .await?;
+    let attempt_limited = proof
+        .open(&one, 1, "Exhausted attempt budget", "urgent", "6000.00")
+        .await?;
+    proof.settled().await?;
+    proof.stop().await;
+    proof.setting(&one, "rules.max_attempts", json!(1)).await?;
+    proof
+        .setting(&one, "rules.runs_per_minute", json!(10000))
+        .await?;
+    let client = proof.db.get().await?;
+    let resumed = client.execute("UPDATE base_queue_jobs SET state='available',available_at=now(),attempt=1 WHERE tenant_id=$1 AND worker_id='base/rules-run' AND state='scheduled' AND args->>'event_id'=(SELECT event_id::text FROM base_rule_runs WHERE tenant_id=$1 AND subject=$2 ORDER BY id LIMIT 1)", &[&one.tenant(), &attempt_limited.to_string()]).await?;
+    check(
+        resumed == 1,
+        "a queued job resumes after spending its allowed attempt",
+    );
+    drop(client);
+    proof.start()?;
+    proof.settled().await?;
+    let attempt_receipts = proof.receipts(attempt_limited).await?;
+    check(!attempt_receipts.is_empty() && attempt_receipts.iter().all(|run| run.1 == "refused" && run.2.as_deref() == Some("attempt_limit")), "the existing ending hook refuses waiting runs when the configured attempt budget is exhausted");
+    check(
+        proof.case(attempt_limited).await? == (None, 0, 0),
+        "an exhausted attempt budget produces no effects",
+    );
+    proof.setting(&one, "rules.max_attempts", json!(25)).await?;
     Ok(())
 }
