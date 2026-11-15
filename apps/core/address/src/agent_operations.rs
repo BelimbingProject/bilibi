@@ -78,6 +78,13 @@ fn timestamp(time: std::time::SystemTime) -> Value {
         .expect("database timestamp fits ISO time")
         .to_string())
 }
+/// An update whose input leaves the phone out, or sends null, keeps the
+/// stored phone; only `""` clears it. A plan built while the phone was hidden
+/// leaves it out, and must not clear it if the restriction is lifted before
+/// the plan commits (#603's gap, for addresses).
+fn keeps_phone(input: &Value) -> bool {
+    input["address"].get("phone").is_none_or(Value::is_null)
+}
 fn record(address: &Address) -> Value {
     let mut value = json!(address);
     value["created_at"] = timestamp(address.created_at);
@@ -245,6 +252,9 @@ impl AddressService {
                 .await
                 .map_err(invalid)?;
                 review["before"] = record(&old);
+                if matches!(action, Action::Update) && keeps_phone(input) {
+                    review["address"]["phone"] = review["before"]["address"]["phone"].clone();
+                }
             }
             Action::Attach(kind)
             | Action::CreateAttached(kind)
@@ -348,6 +358,7 @@ impl AddressService {
                             address_id(input)?,
                             number(input, "version")?,
                             &valid,
+                            keeps_phone(input),
                         )
                         .await
                         .map_err(invalid)?,
