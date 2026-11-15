@@ -13,6 +13,26 @@ use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{Map, Value};
 use tokio_postgres::Transaction;
 
+fn valid_phone(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let (number, extension) = match lower
+        .find("ext")
+        .map(|at| (at, 3))
+        .or_else(|| lower.find('x').map(|at| (at, 1)))
+    {
+        Some((at, marker)) => (&lower[..at], Some(&lower[at + marker..])),
+        None => (lower.as_str(), None),
+    };
+    number.chars().any(|c| c.is_ascii_digit())
+        && number
+            .chars()
+            .all(|c| c.is_ascii_digit() || " +()-./".contains(c))
+        && extension.is_none_or(|extension| {
+            let digits = extension.trim_start_matches(['.', ' ']);
+            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+        })
+}
+
 /// A decimal number as text: optional minus, up to 18 integer digits and up to
 /// 6 fraction digits. No exponent, no plus sign, no separators.
 pub fn valid_number(value: &str) -> bool {
@@ -183,13 +203,10 @@ impl CustomFields {
                 }
             }
             Kind::Phone => {
-                if text.chars().count() <= 64
-                    && text.chars().any(|c| c.is_ascii_digit())
-                    && !text.chars().any(char::is_control)
-                {
+                if text.chars().count() <= 64 && valid_phone(text) {
                     Ok(())
                 } else {
-                    Err("must be a phone number of at most 64 characters".into())
+                    Err("must be a phone number of at most 64 characters: digits, spaces, + ( ) - . / and an optional x or ext extension".into())
                 }
             }
             Kind::Link => {

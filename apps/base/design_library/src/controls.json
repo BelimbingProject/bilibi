@@ -186,6 +186,13 @@
     "kind": "input",
     "form": "sample",
     "key": "checkbox_field",
+    "type": "checkbox",
+    "label": "Enable synchronization"
+  },
+  "sample_switch_field": {
+    "kind": "input",
+    "form": "sample",
+    "key": "switch_field",
     "type": "switch",
     "label": "Synchronization"
   },

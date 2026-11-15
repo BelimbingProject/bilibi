@@ -189,7 +189,7 @@ pub(crate) fn patch(input: &Value) -> Result<Custom> {
 
 /// The agent input schema for `custom`.
 pub(crate) fn schema() -> Value {
-    json!({"type":"array","description":"Custom field values as {key, value} pairs; value is text (a number as a decimal string, a date as YYYY-MM-DD, a choice as its code) or null to clear. Find keys with base.custom_fields.list (record type person).","items":{"type":"object","required":["key"],"properties":{"key":{"type":"string","maxLength":40},"value":{"type":"string","maxLength":10000,"nullable":true}}}})
+    json!({"type":"array","description":"Custom field values as {key, value} pairs; value is text (a number as a decimal string, a date as YYYY-MM-DD, a choice as its code, yes/no as \"true\" or \"false\") or null to clear. Find keys with base.custom_fields.list (record type person).","items":{"type":"object","required":["key"],"properties":{"key":{"type":"string","maxLength":40},"value":{"type":"string","maxLength":10000,"nullable":true}}}})
 }
 
 // People take tenant-defined custom fields: the values live in
