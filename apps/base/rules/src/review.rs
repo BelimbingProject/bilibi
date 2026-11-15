@@ -1,0 +1,706 @@
+//! Writing rules: a draft's checks and its version, the approval review and
+//! the approval, switching a rule on and off, and a version in words. Every
+//! write runs in the caller's `MutationTransaction` with its sealed scope and
+//! returns audited changes; every check is also made in the commit, on the
+//! commit's own transaction.
+use crate::catalog::OfferedTrigger;
+use crate::definition::{self, Definition, Example, Problems};
+use crate::store::Rules;
+use crate::{ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, APPROVE, CHAIN_DEPTH, MANAGE};
+use bilibi_database::{Change, Error, MutationTransaction, Result};
+use bilibi_grid::{Catalog, FieldType};
+use bilibi_tenancy::Scope;
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use tokio_postgres::GenericClient;
+
+/// What a draft or an approval would do, and why it would be refused.
+#[derive(Clone, Debug, Default)]
+pub struct Review {
+    /// Field path → problems; empty when the write may go ahead.
+    pub problems: Problems,
+    pub conditions: Vec<String>,
+    pub actions: Vec<String>,
+    /// Each example: what it expects and what the conditions answer.
+    pub examples: Vec<(bool, bool)>,
+    pub warnings: Vec<String>,
+    pub trigger_title: String,
+}
+impl Review {
+    pub fn ok(&self) -> bool {
+        self.problems.is_empty()
+    }
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "trigger": self.trigger_title,
+            "conditions": self.conditions,
+            "actions": self.actions,
+            "examples": self.examples.iter().map(|(expect, got)| json!({
+                "expect": if *expect {"match"} else {"no_match"},
+                "result": if *got {"match"} else {"no_match"},
+                "passes": expect == got,
+            })).collect::<Vec<_>>(),
+            "warnings": self.warnings,
+            "problems": self.problems.iter().map(|(field, why)| json!({"field": field, "problem": why})).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A draft as the contract and page submit it.
+pub(crate) struct Draft {
+    pub rule_id: Option<i64>,
+    pub name: String,
+    pub trigger: String,
+    pub definition: Option<Definition>,
+    pub examples: Vec<Example>,
+    pub explanation: Option<String>,
+}
+impl Draft {
+    pub(crate) fn parse(input: &Value, problems: &mut Problems) -> Self {
+        let text = |key: &str| bilibi_agent_api::text_field(input, key);
+        let name = text("name");
+        if name.is_empty() || name.chars().count() > 120 {
+            problems.push(("name".into(), "give a name of 1 to 120 characters".into()));
+        }
+        let definition = Definition::parse(input, problems);
+        let examples = definition::parse_examples(&input["examples"], problems);
+        let explanation = bilibi_agent_api::optional_text_field(input, "explanation")
+            .map(|text| text.chars().take(2000).collect());
+        Self {
+            rule_id: input["rule_id"].as_i64(),
+            name,
+            trigger: text("trigger"),
+            definition,
+            examples,
+            explanation,
+        }
+    }
+}
+
+fn digest(definition: &Value, examples: &Value) -> String {
+    let bytes = serde_json::to_vec(&json!({"definition": definition, "examples": examples}))
+        .unwrap_or_default();
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl Rules {
+    /// The checks a draft passes: a mounted trigger, fields the drafter may
+    /// read with values of their type, installed actions on the same record
+    /// with inputs their contract accepts, and examples that come out as
+    /// expected. Writes nothing.
+    pub(crate) async fn review_draft(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        draft: &Draft,
+        mut problems: Problems,
+    ) -> Result<Review> {
+        bilibi_authz::authorize_key(client, scope, MANAGE).await?;
+        let mut review = Review::default();
+        if let Some(id) = draft.rule_id {
+            let row = client
+                .query_opt(
+                    "SELECT trigger FROM base_rules WHERE tenant_id=$1 AND id=$2",
+                    &[&scope.tenant(), &id],
+                )
+                .await?
+                .ok_or(Error::NotFound)?;
+            if row.get::<_, String>(0) != draft.trigger {
+                problems.push((
+                    "trigger".into(),
+                    "a rule keeps its trigger; draft a new rule for another one".into(),
+                ));
+            }
+        }
+        let Some(trigger) = self.trigger(&draft.trigger) else {
+            problems.push(("trigger".into(), "is not an installed trigger".into()));
+            review.problems = problems;
+            return Ok(review);
+        };
+        review.trigger_title = trigger.definition.title.to_owned();
+        let Some(definition) = &draft.definition else {
+            review.problems = problems;
+            return Ok(review);
+        };
+        let catalog = Catalog::for_scope(client, scope)
+            .await
+            .map_err(Error::from)?;
+        self.check(
+            &catalog,
+            trigger,
+            definition,
+            &draft.examples,
+            &mut review,
+            &mut problems,
+        )?;
+        let most = self.limit(client, scope, ACTIONS_PER_RUN).await?;
+        if definition.actions.len() as i64 > most {
+            problems.push((
+                "actions".into(),
+                format!("at most {most} actions per run are allowed"),
+            ));
+        }
+        review.problems = problems;
+        Ok(review)
+    }
+
+    /// Fields, values, actions and examples against `catalog` (the reader's).
+    fn check(
+        &self,
+        catalog: &Catalog,
+        trigger: &OfferedTrigger,
+        definition: &Definition,
+        examples: &[Example],
+        review: &mut Review,
+        problems: &mut Problems,
+    ) -> Result<()> {
+        let table = catalog.table(trigger.definition.table);
+        let field = |path: &str| -> Option<(FieldType, &'static [&'static str], String)> {
+            let table = table?;
+            let column = catalog.resolve(table, path).ok()?;
+            if column.agg.is_some() || column.many.is_some() {
+                return None;
+            }
+            let field = column.field?;
+            if catalog.masked(column.table, field.id) {
+                return None;
+            }
+            Some((column.ty, field.values, column.label.clone()))
+        };
+        if table.is_none() {
+            problems.push((
+                "trigger".into(),
+                format!(
+                    "you may not read {}, so you cannot write conditions on it",
+                    trigger.definition.table
+                ),
+            ));
+        }
+        definition.check_types(
+            |path| field(path).map(|(ty, values, _)| (ty, values)),
+            problems,
+        );
+        review.conditions = definition
+            .conditions
+            .iter()
+            .map(|c| {
+                definition::sentence(
+                    c,
+                    &field(&c.field).map_or_else(|| c.field.clone(), |(_, _, label)| label),
+                )
+            })
+            .collect();
+        for (i, call) in definition.actions.iter().enumerate() {
+            let at = |part: &str| format!("actions.{i}.{part}");
+            let Some(action) = self.action(&call.operation) else {
+                problems.push((
+                    at("operation"),
+                    format!("{} is not an installed action", call.operation),
+                ));
+                continue;
+            };
+            if action.definition.table != trigger.definition.table {
+                problems.push((
+                    at("operation"),
+                    format!(
+                        "acts on {}, not on the trigger's {}",
+                        action.definition.table, trigger.definition.table
+                    ),
+                ));
+            }
+            if call.input.contains_key(action.definition.subject) {
+                problems.push((
+                    at("input"),
+                    format!(
+                        "{} is the trigger's record; leave it out",
+                        action.definition.subject
+                    ),
+                ));
+            }
+            let mut input = call.input.clone();
+            input.insert(
+                action.definition.subject.into(),
+                placeholder(&action.input, action.definition.subject),
+            );
+            if let Err(bilibi_agent_api::Error::InvalidInput(fields)) =
+                self.jobs.validate(action.key, &Value::Object(input))
+            {
+                for (field, why) in fields {
+                    problems.push((format!("actions.{i}.input.{field}"), why.join("; ")));
+                }
+            }
+            let parameters: Vec<String> = call
+                .input
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", definition::shown(value)))
+                .collect();
+            review.actions.push(if parameters.is_empty() {
+                action.title.to_owned()
+            } else {
+                format!("{} ({})", action.title, parameters.join(", "))
+            });
+        }
+        let types = |path: &str| field(path).map_or(FieldType::String, |(ty, _, _)| ty);
+        let fields = definition.fields();
+        for (i, example) in examples.iter().enumerate() {
+            if let Some(unknown) = example.facts.keys().find(|key| !fields.contains(key)) {
+                problems.push((
+                    format!("examples.{i}.facts"),
+                    format!("{unknown} is not a field the conditions read"),
+                ));
+            }
+            let (matched, _) = definition.evaluate(&example.facts, &types);
+            if matched != example.expect {
+                problems.push((
+                    format!("examples.{i}"),
+                    format!(
+                        "expects {} but the conditions answer {}",
+                        if example.expect {
+                            "a match"
+                        } else {
+                            "no match"
+                        },
+                        if matched { "a match" } else { "no match" },
+                    ),
+                ));
+            }
+            review.examples.push((example.expect, matched));
+        }
+        Ok(())
+    }
+
+    /// Writes the draft as the rule's next version (a new rule when it names
+    /// none). Nothing runs until an administrator approves the version.
+    pub(crate) async fn draft(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: Draft,
+        problems: Problems,
+    ) -> Result<(i64, i32, Review)> {
+        if let Some(id) = draft.rule_id {
+            tx.sql()
+                .query_opt(
+                    "SELECT 1 FROM base_rules WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                    &[&scope.tenant(), &id],
+                )
+                .await?
+                .ok_or(Error::NotFound)?;
+        }
+        let review = self.review_draft(tx.sql(), scope, &draft, problems).await?;
+        if !review.ok() {
+            return Err(Error::Invalid);
+        }
+        let definition = draft.definition.as_ref().ok_or(Error::Invalid)?.to_json();
+        let examples = definition::examples_json(&draft.examples);
+        let digest = digest(&definition, &examples);
+        let (tenant, user) = (scope.tenant(), scope.user());
+        let via = if scope.agent().is_some() {
+            "agent"
+        } else {
+            "person"
+        };
+        let Draft {
+            rule_id,
+            name,
+            trigger,
+            explanation,
+            ..
+        } = draft;
+        let (id, number) = tx.mutate(move |sql| Box::pin(async move {
+            let mut changes = Vec::new();
+            let id = match rule_id {
+                Some(id) => {
+                    sql.execute("UPDATE base_rules SET name=$3,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &name]).await?;
+                    id
+                }
+                None => {
+                    let id: i64 = sql.query_one("INSERT INTO base_rules(tenant_id,name,trigger) VALUES($1,$2,$3) RETURNING id", &[&tenant, &name, &trigger]).await?.get(0);
+                    changes.push(Change { kind: "base/rules.rule".into(), id, old: Value::Null, new: json!({"name": name, "trigger": trigger}) });
+                    id
+                }
+            };
+            let row = sql.query_one(
+                "INSERT INTO base_rule_versions(tenant_id,rule_id,number,definition,examples,explanation,digest,drafted_via,drafted_by) SELECT $1,$2,COALESCE(max(number),0)+1,$3,$4,$5,$6,$7,$8 FROM base_rule_versions WHERE tenant_id=$1 AND rule_id=$2 RETURNING id,number",
+                &[&tenant, &id, &definition, &examples, &explanation, &digest, &via, &user],
+            ).await?;
+            let (version, number): (i64, i32) = (row.get(0), row.get(1));
+            changes.push(Change { kind: "base/rules.version".into(), id: version, old: Value::Null,
+                new: json!({"rule": id, "number": number, "definition": definition, "examples": examples, "digest": digest, "drafted_via": via}) });
+            Ok(((id, number), changes))
+        })).await?;
+        Ok((id, number, review))
+    }
+
+    /// The approval review of version `number`: the draft checks again, now
+    /// as the approver, plus what only an approval needs. The approver must
+    /// hold what the rule does (reading the trigger's record and each
+    /// action's capability); the `rules` principal must not meet a restricted
+    /// or masked field; no action may record the rule's own trigger; and the
+    /// tenant's limit on rules per trigger holds.
+    pub async fn review_approval(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        rule: i64,
+        number: i32,
+    ) -> Result<Review> {
+        bilibi_authz::authorize_key(client, scope, APPROVE).await?;
+        let tenant = scope.tenant();
+        let row = client.query_opt(
+            "SELECT r.name,r.trigger,v.definition,v.examples,v.approved_at IS NOT NULL,(SELECT max(number) FROM base_rule_versions l WHERE l.tenant_id=r.tenant_id AND l.rule_id=r.id),r.active_version_id=v.id AND r.disabled_at IS NULL FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.rule_id=r.id AND v.number=$3 WHERE r.tenant_id=$1 AND r.id=$2",
+            &[&tenant, &rule, &number],
+        ).await?.ok_or(Error::NotFound)?;
+        let mut problems = Problems::new();
+        let latest: i32 = row.get(5);
+        if latest != number {
+            problems.push((
+                "version".into(),
+                format!("version {latest} is newer; review and approve that one"),
+            ));
+        }
+        if row.get::<_, Option<bool>>(6) == Some(true) {
+            problems.push(("version".into(), "this version already runs".into()));
+        }
+        let trigger: String = row.get(1);
+        let mut draft = Draft {
+            rule_id: None,
+            name: row.get(0),
+            trigger: trigger.clone(),
+            definition: Definition::parse(&row.get::<_, Value>(2), &mut problems),
+            examples: definition::parse_examples(&row.get::<_, Value>(3), &mut problems),
+            explanation: None,
+        };
+        // Drafted under MANAGE; the approver reviews it under APPROVE, as
+        // themselves: what they cannot read they cannot approve.
+        let mut review = Review::default();
+        let Some(offered) = self.trigger(&trigger) else {
+            problems.push(("trigger".into(), "is no longer installed".into()));
+            review.problems = problems;
+            return Ok(review);
+        };
+        review.trigger_title = offered.definition.title.to_owned();
+        let Some(definition) = draft.definition.take() else {
+            review.problems = problems;
+            return Ok(review);
+        };
+        let catalog = Catalog::for_scope(client, scope)
+            .await
+            .map_err(Error::from)?;
+        self.check(
+            &catalog,
+            offered,
+            &definition,
+            &draft.examples,
+            &mut review,
+            &mut problems,
+        )?;
+        let most = self.limit(client, scope, ACTIONS_PER_RUN).await?;
+        if definition.actions.len() as i64 > most {
+            problems.push((
+                "actions".into(),
+                format!("at most {most} actions per run are allowed"),
+            ));
+        }
+        // The approver's own authority: approving never delegates more.
+        let grid = bilibi_grid::installed()?;
+        let mut needed: Vec<&str> = grid
+            .table(offered.definition.table)
+            .map(|table| vec![table.capability()])
+            .unwrap_or_default();
+        needed.extend(
+            definition
+                .actions
+                .iter()
+                .filter_map(|a| self.action(&a.operation))
+                .map(|a| a.capability),
+        );
+        for key in needed {
+            if !bilibi_authz::decide(client, scope, key).await?.allowed {
+                problems.push(("version".into(), format!("you may not do what this rule does yourself ({key}), so you cannot approve it")));
+            }
+        }
+        // The principal reads every field the conditions name; a restricted or
+        // masked one is refused at the source, never read and hidden later.
+        match self.principal(client, tenant).await {
+            Ok(principal) => {
+                let theirs = Catalog::for_scope(client, &principal)
+                    .await
+                    .map_err(Error::from)?;
+                match theirs.table(offered.definition.table) {
+                    None => review.warnings.push(format!(
+                        "Automation may not read {} yet: the rule will not act until an administrator allows it in Automation access.",
+                        grid.table(offered.definition.table).map_or(offered.definition.table, |t| t.label())
+                    )),
+                    Some(table) => {
+                        for (i, condition) in definition.conditions.iter().enumerate() {
+                            let readable = theirs.resolve(table, &condition.field).ok().filter(|column| {
+                                column.field.is_some_and(|f| !theirs.masked(column.table, f.id))
+                            });
+                            if readable.is_none() {
+                                problems.push((format!("conditions.{i}.field"), format!(
+                                    "{} is hidden from automation, and a rule never reads a hidden field",
+                                    condition.field
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+            Err(_) => review
+                .warnings
+                .push("Automation is not available here.".into()),
+        }
+        let records: Vec<&str> = definition
+            .actions
+            .iter()
+            .filter_map(|a| self.action(&a.operation))
+            .flat_map(|a| a.definition.records.iter().copied())
+            .collect();
+        if records.contains(&trigger.as_str()) {
+            problems.push((
+                "actions".into(),
+                format!(
+                    "its action causes \u{201c}{}\u{201d} again, so the rule would start itself",
+                    offered.definition.title
+                ),
+            ));
+        }
+        let active = client.query(
+            "SELECT id,name,trigger FROM base_rules WHERE tenant_id=$1 AND id<>$2 AND active_version_id IS NOT NULL AND disabled_at IS NULL AND (trigger=$3 OR trigger=ANY($4))",
+            &[&tenant, &rule, &trigger, &records],
+        ).await?;
+        let same = active
+            .iter()
+            .filter(|r| r.get::<_, String>(2) == trigger)
+            .count() as i64;
+        let most = self.limit(client, scope, ACTIVE_PER_TRIGGER).await?;
+        if same >= most {
+            problems.push((
+                "trigger".into(),
+                format!("{most} rules already run on this trigger, the most allowed"),
+            ));
+        }
+        let depth = self.limit(client, scope, CHAIN_DEPTH).await?;
+        for other in active
+            .iter()
+            .filter(|r| records.contains(&r.get::<_, &str>(2)))
+        {
+            review.warnings.push(format!(
+                "Its action can start the rule \u{201c}{}\u{201d}; a chain of rules stops after {depth} in a row.",
+                other.get::<_, String>(1)
+            ));
+        }
+        review.problems = problems;
+        Ok(review)
+    }
+
+    /// Approves version `number` and makes it the one that runs, switching
+    /// the rule on. Runs already queued for an earlier version are refused
+    /// as stale when they come to act.
+    pub async fn approve(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        rule: i64,
+        number: i32,
+    ) -> Result<Review> {
+        let tenant = scope.tenant();
+        tx.sql()
+            .query_opt(
+                "SELECT 1 FROM base_rules WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&tenant, &rule],
+            )
+            .await?
+            .ok_or(Error::NotFound)?;
+        let review = self.review_approval(tx.sql(), scope, rule, number).await?;
+        if !review.ok() {
+            return Err(Error::Invalid);
+        }
+        let user = scope.user();
+        tx.mutate(move |sql| Box::pin(async move {
+            let version: i64 = sql.query_one(
+                "UPDATE base_rule_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,now()) WHERE tenant_id=$1 AND rule_id=$2 AND number=$3 RETURNING id",
+                &[&tenant, &rule, &number, &user],
+            ).await?.get(0);
+            let old: Option<i64> = sql.query_one(
+                "SELECT active_version_id FROM base_rules WHERE tenant_id=$1 AND id=$2",
+                &[&tenant, &rule],
+            ).await?.get(0);
+            sql.execute(
+                "UPDATE base_rules SET active_version_id=$3,disabled_at=NULL,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
+                &[&tenant, &rule, &version],
+            ).await?;
+            Ok(((), vec![Change { kind: "base/rules.rule".into(), id: rule,
+                old: json!({"active_version": old}), new: json!({"active_version": version, "number": number, "approved": true}) }]))
+        })).await?;
+        Ok(review)
+    }
+
+    /// Switches a rule's approved version on or off. Off stops new runs and
+    /// refuses queued ones when they come to act; on runs the same approved
+    /// version again after its approval checks pass once more.
+    pub async fn set_enabled(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        rule: i64,
+        enabled: bool,
+    ) -> Result<Option<Review>> {
+        bilibi_authz::authorize_key(tx.sql(), scope, APPROVE).await?;
+        let tenant = scope.tenant();
+        let row = tx.sql().query_opt(
+            "SELECT r.disabled_at IS NOT NULL,v.number FROM base_rules r LEFT JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id=$2 FOR UPDATE OF r",
+            &[&tenant, &rule],
+        ).await?.ok_or(Error::NotFound)?;
+        let (off, running): (bool, Option<i32>) = (row.get(0), row.get(1));
+        let Some(running) = running else {
+            return Err(Error::Conflict);
+        };
+        if off != enabled {
+            return Ok(None);
+        }
+        let mut review = None;
+        if enabled {
+            let checked = self.review_approval(tx.sql(), scope, rule, running).await?;
+            // The version was approved already; only what changed since counts.
+            let problems: Problems = checked
+                .problems
+                .iter()
+                .filter(|(_, why)| why != "this version already runs" && !why.contains("is newer"))
+                .cloned()
+                .collect();
+            if !problems.is_empty() {
+                return Err(Error::Invalid);
+            }
+            review = Some(checked);
+        }
+        tx.mutate(move |sql| Box::pin(async move {
+            sql.execute(
+                "UPDATE base_rules SET disabled_at=CASE WHEN $3 THEN NULL ELSE now() END,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
+                &[&tenant, &rule, &enabled],
+            ).await?;
+            Ok(((), vec![Change { kind: "base/rules.rule".into(), id: rule, old: json!({"enabled": !enabled}), new: json!({"enabled": enabled}) }]))
+        })).await?;
+        Ok(review)
+    }
+}
+
+/// A stand-in for the bound subject, typed as the contract's schema wants it,
+/// so the rest of an action's input can be checked before any record exists.
+pub(crate) fn placeholder(schema: &Value, field: &str) -> Value {
+    match schema["properties"][field]["type"].as_str() {
+        Some("integer") | Some("number") => json!(1),
+        _ => json!("1"),
+    }
+}
+
+/// The subject key bound into an action's input, typed as its schema wants.
+pub(crate) fn bind(
+    schema: &Value,
+    field: &str,
+    subject: &str,
+    input: &Map<String, Value>,
+) -> Option<Value> {
+    let value = match schema["properties"][field]["type"].as_str() {
+        Some("integer") | Some("number") => json!(subject.parse::<i64>().ok()?),
+        _ => json!(subject),
+    };
+    let mut input = input.clone();
+    input.insert(field.into(), value);
+    Some(Value::Object(input))
+}
+
+/// A stored version in words, for reading: conditions with their fields'
+/// labels, actions with their titles and parameters, examples. Labels come
+/// from the installed catalogs; values from the version itself.
+pub(crate) struct Described {
+    pub matching: &'static str,
+    pub conditions: Vec<String>,
+    pub actions: Vec<String>,
+    pub examples: Vec<String>,
+}
+impl Rules {
+    pub(crate) fn describe(
+        &self,
+        trigger: &str,
+        definition: &Value,
+        examples: &Value,
+    ) -> Described {
+        let mut problems = Vec::new();
+        let parsed = Definition::parse(definition, &mut problems);
+        let table = self
+            .trigger(trigger)
+            .and_then(|t| bilibi_grid::installed().ok()?.table(t.definition.table));
+        let label = |path: &str| {
+            table
+                .and_then(|t| t.field(path))
+                .map_or_else(|| path.to_owned(), |f| f.label.to_owned())
+        };
+        let Some(parsed) = parsed else {
+            return Described {
+                matching: "all",
+                conditions: Vec::new(),
+                actions: Vec::new(),
+                examples: Vec::new(),
+            };
+        };
+        let conditions = parsed
+            .conditions
+            .iter()
+            .map(|c| definition::sentence(c, &label(&c.field)))
+            .collect();
+        let actions = parsed
+            .actions
+            .iter()
+            .map(|a| {
+                let title = self
+                    .action(&a.operation)
+                    .map_or(a.operation.as_str(), |o| o.title);
+                let parameters: Vec<String> = a
+                    .input
+                    .iter()
+                    .map(|(key, value)| format!("{key}: {}", definition::shown(value)))
+                    .collect();
+                if parameters.is_empty() {
+                    title.to_owned()
+                } else {
+                    format!("{title} ({})", parameters.join(", "))
+                }
+            })
+            .collect();
+        let examples = definition::parse_examples(examples, &mut problems)
+            .iter()
+            .map(|e| {
+                let facts: Vec<String> = e
+                    .facts
+                    .iter()
+                    .map(|(field, value)| format!("{} {}", label(field), definition::shown(value)))
+                    .collect();
+                format!(
+                    "{}: {}",
+                    if e.expect {
+                        "Matches"
+                    } else {
+                        "Does not match"
+                    },
+                    if facts.is_empty() {
+                        "any record".to_owned()
+                    } else {
+                        facts.join(", ")
+                    }
+                )
+            })
+            .collect();
+        Described {
+            matching: parsed.matching.key(),
+            conditions,
+            actions,
+            examples,
+        }
+    }
+}

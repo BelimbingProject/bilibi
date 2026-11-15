@@ -29,9 +29,9 @@ use std::{
 };
 use tokio_postgres::{types::ToSql, GenericClient, Row};
 pub use vocabulary::{
-    Audience, CapabilityDefinition, EngagementRole, OptionalCapabilities, RoleDefinition,
-    StandingGrant, SystemPrincipalDefinition, Vocabulary, VocabularyContribution, ENGAGEMENT_ROLES,
-    OPTIONAL_CAPABILITIES, STANDING_GRANTS, VOCABULARY,
+    Audience, CapabilityDefinition, EngagementRole, OfferedCapabilities, OptionalCapabilities,
+    RoleDefinition, StandingGrant, SystemPrincipalDefinition, Vocabulary, VocabularyContribution,
+    ENGAGEMENT_ROLES, OFFERED_CAPABILITIES, OPTIONAL_CAPABILITIES, STANDING_GRANTS, VOCABULARY,
 };
 
 /// Immutable deployment snapshot. Database grants/restrictions are never cached.

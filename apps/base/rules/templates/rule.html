@@ -1,0 +1,15 @@
+{#- One rule: what it is, the version awaiting approval or running, and its
+    receipts. Every part is rendered by src/web.rs through the shared models;
+    this file lays them out. -#}
+{%- import "components.html" as ui -%}
+{%- import "feedback.html" as feedback -%}
+{%- import "workspace.html" as workspace -%}
+<div data-shared-ui>
+{% call feedback::flash_group(messages=flash) %}{% endcall %}
+{% call ui::page(id="rule-detail", variant=bilibi_ui::PageVariant::Detail) %}
+{% call workspace::announce(kind="base/rules.rule", record_id=rule_id) %}{% endcall %}
+{{ header|safe }}
+<div class="space-y-6">{{ summary|safe }}{% for card in versions %}{{ card|safe }}{% endfor %}{{ runs|safe }}</div>
+{{ dialog|safe }}
+{% endcall %}
+</div>

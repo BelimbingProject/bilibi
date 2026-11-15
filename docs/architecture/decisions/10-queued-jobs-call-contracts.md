@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Agents:** claude-code/opus-5.5 (author)
 **Scope:** How background work reads and writes business records (`base/agent_api` job caller), and how a module lets people import, export and update its records in bulk (`base/bulk_data`)
-**Last Updated:** 2026-11-14
+**Last Updated:** 2026-11-16
 
 > Source: [issue 133](https://github.com/BelimbingProject/bilibi/issues/133). Belimbing has no bulk import. ADR 01 defines the four doors; this record adds a fifth.
 
@@ -24,7 +24,7 @@
 - the input schema, and the contract's capability decided live on every call;
 - the owner's preview, then its commit on the job's own transaction (`Execution::begin`), which fences the lease, re-proves the person and keeps the enqueue's trace ID, so every row a run writes shares one trace.
 
-No agent approval round-trip occurs: the person reviewed the job when they started it, as a page form is reviewed before `Plans::submit`. A contract that declares step-up is not callable from a job (no person is present to give a code), and a system principal's job cannot call contracts at all.
+No agent approval round-trip occurs: the person reviewed the job when they started it, as a page form is reviewed before `Plans::submit`. A contract that declares step-up is not callable from a job (no person is present to give a code), and a system principal's job calls only the contracts whose owner admits that principal by name (`PrincipalWrite`, [ADR 31](./31-tenant-rules-run-after-commit-as-one-bounded-principal.md)), under the principal's own grants.
 
 **2. A module opts a record type in with one contribution** (`bilibi_bulk_data::RecordType` under `RECORD_TYPES`), naming its own create contract, an optional duplicates read and update contract with the fields to match on, references to other records (a parent record type, or a read that finds exactly one record), and its own import capability. The mappable-field contract, including the optional tenant-defined fields, lives in [Bulk Data](../../../apps/base/bulk_data/README.md#opting-a-record-type-in). Boot refuses unknown or foreign contracts, writes a job cannot call, undeclared or foreign capabilities, and match fields, references or parents that do not exist. The same entry may offer **export** (its list read contract, open to the job door and paged, and its own export capability) and **bulk update** (its list read, its read of one record, its update contract and the update fields people may set, and its own bulk-update capability); `None` keeps a type out of either.
 

@@ -2,7 +2,7 @@
 //! snake_case name (`supply_chain/receiving.goods_received`); its container is
 //! the module ID's first segment. A subscriber reads only events of other
 //! containers: within one container a module calls its neighbour directly.
-use crate::{EventType, Subscriber, EVENTS, SUBSCRIBERS};
+use crate::{EventType, On, Subscriber, EVENTS, SUBSCRIBERS};
 use bilibi_module_registry::{Catalog, Consumer, Entry, Module, RegistryError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,23 +68,27 @@ fn validate_subscribers(entries: &[Entry]) -> Result<()> {
                 format!("must be named {own}.<snake_case name>"),
             ));
         }
-        if subscriber.events.is_empty() {
-            return Err(refuse(entry, "subscribes to no event".into()));
+        check_reads(entry, subscriber.events.iter())?;
+    }
+    Ok(())
+}
+/// The events one subscriber reads: well-named, of another container, each
+/// once and with versions from 1.
+fn check_reads<'a>(entry: &Entry, events: impl Iterator<Item = &'a On>) -> Result<()> {
+    let own = entry.provenance.module;
+    let mut seen = BTreeSet::new();
+    for on in events {
+        let Some((_, publisher)) = named(on.event) else {
+            return Err(refuse(entry, format!("subscribes to {}, which is not an event name (<name>/<module>.<snake_case name>)", on.event)));
+        };
+        if publisher == container(own) {
+            return Err(refuse(entry, format!("subscribes to {} published inside its own {publisher}; call that module directly instead", on.event)));
         }
-        let mut seen = BTreeSet::new();
-        for on in subscriber.events {
-            let Some((_, publisher)) = named(on.event) else {
-                return Err(refuse(entry, format!("subscribes to {}, which is not an event name (<name>/<module>.<snake_case name>)", on.event)));
-            };
-            if publisher == container(own) {
-                return Err(refuse(entry, format!("subscribes to {} published inside its own {publisher}; call that module directly instead", on.event)));
-            }
-            if on.versions.is_empty() || on.versions.contains(&0) || !seen.insert(on.event) {
-                return Err(refuse(
-                    entry,
-                    format!("lists {} twice or without a version from 1", on.event),
-                ));
-            }
+        if on.versions.is_empty() || on.versions.contains(&0) || !seen.insert(on.event) {
+            return Err(refuse(
+                entry,
+                format!("lists {} twice or without a version from 1", on.event),
+            ));
         }
     }
     Ok(())
@@ -121,7 +125,38 @@ pub(crate) fn routes(catalog: &Catalog, modules: &[&Module]) -> Result<(Types, S
     let mut subscribers = Subscribers::new();
     for entry in catalog.entries::<Subscriber>(SUBSCRIBERS)? {
         depends(entry)?;
-        let subscriber = entry.get::<Subscriber>()?;
+        let listed = entry.get::<Subscriber>()?;
+        // Events another catalog names (`Subscribe::reads`) join the listed
+        // ones in one boot-built declaration, leaked like Authz's merged
+        // bounds: the routing table lives as long as the process.
+        let named = listed.handler.reads(catalog)?;
+        let by_catalog = named.is_some();
+        let more = named.unwrap_or_default();
+        let subscriber: &'static Subscriber = if more.is_empty() {
+            listed
+        } else {
+            let events: Vec<On> = listed
+                .events
+                .iter()
+                .chain(more.iter().copied())
+                .map(|on| On {
+                    event: on.event,
+                    versions: on.versions,
+                })
+                .collect();
+            Box::leak(Box::new(Subscriber {
+                events: Vec::leak(events),
+                handler: listed.handler,
+            }))
+        };
+        check_reads(entry, subscriber.events.iter())?;
+        match (subscriber.events.is_empty(), by_catalog) {
+            // Its catalog names nothing mounted (no owner offers a trigger
+            // yet): it reads nothing and gets no deliveries.
+            (true, true) => continue,
+            (true, false) => return Err(refuse(entry, "subscribes to no event".into())),
+            _ => {}
+        }
         for on in subscriber.events {
             let publisher = on.event.split_once('.').map_or("", |(module, _)| module);
             if !modules.iter().any(|module| module.id == publisher) {

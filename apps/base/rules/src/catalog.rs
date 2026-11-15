@@ -1,0 +1,233 @@
+//! What owners offer rules: triggers (an event of theirs, with the Grid table
+//! its subject lives in) and actions (a write contract of theirs). Base names
+//! no owner: each contributes here, offers the `rules` principal the
+//! capabilities it needs (`bilibi_authz::OFFERED_CAPABILITIES`) and admits
+//! it to the contract (`bilibi_agent_api::job::PRINCIPAL_WRITES`). Boot
+//! refuses an offer that would not work or that could grant access.
+use bilibi_agent_api::{job::JobContracts, Registry};
+use bilibi_events::On;
+use bilibi_module_registry::{Catalog, Consumer, Entry, RegistryError, Result};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// The catalog an owner offers a rule trigger in:
+/// `Contribution::new(TRIGGERS, "<its event name>", provenance, &Trigger { .. })`.
+pub const TRIGGERS: &str = "base/rules.triggers";
+/// The catalog an owner offers a rule action in:
+/// `Contribution::new(ACTIONS, "<its write contract key>", provenance, &Action { .. })`.
+pub const ACTIONS: &str = "base/rules.actions";
+
+/// An event of the contributor's own, offered as a rule trigger. The rule
+/// engine subscribes to it through Base Events, so it is recorded in the
+/// owner's transaction and handed over after commit.
+pub struct Trigger {
+    /// The event and the payload versions the trigger reads.
+    pub on: On,
+    /// What happened, as an administrator reads it: "A case is opened".
+    pub title: &'static str,
+    /// The Grid table of the record the event is about; conditions read its
+    /// fields through Grid as the `rules` principal.
+    pub table: &'static str,
+    /// JSON pointer to that record's key in the event payload (`/case`).
+    pub subject: &'static str,
+}
+
+/// A write contract of the contributor's own that a rule may run on the
+/// trigger's record. There is no "update any record" action: each one is an
+/// owner's operation, with its own schema, preview, checks and audit.
+pub struct Action {
+    /// What it does, as an administrator reads it: "Send the case to a queue".
+    pub title: &'static str,
+    /// The Grid table of the record it acts on; a rule may use it only with a
+    /// trigger on the same table.
+    pub table: &'static str,
+    /// The input property that receives the trigger's record key. A rule
+    /// never supplies it: the runner binds it.
+    pub subject: &'static str,
+    /// The events its commit may record, so an approval can refuse a rule
+    /// that would trigger itself.
+    pub records: &'static [&'static str],
+}
+
+/// Contract owners never offered: an action that grants access, changes
+/// identity or decides an approval runs only by a person's hand.
+const NEVER: [&str; 10] = [
+    "base.authz.",
+    "base.authz_agent.",
+    "base.workflow.",
+    "base.step_up.",
+    "base.rules.",
+    "base.tenancy.",
+    "base.session.",
+    "core.user.",
+    "core.tenant.",
+    "core.agent.",
+];
+
+pub(crate) struct OfferedTrigger {
+    pub event: &'static str,
+    pub definition: &'static Trigger,
+}
+pub(crate) struct OfferedAction {
+    pub key: &'static str,
+    pub definition: &'static Action,
+    pub title: &'static str,
+    pub summary: &'static str,
+    pub capability: &'static str,
+    pub input: Value,
+}
+
+/// The mounted triggers and actions, checked against the Events, Grid,
+/// Authz and Agent API catalogs once at boot.
+pub(crate) struct Offers {
+    pub triggers: BTreeMap<&'static str, OfferedTrigger>,
+    pub actions: BTreeMap<&'static str, OfferedAction>,
+}
+
+fn refuse(entry: &Entry, why: impl std::fmt::Display) -> RegistryError {
+    RegistryError::Contribution(format!(
+        "invalid rule offer {} at {}:{}: {why}",
+        entry.id, entry.provenance.source, entry.provenance.line
+    ))
+}
+
+impl Offers {
+    pub(crate) fn build(
+        catalog: &Catalog,
+        registry: &Registry,
+        jobs: &JobContracts,
+        events: &bilibi_events::Events,
+    ) -> Result<Self> {
+        let vocabulary = bilibi_authz::vocabulary()
+            .map_err(|_| RegistryError::Contribution("authz vocabulary unavailable".into()))?;
+        let bounds = vocabulary
+            .system_principals
+            .get(crate::PRINCIPAL)
+            .map(|principal| principal.capabilities)
+            .unwrap_or_default();
+        let grid = bilibi_grid::installed()?;
+        let declared: Vec<&str> = events.event_types().collect();
+        let mut triggers = BTreeMap::new();
+        for entry in catalog.entries::<Trigger>(TRIGGERS)? {
+            let trigger = entry.get::<Trigger>()?;
+            let module = trigger.on.event.split_once('.').map(|(module, _)| module);
+            if entry.id != trigger.on.event || module != Some(entry.provenance.module) {
+                return Err(refuse(
+                    entry,
+                    "a trigger is one of the contributor's own events, named by its contribution",
+                ));
+            }
+            if !declared.contains(&trigger.on.event) {
+                return Err(refuse(entry, "the event is not a declared event type"));
+            }
+            let Some(table) = grid.table(trigger.table) else {
+                return Err(refuse(
+                    entry,
+                    format!("{} is not a Grid table", trigger.table),
+                ));
+            };
+            if !bounds.contains(&table.capability()) {
+                return Err(refuse(
+                    entry,
+                    format!(
+                        "the rules principal cannot read {}: offer it {} (OFFERED_CAPABILITIES)",
+                        trigger.table,
+                        table.capability()
+                    ),
+                ));
+            }
+            if !trigger.subject.starts_with('/') || trigger.title.trim().is_empty() {
+                return Err(refuse(
+                    entry,
+                    "needs a title and a JSON pointer to the subject",
+                ));
+            }
+            triggers.insert(
+                trigger.on.event,
+                OfferedTrigger {
+                    event: trigger.on.event,
+                    definition: trigger,
+                },
+            );
+        }
+        let mut actions = BTreeMap::new();
+        for entry in catalog.entries::<Action>(ACTIONS)? {
+            let action = entry.get::<Action>()?;
+            if NEVER.iter().any(|prefix| entry.id.starts_with(prefix)) {
+                return Err(refuse(
+                    entry,
+                    "an action that grants access or decides an approval is never automated",
+                ));
+            }
+            let Some(registered) = registry.operations.get(entry.id) else {
+                return Err(refuse(entry, "not a registered operation"));
+            };
+            if registered.provenance.module != entry.provenance.module {
+                return Err(refuse(entry, "the contract belongs to another module"));
+            }
+            jobs.principal_writable(entry.id, crate::PRINCIPAL)
+                .map_err(|_| {
+                    refuse(
+                        entry,
+                        "the contract does not admit the rules principal's jobs (PRINCIPAL_WRITES)",
+                    )
+                })?;
+            let op = registered.definition;
+            if !bounds.contains(&op.capability) {
+                return Err(refuse(
+                    entry,
+                    format!(
+                        "the rules principal cannot hold {}: offer it (OFFERED_CAPABILITIES)",
+                        op.capability
+                    ),
+                ));
+            }
+            if grid.table(action.table).is_none() {
+                return Err(refuse(
+                    entry,
+                    format!("{} is not a Grid table", action.table),
+                ));
+            }
+            if registered.input["properties"].get(action.subject).is_none() {
+                return Err(refuse(
+                    entry,
+                    format!("the contract has no input {}", action.subject),
+                ));
+            }
+            if let Some(event) = action
+                .records
+                .iter()
+                .find(|event| !declared.contains(event))
+            {
+                return Err(refuse(
+                    entry,
+                    format!("{event} is not a declared event type"),
+                ));
+            }
+            actions.insert(
+                entry.id,
+                OfferedAction {
+                    key: entry.id,
+                    definition: action,
+                    title: action.title,
+                    summary: op.summary,
+                    capability: op.capability,
+                    input: registered.input.clone(),
+                },
+            );
+        }
+        Ok(Self { triggers, actions })
+    }
+}
+
+/// The events every mounted trigger names, for the rules subscriber.
+pub(crate) fn trigger_events(catalog: &Catalog) -> Result<Vec<&'static On>> {
+    catalog
+        .entries::<Trigger>(TRIGGERS)?
+        .iter()
+        .map(|entry| entry.get::<Trigger>().map(|trigger| &trigger.on))
+        .collect()
+}
+
+inventory::submit! { Consumer::new::<Trigger>(TRIGGERS, "base/rules", |entries| entries.iter().try_for_each(|entry| entry.get::<Trigger>().map(|_| ()))) }
+inventory::submit! { Consumer::new::<Action>(ACTIONS, "base/rules", |entries| entries.iter().try_for_each(|entry| entry.get::<Action>().map(|_| ()))) }

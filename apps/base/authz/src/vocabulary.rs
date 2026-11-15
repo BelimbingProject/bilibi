@@ -10,6 +10,9 @@ pub const STANDING_GRANTS: &str = "base/authz.standing_grants";
 /// The catalog a module names, for its own system principal, capabilities of
 /// a module it uses only while that module is mounted (`OptionalCapabilities`).
 pub const OPTIONAL_CAPABILITIES: &str = "base/authz.optional_capabilities";
+/// The catalog a module offers some of its own capabilities in, to a named
+/// principal of a module it depends on (`OfferedCapabilities`).
+pub const OFFERED_CAPABILITIES: &str = "base/authz.offered_capabilities";
 /// A role owner can require a named company engagement on assignments.
 pub const ENGAGEMENT_ROLES: &str = "base/authz.engagement_roles";
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +142,21 @@ pub struct OptionalCapabilities {
     pub module: &'static str,
     pub capabilities: &'static [&'static str],
     pub standing: bool,
+}
+/// Capabilities of the contributing module offered to `principal`, declared
+/// by a module the contributor depends on (Base Rules' `rules`): the owner of
+/// a key, not the principal's module, says that principal may hold it, so a
+/// Base principal can act on a Domain's records without Base naming the
+/// Domain. The keys join the principal's bounds; they grant nothing, a tenant
+/// administrator still grants each one (never standing). Boot refuses a key
+/// the contributor does not own, a platform or portal key, a principal its
+/// own module or one it does not depend on declares, a key already in the
+/// bounds, and a second entry for one principal and module. The keys never
+/// enter a role.
+#[derive(Clone, Copy, Debug)]
+pub struct OfferedCapabilities {
+    pub principal: &'static str,
+    pub capabilities: &'static [&'static str],
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VocabularyContribution {
@@ -343,6 +361,10 @@ impl Vocabulary {
             catalog,
             catalog.entries::<OptionalCapabilities>(OPTIONAL_CAPABILITIES)?,
         )?;
+        vocabulary.add_offered(
+            catalog,
+            catalog.entries::<OfferedCapabilities>(OFFERED_CAPABILITIES)?,
+        )?;
         for entry in catalog.entries::<EngagementRole>(ENGAGEMENT_ROLES)? {
             let rule = entry.get::<EngagementRole>()?;
             let role = vocabulary
@@ -394,6 +416,66 @@ impl Vocabulary {
                     entry.id, entry.provenance.source, entry.provenance.line
                 )));
             }
+        }
+        Ok(())
+    }
+    fn add_offered(
+        &mut self,
+        catalog: &bilibi_module_registry::Catalog,
+        entries: &[Entry],
+    ) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for entry in entries {
+            let offer = entry.get::<OfferedCapabilities>()?;
+            let refuse = |why: &str| {
+                invalid(format!(
+                    "invalid offered capabilities {} at {}:{}: {why}",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                ))
+            };
+            let owner = entry.provenance.module;
+            let Some(&declarer) = self.principal_modules.get(offer.principal) else {
+                return Err(refuse("the principal is not declared"));
+            };
+            if declarer == owner
+                || !catalog
+                    .dependencies(owner)
+                    .is_some_and(|dependencies| dependencies.contains(&declarer))
+            {
+                return Err(refuse(
+                    "offer only to a principal of a module this one depends on",
+                ));
+            }
+            if !seen.insert((offer.principal, owner)) {
+                return Err(refuse("a second entry for this principal and module"));
+            }
+            let declared = self.system_principals[offer.principal];
+            let mut keys = BTreeSet::new();
+            for key in offer.capabilities {
+                let owned = self.capabilities.get(key).is_some_and(|capability| {
+                    capability.provenance.module == owner
+                        && capability.definition.audience == Audience::Tenant
+                });
+                if !owned || declared.capabilities.contains(key) || !keys.insert(*key) {
+                    return Err(refuse(&format!(
+                        "{key} is not a tenant capability of {owner} the principal lacks"
+                    )));
+                }
+            }
+            if keys.is_empty() {
+                return Err(refuse("no capabilities"));
+            }
+            // Built once per process, like `add_optional`'s merged bounds.
+            let merged: Vec<&'static str> = declared
+                .capabilities
+                .iter()
+                .chain(offer.capabilities)
+                .copied()
+                .collect();
+            self.system_principals
+                .get_mut(offer.principal)
+                .expect("declared principal")
+                .capabilities = Vec::leak(merged);
         }
         Ok(())
     }
@@ -572,6 +654,7 @@ inventory::submit! { Consumer::new::<VocabularyContribution>(VOCABULARY,"base/au
 // The principal and capability checks need the whole vocabulary; `from_catalog` runs them.
 inventory::submit! { Consumer::new::<StandingGrant>(STANDING_GRANTS,"base/authz",|entries| entries.iter().try_for_each(|entry| entry.get::<StandingGrant>().map(|_| ()))) }
 inventory::submit! { Consumer::new::<OptionalCapabilities>(OPTIONAL_CAPABILITIES,"base/authz",|entries| entries.iter().try_for_each(|entry| entry.get::<OptionalCapabilities>().map(|_| ()))) }
+inventory::submit! { Consumer::new::<OfferedCapabilities>(OFFERED_CAPABILITIES,"base/authz",|entries| entries.iter().try_for_each(|entry| entry.get::<OfferedCapabilities>().map(|_| ()))) }
 
 use CapabilityDefinition as C;
 const fn role(

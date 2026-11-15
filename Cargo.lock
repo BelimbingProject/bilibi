@@ -605,6 +605,7 @@ dependencies = [
  "bilibi-queue",
  "bilibi-records",
  "bilibi-reports",
+ "bilibi-rules",
  "bilibi-schedule",
  "bilibi-search",
  "bilibi-security",
@@ -1573,6 +1574,33 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-rules"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-events",
+ "bilibi-grid",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-principal-directory",
+ "bilibi-queue",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "jiff",
+ "rust_decimal",
+ "serde_json",
+ "sha2 0.11.1",
  "tokio-postgres",
 ]
 

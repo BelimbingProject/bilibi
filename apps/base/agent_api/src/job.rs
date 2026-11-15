@@ -9,17 +9,80 @@
 //! No agent approval round-trip occurs: the person reviewed the job when they started it,
 //! as a page's form is reviewed before `Plans::submit`, and the owner's
 //! version fence recognises a repeat. A contract that declares step-up is
-//! not callable: no person is present to give a code. A system principal's
-//! job cannot call a contract, as system scopes cannot enter the other doors.
+//! not callable: no person is present to give a code.
+//!
+//! A named system principal's job calls a contract only where the contract's
+//! owner admits that principal by name (`PRINCIPAL_WRITES`): Base Rules runs
+//! an approved rule's action as `rules`. The same schema, live capability
+//! (the principal's own tenant grants), preview and commit apply; system
+//! scopes still cannot enter the other doors.
 use crate::{Error, Handler, OperationClient, RegisteredOperation, Registry, Result};
 use bilibi_database::MutationTransaction;
+use bilibi_module_registry::{Entry, RegistryError};
 use bilibi_queue::Execution;
 use bilibi_tenancy::{Channel, Scope};
 use serde_json::Value;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio_postgres::GenericClient;
 
 pub const SERVICE: &str = "base/agent_api.jobs";
+/// The catalog a contract's owner admits named principals' jobs in:
+/// `Contribution::new(PRINCIPAL_WRITES, "<contract key>", provenance,
+/// &PrincipalWrite { principals: &["rules"] })`, from the contract's module.
+pub const PRINCIPAL_WRITES: &str = "base/agent_api.principal_writes";
+
+/// The named principals whose jobs may call one write contract. The contract
+/// must be the contributor's own reviewed write, open to the job door with no
+/// step-up; each principal must be declared. Admitting a principal grants it
+/// nothing: it still needs the contract's capability in its bounds and a
+/// tenant's grant, decided live on every call.
+pub struct PrincipalWrite {
+    pub principals: &'static [&'static str],
+}
+
+pub(crate) fn principal_writes(
+    registry: &Registry,
+    vocabulary: &bilibi_authz::Vocabulary,
+    entries: &[Entry],
+) -> bilibi_module_registry::Result<BTreeMap<&'static str, &'static [&'static str]>> {
+    let mut admitted = BTreeMap::new();
+    for entry in entries {
+        let write = entry.get::<PrincipalWrite>()?;
+        let refuse = |why: &str| {
+            RegistryError::Contribution(format!(
+                "invalid principal write {} at {}:{}: {why}",
+                entry.id, entry.provenance.source, entry.provenance.line
+            ))
+        };
+        let Some(registered) = registry.operations.get(entry.id) else {
+            return Err(refuse("not a registered operation"));
+        };
+        let op = registered.definition;
+        if registered.provenance.module != entry.provenance.module {
+            return Err(refuse("the contract belongs to another module"));
+        }
+        if !matches!(op.handler, Handler::SafeWrite(_))
+            || !op.step_up.is_empty()
+            || !op.channels.allows(Channel::Job)
+        {
+            return Err(refuse(
+                "not a reviewed write open to the job door without step-up",
+            ));
+        }
+        if write.principals.is_empty()
+            || write
+                .principals
+                .iter()
+                .any(|name| !vocabulary.system_principals.contains_key(name))
+        {
+            return Err(refuse("names no principal or an undeclared one"));
+        }
+        if admitted.insert(entry.id, write.principals).is_some() {
+            return Err(refuse("a second entry for this contract"));
+        }
+    }
+    Ok(admitted)
+}
 
 pub struct JobContracts {
     registry: Arc<Registry>,
@@ -64,10 +127,40 @@ impl JobContracts {
         Ok(registered)
     }
 
-    /// The person behind the job, sealed for the job door.
-    fn scope(execution: &Execution) -> Result<Scope> {
+    /// A write contract `principal`'s job may call: [`Self::writable`], and
+    /// its owner admits that principal (`PRINCIPAL_WRITES`).
+    pub fn principal_writable(&self, key: &str, principal: &str) -> Result<&RegisteredOperation> {
+        let registered = self.writable(key)?;
+        if !self
+            .registry
+            .principal_writes
+            .get(key)
+            .is_some_and(|names| names.contains(&principal))
+        {
+            return Err(Error::ChannelNotAllowed);
+        }
+        Ok(registered)
+    }
+
+    /// Whether `input` passes the contract's input schema, for a caller that
+    /// stores an input to commit later (an approved rule's action).
+    pub fn validate(&self, key: &str, input: &Value) -> Result<()> {
+        let registered = self.writable(key)?;
+        crate::schema::validate(&registered.input, input).map_err(Error::InvalidInput)
+    }
+
+    /// The person behind the job, or a named principal the contract's owner
+    /// admits, sealed for the job door.
+    fn scope(&self, execution: &Execution, key: &str) -> Result<Scope> {
         match execution.scope() {
             Some(scope) if scope.principal().is_none() => Ok(scope.clone().in_job()),
+            Some(scope)
+                if scope
+                    .principal()
+                    .is_some_and(|name| self.principal_writable(key, name).is_ok()) =>
+            {
+                Ok(scope.clone().in_job())
+            }
             _ => Err(bilibi_database::Error::Forbidden.into()),
         }
     }
@@ -83,7 +176,7 @@ impl JobContracts {
         key: &str,
         input: &Value,
     ) -> Result<Value> {
-        let scope = Self::scope(execution)?;
+        let scope = self.scope(execution, key)?;
         let registered = self.writable(key)?;
         self.check(client, &scope, registered, input).await?;
         let Handler::SafeWrite(owner) = registered.definition.handler else {
@@ -106,10 +199,14 @@ impl JobContracts {
         key: &str,
         input: &Value,
     ) -> Result<Value> {
-        let scope = Self::scope(execution)?;
+        let scope = self.scope(execution, key)?;
+        let actor = match scope.principal() {
+            Some(principal) => ("system", principal.to_owned()),
+            None => ("user", scope.user().to_string()),
+        };
         if tx.context().tenant != scope.tenant()
-            || tx.context().actor.kind != "user"
-            || tx.context().actor.id != scope.user().to_string()
+            || tx.context().actor.kind != actor.0
+            || tx.context().actor.id != actor.1
         {
             return Err(bilibi_database::Error::Forbidden.into());
         }
@@ -138,7 +235,10 @@ impl JobContracts {
         key: &str,
         input: &Value,
     ) -> Result<Value> {
-        let scope = Self::scope(execution)?;
+        let scope = match execution.scope() {
+            Some(scope) if scope.principal().is_none() => scope.clone().in_job(),
+            _ => return Err(bilibi_database::Error::Forbidden.into()),
+        };
         self.readable(key)?;
         self.registry.call(client, &scope, key, input).await
     }
