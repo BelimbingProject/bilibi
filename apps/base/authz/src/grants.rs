@@ -1,4 +1,6 @@
 //! Authenticated grant writes and explicit authoritative system-role reconciliation.
+#[path = "group_roles.rs"]
+mod group_roles;
 #[path = "identity_roles.rs"]
 mod identity_roles;
 use crate::step_up;
@@ -11,6 +13,7 @@ use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Db, Error, MutationBoundary, MutationTransaction, Result};
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::{PartyProofs, Scope};
+pub use group_roles::{group_roles, Group};
 use serde_json::json;
 use std::sync::Arc;
 use tokio_postgres::{GenericClient, Transaction};

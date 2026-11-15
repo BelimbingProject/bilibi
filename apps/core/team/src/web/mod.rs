@@ -4,7 +4,7 @@
 mod dialogs;
 mod list;
 mod record;
-use crate::{LeadAbove, Member, Team, TeamRow, Teams, MANAGE, PAGES};
+use crate::{LeadAbove, Member, Team, TeamRole, TeamRow, Teams, MANAGE, PAGES};
 use askama::Template;
 use bilibi_agent_api::page::{Call, PageContracts};
 use bilibi_database::{Db, Error, Result};
@@ -112,6 +112,8 @@ impl Pages {
             create: None,
             add: None,
             removing: Vec::new(),
+            role_add: None,
+            role_removing: None,
             flash: None,
             redirect: None,
             commits: CommitStates::default(),
@@ -164,6 +166,12 @@ pub(crate) struct Record {
     inactive: BTreeSet<i64>,
     leads: Vec<Member>,
     above: Vec<LeadAbove>,
+    /// The roles the team gives its members.
+    roles: Vec<TeamRole>,
+    /// The roles the reader may give it now (the "+ Add role" picker).
+    role_choices: Vec<TeamRole>,
+    /// The reader may change the team and holds role-update permission.
+    can_manage_roles: bool,
     /// The reader may change this team now.
     can_change: bool,
     archived: bool,
@@ -185,6 +193,12 @@ pub(crate) struct CreateDraft {
     /// The companies the reader works in, offered for the team's company.
     companies: Vec<Choice>,
     leads: Picker,
+    errors: BTreeMap<String, Vec<String>>,
+}
+/// The "Add role" dialog: the role chosen and the refusal, if any.
+#[derive(Default)]
+pub(crate) struct RoleDraft {
+    role: String,
     errors: BTreeMap<String, Vec<String>>,
 }
 #[derive(Default)]
@@ -216,6 +230,9 @@ pub(crate) struct State {
     add: Option<AddDraft>,
     /// Members waiting for the remove confirmation.
     removing: Vec<i64>,
+    role_add: Option<RoleDraft>,
+    /// The role waiting for the take-away confirmation.
+    role_removing: Option<i64>,
     flash: Option<(StatusKind, String)>,
     redirect: Option<(String, String)>,
     commits: CommitStates,
@@ -257,6 +274,7 @@ fn label_of(field: &str) -> String {
         "parent_id" => "Parent team".into(),
         "company_id" => "Company".into(),
         "user_ids" => "People".into(),
+        "role_id" => "Role".into(),
         other => {
             let mut s = other.replace('_', " ");
             if let Some(first) = s.get_mut(0..1) {
@@ -534,6 +552,12 @@ impl State {
         if !self.removing.is_empty() {
             dialog.push(&dialogs::remove(self)?);
         }
+        if let (Some(draft), Some(record)) = (&self.role_add, &self.record) {
+            dialog.push(&dialogs::add_role(record, draft)?);
+        }
+        if let (Some(role), Some(record)) = (self.role_removing, &self.record) {
+            dialog.push(&dialogs::remove_role(record, role)?);
+        }
         let mut flash = NO_FLASH;
         if let Some((kind, message)) = &self.flash {
             match kind {
@@ -575,7 +599,7 @@ impl LiveState<Scope, Error> for State {
                 embed: "audit.record-history".into(),
                 path: [
                     ("panel".into(), "team-record-history".into()),
-                    ("kinds".into(), "team,team_member".into()),
+                    ("kinds".into(), "team,team_member,team_role".into()),
                     ("id".into(), record.team.id.to_string()),
                 ]
                 .into(),

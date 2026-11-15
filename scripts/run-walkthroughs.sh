@@ -128,6 +128,7 @@ WALKTHROUGHS=(
   'core|consent-search-retention|apps/core/consent|search-retention-proof|none|BILIBI_DISPOSABLE_CONSENT_DEMO=yes|seed;-'
   'core|currency|apps/core/currency|currency-walkthrough|seed|BILIBI_CURRENCY_DEMO=disposable|-'
   'core|team-reads|apps/core/team|team-reads-walkthrough|fixture-seed|BILIBI_TEAM_READS=disposable|-'
+  'core|team-roles|apps/core/team|team-roles-walkthrough|fixture-seed|BILIBI_TEAM_ROLES=disposable|-'
   'core|document-audit|apps/core/document|audit-coverage|fixture-seed|BILIBI_DOCUMENT_AUDIT=disposable BILIBI_DOCUMENT_AUDIT_ROOT=@/documents|-'
   'core|document-export-rows|apps/core/document|export-rows-proof|fixture-seed|BILIBI_DOCUMENT_EXPORT_PROOF=disposable|-'
   # A latency measurement: run small here, only to prove it still runs.

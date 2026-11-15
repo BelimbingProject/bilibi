@@ -63,6 +63,16 @@ impl Team {
     pub fn to_json(&self) -> Value {
         json!(self)
     }
+    /// The team as Authz names it: members hold its roles "via team <name>",
+    /// in its company only when it has one.
+    pub(crate) fn group(&self) -> bilibi_authz::grants::Group<'_> {
+        bilibi_authz::grants::Group {
+            source: crate::GROUP_SOURCE,
+            id: self.id,
+            label: &self.name,
+            company: self.company_id,
+        }
+    }
 }
 /// A list row: the team with the names a reader needs beside it.
 #[derive(Clone, Debug, Serialize)]
@@ -124,6 +134,9 @@ pub struct TeamInput {
 pub struct Teams {
     pub(crate) picklists: Arc<PickLists>,
     pub(crate) authentication: Arc<Authentication>,
+    /// Authz owns the permission: a team's roles and its members' share of
+    /// them are written there, inside the team's own transaction.
+    pub(crate) grants: Arc<bilibi_authz::grants::Grants>,
 }
 pub(crate) const COLUMNS: &str = "id,name,kind,parent_id,company_id,version";
 fn needle(search: &str) -> String {
@@ -526,7 +539,7 @@ impl Teams {
                 .collect(),
             unchanged: Vec::new(),
         };
-        apply(tx, scope, &plan).await?;
+        apply(tx, scope, &self.grants, &plan).await?;
         Ok(Ok(team))
     }
     /// Name, kind, parent team or company, with the version read.
@@ -649,6 +662,22 @@ impl Teams {
                 "A team with this name already exists here.",
             )));
         }
+        // A team's roles apply in its company: moving a team that carries
+        // roles gives them there, so it is a grant like giving them.
+        if after.company_id != before.company_id {
+            if let Err(error) = self
+                .grants
+                .validate_group_move(client, scope, &after.group())
+                .await
+            {
+                let roles = crate::roles::names(client, scope, id).await?;
+                return Ok(Err(crate::roles::grant_refusal(
+                    error,
+                    "company_id",
+                    &format!("This team gives its members {roles}. Moving it to another company needs permission to change roles and every permission those roles give there."),
+                )?));
+            }
+        }
         Ok(Ok(after))
     }
     pub async fn update(
@@ -689,6 +718,9 @@ impl Teams {
             }
         }
         after.version += 1;
+        if after.name != before.name || after.company_id != before.company_id {
+            self.grants.sync_group_in(tx, scope, &after.group()).await?;
+        }
         let tenant = scope.tenant();
         let saved = tx
             .mutate(move |sql| {

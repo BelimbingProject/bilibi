@@ -1,7 +1,8 @@
 //! Membership: every change (a create's leads, add, remove, lead on or
 //! off) is planned by [`Teams::plan_members`] and written by [`apply`], the
-//! one place a membership row changes, so a later rule (team roles) has one
-//! place to check.
+//! one place a membership row changes. Adding someone to a team that carries
+//! roles gives them those roles, so the plan runs Authz's grant check and
+//! `apply` keeps Authz's members of the team in step; removing only narrows.
 use crate::access::{authorize_team, load};
 use crate::facade::{distinct, invalid, Checked, Team, Teams, MAX_BATCH, MAX_MEMBERS};
 use crate::MANAGE;
@@ -153,6 +154,18 @@ impl Teams {
                         &format!("A team holds at most {MAX_MEMBERS} members."),
                     )));
                 }
+                if let Err(error) = self
+                    .grants
+                    .validate_group_members(client, scope, &team.group(), &new)
+                    .await
+                {
+                    let roles = crate::roles::names(client, scope, team.id).await?;
+                    return Ok(Err(crate::roles::grant_refusal(
+                        error,
+                        "user_ids",
+                        &format!("{} gives its members {roles}. Adding people to it needs permission to change roles and every permission those roles give.", team.name),
+                    )?));
+                }
                 for user in &users {
                     if current.contains_key(user) {
                         unchanged.push(name(user));
@@ -255,18 +268,37 @@ impl Teams {
             Ok(plan) => plan,
             Err(e) => return Ok(Err(e)),
         };
-        apply(tx, scope, &plan).await?;
+        apply(tx, scope, &self.grants, &plan).await?;
         Ok(Ok(plan))
     }
 }
 /// The one place a membership row is written. Each person's row is its own
 /// audit entry under the team (`team_member`, the team's id), so the team's
-/// history shows who joined, left and led, and when.
+/// history shows who joined, left and led, and when. Authz's members of the
+/// team change in the same transaction: an addition to a team that carries
+/// roles passes the grant check and step-up there first, so nobody holds a
+/// team role through a door that skipped it.
 pub(crate) async fn apply(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,
+    grants: &bilibi_authz::grants::Grants,
     plan: &MemberPlan,
 ) -> Result<()> {
+    let joined: Vec<i64> = plan
+        .steps
+        .iter()
+        .filter(|s| s.before.is_none() && s.after.is_some())
+        .map(|s| s.user_id)
+        .collect();
+    let left: Vec<i64> = plan
+        .steps
+        .iter()
+        .filter(|s| s.before.is_some() && s.after.is_none())
+        .map(|s| s.user_id)
+        .collect();
+    grants
+        .set_group_members_in(tx, scope, &plan.team.group(), &joined, &left)
+        .await?;
     let tenant = scope.tenant();
     let team = plan.team.id;
     let steps = plan.steps.clone();
