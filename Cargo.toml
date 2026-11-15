@@ -15,6 +15,8 @@ license = "MIT"
 unsafe_code = "deny"
 
 [workspace.dependencies]
+icu_datetime = "2.3.0"
+icu_locale = "2.3.1"
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"] }
 tower-http = { version = "0.6.11", features = ["compression-gzip", "compression-br"] }
 axum = { version = "0.8", features = ["ws", "form"] }
