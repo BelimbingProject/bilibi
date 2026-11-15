@@ -270,12 +270,13 @@ static GRID: GridContribution = GridContribution {
             "documents",
             "Documents",
             VIEW,
-            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on,d.sync_id,d.related_document_id,d.relation,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))"),
+            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on,d.sync_id,d.related_document_id,d.relation,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.search_vector FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
                 Field::new("company_id", "Filing company ID", FieldType::Integer).protected(),
                 Field::new("name", "Name", FieldType::String).protected(),
+                Field::new("search_vector", "Search terms", FieldType::String).hidden(),
                 Field::new("publish_date", "Publication date", FieldType::Date).protected(),
                 Field::choice("source", "Source", &["internal", "external"]).protected(),
                 Field::new("external_url", "Link", FieldType::String).protected(),
@@ -378,6 +379,13 @@ bilibi_records::holder!(
         id_field: "record_id"
     }
 );
+
+// The same grant-filtered Grid source governs discovery and record reads.
+static SEARCH: bilibi_search::Searchable =
+    bilibi_search::Searchable::new("documents", "name", "search_vector", "/documents/{id}")
+        .subtitle(&["sync_id", "category"])
+        .updated("updated_at");
+bilibi_search::contribute!("core/document", "document.search", &SEARCH);
 
 // Pages: the list and a document's record page.
 inventory::submit! { Contribution::new(ROUTES, "core/document.list", provenance!(), &Route {

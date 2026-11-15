@@ -141,11 +141,19 @@ pub struct Reference {
     pub kind: String,
 }
 /// Select a concrete adapter in trusted server code, never from request input.
-/// Check live company membership/state and current subject permissions on every
-/// callback. Purge has no reference and requires company maintenance authority.
+/// Check live company state and current subject permissions on every callback.
+/// Desk checks apply unless this owner explicitly authorizes cross-desk reads. Purge has no reference and requires company maintenance authority.
 /// Base binds both this stable owner ID and the concrete Rust adapter type.
 pub trait Owner: Send + Sync + 'static {
     fn owner_id(&self) -> &'static str;
+    /// Whether staff reads also require a desk in the filing company.
+    /// Defaults to true. An owner with explicit per-record read grants may
+    /// return false, but must prove the tenant's company and the current
+    /// record grant in `authorize` (and `authorize_all`) on every read.
+    /// This never exempts a create, delete, retain or purge from its desk check.
+    fn read_requires_desk(&self) -> bool {
+        true
+    }
     fn authorize<'a>(
         &'a self,
         client: &'a dyn ProofClient,
@@ -742,7 +750,10 @@ impl<O: Owner> Owned<'_, O> {
         {
             return Err(bilibi_database::Error::Forbidden.into());
         }
-        if live.principal().is_none() && live.actor().kind() == bilibi_tenancy::AccountKind::Staff {
+        if live.principal().is_none()
+            && live.actor().kind() == bilibi_tenancy::AccountKind::Staff
+            && (operation != Operation::Read || self.owner.read_requires_desk())
+        {
             self.store
                 .authentication
                 .require_work_company(client, &live, self.company)

@@ -268,7 +268,7 @@ async fn main() -> Result<()> {
               u AS (UPDATE users SET person_id=p.id FROM p, user_identities i WHERE users.identity_id=i.id AND users.tenant_id=1 AND i.email='admin@example.test' RETURNING users.person_id)
          INSERT INTO user_desks(tenant_id,person_id,company_id) SELECT 1,person_id,1 FROM u ON CONFLICT DO NOTHING;
          INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed)
-         SELECT 1, u, c, true FROM unnest(ARRAY[1,2,3,7]) u, unnest(ARRAY['core.document.view','core.document.download']) c
+         SELECT 1, u, c, true FROM unnest(ARRAY[1,2,3,7]) u, unnest(ARRAY['core.document.view','core.document.download','base.search.records.list']) c
          ON CONFLICT DO NOTHING;",
     ).await?;
     let app = bilibi_web::App::new(db.clone(), "http://localhost:35563")?;
@@ -433,6 +433,45 @@ async fn main() -> Result<()> {
                 format!("{} / {}", page.entries.len(), page.total),
                 times,
             );
+        }
+    }
+
+    // Global search, through the same facade as base.search.records. Keep
+    // every mounted kind enabled, as the top-bar search does.
+    let search = fixture
+        .app
+        .services
+        .get::<bilibi_search::Search>(bilibi_search::SERVICE)?;
+    for query in ["permit", "nothing-matches-this"] {
+        for (label, scope) in readers {
+            for suggest in [true, false] {
+                let mut times = Vec::with_capacity(runs);
+                let mut count = 0;
+                for n in 0..runs + 3 {
+                    let start = Instant::now();
+                    let found = if suggest {
+                        search.suggest(scope, query).await?
+                    } else {
+                        search.find(scope, query, None, 1, 25).await?
+                    };
+                    if found.broad {
+                        return Err(format!("global search refused as too broad: {query}").into());
+                    }
+                    count = found.hits.len();
+                    if n >= 3 {
+                        times.push(start.elapsed());
+                    }
+                }
+                row(
+                    &format!(
+                        "Global search, {} ({query})",
+                        if suggest { "suggest" } else { "page" }
+                    ),
+                    label,
+                    count.to_string(),
+                    times,
+                );
+            }
         }
     }
 

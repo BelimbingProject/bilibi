@@ -189,6 +189,12 @@ pub(crate) fn audit_values(row: &Ledger) -> Value {
 }
 
 impl Owner for DocumentFiles {
+    // ADR 23: a named person's live document grant controls reads; filing
+    // company membership grants nothing. `authorize` rechecks that grant.
+    fn read_requires_desk(&self) -> bool {
+        false
+    }
+
     fn owner_id(&self) -> &'static str {
         ARTIFACT_OWNER
     }
