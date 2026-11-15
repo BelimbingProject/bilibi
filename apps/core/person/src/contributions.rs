@@ -53,7 +53,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/person", Provenance { m
 static GRID: GridContribution = GridContribution {
     record_fields: &[bilibi_grid::RecordFields { table: "persons", fields: crate::web::fields::ALL }],
     tables: &[TableDecl::new("persons", "Contacts", LIST,
-        Source::tenant("SELECT id,code,name,kind,CASE WHEN retired_at IS NULL THEN 'current' ELSE 'retired' END AS identity,email,phone,system_key,retired_at,version,created_at,updated_at,search_vector FROM persons WHERE tenant_id=$1"), "id", &[
+        Source::tenant("SELECT id,code,name,kind,CASE WHEN retired_at IS NULL THEN 'current' ELSE 'retired' END AS identity,email,phone,system_key,retired_at,version,created_at,updated_at,search_vector,custom_fields,custom_search_vector FROM persons WHERE tenant_id=$1"), "id", &[
             Field::new("id", "ID", FieldType::Integer).protected(),
             Field::record(crate::web::fields::NAME).protected(),
             // Generated from the name, so as personal as the name (ADR 05).
@@ -68,10 +68,15 @@ static GRID: GridContribution = GridContribution {
             Field::new("created_at", "Created", FieldType::DateTime).protected(),
             Field::new("updated_at", "Updated", FieldType::DateTime).protected(),
             Field::new("search_vector", "Search terms", FieldType::String).hidden(),
+            // The tenant's custom values; Grid adds each active field as `cf_<key>`.
+            Field::new("custom_fields", "Custom fields", FieldType::String).hidden(),
+            Field::new("custom_search_vector", "Custom search terms", FieldType::String).hidden(),
         ]).label_field("name").time_field("created_at").record_types(&["person"])],
     links: &[],
 };
 bilibi_grid::contribute!("core/person", "person.grid", &GRID);
+inventory::submit! { Contribution::new(bilibi_custom_fields::GRID_SOURCES, "person", Provenance { module: "core/person", source: file!(), line: line!() },
+&bilibi_custom_fields::GridSource { record_type: "person", table: "persons", column: "custom_fields" }) }
 
 // Global search finds contacts by name/code, and by the start of a code, email or phone
 // for a reader no held role restricts them for (as the Contacts search does).
@@ -80,7 +85,8 @@ static SEARCH: bilibi_search::Searchable =
         .subtitle(&["code", "email"])
         .prefix(&["code", "email", "phone"])
         .state("identity", &["retired"])
-        .updated("updated_at");
+        .updated("updated_at")
+        .custom("custom_search_vector");
 bilibi_search::contribute!("core/person", "person.search", &SEARCH);
 
 // Contacts import from CSV through the person contracts (issue 133). A row

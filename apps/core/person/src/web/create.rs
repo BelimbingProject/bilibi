@@ -4,12 +4,15 @@
 use super::*;
 use crate::{contributions::CREATE, model, DuplicateQuery, Person, PersonInput, PersonKind};
 use bilibi_agent_api::Error as ContractError;
+use bilibi_custom_fields::Kind;
 use bilibi_ui::{
     error_sentence, Alert, Button, ButtonVariant, ErrorSummary, Field, InputKind, RestrictedField,
     StatusKind,
 };
 
 const OPEN: &str = "/contacts?new=1";
+/// The most ticks one several-choices field posts that the dialog reads.
+const CODES_MAX: usize = 200;
 
 /// HTTP and live visits to `/contacts/new` land on the list with the dialog open.
 pub(super) struct Create;
@@ -34,8 +37,16 @@ pub(super) struct Draft {
     input: PersonInput,
     /// Custom field values as typed, by control name (`cf_<key>`).
     custom: std::collections::BTreeMap<String, String>,
+    /// Several-choices fields' ticked codes, by control name.
+    codes: std::collections::BTreeMap<String, Vec<String>>,
+    /// Record fields' pickers by control name: the text typed so far, its
+    /// hits, and the record chosen.
+    picking: std::collections::BTreeMap<String, Picking>,
     /// The custom fields' labels by control name, for the error summary.
     custom_labels: std::collections::BTreeMap<String, String>,
+    /// The custom fields the form last drew, by control name: how each
+    /// posted value is read.
+    custom_kinds: std::collections::BTreeMap<String, bilibi_custom_fields::Kind>,
     code: String,
     code_edited: bool,
     errors: Vec<(String, String)>,
@@ -54,7 +65,10 @@ impl Draft {
                 phone: None,
             },
             custom: std::collections::BTreeMap::new(),
+            codes: std::collections::BTreeMap::new(),
+            picking: std::collections::BTreeMap::new(),
             custom_labels: std::collections::BTreeMap::new(),
+            custom_kinds: std::collections::BTreeMap::new(),
             code: String::new(),
             code_edited: false,
             errors: Vec::new(),
@@ -70,10 +84,46 @@ impl Draft {
             bilibi_ui::params::form_values_checked(value, "person", bilibi_ui::params::FIELD_LIMIT)
                 .map_err(bilibi_database::Error::refused)?;
         self.code = fields.get("code").cloned().unwrap_or_default();
-        self.custom = fields
+        // A record field posts its search (`cf_<key>_search`) and, once
+        // chosen, `kind:id` (kept from the pick, not from the post); several
+        // choices post one value per tick (`person[cf_<key>][]`).
+        self.custom.clear();
+        for (name, text) in fields.iter().filter(|(name, _)| name.starts_with("cf_")) {
+            let searched = name
+                .strip_suffix("_search")
+                .filter(|base| self.custom_kinds.get(*base) == Some(&Kind::Reference));
+            if let Some(base) = searched {
+                let picking = self.picking.entry(base.to_owned()).or_default();
+                picking.typed = text.chars().take(100).collect();
+                continue;
+            }
+            match self.custom_kinds.get(name) {
+                Some(Kind::Reference | Kind::Choices) => {}
+                Some(_) | None => {
+                    self.custom.insert(name.clone(), text.clone());
+                }
+            }
+        }
+        self.codes = self
+            .custom_kinds
             .iter()
-            .filter(|(name, _)| name.starts_with("cf_"))
-            .map(|(name, value)| (name.clone(), value.clone()))
+            .filter(|(_, kind)| **kind == Kind::Choices)
+            .map(|(name, _)| {
+                let ticked = value
+                    .get(format!("person[{name}][]"))
+                    .and_then(Value::as_array)
+                    .map(|codes| {
+                        codes
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|code| !code.is_empty())
+                            .take(CODES_MAX)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (name.clone(), ticked)
+            })
             .collect();
         self.input = PersonInput {
             name: fields.get("name").cloned().unwrap_or_default(),
@@ -117,6 +167,7 @@ impl Draft {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         self.read(value)?;
+        self.search(pages, scope).await?;
         if !create && self.input.name != previous_name && !self.code_edited {
             let client = pages.db.get().await?;
             let suggestion = if self.input.name.trim().is_empty() {
@@ -147,7 +198,7 @@ impl Draft {
         }
         // Filled custom fields only; the owner checks each against the
         // tenant's definitions and refuses on `cf_<key>`.
-        let custom: Vec<Value> = self
+        let mut custom: Vec<Value> = self
             .custom
             .iter()
             .filter(|(_, value)| !value.trim().is_empty())
@@ -155,6 +206,17 @@ impl Draft {
                 Some(json!({"key": name.strip_prefix("cf_")?, "value": value.trim()}))
             })
             .collect();
+        for (name, codes) in &self.codes {
+            let codes = bilibi_custom_fields::codes_value(codes.iter().map(String::as_str));
+            if let (Some(key), false) = (name.strip_prefix("cf_"), codes.is_null()) {
+                custom.push(json!({"key": key, "values": codes}));
+            }
+        }
+        for (name, picking) in &self.picking {
+            if let (Some(key), Some(chosen)) = (name.strip_prefix("cf_"), &picking.chosen) {
+                custom.push(json!({"key": key, "value": chosen.id}));
+            }
+        }
         if !custom.is_empty() {
             input["custom"] = json!(custom);
         }
@@ -206,6 +268,75 @@ impl Draft {
                 leftover.join(" ")
             };
         }
+    }
+
+    /// Finds the records each record field's typed text names (only when
+    /// it changed), among those the reader may select.
+    async fn search(&mut self, pages: &Pages, scope: &Scope) -> Result<()> {
+        let changed: Vec<String> = self
+            .picking
+            .iter()
+            .filter(|(_, picking)| picking.typed != picking.searched)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let definitions = super::custom::active(pages, scope).await?;
+        for name in changed {
+            let Some(definition) = definitions
+                .iter()
+                .find(|d| d.kind == Kind::Reference && crate::custom::name(&d.key) == name)
+            else {
+                self.picking.remove(&name);
+                continue;
+            };
+            let Some(picking) = self.picking.get_mut(&name) else {
+                continue;
+            };
+            picking.hits = super::custom::hits(scope, definition, &picking.typed).await?;
+            picking.searched = picking.typed.clone();
+        }
+        Ok(())
+    }
+
+    /// A record field's picker raised `pick_cf_<key>` (with `record=kind:id`)
+    /// or `clear_cf_<key>`; `false` when the event is not one of those.
+    pub async fn pick(
+        &mut self,
+        pages: &Pages,
+        scope: &Scope,
+        event: &str,
+        value: &Value,
+    ) -> Result<bool> {
+        let (name, picked) = match (event.strip_prefix("pick_"), event.strip_prefix("clear_")) {
+            (Some(name), _) => (name, true),
+            (None, Some(name)) => (name, false),
+            (None, None) => return Ok(false),
+        };
+        if !name.starts_with("cf_") {
+            return Ok(false);
+        }
+        let definitions = super::custom::active(pages, scope).await?;
+        let definition = definitions
+            .iter()
+            .find(|d| d.kind == Kind::Reference && crate::custom::name(&d.key) == name)
+            .ok_or(Error::Invalid)?;
+        let chosen = if picked {
+            let raised = value["record"].as_str().ok_or(Error::Invalid)?;
+            Some(super::custom::chosen(scope, definition, raised).await?)
+        } else {
+            None
+        };
+        self.errors.retain(|(field, _)| field != name);
+        self.picking.insert(
+            name.to_owned(),
+            Picking {
+                chosen,
+                ..Picking::default()
+            },
+        );
+        Ok(true)
     }
 
     pub async fn form(&mut self, pages: &Pages, scope: &Scope) -> Result<Html> {
@@ -290,8 +421,10 @@ impl Draft {
             }
             fields.push(field);
         }
+        let mut fields = fields.into_iter().map(render).collect::<Result<Vec<_>>>()?;
         // The tenant's own fields, posted as `cf_<key>`.
         self.custom_labels.clear();
+        self.custom_kinds.clear();
         for definition in super::custom::active(pages, scope).await? {
             let name = crate::custom::name(&definition.key);
             let label = definition.label.clone();
@@ -301,15 +434,20 @@ impl Draft {
                 .filter(|(field, _)| *field == name)
                 .map(|(_, message)| sentence(&label, message))
                 .collect();
-            let value = self.custom.get(&name).cloned().unwrap_or_default();
-            let mut field = super::custom::control(pages, scope, &definition, &value, errors)
-                .await?
-                .attr("data-debounce", "300");
-            if !can_create {
-                field = field.disabled();
-            }
-            fields.push(field);
-            self.custom_labels.insert(name, label);
+            let picking = self.picking.get(&name);
+            let entered = super::custom::Entered {
+                text: self.custom.get(&name).map_or("", String::as_str),
+                codes: self.codes.get(&name).map_or(&[], Vec::as_slice),
+                query: picking.map_or("", |p| p.typed.as_str()),
+                hits: picking.map_or(&[], |p| p.hits.as_slice()),
+                chosen: picking.and_then(|p| p.chosen.as_ref()),
+            };
+            fields.push(
+                super::custom::control(pages, scope, &definition, entered, errors, can_create)
+                    .await?,
+            );
+            self.custom_labels.insert(name.clone(), label);
+            self.custom_kinds.insert(name, definition.kind);
         }
         let duplicates = self.duplicates(pages, scope).await?;
         let summary = if self.submitted && !self.errors.is_empty() {
@@ -404,10 +542,21 @@ fn sentence(label: &str, message: &str) -> String {
     error_sentence(label, message)
 }
 
+/// One record field's picker in the dialog.
+#[derive(Default)]
+struct Picking {
+    /// The text typed so far, and the text the hits were found for.
+    typed: String,
+    searched: String,
+    hits: Vec<bilibi_ui::PickerHit>,
+    /// The record chosen, named with the reader's access.
+    chosen: Option<bilibi_records::Resolved>,
+}
+
 #[derive(Template)]
 #[template(path = "person_form.html")]
 struct Form {
-    fields: Vec<Field>,
+    fields: Vec<Html>,
     restricted: Vec<RestrictedField>,
     duplicates: Vec<Person>,
     summary: Html,

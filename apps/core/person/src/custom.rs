@@ -82,19 +82,26 @@ pub(crate) async fn check(
 }
 
 /// The active fields and this person's values, for agents and pages:
-/// `[{key, label, type, value}]` in the fields' order. An archived field, and
-/// its value, is left out.
+/// `[{key, label, type, value}]` in the fields' order, with `target` (the
+/// Base Records kind) on a record field. `value` is the stored JSON: text, an
+/// array of codes for several choices, a record's id for a record field; the
+/// record is never named here (agents name it with `base.records.resolve`).
+/// An archived field, and its value, is left out.
 pub(crate) fn listed(active: &[bilibi_custom_fields::Definition], values: &Custom) -> Value {
     Value::Array(
         active
             .iter()
             .map(|definition| {
-                json!({
+                let mut item = json!({
                     "key": definition.key,
                     "label": definition.label,
                     "type": definition.kind.as_str(),
                     "value": values.get(&definition.key).cloned().unwrap_or(Value::Null),
-                })
+                });
+                if definition.kind == bilibi_custom_fields::Kind::Reference {
+                    item["target"] = json!(definition.target);
+                }
+                item
             })
             .collect(),
     )
@@ -108,62 +115,96 @@ pub(crate) async fn active(
     fields()?.active(client, scope, RECORD_TYPE).await
 }
 
+/// Whether the list and `core.person.list` sort by the field. Several
+/// choices and a record have no order of their own, so neither sorts.
+pub(crate) fn sortable(kind: bilibi_custom_fields::Kind) -> bool {
+    use bilibi_custom_fields::Kind;
+    match kind {
+        Kind::Text
+        | Kind::Number
+        | Kind::Date
+        | Kind::Choice
+        | Kind::Boolean
+        | Kind::LongText
+        | Kind::Link
+        | Kind::Phone
+        | Kind::Email => true,
+        Kind::Choices | Kind::Reference => false,
+    }
+}
+
 /// A custom field's stored value as the SQL type its sort and comparisons
 /// need, read from `persons.custom_fields` with the key as bound parameter
-/// `$index` (never part of the statement text).
+/// `$index` (never part of the statement text). Only for a `sortable` kind.
 pub(crate) fn expression(index: usize, kind: bilibi_custom_fields::Kind) -> String {
+    use bilibi_custom_fields::Kind;
     let cast = match kind {
-        bilibi_custom_fields::Kind::Number => "::numeric",
-        bilibi_custom_fields::Kind::Date => "::date",
-        _ => "",
+        Kind::Number => "::numeric",
+        Kind::Date => "::date",
+        Kind::Text
+        | Kind::Choice
+        | Kind::Boolean
+        | Kind::LongText
+        | Kind::Link
+        | Kind::Phone
+        | Kind::Email
+        | Kind::Choices
+        | Kind::Reference => "",
     };
     format!("(custom_fields ->> ${index}::text){cast}")
 }
 
-/// The SQL comparison a condition makes on `expression`, with its value as
-/// bound parameter `$index`; `None` when the operator does not suit the
-/// field or the value is not one the field can hold.
+/// The SQL condition a filter makes on `persons.custom_fields`, with the
+/// field's key as bound parameter `$key` and the filter's value as `$value`;
+/// `None` when the operator does not suit the field or the value is not one
+/// the field can hold. Several choices hold a code (`has`) by containment,
+/// which the `gin (custom_fields jsonb_path_ops)` index serves; a record
+/// field takes no condition.
 pub(crate) fn condition(
     definition: &bilibi_custom_fields::Definition,
     filter: &crate::model::CustomFilter,
-    expression: &str,
-    index: usize,
+    key: usize,
+    value: usize,
 ) -> Option<String> {
     use bilibi_custom_fields::Kind;
-    let value = filter.value.trim();
+    let text = filter.value.trim();
+    let bounded = !text.is_empty() && text.chars().count() <= 256;
+    let expression = expression(key, definition.kind);
     match (definition.kind, filter.op.as_str()) {
         (Kind::Text | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email, "contains")
-            if !value.is_empty() && value.chars().count() <= 256 =>
+            if bounded =>
         {
             Some(format!(
-                "position(lower(${index}::text) in lower({expression}))>0"
+                "position(lower(${value}::text) in lower({expression}))>0"
             ))
         }
-        (Kind::Boolean, "eq") if matches!(value, "true" | "false") => {
-            Some(format!("{expression}=${index}::text"))
+        (Kind::Boolean, "eq") if matches!(text, "true" | "false") => {
+            Some(format!("{expression}=${value}::text"))
         }
         (
             Kind::Text | Kind::Choice | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email,
             "eq",
-        ) if !value.is_empty() && value.chars().count() <= 256 => {
-            Some(format!("{expression}=${index}::text"))
-        }
-        (Kind::Number, "gte" | "lte") if bilibi_custom_fields::valid_number(value) => {
-            Some(format!(
-                "{expression}{}${index}::text::numeric",
-                if filter.op == "gte" { ">=" } else { "<=" }
-            ))
-        }
-        (Kind::Date, "gte" | "lte") if bilibi_custom_fields::valid_date(value) => Some(format!(
-            "{expression}{}${index}::text::date",
+        ) if bounded => Some(format!("{expression}=${value}::text")),
+        (Kind::Choices, "has") if bounded => Some(format!(
+            "custom_fields @> jsonb_build_object(${key}::text, jsonb_build_array(${value}::text))"
+        )),
+        (Kind::Number, "gte" | "lte") if bilibi_custom_fields::valid_number(text) => Some(format!(
+            "{expression}{}${value}::text::numeric",
+            if filter.op == "gte" { ">=" } else { "<=" }
+        )),
+        (Kind::Date, "gte" | "lte") if bilibi_custom_fields::valid_date(text) => Some(format!(
+            "{expression}{}${value}::text::date",
             if filter.op == "gte" { ">=" } else { "<=" }
         )),
         _ => None,
     }
 }
 
-/// A `custom` input of `[{key, value}]` pairs (the agent dialect has no
-/// free-form object) as a patch. A value is text, or null to clear.
+/// A `custom` input of `[{key, value}]` or `[{key, values}]` pairs (the
+/// agent dialect has no free-form object and one type per property) as a
+/// patch. `value` is text, or null to clear; `values`, for several choices,
+/// is a list of codes, an empty one clearing. A pair carries exactly one of
+/// them; Custom Fields refuses the shape that does not suit the field.
 pub(crate) fn patch(input: &Value) -> Result<Custom> {
     let Some(items) = input.as_array() else {
         return if input.is_null() {
@@ -174,13 +215,19 @@ pub(crate) fn patch(input: &Value) -> Result<Custom> {
     };
     let mut patch = Custom::new();
     for item in items {
-        let key = item["key"].as_str().ok_or(Error::Invalid)?;
-        let value = &item["value"];
-        if !(value.is_string() || value.is_null()) || item.as_object().is_some_and(|o| o.len() > 2)
-        {
-            return Err(Error::Invalid);
-        }
-        if patch.insert(key.to_owned(), value.clone()).is_some() {
+        let object = item.as_object().ok_or(Error::Invalid)?;
+        let key = object
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or(Error::Invalid)?;
+        let value = match (object.get("value"), object.get("values")) {
+            (Some(value), None) if value.is_string() || value.is_null() => value.clone(),
+            (None, Some(Value::Array(codes))) if codes.iter().all(Value::is_string) => {
+                Value::Array(codes.clone())
+            }
+            _ => return Err(Error::Invalid),
+        };
+        if object.len() > 2 || patch.insert(key.to_owned(), value).is_some() {
             return Err(Error::Invalid);
         }
     }
@@ -189,7 +236,7 @@ pub(crate) fn patch(input: &Value) -> Result<Custom> {
 
 /// The agent input schema for `custom`.
 pub(crate) fn schema() -> Value {
-    json!({"type":"array","description":"Custom field values as {key, value} pairs; value is text (a number as a decimal string, a date as YYYY-MM-DD, a choice as its code, yes/no as \"true\" or \"false\") or null to clear. Find keys with base.custom_fields.list (record type person).","items":{"type":"object","required":["key"],"properties":{"key":{"type":"string","maxLength":40},"value":{"type":"string","maxLength":10000,"nullable":true}}}})
+    json!({"type":"array","description":"Custom field values as {key, value} or {key, values} pairs, exactly one of value and values. value is text (a number as a decimal string, a date as YYYY-MM-DD, a choice as its code, yes/no as \"true\" or \"false\", a record field as the record's id from base.records.search) or null to clear; values is for a several-choices field only: its pick-list codes, an empty list clearing it. Find keys, types and a record field's target kind with base.custom_fields.list (record type person).","items":{"type":"object","required":["key"],"properties":{"key":{"type":"string","maxLength":40},"value":{"type":"string","maxLength":10000,"nullable":true},"values":{"type":"array","items":{"type":"string","maxLength":64},"description":"For a several-choices field, the pick-list codes; an empty list clears it."}}}})
 }
 
 // People take tenant-defined custom fields: the values live in

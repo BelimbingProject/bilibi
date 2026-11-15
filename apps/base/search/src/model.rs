@@ -42,6 +42,10 @@ pub struct Searchable {
     pub updated: Option<&'static str>,
     /// Whether the kind is searched until an operator says otherwise.
     pub default_on: bool,
+    /// The hidden Grid field holding a stored `tsvector` of the row's tenant
+    /// custom values (`jsonb_to_tsvector` over `custom_fields`), GIN-indexed.
+    /// A record matches on it only through the tenant's active text fields.
+    pub custom: Option<&'static str>,
 }
 
 /// A field whose listed values mean the record is retired or archived.
@@ -68,6 +72,7 @@ impl Searchable {
             state: None,
             updated: None,
             default_on: true,
+            custom: None,
         }
     }
     pub const fn subtitle(self, fields: &'static [&'static str]) -> Self {
@@ -91,6 +96,14 @@ impl Searchable {
     pub const fn updated(self, field: &'static str) -> Self {
         Self {
             updated: Some(field),
+            ..self
+        }
+    }
+    /// Also find records by the tenant's custom text fields, through the
+    /// hidden custom-values vector `field`.
+    pub const fn custom(self, field: &'static str) -> Self {
+        Self {
+            custom: Some(field),
             ..self
         }
     }
@@ -284,6 +297,13 @@ fn check_fields(table: &Table, decl: &Searchable) -> std::result::Result<(), Str
             "vector {} must be a hidden grid field",
             decl.vector
         ));
+    }
+    if let Some(custom) = decl.custom {
+        if !field(custom)?.hidden {
+            return Err(format!(
+                "custom vector {custom} must be a hidden grid field"
+            ));
+        }
     }
     for id in decl.subtitle {
         if field(id)?.hidden {

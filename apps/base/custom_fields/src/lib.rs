@@ -6,6 +6,7 @@
 //! Contract: `README.md`; decision: ADR 21.
 mod declaration;
 mod definitions;
+mod grid;
 mod operations;
 mod present;
 mod values;
@@ -15,6 +16,7 @@ pub use declaration::{RecordType, LABEL_MAX, RECORD_TYPES, RECORD_TYPE_MAX};
 pub use definitions::{
     Checked, CustomFields, Definition, FieldError, FieldUpdate, Kind, NewField, HELP_MAX, KEY_MAX,
 };
+pub use grid::{GridSource, GRID_SOURCES};
 pub use present::{codes_value, picked};
 pub use values::{codes_of, valid_date, valid_number};
 #[doc(hidden)]
@@ -127,11 +129,15 @@ fn build(
 inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
+        dependencies: &["base/module_registry", "base/database", "base/grid", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
         migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let fields = Arc::new(build(services)?);
+                // Grid reads the tenant's active fields into each fresh catalog.
+                let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
+                let sources = grid::sources(&catalog)?;
+                bilibi_grid::bind_custom_columns(Box::leak(Box::new(grid::Columns { fields: fields.clone(), sources })))?;
                 operations::bind(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(), fields.clone())?;
                 Ok(fields)
             } },

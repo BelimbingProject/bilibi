@@ -19,7 +19,7 @@ use bilibi_ui::{
     page::*, params, ActionLink, BackLink, BuiltinColumn, Button, ButtonVariant, Card, Choice,
     CommitStates, CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, FlexRow, FlexTable,
     Form, Header, Html, IconButton, InlineChoice, InlineEdit, InlineField, InputKind, ListColumns,
-    PageVariant, RecordPicker, SectionHeading, StatusKind, TableEmpty, NO_FLASH,
+    PageVariant, PickerHit, RecordPicker, SectionHeading, StatusKind, TableEmpty, NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -73,7 +73,16 @@ pub(crate) struct Detail {
     hits: Vec<Hit>,
     flash: Option<(StatusKind, String)>,
     customers: Sharing,
+    /// Each record custom field's picker: the typed text and its hits, by
+    /// control name (`cf_<key>`).
+    references: HashMap<String, (String, Vec<PickerHit>)>,
 }
+
+/// The form a record custom field's picker posts its search in.
+const REFERENCE_FORM: &str = "custom_reference";
+/// A record custom field's pick and clear events, then the field's key.
+const PICK_CUSTOM: &str = "pick_cf_";
+const CLEAR_CUSTOM: &str = "clear_cf_";
 
 impl Detail {
     pub async fn new(pages: Pages, scope: &Scope, id: i64, framed: bool) -> Result<Self> {
@@ -107,6 +116,7 @@ impl Detail {
             hits: Vec::new(),
             flash: None,
             customers: Sharing::default(),
+            references: HashMap::new(),
         })
     }
 
@@ -176,7 +186,46 @@ impl Detail {
         Ok(())
     }
 
-    /// One custom field's save: a patch of that key alone.
+    /// The tenant's active custom field with this control name (`cf_<key>`);
+    /// `None` once it was archived while the page was open.
+    async fn custom_definition(
+        &self,
+        scope: &Scope,
+        name: &str,
+    ) -> Result<Option<bilibi_custom_fields::Definition>> {
+        let key = name.strip_prefix("cf_").ok_or(Error::Invalid)?;
+        Ok(self
+            .pages
+            .documents
+            .custom_fields(scope)
+            .await?
+            .into_iter()
+            .find(|definition| definition.key == key))
+    }
+
+    /// Saves one custom field's `{key, value}` or `{key, values}` pair
+    /// through `core.document.update`, as every other field.
+    async fn submit_custom(
+        &self,
+        scope: &Scope,
+        credential: &str,
+        version: i64,
+        pair: Value,
+    ) -> Result<std::result::Result<Value, Refusal>> {
+        self.pages
+            .submit(
+                scope,
+                credential,
+                "save_custom_field",
+                "core.document.update",
+                json!({"id": self.id, "version": version, "patch": {"custom": [pair]}}),
+                "The change was not saved. Try again.",
+            )
+            .await
+    }
+
+    /// One custom field's in-place save: a patch of that key alone. A
+    /// several-choices field sends its ticked codes joined by commas.
     async fn save_custom_field(
         &mut self,
         scope: &Scope,
@@ -184,40 +233,124 @@ impl Detail {
         value: &Value,
     ) -> Result<()> {
         let field = value["field"].as_str().ok_or(Error::Invalid)?;
-        let key = field.strip_prefix("cf_").ok_or(Error::Invalid)?;
         if value["id"].as_str() != Some(&self.id.to_string()) {
             return Err(Error::Invalid);
         }
+        let definition = self.custom_definition(scope, field).await?;
         let submitted = value["value"].as_str().ok_or(Error::Invalid)?;
         let version = value["version"]
             .as_str()
             .and_then(|v| v.parse::<i64>().ok())
             .ok_or(Error::Invalid)?;
-        let input = json!({
-            "id": self.id,
-            "version": version,
-            "patch": {"custom": [{"key": key, "value": submitted}]},
-        });
-        let status = match self
-            .pages
-            .submit(
-                scope,
-                credential,
-                "save_custom_field",
-                "core.document.update",
-                input,
-                "The change was not saved. Try again.",
-            )
-            .await?
-        {
+        let key = field.strip_prefix("cf_").ok_or(Error::Invalid)?;
+        let kind = definition.as_ref().map(|definition| definition.kind);
+        let label = definition
+            .as_ref()
+            .map_or("Field", |definition| definition.label.as_str());
+        let pair = match kind {
+            // An archived field: the contract refuses its key.
+            None => json!({"key": key, "value": submitted}),
+            Some(bilibi_custom_fields::Kind::Choices) => {
+                let codes = match bilibi_custom_fields::codes_value([submitted]) {
+                    Value::Array(codes) => codes,
+                    _ => Vec::new(),
+                };
+                json!({"key": key, "values": codes})
+            }
+            // A record field saves from its picker (`pick_cf_<key>`).
+            Some(bilibi_custom_fields::Kind::Reference) => return Err(Error::Invalid),
+            Some(
+                bilibi_custom_fields::Kind::Text
+                | bilibi_custom_fields::Kind::Number
+                | bilibi_custom_fields::Kind::Date
+                | bilibi_custom_fields::Kind::Choice
+                | bilibi_custom_fields::Kind::Boolean
+                | bilibi_custom_fields::Kind::LongText
+                | bilibi_custom_fields::Kind::Link
+                | bilibi_custom_fields::Kind::Phone
+                | bilibi_custom_fields::Kind::Email,
+            ) => json!({"key": key, "value": submitted}),
+        };
+        let status = match self.submit_custom(scope, credential, version, pair).await? {
             Ok(_) => CommitStatus::Saved,
             Err(Refusal::Fields(fields)) => {
                 let reasons: Vec<&str> = fields.values().flatten().map(String::as_str).collect();
-                CommitStatus::refusal("Field", submitted, &reasons)
+                CommitStatus::refusal(label, submitted, &reasons)
             }
             Err(Refusal::Message(message)) => CommitStatus::Error(message),
         };
         self.statuses.put(field, status);
+        Ok(())
+    }
+
+    /// A record custom field's picker: `record` (`kind:id`) when picked,
+    /// `None` when cleared. Saves at once with the document's version; a
+    /// refusal shows under the picker.
+    async fn save_custom_reference(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        key: &str,
+        record: Option<&str>,
+    ) -> Result<()> {
+        let name = crate::custom::name(key);
+        let Some(definition) = self.custom_definition(scope, &name).await? else {
+            // Archived while the page was open: the next render drops it.
+            return Ok(());
+        };
+        if definition.kind != bilibi_custom_fields::Kind::Reference {
+            return Err(Error::Invalid);
+        }
+        let value = match record {
+            Some(record) => {
+                json!(bilibi_custom_fields::picked(&definition, record).ok_or(Error::Invalid)?)
+            }
+            None => Value::Null,
+        };
+        let version = self.pages.documents.get(scope, self.id).await?.version;
+        let pair = json!({"key": definition.key, "value": value});
+        let status = match self.submit_custom(scope, credential, version, pair).await? {
+            Ok(_) => {
+                self.references.remove(&name);
+                CommitStatus::Saved
+            }
+            Err(refusal) => CommitStatus::Error(bilibi_ui::error_sentence(
+                &definition.label,
+                &refusal.text(),
+            )),
+        };
+        self.statuses.put(name, status);
+        Ok(())
+    }
+
+    /// A record custom field's picker search: the form posts
+    /// `custom_reference[cf_<key>_search]`.
+    async fn search_custom_reference(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+        let form = params::form_values_checked(value, REFERENCE_FORM, params::FIELD_LIMIT)
+            .map_err(Error::refused)?;
+        let Some((name, query)) = form
+            .iter()
+            .find_map(|(field, text)| Some((field.strip_suffix("_search")?, text)))
+        else {
+            return Err(Error::Invalid);
+        };
+        let Some(definition) = self.custom_definition(scope, name).await? else {
+            return Ok(());
+        };
+        if definition.kind != bilibi_custom_fields::Kind::Reference {
+            return Err(Error::Invalid);
+        }
+        let query: String = query.chars().take(100).collect();
+        let hits = if query.trim().is_empty() {
+            Vec::new()
+        } else {
+            self.pages
+                .documents
+                .custom_values()
+                .reference_hits(scope, &definition, &query)
+                .await?
+        };
+        self.references.insert(name.to_owned(), (query, hits));
         Ok(())
     }
 
@@ -280,6 +413,18 @@ impl Detail {
         match name {
             "save_field" => self.save_field(scope, credential, value).await?,
             "save_custom_field" => self.save_custom_field(scope, credential, value).await?,
+            "custom_reference_change" => self.search_custom_reference(scope, value).await?,
+            _ if name.starts_with(PICK_CUSTOM) => {
+                let record = value["record"].as_str().ok_or(Error::Invalid)?;
+                let key = &name[PICK_CUSTOM.len()..];
+                self.save_custom_reference(scope, credential, key, Some(record))
+                    .await?
+            }
+            _ if name.starts_with(CLEAR_CUSTOM) => {
+                let key = &name[CLEAR_CUSTOM.len()..];
+                self.save_custom_reference(scope, credential, key, None)
+                    .await?
+            }
             "related_change" => self.search(scope, value).await?,
             "link" => {
                 let (kind, id) = value["record"]
@@ -772,15 +917,38 @@ impl Detail {
         d: &Document,
         editable: bool,
     ) -> Result<Vec<(String, String, Html)>> {
+        use bilibi_custom_fields::Kind;
+        let definitions = self.pages.documents.custom_fields(scope).await?;
+        // Every record field's held record, named in one read with the
+        // reader's own access.
+        let held: Vec<(&str, Reference)> = definitions
+            .iter()
+            .filter(|definition| definition.kind == Kind::Reference)
+            .filter_map(|definition| {
+                let target = definition.target.as_deref()?;
+                let id = d.custom.get(&definition.key)?.as_str()?;
+                Some((definition.key.as_str(), Reference::new(target, id)))
+            })
+            .collect();
+        let references: Vec<Reference> = held.iter().map(|(_, r)| r.clone()).collect();
+        let named: HashMap<&str, bilibi_records::Resolved> = held
+            .iter()
+            .map(|(key, _)| *key)
+            .zip(self.pages.records.resolve(scope, &references).await?)
+            .collect();
+        let values = self.pages.documents.custom_values();
         let mut rows = Vec::new();
-        for definition in self.pages.documents.custom_fields(scope).await? {
-            let name = format!("cf_{}", definition.key);
-            let value = d
-                .custom
-                .get(&definition.key)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
+        for definition in &definitions {
+            let name = crate::custom::name(&definition.key);
+            let stored = d.custom.get(&definition.key);
+            let codes = bilibi_custom_fields::codes_of(stored);
+            let value = match definition.kind {
+                Kind::Choices => codes.join(","),
+                _ => stored
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            };
             let mut field = InlineField::new(
                 format!("document-{}", name.replace('_', "-")),
                 name.clone(),
@@ -799,7 +967,34 @@ impl Detail {
                 field.hint = help.clone();
             }
             let html = match (definition.kind, definition.picklist.as_deref()) {
-                (bilibi_custom_fields::Kind::Choice, Some(list)) => {
+                (Kind::Choices, Some(_)) => {
+                    let client = self.pages.db.get().await?;
+                    let shown = values
+                        .choice_text(&**client, scope, definition, stored)
+                        .await?;
+                    let editor = bilibi_ui::MultiSelect::new(format!("{name}-input"), &name)
+                        .label(&definition.label)
+                        .label_class("sr-only")
+                        .options(
+                            values
+                                .choice_options(&**client, scope, definition, &codes)
+                                .await?,
+                        )
+                        .values(codes.iter().map(|code| (*code).to_owned()).collect())
+                        .wrapper_class("mb-0");
+                    render(InlineChoice {
+                        field,
+                        display: Html::text(if shown.is_empty() { "—" } else { &shown }),
+                        editor: render(editor)?,
+                    })?
+                }
+                (Kind::Reference, _) => self.custom_reference(
+                    definition,
+                    &name,
+                    named.get(definition.key.as_str()),
+                    editable,
+                )?,
+                (Kind::Choice, Some(list)) => {
                     let shown = self.pages.label(scope, list, Some(&value)).await?;
                     let editor = bilibi_ui::Combobox::new(format!("{name}-input"), &name)
                         .value(&value)
@@ -811,10 +1006,8 @@ impl Detail {
                         editor: render(editor)?,
                     })?
                 }
-                (bilibi_custom_fields::Kind::LongText, _) => {
-                    render(bilibi_ui::InlineLongText { field, rows: 5 })?
-                }
-                (bilibi_custom_fields::Kind::Boolean, _) => {
+                (Kind::LongText, _) => render(bilibi_ui::InlineLongText { field, rows: 5 })?,
+                (Kind::Boolean, _) => {
                     let editor = bilibi_ui::Field::named(&name)
                         .id(format!("{name}-input"))
                         .label(&definition.label)
@@ -830,20 +1023,24 @@ impl Detail {
                         editor: render(editor)?,
                     })?
                 }
-                (bilibi_custom_fields::Kind::Email, _) => render(InlineEdit {
+                (Kind::Email, _) => render(InlineEdit {
                     field: field.input_type("email"),
                 })?,
-                (bilibi_custom_fields::Kind::Phone, _) => render(InlineEdit {
+                (Kind::Phone, _) => render(InlineEdit {
                     field: field.input_type("tel"),
                 })?,
-                (bilibi_custom_fields::Kind::Link, _) => render(InlineEdit {
+                (Kind::Link, _) => render(InlineEdit {
                     field: field.input_type("url"),
                 })?,
-                (bilibi_custom_fields::Kind::Date, _) => {
+                (Kind::Date, _) => {
                     field = field.input_type("date");
                     render(InlineEdit { field })?
                 }
-                _ => render(InlineEdit { field })?,
+                // A pick-list field always names its list; without one it
+                // reads and edits as its stored text.
+                (Kind::Text | Kind::Number | Kind::Choice | Kind::Choices, _) => {
+                    render(InlineEdit { field })?
+                }
             };
             rows.push((
                 definition.label.clone(),
@@ -852,6 +1049,61 @@ impl Detail {
             ));
         }
         Ok(rows)
+    }
+
+    /// A record custom field: its pill, and for an editor the picker that
+    /// saves a pick at once (`pick_cf_<key>`) or clears it (`clear_cf_<key>`,
+    /// the picker's Change). A refusal shows under the picker.
+    fn custom_reference(
+        &self,
+        definition: &bilibi_custom_fields::Definition,
+        name: &str,
+        held: Option<&bilibi_records::Resolved>,
+        editable: bool,
+    ) -> Result<Html> {
+        let dom = format!("document-{}", name.replace('_', "-"));
+        let pill = held.map(|resolved| resolved.pill(format!("{dom}-pill"), self.framed));
+        if !editable {
+            return match pill {
+                Some(pill) => render(pill),
+                None => Ok(Html::text("—")),
+            };
+        }
+        let errors = match self.statuses.get(name) {
+            CommitStatus::Error(message) => vec![message],
+            _ => Vec::new(),
+        };
+        let (query, hits) = self
+            .references
+            .get(name)
+            .map_or(("", &[][..]), |(query, hits)| {
+                (query.as_str(), hits.as_slice())
+            });
+        let selected = held
+            .zip(pill)
+            .map(|(resolved, pill)| (format!("{}:{}", resolved.reference.kind, resolved.id), pill));
+        let pick = format!("{PICK_CUSTOM}{}", definition.key);
+        let clear = format!("{CLEAR_CUSTOM}{}", definition.key);
+        let picker = render(RecordPicker::new(
+            &dom,
+            REFERENCE_FORM,
+            name,
+            &definition.label,
+            query,
+            hits,
+            selected
+                .as_ref()
+                .map(|(value, pill)| (value.as_str(), pill.clone())),
+            (&pick, &clear),
+            errors,
+        ))?;
+        render(Form {
+            id: &format!("{dom}-form"),
+            event: "custom_reference_change",
+            change: true,
+            body: picker,
+            ..Form::default()
+        })
     }
 
     async fn facts(

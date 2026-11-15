@@ -20,6 +20,7 @@ Oversight reads are live, read-only and bounded. Prepared exports and scheduled 
 - A report stores a **definition**, never data. Every run reads through Grid with the reader's own `Scope`, so a reader sees only the rows and fields the record's own page would show them.
 - Columns, groupings, measures and sorts the reader cannot see are **left out** and named in `left_out`.
 - A **filter** on a column the reader cannot see **refuses the run** (`HiddenFilter`), so a filter cannot be used to infer a hidden value.
+- A tenant's **custom fields** are columns like built-in fields (`cf_<key>`, from Grid's scoped catalog: [Custom Fields](../custom_fields/README.md#reports-lists-and-search)). An archived field leaves the columns, so a saved report that uses it leaves it out for every reader, as any column they cannot see.
 
 ## Facade
 

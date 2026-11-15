@@ -745,7 +745,9 @@ impl Index {
                         .collect(),
                 )
                 .value(value("picklist"))
-                .hint("Only for a Pick-list or Several choices field: the values people choose from.")
+                .hint(
+                    "Only for a Pick-list or Several choices field: the values people choose from.",
+                )
                 .errors(errors("picklist")),
         )?);
         body.push(&render(

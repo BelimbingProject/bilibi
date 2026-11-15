@@ -221,6 +221,22 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
         None => ("NULL::text".to_owned(), "false".to_owned()),
     };
     let mut matched = format!("{vector} @@ {query}");
+    // The tenant's custom text: the indexed vector of every custom value
+    // finds the candidates, and only the active text fields' own words keep
+    // one, so an archived field, a code or a yes/no never makes a record match.
+    let mut ranked = vector.clone();
+    let texts = table.custom_search_values("r");
+    if let Some(custom) = decl
+        .custom
+        .and_then(|custom| column(table, custom))
+        .filter(|_| !texts.is_empty())
+    {
+        matched = format!(
+            "({matched} OR ({custom} @@ {query} AND to_tsvector('simple', concat_ws(' ', {})) @@ {query}))",
+            texts.join(", ")
+        );
+        ranked = format!("({vector} || setweight(COALESCE({custom}, ''::tsvector), 'D'))");
+    }
     if prefix {
         for c in decl
             .prefix
@@ -235,7 +251,7 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
     // A record never updated was last changed when it was made.
     let updated = format!("COALESCE({}, {at})", time_of(table, decl.updated));
     format!(
-        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({vector}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
+        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({ranked}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
         kind = literal(kind.id),
         title = text_of(table, Some(decl.title)),
         sub0 = text_of(table, decl.subtitle.first().copied()),

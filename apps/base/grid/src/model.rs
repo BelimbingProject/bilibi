@@ -243,6 +243,9 @@ pub struct Table {
     /// In a scoped catalog: the reader's reach on an owner-declaring table
     /// when it is narrower than all (#683).
     reach: Option<bilibi_authz::Reach>,
+    /// In a scoped catalog: the tenant's custom fields among `fields`, by id,
+    /// with their current label and value SQL over the row alias `{alias}`.
+    custom: BTreeMap<&'static str, (String, String, bool)>,
 }
 impl Table {
     pub fn id(&self) -> &'static str {
@@ -286,6 +289,41 @@ impl Table {
     }
     pub fn field(&self, id: &str) -> Option<&Field> {
         self.fields.iter().find(|field| field.id == id)
+    }
+    /// What a field is called: its declared label, or a tenant custom field's
+    /// current label.
+    pub fn field_label<'a>(&'a self, field: &'a Field) -> &'a str {
+        self.custom
+            .get(field.id)
+            .map_or(field.label, |(label, _, _)| label.as_str())
+    }
+    /// Whether `id` is one of the tenant's custom fields in this catalog.
+    pub fn is_custom(&self, id: &str) -> bool {
+        self.custom.contains_key(id)
+    }
+    pub(crate) fn custom_sql(&self, id: &str, alias: &str) -> Option<String> {
+        self.custom
+            .get(id)
+            .map(|(_, sql, _)| sql.replace("{alias}", alias))
+    }
+    /// The values of the tenant's searchable custom fields (text, links,
+    /// phone numbers, email) on the row `alias`, as SQL text expressions.
+    pub fn custom_search_values(&self, alias: &str) -> Vec<String> {
+        self.custom
+            .values()
+            .filter(|(_, _, searchable)| *searchable)
+            .map(|(_, sql, _)| sql.replace("{alias}", alias))
+            .collect()
+    }
+    pub(crate) fn add_custom(
+        &mut self,
+        field: Field,
+        label: String,
+        sql: String,
+        searchable: bool,
+    ) {
+        self.custom.insert(field.id, (label, sql, searchable));
+        self.fields.push(field);
     }
     /// The fields a column may show: declaration order, without hidden ones.
     pub fn visible_fields(&self) -> impl Iterator<Item = &Field> {
@@ -646,6 +684,7 @@ impl Table {
             links: Vec::new(),
             protected,
             reach: None,
+            custom: BTreeMap::new(),
         })
     }
 }

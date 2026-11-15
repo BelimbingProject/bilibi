@@ -63,6 +63,16 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 - A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
 - A parent's oversight read skips a table it reaches only partly.
 
+## Tenant custom fields
+
+A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declarations, so Grid adds them to each fresh scoped catalog through one hook (`bind_custom_columns`, a `CustomColumns` that `base/custom_fields` binds at boot). Grid does not depend on that module.
+
+- The owner selects its `custom_fields` JSON column in the table's source, declares it as a hidden text field and contributes a `bilibi_custom_fields::GridSource` naming the table and that field ([Custom Fields](../custom_fields/README.md#offer-custom-fields-on-a-record-type)).
+- Each active field becomes `cf_<key>` on that table, with the tenant's current label (`Table::field_label`; the `Field` itself carries the id as its label, so read labels through the table or the resolved `Column`). It resolves, projects, filters, groups and sorts like any field of the table, also through links (`work.company.cf_segment:list`), under the table's capability, reach and tenant predicate. It is never restrictable or masked: it is as visible as its record.
+- Its value is SQL over the hidden field that `base/custom_fields` builds from the validated key and no request text. A record field reads the target's `label_field` through the reader's own `scoped_source` of the target table and is absent when the reader may not read it.
+- `Table::custom_search_values` gives Base Search the tenant's searchable text fields. `Table::is_custom` tells a page that draws its own `cf_` columns which fields are tenant fields.
+- Keys never change and are never reused, so each distinct `cf_<key>` id is kept once for the process; labels are not.
+
 ## Detail fields become columns
 
 A scalar field shown on a record can also be added to its list, under the same label.

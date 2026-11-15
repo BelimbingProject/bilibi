@@ -67,21 +67,34 @@ impl PortalPerson {
 pub struct PortalField {
     pub key: String,
     pub label: String,
-    /// `text`, `number`, `date` or `choice`.
+    /// The field's type (`bilibi_custom_fields::Kind::as_str`): `text`,
+    /// `number`, `date`, `choice`, `choices`, `reference` and the others.
     #[serde(rename = "type")]
     pub kind: &'static str,
-    /// The stored value: text, a decimal string, `YYYY-MM-DD` or a choice
-    /// code; `None` when empty.
+    /// The stored value: text, a decimal string, `YYYY-MM-DD`, a choice code
+    /// or a record field's record id; `None` when empty and for several
+    /// choices (see `codes`).
     pub value: Option<String>,
+    /// The codes a several-choices field holds, in the order chosen; empty
+    /// for other kinds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<String>,
+    /// A record field's Base Records kind. The page names `value` with
+    /// `base/records` under the customer's own scope (`Records::resolve`),
+    /// which leaves a record the customer may not see unnamed; it never
+    /// shows the id instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     /// A choice's label in the customer's language (and whether that choice
-    /// is retired); `None` for other kinds or no value.
+    /// is retired), or several choices' labels joined by ", " (a retired one
+    /// marked "(Retired)"); `None` for other kinds or no value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
     pub editable: bool,
-    /// For an editable choice field, the active choices in the operator's
-    /// order.
+    /// For an editable choice or several-choices field, the active choices
+    /// in the operator's order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<PortalChoice>,
 }
@@ -232,18 +245,35 @@ async fn view(
         .await?;
     let mut custom = Vec::with_capacity(active.len());
     for definition in active.iter().filter(|d| policy.shows(&d.key)) {
-        let value = person
-            .custom
-            .get(&definition.key)
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let stored = person.custom.get(&definition.key);
+        let value = stored.and_then(Value::as_str).map(str::to_owned);
+        let codes: Vec<String> = match definition.kind {
+            bilibi_custom_fields::Kind::Choices => bilibi_custom_fields::codes_of(stored)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        };
         let editable = policy.may(&crate::custom::name(&definition.key));
         let (mut text, mut retired, mut choices) = (None, false, Vec::new());
         if let Some(list) = definition.picklist.as_deref() {
-            if let Some(code) = &value {
-                if let Some(label) = service.picklists.label(client, scope, list, code).await? {
-                    text = Some(label.text);
-                    retired = label.retired;
+            match definition.kind {
+                bilibi_custom_fields::Kind::Choices if !codes.is_empty() => {
+                    text = Some(
+                        crate::custom::fields()?
+                            .choice_text(client, scope, definition, stored)
+                            .await?,
+                    );
+                }
+                _ => {
+                    if let Some(code) = &value {
+                        if let Some(label) =
+                            service.picklists.label(client, scope, list, code).await?
+                        {
+                            text = Some(label.text);
+                            retired = label.retired;
+                        }
+                    }
                 }
             }
             if editable {
@@ -264,6 +294,11 @@ async fn view(
             label: definition.label.clone(),
             kind: definition.kind.as_str(),
             value,
+            codes,
+            target: match definition.kind {
+                bilibi_custom_fields::Kind::Reference => definition.target.clone(),
+                _ => None,
+            },
             text,
             retired,
             editable,
@@ -301,14 +336,33 @@ async fn view(
     })
 }
 
-/// Whether a submitted value equals the stored one: as text, and a number
-/// field's decimals by value (`1.50` and a JSON `1.5` are the same).
+/// Whether a submitted value equals the stored one: as text, a number
+/// field's decimals by value (`1.50` and a JSON `1.5` are the same), several
+/// choices by their codes in order (none, `[]` and `null` the same).
 fn same(
     kind: Option<bilibi_custom_fields::Kind>,
-    submitted: &Option<String>,
-    stored: &Option<String>,
+    submitted: &Value,
+    stored: Option<&Value>,
 ) -> bool {
-    match (kind, submitted, stored) {
+    if kind == Some(bilibi_custom_fields::Kind::Choices) {
+        return match submitted {
+            Value::Null | Value::Array(_) => {
+                let codes = |value: Option<&Value>| {
+                    bilibi_custom_fields::codes_value(bilibi_custom_fields::codes_of(value))
+                };
+                submitted
+                    .as_array()
+                    .is_none_or(|items| items.iter().all(Value::is_string))
+                    && codes(Some(submitted)) == codes(stored)
+            }
+            _ => false,
+        };
+    }
+    let Ok(submitted) = self::submitted(submitted) else {
+        return false;
+    };
+    let stored = stored.and_then(Value::as_str).map(str::to_owned);
+    match (kind, &submitted, &stored) {
         (Some(bilibi_custom_fields::Kind::Number), Some(a), Some(b))
             if bilibi_custom_fields::valid_number(a) && bilibi_custom_fields::valid_number(b) =>
         {
@@ -442,13 +496,8 @@ impl PersonService {
                 });
                 continue;
             }
-            let stored = old
-                .custom
-                .get(key)
-                .and_then(Value::as_str)
-                .map(str::to_owned);
             let kind = active.iter().find(|d| &d.key == key).map(|d| d.kind);
-            if submitted(value).is_ok_and(|value| same(kind, &value, &stored)) {
+            if same(kind, value, old.custom.get(key)) {
                 continue;
             }
             if !may(&crate::custom::name(key)) {

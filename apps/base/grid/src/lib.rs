@@ -5,6 +5,7 @@
 //! through `PageColumns`; see `README.md`.
 pub mod catalog;
 pub mod column;
+mod custom;
 mod field;
 pub mod lens;
 mod model;
@@ -44,6 +45,9 @@ pub use catalog::{
     restrictable, restriction_catalog, Catalog, CatalogError, Restrictable, MAX_COLUMNS,
 };
 pub use column::{Agg, Column, ColumnError, ColumnKind};
+pub use custom::{
+    bind_custom_columns, key_shaped, CustomColumn, CustomColumns, CustomFuture, CustomTable,
+};
 pub use model::{
     id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
     Table, TableDecl, MAX_FIELDS, MAX_LINKS_PER_TABLE, MAX_TABLES,

@@ -265,8 +265,8 @@ fn build(
         return Ok(Column {
             spec: spec.into(),
             id: dom_id(spec),
-            label: label(&hops, field.label),
-            short_label: short_label(&hops, field.label),
+            label: label(&hops, table.field_label(&field)),
+            short_label: short_label(&hops, table.field_label(&field)),
             ty: field.ty,
             kind: ColumnKind::Field,
             root: root.id(),
@@ -304,14 +304,14 @@ fn build(
         .collect();
     let short = field.map_or_else(
         || Agg::Count.label().to_string(),
-        |f| format!("{} ({})", f.label, agg.label()),
+        |f| format!("{} ({})", table.field_label(&f), agg.label()),
     );
     let heading = match field {
         None => format!("{} {}", many.label(), Agg::Count.label().to_lowercase()),
         Some(f) => format!(
             "{} {} {}",
             links.last().expect("many link").label(),
-            lower_first(f.label),
+            lower_first(table.field_label(&f)),
             agg.label().to_lowercase()
         ),
     };

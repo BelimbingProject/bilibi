@@ -48,8 +48,6 @@ pub struct Pages {
     pub settings: Arc<bilibi_settings::Settings>,
     /// Where a contact may be dropped or added to (issue 265).
     pub records: Arc<bilibi_records::Records>,
-    /// Labels and choices of custom pick-list fields.
-    pub picklists: Arc<bilibi_picklists::PickLists>,
 }
 impl Pages {
     /// One of these pages' write events, as the contract it declared.

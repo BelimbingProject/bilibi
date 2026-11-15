@@ -59,11 +59,13 @@ impl CustomFields {
         };
         let mut labels = Vec::with_capacity(codes.len());
         for code in codes.into_iter().filter(|code| !code.is_empty()) {
-            labels.push(match self.picklists.label(client, scope, list, code).await? {
-                Some(label) if label.retired => format!("{} (Retired)", label.text),
-                Some(label) => label.text,
-                None => code.to_owned(),
-            });
+            labels.push(
+                match self.picklists.label(client, scope, list, code).await? {
+                    Some(label) if label.retired => format!("{} (Retired)", label.text),
+                    Some(label) => label.text,
+                    None => code.to_owned(),
+                },
+            );
         }
         Ok(labels.join(", "))
     }
@@ -106,8 +108,7 @@ impl CustomFields {
         ids: &[&str],
     ) -> Result<Vec<Resolved>> {
         let kind = definition.target.as_deref().ok_or(Error::Internal)?;
-        let references: Vec<Reference> =
-            ids.iter().map(|id| Reference::new(kind, *id)).collect();
+        let references: Vec<Reference> = ids.iter().map(|id| Reference::new(kind, *id)).collect();
         self.records.resolve(scope, &references).await
     }
 

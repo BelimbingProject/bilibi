@@ -119,7 +119,12 @@ fn columns(
         .filter(|column| !masked.contains(&column.id))
         .chain(definitions.iter().map(|definition| {
             let name = crate::custom::name(&definition.key);
-            BuiltinColumn::new(&name, &definition.label).sortable(&name)
+            let column = BuiltinColumn::new(&name, &definition.label);
+            if crate::custom::sortable(definition.kind) {
+                column.sortable(&name)
+            } else {
+                column
+            }
         }))
         .collect(),
     )
@@ -308,8 +313,21 @@ impl Index {
                 self.columns.columns.iter().any(|column| column.id == name)
             })
             .collect();
-        let cells =
-            super::custom::cells(&self.pages, scope, &display, &on_screen, &page.entries).await?;
+        // Every record the on-screen record columns hold is named in one call.
+        let names = super::custom::Names::read(
+            scope,
+            &on_screen,
+            page.entries.iter().map(|person| &person.custom),
+        )
+        .await?;
+        let shown = super::custom::Shown {
+            pages: &self.pages,
+            scope,
+            display: &display,
+            names: &names,
+            framed: self.framed,
+        };
+        let cells = super::custom::cells(&shown, &on_screen, &page.entries).await?;
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {
             let Some(person) = page
@@ -357,10 +375,11 @@ impl Index {
             }
             for definition in &on_screen {
                 let name = crate::custom::name(&definition.key);
-                let shown = cells
+                let cell = cells
                     .get(&(person.id.get(), name.clone()))
-                    .map_or("—", String::as_str);
-                row.slots.insert(name, Html::text(shown));
+                    .cloned()
+                    .unwrap_or_else(|| Html::text("—"));
+                row.slots.insert(name, cell);
             }
         }
         self.page_keys = rows.iter().map(|row| row.key.clone()).collect();
@@ -911,6 +930,13 @@ impl LiveState<Scope, Error> for Index {
                         }
                     }
                     "clear-flash" => {}
+                    // A record field's picker in the new-contact dialog.
+                    other if other.starts_with("pick_cf_") || other.starts_with("clear_cf_") => {
+                        let pages = self.pages.clone();
+                        if let Some(draft) = &mut self.draft {
+                            draft.pick(&pages, request.scope, other, value).await?;
+                        }
+                    }
                     _ => return Err(Error::Invalid),
                 },
             }
