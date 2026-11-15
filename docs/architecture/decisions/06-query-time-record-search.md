@@ -44,7 +44,7 @@ Bilibi is PostgreSQL-only. An external engine would hold a second copy of every 
 - A Domain makes a table searchable with one contribution and one migration; no host, Menu or template change.
 - Each searchable table carries a generated column and a GIN index; writes pay for keeping them.
 - The GIN index does not include the tenant, so a very common prefix is matched across tenants before the tenant predicate filters it. The cost check refuses a search too broad to rank and asks for another word.
-- Typo tolerance, matching inside a word and scripts written without spaces need `pg_trgm` or another extension, which would be the Platform's first; each needs its own decision.
+- Typo tolerance, matching inside a word and scripts written without spaces need `pg_trgm` or another extension. [ADR 29](./29-pg-trgm-is-allowed.md) allows `pg_trgm`; record search does not use it yet, and any other extension needs its own decision.
 - If an adopter outgrows PostgreSQL search, a later port can let an Extension provide another engine behind the same contribution.
 
 ## Status
