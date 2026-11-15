@@ -496,10 +496,11 @@ impl Grants {
     /// Whether the actor may set `rule` for `key` on `user`, for both the
     /// write and an agent review: a rule gives no more reach than the actor
     /// holds (#683). An allow needs the key at least as far as it reaches.
-    /// Clearing an allow that capped the account below what its roles and
-    /// team roles give is a widening, so the actor must hold the key as far
-    /// as the account then reaches, their own account included. A deny, and
-    /// clearing one, check no reach.
+    /// Clearing a rule on a key that supports reach needs the key as far as
+    /// the account reaches once the rule is gone, whatever the rule was
+    /// (allow, deny or none), on the actor's own account too; a clear that
+    /// leaves the key unheld needs nothing more. Setting a deny only narrows
+    /// and checks no reach.
     pub async fn validate_direct(
         &self,
         client: &(impl GenericClient + Sync),
@@ -515,19 +516,17 @@ impl Grants {
                 reach
             }
             None => {
-                let capped = client
-                    .query_opt(
-                        "SELECT reach FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed",
-                        &[&actor.tenant(), &user, &key],
-                    )
-                    .await?
-                    .map(|row| Reach::parse(row.get(0)).unwrap_or(Reach::All));
-                let Some(capped) = capped else {
+                if !self
+                    .vocabulary
+                    .capabilities
+                    .get(key)
+                    .is_some_and(|c| c.definition.reach)
+                {
                     return Ok(());
-                };
+                }
                 match crate::effective::reach_without_direct(client, actor, user, key).await? {
-                    Some(after) if after > capped => after,
-                    _ => return Ok(()),
+                    Some(after) => after,
+                    None => return Ok(()),
                 }
             }
         };

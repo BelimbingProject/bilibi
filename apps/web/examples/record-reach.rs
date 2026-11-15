@@ -556,8 +556,8 @@ async fn main() -> Result<(), Failure> {
             .is_err_and(|why| why.contains("always reaches all")),
     )?;
 
-    // Lifting a cap on the user is a widening: the actor must hold the key as
-    // far as the account then reaches.
+    // Clearing a direct rule is a widening: the actor must hold the key as
+    // far as the account reaches once it is gone, whatever the rule was.
     grants.assign_role(&admin, 2, readers, false).await?;
     proof.team_role(&admin, team, team_readers, true).await?;
     proof
@@ -574,12 +574,43 @@ async fn main() -> Result<(), Failure> {
         "the refused clear leaves the user at mine",
         proof.tasks(&viewer).await? == lee,
     )?;
+    prove(
+        "an actor holding mine may deny the capped user",
+        grants
+            .set_direct(&manager, 2, TASKS, Some(Direct::Deny))
+            .await
+            .is_ok(),
+    )?;
+    prove(
+        "but clearing that deny is refused: the user would reach my team's",
+        matches!(
+            grants.set_direct(&manager, 2, TASKS, None).await,
+            Err(Error::Forbidden)
+        ),
+    )?;
+    proof
+        .direct(&admin, Some(Direct::Allow(Reach::Own)))
+        .await?;
     grants.assign_role(&admin, 1, scratch, true).await?;
     grants
         .set_direct(&admin, 1, TASKS, Some(Direct::Allow(Reach::Own)))
         .await?;
     prove(
         "an actor capped at mine cannot clear their own cap",
+        matches!(
+            grants.set_direct(&manager, 1, TASKS, None).await,
+            Err(Error::Forbidden)
+        ),
+    )?;
+    prove(
+        "an actor capped at mine may deny themselves",
+        grants
+            .set_direct(&manager, 1, TASKS, Some(Direct::Deny))
+            .await
+            .is_ok(),
+    )?;
+    prove(
+        "but cannot lift their own cap by clearing that deny",
         matches!(
             grants.set_direct(&manager, 1, TASKS, None).await,
             Err(Error::Forbidden)
