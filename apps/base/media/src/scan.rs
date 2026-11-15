@@ -459,17 +459,29 @@ impl Media {
         row: &Stored,
     ) -> Result<()> {
         let tenant = scope.tenant();
-        let uploader = match tx
+        let attachment = tx
             .sql()
             .query_opt(
-                "SELECT uploaded_by_id FROM base_media_attachments WHERE media_asset_id=$1 AND tenant_id=$2",
+                "SELECT uploaded_by_id,subject_type,subject_id FROM base_media_attachments WHERE media_asset_id=$1 AND tenant_id=$2",
                 &[&row.asset.id, &tenant],
             )
-            .await?
-        {
+            .await?;
+        let uploader = match &attachment {
             // A system principal's attachment names no account to tell.
             Some(attachment) => attachment.get::<_, Option<i64>>(0),
             None => row.created_by,
+        };
+        // The notice names the record the file is attached to, never the
+        // file: a file name can be personal data, and a notification is never
+        // erased (#702). Managers see the name on the Quarantined Files page.
+        let file = format!("File {}", row.asset.id);
+        let name = match &attachment {
+            Some(attachment) => format!(
+                "{file}, attached to {} {},",
+                attachment.get::<_, &str>(1),
+                attachment.get::<_, &str>(2)
+            ),
+            None => file,
         };
         let mut live = Vec::new();
         let limit = i64::try_from(MAX_RECIPIENTS).unwrap_or(500);
@@ -492,14 +504,6 @@ impl Media {
                 }
             }
         }
-        let name: String = row
-            .asset
-            .original_filename
-            .as_deref()
-            .unwrap_or("A file")
-            .chars()
-            .take(120)
-            .collect();
         let found = row.signature.as_deref().unwrap_or("unnamed");
         let (told_uploader, managers): (Vec<i64>, Vec<i64>) =
             live.into_iter().partition(|user| Some(*user) == uploader);
@@ -507,7 +511,7 @@ impl Media {
             let notice = Notice::new("A file you uploaded was quarantined")
                 .kind("media.quarantined")
                 .icon("shield-exclamation")
-                .body(format!("“{name}” failed a malware check, so nobody can open it. Upload a clean copy instead."));
+                .body(format!("{name} failed a malware check, so nobody can open it. Upload a clean copy instead."));
             self.notifications
                 .notify(tx, scope, &told_uploader, &notice)
                 .await?;
@@ -517,7 +521,7 @@ impl Media {
                 .kind("media.quarantined")
                 .icon("shield-exclamation")
                 .url(crate::web::PATH)
-                .body(format!("“{name}” failed a malware check ({found})."));
+                .body(format!("{name} failed a malware check ({found})."));
             self.notifications
                 .notify(tx, scope, &managers, &notice)
                 .await?;
