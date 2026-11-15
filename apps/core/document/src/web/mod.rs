@@ -2,8 +2,9 @@
 //! a revision's file and the CSV
 //! export. Reads use the `Documents` facade; every write calls an operation
 //! contract through `PageContracts` (declared in `PageWrites`), except
-//! receiving a file, which stores it with `store_file` (a listed page-write
-//! gap, as Bulk data's receive). No Bilimbi counterpart; the shapes follow
+//! receiving a file, which stores it with `store_file`, and closing a dialog,
+//! which discards the file it stored with `discard_files` (listed page-write
+//! gaps, as Bulk data's receive). No Bilimbi counterpart; the shapes follow
 //! `cx/activities` and Core Person's list and record pages.
 mod customers;
 mod dialog;
