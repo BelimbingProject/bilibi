@@ -311,14 +311,7 @@ The page holds one `PageColumns` in its live state and:
    `Outcome::Patch` it loads again and returns the merged query; `Sort(key)`
    is a built-in's sort for the page's `ListState`; `Update` re-renders.
 
-`View` is what a person arranged, as one value that round-trips through the
-URL (`cols`, `lens`, `z`, `since`; defaults left out) and the stored JSON
-(`columns`, `lenses`, `zoom`, `since`). An address that carries any of those
-keys wins over memory, so a shared link shows what its sender saw and changes
-nobody's memory until the reader arranges something. An address that carries
-none opens the page the way the account left it (`PageViews::fetch`, read
-afresh every time, never from a copy held in the page), and as the page's own
-columns when the account arranged nothing.
+`View` is what a person arranged, as one value that round-trips through the URL (`cols`, `lens`, `z`, `since`) and the stored JSON (`columns`, `lenses`, `zoom`, `since`). An address that carries any of those keys wins over memory, so a shared link shows what its sender saw and changes nobody's memory until the reader arranges something. An address that carries none opens the page the way the account left it (`PageViews::fetch`, read afresh every time, never from a copy held in the page), and as the page's own columns when the account arranged nothing. `View::to_params` omits defaults; `PageColumns::params` preserves a row-height marker for explicit URL arrangements so canonicalization keeps the address authoritative even at the defaults.
 
 `PageViews` keeps the arrangement per account and per page in the
 user-scoped `ui.grid.page_columns` setting, one `{page, view}` entry per
@@ -369,6 +362,6 @@ A person saves the list they see as a named view (columns, lenses, row height, c
 - **Who sees one:** its owner, everyone when shared that way, or the holders of a shared role (`effective_principal_roles`). Saving a view needs `grid.views.share`; the owner always sees their saved views. A tenant-wide role assignment receives the view in every company; an assignment limited to one company receives it only while that company is selected. Owners can delete their own views after losing sharing permission; deleting another owner’s view requires `grid.views.share`. Deletion asks for confirmation in the strip; at most 100 views per page per tenant and one name per page, whatever its case. The save transaction serializes both checks and insertion per tenant/page.
 - **Writes** go through the mutation boundary (`PageViews::save_shared`, `delete_shared`) and are audited as kind `grid.shared_view`. Pages and agents call `base.grid.view.save` and `base.grid.view.delete` through the normal audited operation transaction. Each host declares both contracts for its Grid event in `PAGE_WRITES` and supplies `ViewCaller` with its page service, event, session credential, canonical query and `PageContracts`.
 
-Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls. Explicit URL arrangements retain a row-height marker through canonicalization, including default arrangements.
+Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls.
 
 The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, and saving filters after queued changes.

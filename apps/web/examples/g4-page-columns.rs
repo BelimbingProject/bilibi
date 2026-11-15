@@ -372,7 +372,6 @@ impl State {
     }
 }
 
-/// The event payload's values as strings, the shape every flex op is read in.
 impl Page<Scope, Error> for Pages {
     fn render<'a>(&'a self, request: PageRequest<'a, Scope>) -> PageFuture<'a, Error> {
         Box::pin(async move {

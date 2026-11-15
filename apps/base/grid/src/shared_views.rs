@@ -12,7 +12,8 @@
 //! Who reads a view is one SQL condition, [`VISIBLE`]: its owner, everyone in
 //! the tenant when shared that way, or a holder of a role it is shared with
 //! (Authz's `effective_principal_roles`, as Reports and Tiling read theirs).
-//! Sharing with others needs [`SHARE`]; a person always keeps their own.
+//! Write authorization is enforced by [`PageViews::save_shared`] and
+//! [`PageViews::delete_shared`].
 //! Every write is audited through the mutation boundary.
 use crate::page_views::PageViews;
 use crate::view::View;
@@ -33,7 +34,7 @@ pub const MAX_PER_PAGE: i64 = 100;
 pub const MAX_ROLES: usize = 50;
 /// Characters of a view's name.
 pub const MAX_NAME: usize = 80;
-/// Query parameters a view keeps, and the bytes of one value.
+/// Maximum bytes of the serialized page query a view keeps.
 pub(crate) const MAX_QUERY: usize = 16384;
 
 inventory::submit! { Contribution::new(VOCABULARY, "grid.views.vocabulary",
@@ -46,7 +47,7 @@ Provenance { module: "base/grid", source: file!(), line: line!() },
     system_principals: &[],
 }) }
 
-/// `$1` tenant, `$2` reader; the view row is `v`.
+/// `$1` tenant, `$2` reader, `$4` current company; the view row is `v`.
 const VISIBLE: &str = "v.tenant_id=$1 AND (v.owner_id=$2 OR v.shared_with_everyone OR EXISTS (SELECT 1 FROM base_grid_shared_view_roles s JOIN effective_principal_roles p ON (p.company_id IS NULL OR p.company_id=$4) AND p.tenant_id=s.tenant_id AND p.role_id=s.role_id WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id AND p.user_id=$2))";
 
 /// Whom a saved view is for.
@@ -87,8 +88,8 @@ impl SharedView {
 
 /// The page query a view keeps from the address it was saved at: the page's
 /// own keys only. The arrangement is taken from the live view, the page number
-/// is dropped so a view opens on its first page, and anything oversized or
-/// oddly named is left out.
+/// is dropped so a view opens on its first page. Invalid keys, control
+/// characters and oversized queries are refused rather than truncated.
 pub(crate) fn clean_params(params: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
     let kept: BTreeMap<_, _> = params
         .iter()
@@ -187,7 +188,7 @@ impl PageViews {
     }
 
     /// Saves `view` and the page's `params` under `name` for `audience`.
-    /// Sharing with anyone but the owner needs [`SHARE`]. A taken name, too
+    /// Saving needs [`SHARE`]. A taken name, too
     /// many views or an unknown role is [`Error::Refused`] with its reason.
     pub async fn save_shared(
         &self,
@@ -299,7 +300,8 @@ impl PageViews {
         Ok(id)
     }
 
-    /// Deletes a view the reader saved; the people it was shared with lose it.
+    /// Deletes the reader's own view, or another owner's with [`SHARE`];
+    /// the people it was shared with lose it.
     pub async fn delete_shared(
         &self,
         tx: &mut MutationTransaction<'_>,

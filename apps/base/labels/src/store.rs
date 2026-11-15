@@ -83,7 +83,7 @@ pub struct Stored {
 }
 
 /// One rename or clear: the word's kind and stable ID, the new text (blank
-/// clears), and the version of the override the writer read (0 when none).
+/// clears), and the override's identity and version (`(0, 0)` when unset).
 #[derive(Clone, Copy, Debug)]
 pub struct Edit<'a> {
     pub kind: Kind,
@@ -204,8 +204,8 @@ impl Labels {
     }
 
     /// Decides what setting `text` (blank clears) would do, or why not. Needs
-    /// `base.labels.manage`. With `version`, the override must still be the one
-    /// the writer read (0 when there was none).
+    /// `base.labels.manage`. The identity and version must still match the
+    /// override the writer read (`(0, 0)` when there was none).
     pub async fn plan(
         &self,
         sql: &dyn bilibi_tenancy::ProofClient,

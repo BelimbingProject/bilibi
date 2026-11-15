@@ -271,8 +271,8 @@ impl PageColumns {
             .map_err(Error::refused)
     }
 
-    /// The URL params a page merges into its own: only what differs from the
-    /// defaults.
+    /// The URL params a page merges into its own. Explicit arrangements keep
+    /// a row-height marker so the address still wins over personal memory.
     pub fn params(&self) -> HashMap<String, String> {
         let mut params = self.view.to_params();
         if self.explicit {

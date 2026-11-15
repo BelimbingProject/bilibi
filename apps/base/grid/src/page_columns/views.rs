@@ -11,7 +11,7 @@ use bilibi_ui::flex_table::{ViewLink, ViewsBar};
 use serde_json::json;
 use std::collections::HashMap;
 
-/// What the page knows of its saved views, read afresh by every `load`.
+/// What the page knows of its saved views; see [`PageColumns::refresh_views`].
 #[derive(Default)]
 pub(super) struct Saved {
     shared: Vec<SharedView>,
