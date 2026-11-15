@@ -12,8 +12,8 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | --- | --- | --- |
 | Trigger | An event an owner records in its own transaction (`rule_cases/cases.opened`) | An owner's `Trigger` contribution |
 | Conditions | `all` or `any` of: a field of the trigger's record, an operator, a value | The rule |
-| Actions | 1 to 10 owner write contracts, each with approved parameters | An owner's `Action` contribution; the rule picks one and its parameters |
-| Examples | 1 to 10 records that should and should not match | The rule's author |
+| Actions | 1 to 10 owner write contracts, each with approved parameters | Owners' `Action` contributions; the rule selects actions and supplies their parameters |
+| Examples | 1 to 10 fact sets with expected `match` or `no_match` outcomes | The rule's author |
 
 - **Fields** are Grid column paths on the trigger's table (`priority`, or `company.name` through a one-link), read as the `rules` principal. No aggregates.
 - **Operators**: `eq`, `ne`, `in`, `not_in`, `lt`, `le`, `gt`, `ge` (numbers and dates), `empty`, `not_empty`.
@@ -33,7 +33,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
 - **Drafting runs nothing.** A new version of a running rule runs only once approved; until then the earlier version keeps running.
 - **A queued run keeps its pinned version.** If another version is approved or the rule is switched off before the run acts, the run is refused (`stale_version`, `rule_off`); nothing silently swaps in the new rule.
-- **Installed bindings are pinned.** Approval stores the condition fields' types and choices, trigger bindings and action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the rule **Needs review** until a new version is approved.
+- **Installed bindings are pinned.** Approval stores a fingerprint of the condition fields' types, choices and source mappings, every linked table's join and key bindings, the trigger bindings and the action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the rule **Needs review** until a new version is approved.
 - **Approval never delegates more.** The approver must hold All reach for every capability the rule reads or acts on, including linked tables; Own or Team reach cannot approve or switch on tenant-wide automation; a rule cannot reach a field the principal may not read.
 
 ## How a run works

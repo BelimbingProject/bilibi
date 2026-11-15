@@ -295,9 +295,9 @@ impl Show {
         );
         let dom = format!("rule-version-{}", version.number);
         let description = if running {
-            "This version runs on every new event."
+            "This is the approved version used when the rule is on."
         } else if version.approved_at.is_none() {
-            "Awaiting approval: nothing runs until an administrator approves it."
+            "This version will not run until an administrator approves it."
         } else {
             "Approved earlier; another version runs now."
         };

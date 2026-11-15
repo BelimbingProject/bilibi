@@ -9,6 +9,8 @@ Typed fields (text, number, date, pick-list, yes/no, long text, link, phone and 
 - **This module owns the definitions, not the values.** A record's owner keeps values in its own row and checks them in its own write.
 - **A tenant that defines no fields, or a module that does not opt in, sees no change.**
 
+For using fields as automation conditions, see [Rules](../rules/README.md#what-a-rule-is) and its [current limits](../rules/README.md#not-yet).
+
 ## Offer custom fields on a record type
 
 Three steps in the owning module.

@@ -216,7 +216,8 @@ impl Rules {
         ))
     }
 
-    /// One rule with its versions (newest first) and its latest receipts.
+    /// One rule with its newest 20 versions, the running version and every
+    /// version referenced by its latest 25 receipts, all newest first.
     pub async fn get(
         &self,
         client: &(impl GenericClient + Sync),

@@ -189,7 +189,7 @@ impl JobContracts {
     }
 
     /// The owner's preview, then its commit on `tx`, which must be this
-    /// execution's (`Execution::begin`): the job's lease, person and trace.
+    /// execution's (`Execution::begin`): the job's lease, caller and trace.
     /// The caller records its own result for the call in the same `tx` and
     /// commits it; dropping `tx` rolls the owner's write back.
     pub async fn commit(

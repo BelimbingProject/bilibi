@@ -30,6 +30,7 @@ pub struct Trigger {
     pub table: &'static str,
     /// JSON pointer to that record's key in the event payload (`/case`).
     pub subject: &'static str,
+    /// The integer Grid field used to detect changes to the evaluated record.
     pub version: &'static str,
 }
 
@@ -45,9 +46,11 @@ pub struct Action {
     /// The input property that receives the trigger's record key. A rule
     /// never supplies it: the runner binds it.
     pub subject: &'static str,
+    /// The integer input the runner binds to the evaluated record version;
+    /// the owner must check it under the record lock before mutating.
     pub version: &'static str,
     /// The events its commit may record, so an approval can refuse a rule
-    /// that would trigger itself.
+    /// that would close a cycle through active rules.
     pub records: &'static [&'static str],
 }
 
