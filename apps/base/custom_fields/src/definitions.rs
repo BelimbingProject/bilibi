@@ -273,10 +273,13 @@ impl CustomFields {
     /// The kinds of record a record field may point at: every mounted Base
     /// Records kind, by key, with its name for people ("Companies").
     pub fn reference_kinds(&self) -> Vec<(&'static str, &'static str)> {
-        self.records
+        let mut kinds: Vec<_> = self
+            .records
             .kinds()
             .map(|kind| (kind.key, self.records.kind_label(kind.key)))
-            .collect()
+            .collect();
+        kinds.sort_by_key(|(key, label)| (*label, *key));
+        kinds
     }
 
     /// The Base Records facade a record field's values are checked and named

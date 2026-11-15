@@ -703,11 +703,16 @@
       this.onPointerDown = () => (this.pressing = true)
       this.onPressEnd = () => (this.pressing = false)
 
+      // Escape closes only this open list: a dialog or inline editor around
+      // it keeps its draft and closes on the next Escape.
       this.onKeyDown = e => {
         if (e.key !== "Escape") return
 
-        if (this.el.contains(document.activeElement)) this.escape()
-        else this.dismiss()
+        if (this.el.contains(document.activeElement)) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.escape()
+        } else this.dismiss()
       }
 
       this.onClickAway = e => {
@@ -734,10 +739,10 @@
         this.listening = open
 
         if (open) {
-          window.addEventListener("keydown", this.onKeyDown)
+          window.addEventListener("keydown", this.onKeyDown, true)
           if (this.clickAway) document.addEventListener("click", this.onClickAway)
         } else {
-          window.removeEventListener("keydown", this.onKeyDown)
+          window.removeEventListener("keydown", this.onKeyDown, true)
           document.removeEventListener("click", this.onClickAway)
         }
       }
@@ -759,7 +764,7 @@
       this.trigger.removeEventListener("click", this.toggle)
       this.el.removeEventListener("pointerdown", this.onPointerDown)
       this.el.removeEventListener("focusout", this.onFocusOut)
-      window.removeEventListener("keydown", this.onKeyDown)
+      window.removeEventListener("keydown", this.onKeyDown, true)
       document.removeEventListener("click", this.onClickAway)
       window.removeEventListener("pointerup", this.onPressEnd)
       window.removeEventListener("pointercancel", this.onPressEnd)
