@@ -85,7 +85,7 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 
 - Name variants through the enums (`ButtonVariant`, `BadgeKind`, `PageVariant`), not class strings.
 - Icons use bare names from `base/ui` (`edit`, `pencil`, `bookmark-solid`), rendered as inline SVG. Use the Belimbing equivalent for a familiar action; see `apps/base/ui/README.md` for names and missing-icon behaviour.
-- Icon-only actions need an accessible label and a title. Inline controls are 24 px; table and toolbar controls are 28 px. Touch screens expand icon, tab, pager and choice targets to 40 px; the labelled button stays 24 px.
+- Icon-only actions need an accessible label and a title. Inline controls are 24 px; table and toolbar controls are 28 px. Touch sizing follows the [Compact scale](#compact-scale).
 - Links navigate; buttons act. Navigation in a page header ("Chart of accounts", "Open book") is the standard `button` with `href`, a link drawn as a button, never a bare text link. Back is always `BackLink`, never a button naming the parent list.
 - **On/off is a `Toggle`**, never a badge beside a check-mark action or a button whose label flips ("Enabled" + ✓ → one On/Off switch).
 - Destructive actions use calm danger text, never a solid red button.
@@ -105,7 +105,7 @@ Shared UI sizes follow the sidebar's 12 px text and tight row rhythm; pages do n
 | Floating fields | 40 px minimum; toolbar and table fields 28 px (`.ui-compact-controls`) |
 | Buttons | 24 px with 8 px side padding, one size everywhere (`ui-button`); a caller's padding, height and text-size classes are discarded (`button_class`) |
 | Header actions | The page header's actions slot is one row: buttons of every variant centred on one line, 8 px apart, wrapping at phone width with the same gap. Callers pass bare buttons, never a wrapper, margin or alignment class |
-| Touch targets | Utility `IconButton`, tabs, pagination and choice labels on coarse pointers: 40 px minimum. `Button` keeps 24 px on phones and touch screens |
+| Touch targets | Utility `IconButton`, tabs, pagination and choice labels on coarse pointers: 40 px minimum, with the exceptions under [Lists](#lists) and [Record pages](#record-pages). `Button` keeps 24 px on phones and touch screens |
 | Card | 12 px body padding; header 8 px vertically and 12 px horizontally; table frames stay at zero |
 | Feedback | 8 px vertically and 12 px horizontally; panel notices use 6 px vertically |
 | Spacing | 4 px steps: 4 within a group, 8 between controls, 12 within surfaces, 16 between groups |
@@ -125,7 +125,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - Never set a page's own max width.
 - Compact does not mean cramped. Keep related controls close and the primary action clear.
 - **Standard gaps only.** Sections, cards, toolbars and tables are spaced by the shared stack and the Compact scale, never page-owned margins. No element touches another; a missing gap is a bug, not a style.
-- **Touch screens.** Coarse pointers grow icon buttons to 40 px; every close button and icon button must still sit inside its box (a flash's ✕ once hung outside the message). Check each page in touch mode.
+- **Touch screens.** Targets follow the [Compact scale](#compact-scale); every close button and icon button must still sit inside its box (a flash's ✕ once hung outside the message). Check each page in touch mode.
 - **Flow.** Every page leads somewhere and never in a circle:
   - No loop between two pages (Book → Chart of accounts → Book). Each link leads forward or Back.
   - A "Go to X" button lands where the person acts (the company's open-book form), not on a list of all of them.
@@ -164,6 +164,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 - **State:** `ListState` keeps page, search, filters, sort and page size in the URL. Reload and shared links reopen the same view.
 - **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. A list a person reads whole (exchange rates) has no search box. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
+- **Phone column order:** A list may name its most useful columns to show first on phones; the API and ordering contract are in [Shared UI](apps/base/ui/README.md#phone-lists-and-header-actions).
+- **Row links:** Below `sm` (640 px) or on a coarse pointer, every row link has a real tap target at least 44 × 44 px; targets never overlap.
 - **Rows:** `py-0.5`, `px-2`. Headers `py-1`, sunken background, `text-xs font-semibold`.
 - **Numbers:** tabular numerals for IDs, counts, dates and amounts.
 - **Dates:** one date format, "6 Nov 2026", and one date and time format, "6 Nov 2026, 09:13" plus the zone, on every page, in every field and in every display mode the top bar offers. Never ISO `2026-11-06`, `06/11/2026` or the browser's own order. A calendar heading or a day tile may name the weekday or spell the month out ("Wed 3 November 2026"); it keeps the day, month, year order. A time alone is "14:30" (24-hour). Show a date through `bilibi_datetime` (`render_date`, `render`, the `instant` markup) and take one with the shared date, date-and-time or time input, which reads "6 Nov 2026", "6/11/2026" (day first), "2026-11-06" or "2:30 pm" and shows what it understood.
@@ -188,6 +190,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - Catalog and field contract: `apps/base/grid/README.md`.
 
 ## Record pages
+
+- **Named actions on phones:** Header icon actions show their names beside the icons below `sm` (640 px) or on a coarse pointer, with targets at least 44 × 44 px. The same controls keep their events, links, disabled states and destructive colours; no action depends on a hover tooltip.
 
 *Read first, edit in place.* No Edit button and no separate edit route for the same facts.
 

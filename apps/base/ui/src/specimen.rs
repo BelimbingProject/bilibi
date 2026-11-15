@@ -473,11 +473,19 @@ impl FormControls {
 
 impl ComponentsSpecimen {
     pub fn new() -> askama::Result<Self> {
-        let header_actions = Html::render(&Button {
+        let mut header_actions = Html::render(&Button {
             variant: ButtonVariant::Primary,
             body: Html::text("Save changes"),
             ..Button::default()
         })?;
+        header_actions.push(&Html::render(&IconButton::new(
+            "archive",
+            "Archive company",
+        ))?);
+        header_actions.push(&Html::render(&IconButton {
+            disabled: true,
+            ..IconButton::new("delete", "Delete company")
+        })?);
         let header_title_actions = Html::render(&IconButton {
             context: IconContext::Inline,
             ..IconButton::new("edit", "Edit company")
