@@ -92,8 +92,9 @@ pub(crate) const RANK_SQL: &str = "CASE r.reach WHEN 'all' THEN 2 WHEN 'team' TH
 
 /// How far the reader holds `key` now, unlogged: `None` when the key is not
 /// held (as [`crate::holds_proof`] answers it), the widest reach of the
-/// grants that give it otherwise. A direct allow and grant-all reach all; a
-/// key that does not support reach is `All` when held. A named principal's
+/// grants that give it otherwise. A direct allow's reach caps the roles;
+/// grant-all reaches all; a key that does not support reach is `All` when
+/// held. A named principal's
 /// scope holds nothing here, as for `holds_proof`. Read it in the same
 /// transaction as the records it filters.
 pub async fn reach_proof(

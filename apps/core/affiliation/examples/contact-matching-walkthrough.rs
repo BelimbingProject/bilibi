@@ -189,7 +189,12 @@ async fn main() -> Result<()> {
         assert!(visible.complete());
         assert_eq!(visible.entries, [person.id]);
         grants
-            .set_direct(&admin, viewer.user(), capability, Some(false))
+            .set_direct(
+                &admin,
+                viewer.user(),
+                capability,
+                Some(bilibi_authz::grants::Direct::Deny),
+            )
             .await?;
         for criterion in [
             email("work.lookup@example.test"),
@@ -603,7 +608,14 @@ async fn erase_reference(
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     for capability in [REQUEST_RECEIVE, REQUEST_VIEW] {
         grants
-            .set_direct(admin, receiver.user(), capability, Some(true))
+            .set_direct(
+                admin,
+                receiver.user(),
+                capability,
+                Some(bilibi_authz::grants::Direct::Allow(
+                    bilibi_authz::Reach::All,
+                )),
+            )
             .await?;
     }
     let mut identity = personal();

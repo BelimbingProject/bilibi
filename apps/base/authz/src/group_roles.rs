@@ -168,7 +168,7 @@ impl Grants {
                 }
                 // A team role carries its reach (#683): the actor holds the
                 // key at least that far.
-                if !Self::covers(&actor, key, reach) {
+                if !actor.reaches(key, reach) {
                     return Err(Error::Forbidden);
                 }
             }
@@ -219,8 +219,7 @@ impl Grants {
                                 c.definition.audience != crate::Audience::Portal
                                     && (company.is_none() || c.definition.company_scoped)
                             })
-                            && Self::covers(
-                                &actor,
+                            && actor.reaches(
                                 key,
                                 crate::Reach::parse(reach).unwrap_or(crate::Reach::All),
                             )

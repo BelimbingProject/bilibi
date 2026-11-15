@@ -2,13 +2,14 @@
 //! with reach mine, my team's or all; Grid keeps a reader to the rows their
 //! reach admits in row pages, summaries, projections and text search; Core
 //! Activity's oversight read and edit follow the same rule; team membership
-//! applies at the next read; a direct deny still wins; and no grant door lets
-//! an actor give more reach than they hold. Explicit disposable DB with the
+//! applies at the next read; a member reaches what the team's role gives
+//! unless the user is restricted (a direct deny, or a narrower direct allow);
+//! and no grant door lets an actor give more reach than they hold. Explicit disposable DB with the
 //! walkthrough fixture only; exits non-zero when a check does not hold.
 //!
 //! BILIBI_RECORD_REACH=disposable cargo run -p bilibi-web --example record-reach
 use bilibi_authz::{
-    grants::{CreatedRole, Grants},
+    grants::{CreatedRole, Direct, Grants},
     roles::NewRole,
     Reach,
 };
@@ -196,6 +197,32 @@ impl Proof {
         tx.commit().await?;
         Ok(())
     }
+    async fn team_role(
+        &self,
+        admin: &Scope,
+        team: i64,
+        role: i64,
+        attach: bool,
+    ) -> Result<(), Failure> {
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .boundary
+            .begin(
+                &mut client,
+                admin.mutation_context("walkthrough.record-reach"),
+            )
+            .await?;
+        self.teams
+            .change_role(&mut tx, admin, team, role, attach)
+            .await?
+            .map_err(|e| format!("team role: {e:?}"))?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn direct(&self, scope: &Scope, rule: Option<Direct>) -> Result<(), Failure> {
+        self.grants.set_direct(scope, 2, TASKS, rule).await?;
+        Ok(())
+    }
     async fn close(&self, scope: &Scope, id: i64) -> Result<Result<(), String>, Failure> {
         let version = self.activities.get(scope, id).await?.version;
         let mut client = self.db.get().await?;
@@ -364,7 +391,75 @@ async fn main() -> Result<(), Failure> {
             ]),
     )?;
 
-    grants.set_direct(&admin, 2, TASKS, Some(false)).await?;
+    // The team's role: Lee reaches what the team can see, unless restricted
+    // on the user.
+    grants.assign_role(&admin, 2, readers, false).await?;
+    let team_readers = proof.role(&admin, "Team task readers").await?;
+    proof
+        .set_reach(&admin, team_readers, TASKS, Some(Reach::Team))
+        .await?
+        .map_err(|e| format!("grant team role: {e}"))?;
+    proof.team_role(&admin, team, team_readers, true).await?;
+    let team_tasks = set(&["Lee task", "Sam task", "Ada team task"]);
+    prove(
+        "a team role gives its member my team's through every Grid door",
+        proof.tasks(&viewer).await? == team_tasks,
+    )?;
+    proof
+        .direct(&admin, Some(Direct::Allow(Reach::Own)))
+        .await?;
+    prove(
+        "a direct allow reaching mine on the user caps the team role's my team's through every Grid door",
+        proof.tasks(&viewer).await? == lee,
+    )?;
+    let catalog = bilibi_grid::Catalog::for_scope(&**db.get().await?, &viewer).await?;
+    prove(
+        "the capped reader's catalog says the table reaches mine",
+        catalog.table("reference_tasks").and_then(|t| t.reach()) == Some(Reach::Own),
+    )?;
+    proof.direct(&admin, None).await?;
+    prove(
+        "clearing the user's direct allow restores the team's reach",
+        proof.tasks(&viewer).await? == team_tasks,
+    )?;
+    proof.direct(&admin, Some(Direct::Deny)).await?;
+    let denied = bilibi_grid::page_keys(
+        &db,
+        &viewer,
+        "reference_tasks",
+        &PageSpec {
+            filters: Vec::new(),
+            sorts: Vec::new(),
+            timezone: "UTC".into(),
+            offset: 0,
+            limit: 10,
+            bounds: Bounds::default(),
+        },
+    )
+    .await;
+    prove(
+        "a direct deny on the user removes the table though the team role gives my team's",
+        denied.is_err(),
+    )?;
+    proof.direct(&admin, None).await?;
+    prove(
+        "a capability whose owner did not opt in cannot be allowed directly with less than all",
+        grants
+            .set_direct(
+                &admin,
+                2,
+                "grid.reference.view",
+                Some(Direct::Allow(Reach::Own)),
+            )
+            .await
+            .is_err_and(|why| matches!(why, Error::Refused(ref text) if text.contains("always reaches all"))),
+    )?;
+    proof.team_role(&admin, team, team_readers, false).await?;
+    grants.assign_role(&admin, 2, readers, true).await?;
+
+    grants
+        .set_direct(&admin, 2, TASKS, Some(Direct::Deny))
+        .await?;
     let denied = bilibi_grid::page_keys(
         &db,
         &viewer,
@@ -420,13 +515,28 @@ async fn main() -> Result<(), Failure> {
             .await?
             .is_ok(),
     )?;
+    for reach in [Reach::All, Reach::Team] {
+        prove(
+            &format!(
+                "an actor holding mine cannot give a direct allow reaching {}",
+                reach.code()
+            ),
+            matches!(
+                grants
+                    .set_direct(&manager, 3, TASKS, Some(Direct::Allow(reach)))
+                    .await,
+                Err(Error::Forbidden)
+            ),
+        )?;
+    }
     prove(
-        "a direct allow reaches all, so an actor holding mine cannot give one",
-        matches!(
-            grants.set_direct(&manager, 3, TASKS, Some(true)).await,
-            Err(Error::Forbidden)
-        ),
+        "an actor holding mine can give a direct allow reaching mine",
+        grants
+            .set_direct(&manager, 3, TASKS, Some(Direct::Allow(Reach::Own)))
+            .await
+            .is_ok(),
     )?;
+    grants.set_direct(&admin, 3, TASKS, None).await?;
     proof
         .set_reach(&admin, scratch, TASKS, Some(Reach::Team))
         .await?

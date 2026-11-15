@@ -12,16 +12,19 @@
 
 ## Decision
 
-**A role gives a capability with a reach: `own`, `team` or `all`.** It is a column on the role's grant (`role_capabilities.reach`, migration `base-authz-017-grant-reach`); a team role carries the reach of its role's grants.
+**A role gives a capability with a reach: `own`, `team` or `all`.** It is a column on the role's grant (`role_capabilities.reach`, migration `base-authz-017-grant-reach`); a team role carries the reach of its role's grants. A direct allow on an account carries one too (`principal_capabilities.reach`).
 
 - **Opt in per capability.** A key can carry less than `all` only when its owner declares `CapabilityDefinition::with_reach`, after every read applies the reach and every write rechecks it, as company scope is opted into ([ADR 20](./20-company-role-assignments.md)).
 - **The owner names the fields.** A Grid table declares its owner field (a deal's owner, a case's assignee) and optionally a team field (a case's queue team). There are no per-record group rows: who may see a record follows from fields the record already has.
 - **One rule, applied by Grid.** Grid wraps the table's source in `Reach::predicate`, so lists, reports, projections, record names and search read the same rows. An owner's own SQL and write rechecks use the same predicate (`reach_proof`, `reach_admits`).
 - **My team's** is: records I own, records owned by someone who shares a Core team with me, and records filed under one of my teams. It reads `authz_group_members`, Authz's own copy of team members, so Base never reads Core tables.
-- **The widest grant wins**, as grants already union. A direct allow, grant-all and a system principal's grant reach all.
+- **The widest grant wins**, as grants already union. Grant-all and a system principal's grant reach all.
+- **A restriction on the user wins over the team.** A member sees what the team can see, unless restricted on the user: a direct deny removes the key, and a direct allow's reach is the account's reach for the key, capping what its roles and team roles give.
 - **Reach only narrows.** It is applied on top of the owner's tenant and company filters, never instead of them ([ADR 19](./19-company-work-access-and-page-scope.md)). It is read live with each decision; nothing is cached.
 
-**No door gives more reach than the actor holds.** Giving a role a key, assigning a role, giving a team a role or adding its members, and setting a provider's role bound each need the actor to hold every key at least as far as it reaches. A direct allow and a system principal's grant need `all`.
+**A grant gives no more reach than the actor holds.** Giving a role a key, assigning a role, giving a team a role or adding members to a team that carries roles, setting a provider's role bound, and a direct allow each need the actor to hold every key at least as far as it reaches. A system principal's grant needs `all`.
+
+**Joining a team gives the member the team's reach.** Team management defines who shares "my team's" records; a membership change is not a grant and runs no reach check. To keep one member narrower, set a direct deny or a narrower direct allow on that user.
 
 **Taking over an account needs `all`.** `holds_everything_of` (password, sign-in address, delete, impersonate) treats a key the actor reaches only partly as covering nobody else's grant of it: the account's own records are not the actor's.
 
@@ -47,4 +50,7 @@ Used by:
 
 - Core Activity: `core.activity.all.view` and `core.activity.all.manage` reach by assignee (`apps/core/activity/README.md`, "Who sees an activity").
 - Grid's reference tasks (`reference_tasks`, `grid.reference.task.view`), proved by `apps/web/examples/record-reach.rs`.
-- CX opportunities and cases opt in from the CX Domain.
+
+Planned:
+
+- CX opportunities and cases opt in, a follow-up in the CX Domain.

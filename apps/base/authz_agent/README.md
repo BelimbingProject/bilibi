@@ -22,6 +22,8 @@ This module gives pages and agents the same reviewed doors for authorization cha
 
 `base.authz_agent.role_capability.set` takes an optional `reach` (`own`, `team` or `all`, the default) for a key that supports record reach; the review names the reach before and after, and the actor must hold the key at least that far (`apps/base/authz/README.md`, "Record reach").
 
+`base.authz_agent.principal_capability.set` takes the same optional `reach` for rule `allow` only: it is the account's reach for the key, capping its roles and team roles. The review shows `current_reach` and `reach`, and the actor must hold the key at least that far.
+
 ## Automation access
 
 Administration → Authorization → **Automation access** (`/authz/automation`) lists every shared schedule on the default `scheduler` identity and every event subscription that wants to act for the current organisation. Those schedules share one consent record; a schedule with its own execution principal is not listed there and is consented through [Installed system principals](#installed-system-principals) ([Schedule owner business authority](../schedule/README.md#owner-business-authority)). Event subscriptions share another.

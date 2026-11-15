@@ -351,7 +351,7 @@ pub async fn authorize_proof(client: &dyn ProofClient, scope: &Scope, key: &str)
 const LIVE_TENANT_SQL: &str =
     "SELECT id FROM tenants WHERE id=$1 AND status='active' AND deleted_at IS NULL";
 const OPERATOR_SQL: &str = "SELECT o.tenant_id FROM platform_operator o JOIN tenants t ON t.id=o.tenant_id WHERE o.singleton AND o.tenant_id=$1 AND t.status='active' AND t.deleted_at IS NULL";
-const GRANTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND NOT is_allowed), EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.grant_all AND p.company_id IS NULL), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NULL), (SELECT min(p.via) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NOT NULL), (SELECT max(CASE r.reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3)";
+const GRANTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND NOT is_allowed), (SELECT CASE reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.grant_all AND p.company_id IS NULL), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NULL), (SELECT min(p.via) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NOT NULL), (SELECT max(CASE r.reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3)";
 const SYSTEM_GRANT_SQL: &str = "SELECT is_allowed FROM authz_system_grants WHERE tenant_id=$1 AND principal=$2 AND capability=$3";
 const LOG_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal,via) VALUES($1,$2,$3,$4,$5,$6,$7,$8)";
 const LOG_RETURNING_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal,via) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id";
@@ -359,21 +359,24 @@ const LOG_RETURNING_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_i
 const GROUP_ROLE: &str = "group_role_capability";
 /// Deny wins over every allow; an allow names the grant that carried it.
 /// Grant-all is a staff role: it never satisfies a portal capability, which
-/// needs a direct allow or a role that lists it (ADR 16). A direct allow and
-/// grant-all reach all; a role grant reaches as far as the widest role that
-/// gives the key, when the key supports reach.
+/// needs a direct allow or a role that lists it (ADR 16). When the key
+/// supports reach, a direct allow reaches as far as it says, capping every
+/// role and team role; otherwise grant-all reaches all and a role grant as
+/// far as the widest role that gives the key.
 fn judge(row: &tokio_postgres::Row, portal: bool, ranged: bool) -> Judged {
-    let role_reach = || {
+    let ranked = |rank: Option<i32>| {
         if ranged {
-            Reach::from_rank(row.get::<_, Option<i32>>(5).unwrap_or(2))
+            Reach::from_rank(rank.unwrap_or(2))
         } else {
             Reach::All
         }
     };
+    let role_reach = || ranked(row.get::<_, Option<i32>>(5));
+    let direct = row.get::<_, Option<i32>>(1);
     let (decision, reach) = if row.get::<_, bool>(0) {
         (Decision::deny("denied_explicitly"), Reach::All)
-    } else if row.get::<_, bool>(1) {
-        (Decision::allow("direct_capability"), Reach::All)
+    } else if direct.is_some() {
+        (Decision::allow("direct_capability"), ranked(direct))
     } else if row.get::<_, bool>(2) && !portal {
         (Decision::allow("grant_all"), Reach::All)
     } else if row.get::<_, bool>(3) {

@@ -374,7 +374,9 @@ async fn main() -> Result<(), Failure> {
     )?;
 
     // A direct deny wins over the team's role.
-    grants.set_direct(&admin, 3, REPORT, Some(false)).await?;
+    grants
+        .set_direct(&admin, 3, REPORT, Some(bilibi_authz::grants::Direct::Deny))
+        .await?;
     let (allowed, reason) = proof.allowed(&staff, REPORT, None).await?;
     prove(
         "a direct deny wins over a role the team gives",

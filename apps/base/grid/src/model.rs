@@ -325,8 +325,13 @@ impl Table {
         let sql = self.decl.source.sql;
         match (self.reach, self.decl.owner) {
             (Some(reach), Some(owner)) => {
-                let column = |id: &str| {
-                    let key = self.field(id).map_or(id, |field| field.source_key());
+                let column = |id: &'static str| {
+                    let key = self
+                        .decl
+                        .fields
+                        .iter()
+                        .find(|field| field.id == id)
+                        .map_or(id, Field::source_key);
                     format!("grid_reach.\"{}\"", key.replace('"', "\"\""))
                 };
                 let team = self.decl.team.map(column);

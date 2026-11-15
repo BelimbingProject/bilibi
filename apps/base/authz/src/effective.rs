@@ -186,6 +186,11 @@ impl Effective {
             .contains(key)
             .then(|| self.reach.get(key).copied().unwrap_or(Reach::All))
     }
+    /// Whether `key` is held at least as far as `reach`: what giving `key`
+    /// with `reach` to another account or role requires (#683).
+    pub fn reaches(&self, key: &str, reach: Reach) -> bool {
+        self.reach_of(key).is_some_and(|held| held >= reach)
+    }
 }
 
 pub async fn effective_capabilities_of(
@@ -222,7 +227,7 @@ pub async fn effective_capabilities_in_company(
     }
     let direct = client
         .query(
-            "SELECT capability,is_allowed FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2",
+            "SELECT capability,is_allowed,reach FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2",
             &[&scope.tenant(), &user],
         )
         .await?;
@@ -250,11 +255,12 @@ pub async fn effective_capabilities_in_company(
         .filter(|row| !row.get::<_, bool>(1))
         .map(|row| row.get(0))
         .collect();
-    let allowed: BTreeSet<String> = direct
+    let direct_reach: BTreeMap<String, Reach> = direct
         .iter()
         .filter(|row| row.get::<_, bool>(1))
-        .map(|row| row.get(0))
+        .map(|row| (row.get(0), Reach::parse(row.get(2)).unwrap_or(Reach::All)))
         .collect();
+    let allowed: BTreeSet<String> = direct_reach.keys().cloned().collect();
     // A company-bounded role counts only for a key that supports company
     // scope; its reach then counts as well.
     let roles: BTreeMap<String, Reach> = granted
@@ -282,16 +288,17 @@ pub async fn effective_capabilities_in_company(
         })
         .map(|(key, _)| *key)
         .collect();
-    // A direct allow and grant-all reach all; otherwise the widest role.
+    // A direct allow's reach caps every role; else grant-all reaches all,
+    // then the widest role.
     let reach = effective
         .iter()
         .filter(|key| vocabulary.capabilities[**key].definition.reach)
         .map(|key| {
-            let wide = allowed.contains(*key)
-                || (grant_all
-                    && vocabulary.capabilities[*key].definition.audience
-                        != crate::Audience::Portal);
-            let reach = if wide {
+            let reach = if let Some(direct) = direct_reach.get(*key) {
+                *direct
+            } else if grant_all
+                && vocabulary.capabilities[*key].definition.audience != crate::Audience::Portal
+            {
                 Reach::All
             } else {
                 roles.get(*key).copied().unwrap_or(Reach::All)

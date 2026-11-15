@@ -58,7 +58,7 @@ impl Grants {
                 .await?
             {
                 let reach = crate::Reach::parse(row.get(1)).unwrap_or(crate::Reach::All);
-                if !Self::covers(&actor_grants, row.get::<_, &str>(0), reach) {
+                if !actor_grants.reaches(row.get::<_, &str>(0), reach) {
                     return Err(Error::Forbidden);
                 }
             }

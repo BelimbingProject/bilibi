@@ -21,7 +21,7 @@ use bilibi_agent_api::{
 };
 use bilibi_authz::{
     effective_capabilities_of,
-    grants::{Assignment, Grants},
+    grants::{Assignment, Direct, Grants},
     roles::{self, RoleSummary},
     Reach,
 };
@@ -104,23 +104,18 @@ async fn role(
         .ok_or_else(|| bilibi_agent_api::invalid("role_id", "is not a role of this tenant"))
 }
 
-/// The escalation guard (`core/user` account page): the actor must hold
-/// everything granted, at least as far as it reaches (#683), and a
-/// full-access role needs a full-access actor.
+/// The escalation guard (`core/user` account page), as `Grants` rechecks
+/// it: the actor holds the key at least as far as the grant reaches (#683).
 async fn guard(
     client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
-    grant_all: bool,
-    capabilities: &[(&str, Reach)],
+    key: &str,
+    reach: Reach,
 ) -> bilibi_agent_api::Result<()> {
-    let actor =
-        bilibi_authz::effective_capabilities_in_company(client, scope, scope.user(), None).await?;
-    let holds = actor.grant_all
-        || (!grant_all
-            && capabilities
-                .iter()
-                .all(|(key, reach)| actor.reach_of(key).is_some_and(|held| held >= *reach)));
-    if holds {
+    if bilibi_authz::effective_capabilities_in_company(client, scope, scope.user(), None)
+        .await?
+        .reaches(key, reach)
+    {
         Ok(())
     } else {
         Err(Error::Forbidden.into())
@@ -237,33 +232,50 @@ async fn review(
                     "must be allow, deny or clear",
                 ));
             }
+            let reach = reach(input)?;
+            if rule != "allow" && input.get("reach").is_some() {
+                return Err(bilibi_agent_api::invalid(
+                    "reach",
+                    "applies only to rule allow",
+                ));
+            }
             bound.grants.verify_principal(client, scope, user).await?;
             if rule == "allow" {
-                guard(client, scope, false, &[(key, Reach::All)]).await?;
+                bound.grants.reach_supported(key, reach)?;
+                guard(client, scope, key, reach).await?;
             }
             let target = effective_capabilities_of(client, scope, user).await?;
-            let current = if target.direct_allowed.contains(key) {
+            let current_reach = target
+                .direct_allowed
+                .contains(key)
+                .then(|| target.reach_of(key).unwrap_or(Reach::All));
+            let current = if current_reach.is_some() {
                 "allow"
             } else if target.direct_denied.contains(key) {
                 "deny"
             } else {
                 "clear"
             };
+            let summary = if rule == "allow" {
+                format!(
+                    "Set the direct rule for {key} on user {user} to allow, reaching {}",
+                    reach.label().to_lowercase()
+                )
+            } else {
+                format!("Set the direct rule for {key} on user {user} to {rule}")
+            };
             Ok(json!({
-                "summary": format!("Set the direct rule for {key} on user {user} to {rule}"),
+                "summary": summary,
                 "user_id": user, "capability": key, "rule": rule, "current_rule": current,
+                "reach": (rule == "allow").then_some(reach.code()),
+                "current_reach": current_reach.map(Reach::code),
                 "step_up": [STEP_UP_CAPABILITY],
             }))
         }
         Write::RoleCapability => {
             let key = capability(&bound.grants, input)?;
             let granted = input["granted"].as_bool().unwrap_or(false);
-            let reach = match input.get("reach").and_then(Value::as_str) {
-                None => Reach::All,
-                Some(code) => Reach::parse(code).ok_or_else(|| {
-                    bilibi_agent_api::invalid("reach", "must be own, team or all")
-                })?,
-            };
+            let reach = reach(input)?;
             let details = role(client, scope, positive(input, "role_id")?).await?;
             if details.role.is_system {
                 return Err(bilibi_agent_api::invalid(
@@ -278,7 +290,7 @@ async fn review(
                 .map(|held| held.reach);
             if granted {
                 bound.grants.reach_supported(key, reach)?;
-                guard(client, scope, false, &[(key, reach)]).await?;
+                guard(client, scope, key, reach).await?;
             }
             let summary = match (granted, current) {
                 (false, _) => format!("Remove {key} from the {} role", details.role.name),
@@ -379,12 +391,15 @@ impl WriteHandler for Write {
                 Self::PrincipalCapability => {
                     let user = facts["user_id"].as_i64().ok_or(Error::Internal)?;
                     let key = facts["capability"].as_str().ok_or(Error::Internal)?;
-                    let allowed = match facts["rule"].as_str() {
-                        Some("allow") => Some(true),
-                        Some("deny") => Some(false),
-                        _ => None,
+                    let rule = match (facts["rule"].as_str(), facts["reach"].as_str()) {
+                        (Some("allow"), Some(code)) => {
+                            Some(Direct::Allow(Reach::parse(code).ok_or(Error::Internal)?))
+                        }
+                        (Some("deny"), None) => Some(Direct::Deny),
+                        (Some("clear"), None) => None,
+                        _ => return Err(Error::Internal.into()),
                     };
-                    grants.set_direct_in(tx, scope, user, key, allowed).await?;
+                    grants.set_direct_in(tx, scope, user, key, rule).await?;
                 }
                 Self::RoleCapability => {
                     let role = facts["role"]["id"].as_i64().ok_or(Error::Internal)?;
@@ -425,8 +440,18 @@ fn principal_role_schema() -> Value {
 fn grant_all_schema() -> Value {
     json!({"type":"object","required":["user_id","role_id"],"properties":{"user_id":id_schema(),"role_id":id_schema(),"assignment":assignment_schema()}})
 }
+/// The optional `reach` of a grant: `all` when absent.
+fn reach(input: &Value) -> bilibi_agent_api::Result<Reach> {
+    match input.get("reach") {
+        None => Ok(Reach::All),
+        Some(code) => code
+            .as_str()
+            .and_then(Reach::parse)
+            .ok_or_else(|| bilibi_agent_api::invalid("reach", "must be own, team or all")),
+    }
+}
 fn principal_capability_schema() -> Value {
-    json!({"type":"object","required":["user_id","capability","rule"],"properties":{"user_id":id_schema(),"capability":capability_schema(),"rule":{"type":"string","enum":["allow","deny","clear"]}}})
+    json!({"type":"object","required":["user_id","capability","rule"],"properties":{"user_id":id_schema(),"capability":capability_schema(),"rule":{"type":"string","enum":["allow","deny","clear"]},"reach":{"type":"string","enum":["own","team","all"],"description":"For rule allow only: how far the direct allow reaches into the records the capability opens: own (records the account owns), team (also records of its Core teams), all (the default). It is the account's reach for the capability, capping its roles and team roles. own and team only for a capability that supports reach."}}})
 }
 fn role_capability_schema() -> Value {
     json!({"type":"object","required":["role_id","capability","granted"],"properties":{"role_id":id_schema(),"capability":capability_schema(),"granted":{"type":"boolean"},"reach":{"type":"string","enum":["own","team","all"],"description":"How far the grant reaches into the records the capability opens: own (records the holder owns), team (also records of their Core teams), all (the default). own and team only for a capability that supports reach."}}})
@@ -453,7 +478,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/authz_agent", Provenan
         Operation { key:consent::SET, title:"Change automation consent", summary:"Grant or withdraw this tenant's consent for all installation-wide schedules or all event subscriptions through Authz's audited system-principal grant.", keywords:&["schedule","events","automation","consent","grant","withdraw"], capability:SYSTEM_LIST, input:consent_schema, output:review_output, handler:Handler::SafeWrite(&Write::AutomationConsent),channels:Channels::Every,step_up:&[STEP_UP_SYSTEM] },
         Operation { key:PRINCIPAL_ROLE_SET, title:"Give or remove a user's role", summary:"Assign or remove one authorization role for one account. Step-up: base.authz.principal_role.set, and base.authz.grant_all_role.assign for a full-access role.", keywords:&["role","assign","access","user"], capability:UPDATE, input:principal_role_schema, output:review_output, handler:Handler::SafeWrite(&Write::PrincipalRole),channels:Channels::Every,step_up:&[STEP_UP_ROLE, STEP_UP_GRANT_ALL] },
         Operation { key:"base.authz_agent.grant_all_role.assign", title:"Give a user a full-access role", summary:"Assign a full-access role such as Core Administrator; refuses any other role. Step-up: base.authz.principal_role.set and base.authz.grant_all_role.assign.", keywords:&["core_admin","administrator","full access","role"], capability:UPDATE, input:grant_all_schema, output:review_output, handler:Handler::SafeWrite(&Write::GrantAllRole),channels:Channels::Every,step_up:&[STEP_UP_ROLE, STEP_UP_GRANT_ALL] },
-        Operation { key:"base.authz_agent.principal_capability.set", title:"Set a user's direct capability rule", summary:"Allow, deny or clear one capability directly on one account; a deny wins over every grant. Step-up: base.authz.principal_capability.set.", keywords:&["capability","grant","deny","user"], capability:UPDATE, input:principal_capability_schema, output:review_output, handler:Handler::SafeWrite(&Write::PrincipalCapability),channels:Channels::Every,step_up:&[STEP_UP_CAPABILITY] },
+        Operation { key:"base.authz_agent.principal_capability.set", title:"Set a user's direct capability rule", summary:"Allow, deny or clear one capability directly on one account; a deny wins over every grant, and an allow's reach (own, team or all records) caps the account's roles and team roles. Step-up: base.authz.principal_capability.set.", keywords:&["capability","grant","deny","user"], capability:UPDATE, input:principal_capability_schema, output:review_output, handler:Handler::SafeWrite(&Write::PrincipalCapability),channels:Channels::Every,step_up:&[STEP_UP_CAPABILITY] },
         Operation { key:"base.authz_agent.role_capability.set", title:"Change a role's capabilities", summary:"Grant or remove one capability on a custom role, or change how far it reaches (own, team or all records). System roles are refused. Step-up: base.authz.role_capability.set.", keywords:&["role","capability","grant"], capability:UPDATE, input:role_capability_schema, output:review_output, handler:Handler::SafeWrite(&Write::RoleCapability),channels:Channels::Every,step_up:&[STEP_UP_ROLE_CAPABILITY] },
     ],
     guides: &[Guide { key:"base.authz_agent", title:"Roles, capability grants and automation consent", summary:"Who may do what in this tenant, including whether scheduled work and event subscriptions may act here.", keywords:&["role","capability","grant","access","core_admin","schedule","events","automation","consent"], capability:LIST,
