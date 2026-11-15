@@ -636,6 +636,53 @@ pub fn scalar_expression(catalog: &Catalog, root: &str, path: &str) -> Result<St
     Ok(cell(catalog, root, &column))
 }
 
+pub fn scalar_access(catalog: &Catalog, root: &str, path: &str) -> Result<String, QueryError> {
+    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
+    let column = catalog
+        .resolve(root, path)
+        .map_err(|error| QueryError::Column(path.into(), error))?;
+    if column.kind != crate::ColumnKind::Field || column.many.is_some() || column.agg.is_some() {
+        return Err(QueryError::Unsupported(
+            path.into(),
+            "a scalar field is required",
+        ));
+    }
+    let mut sources = Vec::new();
+    let mut conditions = Vec::new();
+    let mut access = Vec::new();
+    let mut parent = root;
+    let mut parent_alias = "r".to_owned();
+    for (i, link) in column.hops.iter().enumerate() {
+        let target = catalog.table(link.to()).ok_or(QueryError::ForbiddenRoot)?;
+        let alias = format!("a{i}");
+        conditions.push(condition(link, parent, target, &parent_alias, &alias));
+        if target.reach().is_some() {
+            let joined = |source: String| {
+                let mut sources = sources.clone();
+                sources.push(format!("{source} {alias}"));
+                format!(
+                    "EXISTS (SELECT 1 FROM {} WHERE {})",
+                    sources.join(","),
+                    conditions.join(" AND ")
+                )
+            };
+            access.push(format!(
+                "(NOT {} OR {})",
+                joined(format!("({})", target.source().sql)),
+                joined(source(target))
+            ));
+        }
+        sources.push(format!("{} {alias}", source(target)));
+        parent = target;
+        parent_alias = alias;
+    }
+    Ok(if access.is_empty() {
+        "true".into()
+    } else {
+        access.join(" AND ")
+    })
+}
+
 /// A declared scalar field reached through one Company-style `One` link,
 /// expressed as a single join rather than a correlated lookup per root row.
 #[derive(Clone, Debug)]

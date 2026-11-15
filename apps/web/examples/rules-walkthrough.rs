@@ -602,6 +602,42 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         via == "agent",
         "the version records that an agent drafted it",
     );
+    for parameters in [
+        r#"{"note":"big""#,
+        "null",
+        "[]",
+        "true",
+        "42",
+        r#""scalar""#,
+    ] {
+        let malformed = json!({"name": "Invalid action parameters", "trigger": OPENED, "conditions": [],
+            "actions": [{"operation": "rule_cases.cases.flag", "input": parameters}],
+            "examples": [{"facts": "{}", "expect": "match"}]});
+        check(
+            proof
+                .review(&agent, "base.rules.draft", malformed.clone())
+                .await
+                .to_string()
+                .contains("actions.0.input"),
+            "preview rejects malformed or non-object action parameters at their field",
+        );
+        check(
+            proof
+                .write(&agent, "base.rules.draft", malformed)
+                .await
+                .is_err_and(|why| why.contains("actions.0.input")),
+            "saving refuses supplied invalid action parameters",
+        );
+    }
+    let omitted = json!({"name": "Default action parameters", "trigger": OPENED, "conditions": [],
+        "actions": [{"operation": "rule_cases.cases.flag"}], "examples": [{"facts": "{}", "expect": "match"}]});
+    check(
+        proof
+            .write(&agent, "base.rules.draft", omitted)
+            .await
+            .is_ok(),
+        "omitted action parameters default to an empty object",
+    );
     let wrong = json!({"name": "Wrong example", "trigger": OPENED, "conditions": [{"field": "amount", "op": "ge", "value": "10000"}],
         "actions": [{"operation": "rule_cases.cases.flag", "input": "{}"}],
         "examples": [{"facts": json!({"amount": "5"}).to_string(), "expect": "match"}]});
@@ -1099,5 +1135,99 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         }),
         "every returned receipt has its version definition",
     );
+    drop(client);
+    proof
+        .setting(&one, "rules.runs_per_minute", json!(10000))
+        .await?;
+    let optional = json!({"name": "Cases without a parent title", "trigger": OPENED,
+        "conditions": [{"field": "parent.title", "op": "empty"}, {"field": "parent_edge.title", "op": "empty"}, {"field": "parent.parent.title", "op": "empty"}],
+        "actions": [{"operation": "rule_cases.cases.flag", "input": "{}"}],
+        "examples": [{"facts": json!({"parent.title": null, "parent_edge.title": null, "parent.parent.title": null}).to_string(), "expect": "match"}]});
+    let (optional_rule, optional_version) = proof.draft(&one, optional).await?;
+    check(
+        proof
+            .approve(&one, optional_rule, optional_version)
+            .await
+            .is_ok(),
+        "an empty condition on optional links passes approval",
+    );
+    let absent = proof.open(&one, 1, "No parent", "low", "1.00").await?;
+    proof.settled().await?;
+    check(
+        proof.case(absent).await?.2 == 1,
+        "absent direct, edge and chained links evaluate as null and allow the action",
+    );
+    proof
+        .services
+        .get::<Grants>("base/authz.grants")?
+        .set_direct(
+            &one,
+            2,
+            "rule-cases.case.open",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
+        .await?;
+    let child = proof.write(&viewer, "rule_cases.cases.open", json!({"company_id": 1, "title": "Reader-owned child", "priority": "low", "amount": "1.00", "parent_id": absent})).await.map_err(|_| Error::Invalid)?["case_id"].as_i64().ok_or(Error::Invalid)?;
+    let unlinked = proof
+        .open(&viewer, 1, "Reader-owned unlinked case", "low", "1.00")
+        .await?;
+    proof.settled().await?;
+    proof
+        .services
+        .get::<Grants>("base/authz.grants")?
+        .set_direct(
+            &one,
+            2,
+            "rule-cases.case.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::Own,
+            )),
+        )
+        .await?;
+    let client = proof.db.get().await?;
+    let receipts = proof
+        .rules
+        .runs(&**client, &viewer, Some(optional_rule), 50)
+        .await?;
+    let child_run: i64 = client
+        .query_one(
+            "SELECT id FROM base_rule_runs WHERE tenant_id=1 AND rule_id=$1 AND subject=$2",
+            &[&optional_rule, &child.to_string()],
+        )
+        .await?
+        .get(0);
+    check(
+        receipts.iter().any(|run| {
+            run.id == child_run
+                && run.facts == json!({"restricted": true})
+                && run.outcomes == json!({"restricted": true})
+        }),
+        "a present parent outside the reader's reach keeps the receipt restricted",
+    );
+    check(
+        receipts.iter().any(|run| {
+            run.subject == unlinked.to_string()
+                && run.state == "done"
+                && run.facts.get("parent.title") == Some(&Value::Null)
+        }),
+        "an absent parent stays readable under own-record reach",
+    );
+    let catalog = bilibi_base::grid::Catalog::for_scope(&**client, &viewer)
+        .await
+        .map_err(Error::from)?;
+    let source = catalog
+        .table("rule_cases")
+        .ok_or(Error::Forbidden)?
+        .scoped_source();
+    for path in ["parent.title", "parent_edge.title", "parent.parent.title"] {
+        let access = bilibi_base::grid::scalar_access(&catalog, "rule_cases", path)
+            .map_err(|_| Error::Invalid)?;
+        for (id, expected) in [(child, false), (unlinked, true)] {
+            let allowed: bool = client.query_one(&format!("SELECT {access} FROM {source} r WHERE r.id=$3 AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL"), &[&viewer.tenant(), &viewer.user(), &id]).await?.get(0);
+            check(allowed == expected, "each direct, edge and chained access predicate distinguishes absence from denied reach");
+        }
+    }
     Ok(())
 }

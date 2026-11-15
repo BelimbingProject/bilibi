@@ -18,7 +18,7 @@ use bilibi_authz::{
 };
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_events::{EventType, Events, NewEvent, On, EVENTS};
-use bilibi_grid::{Field, FieldType, GridContribution, Source, TableDecl};
+use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
 use bilibi_rules::{Action, Trigger, ACTIONS, TRIGGERS};
 use bilibi_tenancy::Scope;
@@ -49,7 +49,7 @@ inventory::submit! {
     Module {
         id: MODULE, layer: Layer::Domains,
         dependencies: &["base/agent_api", "base/authz", "base/database", "base/events", "base/grid", "base/rules", "base/tenancy", "core/company"],
-        migrations: &[("rule-cases-cases-001-cases", include_str!("../migrations/001-cases.sql"))],
+        migrations: &[("rule-cases-cases-001-cases", include_str!("../migrations/001-cases.sql")), ("rule-cases-cases-002-links", include_str!("../migrations/002-links.sql"))],
         services: &[Service { id: "rule_cases/cases.events", factory: |services| {
             let events: Arc<Events> = services.get(bilibi_events::SERVICE)?;
             let _ = EVENT_STORE.set(events.clone());
@@ -64,7 +64,7 @@ fn events() -> Result<&'static Events, Error> {
 
 inventory::submit! { Contribution::new(VOCABULARY, "rule_cases/cases.vocabulary", provenance!(), &VocabularyContribution {
     domains: &["rule-cases"], verbs: &["open", "route", "flag"],
-    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(OPEN), CapabilityDefinition::tenant(ROUTE), CapabilityDefinition::tenant(FLAG)],
+    capabilities: &[CapabilityDefinition::tenant(VIEW).with_reach(), CapabilityDefinition::tenant(OPEN), CapabilityDefinition::tenant(ROUTE), CapabilityDefinition::tenant(FLAG)],
     roles: &[], system_principals: &[],
 }) }
 // The rules principal may read cases and route and flag them; a tenant still
@@ -79,9 +79,11 @@ inventory::submit! { Contribution::new(EVENTS, FLAGGED, provenance!(), &EventTyp
 static GRID: GridContribution = GridContribution {
     record_fields: &[],
     tables: &[TableDecl::new("rule_cases", "Cases", VIEW,
-        Source::tenant("SELECT id,title,priority,amount,margin,queue,routed,flags,company_id,created_at,version FROM rule_cases_cases WHERE tenant_id=$1"), "id", &[
+        Source::tenant("SELECT id,title,priority,amount,margin,queue,routed,flags,company_id,created_at,version,parent_id,owner_user_id FROM rule_cases_cases WHERE tenant_id=$1"), "id", &[
             Field::new("id", "ID", FieldType::Integer).protected(),
             Field::new("version", "Version", FieldType::Integer).protected(),
+            Field::new("parent_id", "Parent", FieldType::Integer).protected(),
+            Field::new("owner_user_id", "Owner", FieldType::Integer).protected(),
             Field::new("title", "Title", FieldType::String).protected(),
             Field::choice("priority", "Priority", &["low", "normal", "urgent"]).protected(),
             Field::new("amount", "Amount", FieldType::Decimal).protected(),
@@ -92,8 +94,11 @@ static GRID: GridContribution = GridContribution {
             Field::new("flags", "Flags", FieldType::Integer).protected(),
             Field::new("company_id", "Company ID", FieldType::Integer).protected(),
             Field::new("created_at", "Opened", FieldType::DateTime).protected(),
-        ]).label_field("title").time_field("created_at").record_types(&["rule_cases/cases.case"])],
-    links: &[],
+         ]).owner("owner_user_id").label_field("title").time_field("created_at").record_types(&["rule_cases/cases.case"])],
+    links: &[
+        LinkDecl::on("parent", "Parent", LinkKind::One, TABLE, "parent_id", TABLE, "id"),
+        LinkDecl::edge("parent_edge", "Parent through an edge", LinkKind::One, TABLE, TABLE, Source::tenant("SELECT id AS from_key,parent_id AS to_key FROM rule_cases_cases WHERE tenant_id=$1 AND parent_id IS NOT NULL")),
+    ],
 };
 bilibi_grid::contribute!("rule_cases/cases", "rule_cases/cases.grid", &GRID);
 
@@ -177,11 +182,13 @@ impl WriteHandler for Open {
             bilibi_authz::authorize_key(tx.sql(), scope, OPEN).await?;
             let (company, title, priority, amount, margin) = Self::read(input)?;
             let tenant = scope.tenant();
+            let parent = input["parent_id"].as_i64();
+            let owner = scope.user();
             writable(tx.sql(), tenant, company).await?;
             let id = tx.mutate(move |sql| Box::pin(async move {
                 let id: i64 = sql.query_one(
-                    "INSERT INTO rule_cases_cases(tenant_id,company_id,title,priority,amount,margin) VALUES($1,$2,$3,$4,$5::text::numeric,$6::text::numeric) RETURNING id",
-                    &[&tenant, &company, &title, &priority, &amount, &margin],
+                    "INSERT INTO rule_cases_cases(tenant_id,company_id,title,priority,amount,margin,parent_id,owner_user_id) VALUES($1,$2,$3,$4,$5::text::numeric,$6::text::numeric,$7,$8) RETURNING id",
+                    &[&tenant, &company, &title, &priority, &amount, &margin, &parent, &owner],
                 ).await.map_err(|_| Error::Invalid)?.get(0);
                 Ok((id, vec![Change { kind: "rule_cases/cases.case".into(), id, old: Value::Null, new: json!({"title": title, "priority": priority, "amount": amount, "company": company}) }]))
             })).await?;
@@ -310,6 +317,7 @@ impl WriteHandler for Change2 {
 fn open_schema() -> Value {
     json!({"type":"object","required":["company_id","title","priority","amount"],"properties":{
         "company_id":{"type":"integer","minimum":1},
+        "parent_id":{"type":"integer","minimum":1},
         "title":{"type":"string","maxLength":160},
         "priority":{"type":"string","enum":["low","normal","urgent"]},
         "amount":{"type":"string","maxLength":24,"description":"A decimal amount, such as 1500.00"},

@@ -435,13 +435,10 @@ impl Rules {
                     }
                     _ => return Ok(Err("restricted_field")),
                 };
-                if let Some((prefix, _)) = path.rsplit_once('.') {
-                    let target = catalog.table(column.table).ok_or(Error::Invalid)?;
-                    let target_key = format!("{prefix}.{}", target.key());
-                    let expression = bilibi_grid::scalar_expression(&catalog, table, &target_key)
-                        .map_err(|_| Error::Invalid)?;
-                    reached.push(format!("({expression}) IS NOT NULL"));
-                }
+                reached.push(
+                    bilibi_grid::scalar_access(&catalog, table, path)
+                        .map_err(|_| Error::Invalid)?,
+                );
                 types.push((path.clone(), column.ty));
                 let expression = bilibi_grid::scalar_expression(&catalog, table, path)
                     .map_err(|_| Error::Invalid)?;

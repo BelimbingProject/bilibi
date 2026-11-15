@@ -388,14 +388,12 @@ fn output() -> Value {
 /// The agent schema carries nested JSON (action inputs, example facts) as
 /// text, which the schema dialect can bound; the contract reads it back
 /// into the stored shape before any check.
-pub(crate) fn normalise(input: &Value) -> Value {
+pub(crate) fn normalise(input: &Value) -> bilibi_agent_api::Result<Value> {
     let mut input = input.clone();
-    let object = |text: &Value| match text {
+    let decode = |value: &Value, field: &str| match value {
         Value::String(text) => serde_json::from_str::<Value>(text)
-            .ok()
-            .filter(Value::is_object)
-            .unwrap_or(Value::Null),
-        other => other.clone(),
+            .map_err(|_| bilibi_agent_api::invalid(field, "must be a JSON object")),
+        other => Ok(other.clone()),
     };
     if let Some(conditions) = input["conditions"].as_array_mut() {
         for condition in conditions {
@@ -406,18 +404,18 @@ pub(crate) fn normalise(input: &Value) -> Value {
         }
     }
     if let Some(actions) = input["actions"].as_array_mut() {
-        for action in actions {
-            if action.get("input").is_some() {
-                action["input"] = object(&action["input"]);
+        for (i, action) in actions.iter_mut().enumerate() {
+            if let Some(value) = action.get("input") {
+                action["input"] = decode(value, &format!("actions.{i}.input"))?;
             }
         }
     }
     if let Some(examples) = input["examples"].as_array_mut() {
-        for example in examples {
-            example["facts"] = object(&example["facts"]);
+        for (i, example) in examples.iter_mut().enumerate() {
+            example["facts"] = decode(&example["facts"], &format!("examples.{i}.facts"))?;
         }
     }
-    input
+    Ok(input)
 }
 
 struct Normalised(&'static dyn WriteHandler);
@@ -431,7 +429,7 @@ impl WriteHandler for Normalised {
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
-        Box::pin(async move { self.0.preview(client, scope, &normalise(input)).await })
+        Box::pin(async move { self.0.preview(client, scope, &normalise(input)?).await })
     }
     fn commit<'a>(
         &'a self,
@@ -439,7 +437,7 @@ impl WriteHandler for Normalised {
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
-        Box::pin(async move { self.0.commit(tx, scope, &normalise(input)).await })
+        Box::pin(async move { self.0.commit(tx, scope, &normalise(input)?).await })
     }
 }
 static DRAFT: Normalised = Normalised(&DraftRule);

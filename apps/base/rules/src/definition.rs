@@ -207,11 +207,14 @@ impl Definition {
                 .get("operation")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let input = item
-                .get("input")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
+            let input = match item.get("input") {
+                None => Map::new(),
+                Some(Value::Object(input)) => input.clone(),
+                Some(_) => {
+                    problems.push((format!("actions.{i}.input"), "must be a JSON object".into()));
+                    Map::new()
+                }
+            };
             if operation.is_empty() {
                 problems.push((format!("actions.{i}.operation"), "is required".into()));
             }
