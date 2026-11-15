@@ -80,6 +80,7 @@ Reuse the shared macros and typed models. Do not hand-write markup or copy class
 | Calendar (day, week, month and shared views of records with a start and end; drag to move, drag the edge to resize, Move… for keyboard and touch) | `templates/calendar.html` and `src/calendar.rs` (`Calendar`, `CalendarState`, `CalendarItem`, `CalendarMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
 | Safe Markdown reading view beside the existing plain-text textarea | `Markdown` in `src/markdown.rs`; syntax and trust boundary in `apps/base/ui/README.md` | `apps/base/ui` |
 | File preview (an image, PDF or plain text from the owner's own authorized route, in a modal) | `file_preview` in `templates/components.html`, through `FilePreview` in `src/file_preview.rs`, served with `FileBody::preview` | `apps/base/ui` |
+| Read-only contributed key facts at the top of a record | `RecordFacts`, gathered through `base/ports` | `apps/base/ui` |
 | Status board (columns by a status, cards dragged between them; Move… for keyboard and touch) | `templates/board.html` and `src/board.rs` (`Board`, `BoardState`, `BoardCard`, `BoardMove`); owner contract in `apps/base/ui/README.md` | `apps/base/ui` |
 
 - Name variants through the enums (`ButtonVariant`, `BadgeKind`, `PageVariant`), not class strings.

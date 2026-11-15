@@ -779,6 +779,17 @@ pub struct Facts<'a> {
     pub items: Vec<Fact<'a>>,
 }
 
+/// Read-only key facts contributed to a record page. Empty strips disappear.
+#[derive(Template, Debug, Default)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% if !items.is_empty() %}{% call ui::stat_strip(id=id, title="Key facts", items=items) %}{% endcall %}{% endif %}"#,
+    ext = "html"
+)]
+pub struct RecordFacts<'a> {
+    pub id: &'a str,
+    pub items: Vec<StatItem>,
+}
+
 /// A compact strip of related statistics; `href` makes it a quiet link.
 #[derive(Template, Debug, Default)]
 #[template(

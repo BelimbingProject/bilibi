@@ -40,6 +40,7 @@ bilibi-picklists.workspace = true
 bilibi-settings.workspace = true
 bilibi-settings-editor.workspace = true
 bilibi-records.workspace = true
+bilibi-ports.workspace = true
 bilibi-personal-data.workspace = true
 jiff.workspace = true
 

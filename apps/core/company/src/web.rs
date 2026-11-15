@@ -75,6 +75,7 @@ pub struct Pages {
     /// Where a company may be dropped or added to (issue 265).
     pub records: Arc<bilibi_records::Records>,
     pub contracts: Arc<PageContracts>,
+    pub facts: Arc<bilibi_ports::Ports>,
     pub record_panels: Vec<RecordPanel>,
 }
 /// A panel another module contributes for a company record (Address's
@@ -179,6 +180,7 @@ impl Pages {
             db: self.db.clone(),
             company: self.company.clone(),
             contracts: self.contracts.clone(),
+            facts: self.facts.clone(),
             datetime: self.datetime.clone(),
             locales: self.locales.clone(),
             picklists: self.picklists.clone(),
@@ -405,6 +407,7 @@ struct CompanyPage {
     custom_sorts: Vec<String>,
     company: Arc<crate::CompanyService>,
     contracts: Arc<PageContracts>,
+    facts: Arc<bilibi_ports::Ports>,
     datetime: Arc<bilibi_datetime::DisplayPolicy>,
     locales: Arc<bilibi_locale::Locales>,
     picklists: Arc<bilibi_picklists::PickLists>,
@@ -696,12 +699,17 @@ impl CompanyPage {
                 self.active_panels = self.allowed_panels(&**client, scope, id).await?;
                 let anchors: Vec<String> =
                     self.active_panels.iter().map(|p| p.id.clone()).collect();
+                let facts = self
+                    .facts
+                    .record_facts(&self.db, scope, "core/company", &id.to_string())
+                    .await;
                 views::detail(
                     &client,
                     scope,
                     id,
                     &self.picklists,
                     views::DetailState {
+                        facts: &facts,
                         statuses: &self.statuses,
                         pending: self.pending.as_ref(),
                         notice: &self.notice,

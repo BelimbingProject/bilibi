@@ -157,3 +157,9 @@ With nothing mounted, the example shows `Unavailable`. With the provider mounted
 
 - **Reacting after another Domain commits:** see events in `apps/base/events/README.md`.
 - **Writes, transactions and `MutationTransaction`:** see `apps/base/database/README.md`.
+
+## Record facts
+
+Contribute a `RecordFact` to `RECORD_FACTS` with a record kind and an ordinary port owned by the same module. The port accepts `{ "id": "<record id>" }` and returns `{ "label": "...", "value": "..." }`; it must check the reader and resolve the record within the supplied scope; for display checks use Authz `holds_proof`, whose read-only decision does not write the authorization log. Its read must be cheap and return no markup.
+
+Record pages call `Ports::record_facts` and render the results with `bilibi_ui::RecordFacts`. At most eight contributions run concurrently, each with a 100 ms deadline including pool acquisition and a read-only transaction with a 75 ms PostgreSQL statement timeout. Refusals, errors, oversized values and timeouts are omitted. A provider must use asynchronous, bounded reads and never perform writes or blocking work.
