@@ -104,6 +104,7 @@ WALKTHROUGHS=(
   'privacy|document-privacy|apps/core/document|privacy-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
 
   'core|address|apps/core/address|address-walkthrough|geonames|BILIBI_ADDRESS_DEMO=disposable|-'
+  'core|address-hidden-phone|apps/core/address|address-hidden-phone|none|BILIBI_ADDRESS_PROOF=disposable|-'
   'core|affiliation|apps/core/affiliation|affiliation-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
   'core|affiliation-contact-matching|apps/core/affiliation|contact-matching-walkthrough|none|BILIBI_CONTACT_MATCHING=disposable BILIBI_INSTANCE_DIR=@/instance|seed;-'
   'core|affiliation-operations|apps/core/affiliation|k19-operations-walkthrough|migrate|BILIBI_AFFILIATION_DEMO=disposable|-'
