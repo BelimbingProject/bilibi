@@ -15,6 +15,7 @@ bilibi-dashboard.workspace = true
 bilibi-database.workspace = true
 bilibi-datetime.workspace = true
 bilibi-grid.workspace = true
+bilibi-labels.workspace = true
 bilibi-locale.workspace = true
 bilibi-mail.workspace = true
 bilibi-menu.workspace = true

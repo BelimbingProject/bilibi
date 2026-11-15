@@ -16,6 +16,9 @@
 //     what was typed, and Enter adds the best match (`add_typed`) instead of
 //     asking for suggestions again.
 //   * Choosing a lens closes its menu at once.
+//   * The save-view form posts the address it is saved at (`query`: the page's
+//     own sort, search and filters), which only the browser knows; it is filled
+//     in before the transport reads the form, and the form clears afterwards.
 //
 // The notch's aria-expanded is the one record of open (DisclosureDismiss owns
 // it; the notch is data-live-ignore), so nothing here tracks open state.
@@ -34,6 +37,7 @@
       this.onDragEnd = () => this.dragEnd()
       this.onKeyDown = (event) => this.addBarKeys(event)
       this.onClick = (event) => this.press(event)
+      this.onSubmit = (event) => this.saveView(event)
 
       this.el.addEventListener('dragstart', this.onDragStart)
       this.el.addEventListener('dragover', this.onDragOver)
@@ -42,6 +46,8 @@
       this.el.addEventListener('dragend', this.onDragEnd)
       this.el.addEventListener('keydown', this.onKeyDown)
       this.el.addEventListener('click', this.onClick)
+      // Capturing: the transport reads the form's values from a later listener.
+      this.el.addEventListener('submit', this.onSubmit, true)
 
       this.orderColumns()
       this.applyBars()
@@ -62,6 +68,14 @@
       this.el.removeEventListener('dragend', this.onDragEnd)
       this.el.removeEventListener('keydown', this.onKeyDown)
       this.el.removeEventListener('click', this.onClick)
+      this.el.removeEventListener('submit', this.onSubmit, true)
+    },
+
+    saveView(event) {
+      const form = event.target.closest('[data-save-view]')
+      if (!form || !form.elements.query) return
+      form.elements.query.value = location.search
+      setTimeout(() => form.elements.name && (form.elements.name.value = ''), 0)
     },
 
     // Move the actual cells so reading and keyboard order match the display.

@@ -587,6 +587,7 @@ dependencies = [
  "bilibi-events",
  "bilibi-grid",
  "bilibi-integration",
+ "bilibi-labels",
  "bilibi-language-detection",
  "bilibi-locale",
  "bilibi-mail",
@@ -1037,6 +1038,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "url",
 ]
 
 [[package]]
@@ -1087,6 +1089,26 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "bilibi-labels"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "bilibi-agent-api",
+ "bilibi-audit",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-grid",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tokio-postgres",
 ]
 
 [[package]]
@@ -1530,6 +1552,7 @@ dependencies = [
  "bilibi-database",
  "bilibi-datetime",
  "bilibi-grid",
+ "bilibi-labels",
  "bilibi-locale",
  "bilibi-mail",
  "bilibi-menu",

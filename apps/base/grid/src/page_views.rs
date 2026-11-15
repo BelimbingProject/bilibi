@@ -38,7 +38,7 @@ pub const MAX_PAGES: usize = 64;
 pub struct PageViews {
     db: Db,
     settings: Arc<Settings>,
-    boundary: Arc<MutationBoundary>,
+    pub(crate) boundary: Arc<MutationBoundary>,
 }
 
 impl PageViews {

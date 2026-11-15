@@ -40,6 +40,7 @@
 //! built-ins. A spec the fresh catalog refuses (a field an operator restricted
 //! since, a table the account lost) is pruned from what is shown and from the
 //! address, and leaves the account's memory on the next arrangement.
+mod views;
 use crate::page_views::PageViews;
 use crate::view::View;
 use crate::{lens, Catalog, Column, Lens, Lenses, Stats, MAX_COLUMNS};
@@ -97,6 +98,7 @@ pub struct PageColumns {
     pub suggestions: Vec<FlexColumn>,
     pub add_query: String,
     scalar_sorts: BTreeMap<String, String>,
+    saved: views::Saved,
 }
 
 impl PageColumns {
@@ -144,6 +146,7 @@ impl PageColumns {
             suggestions: Vec::new(),
             add_query: String::new(),
             scalar_sorts: BTreeMap::new(),
+            saved: views::Saved::default(),
         })
     }
 
@@ -272,6 +275,7 @@ impl PageColumns {
             let client = self.views.db().get().await?;
             Catalog::for_scope(&**client, scope).await?
         };
+        self.load_saved(scope).await?;
         if let Some(root) = catalog.table(&self.table) {
             self.record_fields = root.record_fields.clone();
             for builtin in &mut self.builtins {
@@ -490,6 +494,7 @@ impl PageColumns {
         table.since = Some(&self.since);
         table.suggestions = self.suggestions.clone();
         table.add_query = &self.add_query;
+        table.views = Some(self.views_bar());
         table
     }
 
@@ -540,6 +545,9 @@ impl PageColumns {
                 })
                 .and_then(|b| b.sort.clone())
                 .map_or(Outcome::Noop, Outcome::Sort));
+        }
+        if let Some(outcome) = self.handle_views(scope, params).await? {
+            return Ok(outcome);
         }
         // An empty column list means the page default; an op that changes
         // columns starts from that default spelled out, so a built-in is
