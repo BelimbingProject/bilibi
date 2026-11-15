@@ -680,11 +680,28 @@ impl Handler for FinishJob {
                 }
                 Err(error) => {
                     // Shown on the request; the queue retries.
-                    let _ = finish_failed(&self.privacy, execution, scope, id, &error).await;
-                    Outcome::Retry("finish_failed")
+                    let code = finish_code(&error);
+                    let _ = finish_failed(&self.privacy, execution, scope, id, code).await;
+                    Outcome::Retry(code)
                 }
             }
         })
+    }
+}
+
+/// Why a finish attempt failed, as the request's `finish_error` and the
+/// job's failure code: a PDF engine the operator fixes in Settings is named.
+fn finish_code(error: &Error) -> &'static str {
+    match error {
+        Error::Invalid => "export_too_large",
+        Error::Refused(reason) if reason == documents::PDF_ENGINE_UNAVAILABLE => {
+            documents::PDF_ENGINE_UNAVAILABLE
+        }
+        Error::Refused(reason) if reason == documents::PDF_RENDER_TIMED_OUT => {
+            documents::PDF_RENDER_TIMED_OUT
+        }
+        Error::Internal | Error::Database(_) | Error::Pool(_) => "finish_failed",
+        error => code(error),
     }
 }
 
@@ -694,13 +711,8 @@ async fn finish_failed(
     execution: &Execution,
     scope: &Scope,
     id: i64,
-    error: &Error,
+    code: &'static str,
 ) -> Result<()> {
-    let code = match error {
-        Error::Invalid => "export_too_large",
-        Error::Internal | Error::Database(_) | Error::Pool(_) => "finish_failed",
-        error => code(error),
-    };
     let mut client = privacy.db.get().await?;
     let mut tx = execution
         .begin(&mut client, "privacy.request.finish_failed")

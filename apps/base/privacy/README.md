@@ -138,7 +138,7 @@ bilibi_privacy::record_class! {
 | The approver loses the right to run it before a job runs (role, deny, deactivation) | Queue cancels the job; the request is `failed` (`cancelled_actor_refused`) | Manual: a person who may approve runs it again |
 | Erasure of the person running while an access store reads | `Conflict`, nothing staged | Retry, automatically, after the erasure |
 | Export staged before an erasure, or a staged store missing | Built artifact discarded, staged rows dropped, every store reads again | Retry, automatically |
-| Finish fails (artifact, PDF, size, a file no longer found) | Request stays `running` and late; `finish_attempts`, `finish_error` on its page. Only a request that no longer exists cancels its jobs | Retry 25 times, then `failed`: fix the cause, then Run again |
+| Finish fails (artifact, PDF, size, a file no longer found) | Request stays `running` and late; `finish_attempts`, `finish_error` on its page. A certificate the PDF engine cannot print names why, with what to change in Settings: `pdf_engine_unavailable` (no Chromium at PDF Chromium executable) or `pdf_render_timed_out` (#715). Only a request that no longer exists cancels its jobs | Retry 25 times, then `failed`: fix the cause, then Run again |
 | Workflow engine moves a request without the owner's work | `running` or `completed` refused | None needed |
 | Legal hold on a record or person | Record kept and listed with its hold; owed cleanup persisted | Retry: the daily run after release |
 | Document kept for its retention date | Kept and listed with its date; owed cleanup persisted, due at that date | Retry: the first daily run after the date erases it; until then the cleanup is not run |

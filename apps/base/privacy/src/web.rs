@@ -698,6 +698,14 @@ enum Dialog {
     Approve,
     RunAgain,
 }
+/// What a request's `finish_error` means for the operator, and what to do.
+fn finish_reason(code: &str) -> String {
+    match code {
+        crate::documents::PDF_ENGINE_UNAVAILABLE => "no Chromium was found to print the certificate; set PDF Chromium executable in Settings".into(),
+        crate::documents::PDF_RENDER_TIMED_OUT => "printing the certificate timed out; check PDF Chromium executable, or raise PDF browser start timeout or PDF render timeout in Settings".into(),
+        code => code.replace('_', " "),
+    }
+}
 /// Why a request's background work stopped, in plain words, from its code
 /// (`cancelled_actor_refused`, `discarded_store_failed`, …).
 fn stopped_because(code: &str) -> &'static str {
@@ -1323,9 +1331,9 @@ impl RequestPage {
                         ),
                         (None, Some(at), _) => format!("Completed {}", when(&display, Some(at))),
                         (None, None, Some(code)) => format!(
-                            "Finishing failed {} time(s) ({}); it is retried",
+                            "Finishing failed {} time(s): {}. It is retried.",
                             request.finish_attempts,
-                            code.replace('_', " ")
+                            finish_reason(code)
                         ),
                         _ => "Open".into(),
                     }),
