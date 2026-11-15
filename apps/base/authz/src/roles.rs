@@ -80,10 +80,16 @@ pub struct RolePage {
     pub total_entries: u64,
 }
 
+/// One capability a role gives, and how far it reaches (#683).
+#[derive(Clone, Debug)]
+pub struct Granted {
+    pub key: String,
+    pub reach: crate::Reach,
+}
 pub struct RoleDetails {
     pub role: RoleSummary,
-    /// Sorted capability keys stored on the role.
-    pub capabilities: Vec<String>,
+    /// The capabilities stored on the role, by key.
+    pub capabilities: Vec<Granted>,
     /// User ids holding the role, ascending.
     pub principals: Vec<i64>,
 }
@@ -298,12 +304,15 @@ pub async fn get(
     };
     let capabilities = client
         .query(
-            "SELECT capability FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 ORDER BY capability",
+            "SELECT capability,reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 ORDER BY capability",
             &[&tenant, &id],
         )
         .await?
         .iter()
-        .map(|row| row.get(0))
+        .map(|row| Granted {
+            key: row.get(0),
+            reach: crate::Reach::parse(row.get(1)).unwrap_or(crate::Reach::All),
+        })
         .collect();
     let principals = client
         .query(

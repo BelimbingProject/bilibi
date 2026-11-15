@@ -52,12 +52,13 @@ impl Grants {
             for row in tx
                 .sql()
                 .query(
-                    "SELECT capability FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2",
+                    "SELECT capability,reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2",
                     &[&tenant, role],
                 )
                 .await?
             {
-                if !actor_grants.allowed.contains(row.get::<_, &str>(0)) {
+                let reach = crate::Reach::parse(row.get(1)).unwrap_or(crate::Reach::All);
+                if !Self::covers(&actor_grants, row.get::<_, &str>(0), reach) {
                     return Err(Error::Forbidden);
                 }
             }

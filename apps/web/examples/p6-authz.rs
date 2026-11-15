@@ -93,7 +93,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let row=client.query_one("INSERT INTO roles(tenant_id,name) VALUES(1,'P6 reference') ON CONFLICT(tenant_id,name) DO UPDATE SET name=EXCLUDED.name RETURNING id",&[]).await?;
     let custom: i64 = row.get(0);
     grants
-        .set_role_capability(&admin, custom, "reference.records.view", true)
+        .set_role_capability(
+            &admin,
+            custom,
+            "reference.records.view",
+            Some(bilibi_authz::Reach::All),
+        )
         .await?;
     grants
         .assign_role(&admin, manager.user(), custom, true)

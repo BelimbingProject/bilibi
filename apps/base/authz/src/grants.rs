@@ -8,6 +8,7 @@ use crate::{
     authorize_key,
     roles::{NewRole, RoleErrors},
     vocabulary::{SystemRole, Vocabulary},
+    Effective, Reach,
 };
 use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Db, Error, MutationBoundary, MutationTransaction, Result};
@@ -145,6 +146,11 @@ impl Grants {
             _ => Err(Error::Invalid),
         }
     }
+    /// Whether the actor may give `key` with `reach`: they hold it at least
+    /// that far (#683). Giving a reach you do not hold would widen access.
+    pub(crate) fn covers(actor: &Effective, key: &str, reach: Reach) -> bool {
+        actor.reach_of(key).is_some_and(|held| held >= reach)
+    }
     /// Assign/remove an authorization role to a live or invited staff
     /// principal of this tenant. Business relationship roles never enter this
     /// table.
@@ -223,14 +229,14 @@ impl Grants {
                 .await?;
         }
         if assigned {
-            let keys: Vec<String> = client
+            let keys: Vec<(String, Reach)> = client
                 .query(
-                    "SELECT capability FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2",
+                    "SELECT capability,reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2",
                     &[&actor.tenant(), &role],
                 )
                 .await?
                 .iter()
-                .map(|r| r.get(0))
+                .map(|r| (r.get(0), Reach::parse(r.get(1)).unwrap_or(Reach::All)))
                 .collect();
             let actor_grants = crate::effective_capabilities_in_company(
                 client,
@@ -242,7 +248,7 @@ impl Grants {
             if grant_all && !actor_grants.grant_all {
                 return Err(Error::Forbidden);
             }
-            for key in keys {
+            for (key, reach) in keys {
                 self.staff_key(&key)?;
                 if bounds.company_id.is_some()
                     && !self
@@ -253,7 +259,7 @@ impl Grants {
                 {
                     return Err(Error::Refused("This role contains tenant-wide permissions and cannot be limited to one company.".into()));
                 }
-                if !actor_grants.allowed.contains(key.as_str()) {
+                if !Self::covers(&actor_grants, &key, reach) {
                     return Err(Error::Forbidden);
                 }
             }
@@ -458,11 +464,14 @@ impl Grants {
                 &format!("user:{user} capability:{key} {allowed:?}"),
             )
             .await?;
+        // A direct allow reaches all of the key's records (#683).
         if allowed == Some(true)
-            && !crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
-                .await?
-                .allowed
-                .contains(key)
+            && !Self::covers(
+                &crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
+                    .await?,
+                key,
+                Reach::All,
+            )
         {
             return Err(Error::Forbidden);
         }
@@ -479,12 +488,15 @@ impl Grants {
         })).await?;
         Ok(())
     }
+    /// Give `key` on a custom role with `grant` reach, change how far it
+    /// reaches, or take it away (`None`). Reach narrower than all needs a key
+    /// whose owner supports it (`CapabilityDefinition::with_reach`).
     pub async fn set_role_capability(
         &self,
         actor: &Scope,
         role: i64,
         key: &str,
-        granted: bool,
+        grant: Option<Reach>,
     ) -> Result<()> {
         self.known(key)?;
         let mut client = self.db.get().await?;
@@ -495,23 +507,43 @@ impl Grants {
                 actor.mutation_context("authz.role_capability.set"),
             )
             .await?;
-        self.set_role_capability_in(&mut tx, actor, role, key, granted)
+        self.set_role_capability_in(&mut tx, actor, role, key, grant)
             .await?;
         tx.commit().await
     }
+    /// Whether `key` may be given with `reach`: `all` always, a narrower
+    /// reach only on a key that supports it.
+    pub fn reach_supported(&self, key: &str, reach: Reach) -> Result<()> {
+        if reach == Reach::All
+            || self
+                .vocabulary
+                .capabilities
+                .get(key)
+                .is_some_and(|c| c.definition.reach)
+        {
+            Ok(())
+        } else {
+            Err(Error::Refused(format!(
+                "{key} always reaches all records; it cannot be limited to {}.",
+                reach.label().to_lowercase()
+            )))
+        }
+    }
     /// [`Grants::set_role_capability`] inside the caller's audited transaction (an agent
     /// plan's commit): the same checks, step-up and write, committed by the caller.
+    /// The actor must hold the key at least as far as the reach given.
     pub async fn set_role_capability_in(
         &self,
         tx: &mut MutationTransaction<'_>,
         actor: &Scope,
         role: i64,
         key: &str,
-        granted: bool,
+        grant: Option<Reach>,
     ) -> Result<()> {
         self.known(key)?;
-        if granted {
+        if let Some(reach) = grant {
             self.staff_key(key)?;
+            self.reach_supported(key, reach)?;
         }
         self.verify_user(tx.sql(), actor, actor.user()).await?;
         authorize_key(tx.sql(), actor, "admin.authz.role.update").await?;
@@ -522,15 +554,17 @@ impl Grants {
             )
             .await?
             .ok_or(Error::Invalid)?;
-        if granted && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
+        if grant.is_some() && !self.vocabulary.capabilities.get(key).is_some_and(|c|c.definition.company_scoped)
             && tx.sql().query_opt("SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND role_id=$2 AND company_id IS NOT NULL LIMIT 1", &[&actor.tenant(),&role]).await?.is_some() { return Err(Error::Invalid); }
-        if granted
-            && !crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
-                .await?
-                .allowed
-                .contains(key)
-        {
-            return Err(Error::Forbidden);
+        if let Some(reach) = grant {
+            if !Self::covers(
+                &crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
+                    .await?,
+                key,
+                reach,
+            ) {
+                return Err(Error::Forbidden);
+            }
         }
         self.step_up
             .require(
@@ -538,19 +572,22 @@ impl Grants {
                 step_up::ROLE_CAPABILITY,
                 &format!(
                     "role:{role} capability:{key} {}",
-                    if granted { "grant" } else { "remove" }
+                    grant.map_or("remove", Reach::code)
                 ),
             )
             .await?;
         let tenant = actor.tenant();
         let key = key.to_owned();
+        let reach = grant.map(Reach::code);
         tx.mutate(|sql|Box::pin(async move {
             let row=sql.query_opt("SELECT is_system FROM roles WHERE tenant_id=$1 AND id=$2 FOR UPDATE",&[&tenant,&role]).await?.ok_or(Error::Invalid)?;
             if row.get::<_,bool>(0) {return Err(Error::Forbidden);}
-            let old=sql.query_opt("SELECT capability FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?.is_some();
-            if granted {sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",&[&tenant,&role,&key]).await?;}
-            else {sql.execute("DELETE FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?;}
-            Ok(((),vec![Change{kind:"authz.role_capability".into(),id:role,old:json!({"capability":key,"granted":old}),new:json!({"capability":key,"granted":granted})}]))
+            let old:Option<String>=sql.query_opt("SELECT reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?.map(|row|row.get(0));
+            match reach {
+                Some(reach)=>{sql.execute("INSERT INTO role_capabilities(tenant_id,role_id,capability,reach) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,role_id,capability) DO UPDATE SET reach=EXCLUDED.reach",&[&tenant,&role,&key,&reach]).await?;},
+                None=>{sql.execute("DELETE FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2 AND capability=$3",&[&tenant,&role,&key]).await?;},
+            }
+            Ok(((),vec![Change{kind:"authz.role_capability".into(),id:role,old:json!({"capability":key,"granted":old.is_some(),"reach":old}),new:json!({"capability":key,"granted":reach.is_some(),"reach":reach})}]))
         })).await?;
         Ok(())
     }
@@ -675,11 +712,14 @@ impl Grants {
         };
         self.verify_user(tx.sql(), actor, actor.user()).await?;
         authorize_key(tx.sql(), actor, gate).await?;
+        // A named principal reaches all of the key's records (#683).
         if allowed == Some(true)
-            && !crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
-                .await?
-                .allowed
-                .contains(key)
+            && !Self::covers(
+                &crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
+                    .await?,
+                key,
+                Reach::All,
+            )
         {
             return Err(Error::Forbidden);
         }

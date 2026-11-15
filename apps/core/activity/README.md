@@ -22,12 +22,13 @@ Not here: pulling in outside calendars (Google, Outlook, iCalendar subscriptions
 | --- | --- |
 | Creator, assignee, account guest | Always |
 | Anyone who may view the related record | Only when the activity is **shared** (`shared = true`, which needs a related record) |
-| Holder of `core.activity.all.view` | Every activity of the tenant (oversight; no contributed role holds it) |
+| Holder of `core.activity.all.view` | Every activity of the tenant (oversight; no contributed role holds it). With reach "my team's" (#683), those assigned to someone in one of the reader's Core teams; "mine" adds nothing |
 
 - The same rule answers every read: `get`, the list, panels, the agent operations, `base/records` pills and the bell. A shared activity counts when the related record's owner answers `Readable` for the reader (`RecordOwner::authorize`).
 - The list without a record filter shows the activities you take part in. Shared activities on a record show on that record's panel and on `/activities?related=<kind>:<id>`, after `base/records.check` of the record for you.
 - Reports (Grid table `activities`, capability `core.activity.view`) read only the activities the reader takes part in; the shared rule needs the owner's record check, which a Grid source cannot ask.
-- Changes, Close and Delete need `core.activity.manage` and an activity you created or are assigned; with `core.activity.all.manage` as well, any activity you can see.
+- Changes, Close and Delete need `core.activity.manage` and an activity you created or are assigned; with `core.activity.all.manage` as well, any activity you can see that its reach admits (by assignee, rechecked in the write with `reach_admits`). Lists drag and edit others' rows only when it reaches all; with "my team's" each activity's own page decides.
+- Both oversight keys support record reach (`with_reach`); the assignee is the owner field (`apps/base/authz/README.md`, "Record reach").
 - An activity cannot be about another activity.
 
 ## Records

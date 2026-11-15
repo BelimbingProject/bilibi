@@ -20,6 +20,8 @@ This module gives pages and agents the same reviewed doors for authorization cha
 | `base.authz_agent.principal_capability.set` | `admin.authz.role.update` | `set_direct_in` | `base.authz.principal_capability.set` |
 | `base.authz_agent.role_capability.set` | `admin.authz.role.update` | `set_role_capability_in` | `base.authz.role_capability.set` |
 
+`base.authz_agent.role_capability.set` takes an optional `reach` (`own`, `team` or `all`, the default) for a key that supports record reach; the review names the reach before and after, and the actor must hold the key at least that far (`apps/base/authz/README.md`, "Record reach").
+
 ## Automation access
 
 Administration → Authorization → **Automation access** (`/authz/automation`) lists every shared schedule on the default `scheduler` identity and every event subscription that wants to act for the current organisation. Those schedules share one consent record; a schedule with its own execution principal is not listed there and is consented through [Installed system principals](#installed-system-principals) ([Schedule owner business authority](../schedule/README.md#owner-business-authority)). Event subscriptions share another.
@@ -43,7 +45,7 @@ Read `base.authz_agent.system_principal.list`, then review `base.authz_agent.sys
 - The plan service authorizes each operation's capability.
 - `Grants` re-proves it inside the write.
 - The account page's escalation guard holds here as well, at review and again at commit:
-  - a role or capability is grantable only by an actor who holds everything it grants;
+  - a role or capability is grantable only by an actor who holds everything it grants, at least as far as it reaches;
   - a full-access role is grantable only by a full-access actor.
 - System roles' capabilities are refused: reconciliation owns them.
 - Impersonation is never agent reach (`apps/base/agent_api/README.md`).

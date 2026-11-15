@@ -235,12 +235,12 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
     // A record never updated was last changed when it was made.
     let updated = format!("COALESCE({}, {at})", time_of(table, decl.updated));
     format!(
-        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({vector}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM ({source}) r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
+        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({vector}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
         kind = literal(kind.id),
         title = text_of(table, Some(decl.title)),
         sub0 = text_of(table, decl.subtitle.first().copied()),
         sub1 = text_of(table, decl.subtitle.get(1).copied()),
-        source = table.source().sql,
+        source = table.scoped_source(),
     )
 }
 

@@ -3,11 +3,15 @@
 //! run against. Groups, items and movements exercise a one-link, many-links, a
 //! chained one-link after a many-link, an enum, decimals, dates, a timestamp and a restrictable
 //! field (`reference_items.unit_cost`). A role granted [`READ`] may read them;
-//! no product role carries it, the walkthrough fixture's roles do.
+//! no product role carries it, the walkthrough fixture's roles do. Tasks
+//! (`reference_tasks`, [`TASKS`]) carry an owner and a team for record reach.
 use crate::{Field, FieldType::*, GridContribution, LinkDecl, LinkKind::*, Source, TableDecl};
 use bilibi_authz::{CapabilityDefinition as C, VocabularyContribution, VOCABULARY};
 
 pub const READ: &str = "grid.reference.view";
+/// Reads reference tasks, which support record reach (#683): a role may give
+/// it for the reader's own tasks, their teams' or all.
+pub const TASKS: &str = "grid.reference.task.view";
 
 static GRID: GridContribution = GridContribution {
     record_fields: &[],
@@ -61,6 +65,23 @@ static GRID: GridContribution = GridContribution {
             ],
         )
         .time_field("moved_on"),
+        TableDecl::new(
+            "reference_tasks",
+            "Reference tasks",
+            TASKS,
+            Source::tenant("SELECT id, name, owner_user_id, team_id, hours FROM base_grid_ref_tasks WHERE tenant_id = $1"),
+            "id",
+            &[
+                Field::new("id", "ID", Integer).non_personal(),
+                Field::new("name", "Name", String).non_personal(),
+                Field::new("owner_user_id", "Owner", Integer).non_personal(),
+                Field::new("team_id", "Team", Integer).non_personal(),
+                Field::new("hours", "Hours", Integer).non_personal(),
+            ],
+        )
+        .label_field("name")
+        .owner("owner_user_id")
+        .team("team_id"),
     ],
     links: &[
         LinkDecl::on("group", "Group", One, "reference_items", "group_id", "reference_groups", "id"),
@@ -104,7 +125,7 @@ bilibi_module_registry::Provenance { module: "base/grid", source: file!(), line:
 &VocabularyContribution {
     domains: &["grid"],
     verbs: &["view"],
-    capabilities: &[C::tenant(READ)],
+    capabilities: &[C::tenant(READ), C::tenant(TASKS).with_reach()],
     roles: &[],
     system_principals: &[],
 }) }

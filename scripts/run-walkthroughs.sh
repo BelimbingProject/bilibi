@@ -196,6 +196,7 @@ WALKTHROUGHS=(
   'web|records|apps/web|records-reference|none|-APP_ORIGIN|-'
   'web|records-equivalence|apps/web|records-equivalence|none||-'
   'web|role-assignment-bounds|apps/web|role-assignment-bounds|seed|BILIBI_ASSIGNMENT_PROOF=disposable|-'
+  'web|record-reach|apps/web|record-reach|fixture-seed|BILIBI_RECORD_REACH=disposable|-'
   'web|system-principal-grants|apps/web|system-principal-grants|seed-app|BILIBI_PRINCIPAL_PROOF=disposable|-'
   'web|visitor|apps/web|visitor-walkthrough|migrate|BILIBI_DISPOSABLE_VISITOR_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'
