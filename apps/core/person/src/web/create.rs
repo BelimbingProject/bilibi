@@ -2,17 +2,17 @@
 //! the same shared modal as legal entity types (`company/web/reference_types`).
 //! `/contacts/new` only sends the browser to the list with that dialog open.
 use super::*;
-use crate::{contributions::CREATE, model, DuplicateQuery, Person, PersonInput, PersonKind};
+use crate::{DuplicateQuery, Person, PersonInput, PersonKind, contributions::CREATE, model};
 use bilibi_agent_api::Error as ContractError;
 use bilibi_custom_fields::Kind;
 use bilibi_ui::{
-    error_sentence, Alert, Button, ButtonVariant, ErrorSummary, Field, InputKind, RestrictedField,
-    StatusKind,
+    Alert, Button, ButtonVariant, ErrorSummary, Field, InputKind, RestrictedField, StatusKind,
+    error_sentence,
 };
 
 const OPEN: &str = "/contacts?new=1";
 /// The most ticks one several-choices field posts that the dialog reads.
-const CODES_MAX: usize = 200;
+const CODES_MAX: usize = bilibi_picklists::VALUES_MAX;
 
 /// HTTP and live visits to `/contacts/new` land on the list with the dialog open.
 pub(super) struct Create;
@@ -84,24 +84,24 @@ impl Draft {
             bilibi_ui::params::form_values_checked(value, "person", bilibi_ui::params::FIELD_LIMIT)
                 .map_err(bilibi_database::Error::refused)?;
         self.code = fields.get("code").cloned().unwrap_or_default();
-        // A record field posts its search (`cf_<key>_search`) and, once
-        // chosen, `kind:id` (kept from the pick, not from the post); several
-        // choices post one value per tick (`person[cf_<key>][]`).
         self.custom.clear();
         for (name, text) in fields.iter().filter(|(name, _)| name.starts_with("cf_")) {
-            let searched = name
-                .strip_suffix("_search")
-                .filter(|base| self.custom_kinds.get(*base) == Some(&Kind::Reference));
-            if let Some(base) = searched {
-                let picking = self.picking.entry(base.to_owned()).or_default();
-                picking.typed = text.chars().take(100).collect();
-                continue;
-            }
             match self.custom_kinds.get(name) {
                 Some(Kind::Reference | Kind::Choices) => {}
                 Some(_) | None => {
                     self.custom.insert(name.clone(), text.clone());
                 }
+            }
+        }
+        let searches = bilibi_ui::params::form_values_checked(
+            value,
+            "person_search",
+            bilibi_ui::params::FIELD_LIMIT,
+        )
+        .map_err(bilibi_database::Error::refused)?;
+        for (name, text) in searches {
+            if self.custom_kinds.get(&name) == Some(&Kind::Reference) {
+                self.picking.entry(name).or_default().typed = text.chars().take(100).collect();
             }
         }
         self.codes = self

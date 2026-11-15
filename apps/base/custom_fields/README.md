@@ -92,13 +92,13 @@ The owner opt-in and mapping contract lives in [Bulk Data](../bulk_data/README.m
 
 ## Reports, lists and search
 
-A fresh Grid catalog asks this module (the `bilibi_grid::CustomColumns` hook it binds at boot) for the tenant's active fields of each `GridSource` table, and they join that table as `cf_<key>` fields: report columns, filters, groupings, sorts and measures, and columns a list adds from its picker, under the table's own capability, reach and tenant predicate, with no grant of their own.
+A fresh Grid catalog asks this module (the `bilibi_grid::CustomColumns` hook it binds at boot) for the tenant's active fields of each `GridSource` table, and they join that table as `cf_<key>` fields: report columns, filters, groupings, sorts and measures, and columns a list adds from its picker (except record fields), under the table's own capability, reach and tenant predicate, with no grant of their own.
 
 | Kind | In Grid |
 | --- | --- |
 | Number, date, yes/no | Decimal, date and yes/no values; a stored value of another shape reads as empty |
 | Choice, several choices | The code, or the codes joined by `, ` in the order chosen |
-| Record | The record's name, through the reader's own scoped source of the target's table; left out for a reader who may not read that table |
+| Record | Grid projects its stored id and carries its Base Records kind. Reports name cells and groups through `Records::resolve` under the reader's scope, including CSV/PDF exports: merges show the survivor and an unnamed record shows Restricted. The column stays available to readers of the root table. Filters compare stored ids only (equals, one_of, empty, not_empty); list column pickers and related paths exclude record fields. |
 | Text, long text, link, phone, email | Text, and searchable |
 
 Global search finds a record by a word of an active text field through the owner's generated `custom_search_vector`; an archived field's words, codes, numbers, dates, yes/no and record ids never make a record match.
@@ -122,5 +122,5 @@ BILIBI_CUSTOM_FIELDS_DEMO=disposable DATABASE_URL=… APP_ORIGIN=… \
 | Values | Several choices are one array of codes, each once; a record field stores the id in its one spelling (`01` is `1`); both live in the contact's own JSON |
 | Refusals | An unknown code, a single string for several choices, an array for text and a forged record id are each refused on `cf_<key>` |
 | Target's access | A person who may not see companies cannot choose one, can still save another field of a contact that holds one, and sees it unnamed |
-| Reports | Each active field is a column; a record field only for readers of its kind; none in another tenant; a rows report filters, sorts and shows text, codes and the partner's name; a summary groups by several choices |
+| Reports | Each active field is a column; a record field stays offered with its name withheld when the target is unreadable; none in another tenant; a rows report filters, sorts and shows text, codes and the partner's name; a summary groups by several choices |
 | Search | A word of a custom text field finds the contact; another tenant and a pick-list code do not; an archived field's words stop finding it and its column leaves reports |

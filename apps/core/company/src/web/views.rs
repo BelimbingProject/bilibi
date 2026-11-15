@@ -1,5 +1,5 @@
-use super::fields;
 use super::Pending;
+use super::fields;
 use crate::{Company, FieldError, NewCompany, Params};
 use askama::Template;
 use bilibi_database::{Error, Result};
@@ -43,11 +43,7 @@ pub(super) fn columns(
     .filter(|(id, _, _)| !masked.contains(*id))
     .map(|(id, label, sort)| {
         let column = BuiltinColumn::new(id, label);
-        if sort {
-            column.sortable(id)
-        } else {
-            column
-        }
+        if sort { column.sortable(id) } else { column }
     })
     .collect();
     // The page's own columns are the defaults; a tenant's custom fields are
@@ -708,7 +704,7 @@ pub(super) struct CustomPickers {
     pub chosen: HashMap<String, bilibi_records::Resolved>,
 }
 /// The form namespace a record field's search posts in
-/// (`custom_reference[cf_<key>_search]`).
+/// (`custom_reference[cf_<key>]` for the held choice).
 pub(super) const CUSTOM_REFERENCE_FORM: &str = "custom_reference";
 /// The record page's search event of a record field's picker.
 pub(super) const CUSTOM_REFERENCE_SEARCH: &str = "custom_reference_search";
@@ -749,7 +745,8 @@ fn custom_picker(
         (CUSTOM_PICK, CUSTOM_CLEAR),
         errors,
     )
-    .key(name);
+    .key(name)
+    .search_name(format!("custom_reference_search[{name}]"));
     render(&if saves { picker.in_fact() } else { picker })
 }
 fn parent_pill(id: i64, label: &str, link: bool, workspace: bool) -> RelatedRecord {
@@ -1594,10 +1591,18 @@ pub(super) async fn detail(
             }
         );
         let detail = match pending.operation {
-            crate::lifecycle::Operation::Archive => "Its records are kept. Archiving is final: an archived company cannot be reactivated.",
-            crate::lifecycle::Operation::Suspend => "Its records are kept. Reactivating the company lifts the suspension.",
-            crate::lifecycle::Operation::Activate => "The company becomes active. It can be suspended later.",
-            crate::lifecycle::Operation::Reactivate => "The suspension is lifted and the company is active again.",
+            crate::lifecycle::Operation::Archive => {
+                "Its records are kept. Archiving is final: an archived company cannot be reactivated."
+            }
+            crate::lifecycle::Operation::Suspend => {
+                "Its records are kept. Reactivating the company lifts the suspension."
+            }
+            crate::lifecycle::Operation::Activate => {
+                "The company becomes active. It can be suspended later."
+            }
+            crate::lifecycle::Operation::Reactivate => {
+                "The suspension is lifted and the company is active again."
+            }
         };
         let mut reason = Field::named("reason")
             .id("company-lifecycle-reason")

@@ -12,12 +12,12 @@
 //! are column specs resolved against that catalog, so a column the reader
 //! cannot see is refused like an unknown one and cannot be used to infer a
 //! hidden value. Only catalog identifiers enter SQL; every value is bound.
-use crate::query::{cell, field, source, QueryError, MAX_ESTIMATED_COST, MAX_HOPS, MAX_ROWS};
+use crate::query::{MAX_ESTIMATED_COST, MAX_HOPS, MAX_ROWS, QueryError, cell, field, source};
 use crate::{Agg, Catalog, Column, FieldType, Table};
 use bilibi_database::{Db, Error};
 use bilibi_tenancy::Scope;
 use bytes::BytesMut;
-use jiff::{civil::Date, tz::TimeZone, Timestamp, ToSpan};
+use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
 use serde_json::Value;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type};
 
@@ -797,6 +797,14 @@ fn test(
     today: Date,
     binds: &mut Binds,
 ) -> Result<String, QueryError> {
+    if column.reference.is_some()
+        && !matches!(
+            test,
+            Test::Equals(_) | Test::OneOf(_) | Test::Empty | Test::NotEmpty
+        )
+    {
+        return Err(unsupported(column, "record fields compare stored ids only"));
+    }
     let ty = column.ty;
     let dated = matches!(ty, FieldType::Date | FieldType::DateTime);
     Ok(match test {

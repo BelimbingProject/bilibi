@@ -711,8 +711,16 @@
         if (this.el.contains(document.activeElement)) {
           e.preventDefault()
           e.stopPropagation()
+          window.addEventListener("keyup", this.onEscapeUp, true)
           this.escape()
         } else this.dismiss()
+      }
+
+      this.onEscapeUp = e => {
+        if (e.key !== "Escape") return
+        e.preventDefault()
+        e.stopPropagation()
+        window.removeEventListener("keyup", this.onEscapeUp, true)
       }
 
       this.onClickAway = e => {
@@ -761,6 +769,7 @@
 
     destroyed() {
       this.expansion.disconnect()
+      window.removeEventListener("keyup", this.onEscapeUp, true)
       this.trigger.removeEventListener("click", this.toggle)
       this.el.removeEventListener("pointerdown", this.onPointerDown)
       this.el.removeEventListener("focusout", this.onFocusOut)

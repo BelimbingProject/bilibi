@@ -13,12 +13,12 @@
 //! fixture tenant's pick-lists, provisioned as a new tenant's are, and a
 //! direct deny that keeps one account from seeing companies.
 use bilibi_agent_api::{
-    plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
     Registry,
+    plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
 };
-use bilibi_database::{pool, Db};
+use bilibi_database::{Db, pool};
 use bilibi_tenancy::{ProofFuture, Scope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_postgres::Transaction;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
@@ -139,7 +139,7 @@ async fn main() -> Result<(), Failure> {
         client
             .batch_execute(
                 "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES
-                 (1,1,'reports.view',true),(1,1,'reports.author',true),(1,1,'base.records.view',true),(1,1,'base.search.records.list',true),
+                 (1,1,'reports.view',true),(1,1,'reports.author',true),(1,1,'reports.share',true),(1,1,'base.records.view',true),(1,1,'base.search.records.list',true),
                  (1,3,'reports.view',true),(1,3,'base.records.view',true),(1,3,'base.search.records.list',true),
                  (2,5,'reports.view',true),(2,5,'base.search.records.list',true),
                  (1,3,'admin.company.view',false),(1,3,'admin.company.list',false) ON CONFLICT DO NOTHING",
@@ -365,9 +365,9 @@ async fn main() -> Result<(), Failure> {
             .await?,
     );
     proof.check(
-        "a record field is offered only to readers who may read its kind",
+        "a record field stays offered to root-table readers without company access",
         staff_offered.iter().any(|s| s == "cf_memo")
-            && !staff_offered.iter().any(|s| s == "cf_partner"),
+            && staff_offered.iter().any(|s| s == "cf_partner"),
     );
     let other_offered = specs(
         &other
@@ -428,6 +428,36 @@ async fn main() -> Result<(), Failure> {
         "the report is the author's: another reader cannot run it unshared",
         staff_run.is_err(),
     );
+    let owned = manager
+        .read("base.reports.get", json!({"id": report_id}))
+        .await?;
+    manager
+        .plan(
+            "base.reports.share",
+            json!({"id": report_id, "version": owned["version"], "everyone": true}),
+        )
+        .await?;
+    let unnamed = staff
+        .read("base.reports.run", json!({"id": report_id}))
+        .await?;
+    proof.check(
+        "staff keep the reference column without its name",
+        unnamed["columns"]
+            .as_array()
+            .is_some_and(|columns| columns.iter().any(|c| c["spec"] == "cf_partner"))
+            && unnamed["rows"][0][1][3] == "Restricted",
+    );
+    {
+        let client = db.get().await?;
+        client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES (1,2,'admin.company.list',true),(1,2,'admin.company.view',false) ON CONFLICT (tenant_id,user_id,capability) DO UPDATE SET is_allowed=EXCLUDED.is_allowed", &[]).await?;
+    }
+    let unnamed = manager
+        .read("base.reports.run", json!({"id": report_id}))
+        .await?;
+    proof.check(
+        "company list permission without view never names a report reference",
+        unnamed["rows"][0][1][3] == "Restricted" && !unnamed["rows"].to_string().contains(&company),
+    );
     let grouped = manager
         .plan(
             "base.reports.create",
@@ -456,6 +486,16 @@ async fn main() -> Result<(), Failure> {
             .await?
             .contains(&zara_id.to_string()),
     );
+    for (query, expected) in [
+        ("zara velvetine", true),
+        ("zara -velvetine", false),
+        ("velvetine -zara", false),
+    ] {
+        proof.check(
+            &format!("combined search: {query}"),
+            manager.found(query).await?.contains(&zara_id.to_string()) == expected,
+        );
+    }
     proof.check(
         "another tenant does not find it",
         other.found("velvetine").await?.is_empty(),

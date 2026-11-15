@@ -10,14 +10,14 @@ mod reference_types;
 pub(super) mod relationships;
 mod setup;
 mod views;
-use crate::{lifecycle::Operation, CreateOutcome, Edit, FieldError, Params};
+use crate::{CreateOutcome, Edit, FieldError, Params, lifecycle::Operation};
 use bilibi_agent_api::page::{Call, PageContracts};
 use bilibi_database::{Db, Error, Result};
 use bilibi_grid::{PageColumns, PageViews};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    page::*, CommitStates, CommitStatus, Filter, FlashMap, ListColumns, ListSpec, ListState,
-    SortDir, StatusKind, NO_FLASH,
+    CommitStates, CommitStatus, Filter, FlashMap, ListColumns, ListSpec, ListState, NO_FLASH,
+    SortDir, StatusKind, page::*,
 };
 use serde_json::Value;
 use std::{
@@ -90,7 +90,7 @@ pub struct RecordPanel {
 /// reauthorizes each on mount, event and refresh; this only decides whether
 /// to place its anchor.
 pub fn record_panels() -> bilibi_module_registry::Result<Vec<RecordPanel>> {
-    use bilibi_module_registry::contributions::{Embed, EmbedContext, EMBEDS};
+    use bilibi_module_registry::contributions::{EMBEDS, Embed, EmbedContext};
     let mut panels = Vec::new();
     for entry in inventory::iter::<bilibi_module_registry::Contribution>
         .into_iter()
@@ -575,7 +575,7 @@ impl CompanyPage {
             .find(|definition| definition.key == key))
     }
     /// Searches each record field whose typed text changed (posted as
-    /// `custom_reference[cf_<key>_search]`), among the records of its kind
+    /// `custom_reference_search[cf_<key>]`), among the records of its kind
     /// the reader may select.
     async fn search_references(
         &mut self,
@@ -583,12 +583,10 @@ impl CompanyPage {
         fields: &HashMap<String, String>,
     ) -> Result<()> {
         for (posted, query) in fields {
-            let Some(name) = posted
-                .strip_suffix("_search")
-                .filter(|name| name.starts_with("cf_"))
-            else {
+            let name = posted.as_str();
+            if !name.starts_with("cf_") {
                 continue;
-            };
+            }
             let query: String = query.chars().take(100).collect();
             if self.custom_pickers.queries.get(name) == Some(&query) {
                 continue;
@@ -692,7 +690,7 @@ impl CompanyPage {
         let status = match result {
             Ok(_) => CommitStatus::Saved,
             Err(bilibi_agent_api::Error::Backend(Error::Unauthorized)) => {
-                return Err(Error::Unauthorized)
+                return Err(Error::Unauthorized);
             }
             Err(bilibi_agent_api::Error::Backend(Error::Forbidden | Error::NotFound)) => {
                 self.notice = "You no longer have permission to change this company, or the company is archived.".into();
@@ -1106,7 +1104,7 @@ impl CompanyPage {
                 let status = match result {
                     Ok(_) => CommitStatus::Saved,
                     Err(bilibi_agent_api::Error::Backend(Error::Unauthorized)) => {
-                        return Err(Error::Unauthorized)
+                        return Err(Error::Unauthorized);
                     }
                     Err(bilibi_agent_api::Error::Backend(Error::Forbidden | Error::NotFound)) => {
                         self.notice = "You no longer have permission to change this company, or the company is archived.".into();
@@ -1156,7 +1154,7 @@ impl CompanyPage {
             "custom_reference_search" if self.operation == "detail" => {
                 let fields = bilibi_ui::params::form_values_checked(
                     value,
-                    views::CUSTOM_REFERENCE_FORM,
+                    "custom_reference_search",
                     bilibi_ui::params::FIELD_LIMIT,
                 )
                 .map_err(Error::refused)?;
@@ -1207,7 +1205,7 @@ impl CompanyPage {
                 let status = match result {
                     Ok(()) => CommitStatus::Saved,
                     Err(crate::WriteError::Access(Error::Unauthorized)) => {
-                        return Err(Error::Unauthorized)
+                        return Err(Error::Unauthorized);
                     }
                     Err(crate::WriteError::Access(Error::Forbidden)) => {
                         self.notice="You no longer have permission to change this company, or the company is archived.".into();
@@ -1282,7 +1280,7 @@ impl CompanyPage {
                     let status = match self.company.save_fact(scope, credential, &edit).await {
                         Ok(()) => CommitStatus::Saved,
                         Err(crate::WriteError::Access(Error::Unauthorized)) => {
-                            return Err(Error::Unauthorized)
+                            return Err(Error::Unauthorized);
                         }
                         Err(crate::WriteError::Access(Error::Conflict)) => CommitStatus::Error(
                             "The record changed. Reload before changing its activities.".into(),
@@ -1407,7 +1405,7 @@ impl CompanyPage {
                 self.search_parents(scope, &query).await?;
                 let references = bilibi_ui::params::form_values_checked(
                     value,
-                    views::CUSTOM_REFERENCE_FORM,
+                    "custom_reference_search",
                     bilibi_ui::params::FIELD_LIMIT,
                 )
                 .map_err(Error::refused)?;

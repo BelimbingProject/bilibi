@@ -31,9 +31,7 @@ pub struct CustomColumn {
     /// the definitions module from validated keys and declared pick-list keys
     /// only; it may bind the tenant as `$1`, as every Grid statement does.
     pub value: String,
-    /// For a reference to another record: the Grid table of its kind. The
-    /// column shows that record's name through the reader's own scoped source
-    /// of that table, and exists only when the reader may read it.
+    /// The Base Records kind key; the projected value remains the stored id.
     pub reference: Option<&'static str>,
     /// Whether people find a record by this field's text in global search
     /// (free text, links, phone numbers and email addresses).

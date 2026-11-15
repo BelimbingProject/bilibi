@@ -16,10 +16,10 @@ mod web;
 
 #[doc(hidden)]
 pub use bilibi_module_registry::{Contribution, Provenance};
-pub use builtin::{Builtin, BUILTINS};
+pub use builtin::{BUILTINS, Builtin};
 pub use contributions::{AUTHOR, EXPORT, MANAGE, SCHEDULE, SHARE, VIEW};
 pub use definition::{
-    Definition, FilterDef, GroupingDef, Kind, MeasureDef, SortDef, CHARTS, MAX_COLUMNS,
+    CHARTS, Definition, FilterDef, GroupingDef, Kind, MAX_COLUMNS, MeasureDef, SortDef,
 };
 pub use export::{File, Format};
 pub use exports::Prepared;
@@ -36,7 +36,7 @@ use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, Summ
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const SERVICE: &str = "base/reports.reports";
@@ -110,7 +110,9 @@ pub enum ReportError {
     Refused(String),
     /// Over the read's cost or time bound: a prepared export, which runs in
     /// the background under the larger bounds, may still produce it.
-    #[error("This report is too heavy to show here ({0}). Prepare it as an export instead; it runs in the background and the bell says when it is ready.")]
+    #[error(
+        "This report is too heavy to show here ({0}). Prepare it as an export instead; it runs in the background and the bell says when it is ready."
+    )]
     TooHeavy(&'static str),
     #[error(transparent)]
     Database(#[from] Error),
@@ -838,6 +840,49 @@ impl Reports {
             .collect())
     }
 
+    async fn name_references<'a>(
+        &self,
+        scope: &Scope,
+        columns: &[Column],
+        rows: impl Iterator<Item = &'a mut Vec<Value>>,
+        group_keys: bool,
+    ) -> Outcome<()> {
+        let mut cells: std::collections::BTreeMap<&str, Vec<&mut Value>> = Default::default();
+        for row in rows {
+            for (column, value) in columns.iter().zip(row) {
+                if let Some(kind) = column.reference.filter(|_| !value.is_null()) {
+                    cells.entry(kind).or_default().push(value);
+                }
+            }
+        }
+        for (kind, values) in cells {
+            let ids: std::collections::BTreeSet<String> = values.iter().map(|v| cell(v)).collect();
+            let references: Vec<_> = ids
+                .into_iter()
+                .map(|id| bilibi_records::Reference::new(kind, id))
+                .collect();
+            let mut labels = std::collections::BTreeMap::new();
+            for chunk in references.chunks(100) {
+                for resolved in self.records.resolve(scope, chunk).await? {
+                    labels.insert(
+                        resolved.reference.id,
+                        resolved.label.unwrap_or_else(|| "Restricted".into()),
+                    );
+                }
+            }
+            for value in values {
+                let id = cell(value);
+                let label = labels.get(&id).map(String::as_str).unwrap_or("Restricted");
+                *value = if group_keys {
+                    serde_json::json!({"stored_id": id, "label": label})
+                } else {
+                    Value::String(label.to_owned())
+                };
+            }
+        }
+        Ok(())
+    }
+
     /// Each row's own page, through Base Records: a kind its owner registers
     /// for this table names the record only when the reader may open it.
     async fn record_pages(
@@ -853,7 +898,11 @@ impl Reports {
             .iter()
             .map(|(key, _)| bilibi_records::Reference::new(kind.key, cell(key)))
             .collect();
-        Ok(self.records.resolve(scope, &references).await?)
+        let mut pages = Vec::new();
+        for chunk in references.chunks(100) {
+            pages.extend(self.records.resolve(scope, chunk).await?);
+        }
+        Ok(pages)
     }
 
     /// Runs a report as the reader: their catalog, grants and time zone.
@@ -1030,12 +1079,7 @@ impl Reports {
                     timezone: timezone.clone(),
                 };
                 let page = listing
-                    .page(
-                        &self.db,
-                        scope,
-                        input.page.saturating_mul(page_size),
-                        page_size,
-                    )
+                    .page(self, scope, input.page.saturating_mul(page_size), page_size)
                     .await?;
                 let rows = page.rows;
                 // A file holds no links: the reader opens records from the page.
@@ -1109,7 +1153,7 @@ impl Reports {
                     .setting(&**client, scope, contributions::MAX_GROUPS_KEY)
                     .await?;
                 drop(client);
-                let summary = bilibi_grid::summarize(
+                let mut summary = bilibi_grid::summarize(
                     &self.db,
                     scope,
                     &report.record_type,
@@ -1124,6 +1168,15 @@ impl Reports {
                 )
                 .await
                 .map_err(grid)?;
+                let group_columns: Vec<_> =
+                    summary.groupings.iter().map(|(c, _)| c.clone()).collect();
+                self.name_references(
+                    scope,
+                    &group_columns,
+                    summary.lines.iter_mut().map(|l| &mut l.keys),
+                    true,
+                )
+                .await?;
                 RunResult::Summary {
                     groupings: summary
                         .groupings

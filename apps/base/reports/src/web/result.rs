@@ -27,6 +27,11 @@ pub(crate) fn cell(value: &Value) -> String {
         Value::Bool(true) => "Yes".into(),
         Value::Bool(false) => "No".into(),
         Value::String(text) => text.clone(),
+        Value::Object(object) if object.contains_key("stored_id") => object
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("Restricted")
+            .to_owned(),
         other => other.to_string(),
     }
 }
@@ -57,7 +62,7 @@ pub(crate) fn key_text(value: &Value, bucket: Option<&str>) -> String {
 /// The first and last day of the period a date bucket's key starts, as
 /// `YYYY-MM-DD`, for the range filter a drill into it adds.
 pub(crate) fn bucket_days(value: &Value, bucket: &str) -> Option<(String, String)> {
-    use jiff::{civil::Date, ToSpan};
+    use jiff::{ToSpan, civil::Date};
     let first: Date = cell(value).get(0..10)?.parse().ok()?;
     let last = match bucket {
         "day" => first,

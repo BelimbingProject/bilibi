@@ -170,6 +170,7 @@ pub struct Column {
     pub field: Option<Field>,
     pub agg: Option<Agg>,
     pub depth: usize,
+    pub reference: Option<&'static str>,
     /// The many-link target's time field when the rollup ends on that target
     /// (no tail): what dates a trend's months and a change-since date.
     pub time_field: Option<&'static str>,
@@ -225,7 +226,7 @@ pub fn resolve<'a>(
                 (LinkKind::One, true) => walk.tail.push(*link),
                 (LinkKind::Many, false) => walk.many = Some(*link),
                 (LinkKind::Many, true) => {
-                    return Err(ColumnError::SecondManyLink((*segment).into()))
+                    return Err(ColumnError::SecondManyLink((*segment).into()));
                 }
             }
             table = target;
@@ -271,6 +272,7 @@ fn build(
             kind: ColumnKind::Field,
             root: root.id(),
             table: table.id(),
+            reference: table.custom_reference(field.id),
             depth: hops.len(),
             hops,
             many: None,
@@ -281,18 +283,21 @@ fn build(
         });
     };
     let agg = agg.ok_or(ColumnError::ManyLinkNeedsAggregate)?;
+    if field.is_some_and(|f| table.custom_reference(f.id).is_some()) {
+        return Err(ColumnError::AggregateNeedsOrderedValue);
+    }
     match (agg, field) {
         (Agg::Count, Some(_)) => return Err(ColumnError::CountTakesNoField),
         (Agg::Count, None) => {}
         (_, None) => return Err(ColumnError::AggregateNeedsField),
         (Agg::Sum | Agg::Avg, Some(f)) if !f.ty.number() => {
-            return Err(ColumnError::AggregateNeedsNumber)
+            return Err(ColumnError::AggregateNeedsNumber);
         }
         (Agg::Min | Agg::Max, Some(f)) if f.ty == FieldType::Boolean => {
-            return Err(ColumnError::AggregateNeedsOrderedValue)
+            return Err(ColumnError::AggregateNeedsOrderedValue);
         }
         (Agg::Latest, Some(_)) if table.time_field().is_none() => {
-            return Err(ColumnError::LatestNeedsTimeField)
+            return Err(ColumnError::LatestNeedsTimeField);
         }
         _ => {}
     }
@@ -331,6 +336,7 @@ fn build(
         kind: ColumnKind::Rollup,
         root: root.id(),
         table: table.id(),
+        reference: None,
         depth: links.len(),
         hops,
         many: Some(many),

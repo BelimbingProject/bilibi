@@ -14,7 +14,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex, OnceLock},
 };
-use tokio_postgres::{types::Type, GenericClient};
+use tokio_postgres::{GenericClient, types::Type};
 
 pub const MAX_COLUMNS: usize = 32;
 pub const MAX_SUGGESTIONS: usize = 50;
@@ -119,6 +119,13 @@ pub struct Catalog {
     masks: BTreeMap<&'static str, BTreeMap<String, &'static str>>,
 }
 impl Catalog {
+    pub(crate) fn without_custom_references(mut self) -> Self {
+        for table in self.tables.values_mut() {
+            table.remove_custom_references();
+        }
+        self
+    }
+
     /// The catalog this scope's actor may read, built from the installed snapshot
     /// with a fresh read of grants and field restrictions. A source is described to
     /// the server once per process to settle which of its keys each field reads.
@@ -540,10 +547,6 @@ impl Catalog {
     }
 }
 
-/// Adds a table's tenant custom fields as `cf_<key>` fields read from its
-/// hidden JSON field. A record field becomes the name of the record it points
-/// at, through the reader's own scoped source of that kind's table, and is
-/// left out when the reader may not read that table.
 fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom::CustomTable) {
     let Some(json) = tables
         .get(custom.table)
@@ -559,25 +562,7 @@ fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom:
             continue;
         }
         let id = crate::custom::field_id(&column.key);
-        let value = match column.reference {
-            None => column.value,
-            Some(target) => {
-                let Some(target) = tables.get(target) else {
-                    continue;
-                };
-                let Some(label) = target.label_field() else {
-                    continue;
-                };
-                format!(
-                    "(SELECT {} FROM {} cf_ref WHERE ({})::text = {})",
-                    crate::query::field("cf_ref", target, label),
-                    target.scoped_source(),
-                    crate::query::field("cf_ref", target, target.key()),
-                    column.value
-                )
-            }
-        };
-        let sql = value.replace(
+        let sql = column.value.replace(
             "{json}",
             &format!("{{alias}}.\"{}\"", json.replace('"', "\"\"")),
         );
@@ -586,14 +571,15 @@ fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom:
             column.label,
             sql,
             column.searchable && column.reference.is_none(),
+            column.reference,
         ));
     }
     let Some(table) = tables.get_mut(custom.table) else {
         return;
     };
-    for (field, label, sql, searchable) in added {
+    for (field, label, sql, searchable, reference) in added {
         if table.field(field.id).is_none() {
-            table.add_custom(field, label, sql, searchable);
+            table.add_custom(field, label, sql, searchable, reference);
         }
     }
 }
@@ -604,12 +590,16 @@ fn truncated(spec: &str) -> String {
 fn field_specs(table: &Table, prefix: &str) -> Vec<String> {
     table
         .visible_fields()
+        .filter(|field| table.custom_reference(field.id).is_none())
         .map(|field| format!("{prefix}{}", field.id))
         .collect()
 }
 fn rollup_specs(target: &Table, path: &str, out: &mut Vec<String>) {
     out.push(format!("{path}:count"));
-    for field in target.visible_fields() {
+    for field in target
+        .visible_fields()
+        .filter(|field| target.custom_reference(field.id).is_none())
+    {
         let id = field.id;
         match field.ty {
             FieldType::Integer | FieldType::Float | FieldType::Decimal if id != target.key() => {

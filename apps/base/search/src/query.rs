@@ -221,9 +221,6 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
         None => ("NULL::text".to_owned(), "false".to_owned()),
     };
     let mut matched = format!("{vector} @@ {query}");
-    // The tenant's custom text: the indexed vector of every custom value
-    // finds the candidates, and only the active text fields' own words keep
-    // one, so an archived field, a code or a yes/no never makes a record match.
     let mut ranked = vector.clone();
     let texts = table.custom_search_values("r");
     if let Some(custom) = decl
@@ -231,11 +228,15 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
         .and_then(|custom| column(table, custom))
         .filter(|_| !texts.is_empty())
     {
-        matched = format!(
-            "({matched} OR ({custom} @@ {query} AND to_tsvector('simple', concat_ws(' ', {})) @@ {query}))",
+        let active = format!(
+            "to_tsvector('simple', concat_ws(' ', {}))",
             texts.join(", ")
         );
-        ranked = format!("({vector} || setweight(COALESCE({custom}, ''::tsvector), 'D'))");
+        let candidate = "to_tsquery('simple', split_part($3::text, chr(39), 2) || ':*')";
+        ranked = format!("({vector} || setweight({active}, 'D'))");
+        matched = format!(
+            "(({vector} @@ {candidate} OR {custom} @@ {candidate}) AND {ranked} @@ {query})"
+        );
     }
     if prefix {
         for c in decl
@@ -269,7 +270,9 @@ fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool) -> String {
         .map(|kind| branch(kind, limit, prefix))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
-    format!("WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain), hits AS ({branches})")
+    format!(
+        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain), hits AS ({branches})"
+    )
 }
 
 // Equal ranks read newest first, then by name, as a person scans them.
@@ -280,7 +283,9 @@ const COLUMNS: &str = "kind, id, title, sub0, sub1, state, inactive, updated";
 /// together in their ranking, the kinds in the order of their best hit.
 /// Select from `grouped` `ORDER BY lead, pos`.
 fn grouped(filter: &str) -> String {
-    format!("ranked AS (SELECT *, row_number() OVER ({ORDER}) AS pos FROM hits{filter}), grouped AS (SELECT *, min(pos) OVER (PARTITION BY kind) AS lead FROM ranked)")
+    format!(
+        "ranked AS (SELECT *, row_number() OVER ({ORDER}) AS pos FROM hits{filter}), grouped AS (SELECT *, min(pos) OVER (PARTITION BY kind) AS lead FROM ranked)"
+    )
 }
 
 /// The search box: the best `per_kind` hits of each kind, grouped by kind.

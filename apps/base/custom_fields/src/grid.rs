@@ -5,7 +5,7 @@
 //! scoped catalog then asks this module for the tenant's active fields of
 //! those tables (`bilibi_grid::CustomColumns`). Values are read with each key
 //! as a validated literal, never request text.
-use crate::{definitions::Kind, CustomFields, RECORD_TYPES};
+use crate::{CustomFields, RECORD_TYPES, definitions::Kind};
 use bilibi_grid::{CustomColumn, CustomColumns, CustomFuture, CustomTable, FieldType};
 use bilibi_module_registry::{Catalog, Consumer, RegistryError};
 use bilibi_tenancy::{ReadClient, Scope};
@@ -103,7 +103,7 @@ impl CustomColumns for Columns {
                 let target: Option<&str> = row.get("target");
                 let reference = match (kind, target) {
                     (Kind::Reference, Some(target)) => match self.fields.records.kind(target) {
-                        Some(kind) => Some(kind.table),
+                        Some(kind) => Some(kind.key),
                         None => continue,
                     },
                     _ => None,
@@ -148,11 +148,15 @@ fn value(kind: Kind, key: &str) -> (FieldType, String) {
     match kind {
         Kind::Number => (
             FieldType::Decimal,
-            format!("(CASE WHEN {text} ~ '^-?[0-9]{{1,18}}(\\.[0-9]{{1,6}})?$' THEN {text}::numeric END)"),
+            format!(
+                "(CASE WHEN {text} ~ '^-?[0-9]{{1,18}}(\\.[0-9]{{1,6}})?$' THEN {text}::numeric END)"
+            ),
         ),
         Kind::Date => (
             FieldType::Date,
-            format!("(CASE WHEN {text} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$' THEN {text}::date END)"),
+            format!(
+                "(CASE WHEN {text} ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$' THEN {text}::date END)"
+            ),
         ),
         Kind::Boolean => (
             FieldType::Boolean,
@@ -161,7 +165,9 @@ fn value(kind: Kind, key: &str) -> (FieldType, String) {
         // Several codes read as one text, in the order chosen.
         Kind::Choices => (
             FieldType::String,
-            format!("(SELECT string_agg(code, ', ' ORDER BY n) FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof({{json}} -> '{key}') = 'array' THEN {{json}} -> '{key}' END) WITH ORDINALITY AS codes(code, n))"),
+            format!(
+                "(SELECT string_agg(code, ', ' ORDER BY n) FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof({{json}} -> '{key}') = 'array' THEN {{json}} -> '{key}' END) WITH ORDINALITY AS codes(code, n))"
+            ),
         ),
         Kind::Text
         | Kind::LongText

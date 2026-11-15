@@ -4,12 +4,12 @@
 //! (`bilibi_artifacts::pdf`). Each export is audited with the report, the
 //! reader, the format and the row count, never the data.
 use crate::{
-    cell, contributions, line, web::result, Kind, ReportError, Reports, RunInput, RunResult, EXPORT,
+    EXPORT, Kind, ReportError, Reports, RunInput, RunResult, cell, contributions, line, web::result,
 };
-use bilibi_audit::{record_action, Attribution};
+use bilibi_audit::{Attribution, record_action};
 use bilibi_database::Error;
 use bilibi_tenancy::Scope;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 type Outcome<T> = Result<T, ReportError>;
 
@@ -198,7 +198,7 @@ impl Reports {
                     }
                     let mut offset = first_page;
                     while (offset as i64) < expected_total {
-                        let page = listing.page(&self.db, scope, offset, FILE_PAGE).await?;
+                        let page = listing.page(self, scope, offset, FILE_PAGE).await?;
                         if page.total != expected_total {
                             return Err(changed(background));
                         }
@@ -384,7 +384,9 @@ fn too_many(total: i64, cap: usize, background: bool) -> ReportError {
             "This report has {total} rows; a prepared export holds at most {cap}. Add a filter."
         )
     } else {
-        format!("This report has {total} rows; a download holds at most {cap}. Prepare it as an export instead, or add a filter.")
+        format!(
+            "This report has {total} rows; a download holds at most {cap}. Prepare it as an export instead, or add a filter."
+        )
     })
 }
 

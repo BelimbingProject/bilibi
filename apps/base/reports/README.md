@@ -121,3 +121,5 @@ A module contributes one in code with `bilibi_reports::builtin!` (key, name, des
 ## Not yet
 
 Computed columns, XLSX, mail attachments, a read replica and owner summary tables are later issues (#128, "Out of scope" and "Reporting store").
+
+Custom record fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters retain the stored id while labels follow merges and show Restricted when unavailable. Reference rollups are not supported.

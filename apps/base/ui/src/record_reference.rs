@@ -3,7 +3,7 @@
 //! unavailable), and the `RecordPicker` live control finds one by name.
 //! `base/records` resolves names and hits with the reader's permissions; this
 //! module only draws them, so a page writes no markup of its own.
-use crate::{forms::InputKind, Button, Field, Html, Restricted};
+use crate::{Button, Field, Html, Restricted, forms::InputKind};
 use askama::Template;
 
 /// How a reference reads for this viewer.
@@ -126,7 +126,7 @@ impl NamedKind<'_> {
 {%- if let Some(pill) = selected -%}
 <div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
 {%- else -%}
-{{ search }}
+{{ self.search_html() }}
 {%- if !hits.is_empty() -%}<ul id="{{ id }}-hits" aria-label="{{ label }}" class="space-y-1">{% for hit in self.hit_buttons() %}<li>{{ hit }}</li>{% endfor %}</ul>
 {%- else if !query.is_empty() -%}<p id="{{ id }}-none" class="text-xs text-ink-muted">No matching record you may see.</p>
 {%- endif -%}
@@ -139,7 +139,7 @@ pub struct RecordPicker {
     pub label: String,
     query: String,
     selected: Option<Html>,
-    search: Html,
+    search: Field,
     hidden: Html,
     clear_id: String,
     clear_event: String,
@@ -154,6 +154,14 @@ pub struct RecordPicker {
     errors: Vec<String>,
 }
 impl RecordPicker {
+    pub fn search_name(mut self, name: impl Into<String>) -> Self {
+        self.search.name = name.into();
+        self
+    }
+    fn search_html(&self) -> Html {
+        Html::render(&self.search).unwrap_or(Html::EMPTY)
+    }
+
     /// `form` and `key` name the posted fields: the typed text as
     /// `{form}[{key}_search]`, the choice as `{form}[{key}]`.
     #[allow(clippy::too_many_arguments)]
@@ -205,7 +213,7 @@ impl RecordPicker {
             label: label.into(),
             query: query.into(),
             selected,
-            search: Html::render(&search).unwrap_or(Html::EMPTY),
+            search,
             hidden,
             clear_id: format!("{id}-clear"),
             clear_event: clear_event.into(),

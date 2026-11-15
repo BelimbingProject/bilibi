@@ -5,8 +5,8 @@
 //! pill with the reader's own access); every save goes through
 //! `core.person.update` or `core.person.create`, which check it against the
 //! tenant's definitions.
-use super::{render, Pages};
-use bilibi_custom_fields::{codes_of, Definition, Kind};
+use super::{Pages, render};
+use bilibi_custom_fields::{Definition, Kind, codes_of};
 use bilibi_database::{Error, Result};
 use bilibi_datetime::DisplayContext;
 use bilibi_records::{Reference, Resolved};
@@ -349,7 +349,7 @@ pub(super) struct Entered<'a> {
 /// The create form's control for one field, named `cf_<key>` in form
 /// `person`: several choices post every tick (`person[cf_<key>][]`), a
 /// record field posts its choice as `kind:id` and its search as
-/// `person[cf_<key>_search]`, raising `pick_custom_reference` and `clear_custom_reference` with `key`.
+/// `person_search[cf_<key>]`, raising `pick_custom_reference` and `clear_custom_reference` with `key`.
 pub(super) async fn control(
     pages: &Pages,
     scope: &Scope,
@@ -417,7 +417,8 @@ pub(super) async fn control(
                     (PICK_EVENT, CLEAR_EVENT),
                     errors,
                 )
-                .key(&name),
+                .key(&name)
+                .search_name(format!("person_search[{name}]")),
             )
         }
         Kind::Date => render(field(InputKind::Date)),

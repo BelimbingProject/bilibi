@@ -245,7 +245,14 @@ pub struct Table {
     reach: Option<bilibi_authz::Reach>,
     /// In a scoped catalog: the tenant's custom fields among `fields`, by id,
     /// with their current label and value SQL over the row alias `{alias}`.
-    custom: BTreeMap<&'static str, (String, String, bool)>,
+    custom: BTreeMap<&'static str, CustomField>,
+}
+#[derive(Clone, Debug)]
+struct CustomField {
+    label: String,
+    sql: String,
+    searchable: bool,
+    reference: Option<&'static str>,
 }
 impl Table {
     pub fn id(&self) -> &'static str {
@@ -295,24 +302,36 @@ impl Table {
     pub fn field_label<'a>(&'a self, field: &'a Field) -> &'a str {
         self.custom
             .get(field.id)
-            .map_or(field.label, |(label, _, _)| label.as_str())
+            .map_or(field.label, |custom| custom.label.as_str())
     }
     /// Whether `id` is one of the tenant's custom fields in this catalog.
     pub fn is_custom(&self, id: &str) -> bool {
         self.custom.contains_key(id)
     }
+    pub fn custom_reference(&self, id: &str) -> Option<&'static str> {
+        self.custom.get(id).and_then(|custom| custom.reference)
+    }
+    pub(crate) fn remove_custom_references(&mut self) {
+        self.fields.retain(|field| {
+            !self
+                .custom
+                .get(field.id)
+                .is_some_and(|custom| custom.reference.is_some())
+        });
+        self.custom.retain(|_, custom| custom.reference.is_none());
+    }
     pub(crate) fn custom_sql(&self, id: &str, alias: &str) -> Option<String> {
         self.custom
             .get(id)
-            .map(|(_, sql, _)| sql.replace("{alias}", alias))
+            .map(|custom| custom.sql.replace("{alias}", alias))
     }
     /// The values of the tenant's searchable custom fields (text, links,
     /// phone numbers, email) on the row `alias`, as SQL text expressions.
     pub fn custom_search_values(&self, alias: &str) -> Vec<String> {
         self.custom
             .values()
-            .filter(|(_, _, searchable)| *searchable)
-            .map(|(_, sql, _)| sql.replace("{alias}", alias))
+            .filter(|custom| custom.searchable)
+            .map(|custom| custom.sql.replace("{alias}", alias))
             .collect()
     }
     pub(crate) fn add_custom(
@@ -321,8 +340,17 @@ impl Table {
         label: String,
         sql: String,
         searchable: bool,
+        reference: Option<&'static str>,
     ) {
-        self.custom.insert(field.id, (label, sql, searchable));
+        self.custom.insert(
+            field.id,
+            CustomField {
+                label,
+                sql,
+                searchable,
+                reference,
+            },
+        );
         self.fields.push(field);
     }
     /// The fields a column may show: declaration order, without hidden ones.

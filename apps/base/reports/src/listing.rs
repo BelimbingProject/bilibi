@@ -3,8 +3,7 @@
 //! reads its one page through it; a file keeps it and reads the remaining
 //! pages with only the keys and the cells (`export::tabulate`), never a
 //! whole run per page.
-use crate::{grid, Outcome};
-use bilibi_database::Db;
+use crate::{Outcome, grid};
 use bilibi_grid::{Bounds, Column, Filter, PageSpec, Sort};
 use bilibi_tenancy::Scope;
 use serde_json::Value;
@@ -32,13 +31,13 @@ impl Listing {
     /// cells under the same bounds the keys were read under.
     pub(crate) async fn page(
         &self,
-        db: &Db,
+        reports: &crate::Reports,
         scope: &Scope,
         offset: usize,
         limit: usize,
     ) -> Outcome<ListPage> {
         let keys = bilibi_grid::page_keys(
-            db,
+            &reports.db,
             scope,
             &self.record_type,
             &PageSpec {
@@ -54,7 +53,7 @@ impl Listing {
         .map_err(grid)?;
         let specs: Vec<&str> = self.specs.iter().map(String::as_str).collect();
         let projection = bilibi_grid::project_within(
-            db,
+            &reports.db,
             scope,
             &self.record_type,
             &keys.keys,
@@ -63,7 +62,7 @@ impl Listing {
         )
         .await
         .map_err(grid)?;
-        let rows = projection
+        let mut rows: Vec<_> = projection
             .rows
             .into_iter()
             .map(|row| {
@@ -75,6 +74,14 @@ impl Listing {
                 (row.key, cells)
             })
             .collect();
+        reports
+            .name_references(
+                scope,
+                &projection.columns,
+                rows.iter_mut().map(|(_, cells)| cells),
+                false,
+            )
+            .await?;
         Ok(ListPage {
             total: keys.total,
             columns: projection.columns,

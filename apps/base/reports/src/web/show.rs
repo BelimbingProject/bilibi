@@ -5,21 +5,21 @@
 //! Delete confirm through the shared dialog. Answers and the page travel in
 //! the address, so a link and the CSV download repeat the same question.
 use super::{
-    builder::Builder, clear_flash, flash_map, index::kind_label, page_error, refusal, render,
-    report_path, result, schedule, Can, Pages, Refusal,
+    Can, Pages, Refusal, builder::Builder, clear_flash, flash_map, index::kind_label, page_error,
+    refusal, render, report_path, result, schedule,
 };
 use crate::{ColumnInfo, FilterDef, Kind, Report, ReportError, RunInput, RunResult};
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    choices,
-    page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
-    params, ActionLink, Alert, Badge, BadgeKind, Button, ButtonVariant, Card, ColumnsOutcome,
+    ActionLink, Alert, Badge, BadgeKind, Button, ButtonVariant, Card, ColumnsOutcome,
     ConfirmDialog, Fact, Facts, Field, FlashMap, Header, Html, IconButton, IconKind, InputKind,
-    ListColumns, MultiSelect, StatusKind, Tab, Tabs,
+    ListColumns, MultiSelect, StatusKind, Tab, Tabs, choices,
+    page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
+    params,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 
 const TABS: [(&str, &str); 4] = [
@@ -639,7 +639,7 @@ impl Show {
                         return Ok(Some((
                             super::INDEX.into(),
                             Some(format!("{} was deleted.", report.name)),
-                        )))
+                        )));
                     }
                     Err(error) => self.refused(refusal(error, DENIED_AUTHOR)?),
                 }
@@ -695,7 +695,7 @@ impl Show {
                     Some((min, max)) => ("range", json!({"min": min, "max": max})),
                     None => continue,
                 },
-                None => ("equals", key.clone()),
+                None => ("equals", key.get("stored_id").unwrap_or(key).clone()),
             };
             added.push(Drill {
                 filter: FilterDef {
@@ -871,8 +871,7 @@ impl Show {
             Some(Confirm::Unsubscribe(..)) => render(ConfirmDialog {
                 id: "report-unsubscribe-confirm",
                 consequence: "Delete this schedule?",
-                detail:
-                    "Its deliveries stop, for everyone it reached, and its history goes with it.",
+                detail: "Its deliveries stop, for everyone it reached, and its history goes with it.",
                 confirm: "Delete",
                 working: "Deleting…",
                 confirm_event: "unsubscribe",
@@ -1136,7 +1135,9 @@ impl Show {
                         .await
                         .map_err(page_error)?;
                     if *total as usize > cap {
-                        let message = format!("{total} rows is more than a download holds ({cap}). Prepare it as an export instead; you get a notice when it is ready.");
+                        let message = format!(
+                            "{total} rows is more than a download holds ({cap}). Prepare it as an export instead; you get a notice when it is ready."
+                        );
                         out.push(&alert("report-export-cap", StatusKind::Info, &message)?);
                     }
                 }
@@ -1164,7 +1165,10 @@ impl Show {
                     .then(|| result::matrix_columns(summary))
                     .flatten();
                 if report.kind == Kind::Matrix && matrix.is_none() && !report.definition.oversight {
-                    let message = format!("More than {} values run across, so this matrix is shown as a summary. Filter it, or group across a field with fewer values.", result::MAX_ACROSS);
+                    let message = format!(
+                        "More than {} values run across, so this matrix is shown as a summary. Filter it, or group across a field with fewer values.",
+                        result::MAX_ACROSS
+                    );
                     out.push(&alert("report-matrix-wide", StatusKind::Info, &message)?);
                 }
                 let (html, drillable) = match matrix {
@@ -1238,7 +1242,11 @@ impl Show {
     /// ask for one.
     async fn exports(&mut self, scope: &Scope, report: &Report) -> Result<Html> {
         if report.definition.oversight {
-            return alert("report-oversight-live",StatusKind::Info,"Oversight downloads are live and bounded. Prepared files and scheduled deliveries are unavailable: child data is not retained in this tenant.");
+            return alert(
+                "report-oversight-live",
+                StatusKind::Info,
+                "Oversight downloads are live and bounded. Prepared files and scheduled deliveries are unavailable: child data is not retained in this tenant.",
+            );
         }
         let display = self.pages.display(scope).await?;
         let list = self
