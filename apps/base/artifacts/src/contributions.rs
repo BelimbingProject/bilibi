@@ -151,7 +151,17 @@ setting!(
     Some(1.0),
     Some(600.0),
     "PDF render timeout (seconds)",
-    "Maximum runtime of one Chromium render."
+    "Maximum runtime of one Chromium render, counted from when the browser has started."
+);
+setting!(
+    "pdf.launch_timeout_seconds",
+    Integer,
+    json!(60),
+    false,
+    Some(1.0),
+    Some(600.0),
+    "PDF browser start timeout (seconds)",
+    "Maximum time Chromium may take to start and answer before a render begins; a first start after a restart or on a slow disk can take tens of seconds."
 );
 setting!("pdf.render_origin",String,json!(""),false,None,None,Some(Validator { accepts: |value| value.as_str().is_some_and(valid_origin), message: "must be empty or an http(s) origin with a host name or IPv4 address, no path" }),"PDF render origin","Application origin reachable from Chromium; signed render requests must reach the issuing node.");
 setting!(
