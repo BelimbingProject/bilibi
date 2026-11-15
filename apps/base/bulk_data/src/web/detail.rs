@@ -203,7 +203,16 @@ impl Detail {
                     value: Some(
                         form.get(format!("v_{}", field.name).as_str())
                             .copied()
-                            .unwrap_or("")
+                            .unwrap_or(
+                                if matches!(
+                                    field.kind,
+                                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                                ) {
+                                    "false"
+                                } else {
+                                    ""
+                                },
+                            )
                             .to_owned(),
                     ),
                     ..FieldMap::default()
@@ -221,6 +230,18 @@ impl Detail {
                 continue;
             };
             fields.push(entry);
+        }
+        if let Some(draft) = &self.draft {
+            fields.extend(
+                draft
+                    .fields
+                    .iter()
+                    .filter(|entry| {
+                        !info.fields.iter().any(|field| field.name == entry.field)
+                            && form.get(format!("f_{}", entry.field).as_str()).copied() != Some("")
+                    })
+                    .cloned(),
+            );
         }
         self.draft = Some(Mapping {
             fields,
@@ -420,13 +441,27 @@ impl Detail {
                             }
                         }
                         let name = saved.name.clone();
+                        self.errors = self
+                            .info
+                            .as_ref()
+                            .map(|info| {
+                                mapping
+                                    .check(
+                                        &info.fields,
+                                        &[],
+                                        self.run.as_ref().map(|run| run.header.as_slice()),
+                                        !info.matches.is_empty(),
+                                    )
+                                    .err()
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
                         self.draft = Some(mapping);
-                        self.errors.clear();
                         self.say(
-                            StatusKind::Info,
-                            format!(
+                            if self.errors.is_empty() { StatusKind::Info } else { StatusKind::Error },
+                            if self.errors.is_empty() { format!(
                                 "Applied the saved mapping {name}. Check it before you import."
-                            ),
+                            ) } else { format!("The saved mapping {name} needs fixing first; see the fields marked below.") },
                         );
                     }
                     None => self.say(StatusKind::Info, "Choose a saved mapping first."),
@@ -716,6 +751,18 @@ impl Detail {
                 let value = entry
                     .and_then(|entry| entry.value.clone())
                     .unwrap_or_default();
+                let value = if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                ) {
+                    crate::mapping::convert(field, &value)
+                        .ok()
+                        .flatten()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
                 let mut input = bilibi_ui::Field::in_form("map", &format!("v_{}", field.name))
                     .id(format!("{id}-value"))
                     .label("Value")
@@ -730,12 +777,20 @@ impl Detail {
                         .kind(InputKind::Select)
                         .prompt("Choose")
                         .options(choices(&options))
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                ) {
+                    input.kind(InputKind::Switch)
                 } else if field.kind == Kind::Boolean {
                     input
                         .kind(InputKind::Select)
                         .prompt("Choose")
                         .options(choices(&[("Yes", "yes"), ("No", "no")]))
-                } else if field.kind == Kind::Date {
+                } else if matches!(
+                    field.kind,
+                    Kind::Date | Kind::Custom(bilibi_custom_fields::Kind::Date)
+                ) {
                     input.kind(InputKind::Date)
                 } else {
                     input
@@ -783,6 +838,26 @@ impl Detail {
                 field.label.clone()
             };
             controls.push((title, format!("{id}-fact"), html));
+        }
+        for entry in &draft.fields {
+            if info.fields.iter().any(|field| field.name == entry.field) {
+                continue;
+            }
+            let id = format!("import-map-{}", dom(&entry.field));
+            controls.push((
+                format!("{} (unavailable)", entry.field),
+                format!("{id}-fact"),
+                render(
+                    bilibi_ui::Field::in_form("map", &format!("f_{}", entry.field))
+                        .id(id)
+                        .kind(InputKind::Select)
+                        .label("Source")
+                        .options(choices(&[("Keep mapping (unavailable)", "keep"), ("Not imported", "")]))
+                        .value("keep")
+                        .hint("This field is unavailable. Choose Not imported to remove its mapping, or restore access before importing.")
+                        .errors(errors(&format!("fields.{}", entry.field))),
+                )?,
+            ));
         }
         let source = run
             .header
@@ -937,7 +1012,11 @@ impl Detail {
             "check"
         };
         let text = if run.stopped {
-            format!("The {what} stopped before it finished, after {} of {} rows: your access changed, or it failed every attempt. Cancel it to map and start again.", run.progress(), run.row_count)
+            format!(
+                "The {what} stopped before it finished, after {} of {} rows: your access changed, or it failed every attempt. Cancel it to map and start again.",
+                run.progress(),
+                run.row_count
+            )
         } else {
             format!(
                 "{} of {} rows done. This page follows along; you can leave it.",
@@ -1047,7 +1126,16 @@ impl Detail {
                     kind: StatusKind::Info,
                     id: "import-undo-available",
                     class: "",
-                    body: Html::text(&format!("Available until {}. Only records this import created and nobody changed are removed.", display.render(deadline, bilibi_datetime::Format::DateTime, bilibi_datetime::Precision::Minute).text)),
+                    body: Html::text(&format!(
+                        "Available until {}. Only records this import created and nobody changed are removed.",
+                        display
+                            .render(
+                                deadline,
+                                bilibi_datetime::Format::DateTime,
+                                bilibi_datetime::Precision::Minute
+                            )
+                            .text
+                    )),
                 })?
             }
             _ => Html::EMPTY,

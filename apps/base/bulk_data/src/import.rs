@@ -191,6 +191,10 @@ impl Work<'_> {
                 .find(|field| field.name == entry.field)
                 .cloned()
             else {
+                problems.push(format!(
+                    "{}: is no longer available for import",
+                    entry.field
+                ));
                 continue;
             };
             let text = match (&entry.column, &entry.value) {
@@ -219,10 +223,21 @@ impl Work<'_> {
             return Ok(Planned::Refused(problems.join("; ")));
         }
         let import = &self.registered.definition.import;
-        let create = |input: Map<String, Value>| Planned::Write {
-            contract: import.create,
-            input: Value::Object(input),
-            outcome: Outcome::Create,
+        let custom = self
+            .registered
+            .custom
+            .map(|_| crate::custom::take(&mut input));
+        let create = |mut input: Map<String, Value>| {
+            if let (Some(binding), Some(custom)) = (self.registered.custom, &custom) {
+                if !custom.is_empty() {
+                    input.insert(binding.create_field.into(), json!(custom));
+                }
+            }
+            Planned::Write {
+                contract: import.create,
+                input: Value::Object(input),
+                outcome: Outcome::Create,
+            }
         };
         let Some(duplicates) = &import.duplicates else {
             return Ok(create(input));
@@ -273,6 +288,9 @@ impl Work<'_> {
                 }
                 let mut fields = Map::new();
                 for name in &self.registered.update_fields {
+                    if self.registered.custom.is_some_and(|binding| binding.update_field == name) {
+                        continue;
+                    }
                     let value = input.get(name).cloned().or_else(|| {
                         candidate
                             .get(name)
@@ -290,6 +308,11 @@ impl Work<'_> {
                     update.extend(fields);
                 } else {
                     update.insert(duplicates.update_fields.into(), Value::Object(fields));
+                }
+                if let (Some(binding), Some(custom)) = (self.registered.custom, custom) {
+                    if !custom.is_empty() {
+                        update.insert(binding.update_field.into(), json!(custom));
+                    }
                 }
                 Ok(Planned::Write {
                     contract: duplicates.update,

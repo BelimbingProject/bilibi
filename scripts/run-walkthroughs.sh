@@ -72,6 +72,7 @@ WALKTHROUGHS=(
   'base|audit-bounded-evidence|apps/base/audit_views|bounded-evidence|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-mutations|apps/base/audit_views|mutations-fixture|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-history-kinds|apps/base/audit_views|history-kinds|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-|serve'
+  'base|bulk-custom-import|apps/base/bulk_data|custom-import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-import|apps/base/bulk_data|import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'

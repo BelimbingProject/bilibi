@@ -68,6 +68,10 @@ Three steps in the owning module.
 
 Each write is a reviewed safe write: the preview runs the facade's checks without locking or writing, and the commit writes on the plan's audited transaction. The guide `base.custom_fields` explains keys, types and archiving to agents.
 
+## CSV import
+
+The owner opt-in and mapping contract lives in [Bulk Data](../bulk_data/README.md#tenant-defined-fields-in-csv-import). Several choices, record references and dynamic report/search fields remain outside the current contract.
+
 ## Storage
 
 `base_custom_fields` (migrations `base-custom_fields-001-definitions`, `base-custom_fields-002-more-types`): one row per tenant, record type and key. Every statement binds the tenant.

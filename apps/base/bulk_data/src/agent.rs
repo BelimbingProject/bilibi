@@ -134,7 +134,7 @@ impl ReadHandler for Read {
                         "fields": info.fields.iter().map(|field| json!({
                             "name": field.name,
                             "label": field.label,
-                            "type": format!("{:?}", field.kind).to_lowercase(),
+                            "type": field.kind.as_str(),
                             "required": field.required,
                             "choices": field.choices,
                             "parent": field.reference.and_then(|r| r.parent),
@@ -226,7 +226,7 @@ impl ReadHandler for Read {
                     }
                     Output::Data(Data::Json(json!(fields
                         .iter()
-                        .map(|field| json!({"field": field.name, "label": field.label, "kind": format!("{:?}", field.kind).to_lowercase(), "choices": field.choices}))
+                        .map(|field| json!({"field": field.name, "label": field.label, "kind": field.kind.as_str(), "choices": field.choices}))
                         .collect::<Vec<_>>())))
                 }
                 Self::Update => {

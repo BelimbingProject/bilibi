@@ -1,7 +1,7 @@
 //! CSV import for any module that opts in (issue 133).
 //!
 //! A module contributes a `RecordType` naming its write contracts; a person
-//! uploads a CSV file, maps its columns to the create contract's fields,
+//! uploads a CSV file, maps its columns to the offered fields,
 //! checks it in a dry run and runs it in the background. Every row is one
 //! call to the owner's contract as that person, from a queued job
 //! (`bilibi_agent_api::job`, ADR 10), each in its own short transaction with
@@ -13,6 +13,7 @@
 mod agent;
 mod contributions;
 mod csv;
+mod custom;
 mod export;
 mod files;
 mod import;
@@ -26,6 +27,7 @@ mod undo;
 mod update;
 mod web;
 
+pub use custom::{CustomImport, CUSTOM_IMPORTS};
 pub use export::{ExportRun, ExportState, EXPORTED};
 pub use files::{RunFiles, ARTIFACT_OWNER, FILES};
 pub use mapping::{FieldMap, Mapping, Policy};
@@ -231,6 +233,7 @@ pub struct BulkData {
     db: Db,
     boundary: Arc<MutationBoundary>,
     settings: Arc<Settings>,
+    custom_fields: Arc<bilibi_custom_fields::CustomFields>,
     artifacts: Arc<Artifacts>,
     queue: Arc<Queue>,
     jobs: Arc<JobContracts>,
@@ -300,21 +303,29 @@ impl BulkData {
     /// The fields this person may fill, and those restricted for them.
     async fn offered(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         registered: &Registered,
     ) -> Result<(Vec<Field>, Vec<Field>)> {
         let restricted =
             bilibi_authz::restrictions_for(client, scope, registered.definition.table).await?;
-        Ok(registered
-            .fields
-            .iter()
-            .cloned()
+        let mut fields = registered.fields.clone();
+        if let Some(binding) = registered.custom {
+            fields.extend(
+                self.custom_fields
+                    .active(client, scope, binding.record_type)
+                    .await?
+                    .into_iter()
+                    .map(custom::field),
+            );
+        }
+        Ok(fields
+            .into_iter()
             .partition(|field| !restricted.contains(&field.name)))
     }
     async fn info(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         registered: &Registered,
     ) -> Result<TypeInfo> {
@@ -337,7 +348,11 @@ impl BulkData {
     }
 
     /// The record types this person may import, by label.
-    pub async fn types(&self, client: &impl GenericClient, scope: &Scope) -> Result<Vec<TypeInfo>> {
+    pub async fn types(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Vec<TypeInfo>> {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let held = bilibi_authz::effective_capabilities(client, scope).await?;
         let mut types = Vec::new();
@@ -352,7 +367,7 @@ impl BulkData {
     /// One record type the person may import.
     pub async fn record_type(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<TypeInfo> {
@@ -1018,7 +1033,7 @@ impl BulkData {
     /// stored, the type is theirs to import and the mapping fits.
     async fn ready(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         run: &Run,
         version: i64,
@@ -1088,7 +1103,7 @@ impl BulkData {
     }
     async fn saveable(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         record_type: &str,
         name: &str,
@@ -1191,7 +1206,7 @@ pub(crate) use provenance;
 
 inventory::submit! { bilibi_module_registry::Module {
     id: "base/bulk_data", layer: bilibi_module_registry::Layer::Base,
-    dependencies: &["base/module_registry", "base/agent_api", "base/artifacts", "base/authz", "base/database", "base/datetime", "base/grid", "base/locale", "base/menu", "base/notifications", "base/personal_data", "base/queue", "base/schedule", "base/settings", "base/system", "base/tenancy", "base/ui"],
+    dependencies: &["base/module_registry", "base/agent_api", "base/artifacts", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/menu", "base/notifications", "base/personal_data", "base/queue", "base/schedule", "base/settings", "base/system", "base/tenancy", "base/ui"],
     migrations: &[
         ("base-bulk-data-001-imports", include_str!("../migrations/001-imports.sql")),
         ("base-bulk-data-002-exports", include_str!("../migrations/002-exports.sql")),
@@ -1205,12 +1220,14 @@ inventory::submit! { bilibi_module_registry::Module {
         bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let jobs = services.get::<JobContracts>(bilibi_agent_api::job::SERVICE)?;
             let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
-            let types = record::register(&catalog, &jobs)?;
+            let mut types = record::register(&catalog, &jobs)?;
+            custom::register(&catalog, &jobs, &mut types)?;
             files::bind(services.get::<PartyProofs>("base/tenancy.parties")?)?;
             let bulk = Arc::new(BulkData {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(),
                 boundary: services.get("base/database.mutations")?,
                 settings: services.get("base/settings.store")?,
+                custom_fields: services.get(bilibi_custom_fields::SERVICE)?,
                 artifacts: services.get("base/artifacts.store")?,
                 queue: services.get("base/queue.store")?,
                 jobs,

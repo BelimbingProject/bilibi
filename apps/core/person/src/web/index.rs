@@ -673,7 +673,7 @@ impl Index {
             bilibi_bulk_data::Kind::Integer | bilibi_bulk_data::Kind::Number => {
                 control.kind(InputKind::Number)
             }
-            bilibi_bulk_data::Kind::Text => control,
+            bilibi_bulk_data::Kind::Text | bilibi_bulk_data::Kind::Custom(_) => control,
         };
         let which = if self.selection.all_matching && !self.selection.excluded.is_empty() {
             format!("{count} of the {matching} contacts the filters match")
