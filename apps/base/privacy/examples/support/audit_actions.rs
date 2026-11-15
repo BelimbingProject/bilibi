@@ -6,7 +6,7 @@ use tokio_postgres::Client;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const EVENT: &str = "walkthrough.audit_privacy";
-const ROWS: usize = 1004;
+const ROWS: usize = 1005;
 
 pub async fn prepare(client: &mut Client, scope: &bilibi_tenancy::Scope) -> Result<()> {
     let tx = client.transaction().await?;
@@ -71,6 +71,22 @@ pub async fn prepare(client: &mut Client, scope: &bilibi_tenancy::Scope) -> Resu
         false,
     )
     .await?;
+    // Another operator impersonating the subject: the request values are theirs.
+    who.impersonator_id = Some(2);
+    let operator = RequestInfo {
+        ip: Some("198.51.100.7".parse()?),
+        url: Some("/operator-console".into()),
+        user_agent: Some("Operator browser".into()),
+    };
+    record_action(
+        &tx,
+        &who,
+        Some(&operator),
+        EVENT,
+        json!({"number": 1004}),
+        false,
+    )
+    .await?;
     // Different person and different tenant must not leak through the export.
     who.actor_id = 2;
     who.impersonator_id = None;
@@ -114,20 +130,35 @@ pub fn disclosure(bundle: &Value) -> Result<()> {
         .and_then(|store| store["records"]["audit_actions"].as_array())
         .ok_or("account actions missing from disclosure")?;
     let proof: Vec<_> = actions.iter().filter(|row| row["event"] == EVENT).collect();
+    let (own, operated) = proof.split_at(proof.len().saturating_sub(1));
     if proof.len() != ROWS
-        || proof.iter().enumerate().any(|(i, row)| {
+        || own.iter().enumerate().any(|(i, row)| {
             row["payload"]["number"] != json!(i)
                 || row["ip_address"] != "192.0.2.1"
                 || row["url"] != "/privacy-fixture"
                 || row["user_agent"] != "Privacy walkthrough"
+                || row["acted_by_administrator"] != false
+        })
+        || operated.iter().any(|row| {
+            row["actor_id"] != 1
+                || row["acted_by_administrator"] != true
+                || [
+                    "impersonator_id",
+                    "ip_address",
+                    "url",
+                    "user_agent",
+                    "payload",
+                ]
+                .iter()
+                .any(|field| !row[*field].is_null())
         })
         || proof[0]["retained"] != true
         || proof[1001]["actor_type"] != "agent"
         || proof[1002]["impersonator_id"] != 1
     {
-        return Err("action disclosure lost a page, attribution or request values, or leaked an unrelated action".into());
+        return Err("action disclosure lost a page, attribution or request values, leaked an unrelated action or an impersonating operator's values".into());
     }
-    println!("audit action disclosure: all {ROWS} rows across pages, agent and impersonation, no unrelated person or tenant");
+    println!("audit action disclosure: all {ROWS} rows across pages, agent and impersonation, operator values withheld, no unrelated person or tenant");
     Ok(())
 }
 
@@ -142,11 +173,11 @@ pub async fn kept(client: &Client, request: &RequestView) -> Result<()> {
     if !kept.iter().any(|row| {
         row["kind"] == "audit.account_actions"
             && row["id"] == "1"
-            && row["reason"] == "retained_until"
+            && row["reason"] == "evidence"
             && row["until"].is_null()
     }) {
         return Err(
-            "erasure result omits retained account actions or promises a false deadline".into(),
+            "erasure result omits kept account actions, promises a false deadline or owes them cleanup".into(),
         );
     }
     let remaining: i64 = client.query_one(

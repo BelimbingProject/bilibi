@@ -33,6 +33,9 @@ pub async fn count_account_actions(
 /// Exports all actions of tenant-local accounts for an approved disclosure.
 /// The account owner checks the grant's subject and resolves `users` from it.
 /// Includes impersonation and person-backed agents, with each action once.
+/// Where another account impersonated the subject, the row says an
+/// administrator acted and withholds that operator's ID, address, URL,
+/// browser and payload.
 /// Reads bounded pages; refuses an oversized bundle rather than truncating it.
 /// Erased values stay erased. Retention and bookmarks are not changed.
 pub async fn export_account_actions(
@@ -64,12 +67,18 @@ pub async fn export_account_actions(
         let done = rows.len() < PAGE as usize;
         for row in rows {
             after = row.get(0);
+            let impersonator: Option<i64> = row.get(3);
+            let operator = impersonator.is_some_and(|id| !users.contains(&id));
+            let own = |value: Value| if operator { Value::Null } else { value };
             records.push(json!({
                 "id": after, "actor_type": row.get::<_, String>(1),
-                "actor_id": row.get::<_, i64>(2), "impersonator_id": row.get::<_, Option<i64>>(3),
+                "actor_id": row.get::<_, i64>(2), "impersonator_id": own(json!(impersonator)),
+                "acted_by_administrator": operator,
                 "event": row.get::<_, String>(4), "occurred_at": row.get::<_, String>(5),
-                "ip_address": row.get::<_, Option<String>>(6), "url": row.get::<_, Option<String>>(7),
-                "user_agent": row.get::<_, Option<String>>(8), "payload": row.get::<_, Option<Value>>(9),
+                "ip_address": own(json!(row.get::<_, Option<String>>(6))),
+                "url": own(json!(row.get::<_, Option<String>>(7))),
+                "user_agent": own(json!(row.get::<_, Option<String>>(8))),
+                "payload": own(json!(row.get::<_, Option<Value>>(9))),
                 "erased_at": row.get::<_, Option<String>>(10), "retained": row.get::<_, bool>(11),
                 "actor_role": row.get::<_, Option<String>>(12),
                 "agent_self_report": row.get::<_, Option<String>>(13),

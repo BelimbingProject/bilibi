@@ -267,14 +267,11 @@ impl Handler for Accounts {
                     row.get(5),
                     row.get(6),
                 );
-                // Actions remain evidence under the operator's retention policy,
-                // including on repeat erasure of an already anonymised account.
-                // No fixed deadline: retention can be disabled or bookmarked.
                 if bilibi_audit::count_account_actions(tx.sql(), scope, &[user]).await? > 0 {
                     erased.kept.push(Kept {
                         kind: AUDIT_ACTIONS_KIND.into(),
                         id: user.to_string(),
-                        reason: KeptReason::RetainedUntil,
+                        reason: KeptReason::Evidence,
                         until: None,
                         hold: None,
                     });
