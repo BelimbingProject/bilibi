@@ -148,7 +148,8 @@ impl Period {
     }
 
     /// Like `parse`, with financial-year choices enabled only when the caller's
-    /// current year contains today. Missing or stale calendars use the default.
+    /// current year contains today. An unavailable financial-year preset uses
+    /// the default, including Last financial year without a previous start.
     /// Year to date always means 1 January through today.
     pub fn parse_with_financial_years(
         param: impl Fn(&str) -> Option<String>,
@@ -227,7 +228,8 @@ impl Period {
         })
     }
 
-    /// The URL parameters that round-trip through `parse`.
+    /// URL parameters for `parse`, or `parse_with_financial_years` with the
+    /// caller's current calendar when using financial-year presets.
     pub fn params(&self) -> [(&'static str, String); 3] {
         [
             ("period", self.preset.as_str().to_owned()),
