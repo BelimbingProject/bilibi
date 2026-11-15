@@ -21,8 +21,9 @@ use bilibi_authz::effective_capabilities;
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::{DisplayContext, DisplayPolicy, Format, Precision};
 use bilibi_locale::Locales;
+use bilibi_party_ids::OrganisationId;
 use bilibi_personal_data::{Identifier, Located};
-use bilibi_tenancy::{PartyProofs, Scope};
+use bilibi_tenancy::{OrganisationSearch, PartyProofs, Scope};
 use bilibi_ui::{
     download::{Download, DownloadFuture, DownloadRequest, FileBody},
     forms::{Choice, Field, Form, InputKind},
@@ -33,8 +34,9 @@ use bilibi_ui::{
     },
     params, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnsOutcome,
     ConfirmDialog, CreateButton, Fact, Facts, FilterToolbar, FlashMap, FlexRow, FlexTable, Header,
-    Html, IconButton, IconKind, ListColumns, ListSpec, ListState, Modal, PageCounts, Pagination,
-    RecordLink, SectionHeading, StatusKind, TableEmpty, ToolbarControl, NO_FLASH,
+    Html, IconButton, IconKind, ListColumns, ListSpec, ListState, Modal, NamedKind, PageCounts,
+    Pagination, RecordLink, RecordPicker, SectionHeading, StatusKind, TableEmpty, ToolbarControl,
+    NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -49,6 +51,22 @@ pub(crate) const SERVICE: &str = "base/privacy.pages";
 pub(crate) const DOWNLOADS: &str = "base/privacy.downloads";
 const PAGE_SIZES: [u64; 3] = [25, 50, 100];
 const REQUEST_FORM: &str = "request";
+/// Companies as the request dialog's picker names them.
+const COMPANY: NamedKind<'static> = NamedKind {
+    kind: "core/company",
+    prefix: "company",
+    label: "Company",
+    page: Some("/companies"),
+};
+/// The company a picker hit raised (`record=company:<id>`).
+fn get_company(value: &Value) -> Result<OrganisationId> {
+    value
+        .get("record")
+        .and_then(Value::as_str)
+        .and_then(|record| COMPANY.picked(record))
+        .and_then(|id| OrganisationId::new(id).ok())
+        .ok_or(Error::Invalid)
+}
 const HOLD_FORM: &str = "hold";
 const NOTE_FORM: &str = "note";
 const REVEAL_FORM: &str = "reveal";
@@ -229,7 +247,10 @@ fn request_columns() -> Vec<BuiltinColumn> {
 struct RequestDialog {
     values: HashMap<String, String>,
     errors: BTreeMap<String, Vec<String>>,
-    companies: Vec<Choice>,
+    /// The chosen company, reproved as selectable on each view.
+    company: Option<OrganisationId>,
+    /// The company search text; its hits are read on each view.
+    company_query: String,
 }
 
 struct Requests {
@@ -274,21 +295,33 @@ impl Requests {
             },
             "clear-flash" => clear_flash(&mut self.flash, value),
             "new_request" => {
-                let client = self.pages.db.get().await?;
-                let companies = self
-                    .pages
-                    .parties
-                    .selectable_organisations(&**client, scope, REQUEST_RECEIVE)
-                    .await?
-                    .into_iter()
-                    .filter(|company| !company.archived)
-                    .map(|company| Choice::new(company.name, company.id.get().to_string()))
-                    .collect();
                 self.flash = None;
-                self.dialog = Some(RequestDialog {
-                    companies,
-                    ..RequestDialog::default()
-                });
+                self.dialog = Some(RequestDialog::default());
+            }
+            "request_change" => {
+                let Some(dialog) = self.dialog.as_mut() else {
+                    return Ok(());
+                };
+                let values = params::form_values(value, REQUEST_FORM);
+                dialog.company_query = values.get("company_id_search").cloned().unwrap_or_default();
+                dialog.company = values
+                    .get("company_id")
+                    .and_then(|id| id.parse().ok())
+                    .and_then(|id| OrganisationId::new(id).ok());
+                dialog.values = values;
+            }
+            "pick_request_company" => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    let id = get_company(value)?;
+                    dialog.company = Some(id);
+                    dialog.company_query.clear();
+                    dialog.errors.remove("company_id");
+                }
+            }
+            "change_request_company" => {
+                if let Some(dialog) = self.dialog.as_mut() {
+                    dialog.company = None;
+                }
             }
             "close_modal" => self.dialog = None,
             "create" => {
@@ -472,6 +505,53 @@ impl Requests {
             body: list,
             ..Card::default()
         })?);
+        let (company_chosen, company_hits) = match &self.dialog {
+            Some(dialog) => {
+                let named = |companies: Vec<bilibi_tenancy::NamedOrganisation>| {
+                    companies
+                        .into_iter()
+                        .filter(|company| !company.archived)
+                        .map(|company| (company.id.get(), company.name))
+                        .collect::<Vec<_>>()
+                };
+                let chosen = match dialog.company {
+                    Some(id) => {
+                        let ids = [id];
+                        named(
+                            pages
+                                .parties
+                                .selectable_organisations(
+                                    &**client,
+                                    scope,
+                                    REQUEST_RECEIVE,
+                                    OrganisationSearch::among(&ids),
+                                )
+                                .await?,
+                        )
+                        .into_iter()
+                        .next()
+                    }
+                    None => None,
+                };
+                let hits = if chosen.is_none() && !dialog.company_query.trim().is_empty() {
+                    named(
+                        pages
+                            .parties
+                            .selectable_organisations(
+                                &**client,
+                                scope,
+                                REQUEST_RECEIVE,
+                                OrganisationSearch::text(&dialog.company_query),
+                            )
+                            .await?,
+                    )
+                } else {
+                    Vec::new()
+                };
+                (chosen, hits)
+            }
+            None => (None, Vec::new()),
+        };
         let dialog = match &self.dialog {
             Some(dialog) => {
                 let field = |key: &str, label: &str| {
@@ -501,14 +581,20 @@ impl Requests {
                         .hint("The person's ID from Contacts.")
                         .required(),
                 )?);
-                fields.push(&render(
-                    field("company_id", "Filed under company")
-                        .kind(InputKind::Select)
-                        .prompt("Choose a company")
-                        .options(dialog.companies.clone())
-                        .hint("The export or certificate is kept under this company.")
-                        .required(),
-                )?);
+                fields.push(&render(RecordPicker::named(
+                    COMPANY,
+                    "privacy-request-company-id",
+                    REQUEST_FORM,
+                    "company_id",
+                    "Filed under company (keeps the export or certificate)",
+                    &dialog.company_query,
+                    &company_hits,
+                    company_chosen
+                        .as_ref()
+                        .map(|(id, name)| (*id, name.as_str())),
+                    ("pick_request_company", "change_request_company"),
+                    dialog.errors.get("company_id").cloned().unwrap_or_default(),
+                ))?);
                 fields.push(&render(
                     field("emails", "Emails the person gave").hint("Separate several with commas."),
                 )?);
@@ -529,13 +615,16 @@ impl Requests {
                     body: Html::text("Record request"),
                     ..Button::default()
                 })?);
-                let form = render(Form {
+                let form = Form {
                     id: "privacy-request-form",
-                    event: "create",
+                    event: "request_change",
+                    change: true,
                     body: fields,
                     actions,
                     ..Form::default()
-                })?;
+                }
+                .submit_event("create")
+                .map_err(|_| Error::Internal)?;
                 render(Modal {
                     id: "privacy-request-modal",
                     title: "New request",

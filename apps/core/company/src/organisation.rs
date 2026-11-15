@@ -10,8 +10,8 @@ use bilibi_authz::{authorize_key, authorize_proof, decide_proof, holds_proof, re
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_party_ids::OrganisationId;
 use bilibi_tenancy::{
-    NamedOrganisation, OrganisationDirectory, OrganisationProvider, ProofClient, ProofFuture,
-    ReadClient, Scope,
+    NamedOrganisation, OrganisationDirectory, OrganisationProvider, OrganisationSearch,
+    ProofClient, ProofFuture, ReadClient, Scope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -215,12 +215,41 @@ async fn named_in_scope(
     ids: Option<Vec<i64>>,
     unarchived: bool,
 ) -> Result<Vec<NamedOrganisation>> {
+    named_matching(client, scope, ids, unarchived, None).await
+}
+/// `named_in_scope` narrowed by a picker's search: the text and the limit
+/// apply in SQL, so the answer never holds more than `limit` companies.
+async fn named_matching(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    ids: Option<Vec<i64>>,
+    unarchived: bool,
+    search: Option<OrganisationSearch<'_>>,
+) -> Result<Vec<NamedOrganisation>> {
+    let ids = match search.and_then(|search| search.among) {
+        Some(among) => {
+            let among: Vec<i64> = among.iter().map(|id| id.get()).collect();
+            Some(match ids {
+                Some(ids) => among.into_iter().filter(|id| ids.contains(id)).collect(),
+                None => among,
+            })
+        }
+        None => ids,
+    };
+    let pattern = search
+        .map(|search| search.text.trim())
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("%{}%", escape_like(text)));
+    let limit = search.map(|search| i64::try_from(search.limit).unwrap_or(i64::MAX));
     // The proof connection answers one row; a tenant's companies arrive as
     // one JSON array of tenant-scoped rows, never as client input.
     let rows: serde_json::Value = client
         .query_opt(
-            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2)) AND NOT ($3 AND status=$4)",
-            &[&scope.tenant(), &ids, &unarchived, &ARCHIVED],
+            "SELECT COALESCE(json_agg(json_build_object('id',id,'name',name,'legal_name',legal_name,'status',status) ORDER BY id),'[]'::json) FROM (\
+             SELECT id,name,legal_name,status FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND ($2::bigint[] IS NULL OR id=ANY($2)) AND NOT ($3 AND status=$4) \
+             AND ($5::text IS NULL OR name ILIKE $5 OR legal_name ILIKE $5 OR code ILIKE $5) \
+             ORDER BY lower(CASE WHEN btrim(coalesce(legal_name,''))<>'' THEN legal_name ELSE name END),id LIMIT $6) c",
+            &[&scope.tenant(), &ids, &unarchived, &ARCHIVED, &pattern, &limit],
         )
         .await?
         .map(|row| row.get(0))
@@ -326,6 +355,7 @@ impl OrganisationDirectory for Directory {
         client: &'a dyn ProofClient,
         scope: &'a Scope,
         capability: &'a str,
+        search: OrganisationSearch<'a>,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
         Box::pin(async move {
             if !decide_proof(client, scope, capability).await?.allowed {
@@ -343,8 +373,16 @@ impl OrganisationDirectory for Directory {
                     None => return Ok(Vec::new()),
                 }
             };
-            named_in_scope(client, scope, ids, true).await
+            named_matching(client, scope, ids, true, Some(search)).await
         })
+    }
+    fn find<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        search: OrganisationSearch<'a>,
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>> {
+        Box::pin(named_matching(client, scope, None, true, Some(search)))
     }
     fn target<'a>(
         &'a self,

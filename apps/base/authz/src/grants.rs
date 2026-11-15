@@ -112,16 +112,18 @@ impl Grants {
             .map(|company| company.id.get())
             .collect())
     }
-    /// Company choices for an administrator granting a scoped role. Target
+    /// Company choices for an administrator granting a scoped role, as many
+    /// as `search` asks for. Target
     /// validation repeats the directory proof on the saving transaction.
     pub async fn assignable_companies(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
+        search: bilibi_tenancy::OrganisationSearch<'_>,
     ) -> Result<Vec<bilibi_tenancy::NamedOrganisation>> {
         authorize_key(client, scope, "admin.authz.role.update").await?;
         self.parties
-            .selectable_organisations(client, scope, "admin.authz.role.update")
+            .selectable_organisations(client, scope, "admin.authz.role.update", search)
             .await
     }
     fn known(&self, key: &str) -> Result<()> {

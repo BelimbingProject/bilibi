@@ -92,6 +92,28 @@ pub struct PickerHit {
     pub kind_label: String,
 }
 
+/// One kind of record a [`RecordPicker::named`] offers: its Base Records kind,
+/// the prefix a hit raises (`<prefix>:<id>`), its name for people and, when it
+/// has one, the page a chosen record links to (`<page>/<id>`).
+#[derive(Clone, Copy, Debug)]
+pub struct NamedKind<'a> {
+    pub kind: &'a str,
+    pub prefix: &'a str,
+    pub label: &'a str,
+    pub page: Option<&'a str>,
+}
+impl NamedKind<'_> {
+    /// The id a hit of this kind raised as `record`, if it is one.
+    pub fn picked(&self, record: &str) -> Option<i64> {
+        record
+            .strip_prefix(self.prefix)?
+            .strip_prefix(':')?
+            .parse()
+            .ok()
+            .filter(|id| *id > 0)
+    }
+}
+
 /// A live type-ahead over the kinds a field allows. It sits in the owner's
 /// `Form` with `change`: typing raises the form's event, the owner searches
 /// (`base/records` `search`) and renders the hits; choosing one raises
@@ -202,5 +224,56 @@ impl RecordPicker {
             hits,
             errors,
         }
+    }
+    /// A picker whose hits and choice the owner names itself, as `(id, name)`
+    /// pairs of one `kind` (a directory search rather than Base Records): each
+    /// hit raises `record=<prefix>:<id>` and the chosen record posts its bare
+    /// id as `{form}[{key}]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn named(
+        kind: NamedKind<'_>,
+        id: &str,
+        form: &str,
+        key: &str,
+        label: &str,
+        query: &str,
+        hits: &[(i64, String)],
+        chosen: Option<(i64, &str)>,
+        events: (&str, &str),
+        errors: Vec<String>,
+    ) -> Self {
+        let hits: Vec<PickerHit> = hits
+            .iter()
+            .map(|(record, name)| PickerHit {
+                value: format!("{}:{record}", kind.prefix),
+                label: name.clone(),
+                kind_label: kind.label.to_owned(),
+            })
+            .collect();
+        let chosen = chosen.map(|(record, name)| {
+            let pill = RelatedRecord::new(
+                format!("{id}-pill"),
+                kind.kind,
+                record.to_string(),
+                RecordState::Named {
+                    label: name.to_owned(),
+                    href: kind.page.map(|page| format!("{page}/{record}")),
+                },
+            );
+            (record.to_string(), pill)
+        });
+        Self::new(
+            id,
+            form,
+            key,
+            label,
+            query,
+            &hits,
+            chosen
+                .as_ref()
+                .map(|(value, pill)| (value.as_str(), pill.clone())),
+            events,
+            errors,
+        )
     }
 }

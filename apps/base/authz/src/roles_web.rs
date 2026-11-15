@@ -20,15 +20,15 @@ use crate::{
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_party_ids::OrganisationId;
-use bilibi_tenancy::{NamedOrganisation, Scope};
+use bilibi_tenancy::{NamedOrganisation, OrganisationSearch, Scope};
 use bilibi_ui::{
-    choices,
     list_state::FILTERS_FORM,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
     params, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
     ColumnsOutcome, CreateButton, Fact, Facts, Field, FilterToolbar, FlashGroup, FlashMap, FlexRow,
-    FlexTable, Header, Html, InputKind, ListColumns, ListSpec, ListState, PageCounts, PageVariant,
-    Pagination, RowMode, SectionHeading, SortDir, StatusKind, TableEmpty, ToolbarControl,
+    FlexTable, Header, Html, InputKind, ListColumns, ListSpec, ListState, NamedKind, PageCounts,
+    PageVariant, Pagination, RecordPicker, RowMode, SectionHeading, SortDir, StatusKind,
+    TableEmpty, ToolbarControl,
 };
 use std::{
     collections::HashMap,
@@ -512,7 +512,7 @@ fn render_role(
 
 #[derive(Template)]
 #[template(
-    source = r#"<form id="role-form" data-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
+    source = r#"<form id="role-form" data-event="role-change" data-change data-submit-event="create-role" class="space-y-5"><section class="rounded-xl border border-line bg-surface px-6 py-5">{{ company }}{{ name }}{{ code }}{{ description }}</section><div class="flex items-center justify-end gap-3"><a id="role-cancel" href="/authz/roles" class="text-sm font-medium text-ink-muted hover:text-ink">Cancel</a>{{ save }}</div></form>"#,
     ext = "html"
 )]
 struct RoleForm {
@@ -523,9 +523,19 @@ struct RoleForm {
     save: Html,
 }
 
+/// Companies as the create form's picker names them.
+const COMPANY: NamedKind<'static> = NamedKind {
+    kind: "core/company",
+    prefix: "company",
+    label: "Company",
+    page: Some("/companies"),
+};
+
+/// The owner company picker: the chosen company, or the typed text and the
+/// companies it finds, never a list of every company.
 fn render_create(
     role: &NewRole,
-    companies: &[NamedOrganisation],
+    picker: &CompanyPicker,
     errors: &RoleErrors,
     created: bool,
 ) -> Result<String> {
@@ -535,18 +545,21 @@ fn render_create(
             .value(value)
             .errors(errors.to_vec())
     };
-    let options: Vec<(String, String)> = companies
-        .iter()
-        .map(|company| (company.name.clone(), company.id.get().to_string()))
-        .collect();
-    let company = Field::in_form("role", "company_id")
-        .id("role-company-scope")
-        .kind(InputKind::Select)
-        .label("Company Scope")
-        .prompt("Select a company")
-        .options(choices(&options))
-        .value(role.company_id.map(|id| id.to_string()).unwrap_or_default())
-        .errors(errors.company_id.clone());
+    let company = RecordPicker::named(
+        COMPANY,
+        "role-company-scope",
+        "role",
+        "company_id",
+        "Company Scope",
+        &picker.query,
+        &picker.hits,
+        picker
+            .chosen
+            .as_ref()
+            .map(|(id, name)| (*id, name.as_str())),
+        ("pick-company", "change-company"),
+        errors.company_id.clone(),
+    );
     let mut html = render(FlashGroup {
         id: "flash-group",
         flash: FlashMap {
@@ -605,7 +618,8 @@ fn render_create(
 /// will, so nothing changes under the reader when the socket attaches.
 pub(crate) async fn create_view(pages: &Pages, scope: &Scope) -> Result<String> {
     let form = RoleCreate::mount(pages.clone(), scope).await?;
-    render_create(&form.role, &form.companies, &form.errors, false)
+    let picker = form.picker(scope).await?;
+    render_create(&form.role, &picker, &form.errors, false)
 }
 
 /// Filters, sorting and paging stay in the URL for links and Back; column
@@ -712,6 +726,8 @@ enum CreateEvent {
     CreateRole {
         #[serde(rename = "role[company_id]", default)]
         company_id: String,
+        #[serde(rename = "role[company_id_search]", default)]
+        company_search: String,
         #[serde(rename = "role[name]", default)]
         name: String,
         #[serde(rename = "role[code]", default)]
@@ -719,6 +735,22 @@ enum CreateEvent {
         #[serde(rename = "role[description]", default)]
         description: String,
     },
+    RoleChange {
+        #[serde(rename = "role[company_id]", default)]
+        company_id: String,
+        #[serde(rename = "role[company_id_search]", default)]
+        company_search: String,
+        #[serde(rename = "role[name]", default)]
+        name: String,
+        #[serde(rename = "role[code]", default)]
+        code: String,
+        #[serde(rename = "role[description]", default)]
+        description: String,
+    },
+    PickCompany {
+        record: String,
+    },
+    ChangeCompany {},
     ClearFlash {
         key: String,
     },
@@ -727,45 +759,101 @@ enum CreateEvent {
 /// Mounted create form. The form keeps what was typed while it is refused;
 /// a created role lands on its detail page, which is where its capabilities
 /// are read, or on the list, or back here with a cleared form for an actor
-/// who may open neither. The company options are read at mount and again
-/// after each submission, so a company that left scope meanwhile is refused
-/// as a field error, as in the source.
+/// who may open neither. The owner company is found by search, and the chosen
+/// one is read again after each submission, so a company that left scope
+/// meanwhile is refused as a field error, as in the source.
 pub(crate) struct RoleCreate {
     pub(crate) pages: Pages,
     pub(crate) role: NewRole,
-    pub(crate) companies: Vec<NamedOrganisation>,
+    /// The owner company's search text; its hits are read on each view.
+    pub(crate) company_query: String,
     pub(crate) errors: RoleErrors,
     pub(crate) created: bool,
 }
+/// The owner company picker's state for one view.
+pub(crate) struct CompanyPicker {
+    query: String,
+    hits: Vec<(i64, String)>,
+    chosen: Option<(i64, String)>,
+}
 impl RoleCreate {
     pub(crate) async fn mount(pages: Pages, scope: &Scope) -> Result<Self> {
-        let companies = Self::companies(&pages, scope).await?;
         // Belimbing preselects nothing; the actor's current workplace is the one
         // choice that is certainly in scope, so it is offered first.
-        let own = scope.current_company().map(|id| id.get());
+        let own = match scope.current_company() {
+            Some(id) => {
+                let ids = [id];
+                Self::companies(&pages, scope, OrganisationSearch::among(&ids))
+                    .await?
+                    .first()
+                    .map(|company| company.id.get())
+            }
+            None => None,
+        };
         let role = NewRole {
-            company_id: own.filter(|id| companies.iter().any(|c| c.id.get() == *id)),
+            company_id: own,
             ..NewRole::default()
         };
         Ok(Self {
             pages,
             role,
-            companies,
+            company_query: String::new(),
             errors: RoleErrors::default(),
             created: false,
         })
     }
-    /// The tenant's unarchived companies: an archived one is read-only and
-    /// create would refuse it, so the picker never offers it.
-    async fn companies(pages: &Pages, scope: &Scope) -> Result<Vec<NamedOrganisation>> {
+    /// The tenant's unarchived companies `search` finds: an archived one is
+    /// read-only and create would refuse it, so the picker never offers it.
+    async fn companies(
+        pages: &Pages,
+        scope: &Scope,
+        search: OrganisationSearch<'_>,
+    ) -> Result<Vec<NamedOrganisation>> {
         let client = pages.db.get().await?;
-        Ok(pages
+        pages
             .parties
-            .organisations_in_scope(&**client, scope)
+            .find_organisations(&**client, scope, search)
+            .await
+    }
+    /// Whether `id` is a company the picker would offer.
+    async fn offered(&self, scope: &Scope, id: i64) -> Result<Option<NamedOrganisation>> {
+        let Ok(id) = OrganisationId::new(id) else {
+            return Ok(None);
+        };
+        let ids = [id];
+        Ok(
+            Self::companies(&self.pages, scope, OrganisationSearch::among(&ids))
+                .await?
+                .into_iter()
+                .next(),
+        )
+    }
+    pub(crate) async fn picker(&self, scope: &Scope) -> Result<CompanyPicker> {
+        let chosen = match self.role.company_id {
+            Some(id) => self
+                .offered(scope, id)
+                .await?
+                .map(|company| (company.id.get(), company.name)),
+            None => None,
+        };
+        let hits = if chosen.is_none() && !self.company_query.trim().is_empty() {
+            Self::companies(
+                &self.pages,
+                scope,
+                OrganisationSearch::text(&self.company_query),
+            )
             .await?
             .into_iter()
-            .filter(|company| !company.archived)
-            .collect())
+            .map(|company| (company.id.get(), company.name))
+            .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(CompanyPicker {
+            query: self.company_query.clone(),
+            hits,
+            chosen,
+        })
     }
 }
 
@@ -779,14 +867,38 @@ impl LiveState<Scope, Error> for RoleCreate {
                     match serde_json::from_value::<CreateEvent>(value.clone())
                         .map_err(|_| Error::Invalid)?
                     {
+                        CreateEvent::RoleChange {
+                            company_id,
+                            company_search,
+                            name,
+                            code,
+                            description,
+                        } => {
+                            // Each change keeps what was typed: the form follows the server.
+                            self.role = NewRole {
+                                company_id: company_id.trim().parse::<i64>().ok(),
+                                name,
+                                code,
+                                description,
+                            };
+                            self.company_query = company_search;
+                        }
+                        CreateEvent::PickCompany { record } => {
+                            self.role.company_id =
+                                Some(COMPANY.picked(&record).ok_or(Error::Invalid)?);
+                            self.company_query.clear();
+                            self.errors.company_id.clear();
+                        }
+                        CreateEvent::ChangeCompany {} => self.role.company_id = None,
                         CreateEvent::CreateRole {
                             company_id,
+                            company_search,
                             name,
                             code,
                             description,
                         } => {
                             self.created = false;
-                            self.companies = Self::companies(&self.pages, request.scope).await?;
+                            self.company_query = company_search;
                             let company_id = company_id.trim().parse::<i64>().ok();
                             self.role = NewRole {
                                 company_id,
@@ -796,8 +908,10 @@ impl LiveState<Scope, Error> for RoleCreate {
                             };
                             // The source's `validate_inclusion`: a value the
                             // picker never offered is a field error.
-                            let offered = company_id
-                                .is_some_and(|id| self.companies.iter().any(|c| c.id.get() == id));
+                            let offered = match company_id {
+                                Some(id) => self.offered(request.scope, id).await?.is_some(),
+                                None => false,
+                            };
                             let outcome = if company_id.is_some() && !offered {
                                 let mut errors = roles::validate(&self.role);
                                 errors
@@ -846,8 +960,9 @@ impl LiveState<Scope, Error> for RoleCreate {
                     }
                 }
             }
+            let picker = self.picker(request.scope).await?;
             Ok(LiveBody {
-                html: render_create(&self.role, &self.companies, &self.errors, self.created)?,
+                html: render_create(&self.role, &picker, &self.errors, self.created)?,
                 ..LiveBody::default()
             })
         })
