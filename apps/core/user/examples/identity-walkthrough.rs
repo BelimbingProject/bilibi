@@ -320,7 +320,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     bilibi_company::authorize_target(&**sql, &chosen, 2, bilibi_company::UPDATE).await?;
     let selectable = bilibi_company::Directory
-        .selectable(&**sql, &chosen, bilibi_company::UPDATE)
+        .selectable(
+            &**sql,
+            &chosen,
+            bilibi_company::UPDATE,
+            bilibi_tenancy::OrganisationSearch::text("").limit(usize::MAX),
+        )
         .await?;
     if selectable
         .iter()

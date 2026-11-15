@@ -155,10 +155,14 @@ saved outcome. A refusal (`CreateOutcome::Refused`, `Outcome::Refused`) lists
   target with a capability, current company or tenant-wide, filtered in SQL
   so an actor without the tenant-wide reach reads only its current company),
   `named`: the live ones among given ids (Authz asks only about the companies
-  that own a role), and `target`, the `authorize_target` rule on the sealed
-  proof connection. The settings
-  editor's company picker and the Authz role create picker read it; Base
-  never queries `companies`. Migration `006-authz-role-owner` contributes the
+  that own a role), `find`: the unarchived ones whatever the actor's reach,
+  for a write that proves its company itself (a role's owner), and `target`,
+  the `authorize_target` rule on the sealed proof connection. `selectable` and
+  `find` take an `OrganisationSearch` (text over name, legal name and code,
+  optional ids, a limit) applied in SQL, so a picker reads at most one page of
+  companies, never every company of the tenant. The settings editor's company
+  picker, the Authz role create and grant pickers, the privacy request picker
+  and the account and desk pickers read it; Base never queries `companies`. Migration `006-authz-role-owner` contributes the
   scoped foreign key behind Authz's `roles.company_id`.
 - `files` (K15) is the private-file owner: the Media attachment subject
   `core.company` and the Artifacts owner `core.company` (`bilibi_company::FILES`).

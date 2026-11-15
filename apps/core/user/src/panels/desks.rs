@@ -3,8 +3,9 @@ use super::{event, render};
 use crate::web::Pages;
 use askama::Template;
 use bilibi_database::{Error, Result};
+use bilibi_party_ids::OrganisationId;
 use bilibi_security::Scope;
-use bilibi_tenancy::OrganisationDirectory;
+use bilibi_tenancy::{OrganisationDirectory, OrganisationSearch};
 use bilibi_ui::{
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, PageRequest},
     params, BuiltinColumn, Button, Card, Choice, ColumnsOutcome, ConfirmDialog, Field, FlexRow,
@@ -97,17 +98,6 @@ impl Desks {
                 .await?;
         }
         let client = self.pages.db.get().await?;
-        let manageable_companies = if self.company {
-            Vec::new()
-        } else {
-            bilibi_company::Directory
-                .selectable(&**client, scope, bilibi_company::UPDATE)
-                .await?
-        };
-        let manageable_company_ids: HashSet<i64> = manageable_companies
-            .iter()
-            .map(|company| company.id.get())
-            .collect();
         let can_manage = if self.company {
             self.pages.allowed(scope, bilibi_company::UPDATE).await?
                 && bilibi_company::authorize_target(
@@ -119,7 +109,15 @@ impl Desks {
                 .await
                 .is_ok()
         } else {
-            !manageable_company_ids.is_empty()
+            !bilibi_company::Directory
+                .selectable(
+                    &**client,
+                    scope,
+                    bilibi_company::UPDATE,
+                    OrganisationSearch::text("").limit(1),
+                )
+                .await?
+                .is_empty()
         };
         // An archived company keeps its desks (its people still read its
         // records) and takes no new one; a desk there can still be removed.
@@ -145,6 +143,26 @@ impl Desks {
                 .await?;
         }
         let total = entries.first().map_or(0, |row| row.get::<_, i64>("total")) as u64;
+        // Which desks on this page the actor may remove: only their companies are asked.
+        let manageable_company_ids: HashSet<i64> = if self.company || !can_manage {
+            HashSet::new()
+        } else {
+            let listed = entries
+                .iter()
+                .filter_map(|row| OrganisationId::new(row.get(0)).ok())
+                .collect::<Vec<_>>();
+            bilibi_company::Directory
+                .selectable(
+                    &**client,
+                    scope,
+                    bilibi_company::UPDATE,
+                    OrganisationSearch::among(&listed),
+                )
+                .await?
+                .into_iter()
+                .map(|company| company.id.get())
+                .collect()
+        };
         let mut rows = Vec::new();
         let counts =
             bilibi_ui::list_state::PageCounts::new(self.list.page, self.list.page_size, total);
@@ -220,18 +238,32 @@ impl Desks {
             );
             let available = if self.company {
                 client.query("SELECT DISTINCT p.id,p.name FROM persons p JOIN users u ON u.tenant_id=p.tenant_id AND u.person_id=p.id AND u.kind='staff' AND u.deleted_at IS NULL WHERE p.tenant_id=$1 AND p.retired_at IS NULL AND p.name ILIKE $2 ORDER BY p.name,p.id LIMIT 100",&[&scope.tenant(),&pattern]).await?
+                    .iter()
+                    .map(|r| (r.get::<_, i64>(0), r.get::<_, String>(1)))
+                    .collect::<Vec<_>>()
             } else {
-                let companies: Vec<i64> = manageable_company_ids.iter().copied().collect();
-                client.query("SELECT id,name FROM companies WHERE tenant_id=$1 AND deleted_at IS NULL AND status <> 'archived' AND name ILIKE $2 AND id=ANY($3) ORDER BY name,id LIMIT 100",&[&scope.tenant(),&pattern,&companies]).await?
+                bilibi_company::Directory
+                    .selectable(
+                        &**client,
+                        scope,
+                        bilibi_company::UPDATE,
+                        OrganisationSearch::text(&self.search).limit(100),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|company| (company.id.get(), company.name))
+                    .collect()
             };
             let field = Field::in_form("desk", "id")
                 .label(if self.company { "Person" } else { "Company" })
                 .kind(InputKind::Select)
                 .options(
                     std::iter::once(Choice::new("Choose…", ""))
-                        .chain(available.iter().map(|r| {
-                            Choice::new(r.get::<_, String>(1), r.get::<_, i64>(0).to_string())
-                        }))
+                        .chain(
+                            available
+                                .iter()
+                                .map(|(id, name)| Choice::new(name, id.to_string())),
+                        )
                         .collect(),
                 );
             let search = render(&Form {

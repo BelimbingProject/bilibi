@@ -28,7 +28,7 @@ use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_party_ids::OrganisationId;
 use bilibi_settings::{Settings, Target, ValueType};
 use bilibi_step_up::StepUp;
-use bilibi_tenancy::{NamedOrganisation, PartyProofs, Scope};
+use bilibi_tenancy::{NamedOrganisation, OrganisationSearch, PartyProofs, Scope};
 use bilibi_ui::{
     choices,
     forms::{Field as Control, InputKind},
@@ -58,6 +58,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         default_sort: Some("setting".into()),
         filters: [
             ("company".into(), Filter::string(GLOBAL)),
+            ("company_search".into(), Filter::string("")),
             ("area".into(), Filter::string("")),
             ("module".into(), Filter::string("")),
         ]
@@ -1144,16 +1145,33 @@ impl Editor {
             ("Global".to_owned(), GLOBAL.to_owned()),
             ("This tenant".to_owned(), TENANT.to_owned()),
         ];
+        // The scope select offers the companies its search finds, never every
+        // company of the tenant; the picked one stays offered.
+        let company_search = self.list.filters["company_search"].clone();
         let companies = if plan.capabilities.contains(COMPANY_MANAGE) {
             Some(
                 self.core
                     .parties
-                    .selectable_organisations(&**client, scope, COMPANY_MANAGE)
+                    .selectable_organisations(
+                        &**client,
+                        scope,
+                        COMPANY_MANAGE,
+                        OrganisationSearch::text(&company_search),
+                    )
                     .await?,
             )
         } else {
             None
         };
+        if let Some(company) = self.picked.company() {
+            if !companies
+                .iter()
+                .flatten()
+                .any(|found| found.id == company.id)
+            {
+                options.push((company.name.clone(), company.id.get().to_string()));
+            }
+        }
         options.extend(
             companies
                 .iter()
@@ -1171,8 +1189,17 @@ impl Editor {
             &self.picked.value(),
             choices(&options),
         ));
+        if companies.is_some() {
+            controls.push(ToolbarControl::search(
+                "settings-company-search",
+                "company_search",
+                "Find a company",
+                &company_search,
+                "Find a company…",
+            ));
+        }
         let scopes = if let Some(companies) = companies {
-            if companies.is_empty() {
+            if companies.is_empty() && company_search.trim().is_empty() {
                 render(Withheld {
                     state: EmptyState::missing(
                         "No companies are available to manage.",
