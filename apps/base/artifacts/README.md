@@ -282,7 +282,7 @@ Operator Settings (same capability as the artifact settings): `pdf.chromium.bina
 (bare name searched on `PATH`, or absolute; default `chromium`), `pdf.render_origin`
 (http(s) origin the browser can reach, such as `http://127.0.0.1:3000`; empty
 disables signed-URL printing), `pdf.signed_url_ttl_seconds` (60),
-`pdf.render_timeout_seconds` (30), `pdf.max_render_tokens` (100),
+`pdf.launch_timeout_seconds` (60: how long the browser may take to start and answer its first command), `pdf.render_timeout_seconds` (30: the render itself, counted from that first answer, so a cold start after a restart or on a slow disk does not use it up, #707), `pdf.max_render_tokens` (100),
 `pdf.paper.format` (`A4`) and `pdf.paper.print_background` (true). Rendered size is
 bounded by `artifacts.max_bytes`. The walkthrough ran with Google Chrome 154 and the
 Snap Chromium. Password protection and queued rendering are the next sections.
