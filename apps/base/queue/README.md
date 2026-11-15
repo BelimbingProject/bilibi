@@ -59,9 +59,9 @@ cancellation. Shutdown drops in-flight futures and leaves their leases for
 recovery. Handler/validator panics, timeouts and invalid results retry within
 the captured attempt budget; infrastructure errors preserve durable recovery.
 Only bounded safe failure codes are stored, never error payloads or arguments.
-One failed heartbeat (a busy pool or database) does not end the attempt: the
-handler keeps running while the next beat still falls inside its lease, and is
-dropped before the lease can run out.
+One failed heartbeat (a database error) does not end the attempt if the next beat still falls inside its lease; otherwise the handler is dropped. A pending heartbeat (behind the row lock of an owner's fenced transaction, or waiting for a busy pool) stays in flight while the attempt runs, without a separate heartbeat timeout. An answer that the lease is gone stops the handler; the overall attempt timeout and shutdown still apply.
+
+A slot or the endings loop that ends while the process runs, by a panic or an unexpected return, is started again after a poll interval.
 
 A slot that ran a job claims the next at once, so a busy process is not capped at
 one job a second per slot; it waits a poll interval only when it claimed nothing
@@ -144,7 +144,7 @@ caller-supplied audit attribution cannot create execution authority.
 | Failure | An error, panic or timeout rolls back and is tried again with the job backoff (`min(3600, 2^n)` seconds), 25 times, then `ending='failed'`, counted on System Info |
 | Retry | `retry_for` makes the job alive again and clears its ending, so a second ending is told again |
 
-- Each executor runs one endings loop beside its slots, up to 100 jobs a pass; after a full pass in which every job was told it goes straight to the next, otherwise it waits a poll; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
+- Each executor runs one endings loop beside its slots, up to 100 jobs a pass, told serially with each telling bounded at 60 seconds (or the attempt timeout, if shorter); after a full pass in which every job was told it goes straight to the next, otherwise it waits a poll; processes skip each other's rows (`FOR UPDATE SKIP LOCKED`).
 - Move the waiting record to a named state through the owner's normal path (a Workflow edge for a business status), and give people a permission-gated way to run it again. `base/privacy` is the first user: a request job that ends moves the request `running → failed`, as `privacy-monitor`.
 
 ## Retention and the status line
@@ -222,7 +222,7 @@ stops the private executable gracefully. It never drives Herdr or shared app
 processes. The contributed worker/handler is absent from production.
 
 Other enqueue modes: `retry`, `discard`, `cancel`, `panic`, `invalid`,
-`heartbeat`, `timeout`, `late-write`, `fenced-write`, `company-write`, `complete`, `secret`
+`heartbeat`, `slow-fence` (holds the fence open `QUEUE_DEMO_HOLD` ms, 2500 by default, past two heartbeats yet inside the lease), `timeout`, `late-write`, `fenced-write`, `company-write`, `complete`, `secret`
 (reads the company secret as the actor; `enqueue-system secret` as the
 principal; `BILIBI_SETTINGS_KEY` must be set for `prepare` and `worker`).
 `grant`, `revoke-secret` and `revoke` change the principal's grants as the

@@ -56,6 +56,7 @@ fn allowlist(args: Value) -> Result<Value> {
                     | "panic"
                     | "invalid"
                     | "heartbeat"
+                    | "slow-fence"
                     | "timeout"
                     | "late-write"
                     | "fenced-write"
@@ -181,6 +182,17 @@ impl Specimen {
         let mut tx = execution
             .begin(&mut client, "queue.specimen.effect")
             .await?;
+        if mode == "slow-fence" {
+            // The owner's transaction holds the job row for longer than two
+            // heartbeats (a lock wait, a slow database) yet inside the lease:
+            // the renewal waits behind it and the attempt must survive.
+            let millis = std::env::var("QUEUE_DEMO_HOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2500);
+            println!("fence held open for {millis} ms job={}", execution.job_id);
+            tokio::time::sleep(Duration::from_millis(millis)).await;
+        }
         let id = execution.job_id;
         // The job ID is a durable owner idempotency key. Duplicate delivery
         // returns the existing effect rather than applying it again.
@@ -366,9 +378,16 @@ async fn main() -> Result<()> {
         };
         let executor = Executor::from_services(&services, config)?;
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let running = tokio::spawn(executor.run(stopped));
+        let mut running = tokio::spawn(executor.run(stopped));
         println!("private worker pid={}", std::process::id());
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            ended = &mut running => {
+                // The pages of a real process would keep serving here.
+                println!("executor stopped on its own: {ended:?}");
+                return Err(Error::Internal);
+            }
+        }
         let _ = stop.send(true);
         return running.await.map_err(|_| Error::Internal)?;
     }
