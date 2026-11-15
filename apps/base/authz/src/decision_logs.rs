@@ -109,8 +109,9 @@ pub struct DecisionLogSummary {
     pub resource_id: Option<String>,
     pub allowed: bool,
     pub reason: String,
-    /// Where an allowing role came from ("team Line 2 crew"), when only a
-    /// group's role allowed it.
+    /// Where an allowing role came from, when only a group's role allowed it:
+    /// "team Line 2 crew", or "a team in a company you do not work in" when
+    /// the reader may not see that team.
     pub via: Option<String>,
     pub occurred_at: SystemTime,
 }
@@ -122,10 +123,12 @@ pub struct DecisionLogPage {
 
 /// One page of the tenant's decisions. An out-of-range page returns no entries
 /// with the real total, so the caller can land on the last page.
+/// `reach` is the companies the reader works in; `None` reaches every company.
 pub async fn list(
     client: &impl GenericClient,
     scope: &Scope,
     query: &Query,
+    reach: Option<&[i64]>,
 ) -> Result<DecisionLogPage> {
     let search = query.search.trim();
     if search.len() > MAX_SEARCH
@@ -143,7 +146,7 @@ pub async fn list(
         params.push(&pattern);
         let n = params.len();
         filters.push(format!(
-            "(capability ILIKE ${n} OR reason ILIKE ${n} OR resource_type ILIKE ${n} OR resource_id ILIKE ${n} OR principal_type ILIKE ${n} OR system_principal ILIKE ${n} OR via ILIKE ${n})"
+            "(capability ILIKE ${n} OR reason ILIKE ${n} OR resource_type ILIKE ${n} OR resource_id ILIKE ${n} OR principal_type ILIKE ${n} OR system_principal ILIKE ${n})"
         ));
     }
     if let Some(allowed) = query.allowed.as_ref() {
@@ -167,7 +170,9 @@ pub async fn list(
     let rows = client
         .query(
             &format!(
-                "SELECT id,principal_type,user_id,acting_for_user_id,system_principal,capability,resource_type,resource_id,allowed,reason,created_at,via \
+                "SELECT id,principal_type,user_id,acting_for_user_id,system_principal,capability,resource_type,resource_id,allowed,reason,created_at,split_part(via,':',1),\
+                 (SELECT g.label FROM authz_groups g WHERE g.tenant_id=authz_decision_log.tenant_id AND g.source=split_part(via,':',1) AND g.group_id=split_part(via,':',2)::bigint),\
+                 (SELECT g.company_id FROM authz_groups g WHERE g.tenant_id=authz_decision_log.tenant_id AND g.source=split_part(via,':',1) AND g.group_id=split_part(via,':',2)::bigint) \
                  FROM authz_decision_log WHERE {filter} ORDER BY {column} {direction} NULLS LAST, id {direction} LIMIT ${l} OFFSET ${o}",
                 column = query.sort.column(),
                 l = params.len() - 1,
@@ -195,7 +200,20 @@ pub async fn list(
                     allowed: row.get(8),
                     reason: row.get(9),
                     occurred_at: row.get(10),
-                    via: row.get(11),
+                    via: row.get::<_, Option<String>>(11).map(|source| {
+                        match (
+                            row.get::<_, Option<String>>(12),
+                            row.get::<_, Option<i64>>(13),
+                        ) {
+                            (None, _) => format!("a removed {source}"),
+                            (Some(_), Some(company))
+                                if reach.is_some_and(|reach| !reach.contains(&company)) =>
+                            {
+                                format!("a {source} in a company you do not work in")
+                            }
+                            (Some(label), _) => format!("{source} {label}"),
+                        }
+                    }),
                 }
             })
             .collect(),

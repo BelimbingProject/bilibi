@@ -29,8 +29,9 @@ CREATE TABLE authz_group_members (
 );
 CREATE INDEX authz_group_members_user ON authz_group_members(tenant_id, user_id);
 
--- `via` names where a role came from ("team Line 2 crew"); NULL for a manual
--- or sign-in provider membership. A group role is scoped to the group's
+-- `via` is the group a role came from as "source:id" ("team:12"); NULL for a
+-- manual or sign-in provider membership. It holds no name: a reader sees the
+-- group's name only when the reader may see that group. A group role is scoped to the group's
 -- company (ADR 20) and is never a grant-all or engagement role, even if a
 -- role changed after it was attached. Keep the applied 015 definition frozen.
 CREATE OR REPLACE VIEW effective_principal_roles AS
@@ -41,7 +42,7 @@ CREATE OR REPLACE VIEW effective_principal_roles AS
    AND (valid_until IS NULL OR valid_until >= (clock_timestamp() AT TIME ZONE 'UTC')::date)
  UNION SELECT p.tenant_id,p.user_id,p.role_id,NULL::bigint,NULL::text FROM authz_identity_roles p
  JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE NOT r.requires_engagement
- UNION SELECT m.tenant_id,m.user_id,g.role_id,o.company_id,o.source||' '||o.label FROM authz_group_members m
+ UNION SELECT m.tenant_id,m.user_id,g.role_id,o.company_id,o.source||':'||o.group_id FROM authz_group_members m
  JOIN authz_groups o ON o.tenant_id=m.tenant_id AND o.source=m.source AND o.group_id=m.group_id
  JOIN authz_group_roles g ON g.tenant_id=m.tenant_id AND g.source=m.source AND g.group_id=m.group_id
  JOIN roles r ON r.tenant_id=g.tenant_id AND r.id=g.role_id WHERE NOT r.requires_engagement AND NOT r.grant_all;
@@ -57,4 +58,4 @@ LANGUAGE sql VOLATILE AS $$
  AND (p.company_id IS NULL OR p.company_id=target_company)
 $$;
 
-ALTER TABLE authz_decision_log ADD COLUMN via text CHECK (via IS NULL OR length(via) <= 300);
+ALTER TABLE authz_decision_log ADD COLUMN via text CHECK (via IS NULL OR via ~ '^[a-z][a-z_]{0,39}:[0-9]{1,18}$');

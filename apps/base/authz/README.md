@@ -225,7 +225,7 @@ A group another module owns (a Core team) can carry roles; its members hold them
 - **Never grant-all, never engagement.** A group cannot carry a full-access role or an engagement role, and `effective_principal_roles` ignores one that became so later.
 - **Company scope (ADR 20).** A group with a company grants its roles there only (`company_id` on the effective row), so its roles may hold only keys that support company scope.
 - **Live.** Decisions read the rows; there is no cache, job or sign-in step.
-- **Explainable.** `effective_principal_roles` and `authz_roles_for` carry `via` ("team Line 2 crew"; null for manual and provider memberships). A decision only a group's role allowed logs reason `group_role_capability` with `via`, and the decision log shows it.
+- **Explainable.** `effective_principal_roles` and `authz_roles_for` carry `via` ("team:12", the group's source and id, never its name; null for manual and provider memberships). A decision only a group's role allowed logs reason `group_role_capability` with `via`. The decision log resolves it when shown: the group's name when the reader works in its company, otherwise "a team in a company you do not work in".
 - Direct denies win over group roles, as over every other grant.
 
 ## Restrictions on a caller's read connection

@@ -123,12 +123,24 @@ impl Pages {
         let client = self.db.get().await?;
         let locale = self.locales.resolve(&**client, scope, None).await?.locale;
         let display = self.display.display(&**client, scope, None, locale).await?;
-        let mut page = decision_logs::list(&**client, scope, &query(state)).await?;
+        let reach = match scope.principal() {
+            Some(_) => None,
+            None => Some(
+                self.parties
+                    .reachable_organisations(&**client, scope)
+                    .await?
+                    .into_iter()
+                    .map(|company| company.id.get())
+                    .collect::<Vec<_>>(),
+            ),
+        };
+        let reach = reach.as_deref();
+        let mut page = decision_logs::list(&**client, scope, &query(state), reach).await?;
         // An out-of-range page (a stale link, a shrunk filter) lands on the last
         // real page instead of an empty one with no pager.
         let pages = page.total_entries.div_ceil(state.page_size);
         if state.clamp_to_last_page(pages, true) {
-            page = decision_logs::list(&**client, scope, &query(state)).await?;
+            page = decision_logs::list(&**client, scope, &query(state), reach).await?;
         }
         render_page(state, columns, &display, &page.entries, page.total_entries)
     }

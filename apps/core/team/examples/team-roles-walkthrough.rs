@@ -52,6 +52,7 @@ struct Proof {
     db: Db,
     boundary: std::sync::Arc<MutationBoundary>,
     teams: std::sync::Arc<Teams>,
+    parties: std::sync::Arc<bilibi_tenancy::PartyProofs>,
 }
 type Refusal = Result<(), String>;
 /// Runs one team write in its own audited transaction: committed when the
@@ -168,17 +169,38 @@ impl Proof {
         let decision = bilibi_authz::decide_in_company(&**client, scope, key, company).await?;
         Ok((decision.allowed, decision.reason))
     }
-    async fn last_via(&self, user: i64, key: &str) -> Result<Option<String>, Failure> {
-        Ok(self
-            .db
-            .get()
-            .await?
-            .query_one(
-                "SELECT via FROM authz_decision_log WHERE tenant_id=1 AND user_id=$1 AND capability=$2 ORDER BY id DESC LIMIT 1",
-                &[&user, &key],
-            )
-            .await?
-            .get(0))
+    /// What the decision log page shows `reader` as the source of `user`'s
+    /// latest allow of `key`.
+    async fn last_via(
+        &self,
+        reader: &Scope,
+        user: i64,
+        key: &str,
+    ) -> Result<Option<String>, Failure> {
+        let client = self.db.get().await?;
+        let reach: Option<Vec<i64>> = Some(
+            self.parties
+                .reachable_organisations(&**client, reader)
+                .await?
+                .into_iter()
+                .map(|company| company.id.get())
+                .collect(),
+        );
+        let query = bilibi_authz::decision_logs::Query {
+            search: key.into(),
+            allowed: Some(true),
+            sort: bilibi_authz::decision_logs::Sort::OccurredAt,
+            descending: true,
+            page: 1,
+            page_size: 50,
+        };
+        let page =
+            bilibi_authz::decision_logs::list(&**client, reader, &query, reach.as_deref()).await?;
+        Ok(page
+            .entries
+            .into_iter()
+            .find(|log| log.actor_id == user && log.capability == key)
+            .and_then(|log| log.via))
     }
     async fn instance_role(&self, role: &str) -> Result<(), Failure> {
         Ok(bilibi_walkthrough_fixture::set_instance_role(&self.db, role).await?)
@@ -243,6 +265,7 @@ async fn main() -> Result<(), Failure> {
             .services
             .get::<MutationBoundary>("base/database.mutations")?,
         teams: app.services.get::<Teams>(SERVICE)?,
+        parties: app.services.get("base/tenancy.parties")?,
     };
 
     // A tenant-wide team led by Sam Staff. Ada Manager manages teams but is
@@ -296,7 +319,7 @@ async fn main() -> Result<(), Failure> {
     )?;
     prove(
         "the decision log says where the role came from",
-        proof.last_via(3, REPORT).await?.as_deref() == Some("team Line 2 crew"),
+        proof.last_via(&admin, 3, REPORT).await?.as_deref() == Some("team Line 2 crew"),
     )?;
     let held = bilibi_authz::roles::group_assignments(&**db.get().await?, &admin, 3).await?;
     prove(
@@ -371,7 +394,7 @@ async fn main() -> Result<(), Failure> {
     proof.allowed(&staff, REPORT, None).await?;
     prove(
         "after a rename the decision log names the team by its new name",
-        proof.last_via(3, REPORT).await?.as_deref() == Some("team Line 2 day crew"),
+        proof.last_via(&admin, 3, REPORT).await?.as_deref() == Some("team Line 2 day crew"),
     )?;
     proof
         .give(&admin, line, reports, false)
@@ -430,6 +453,16 @@ async fn main() -> Result<(), Failure> {
                 .await,
             Err(Error::NotFound)
         ),
+    )?;
+    proof.allowed(&staff, RECORD, Some(2)).await?;
+    prove(
+        "a log reader who works in the team's company sees its name",
+        proof.last_via(&admin, 3, RECORD).await?.as_deref() == Some("team Company 1 crew"),
+    )?;
+    let hidden = proof.last_via(&manager, 3, RECORD).await?;
+    prove(
+        "a log reader without a desk in the team's company does not see its name",
+        hidden.as_deref() == Some("a team in a company you do not work in"),
     )?;
     let held = bilibi_authz::roles::group_assignments(&**db.get().await?, &admin, 3).await?;
     prove(
