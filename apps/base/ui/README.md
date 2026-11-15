@@ -16,6 +16,29 @@ List toolbars put search first and filter boxes to its right, and on a phone fol
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+## Record field vocabulary
+
+Declare a field once so record labels, Grid columns and operation inputs use the same meaning.
+
+For example, Contacts declares personal email with a key, label, type and personal-data class:
+
+```rust
+bilibi_ui::record_fields! { "core/person", pub(crate) mod fields {
+    EMAIL: bilibi_ui::RecordField::new("email", "Personal email", bilibi_ui::RecordFieldType::String)
+        .personal(bilibi_ui::PersonalDataClass::Email),
+} }
+```
+
+- Use `fields::EMAIL.fact(value)` on the record and `bilibi_grid::Field::record(fields::EMAIL)` in the Grid table. SQL source keys, protection and links stay in Grid.
+- Use `fields::EMAIL.input(json!({"maxLength":254}))` for the corresponding operation property. Required fields, limits, null handling and record references stay with that operation.
+- Declare closed choices with `RecordFieldType::Enum` and `.choices(...)`, or an operator list with `RecordFieldType::String` and `.picklist("owner.list")`. An operation may narrow closed choices, but cannot introduce another choice.
+- Classify personal values with `PersonalDataClass`; `NonPersonal` means the owner reviewed the field. An absent class remains unknown, so adopting this vocabulary cannot enable oversight accidentally.
+- Use `.path(...)`, `.slot(...)` and `.excluded(...)` for read presentation. A linked display can show a name while the write takes an integer ID. Collections and structured facts use `Array` or `Object` and remain excluded from scalar Grid columns.
+
+The macro registers each named field under `RECORD_FIELDS`, with the declaring module and source location. Boot refuses duplicate or invalid vocabulary entries, unknown input references, properties with a different key, and conflicting labels, types, pick-lists or personal-data classes. Grid also refuses a direct record fact backed by an independent field declaration. Contract schemas expose the reference as `x-bilibi-field` and classification as `x-bilibi-personal-data`; neither grants access or changes owner validation.
+
+See [Grid projections](../grid/README.md#detail-fields-become-columns) and the [input schema contract](../agent_api/README.md). Run `cargo run -p bilibi-web --example field-vocabulary` to exercise discovery and disagreement refusals without changing business data.
+
 ## Markdown
 
 Use `Markdown::new(source)` for a reading view of untrusted plain-text Markdown; render it with `Html::render` like other typed components.

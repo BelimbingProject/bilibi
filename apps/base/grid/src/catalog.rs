@@ -6,7 +6,7 @@
 //! resolved against it, so a table or field it left out cannot be reached by any
 //! spelling. Build it again wherever the page refreshes its own capabilities.
 use crate::column::{self, Agg, Column, ColumnError, MAX_SPEC};
-use crate::model::{Field, FieldType, Installed, Join, LinkKind, Source, Table};
+use crate::{Field, FieldType, Installed, Join, LinkKind, Source, Table};
 use bilibi_database::Error;
 use bilibi_tenancy::Scope;
 use std::{

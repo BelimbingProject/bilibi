@@ -58,6 +58,7 @@ cd "$root"
 #   database, separated by `;`. `-` is a run without arguments. `@/x` and @model as above.
 # kind: `serve` for a walkthrough that ends by serving the app (see above).
 WALKTHROUGHS=(
+  'web|field-vocabulary|apps/web|field-vocabulary|none||-'
   'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|agent-write|apps/base/agent_api|write-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|artifacts|apps/base/artifacts|artifacts-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;recover'
