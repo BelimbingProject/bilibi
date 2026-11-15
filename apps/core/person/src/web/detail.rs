@@ -678,11 +678,9 @@ impl Detail {
                     }
                 }
             }
-            name if name.starts_with("pick_cf_") || name.starts_with("clear_cf_") => {
-                let (field, picked) = match name.strip_prefix("pick_") {
-                    Some(field) => (field, true),
-                    None => (name.trim_start_matches("clear_"), false),
-                };
+            name @ (super::custom::PICK_EVENT | super::custom::CLEAR_EVENT) => {
+                let picked = name == super::custom::PICK_EVENT;
+                let field = value["key"].as_str().ok_or(Error::Invalid)?;
                 let definitions = super::custom::active(&self.pages, scope).await?;
                 let definition = reference_field(&definitions, field)?;
                 let id = if picked {

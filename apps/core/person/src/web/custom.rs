@@ -56,14 +56,11 @@ pub(super) fn inline_value(definition: &Definition, value: Option<&Value>) -> St
     }
 }
 
-/// The event a record field's picker raises when a hit is chosen, and when
-/// its choice is cleared: `pick_cf_<key>`, `clear_cf_<key>`.
-pub(super) fn pick_event(name: &str) -> String {
-    format!("pick_{name}")
-}
-pub(super) fn clear_event(name: &str) -> String {
-    format!("clear_{name}")
-}
+/// The events every record field's picker raises when a hit is chosen and
+/// when its choice is cleared, with the field's name (`cf_<key>`) as `key`:
+/// fixed names, so the page declares them with their contract.
+pub(super) const PICK_EVENT: &str = "pick_custom_reference";
+pub(super) const CLEAR_EVENT: &str = "clear_custom_reference";
 
 /// The records the record fields of a page hold, named with the reader's own
 /// access in one `base/records` call. A record the reader cannot see, or a
@@ -228,7 +225,7 @@ impl Shown<'_> {
                     field = field.allow_empty();
                     render(
                         MultiSelect::new(format!("{}-select", field.id), &field.name)
-                            .label_class("sr-only")
+                            .in_fact()
                             .label(&definition.label)
                             .options(options)
                             .values(codes.iter().map(|code| (*code).to_owned()).collect()),
@@ -265,18 +262,23 @@ impl Shown<'_> {
                         None => Ok(Html::text("—")),
                     };
                 };
-                let picker = render(RecordPicker::new(
-                    &field.id,
-                    REFERENCE_FORM,
-                    &field.name,
-                    &definition.label,
-                    picking.query,
-                    picking.hits,
-                    pill.as_ref()
-                        .map(|(value, pill)| (value.as_str(), pill.clone())),
-                    (&pick_event(&field.name), &clear_event(&field.name)),
-                    picking.errors,
-                ))?;
+                let picker = render(
+                    RecordPicker::new(
+                        &field.id,
+                        REFERENCE_FORM,
+                        &field.name,
+                        &definition.label,
+                        picking.query,
+                        picking.hits,
+                        pill.as_ref()
+                            .map(|(value, pill)| (value.as_str(), pill.clone())),
+                        (PICK_EVENT, CLEAR_EVENT),
+                        picking.errors,
+                    )
+                    .key(&field.name)
+                    // Clearing saves at once on the record page.
+                    .in_fact(),
+                )?;
                 render(bilibi_ui::Form {
                     id: &format!("{}-form", field.id),
                     event: REFERENCE_SEARCH,
@@ -347,7 +349,7 @@ pub(super) struct Entered<'a> {
 /// The create form's control for one field, named `cf_<key>` in form
 /// `person`: several choices post every tick (`person[cf_<key>][]`), a
 /// record field posts its choice as `kind:id` and its search as
-/// `person[cf_<key>_search]`, raising `pick_cf_<key>` and `clear_cf_<key>`.
+/// `person[cf_<key>_search]`, raising `pick_custom_reference` and `clear_custom_reference` with `key`.
 pub(super) async fn control(
     pages: &Pages,
     scope: &Scope,
@@ -401,19 +403,22 @@ pub(super) async fn control(
                     resolved.pill(format!("{id}-pill"), false),
                 )
             });
-            render(RecordPicker::new(
-                &id,
-                "person",
-                &name,
-                &definition.label,
-                entered.query,
-                entered.hits,
-                chosen
-                    .as_ref()
-                    .map(|(value, pill)| (value.as_str(), pill.clone())),
-                (&pick_event(&name), &clear_event(&name)),
-                errors,
-            ))
+            render(
+                RecordPicker::new(
+                    &id,
+                    "person",
+                    &name,
+                    &definition.label,
+                    entered.query,
+                    entered.hits,
+                    chosen
+                        .as_ref()
+                        .map(|(value, pill)| (value.as_str(), pill.clone())),
+                    (PICK_EVENT, CLEAR_EVENT),
+                    errors,
+                )
+                .key(&name),
+            )
         }
         Kind::Date => render(field(InputKind::Date)),
         Kind::Number => render(field(InputKind::Text).attr("inputmode", "decimal")),

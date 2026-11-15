@@ -40,7 +40,10 @@
       listen(this.el, 'keyup', (event) => {
         if (this.active && event.key === 'Escape' && !event.isComposing) this.cancel(true);
       });
-      listen(this.el, 'focusout', () => {
+      listen(this.el, 'focusout', (event) => {
+        // Focus moving within the editor (a tick in its list) is not leaving
+        // it; the microtask below runs before the new element takes focus.
+        if (event.relatedTarget && this.editor()?.contains(event.relatedTarget)) return;
         queueMicrotask(() => {
           if (!this.active || this.editor()?.contains(document.activeElement)) return;
           // Several choices are ticked one by one: leaving the editor commits them.

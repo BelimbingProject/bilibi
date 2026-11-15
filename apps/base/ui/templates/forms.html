@@ -147,7 +147,7 @@
 <div data-live-expanded class="{{ control.trigger_class() }}"{% if control.disabled() %} data-disabled{% endif %}>
 <button id="{{ control.id }}" type="button" class="ui-multi-trigger" aria-expanded="false" aria-controls="{{ control.id }}-options" aria-labelledby="{{ control.id }}-label {{ control.id }}-count"{% if control.required %} aria-required="true"{% endif %}{% if control.disabled() %} disabled{% endif %}{% call aria(invalid=control.invalid(), described_by=control.described_by()) %}{% endcall %}{{ control.attrs.html() }}></button>
 <div class="ui-multi-content">
-<div class="ui-multi-heading"><span id="{{ control.id }}-label" class="truncate">{{ control.display_label() }}{% if control.required %}<span aria-hidden="true">*</span>{% endif %}</span><span id="{{ control.id }}-count" data-selected-count class="shrink-0">({{ control.selected_count() }} selected)</span></div>
+<div class="ui-multi-heading{% if control.in_fact %} invisible{% endif %}"><span id="{{ control.id }}-label" class="truncate">{{ control.display_label() }}{% if control.required %}<span aria-hidden="true">*</span>{% endif %}</span><span id="{{ control.id }}-count" data-selected-count class="shrink-0">({{ control.selected_count() }} selected)</span></div>
 <span id="{{ control.id }}-chevron" class="ui-multi-chevron" aria-hidden="true">{% call ui::icon(name="chevron-down", class="size-4 text-ink-muted") %}{% endcall %}</span>
 <div id="{{ control.id }}-chips" class="ui-multi-chips" data-chip-row role="list" aria-labelledby="{{ control.id }}-label">
 {#- Every option has its chip, hidden while unticked, so the hook can follow a tick without a server round trip. -#}

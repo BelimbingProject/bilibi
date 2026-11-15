@@ -1162,17 +1162,19 @@ impl CompanyPage {
                 .map_err(Error::refused)?;
                 self.search_references(scope, &fields).await?;
             }
-            kind if kind.starts_with("pick_cf_")
-                && matches!(self.operation, "detail" | "create") =>
-            {
-                let name = kind["pick_".len()..].to_owned();
+            views::CUSTOM_PICK if matches!(self.operation, "detail" | "create") => {
+                let name = get("key").to_owned();
+                if !name.starts_with("cf_") {
+                    return Err(Error::Invalid);
+                }
                 self.pick_reference(scope, credential, &name, get("record"))
                     .await?;
             }
-            kind if kind.starts_with("clear_cf_")
-                && matches!(self.operation, "detail" | "create") =>
-            {
-                let name = kind["clear_".len()..].to_owned();
+            views::CUSTOM_CLEAR if matches!(self.operation, "detail" | "create") => {
+                let name = get("key").to_owned();
+                if !name.starts_with("cf_") {
+                    return Err(Error::Invalid);
+                }
                 self.custom_pickers.queries.remove(&name);
                 self.custom_pickers.hits.remove(&name);
                 if self.operation == "detail" {

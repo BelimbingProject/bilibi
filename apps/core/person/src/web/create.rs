@@ -300,8 +300,8 @@ impl Draft {
         Ok(())
     }
 
-    /// A record field's picker raised `pick_cf_<key>` (with `record=kind:id`)
-    /// or `clear_cf_<key>`; `false` when the event is not one of those.
+    /// A record field's picker raised its pick (with `record=kind:id`) or its
+    /// clear, naming the field as `key`; `false` when the event is neither.
     pub async fn pick(
         &mut self,
         pages: &Pages,
@@ -309,11 +309,12 @@ impl Draft {
         event: &str,
         value: &Value,
     ) -> Result<bool> {
-        let (name, picked) = match (event.strip_prefix("pick_"), event.strip_prefix("clear_")) {
-            (Some(name), _) => (name, true),
-            (None, Some(name)) => (name, false),
-            (None, None) => return Ok(false),
+        let picked = match event {
+            super::custom::PICK_EVENT => true,
+            super::custom::CLEAR_EVENT => false,
+            _ => return Ok(false),
         };
+        let name = value["key"].as_str().ok_or(Error::Invalid)?;
         if !name.starts_with("cf_") {
             return Ok(false);
         }

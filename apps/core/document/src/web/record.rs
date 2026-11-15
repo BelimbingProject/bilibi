@@ -80,9 +80,10 @@ pub(crate) struct Detail {
 
 /// The form a record custom field's picker posts its search in.
 const REFERENCE_FORM: &str = "custom_reference";
-/// A record custom field's pick and clear events, then the field's key.
-const PICK_CUSTOM: &str = "pick_cf_";
-const CLEAR_CUSTOM: &str = "clear_cf_";
+/// Every record custom field's pick and clear events, with the field's key
+/// as `key`: fixed names, so the page declares them with their contract.
+const PICK_CUSTOM: &str = "pick_custom_reference";
+const CLEAR_CUSTOM: &str = "clear_custom_reference";
 
 impl Detail {
     pub async fn new(pages: Pages, scope: &Scope, id: i64, framed: bool) -> Result<Self> {
@@ -257,7 +258,7 @@ impl Detail {
                 };
                 json!({"key": key, "values": codes})
             }
-            // A record field saves from its picker (`pick_cf_<key>`).
+            // A record field saves from its picker (`pick_custom_reference`).
             Some(bilibi_custom_fields::Kind::Reference) => return Err(Error::Invalid),
             Some(
                 bilibi_custom_fields::Kind::Text
@@ -414,14 +415,14 @@ impl Detail {
             "save_field" => self.save_field(scope, credential, value).await?,
             "save_custom_field" => self.save_custom_field(scope, credential, value).await?,
             "custom_reference_change" => self.search_custom_reference(scope, value).await?,
-            _ if name.starts_with(PICK_CUSTOM) => {
+            PICK_CUSTOM => {
                 let record = value["record"].as_str().ok_or(Error::Invalid)?;
-                let key = &name[PICK_CUSTOM.len()..];
+                let key = value["key"].as_str().ok_or(Error::Invalid)?;
                 self.save_custom_reference(scope, credential, key, Some(record))
                     .await?
             }
-            _ if name.starts_with(CLEAR_CUSTOM) => {
-                let key = &name[CLEAR_CUSTOM.len()..];
+            CLEAR_CUSTOM => {
+                let key = value["key"].as_str().ok_or(Error::Invalid)?;
                 self.save_custom_reference(scope, credential, key, None)
                     .await?
             }
@@ -974,7 +975,7 @@ impl Detail {
                         .await?;
                     let editor = bilibi_ui::MultiSelect::new(format!("{name}-input"), &name)
                         .label(&definition.label)
-                        .label_class("sr-only")
+                        .in_fact()
                         .options(
                             values
                                 .choice_options(&**client, scope, definition, &codes)
@@ -1052,8 +1053,8 @@ impl Detail {
     }
 
     /// A record custom field: its pill, and for an editor the picker that
-    /// saves a pick at once (`pick_cf_<key>`) or clears it (`clear_cf_<key>`,
-    /// the picker's Change). A refusal shows under the picker.
+    /// saves a pick at once (`pick_custom_reference`) or clears it (`clear_custom_reference`,
+    /// the picker's Remove). A refusal shows under the picker.
     fn custom_reference(
         &self,
         definition: &bilibi_custom_fields::Definition,
@@ -1082,21 +1083,24 @@ impl Detail {
         let selected = held
             .zip(pill)
             .map(|(resolved, pill)| (format!("{}:{}", resolved.reference.kind, resolved.id), pill));
-        let pick = format!("{PICK_CUSTOM}{}", definition.key);
-        let clear = format!("{CLEAR_CUSTOM}{}", definition.key);
-        let picker = render(RecordPicker::new(
-            &dom,
-            REFERENCE_FORM,
-            name,
-            &definition.label,
-            query,
-            hits,
-            selected
-                .as_ref()
-                .map(|(value, pill)| (value.as_str(), pill.clone())),
-            (&pick, &clear),
-            errors,
-        ))?;
+        let picker = render(
+            RecordPicker::new(
+                &dom,
+                REFERENCE_FORM,
+                name,
+                &definition.label,
+                query,
+                hits,
+                selected
+                    .as_ref()
+                    .map(|(value, pill)| (value.as_str(), pill.clone())),
+                (PICK_CUSTOM, CLEAR_CUSTOM),
+                errors,
+            )
+            .key(&definition.key)
+            // Clearing saves at once on the record page.
+            .in_fact(),
+        )?;
         render(Form {
             id: &format!("{dom}-form"),
             event: "custom_reference_change",

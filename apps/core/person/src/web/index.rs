@@ -931,7 +931,7 @@ impl LiveState<Scope, Error> for Index {
                     }
                     "clear-flash" => {}
                     // A record field's picker in the new-contact dialog.
-                    other if other.starts_with("pick_cf_") || other.starts_with("clear_cf_") => {
+                    other @ (super::custom::PICK_EVENT | super::custom::CLEAR_EVENT) => {
                         let pages = self.pages.clone();
                         if let Some(draft) = &mut self.draft {
                             draft.pick(&pages, request.scope, other, value).await?;

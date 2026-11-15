@@ -712,22 +712,23 @@ pub(super) struct CustomPickers {
 pub(super) const CUSTOM_REFERENCE_FORM: &str = "custom_reference";
 /// The record page's search event of a record field's picker.
 pub(super) const CUSTOM_REFERENCE_SEARCH: &str = "custom_reference_search";
-/// A record field's pick and clear events (`pick_cf_<key>`, `clear_cf_<key>`):
-/// a hit raises only the record it names, so the event names the field.
-pub(super) fn custom_picker_events(name: &str) -> (String, String) {
-    (format!("pick_{name}"), format!("clear_{name}"))
-}
+/// Every record field's pick and clear events, with the field's name
+/// (`cf_<key>`) as `key`: fixed names, so the page declares them with their
+/// contract.
+pub(super) const CUSTOM_PICK: &str = "pick_custom_reference";
+pub(super) const CUSTOM_CLEAR: &str = "clear_custom_reference";
 /// The picker of the record field `definition` (named `name`), with the
 /// record it holds or was chosen, if any, and its refusal beneath.
+/// `saves` is true on the record page, where clearing saves at once.
 fn custom_picker(
     pickers: &CustomPickers,
     definition: &bilibi_custom_fields::Definition,
     name: &str,
     selected: Option<(String, RelatedRecord)>,
     errors: Vec<String>,
+    saves: bool,
 ) -> Result<Html> {
-    let (pick, clear) = custom_picker_events(name);
-    render(&RecordPicker::new(
+    let picker = RecordPicker::new(
         &format!("company-{}", name.replace('_', "-")),
         CUSTOM_REFERENCE_FORM,
         name,
@@ -745,9 +746,11 @@ fn custom_picker(
         selected
             .as_ref()
             .map(|(value, pill)| (value.as_str(), pill.clone())),
-        (&pick, &clear),
+        (CUSTOM_PICK, CUSTOM_CLEAR),
         errors,
-    ))
+    )
+    .key(name);
+    render(&if saves { picker.in_fact() } else { picker })
 }
 fn parent_pill(id: i64, label: &str, link: bool, workspace: bool) -> RelatedRecord {
     RelatedRecord::new(
@@ -1209,7 +1212,7 @@ pub(super) async fn detail(
                         id: &format!("{id_attr}-form"),
                         event: CUSTOM_REFERENCE_SEARCH,
                         change: true,
-                        body: custom_picker(custom, definition, &name, selected, errors)?,
+                        body: custom_picker(custom, definition, &name, selected, errors, true)?,
                         ..Form::default()
                     })?
                 } else {
@@ -1276,7 +1279,8 @@ pub(super) async fn detail(
                         .choice_text(client, scope, definition, stored)
                         .await?;
                     let editor = MultiSelect::new(format!("{name}-input"), &name)
-                        .aria_label(&definition.label)
+                        .label(&definition.label)
+                        .in_fact()
                         .options(
                             custom_fields
                                 .choice_options(client, scope, definition, &codes)
@@ -2005,6 +2009,7 @@ pub(super) async fn create(
                         &name,
                         selected,
                         field_errors,
+                        false,
                     )?);
                     continue;
                 }

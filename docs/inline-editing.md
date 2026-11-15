@@ -59,7 +59,8 @@ never treated as stored.
 4. For a choice, render the editor with the shared `Field` select or
    `Combobox` (no `data-event` of its own) and pass its committed label as
    `display`. For several choices, render a `MultiSelect` named exactly as the
-   field (it appends `[]`) with the held codes as `values`, the field's value
+   field (it appends `[]`), with `in_fact()` so the fact's label takes the
+   heading's place, with the held codes as `values`, the field's value
    being those codes joined by `,`, and `allow_empty()` so all can be
    unticked: ticks keep the editor open, and leaving it or Enter commits the
    ticked codes joined by `,` (`bilibi_custom_fields::codes_value` reads

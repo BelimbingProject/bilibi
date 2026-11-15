@@ -469,6 +469,8 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("create", "core.document.create"),
         ("save_field", "core.document.update"),
         ("save_custom_field", "core.document.update"),
+        ("pick_custom_reference", "core.document.update"),
+        ("clear_custom_reference", "core.document.update"),
         ("add_revision", "core.document.add_revision"),
         ("link", "core.document.link"),
         ("unlink", "core.document.unlink"),
