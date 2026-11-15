@@ -1076,7 +1076,7 @@ impl CompanyService {
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/company.pages", bilibi_module_registry::Provenance { module: "core/company", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "core/company.pages",
-    contracts: &[("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update")],
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update")],
     pending: bilibi_module_registry::contributions::Pending::Events {
         events: &["save_field", "pick_parent", "remove_parent", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
         reason: "Built-in facts (the parent picker included), activities, lifecycle and Company create still write through their owner facade.",

@@ -170,6 +170,7 @@ impl Index {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        self.columns.refresh_views(scope).await?;
         // Each read below takes its own pooled connection; none is held
         // across another, so many open lists cannot exhaust the pool.
         let masked = {
@@ -828,8 +829,19 @@ impl LiveState<Scope, Error> for Index {
                         self.list.next_sort(value["sort"].as_str().unwrap_or(""));
                     }
                     "grid" => {
-                        if let Outcome::Sort(key) =
-                            self.columns.handle(request.scope, &values(value)).await?
+                        if let Outcome::Sort(key) = self
+                            .columns
+                            .handle(
+                                request.scope,
+                                &PageColumns::event_values(value)?,
+                                bilibi_grid::ViewCaller {
+                                    contracts: &self.pages.contracts,
+                                    credential: request.credential,
+                                    service: super::SERVICE,
+                                    event: "grid",
+                                },
+                            )
+                            .await?
                         {
                             self.list.next_sort(&key);
                         }

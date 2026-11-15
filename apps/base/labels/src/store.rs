@@ -77,6 +77,7 @@ impl LabelSet {
 /// A stored override with the version a writer must still hold.
 #[derive(Clone, Debug)]
 pub struct Stored {
+    pub id: i64,
     pub label: String,
     pub version: i64,
 }
@@ -88,7 +89,7 @@ pub struct Edit<'a> {
     pub kind: Kind,
     pub subject: &'a str,
     pub text: &'a str,
-    pub version: Option<i64>,
+    pub version: (i64, i64),
 }
 
 /// What a rename or clear would do, decided without writing.
@@ -135,7 +136,7 @@ impl Labels {
     ) -> Result<BTreeMap<(Kind, String), Stored>> {
         let rows = client
             .query(
-                "SELECT kind, subject, label, version FROM base_labels WHERE tenant_id=$1 LIMIT 5000",
+                "SELECT kind, subject, label, version, id FROM base_labels WHERE tenant_id=$1 LIMIT 5000",
                 &[&scope.tenant()],
             )
             .await?;
@@ -146,6 +147,7 @@ impl Labels {
                 Some((
                     (kind, row.get::<_, String>(1)),
                     Stored {
+                        id: row.get(4),
                         label: row.get(2),
                         version: row.get(3),
                     },
@@ -228,12 +230,14 @@ impl Labels {
         let lock = if lock { " FOR UPDATE" } else { "" };
         let current = sql
             .query_opt(
-                &format!("SELECT label, version FROM base_labels WHERE tenant_id=$1 AND kind=$2 AND subject=$3{lock}"),
+                &format!("SELECT label, version, id FROM base_labels WHERE tenant_id=$1 AND kind=$2 AND subject=$3{lock}"),
                 &[&scope.tenant(), &kind.key(), &subject],
             )
             .await?;
         if version
-            .is_some_and(|held| held != current.as_ref().map_or(0, |row| row.get::<_, i64>(1)))
+            != current
+                .as_ref()
+                .map_or((0, 0), |row| (row.get::<_, i64>(2), row.get::<_, i64>(1)))
         {
             return Err(Error::Conflict);
         }
@@ -264,12 +268,12 @@ impl Labels {
             Box::pin(async move {
                 let (id, new) = match &after {
                     Some(label) => {
-                        let row = sql
-                            .query_one(
-                                "INSERT INTO base_labels(tenant_id,kind,subject,label) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,kind,subject) DO UPDATE SET label=EXCLUDED.label, version=base_labels.version+1, updated_at=now() RETURNING id",
-                                &[&tenant, &kind_key, &subject_id, label],
-                            )
-                            .await?;
+                        let query = if before.is_some() {
+                            "UPDATE base_labels SET label=$4, version=version+1, updated_at=now() WHERE tenant_id=$1 AND kind=$2 AND subject=$3 RETURNING id"
+                        } else {
+                            "INSERT INTO base_labels(tenant_id,kind,subject,label) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,kind,subject) DO NOTHING RETURNING id"
+                        };
+                        let row = sql.query_opt(query, &[&tenant, &kind_key, &subject_id, label]).await?.ok_or(Error::Conflict)?;
                         (row.get::<_, i64>(0), json!({"label": label}))
                     }
                     None => {

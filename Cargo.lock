@@ -1023,6 +1023,7 @@ dependencies = [
 name = "bilibi-grid"
 version = "0.2.1"
 dependencies = [
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-database",
@@ -1056,6 +1057,7 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "axum",
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-base",

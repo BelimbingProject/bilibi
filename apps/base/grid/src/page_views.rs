@@ -162,9 +162,11 @@ Provenance { module: "base/grid", source: file!(), line: line!() },
 pub(crate) fn service(
     services: &bilibi_module_registry::Services,
 ) -> bilibi_module_registry::Result<bilibi_module_registry::Value> {
-    Ok(Arc::new(PageViews::new(
+    let views = Arc::new(PageViews::new(
         services.get::<Db>("base/database.pool")?.as_ref().clone(),
         services.get::<Settings>("base/settings.store")?,
         services.get::<MutationBoundary>("base/database.mutations")?,
-    )))
+    ));
+    crate::view_operations::bind(views.clone())?;
+    Ok(views)
 }

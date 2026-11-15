@@ -25,3 +25,5 @@ Read the tenant's overrides once per render with `Labels::labels(client, scope)`
 | An agent | `base.labels.list`, `base.labels.set` and `base.labels.clear`, the same contracts the page calls. Writes are reviewed first. |
 
 A label is 1 to 60 characters of plain text; Askama escapes it wherever it is shown. A subject that no module declares is refused, and every change is audited as kind `label`.
+
+Editors carry the `identity:version` token returned by `base.labels.list` (`0:0` for an unset override). Changed or replaced overrides and concurrent first writes are refused rather than overwritten.

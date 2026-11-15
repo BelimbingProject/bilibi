@@ -17,7 +17,7 @@
 use crate::page_views::PageViews;
 use crate::view::View;
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
-use bilibi_database::{Change, Error, Result};
+use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -34,8 +34,7 @@ pub const MAX_ROLES: usize = 50;
 /// Characters of a view's name.
 pub const MAX_NAME: usize = 80;
 /// Query parameters a view keeps, and the bytes of one value.
-const MAX_PARAMS: usize = 24;
-const MAX_VALUE: usize = 500;
+pub(crate) const MAX_QUERY: usize = 16384;
 
 inventory::submit! { Contribution::new(VOCABULARY, "grid.views.vocabulary",
 Provenance { module: "base/grid", source: file!(), line: line!() },
@@ -53,8 +52,6 @@ const VISIBLE: &str = "v.tenant_id=$1 AND (v.owner_id=$2 OR v.shared_with_everyo
 /// Whom a saved view is for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Audience {
-    /// Only its owner.
-    Owner,
     /// Everyone in the tenant.
     Everyone,
     /// The holders of these roles.
@@ -92,19 +89,21 @@ impl SharedView {
 /// own keys only. The arrangement is taken from the live view, the page number
 /// is dropped so a view opens on its first page, and anything oversized or
 /// oddly named is left out.
-pub fn clean_params(address: &str) -> BTreeMap<String, String> {
-    let address = address.trim_start_matches('?');
-    url::form_urlencoded::parse(address.as_bytes())
-        .filter(|(key, value)| {
-            valid_key(key)
-                && !crate::view::KEYS.contains(&key.as_ref())
-                && !matches!(key.as_ref(), "page" | "after")
-                && value.chars().count() <= MAX_VALUE
-                && !value.chars().any(char::is_control)
+pub(crate) fn clean_params(params: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+    let kept: BTreeMap<_, _> = params
+        .iter()
+        .filter(|(key, _)| {
+            !crate::view::KEYS.contains(&key.as_str()) && !matches!(key.as_str(), "page" | "after")
         })
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .take(MAX_PARAMS)
-        .collect()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if kept.iter().any(|(key, value)| {
+        key.is_empty() || key.chars().any(char::is_control) || value.chars().any(char::is_control)
+    }) || serde_json::to_vec(&kept).map_err(|_| Error::Invalid)?.len() > MAX_QUERY
+    {
+        return Err(refused("The view's filters are too large or invalid."));
+    }
+    Ok(kept)
 }
 
 fn valid_key(key: &str) -> bool {
@@ -144,8 +143,6 @@ fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
         params,
         audience: if row.get(4) {
             Audience::Everyone
-        } else if roles.is_empty() {
-            Audience::Owner
         } else {
             Audience::Roles(roles)
         },
@@ -194,6 +191,7 @@ impl PageViews {
     /// many views or an unknown role is [`Error::Refused`] with its reason.
     pub async fn save_shared(
         &self,
+        tx: &mut MutationTransaction<'_>,
         scope: &Scope,
         view: &View,
         params: &BTreeMap<String, String>,
@@ -214,23 +212,26 @@ impl PageViews {
         };
         roles.sort_unstable();
         roles.dedup();
+        if matches!(audience, Audience::Roles(_)) && roles.is_empty() {
+            return Err(refused("Choose at least one role."));
+        }
         if roles.len() > MAX_ROLES {
             return Err(refused("Share a view with at most 50 roles."));
         }
         let mut stored = view.to_json();
-        stored["params"] = json!(params);
+        stored["params"] = json!(clean_params(params)?);
+        if serde_json::to_vec(&stored)
+            .map_err(|_| Error::Invalid)?
+            .len()
+            > 8000
+        {
+            return Err(refused(
+                "The saved view is too large; use fewer columns or filters.",
+            ));
+        }
         let everyone = *audience == Audience::Everyone;
         let (tenant, owner, page) = (scope.tenant(), scope.user(), view.table.clone());
-        let mut client = self.db().get().await?;
-        let mut tx = self
-            .boundary
-            // A saved list arrangement, like a person's own columns, is view
-            // state; sharing it is gated by `grid.views.share` below.
-            .begin_view_state(&mut client, scope.mutation_context("grid.shared_view.save"))
-            .await?;
-        if *audience != Audience::Owner {
-            bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
-        }
+        bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
         let taken: i64 = tx
             .sql()
             .query_one(
@@ -291,21 +292,18 @@ impl PageViews {
                 })
             })
             .await?;
-        tx.commit().await?;
         Ok(id)
     }
 
     /// Deletes a view the reader saved; the people it was shared with lose it.
-    pub async fn delete_shared(&self, scope: &Scope, id: i64) -> Result<()> {
+    pub async fn delete_shared(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<()> {
         let (tenant, owner) = (scope.tenant(), scope.user());
-        let mut client = self.db().get().await?;
-        let mut tx = self
-            .boundary
-            .begin_view_state(
-                &mut client,
-                scope.mutation_context("grid.shared_view.delete"),
-            )
-            .await?;
+        bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
         let row = tx
             .sql()
             .query_opt(
@@ -334,6 +332,6 @@ impl PageViews {
             })
         })
         .await?;
-        tx.commit().await
+        Ok(())
     }
 }

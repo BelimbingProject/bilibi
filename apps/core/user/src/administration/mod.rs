@@ -151,6 +151,7 @@ pub(crate) fn service(
             grants: services.get("base/authz.grants")?,
             records: services.get(bilibi_records::SERVICE)?,
             views: services.get(bilibi_grid::PAGE_VIEWS)?,
+            contracts: services.get(bilibi_agent_api::page::SERVICE)?,
             display: services.get("base/datetime.display")?,
             locales: services.get("base/locale.locales")?,
         },
@@ -171,6 +172,6 @@ inventory::submit! {
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, SERVICE, bilibi_module_registry::Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: SERVICE,
-    contracts: &[],
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ],
     pending: bilibi_module_registry::contributions::Pending::Every { reason: "Account administration writes through the User facade; no contract yet." },
 }) }

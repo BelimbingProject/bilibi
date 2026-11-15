@@ -307,7 +307,7 @@ The page holds one `PageColumns` in its live state and:
    rows' keys as JSON scalars and the request's `DisplayContext`;
 4. renders `flex_table(id, rows)` over `rows` (a clone of
    `PageColumns::rows`, each row's slots filled for the built-in ids);
-5. delegates its `grid` event to `handle(scope, values)`: after
+5. delegates its `grid` event to `handle(scope, values, caller)`: after
    `Outcome::Patch` it loads again and returns the merged query; `Sort(key)`
    is a built-in's sort for the page's `ListState`; `Update` re-renders.
 
@@ -362,9 +362,11 @@ while restricted.
 
 ## Shared list views (#686)
 
-A person saves the list they see as a named view (columns, lenses, row height, change-since date, and the page's own sort, search and filters) and shares it with nobody, everyone or a role. A page that hosts `PageColumns` gets the strip of views above its table and the save form in the notch with no code of its own; do not build a second saved-filters feature.
+A person saves the list they see as a named view (columns, lenses, row height, change-since date, and the page's own sort, search and filters) and shares it with everyone or a role. The primary table that restores `PageColumns::from_params` gets the strip of views above its table and, for readers with sharing permission, the save form in the notch; do not build a second saved-filters feature.
 
 - **A view is a link, not access.** It is stored as JSON in `base_grid_shared_views` (+ `base_grid_shared_view_roles`) and opened as `?<query>` on the page's own address (`SharedView::query`), so the page applies the reader's own grants, field restrictions and reach, prunes what they may not see, and leaves their remembered arrangement alone (an address that names the arrangement wins, as for any shared link). The row height is always named so a view with the page's own columns still wins over a reader's memory.
-- **The page's own query** is taken from the browser's address when the form is sent (`flex_table.js` fills `query`), cleaned by `clean_params` (the page's keys only: no `page`, no Grid keys, at most 24 short plain values), and applied again by the page's existing params handling. A page needs nothing extra; keep sort, search and filters in the address as `ListState` already does.
-- **Who sees one:** its owner, everyone when shared that way, or the holders of a shared role (`effective_principal_roles`). Sharing with anyone but oneself needs `grid.views.share`; a person always keeps their own. The owner deletes (after a confirmation in the strip); at most 100 views per page per tenant and one name per page, whatever its case.
-- **Writes** go through the mutation boundary (`PageViews::save_shared`, `delete_shared`) and are audited as kind `grid.shared_view`. They use the view-state seam like a person's own columns; agents have no operation for views yet.
+- **The page's own query** is taken from the browser's address when the form is sent (`flex_table.js` fills `query`), sent as decoded JSON values with Grid and pagination keys omitted, then validated by `clean_params` without truncation (unsupported sizes are refused), and applied again by the page's existing params handling. A page needs nothing extra; keep sort, search and filters in the address as `ListState` already does.
+- **Who sees one:** its owner, everyone when shared that way, or the holders of a shared role (`effective_principal_roles`). Saving a view needs `grid.views.share`; the owner always sees their saved views. The owner deletes (after a confirmation in the strip); at most 100 views per page per tenant and one name per page, whatever its case.
+- **Writes** go through the mutation boundary (`PageViews::save_shared`, `delete_shared`) and are audited as kind `grid.shared_view`. Pages and agents call `base.grid.view.save` and `base.grid.view.delete` through the normal audited operation transaction. Each host declares both contracts for its Grid event in `PAGE_WRITES` and supplies `ViewCaller` with its page service, event, session credential and `PageContracts`.
+
+Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls. Explicit URL arrangements retain a row-height marker through canonicalization, including default arrangements.

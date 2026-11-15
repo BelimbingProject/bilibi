@@ -196,16 +196,22 @@ impl Index {
                 let id = get("id").unwrap_or_default();
                 let (kind, subject) = subject(id).ok_or(Error::Invalid)?;
                 let submitted = get("value").unwrap_or_default();
-                let version: i64 = get("version")
-                    .unwrap_or_default()
-                    .parse()
-                    .map_err(|_| Error::Invalid)?;
+                let version = get("version").ok_or(Error::Invalid)?;
+                let contract = if submitted.trim().is_empty() {
+                    "base.labels.clear"
+                } else {
+                    "base.labels.set"
+                };
+                let mut input = json!({"kind": kind.key(), "subject": subject, "version": version});
+                if contract == "base.labels.set" {
+                    input["label"] = json!(submitted);
+                }
                 let result = self
                     .pages
                     .contracts
                     .submit(
-                        &Self::call(scope, credential, "save_field", "base.labels.set"),
-                        json!({"kind": kind.key(), "subject": subject, "label": submitted, "version": version}),
+                        &Self::call(scope, credential, "save_field", contract),
+                        input,
                     )
                     .await;
                 let status = match outcome(result)? {
@@ -220,14 +226,17 @@ impl Index {
                 self.statuses.put(id.to_owned(), status);
             }
             "restore" => {
-                let id = get("key").unwrap_or_default();
+                let (id, version) = get("key")
+                    .unwrap_or_default()
+                    .split_once('@')
+                    .ok_or(Error::Invalid)?;
                 let (kind, subject) = subject(id).ok_or(Error::Invalid)?;
                 let result = self
                     .pages
                     .contracts
                     .submit(
                         &Self::call(scope, credential, "restore", "base.labels.clear"),
-                        json!({"kind": kind.key(), "subject": subject}),
+                        json!({"kind": kind.key(), "subject": subject, "version": version}),
                     )
                     .await;
                 self.flash = Some(match outcome(result)? {
@@ -256,7 +265,11 @@ impl Index {
             "Label",
             stored.map_or("", |stored| stored.label.as_str()),
         )
-        .version(stored.map_or(0, |stored| stored.version))
+        .version(stored.map_or_else(
+            || "0:0".to_owned(),
+            |stored| format!("{}:{}", stored.id, stored.version),
+        ))
+        .allow_empty()
         .status(self.statuses.get(&id));
         inline.placeholder = subject.default.clone();
         inline.id_value = id;
@@ -350,7 +363,7 @@ impl Index {
                         field: self.inline(subject, own, edits),
                     })?,
                 );
-            if edits && own.is_some() {
+            if let Some(own) = own.filter(|_| edits) {
                 row.actions = render(IconButton {
                     id: &format!(
                         "label-restore-{}-{}",
@@ -360,7 +373,7 @@ impl Index {
                     kind: IconKind::Neutral,
                     event: "restore",
                     name: "key",
-                    value: &key,
+                    value: &format!("{key}@{}:{}", own.id, own.version),
                     ..IconButton::new("unarchive", "Restore the module's word")
                 })?;
             }

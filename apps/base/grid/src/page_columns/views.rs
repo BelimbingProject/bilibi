@@ -2,11 +2,13 @@
 //! form that saves the current list as one, and the delete that asks first.
 //! A view is a link to the page's own address ([`SharedView::query`]); the
 //! store and its rules are [`crate::shared_views`].
-use super::{Outcome, PageColumns};
-use crate::shared_views::{clean_params, Audience, SharedView};
+use super::{Outcome, PageColumns, ViewCaller};
+use crate::shared_views::{Audience, SharedView};
+use bilibi_agent_api::page::Call;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::flex_table::{ViewLink, ViewsBar};
+use serde_json::json;
 use std::collections::HashMap;
 
 /// What the page knows of its saved views, read afresh by every `load`.
@@ -22,7 +24,10 @@ pub(super) struct Saved {
 }
 
 impl PageColumns {
-    pub(super) async fn load_saved(&mut self, scope: &Scope) -> Result<()> {
+    pub async fn refresh_views(&mut self, scope: &Scope) -> Result<()> {
+        if !self.named_views {
+            return Ok(());
+        }
         self.saved.shared = self.views.shared(scope, &self.table).await?;
         self.saved.roles = self.views.share_roles(scope).await?;
         let confirming = self.saved.confirming;
@@ -65,30 +70,27 @@ impl PageColumns {
         &mut self,
         scope: &Scope,
         params: &HashMap<String, String>,
+        caller: ViewCaller<'_>,
     ) -> Result<Option<Outcome>> {
         let get = |key: &str| params.get(key).map(String::as_str).unwrap_or("");
         let id = get("id").parse::<i64>().unwrap_or(0);
         match get("op") {
             "save_view" => {
                 self.saved.notice = None;
+                if !self.named_views {
+                    return Err(Error::Invalid);
+                }
                 let audience = match get("audience") {
-                    "everyone" => Audience::Everyone,
+                    "everyone" => json!({"everyone": true}),
                     role if role.starts_with("role:") => {
-                        Audience::Roles(role[5..].parse().into_iter().collect())
+                        json!({"roles": [role[5..].parse::<i64>().map_err(|_| Error::Invalid)?]})
                     }
-                    _ => Audience::Owner,
+                    _ => return Err(Error::Invalid),
                 };
-                let saved = self
-                    .views
-                    .save_shared(
-                        scope,
-                        &self.view,
-                        &clean_params(get("query")),
-                        get("name"),
-                        &audience,
-                    )
-                    .await;
-                self.saved.notice = refusal(saved)?;
+                let result = caller.contracts.submit(&Call { scope, credential: caller.credential, service: caller.service, event: caller.event, contract: "base.grid.view.save" },
+                    json!({"page": self.table, "view": self.view.to_json().to_string(), "params": get("query"), "name": get("name"), "audience": audience})).await;
+                self.saved.notice = refusal(result)?;
+                self.refresh_views(scope).await?;
             }
             "ask_delete_view" => {
                 self.saved.notice = None;
@@ -100,7 +102,25 @@ impl PageColumns {
             }
             "delete_view" => {
                 self.saved.confirming = None;
-                self.saved.notice = refusal(self.views.delete_shared(scope, id).await)?;
+                if !self.named_views {
+                    return Err(Error::Invalid);
+                }
+                self.saved.notice = refusal(
+                    caller
+                        .contracts
+                        .submit(
+                            &Call {
+                                scope,
+                                credential: caller.credential,
+                                service: caller.service,
+                                event: caller.event,
+                                contract: "base.grid.view.delete",
+                            },
+                            json!({"id": id}),
+                        )
+                        .await,
+                )?;
+                self.refresh_views(scope).await?;
             }
             _ => return Ok(None),
         }
@@ -109,19 +129,31 @@ impl PageColumns {
 }
 
 /// What a refused write tells the reader; any other failure is the page's.
-fn refusal<T>(result: Result<T>) -> Result<Option<String>> {
+fn refusal<T>(result: bilibi_agent_api::Result<T>) -> Result<Option<String>> {
+    use bilibi_agent_api::Error as ContractError;
     match result {
         Ok(_) => Ok(None),
-        Err(Error::Refused(message)) => Ok(Some(message)),
-        Err(Error::Forbidden) => Ok(Some("You may not share views.".into())),
-        Err(Error::NotFound) => Ok(Some("That view is already gone.".into())),
-        Err(error) => Err(error),
+        Err(ContractError::Backend(Error::Refused(message))) => Ok(Some(message)),
+        Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
+            Ok(Some("You may not share views.".into()))
+        }
+        Err(ContractError::Backend(Error::NotFound)) => {
+            Ok(Some("That view is already gone.".into()))
+        }
+        Err(ContractError::InvalidInput(fields)) => Ok(Some(
+            fields
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; "),
+        )),
+        Err(ContractError::Backend(error)) => Err(error),
+        Err(_) => Err(Error::Internal),
     }
 }
 
 fn audience_text(view: &SharedView, roles: &[(i64, String)]) -> String {
     match &view.audience {
-        Audience::Owner => "Only you".into(),
         Audience::Everyone => "Everyone".into(),
         Audience::Roles(ids) => {
             let names: Vec<&str> = ids

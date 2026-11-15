@@ -69,7 +69,7 @@ inventory::submit! { Contribution::new(ROUTES, "base/labels.index", provenance!(
 // Every write goes through the contracts agents call.
 inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageWrites {
     service: PAGES,
-    contracts: &[("save_field", "base.labels.set"), ("restore", "base.labels.clear")],
+    contracts: &[("save_field", "base.labels.set"), ("save_field", "base.labels.clear"), ("restore", "base.labels.clear")],
     pending: Pending::None,
 }) }
 bilibi_menu::contribute!(

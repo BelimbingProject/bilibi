@@ -74,7 +74,9 @@
     saveView(event) {
       const form = event.target.closest('[data-save-view]')
       if (!form || !form.elements.query) return
-      form.elements.query.value = location.search
+      const params = new URLSearchParams(location.search)
+      for (const key of ['cols', 'lens', 'z', 'since', 'page', 'after']) params.delete(key)
+      form.elements.query.value = JSON.stringify(Object.fromEntries(params))
       setTimeout(() => form.elements.name && (form.elements.name.value = ''), 0)
     },
 
