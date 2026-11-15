@@ -87,11 +87,11 @@ impl Clock {
     }
 }
 
-/// Caller-owned financial calendar: three consecutive year starts. Explicit
+/// Caller-owned financial calendar: current boundaries and an optional previous start. Explicit
 /// boundaries support short and long financial years without guessing a month.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FinancialYears {
-    previous_start: Date,
+    previous_start: Option<Date>,
     current_start: Date,
     next_start: Date,
 }
@@ -105,10 +105,25 @@ impl FinancialYears {
             return Err("Financial year starts must be in date order.");
         }
         Ok(Self {
-            previous_start,
+            previous_start: Some(previous_start),
             current_start,
             next_start,
         })
+    }
+    /// A current year without a known immediately preceding year.
+    pub fn current(current_start: Date, next_start: Date) -> Result<Self, &'static str> {
+        if current_start >= next_start {
+            return Err("Financial year starts must be in date order.");
+        }
+        Ok(Self {
+            previous_start: None,
+            current_start,
+            next_start,
+        })
+    }
+    pub(crate) fn supports(self, preset: Preset, today: Date) -> bool {
+        self.contains(today)
+            && (preset != Preset::LastFinancialYear || self.previous_start.is_some())
     }
     pub fn contains(self, today: Date) -> bool {
         self.current_start <= today && today < self.next_start
@@ -144,7 +159,10 @@ impl Period {
         let preset = param("period")
             .as_deref()
             .and_then(Preset::parse)
-            .filter(|preset| !preset.needs_financial_year() || years.is_some())
+            .filter(|preset| {
+                !preset.needs_financial_year()
+                    || years.is_some_and(|years| years.supports(*preset, today))
+            })
             .unwrap_or(Preset::Last30Days);
         let back = |days: i64| today.checked_sub(days.days()).unwrap_or(today);
         let date = |name: &str, fallback: Date| {
@@ -178,12 +196,12 @@ impl Period {
                         years.next_start.yesterday().unwrap_or(years.current_start),
                     )
                 } else {
+                    let previous = years
+                        .previous_start
+                        .expect("previous financial year checked above");
                     (
-                        years.previous_start,
-                        years
-                            .current_start
-                            .yesterday()
-                            .unwrap_or(years.previous_start),
+                        previous,
+                        years.current_start.yesterday().unwrap_or(previous),
                     )
                 }
             }

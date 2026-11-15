@@ -94,8 +94,7 @@ pub struct KeptFile {
 pub(crate) fn financial_years(today: jiff::civil::Date) -> FinancialYears {
     let year = today.year() - i16::from(today.month() < 4);
     let start = |year| jiff::civil::Date::new(year, 4, 1).expect("specimen year start");
-    FinancialYears::new(start(year - 1), start(year), start(year + 1))
-        .expect("ordered specimen year starts")
+    FinancialYears::current(start(year), start(year + 1)).expect("ordered specimen year starts")
 }
 
 const PERIOD_FILTERS: [&str; 2] = ["example-period-filter", "design-library-filter-period"];

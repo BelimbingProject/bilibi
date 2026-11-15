@@ -217,7 +217,7 @@ impl PeriodFilter {
                 !preset.needs_financial_year()
                     || self
                         .financial_years
-                        .is_some_and(|years| years.contains(self.today))
+                        .is_some_and(|years| years.supports(*preset, self.today))
             })
             .map(|(label, preset)| Choice::new(*label, preset.as_str()))
             .collect();

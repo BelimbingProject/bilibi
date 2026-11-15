@@ -39,4 +39,4 @@ Graphic lists every embedded SVG variant and semantic action from `bilibi_ui::Ic
 Theme and Design Spec preserve the source's foundations and accepted decisions.
 No unit tests or test-only infrastructure belong to this module.
 
-The period-filter specimen enables financial-year presets with a 1 April year start, using the same caller-owned calendar API as reports.
+The period-filter specimen enables financial-year presets with a 1 April year start and no preceding year, using the same caller-owned calendar API as reports.
