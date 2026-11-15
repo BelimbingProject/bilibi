@@ -2340,6 +2340,24 @@ pub(super) fn new_company(
     };
     let activities = object("scope_activities");
     let metadata = object("metadata");
+    for (name, value) in values {
+        if let Some(field) = name
+            .strip_suffix("[]")
+            .filter(|field| field.starts_with("cf_"))
+        {
+            if value
+                .split(',')
+                .filter(|code| !code.trim().is_empty())
+                .count()
+                > bilibi_picklists::VALUES_MAX
+            {
+                errors.push(FieldError::new_owned(
+                    field.to_owned(),
+                    format!("must have at most {} choices", bilibi_picklists::VALUES_MAX),
+                ));
+            }
+        }
+    }
     (new, company_fields, activities, metadata, errors)
 }
 

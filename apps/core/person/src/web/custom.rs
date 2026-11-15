@@ -397,7 +397,15 @@ pub(super) async fn control(
             render(select)
         }
         Kind::Reference => {
-            let chosen = entered.chosen.map(|resolved| {
+            let current = match entered.chosen {
+                Some(held) => crate::custom::fields()?
+                    .references(scope, definition, &[&held.reference.id])
+                    .await?
+                    .into_iter()
+                    .next(),
+                None => None,
+            };
+            let chosen = current.as_ref().map(|resolved| {
                 (
                     format!("{}:{}", resolved.reference.kind, resolved.id),
                     resolved.pill(format!("{id}-pill"), false),

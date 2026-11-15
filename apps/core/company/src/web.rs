@@ -761,6 +761,28 @@ impl CompanyPage {
     }
     async fn draw(&mut self, scope: &Scope) -> Result<LiveBody> {
         self.columns.refresh_views(scope).await?;
+        let mut chosen: Vec<_> = self.custom_pickers.chosen.values_mut().collect();
+        for chunk in chosen.chunks_mut(100) {
+            let references: Vec<_> = chunk.iter().map(|held| held.reference.clone()).collect();
+            let current = self.records.resolve(scope, &references).await?;
+            for (held, resolved) in chunk.iter_mut().zip(current) {
+                **held = resolved;
+            }
+        }
+        if let Some((id, label)) = &mut self.parent_chosen {
+            let current = self
+                .records
+                .resolve(
+                    scope,
+                    &[bilibi_records::Reference::new("company", id.to_string())],
+                )
+                .await?;
+            *label = current
+                .into_iter()
+                .next()
+                .and_then(|r| r.label)
+                .unwrap_or_else(|| "Restricted".into());
+        }
         let mut client = self.db.get().await?;
         let masked = crate::field_contributions::effective_restrictions(&**client, scope).await?;
         let html = match self.operation {
@@ -1402,6 +1424,7 @@ impl CompanyPage {
                     .cloned()
                     .unwrap_or_default();
                 self.form = values;
+                self.errors = views::new_company(&self.form).4;
                 self.search_parents(scope, &query).await?;
                 let references = bilibi_ui::params::form_values_checked(
                     value,
@@ -1525,6 +1548,8 @@ impl CompanyPage {
 impl LiveState<Scope, Error> for CompanyPage {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
+            self.custom_pickers.hits.clear();
+            self.parent_hits.clear();
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {

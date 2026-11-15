@@ -376,12 +376,17 @@ fn access_key(catalog: &Catalog, report: &Report) -> String {
         // A masked column still resolves; its values are read partial, so
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
+            Ok(column) if column.reference.is_some() => 'r',
             Ok(column) if catalog.mask(&column).is_some() => 'm',
             Ok(_) => '1',
             Err(_) => '0',
         })
         .collect();
-    format!("{}:{seen}", report.version)
+    if seen.contains('r') {
+        format!("{}:{seen}:{}", report.version, jiff::Timestamp::now())
+    } else {
+        format!("{}:{seen}", report.version)
+    }
 }
 
 impl Reports {

@@ -17,18 +17,18 @@ mod query;
 mod web;
 
 pub use model::{Kind, Searchable, State};
-pub use query::{terms, Terms, MAX_KIND_HITS, MAX_TEXT, MAX_WORDS};
+pub use query::{MAX_KIND_HITS, MAX_TEXT, MAX_WORDS, Terms, terms};
 
 use bilibi_authz::authorize_key;
 use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{
-    contributions::{Access, Viewer},
     Catalog, RegistryError,
+    contributions::{Access, Viewer},
 };
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ReadClient, Scope};
 use query::Planned;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
@@ -474,7 +474,7 @@ impl Search {
             ),
         };
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            vec![&tenant, &user, &words, &pattern, &plain];
+            vec![&tenant, &user, &words, &pattern, &plain, &terms.candidates];
         if matches!(mode, Mode::Page { .. }) {
             params.extend([
                 &filter as &(dyn tokio_postgres::types::ToSql + Sync),

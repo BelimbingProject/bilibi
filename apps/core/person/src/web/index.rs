@@ -1,13 +1,13 @@
 use super::*;
-use crate::{contributions::CREATE, PersonKind, Search};
+use crate::{PersonKind, Search, contributions::CREATE};
 use bilibi_grid::{Outcome, PageColumns};
 use bilibi_records::Reference;
 use bilibi_ui::{
+    BuiltinColumn, Button, ButtonVariant, Card, CreateButton, Field, Filter, FilterToolbar, Header,
+    InputKind, ListSpec, ListState, Pagination, Selection, SortDir, TableEmpty, ToolbarControl,
     choices,
     list_state::{InvalidPageSize, ParamNames},
     lists::RecordLink,
-    BuiltinColumn, Button, ButtonVariant, Card, CreateButton, Field, Filter, FilterToolbar, Header,
-    InputKind, ListSpec, ListState, Pagination, Selection, SortDir, TableEmpty, ToolbarControl,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, sync::LazyLock};
@@ -809,6 +809,9 @@ impl Index {
 impl LiveState<Scope, Error> for Index {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
+            if let Some(draft) = &mut self.draft {
+                draft.clear_hits();
+            }
             // A refused Export stays shown until the person moves the list
             // or acts again; a background refresh keeps it.
             if !matches!(request.input, LiveInput::Refresh) {
@@ -900,7 +903,7 @@ impl LiveState<Scope, Error> for Index {
                     "bulk_update" => {
                         return self
                             .bulk_update(request.scope, request.credential, value)
-                            .await
+                            .await;
                     }
                     "close_modal" => self.draft = None,
                     "validate" | "create" => {

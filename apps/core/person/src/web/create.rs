@@ -11,8 +11,6 @@ use bilibi_ui::{
 };
 
 const OPEN: &str = "/contacts?new=1";
-/// The most ticks one several-choices field posts that the dialog reads.
-const CODES_MAX: usize = bilibi_picklists::VALUES_MAX;
 
 /// HTTP and live visits to `/contacts/new` land on the list with the dialog open.
 pub(super) struct Create;
@@ -56,6 +54,12 @@ pub(super) struct Draft {
 }
 
 impl Draft {
+    pub fn clear_hits(&mut self) {
+        for picking in self.picking.values_mut() {
+            picking.hits.clear();
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             input: PersonInput {
@@ -117,7 +121,6 @@ impl Draft {
                             .iter()
                             .filter_map(Value::as_str)
                             .filter(|code| !code.is_empty())
-                            .take(CODES_MAX)
                             .map(str::to_owned)
                             .collect()
                     })
@@ -148,6 +151,17 @@ impl Draft {
             .into_iter()
             .map(|error| (error.field.to_owned(), error.message.to_owned()))
             .collect();
+        self.errors.extend(
+            self.codes
+                .iter()
+                .filter(|(_, codes)| codes.len() > bilibi_picklists::VALUES_MAX)
+                .map(|(name, _)| {
+                    (
+                        name.clone(),
+                        format!("must have at most {} choices", bilibi_picklists::VALUES_MAX),
+                    )
+                }),
+        );
         self.notice.clear();
         Ok(())
     }

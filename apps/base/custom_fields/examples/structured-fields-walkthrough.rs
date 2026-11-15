@@ -199,6 +199,7 @@ async fn main() -> Result<(), Failure> {
     };
     for (key, label, kind, extra) in [
         ("memo", "Memo", "text", json!({})),
+        ("site", "Site", "link", json!({})),
         ("old_note", "Old note", "text", json!({})),
         ("tags", "Tags", "choices", json!({"picklist": list})),
         (
@@ -235,6 +236,7 @@ async fn main() -> Result<(), Failure> {
             "core.person.create",
             json!({"name": "Zara Quill", "kind": "human", "custom": [
                 {"key": "memo", "value": "Velvetine orchard"},
+                {"key": "site", "value": "https://example.test/orchard"},
                 {"key": "old_note", "value": "Quokkaberry"},
                 {"key": "tags", "values": [first, second, first]},
                 {"key": "partner", "value": "01"},
@@ -496,6 +498,13 @@ async fn main() -> Result<(), Failure> {
             manager.found(query).await?.contains(&zara_id.to_string()) == expected,
         );
     }
+    proof.check(
+        "a complete custom link matches PostgreSQL's plain-text alternative",
+        manager
+            .found("https://example.test/orchard")
+            .await?
+            .contains(&zara_id.to_string()),
+    );
     proof.check(
         "another tenant does not find it",
         other.found("velvetine").await?.is_empty(),

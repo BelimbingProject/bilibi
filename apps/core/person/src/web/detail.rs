@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
+    Person, PersonInput, PersonKind,
     contributions::{RETIRE, UPDATE},
     model::kind_key,
-    Person, PersonInput, PersonKind,
 };
 use bilibi_agent_api::Error as ContractError;
 use bilibi_ui::{
@@ -404,10 +404,14 @@ impl Detail {
             })?
         } else if let Some((name, _)) = &self.pending_retire {
             render(ConfirmDialog {
-            id: "person-retire-confirm", consequence: &format!("{name} will be retired."),
-            detail: "Their details, history and affiliations are kept. The contact cannot be edited or linked again.",
-            confirm: "Retire", working: "Retiring…", confirm_event: "retire", cancel_event: "cancel_retire",
-        })?
+                id: "person-retire-confirm",
+                consequence: &format!("{name} will be retired."),
+                detail: "Their details, history and affiliations are kept. The contact cannot be edited or linked again.",
+                confirm: "Retire",
+                working: "Retiring…",
+                confirm_event: "retire",
+                cancel_event: "cancel_retire",
+            })?
         } else {
             Html::EMPTY
         };
@@ -821,6 +825,9 @@ impl Detail {
 impl LiveState<Scope, Error> for Detail {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
+            for (_, hits) in self.picking.values_mut() {
+                hits.clear();
+            }
             if let LiveInput::Event(value) = request.input {
                 self.handle(request.scope, request.credential, value)
                     .await?;
