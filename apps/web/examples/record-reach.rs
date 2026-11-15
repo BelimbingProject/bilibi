@@ -8,15 +8,15 @@
 //! walkthrough fixture only; exits non-zero when a check does not hold.
 //!
 //! BILIBI_RECORD_REACH=disposable cargo run -p bilibi-web --example record-reach
+use bilibi_activity::{Activities, Filter, State, WriteError};
 use bilibi_authz::{
     grants::{CreatedRole, Direct, Grants},
     roles::NewRole,
     Reach,
 };
-use bilibi_core::activity::{Activities, Filter, State, WriteError};
-use bilibi_core::team::{MemberChange, TeamInput, Teams};
 use bilibi_database::{pool, Db, Error, MutationBoundary};
 use bilibi_grid::{Agg, Bounds, Measure, PageSpec, SummarySpec};
+use bilibi_team::{MemberChange, TeamInput, Teams};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc};
@@ -294,10 +294,8 @@ async fn main() -> Result<(), Failure> {
             .services
             .get::<MutationBoundary>("base/database.mutations")?,
         grants: grants.clone(),
-        teams: app.services.get::<Teams>(bilibi_core::team::SERVICE)?,
-        activities: app
-            .services
-            .get::<Activities>(bilibi_core::activity::SERVICE)?,
+        teams: app.services.get::<Teams>(bilibi_team::SERVICE)?,
+        activities: app.services.get::<Activities>(bilibi_activity::SERVICE)?,
     };
 
     // A team of Lee and Sam, created through Core Team (its members reach
