@@ -149,6 +149,7 @@ WALKTHROUGHS=(
   'core|person-duplicates|apps/core/person|person-duplicates|none|BILIBI_PERSON_PROOF=disposable|-'
   'core|person-code-allocation|apps/core/person|person-code-allocation|none|BILIBI_PERSON_PROOF=disposable|-'
   'core|person-contact-integrity|apps/core/person|person-contact-integrity|none|BILIBI_PERSON_PROOF=disposable|-'
+  'core|person-search-scale|apps/core/person|person-search-scale|none|BILIBI_PERSON_PROOF=disposable|-'
   'core|person-custom-fields|apps/core/person|person-custom-fields|migrate|BILIBI_PERSON_DEMO=disposable|-|serve'
   'core|person-portal|apps/core/person|person-portal|migrate|BILIBI_PERSON_DEMO=disposable|-'
   'core|product|apps/core/product|product-walkthrough|seed|BILIBI_PRODUCT_WALKTHROUGH=disposable|-'

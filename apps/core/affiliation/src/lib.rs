@@ -193,7 +193,8 @@ inventory::submit! {
         dependencies: &["base/audit", "base/database", "base/tenancy", "base/authz", "base/grid", "base/agent_api", "base/ui", "base/datetime", "base/locale", "base/principal_directory", "base/bulk_data", "base/personal_data", "core/party", "core/person", "core/company"],
         migrations: &[("001-core-affiliation", include_str!("../migrations/001-affiliation.sql")),
             ("core-affiliation-002-personal-data", include_str!("../migrations/002-personal-data.sql")),
-            ("core-affiliation-003-contact-lookup", include_str!("../migrations/003-contact-lookup.sql"))],
+            ("core-affiliation-003-contact-lookup", include_str!("../migrations/003-contact-lookup.sql")),
+            ("core-affiliation-004-search-trigram", include_str!("../migrations/004-search-trigram.sql"))],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             CHANGES.set(broadcast::channel(128).0).map_err(|_| bilibi_module_registry::RegistryError::Service("duplicate affiliation change sender".into()))?;
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
