@@ -65,14 +65,12 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let views = bound()?;
-            let client = views.db().get().await.map_err(Error::from)?;
-            bilibi_authz::authorize_key(&**client, scope, SHARE_VIEWS).await?;
+            bilibi_authz::authorize_proof(client, scope, SHARE_VIEWS).await?;
             let summary = match self {
                 Self::Save => {
                     audience(&input["audience"])?;
@@ -85,7 +83,7 @@ impl WriteHandler for Write {
                     )
                 }
                 Self::Delete => {
-                    let row = client.query_opt("SELECT name FROM base_grid_shared_views WHERE tenant_id=$1 AND owner_id=$2 AND id=$3", &[&scope.tenant(), &scope.user(), &input["id"].as_i64().ok_or(Error::Invalid)?]).await.map_err(Error::from)?.ok_or(Error::NotFound)?;
+                    let row = client.query_opt("SELECT name FROM base_grid_shared_views WHERE tenant_id=$1 AND owner_id=$2 AND id=$3", &[&scope.tenant(), &scope.user(), &input["id"].as_i64().ok_or(Error::Invalid)?]).await?.ok_or(Error::NotFound)?;
                     format!("Delete shared view “{}”", row.get::<_, String>(0))
                 }
             };

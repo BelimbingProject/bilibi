@@ -1,0 +1,200 @@
+use bilibi_agent_api::page::{Call, PageContracts};
+use bilibi_authz::grants::Grants;
+use bilibi_base::session::session_id;
+use bilibi_database::pool;
+use bilibi_grid::{PageViews, View, PAGE_VIEWS};
+use bilibi_tenancy::Authentication;
+use serde_json::json;
+
+bilibi_walkthrough_fixture::walkthrough_vocabulary!();
+bilibi_walkthrough_fixture::walkthrough_module_roles!();
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("BILIBI_GRID_DEMO").as_deref() != Ok("disposable") {
+        return Err("set BILIBI_GRID_DEMO=disposable on a disposable migrated database".into());
+    }
+    let db = pool(&std::env::var("DATABASE_URL")?)?;
+    assert_eq!(db.status().max_size, 1, "run with DATABASE_POOL_SIZE=1");
+    bilibi_database::migrate(&db, &bilibi_web::modules()?).await?;
+    bilibi_walkthrough_fixture::install(&db).await?;
+    bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
+    let app = bilibi_web::App::new(db.clone(), "http://localhost:35567")?;
+    app.services
+        .get::<Grants>("base/authz.grants")?
+        .reconcile()
+        .await?;
+    let auth = app
+        .services
+        .get::<Authentication>("base/tenancy.authentication")?;
+    let views = app.services.get::<PageViews>(PAGE_VIEWS)?;
+    let contracts = app
+        .services
+        .get::<PageContracts>(bilibi_agent_api::page::SERVICE)?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let second_token = uuid::Uuid::new_v4().simple().to_string();
+    let role;
+    let admin;
+    let second_admin;
+    {
+        let client = db.get().await?;
+        admin = auth.authenticate(&**client, 1, 4, String::new()).await?;
+        second_admin = auth.authenticate(&**client, 1, 6, String::new()).await?;
+        client.execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,4,$2,now()+interval '1 hour')",
+            &[&session_id(&token), &uuid::Uuid::new_v4().simple().to_string()],
+        ).await?;
+        client.execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,6,$2,now()+interval '1 hour')",
+            &[&session_id(&second_token), &uuid::Uuid::new_v4().simple().to_string()],
+        ).await?;
+        client.execute(
+            "INSERT INTO user_desks(tenant_id,person_id,company_id) VALUES(1,1,2),(1,2,1) ON CONFLICT DO NOTHING",
+            &[],
+        ).await?;
+        role = client.query_one(
+            "INSERT INTO roles(tenant_id,company_id,name,code) VALUES(1,1,'Shared view readers','grid_shared_view_readers') RETURNING id",
+            &[],
+        ).await?.get::<_, i64>(0);
+        client.execute(
+            "INSERT INTO principal_roles(tenant_id,user_id,role_id,company_id) VALUES(1,1,$1,1),(1,7,$1,NULL)",
+            &[&role],
+        ).await?;
+    }
+    let call = |contract| Call {
+        scope: &admin,
+        credential: &token,
+        service: "core/company.pages",
+        event: "grid",
+        contract,
+    };
+    contracts
+        .submit(
+            &call("base.grid.view.save"),
+            json!({
+                "page":"reference_items", "view":View::new("reference_items").to_json().to_string(),
+                "params":"{}", "name":"Company Monday", "audience":{"roles":[role]}
+            }),
+        )
+        .await?;
+    let owned = views.shared(&admin, "reference_items").await?;
+    assert_eq!(owned.len(), 1);
+    assert!(owned[0].owned);
+    let id = owned[0].id;
+    for (user, company, visible) in [(1, 1, true), (1, 2, false), (7, 1, true), (7, 2, true)] {
+        let scope = {
+            let client = db.get().await?;
+            auth.authenticate_session(&**client, 1, user, None, Some(company), String::new())
+                .await?
+        };
+        assert_eq!(
+            scope.current_company().map(|company| company.get()),
+            Some(company)
+        );
+        let found = views.shared(&scope, "reference_items").await?;
+        assert_eq!(
+            found.iter().any(|view| view.id == id),
+            visible,
+            "user {user}, company {company}"
+        );
+    }
+    let other_tenant = {
+        let client = db.get().await?;
+        auth.authenticate(&**client, 2, 5, String::new()).await?
+    };
+    assert!(views
+        .shared(&other_tenant, "reference_items")
+        .await?
+        .is_empty());
+    contracts
+        .submit(&call("base.grid.view.delete"), json!({"id":id}))
+        .await?;
+    assert!(views.shared(&admin, "reference_items").await?.is_empty());
+    let label_call = |contract| Call {
+        scope: &admin,
+        credential: &token,
+        service: "base/labels.pages",
+        event: "save_field",
+        contract,
+    };
+    contracts.submit(&label_call("base.labels.set"), json!({
+        "kind":"record", "subject":"reference_items", "label":"Monday items", "version":"0:0"
+    })).await?;
+    let listed = contracts
+        .read(&admin, "base.labels.list", &json!({"kind":"record"}))
+        .await?;
+    let label = listed["result"]
+        .as_array()
+        .ok_or("missing label list")?
+        .iter()
+        .find(|label| label["subject"] == "reference_items")
+        .ok_or("missing record label")?;
+    assert_eq!(label["label"], json!("Monday items"));
+    let version = label["version"]
+        .as_str()
+        .ok_or("missing label version")?
+        .to_owned();
+    contracts
+        .submit(
+            &label_call("base.labels.clear"),
+            json!({
+                "kind":"record", "subject":"reference_items", "version":version
+            }),
+        )
+        .await?;
+    let cleared = contracts
+        .read(&admin, "base.labels.list", &json!({"kind":"record"}))
+        .await?;
+    let label = cleared["result"]
+        .as_array()
+        .ok_or("missing cleared label list")?
+        .iter()
+        .find(|label| label["subject"] == "reference_items")
+        .ok_or("missing cleared record label")?;
+    assert!(label["label"].is_null());
+    assert_eq!(label["version"], json!("0:0"));
+    println!("PASS: company-scoped roles receive views only in their company; tenant-wide roles receive them everywhere; owners retain visibility; cross-tenant readers cannot see them.");
+    println!(
+        "PASS: shared-view save/delete and label set/list/clear finish with a one-connection pool."
+    );
+    db.resize(2);
+    let save = |name: String| {
+        json!({
+            "page":"reference_items", "view":View::new("reference_items").to_json().to_string(),
+            "params":"{}", "name":name, "audience":{"everyone":true}
+        })
+    };
+    for index in 0..99 {
+        contracts
+            .submit(&call("base.grid.view.save"), save(format!("Limit {index}")))
+            .await?;
+    }
+    let first_call = call("base.grid.view.save");
+    let second_call = Call {
+        scope: &second_admin,
+        credential: &second_token,
+        service: "core/company.pages",
+        event: "grid",
+        contract: "base.grid.view.save",
+    };
+    let (first, second) = tokio::join!(
+        contracts.submit(&first_call, save("Concurrent first".into())),
+        contracts.submit(&second_call, save("Concurrent second".into())),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let refused = first
+        .err()
+        .or_else(|| second.err())
+        .ok_or("expected one refused save")?;
+    assert!(matches!(
+        refused,
+        bilibi_agent_api::Error::Backend(bilibi_database::Error::Refused(_))
+    ));
+    assert_eq!(views.shared(&admin, "reference_items").await?.len(), 100);
+    let total: i64 = db.get().await?.query_one(
+        "SELECT count(*) FROM base_grid_shared_views WHERE tenant_id=1 AND page='reference_items'", &[]
+    ).await?.get(0);
+    assert_eq!(total, 100);
+    println!("PASS: concurrent saves at 99 views commit exactly one additional view and refuse the other.");
+    Ok(())
+}

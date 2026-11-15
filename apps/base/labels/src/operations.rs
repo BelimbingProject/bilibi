@@ -77,16 +77,15 @@ impl ReadHandler for Read {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let labels = bound()?;
-            let client = labels.db.get().await.map_err(Error::from)?;
             let wanted = input["kind"].as_str().and_then(Kind::from_key);
             let search = input["search"].as_str().unwrap_or_default().to_lowercase();
-            let stored = Labels::stored(&**client, scope).await?;
+            let stored = Labels::stored(client, scope).await?;
             let rows: Vec<Value> = labels
                 .subjects()?
                 .into_iter()
@@ -138,13 +137,12 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let labels = bound()?;
-            let client = labels.db.get().await.map_err(Error::from)?;
             if matches!(self, Self::Set) && self.text(input).trim().is_empty() {
                 return Err(bilibi_agent_api::invalid(
                     "label",
@@ -152,7 +150,7 @@ impl WriteHandler for Write {
                 ));
             }
             let plan = labels
-                .plan(&**client, scope, self.edit(input)?, false)
+                .plan(client, scope, self.edit(input)?, false)
                 .await
                 .map_err(found)?;
             let summary = match &plan.after {

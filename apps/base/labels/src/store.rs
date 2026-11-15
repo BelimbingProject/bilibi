@@ -131,7 +131,7 @@ impl Labels {
 
     /// The overrides with their versions, for the page that edits them.
     pub(crate) async fn stored(
-        client: &impl GenericClient,
+        client: &dyn bilibi_tenancy::ReadClient,
         scope: &Scope,
     ) -> Result<BTreeMap<(Kind, String), Stored>> {
         let rows = client
@@ -208,7 +208,7 @@ impl Labels {
     /// the writer read (0 when there was none).
     pub async fn plan(
         &self,
-        sql: &impl GenericClient,
+        sql: &dyn bilibi_tenancy::ProofClient,
         scope: &Scope,
         edit: Edit<'_>,
         lock: bool,
@@ -219,7 +219,7 @@ impl Labels {
             text,
             version,
         } = edit;
-        bilibi_authz::authorize_key(sql, scope, crate::MANAGE).await?;
+        bilibi_authz::authorize_proof(sql, scope, crate::MANAGE).await?;
         let known = self.subject(kind, subject)?;
         let text = text.trim();
         if text.chars().count() > MAX_LABEL || text.chars().any(char::is_control) {

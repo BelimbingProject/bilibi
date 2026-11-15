@@ -47,7 +47,7 @@ Provenance { module: "base/grid", source: file!(), line: line!() },
 }) }
 
 /// `$1` tenant, `$2` reader; the view row is `v`.
-const VISIBLE: &str = "v.tenant_id=$1 AND (v.owner_id=$2 OR v.shared_with_everyone OR EXISTS (SELECT 1 FROM base_grid_shared_view_roles s JOIN effective_principal_roles p ON p.company_id IS NULL AND p.tenant_id=s.tenant_id AND p.role_id=s.role_id WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id AND p.user_id=$2))";
+const VISIBLE: &str = "v.tenant_id=$1 AND (v.owner_id=$2 OR v.shared_with_everyone OR EXISTS (SELECT 1 FROM base_grid_shared_view_roles s JOIN effective_principal_roles p ON (p.company_id IS NULL OR p.company_id=$4) AND p.tenant_id=s.tenant_id AND p.role_id=s.role_id WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id AND p.user_id=$2))";
 
 /// Whom a saved view is for.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -157,7 +157,7 @@ impl PageViews {
         let rows = client
             .query(
                 &format!("SELECT v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{{}}') FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
-                &[&scope.tenant(), &scope.user(), &page],
+                &[&scope.tenant(), &scope.user(), &page, &scope.current_company().map(|company| company.get())],
             )
             .await?;
         Ok(rows
@@ -232,6 +232,10 @@ impl PageViews {
         let everyone = *audience == Audience::Everyone;
         let (tenant, owner, page) = (scope.tenant(), scope.user(), view.table.clone());
         bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
+        tx.sql().execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('base-grid-shared-views-' || $1::text || ':' || $2, 0))",
+            &[&tenant.to_string(), &page],
+        ).await?;
         let taken: i64 = tx
             .sql()
             .query_one(
