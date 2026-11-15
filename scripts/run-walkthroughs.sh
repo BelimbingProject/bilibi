@@ -221,7 +221,9 @@ WALKTHROUGHS=(
   # Each mounts a container from fixtures/containers, rebuilds, runs and unmounts.
   # events-reference: the publisher alone, then both, then the subscriber alone,
   # in this order on one database (its unmounted run is events-unmounted above).
-  'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:event_publisher/receiving;@absent:event_subscriber/payables;@mount:event_subscriber;-;@expect:event_publisher/receiving;@expect:event_subscriber/payables;@unmount:event_publisher;-;@expect:event_subscriber/payables;@absent:event_publisher/receiving'
+  # The checks name the module in the printed list of mounted modules, `("ID"`: a
+  # later run also prints the event rows an earlier run left, which name the other.
+  'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:("event_publisher/receiving";@absent:("event_subscriber/payables";@mount:event_subscriber;-;@expect:("event_publisher/receiving";@expect:("event_subscriber/payables";@unmount:event_publisher;-;@expect:("event_subscriber/payables";@absent:("event_publisher/receiving"'
   'mounted|ports-mounted|apps/web|ports-reference|none||@mount:port_reference;-;@expect:port_reference/orders'
   # `end`, then `deliver` in a new process: the notices outlive the first one.
   'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'
