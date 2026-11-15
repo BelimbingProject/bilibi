@@ -1,4 +1,4 @@
-//! Tenant-defined custom fields: typed fields (text, number, date, pick-list)
+//! Tenant-defined custom fields: stable typed values
 //! an administrator adds to the records of a module that opts in, without a
 //! release. This module owns the tenant's definitions and the page and agent
 //! operations that manage them; the record's owner keeps the values in its own
@@ -125,7 +125,7 @@ inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/ui", "base/audit", "base/agent_api", "base/menu"],
-        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql"))],
+        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let fields = Arc::new(build(services)?);

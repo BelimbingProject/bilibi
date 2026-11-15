@@ -116,6 +116,7 @@ fn field(c: &Value, state: &State) -> Field {
         "textarea" => InputKind::Textarea,
         "select" => InputKind::Select,
         "checkbox" => InputKind::Checkbox,
+        "switch" => InputKind::Switch,
         "date" => InputKind::Date,
         "time" => InputKind::Time,
         "datetime-local" => InputKind::DatetimeLocal,

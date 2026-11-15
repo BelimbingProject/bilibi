@@ -134,6 +134,7 @@ pub struct FormControls {
     pub textarea: Field,
     pub select: Field,
     pub checkbox: Field,
+    pub switches: [Field; 5],
     pub radio: RadioGroup,
     pub required_roles: MultiSelect,
     pub chip_roles: MultiSelect,
@@ -285,6 +286,25 @@ impl FormControls {
                 .kind(InputKind::Checkbox)
                 .label("Enable synchronization")
                 .checked(true),
+            switches: [
+                sample("switch_on", "true")
+                    .kind(InputKind::Switch)
+                    .label("Synchronization"),
+                sample("switch_off", "false")
+                    .kind(InputKind::Switch)
+                    .label("Notifications"),
+                sample("switch_unset", "")
+                    .kind(InputKind::Switch)
+                    .label("Reminders"),
+                sample("switch_disabled", "true")
+                    .kind(InputKind::Switch)
+                    .label("Managed setting")
+                    .disabled(),
+                sample("switch_error", "")
+                    .kind(InputKind::Switch)
+                    .label("Consent")
+                    .error("must be yes or no"),
+            ],
             radio: RadioGroup::in_form("sample", "radio_field", choices(&APPEARANCE))
                 .id("specimen-radio-group")
                 .label("Appearance")

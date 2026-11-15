@@ -14,6 +14,7 @@
     "platform"
   ],
   "checkbox_field": "true",
+  "switch_field": "true",
   "radio_field": "system",
   "textarea_field": "Multi-line sample content demonstrating textarea rendering.",
   "date_field": "2026-08-17",

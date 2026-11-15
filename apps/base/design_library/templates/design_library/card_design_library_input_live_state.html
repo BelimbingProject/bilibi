@@ -15,6 +15,7 @@
                     {{ self.text("@sample_form[:required_roles].value") }}
                   {% endcall %}
                   {% call ui::fact(title="Checkbox") %}{{ self.text("@sample_form[:checkbox_field].value") }}{% endcall %}
+                  {% call ui::fact(title="Switch") %}{{ self.text("@sample_form[:switch_field].value") }}{% endcall %}
                   {% call ui::fact(title="Radio") %}{{ self.text("@sample_form[:radio_field].value") }}{% endcall %}
                   {% call ui::fact(title="Date and time") %}
                     {{ self.control("design-library-input-datetime")? }}

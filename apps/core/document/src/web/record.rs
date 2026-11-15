@@ -811,6 +811,34 @@ impl Detail {
                         editor: render(editor)?,
                     })?
                 }
+                (bilibi_custom_fields::Kind::LongText, _) => {
+                    render(bilibi_ui::InlineLongText { field, rows: 5 })?
+                }
+                (bilibi_custom_fields::Kind::Boolean, _) => {
+                    let editor = bilibi_ui::Field::named(&name)
+                        .id(format!("{name}-input"))
+                        .label(&definition.label)
+                        .value(&value)
+                        .kind(bilibi_ui::InputKind::Switch);
+                    render(InlineChoice {
+                        field,
+                        display: Html::text(match value.as_str() {
+                            "true" => "Yes",
+                            "false" => "No",
+                            _ => "—",
+                        }),
+                        editor: render(editor)?,
+                    })?
+                }
+                (bilibi_custom_fields::Kind::Email, _) => render(InlineEdit {
+                    field: field.input_type("email"),
+                })?,
+                (bilibi_custom_fields::Kind::Phone, _) => render(InlineEdit {
+                    field: field.input_type("tel"),
+                })?,
+                (bilibi_custom_fields::Kind::Link, _) => render(InlineEdit {
+                    field: field.input_type("url"),
+                })?,
                 (bilibi_custom_fields::Kind::Date, _) => {
                     field = field.input_type("date");
                     render(InlineEdit { field })?

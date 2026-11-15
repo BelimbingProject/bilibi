@@ -1391,3 +1391,41 @@
     },
   })
 })()
+
+// A form switch keeps its boolean in the named hidden input, so normal forms
+// and InlineChoice send the same value through their ordinary save contract.
+;(() => {
+  window.BilibiUI.registerHook('SwitchInput', {
+    mounted() {
+      this.abort = new AbortController();
+      this.el.addEventListener('bilibi:switch-value', () => this.paint(), {signal: this.abort.signal});
+      this.el.querySelector('[role="switch"]').addEventListener('click', () => {
+        const input = this.el.querySelector('input');
+        input.value = input.value === 'true' ? 'false' : 'true';
+        this.paint();
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+      }, {signal: this.abort.signal});
+      this.paint();
+    },
+    updated() { this.paint(); },
+    paint() {
+      const button = this.el.querySelector('[role="switch"]');
+      const on = this.el.querySelector('input').value === 'true';
+      button.setAttribute('aria-checked', String(on));
+      button.classList.toggle('text-success-ink', on);
+      button.classList.toggle('text-ink-muted', !on);
+      const track = button.firstElementChild;
+      track.classList.toggle('border-success-line', on);
+      track.classList.toggle('bg-success-surface', on);
+      track.classList.toggle('border-line', !on);
+      track.classList.toggle('bg-surface-sunken', !on);
+      const thumb = track.firstElementChild;
+      thumb.classList.toggle('translate-x-4', on);
+      thumb.classList.toggle('bg-success-ink', on);
+      thumb.classList.toggle('bg-ink-muted', !on);
+      const label = on ? 'On' : 'Off';
+      if (button.lastElementChild.textContent !== label) button.lastElementChild.textContent = label;
+    },
+    destroyed() { this.abort.abort(); },
+  });
+})();

@@ -25,6 +25,7 @@ pub struct FieldFilter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ListKind {
     Text,
+    Boolean,
     /// A tenant-defined number: an exact decimal string, compared as a number.
     Number,
     Date,
@@ -98,6 +99,13 @@ pub(crate) async fn available(
         let (kind, choices) = match (definition.kind, definition.picklist.as_deref()) {
             (bilibi_custom_fields::Kind::Number, _) => (ListKind::Number, Vec::new()),
             (bilibi_custom_fields::Kind::Date, _) => (ListKind::Date, Vec::new()),
+            (bilibi_custom_fields::Kind::Boolean, _) => (
+                ListKind::Boolean,
+                vec![
+                    bilibi_ui::Choice::new("Yes", "true"),
+                    bilibi_ui::Choice::new("No", "false"),
+                ],
+            ),
             (bilibi_custom_fields::Kind::Choice, Some(list)) => (
                 ListKind::Choice {
                     picklist: list.into(),
@@ -141,7 +149,7 @@ pub(crate) fn operators(kind: &ListKind) -> &'static [(&'static str, &'static st
             ("gt", "After"),
             ("gte", "On or after"),
         ],
-        ListKind::Choice { .. } => &[("eq", "Equals")],
+        ListKind::Boolean | ListKind::Choice { .. } => &[("eq", "Equals")],
     }
 }
 
@@ -156,7 +164,7 @@ fn filter_error(filter: &FieldFilter, field: &AvailableField) -> Option<String> 
         ListKind::Text => !filter.value.is_empty() && filter.value.chars().count() <= 256,
         ListKind::Number => bilibi_custom_fields::valid_number(&filter.value),
         ListKind::Date => field_contributions::valid_date(&filter.value),
-        ListKind::Choice { .. } => field
+        ListKind::Boolean | ListKind::Choice { .. } => field
             .choices
             .iter()
             .any(|choice| choice.value == filter.value),
@@ -166,7 +174,7 @@ fn filter_error(filter: &FieldFilter, field: &AvailableField) -> Option<String> 
             ListKind::Text => "Enter text up to 256 characters.",
             ListKind::Number => "Enter a number such as 12 or -3.5.",
             ListKind::Date => "Enter a valid date from 0001-01-01 to 9999-12-31.",
-            ListKind::Choice { .. } => "Choose an active value from this list.",
+            ListKind::Boolean | ListKind::Choice { .. } => "Choose a value from this list.",
         }
         .into()
     })

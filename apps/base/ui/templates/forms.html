@@ -96,6 +96,8 @@
 {% macro input(field) %}
 {%- if field.kind.is_hidden() -%}
 <input type="hidden" id="{{ field.id }}" name="{{ field.name }}" value="{{ field.value }}"{{ field.attrs.html() }} />
+{%- elif field.kind.is_switch() -%}
+<div class="{{ field.wrapper() }}" data-hook="SwitchInput"><label for="{{ field.id }}" class="{{ field.checkbox_label_classes() }}">{{ field.label }}</label><input type="hidden" name="{{ field.name }}" value="{{ field.value }}"{{ field.attrs.companion_html() }} />{% call ui::toggle(on=field.value == "true", label=field.label, id=field.id, disabled=field.attrs.disabled || field.attrs.readonly, described_by=field.described_by(), invalid=field.invalid()) %}{% endcall %}{% call hint(id=field.id, text=field.hint) %}{% endcall %}{% call errors(id=field.id, errors=field.errors) %}{% endcall %}</div>
 {%- elif field.kind.is_checkbox() -%}
 <div class="{{ field.wrapper() }}"><label for="{{ field.id }}" class="{{ field.checkbox_label_classes() }}"><input type="hidden" name="{{ field.name }}" value="false"{{ field.attrs.companion_html() }} /><input type="checkbox" id="{{ field.id }}" name="{{ field.name }}" value="true"{% if field.checked %} checked{% endif %}{% call aria(invalid=field.invalid(), described_by=field.described_by()) %}{% endcall %} class="{{ field.control_class() }}"{{ field.attrs.html() }} />{{ field.label }}{% if field.attrs.required %}<span aria-hidden="true">*</span>{% endif %}</label>{% call hint(id=field.id, text=field.hint) %}{% endcall %}{% call errors(id=field.id, errors=field.errors) %}{% endcall %}</div>
 {%- elif field.revealed() -%}

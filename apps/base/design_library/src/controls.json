@@ -189,6 +189,13 @@
     "type": "checkbox",
     "label": "Enable synchronization"
   },
+  "sample_switch_field": {
+    "kind": "input",
+    "form": "sample",
+    "key": "switch_field",
+    "type": "switch",
+    "label": "Synchronization"
+  },
   "component-radio-group": {
     "kind": "radio_group",
     "form": "sample",
