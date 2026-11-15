@@ -201,28 +201,22 @@ impl Grants {
             crate::effective_capabilities_in_company(client, scope, scope.user(), company).await?;
         let rows = client
             .query(
-                &format!("SELECT {}, COALESCE((SELECT array_agg(c.capability) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),'{{}}'), COALESCE((SELECT array_agg(c.reach) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),'{{}}') FROM roles r WHERE r.tenant_id=$1 AND (r.company_id IS NULL OR r.company_id=ANY($2)) AND NOT r.grant_all AND NOT r.requires_engagement ORDER BY lower(r.name),r.id", crate::roles::SUMMARY),
+                &format!("SELECT {}, COALESCE((SELECT array_agg(c.reach || ':' || c.capability) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),'{{}}') FROM roles r WHERE r.tenant_id=$1 AND (r.company_id IS NULL OR r.company_id=ANY($2)) AND NOT r.grant_all AND NOT r.requires_engagement ORDER BY lower(r.name),r.id", crate::roles::SUMMARY),
                 &[&scope.tenant(), &companies],
             )
             .await?;
         Ok(rows
             .iter()
             .filter(|row| {
-                let keys: Vec<String> = row.get(9);
-                let reaches: Vec<String> = row.get(10);
-                !keys.is_empty()
-                    && keys.iter().zip(&reaches).all(|(key, reach)| {
-                        self.vocabulary
-                            .capabilities
-                            .get(key.as_str())
-                            .is_some_and(|c| {
-                                c.definition.audience != crate::Audience::Portal
-                                    && (company.is_none() || c.definition.company_scoped)
-                            })
-                            && actor.reaches(
-                                key,
-                                crate::Reach::parse(reach).unwrap_or(crate::Reach::All),
-                            )
+                let grants: Vec<String> = row.get(9);
+                !grants.is_empty()
+                    && grants.iter().all(|grant| {
+                        let (reach, key) = grant.split_once(':').unwrap_or(("all", grant));
+                        self.vocabulary.capabilities.get(key).is_some_and(|c| {
+                            c.definition.audience != crate::Audience::Portal
+                                && (company.is_none() || c.definition.company_scoped)
+                        }) && actor
+                            .reaches(key, crate::Reach::parse(reach).unwrap_or(crate::Reach::All))
                     })
             })
             .map(crate::roles::summary)
