@@ -2,9 +2,9 @@
 
 **Document Type:** Architecture Decision Record
 **Status:** Proposed
-**Agents:** claude-code/opus-5.5 (author), amp/opus-5.5 (pg_trgm amendment)
+**Agents:** claude-code/opus-5.5 (author)
 **Scope:** How Bilibi finds records across mounted modules: the search box, the results page and the agent operation
-**Last Updated:** 2026-11-15
+**Last Updated:** 2026-10-22
 
 > Source: [issue 130](https://github.com/BelimbingProject/bilibi/issues/130). There is no prior art to cite.
 
@@ -44,16 +44,8 @@ Bilibi is PostgreSQL-only. An external engine would hold a second copy of every 
 - A Domain makes a table searchable with one contribution and one migration; no host, Menu or template change.
 - Each searchable table carries a generated column and a GIN index; writes pay for keeping them.
 - The GIN index does not include the tenant, so a very common prefix is matched across tenants before the tenant predicate filters it. The cost check refuses a search too broad to rank and asks for another word.
-- Typo tolerance and scripts written without spaces need more than this; each needs its own decision. Matching inside a word is decided below.
+- Typo tolerance, matching inside a word and scripts written without spaces need `pg_trgm` or another extension. [ADR 29](./29-pg-trgm-is-allowed.md) allows `pg_trgm`; record search does not use it yet, and any other extension needs its own decision.
 - If an adopter outgrows PostgreSQL search, a later port can let an Extension provide another engine behind the same contribution.
-
-## Amendment: `pg_trgm` for matching inside a word
-
-**A migration may enable `pg_trgm`, and a list that matches any part of a value (`LIKE '%term%'`) indexes that value with a trigram GIN index.** Decided by the owner on the coordination channel, 2026-11-14 ([#589](https://github.com/BelimbingProject/bilibi/issues/589)).
-
-- **Why.** A list search such as Contacts matches part of a name, code, email or phone, and Grid's `text_search_sql` matches part of a linked value (a contact's work email or company). No built-in index serves a substring, so every search read the whole tenant: with 20,000 contacts, 80,032 rows per search.
-- **Why it is safe to depend on.** `pg_trgm` ships with PostgreSQL as a trusted extension, so the database owner can create it, and every managed PostgreSQL offers it. Each migration that needs it runs `CREATE EXTENSION IF NOT EXISTS pg_trgm`, so no module depends on another having run first.
-- **What it does not change.** Record search (above) stays on full-text vectors. The trigram index includes no tenant, like the vectors: a very common substring is matched across tenants before the tenant predicate filters it.
 
 ## Status
 

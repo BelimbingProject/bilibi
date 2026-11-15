@@ -1,7 +1,7 @@
 -- Contacts search matches any part of a name, code, email or phone (#589).
 -- Trigram indexes serve that substring match (`LIKE '%term%'`), so a search
 -- reads the contacts that match instead of every contact of the tenant.
--- pg_trgm is decided in ADR 06; it is a trusted extension, so the database
+-- pg_trgm is decided in ADR 29; it is a trusted extension, so the database
 -- owner installs it.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX persons_name_trgm ON persons USING gin (lower(name) gin_trgm_ops);
