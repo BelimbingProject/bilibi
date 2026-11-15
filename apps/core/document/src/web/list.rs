@@ -290,7 +290,9 @@ impl Index {
                 }
             }
             "close_modal" => {
-                self.dialog = None;
+                if let Some(mut dialog) = self.dialog.take() {
+                    dialog.discard(&self.pages, scope).await;
+                }
                 self.uploads.clear(dialog::UPLOAD);
             }
             "quick" => {
@@ -305,7 +307,9 @@ impl Index {
                 }
             }
             "close_quick" => {
-                self.quick = None;
+                if let Some(mut quick) = self.quick.take() {
+                    quick.discard(&self.pages, scope).await;
+                }
                 self.uploads.clear(dialog::UPLOAD);
             }
             "quick_create" => {

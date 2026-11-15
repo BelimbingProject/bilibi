@@ -448,7 +448,8 @@ bilibi_menu::contribute!(
 );
 
 // Every write on the pages and panels calls the contract agents use (ADR 01).
-// Receiving a file is the one gap: it stores the bytes with `store_file`.
+// Files are the one gap: receiving one stores the bytes with `store_file`,
+// and closing a dialog discards the file it stored with `discard_files`.
 inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", provenance!(), &PageWrites {
     service: crate::web::SERVICE,
     contracts: &[
@@ -467,5 +468,5 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("copy", "core.document.copy"),
         ("merge", "core.document.merge"),
     ],
-    pending: Pending::Events { events: &["upload", "copy_file", "quick_create"], reason: "Storing an uploaded or copied file (also Quick add, which then calls create) takes bytes outside a contract; Artifacts bounds contract input at 1 MiB. Agent-supplied files: issue 133." },
+    pending: Pending::Events { events: &["upload", "copy_file", "quick_create", "close_modal", "close_quick"], reason: "Storing a file (upload, copy, Quick add) and discarding the one a closed dialog stored take bytes outside a contract; Artifacts bounds contract input at 1 MiB. Agent-supplied files: issue 133." },
 }) }

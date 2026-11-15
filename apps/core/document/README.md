@@ -121,9 +121,11 @@ Internal revisions store the ledger file ID and either a clean Artifact ID or a 
 
 ### Files never attached
 
-A file stored but never attached (a dialog cancelled, a file replaced, a create refused, a dropped connection, a copy refused) is removed a day after it was stored.
+A file stored but never attached is removed at once when the dialog lets go of it, and otherwise a day after it was stored.
 
-- Storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
+- The New document, Quick add and New revision dialogs discard the file they hold (`Documents::discard_files`) when another upload replaces it or the dialog is closed (`close_modal`, `close_quick`, listed beside `upload` as page writes outside a contract). A file a refused create keeps stays, so the person can try again.
+
+- Every other case (a tab closed, a dropped connection, a refused copy, a discard that failed) waits for the job: storing a file queues a `core/document-file-discard` job, available 24 hours later, in the transaction that reserves its ledger row, so every stored file has its way out.
 - The job runs as the system principal `document-file-cleaner`, which holds only `core.document.discard.settle` (a standing grant). A file attached by then is left alone.
 - Otherwise the job moves the ledger row to `discarding`, which no write can attach ("is not a file you stored"), deletes its Artifact, then removes the row. Each step is audited as `System · document-file-cleaner`; a failed step retries with Queue's backoff.
 - A held upload's staged bytes stay Media's: its draft cleanup removes them.
