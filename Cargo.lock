@@ -927,6 +927,7 @@ dependencies = [
  "bilibi-privacy",
  "bilibi-queue",
  "bilibi-records",
+ "bilibi-search",
  "bilibi-settings",
  "bilibi-tenancy",
  "bilibi-ui",

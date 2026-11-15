@@ -816,8 +816,8 @@ impl Documents {
     }
     /// One revision's file, read through `base/artifacts` (which rechecks
     /// access and audits the read) every time. Needs
-    /// `core.document.download` and a document the reader may see; artifacts
-    /// also requires the reader to belong to the filing company.
+    /// `core.document.download` and the document's live download grant.
+    /// Filing-company desks grant no document access (ADR 23).
     pub async fn read_file(&self, scope: &Scope, id: i64, revision: i32) -> WriteResult<File> {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let scope = self.fresh(&**client, scope).await?;
@@ -1288,7 +1288,7 @@ impl Documents {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/search", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),
@@ -1302,6 +1302,7 @@ inventory::submit! { Module {
         ("core-document-010-file-discard", include_str!("../migrations/010-file-discard.sql")),
         ("core-document-011-personal-data", include_str!("../migrations/011-personal-data.sql")),
         ("core-document-012-erasure", include_str!("../migrations/012-erasure.sql")),
+        ("core-document-013-search", include_str!("../migrations/013-search.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;

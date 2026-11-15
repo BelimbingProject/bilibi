@@ -623,6 +623,16 @@ async fn main() -> Result<()> {
     trail.start().await?;
     documents.read_file(&scope, filed.id, 1).await?;
     trail.finish("download / preview", &[filed.id]).await?;
+    // Isolate the document-grant check from capabilities and desks.
+    db.get()
+        .await?
+        .execute(
+            "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed)
+         SELECT $1,$2,c,true FROM unnest(ARRAY['core.document.view','core.document.download']) c
+         ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
+            &[&scope.tenant(), &viewer],
+        )
+        .await?;
     let outsider = app
         .user
         .login("viewer@example.test", bilibi_walkthrough_fixture::PASSWORD)
@@ -633,6 +643,74 @@ async fn main() -> Result<()> {
         return Err("a reader with no grant got the file".into());
     }
     trail.finish("refused download", &[filed.id]).await?;
+
+    if outsider.current_company().is_some() || outsider.actor().person().is_some() {
+        return Err("the cross-desk reader unexpectedly holds a workplace".into());
+    }
+    for (label, can_download, ended) in [
+        ("view-only download", false, false),
+        ("granted download without a desk", true, false),
+        ("ended download", true, true),
+    ] {
+        write!(app, scope, "core.document.share", |tx| documents
+            .share(
+                &mut tx,
+                &scope,
+                filed.id,
+                &ShareInput {
+                    user_id: viewer,
+                    can_download,
+                    ..ShareInput::default()
+                },
+            )
+            .await?);
+        if ended {
+            // Move only the disposable fixture clock; Share refuses past dates.
+            db.get()
+                .await?
+                .execute(
+                    "UPDATE core_document_access SET expires_at=now()-interval '2 days'
+                 WHERE tenant_id=$1 AND document_id=$2 AND user_id=$3",
+                    &[&scope.tenant(), &filed.id, &viewer],
+                )
+                .await?;
+        }
+        if documents.get(&outsider, filed.id).await.is_ok() == ended {
+            return Err(format!("wrong metadata visibility: {label}").into());
+        }
+        trail.start().await?;
+        let downloaded = documents.read_file(&outsider, filed.id, 1).await;
+        if can_download && !ended {
+            if downloaded?.bytes != b"Audit coverage file\n" {
+                return Err("a granted cross-desk download returned the wrong bytes".into());
+            }
+        } else {
+            if downloaded.is_ok() {
+                return Err(format!("{label} returned bytes").into());
+            }
+            let reason: String = db
+                .get()
+                .await?
+                .query_one(
+                    "SELECT payload->>'reason' FROM base_audit_actions
+                 WHERE tenant_id=$1 AND actor_id=$2 AND event='core.document.download_refused'
+                   AND payload->>'document_id'=$3 ORDER BY id DESC LIMIT 1",
+                    &[&scope.tenant(), &viewer, &filed.id.to_string()],
+                )
+                .await?
+                .get(0);
+            if reason
+                != if ended {
+                    "grant_ended"
+                } else {
+                    "no_download_permission"
+                }
+            {
+                return Err(format!("wrong refusal audit: {label}: {reason}").into());
+            }
+        }
+        trail.finish(label, &[filed.id]).await?;
+    }
 
     // Sharing with a portal customer (a company's business customers). The
     // customer's own download and refusals are proved, with their audit, by

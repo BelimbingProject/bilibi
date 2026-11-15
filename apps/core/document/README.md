@@ -19,7 +19,7 @@ Base owns private bytes, malware scanning, retention and legal holds. Domains ow
 
 ## Access
 
-Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission; the record page links a revision's file only for a reader who holds both. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
+Every metadata read starts with `core.document.view` and an explicit grant for the signed-in user. A file download also needs `core.document.download` and the grant's download permission, with no desk required in the filing company; the record page links a revision's file only for a reader who holds both. Changes need `core.document.manage` and the grant's manage permission. Access changes need `core.document.manage` and the grant's share permission.
 
 Creating a document gives its creator view, download, manage and share permissions. Sharing accepts only an active account; there are no whole-company, role or team grants.
 
@@ -30,7 +30,7 @@ Creating a document gives its creator view, download, manage and share permissio
 - no end date, or a later one, when your own access ends (**Access until** must be no later than your own last day);
 - the creator's account, unless you are the creator; `unshare` likewise removes the creator's grant only for the creator, and nobody removes their own.
 
-Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant.
+Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant. Global search uses Base Search over the grant-filtered Grid source, matching name words and integration sync IDs through a generated, GIN-indexed vector; a view-only grant exposes metadata but never file bytes.
 
 ## Sharing by email, and when access ends
 
@@ -115,7 +115,7 @@ The New document, New revision and Quick add dialogs take the file through one r
 - **Resume:** the bytes wait on Media's staging disk (`media.upload.staging_disk`). While the New document dialog is open the list's address carries `new=1`, so the remount after a dropped connection opens it again and the file carries on from the bytes already there. After a reload, or in a dialog the remount does not reopen (New revision, Quick add), choosing the same file again continues it, until `media.upload.staging_hours` passes.
 - **Limit:** the input is declared with the tenant's effective limit (the smaller of `core.document.max_upload_bytes` and `artifacts.max_bytes`), read when the page opens, so a larger file is refused before its bytes arrive; the host lowers it further to Media's staging limit (`media.max_bytes`, never below 64 MiB, at most 512 MiB). `store_file` checks the limit again. Without a staging disk the input holds the bytes in memory, at most 64 MiB, and a drop starts again.
 - **Scan:** a resumed file is stored like any other: `store_file` stages it through Media, and it stays held, unreadable, until the scan calls it clean.
-- **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold.
+- **Proof:** `apps/core/document/examples/upload-resume-proof.rs` serves the real host with a fixture scanner that holds files pending until released, for a browser run of progress, resume and the hold. Before holding uploads it creates four clean files for `viewer@example.test`: no grant, view only, ended grant and allowed. It prints their record and download paths. No grant and ended grant hide metadata; view only keeps metadata visible. All three refuse bytes and write `core.document.download_refused`, found by the audit query below. The allowed file is the control for successful bytes and Artifact audit.
 
 Internal revisions store the ledger file ID and either a clean Artifact ID or a held Media attachment ID; external revisions store one HTTPS link. The file ledger records reservations, stored files and attached files without recording content or storage paths.
 
@@ -260,7 +260,7 @@ A new document action belongs in that example in the same change. It also fails 
 
 ## List and audit latency
 
-`apps/core/document/examples/list-latency.rs` seeds a large library through the facade and times the list, its filters and the audit queries above.
+`apps/core/document/examples/list-latency.rs` seeds a large library through the facade and times the list, its filters, Base Search suggestions and result pages across all mounted kinds, and the audit queries above.
 
 - **Fixture.** 50,000 link documents filed by the administrator, each related to one walkthrough company. The viewer holds view and download on 40%, view without download on 10% and an ended grant on 10%, and favourites 1,000 of them. The contractor sees 1% and the manager and staff a third and a fifth. Every twentieth document has expired.
 - **Run.** On a migrated database that holds the walkthrough fixture and is seeded (as for the coverage check). Seeding takes about ten minutes once; a rerun only measures. `BILIBI_DOCUMENT_LATENCY_DOCUMENTS` and `BILIBI_DOCUMENT_LATENCY_RUNS` (50) change the size and repetitions.
@@ -269,7 +269,7 @@ A new document action belongs in that example in the same change. It also fails 
 BILIBI_DOCUMENT_LATENCY=disposable cargo run -p bilibi-document --example list-latency --release --locked
 ```
 
-- **Output.** One Markdown row per case and reader: rows on the page and in total, median, p95 and maximum in milliseconds, timed around `Documents::list` (authorization and both statements) or the audit statement.
+- **Output.** One Markdown row per case and reader: rows on the page and in total, median, p95 and maximum in milliseconds, timed around `Documents::list` (authorization and both statements), `Search::suggest` / `Search::find` (the same facade as `base.search.records`), or the audit statement. Search cases fail if the query exceeds the search bounds.
 - **Shape of the reads.** A record or mark filter is a top-level `EXISTS`, so the planner starts from the record's links or the reader's marks; the default order has an index (`core_documents_last_revision_idx`) so a page walks documents newest first and checks each grant. The total still counts every document the reader may see, and name search scans names. The per-document audit queries filter on JSON values and scan the audit tables; the per-actor queries use Base Audit's actor index.
 
 ## Public facade

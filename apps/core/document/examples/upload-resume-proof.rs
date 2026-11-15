@@ -9,12 +9,14 @@
 //! Artifacts and Documents) and the scan time limit to 600 seconds, and
 //! resumable uploads stage on the `local` Media disk under `<root>/media`.
 //!
-//! Run after `migrate` against a dedicated disposable database:
+//! Run after `migrate`, installing `fixtures/walkthrough` and then
+//! `seed-production` against a dedicated disposable database:
 //! `BILIBI_DOCUMENT_UPLOAD_PROOF=disposable DATABASE_URL=… BILIBI_DOCUMENT_UPLOAD_ROOT=…
 //! APP_ORIGIN=http://127.0.0.1:4476 BIND_ADDR=127.0.0.1:4476
 //! cargo run -p bilibi-document --example upload-resume-proof`, then sign in
 //! as `admin@example.test` at `APP_ORIGIN`.
 use bilibi_database::pool;
+use bilibi_document::{Documents, Draft, ShareInput, Upload, SERVICE};
 use bilibi_media::{Media, ScanFacts, ScanFuture, Scanner, Verdict};
 use bilibi_queue::{Config, Executor};
 use serde_json::json;
@@ -99,7 +101,9 @@ async fn main() -> Result<()> {
     }
     drop(client);
     let hold = root.join("scan-hold");
-    std::fs::write(&hold, b"")?;
+    if hold.exists() {
+        std::fs::remove_file(&hold)?;
+    }
     app.services
         .get::<Media>("base/media.store")?
         .bind_scanner(Arc::new(HoldingScanner { hold: hold.clone() }))?;
@@ -119,10 +123,92 @@ async fn main() -> Result<()> {
         )?
         .run(stopped),
     );
+    seed_downloads(&app).await?;
+    std::fs::write(&hold, b"")?;
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("Bilibi at {origin}");
     let served = axum::serve(listener, bilibi_web::router(app)).await;
     let _ = stop.send(true);
     let _ = worker.await;
     Ok(served?)
+}
+
+/// Four real files for browser access proofs as viewer@example.test. A
+/// view-only grant still exposes metadata; it withholds only the bytes.
+async fn seed_downloads(app: &bilibi_web::App) -> Result<()> {
+    let login = app
+        .user
+        .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
+        .await?;
+    let scope = app.security.guard(&login.token).await?;
+    let documents = app.services.get::<Documents>(SERVICE)?;
+    let client = app.db.get().await?;
+    client.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed)
+         SELECT $1,2,c,true FROM unnest(ARRAY['core.document.view','core.document.download','base.search.records.list']) c
+         ON CONFLICT DO NOTHING", &[&scope.tenant()],
+    ).await?;
+    drop(client);
+    for (label, grant) in [
+        ("No grant", None),
+        ("View only", Some(false)),
+        ("Ended grant", Some(true)),
+        ("Allowed", Some(true)),
+    ] {
+        let stored = documents
+            .store_file(
+                &scope,
+                Upload {
+                    bytes: b"Document browser proof: authorized bytes only.\n",
+                    file_name: "download-proof.txt",
+                },
+            )
+            .await?;
+        let mut client = app.db.get().await?;
+        let mut tx = app
+            .mutations
+            .begin(&mut client, scope.mutation_context("core.document.create"))
+            .await?;
+        let document = documents
+            .create(
+                &mut tx,
+                &scope,
+                &Draft {
+                    name: Some(format!("Download proof {label}")),
+                    artifact_id: Some(stored.artifact_id),
+                    ..Draft::default()
+                },
+            )
+            .await?;
+        tx.commit().await?;
+        if let Some(can_download) = grant {
+            let mut tx = app
+                .mutations
+                .begin(&mut client, scope.mutation_context("core.document.share"))
+                .await?;
+            documents
+                .share(
+                    &mut tx,
+                    &scope,
+                    document.id,
+                    &ShareInput {
+                        user_id: 2,
+                        can_download,
+                        ..ShareInput::default()
+                    },
+                )
+                .await?;
+            tx.commit().await?;
+        }
+        // Only the disposable fixture clock is moved backwards. Production
+        // Share refuses past dates, so an ended grant cannot be created there.
+        if label == "Ended grant" {
+            client.execute("UPDATE core_document_access SET expires_at=now()-interval '2 days' WHERE tenant_id=$1 AND document_id=$2 AND user_id=2", &[&scope.tenant(), &document.id]).await?;
+        }
+        println!(
+            "Browser access case: {label}: /documents/{} /documents/{}/revisions/1/file",
+            document.id, document.id
+        );
+    }
+    Ok(())
 }

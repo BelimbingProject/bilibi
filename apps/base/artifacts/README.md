@@ -14,7 +14,7 @@ owner-reviewed data migration. There is no Base query of Company tables.
 Every callback must prove a live company in the tenant, current actor authority,
 and the live subject for that operation. `Purge` has no reference and requires
 company maintenance access. Base reauthenticates the sealed account on every
-operation and refuses changed identity or lost desk access to the bound company. The file company may differ from the selected desk when the person still has access there; the owner still authorizes every action. System-principal and approved privacy actions retain their existing authority.
+operation and refuses changed identity or lost desk access to the bound company. The file company may differ from the selected desk when the person still has access there; the owner still authorizes every action. An owner whose reads use explicit per-record grants may return `false` from `Owner::read_requires_desk`; only its staff reads then omit the desk check, while live identity, tenant/company binding, owner authorization and read audit still apply. The owner must prove the current record grant on every read; Core Document is the opt-in user (ADR 23). All other operations and owners retain their desk checks. System-principal and approved privacy actions retain their existing authority.
 The owner validates upload MIME/content
 and scanning policy; `content_type` is descriptive metadata only.
 
