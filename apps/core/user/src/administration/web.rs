@@ -778,6 +778,15 @@ impl Index {
             ..bilibi_ui::Page::default()
         })?
         .to_string();
+        let query = self.query();
+        Ok(LiveBody {
+            html,
+            query,
+            rows,
+            ..LiveBody::default()
+        })
+    }
+    fn query(&self) -> HashMap<String, String> {
         let mut query = self.list.to_params();
         if !self.role_ids.is_empty() {
             query.insert(
@@ -793,12 +802,7 @@ impl Index {
             query.insert(MEMBERSHIP.into(), membership.database_value().into());
         }
         query.extend(self.columns.params());
-        Ok(LiveBody {
-            html,
-            query,
-            rows,
-            ..LiveBody::default()
-        })
+        query
     }
     fn listed(&self, value: &Value) -> Option<&Entry> {
         let id = params::positive_id(value.get("id").and_then(Value::as_str))
@@ -833,6 +837,7 @@ impl Index {
                     .next_sort(value.get("sort").and_then(Value::as_str).unwrap_or(""));
             }
             "grid" => {
+                let query = self.query();
                 if let Outcome::Sort(key) = self
                     .columns
                     .handle(
@@ -843,6 +848,7 @@ impl Index {
                             credential,
                             service: super::SERVICE,
                             event: "grid",
+                            query,
                         },
                     )
                     .await?

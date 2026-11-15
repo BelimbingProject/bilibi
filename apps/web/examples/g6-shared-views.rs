@@ -2,9 +2,11 @@ use bilibi_agent_api::page::{Call, PageContracts};
 use bilibi_authz::grants::Grants;
 use bilibi_base::session::session_id;
 use bilibi_database::pool;
-use bilibi_grid::{PageViews, View, PAGE_VIEWS};
+use bilibi_grid::{PageColumns, PageViews, View, ViewCaller, PAGE_VIEWS, SHARE_VIEWS};
 use bilibi_tenancy::Authentication;
+use bilibi_ui::{BuiltinColumn, ListSpec, ListState};
 use serde_json::json;
+use std::collections::HashMap;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
@@ -20,10 +22,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bilibi_walkthrough_fixture::install(&db).await?;
     bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let app = bilibi_web::App::new(db.clone(), "http://localhost:35567")?;
-    app.services
-        .get::<Grants>("base/authz.grants")?
-        .reconcile()
-        .await?;
+    let grants = app.services.get::<Grants>("base/authz.grants")?;
+    grants.reconcile().await?;
     let auth = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
@@ -33,13 +33,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get::<PageContracts>(bilibi_agent_api::page::SERVICE)?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let second_token = uuid::Uuid::new_v4().simple().to_string();
+    let reader_token = uuid::Uuid::new_v4().simple().to_string();
     let role;
     let admin;
     let second_admin;
+    let reader;
     {
         let client = db.get().await?;
         admin = auth.authenticate(&**client, 1, 4, String::new()).await?;
         second_admin = auth.authenticate(&**client, 1, 6, String::new()).await?;
+        reader = auth.authenticate(&**client, 1, 1, String::new()).await?;
         client.execute(
             "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,4,$2,now()+interval '1 hour')",
             &[&session_id(&token), &uuid::Uuid::new_v4().simple().to_string()],
@@ -47,6 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.execute(
             "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,6,$2,now()+interval '1 hour')",
             &[&session_id(&second_token), &uuid::Uuid::new_v4().simple().to_string()],
+        ).await?;
+        client.execute(
+            "INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,1,1,$2,now()+interval '1 hour')",
+            &[&session_id(&reader_token), &uuid::Uuid::new_v4().simple().to_string()],
         ).await?;
         client.execute(
             "INSERT INTO user_desks(tenant_id,person_id,company_id) VALUES(1,1,2),(1,2,1) ON CONFLICT DO NOTHING",
@@ -106,10 +113,126 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .shared(&other_tenant, "reference_items")
         .await?
         .is_empty());
+    let denied = contracts
+        .submit(
+            &Call {
+                scope: &reader,
+                credential: &reader_token,
+                service: "core/company.pages",
+                event: "grid",
+                contract: "base.grid.view.delete",
+            },
+            json!({"id":id}),
+        )
+        .await;
+    assert!(matches!(
+        denied,
+        Err(bilibi_agent_api::Error::Backend(
+            bilibi_database::Error::Forbidden
+        ))
+    ));
+    println!("PASS: a non-owner without sharing permission cannot delete a view.");
+    db.get().await?.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,4,$1,false,'all')",
+        &[&SHARE_VIEWS],
+    ).await?;
+    {
+        let client = db.get().await?;
+        assert!(!bilibi_authz::effective_capabilities(&**client, &admin)
+            .await?
+            .contains(SHARE_VIEWS));
+        let registry = app
+            .services
+            .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
+        let description = registry
+            .describe(&**client, &admin, "base.grid.view.delete")
+            .await?;
+        assert_eq!(
+            description["capability"],
+            json!(bilibi_agent_api::SIGNED_IN)
+        );
+        let operations = registry
+            .search(
+                &**client,
+                &admin,
+                "base.grid.view.delete",
+                bilibi_agent_api::SearchOptions {
+                    limit: 50,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(operations
+            .iter()
+            .any(|operation| operation["key"] == "base.grid.view.delete"
+                && operation["available"] == true));
+    }
+    assert!(views
+        .shared(&admin, "reference_items")
+        .await?
+        .iter()
+        .any(|view| view.id == id && view.owned));
     contracts
         .submit(&call("base.grid.view.delete"), json!({"id":id}))
         .await?;
     assert!(views.shared(&admin, "reference_items").await?.is_empty());
+    println!("PASS: an owner without sharing permission can discover and delete their view.");
+    db.get()
+        .await?
+        .execute(
+            "DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=4 AND capability=$1",
+            &[&SHARE_VIEWS],
+        )
+        .await?;
+    let mut columns = PageColumns::mount(
+        views.clone(),
+        "reference_items",
+        vec![BuiltinColumn::new("name", "Name")],
+    )?;
+    let mut list = ListState::parse(&HashMap::new(), ListSpec::default().shared()?)?;
+    columns.from_params(&admin, &HashMap::new()).await?;
+    list.apply_filters(&HashMap::from([("search".into(), "latest filter".into())]));
+    columns
+        .handle(
+            &admin,
+            &HashMap::from([
+                ("op".into(), "save_view".into()),
+                ("name".into(), "Queued filter".into()),
+                ("audience".into(), "everyone".into()),
+                ("query".into(), r#"{"search":"stale filter"}"#.into()),
+            ]),
+            ViewCaller {
+                contracts: &contracts,
+                credential: &token,
+                service: "core/company.pages",
+                event: "grid",
+                query: list.to_params(),
+            },
+        )
+        .await?;
+    let saved = views.shared(&admin, "reference_items").await?;
+    let queued = saved
+        .iter()
+        .find(|view| view.name == "Queued filter")
+        .ok_or("missing queued view")?;
+    assert_eq!(
+        queued.params.get("search").map(String::as_str),
+        Some("latest filter")
+    );
+    contracts
+        .submit(
+            &Call {
+                scope: &second_admin,
+                credential: &second_token,
+                service: "core/company.pages",
+                event: "grid",
+                contract: "base.grid.view.delete",
+            },
+            json!({"id":queued.id}),
+        )
+        .await?;
+    assert!(views.shared(&admin, "reference_items").await?.is_empty());
+    println!("PASS: owners without sharing permission can discover and delete their views; other owners need sharing permission; queued saves use the latest server filters.");
     let label_call = |contract| Call {
         scope: &admin,
         credential: &token,

@@ -108,6 +108,7 @@ pub struct ViewCaller<'a> {
     pub credential: &'a str,
     pub service: &'static str,
     pub event: &'a str,
+    pub query: HashMap<String, String>,
 }
 
 impl PageColumns {

@@ -70,9 +70,9 @@ impl WriteHandler for Write {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            bilibi_authz::authorize_proof(client, scope, SHARE_VIEWS).await?;
             let summary = match self {
                 Self::Save => {
+                    bilibi_authz::authorize_proof(client, scope, SHARE_VIEWS).await?;
                     audience(&input["audience"])?;
                     params(input)?;
                     view(input)?;
@@ -83,7 +83,10 @@ impl WriteHandler for Write {
                     )
                 }
                 Self::Delete => {
-                    let row = client.query_opt("SELECT name FROM base_grid_shared_views WHERE tenant_id=$1 AND owner_id=$2 AND id=$3", &[&scope.tenant(), &scope.user(), &input["id"].as_i64().ok_or(Error::Invalid)?]).await?.ok_or(Error::NotFound)?;
+                    let row = client.query_opt("SELECT name, owner_id FROM base_grid_shared_views WHERE tenant_id=$1 AND id=$2", &[&scope.tenant(), &input["id"].as_i64().ok_or(Error::Invalid)?]).await?.ok_or(Error::NotFound)?;
+                    if row.get::<_, i64>(1) != scope.user() {
+                        bilibi_authz::authorize_proof(client, scope, SHARE_VIEWS).await?;
+                    }
                     format!("Delete shared view “{}”", row.get::<_, String>(0))
                 }
             };
@@ -138,6 +141,6 @@ fn output() -> Value {
 inventory::submit! { Contribution::new(DEFINITIONS, "base/grid.views", Provenance { module: "base/grid", source: file!(), line: line!() }, &Definitions {
     operations: &[
         Operation { key: "base.grid.view.save", title: "Share a list view", summary: "Save columns, filters and sort for everyone or roles. Readers retain their own access checks.", keywords: &["list", "view", "share"], capability: SHARE_VIEWS, input: save_schema, output, handler: Handler::SafeWrite(&Write::Save), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.grid.view.delete", title: "Delete a shared list view", summary: "Delete a view you saved, removing it for everyone it was shared with.", keywords: &["list", "view", "delete"], capability: SHARE_VIEWS, input: delete_schema, output, handler: Handler::SafeWrite(&Write::Delete), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.grid.view.delete", title: "Delete a shared list view", summary: "Delete your own view, or another owner’s with sharing permission.", keywords: &["list", "view", "delete"], capability: bilibi_agent_api::SIGNED_IN, input: delete_schema, output, handler: Handler::SafeWrite(&Write::Delete), channels: Channels::Every, step_up: &[] },
     ], guides: &[],
 }) }

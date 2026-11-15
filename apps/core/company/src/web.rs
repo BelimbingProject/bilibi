@@ -777,6 +777,7 @@ impl CompanyPage {
         let get = |key| value.get(key).and_then(Value::as_str).unwrap_or("");
         match get("type") {
             "grid" if self.operation == "list" => {
+                let query = self.query();
                 let values = PageColumns::event_values(value)?;
                 if let bilibi_grid::page_columns::Outcome::Sort(field) = self
                     .columns
@@ -788,6 +789,7 @@ impl CompanyPage {
                             credential,
                             service: "core/company.pages",
                             event: "grid",
+                            query,
                         },
                     )
                     .await?

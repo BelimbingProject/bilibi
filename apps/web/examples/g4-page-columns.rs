@@ -411,6 +411,7 @@ impl LiveState<Scope, Error> for State {
                     self.columns.from_params(scope, values).await?;
                 }
                 LiveInput::Event(event) => {
+                    let query = self.query();
                     let get = |key: &str| event.get(key).and_then(Value::as_str);
                     match get("type") {
                         Some("grid") => match self
@@ -423,6 +424,7 @@ impl LiveState<Scope, Error> for State {
                                     credential: request.credential,
                                     service: "extensions/g4_page_columns.pages",
                                     event: "grid",
+                                    query,
                                 },
                             )
                             .await?

@@ -484,6 +484,7 @@ impl State {
                 self.reload = true;
             }
             "grid" => {
+                let query = self.list.to_params();
                 let params = PageColumns::event_values(v)?;
                 let columns = if self.id.is_some() {
                     &mut self.price_columns
@@ -499,7 +500,8 @@ impl State {
                                 contracts: &self.pages.contracts,
                                 credential,
                                 service: "core/product.pages",
-                                event: "grid"
+                                event: "grid",
+                                query,
                             }
                         )
                         .await?,

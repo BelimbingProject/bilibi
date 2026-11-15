@@ -481,6 +481,7 @@ impl State {
                 self.reload = true;
             }
             "grid" | "grid_subs" => {
+                let query = self.list.to_params();
                 let params = PageColumns::event_values(v)?;
                 let columns = if text(v, "type") == "grid" {
                     &mut self.columns
@@ -496,7 +497,8 @@ impl State {
                                 contracts: &self.pages.contracts,
                                 credential,
                                 service: "core/team.pages",
-                                event: text(v, "type")
+                                event: text(v, "type"),
+                                query,
                             }
                         )
                         .await?,

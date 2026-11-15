@@ -55,7 +55,7 @@ impl PageColumns {
                     name: view.name.clone(),
                     query: view.query(),
                     audience: audience_text(view, &roles),
-                    deletable: view.owned,
+                    deletable: view.owned || self.saved.roles.is_some(),
                 })
                 .collect(),
             can_share: self.saved.roles.is_some(),
@@ -87,8 +87,9 @@ impl PageColumns {
                     }
                     _ => return Err(Error::Invalid),
                 };
+                let query = crate::shared_views::clean_params(&caller.query.into_iter().collect())?;
                 let result = caller.contracts.submit(&Call { scope, credential: caller.credential, service: caller.service, event: caller.event, contract: "base.grid.view.save" },
-                    json!({"page": self.table, "view": self.view.to_json().to_string(), "params": get("query"), "name": get("name"), "audience": audience})).await;
+                    json!({"page": self.table, "view": self.view.to_json().to_string(), "params": serde_json::to_string(&query).map_err(|_| Error::Invalid)?, "name": get("name"), "audience": audience})).await;
                 self.saved.notice = refusal(result)?;
                 self.refresh_views(scope).await?;
             }

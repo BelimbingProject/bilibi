@@ -829,6 +829,7 @@ impl LiveState<Scope, Error> for Index {
                         self.list.next_sort(value["sort"].as_str().unwrap_or(""));
                     }
                     "grid" => {
+                        let query = self.list.to_params();
                         if let Outcome::Sort(key) = self
                             .columns
                             .handle(
@@ -839,6 +840,7 @@ impl LiveState<Scope, Error> for Index {
                                     credential: request.credential,
                                     service: super::SERVICE,
                                     event: "grid",
+                                    query,
                                 },
                             )
                             .await?

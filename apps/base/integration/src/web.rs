@@ -513,6 +513,7 @@ impl Index {
                 self.reload = true;
             }
             "grid" => {
+                let query = self.query();
                 // No column sorts: the log stays newest first. A changed
                 // arrangement is already remembered; the rows load again
                 // under it.
@@ -526,6 +527,7 @@ impl Index {
                             credential,
                             service: "base/integration.pages",
                             event: "grid",
+                            query,
                         },
                     )
                     .await?

@@ -307,15 +307,17 @@ impl PageViews {
         id: i64,
     ) -> Result<()> {
         let (tenant, owner) = (scope.tenant(), scope.user());
-        bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
         let row = tx
             .sql()
             .query_opt(
-                "SELECT page, name, view, shared_with_everyone FROM base_grid_shared_views WHERE tenant_id=$1 AND id=$2 AND owner_id=$3 FOR UPDATE",
-                &[&tenant, &id, &owner],
+                "SELECT page, name, view, shared_with_everyone, owner_id FROM base_grid_shared_views WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+                &[&tenant, &id],
             )
             .await?
             .ok_or(Error::NotFound)?;
+        if row.get::<_, i64>(4) != owner {
+            bilibi_authz::authorize_key(tx.sql(), scope, SHARE).await?;
+        }
         let old = json!({"page": row.get::<_, String>(0), "name": row.get::<_, String>(1), "view": row.get::<_, Value>(2), "shared_with_everyone": row.get::<_, bool>(3)});
         tx.mutate(move |sql| {
             Box::pin(async move {
