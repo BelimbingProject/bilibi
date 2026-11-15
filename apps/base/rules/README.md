@@ -17,7 +17,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 
 - **Fields** are Grid column paths on the trigger's table (`priority`, or `company.name` through a one-link), read as the `rules` principal. No aggregates.
 - **Operators**: `eq`, `ne`, `in`, `not_in`, `lt`, `le`, `gt`, `ge` (numbers and dates), `empty`, `not_empty`.
-- **Values compare exactly**: numbers as decimals (never floating point), dates and times as instants, text as written, true/false as such. A missing value matches only `empty`; every other comparison with it is false.
+- **Values compare exactly**: numbers as exact decimals (integer JSON numbers or decimal strings; fractional JSON numbers and values beyond decimal precision are refused), dates and times as instants, text as written, true/false as such. A missing value matches only `empty`; every other comparison with it is false.
 - **No "update any record" action.** An action is one owner's contract with its own schema, preview, checks and audit. The runner binds the action's subject field to the trigger's record; a rule never names a record, tenant, principal or operation outside the installed set.
 
 ## Versions and approval

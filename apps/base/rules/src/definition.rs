@@ -361,7 +361,7 @@ fn typed(ty: FieldType, choices: &[&str], value: &Value) -> Result<(), String> {
     match ty {
         FieldType::Integer | FieldType::Float | FieldType::Decimal => decimal(value)
             .map(|_| ())
-            .ok_or_else(|| "must be a number".into()),
+            .ok_or_else(|| "must be a number representable exactly; write decimals as text".into()),
         FieldType::Boolean => boolean(value)
             .map(|_| ())
             .ok_or_else(|| "must be true or false".into()),
@@ -399,10 +399,10 @@ fn boolean(value: &Value) -> Option<bool> {
 /// An exact number: a JSON number or a decimal string, never a float.
 fn decimal(value: &Value) -> Option<Decimal> {
     match value {
-        Value::Number(number) => Decimal::from_str(&number.to_string())
-            .or_else(|_| Decimal::from_scientific(&number.to_string()))
-            .ok(),
-        Value::String(text) => Decimal::from_str(text.trim()).ok(),
+        Value::Number(number) if number.is_i64() || number.is_u64() => {
+            Decimal::from_str_exact(&number.to_string()).ok()
+        }
+        Value::String(text) => Decimal::from_str_exact(text.trim()).ok(),
         _ => None,
     }
 }

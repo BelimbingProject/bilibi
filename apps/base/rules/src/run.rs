@@ -106,7 +106,6 @@ impl Subscribe for Triggers {
                 worker: crate::WORKER,
                 principal: crate::PRINCIPAL,
                 args: json!({"event_id": event.id}),
-                at: None,
             })
     }
 }

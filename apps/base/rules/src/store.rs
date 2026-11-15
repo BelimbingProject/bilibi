@@ -412,80 +412,126 @@ impl Rules {
             &'static str,
         >,
     > {
-        let catalog = Catalog::for_scope(client, scope)
-            .await
-            .map_err(Error::from)?;
-        let Some(root) = catalog.table(table) else {
-            return Ok(Err("read_refused"));
-        };
-        let mut types = Vec::new();
-        let mut expressions = Vec::new();
-        let mut reached = Vec::new();
-        for path in fields {
-            let column = match catalog.resolve(root, path) {
-                Ok(column)
-                    if column.agg.is_none()
-                        && column.many.is_none()
-                        && column
-                            .field
-                            .is_some_and(|field| !catalog.masked(column.table, field.id)) =>
-                {
-                    column
+        let read = async {
+            let catalog = Catalog::for_scope(client, scope)
+                .await
+                .map_err(Error::from)?;
+            let Some(root) = catalog.table(table) else {
+                return Ok(Err("read_refused"));
+            };
+            let mut types = Vec::new();
+            let mut expressions = Vec::new();
+            let mut reached = Vec::new();
+            for path in fields {
+                let column = match catalog.resolve(root, path) {
+                    Ok(column)
+                        if column.agg.is_none()
+                            && column.many.is_none()
+                            && column
+                                .field
+                                .is_some_and(|field| !catalog.masked(column.table, field.id)) =>
+                    {
+                        column
+                    }
+                    _ => return Ok(Err("restricted_field")),
+                };
+                if let Some((prefix, _)) = path.rsplit_once('.') {
+                    let target = catalog.table(column.table).ok_or(Error::Invalid)?;
+                    let target_key = format!("{prefix}.{}", target.key());
+                    let expression = bilibi_grid::scalar_expression(&catalog, table, &target_key)
+                        .map_err(|_| Error::Invalid)?;
+                    reached.push(format!("({expression}) IS NOT NULL"));
                 }
-                _ => return Ok(Err("restricted_field")),
-            };
-            if let Some((prefix, _)) = path.rsplit_once('.') {
-                let target = catalog.table(column.table).ok_or(Error::Invalid)?;
-                let target_key = format!("{prefix}.{}", target.key());
-                let expression = bilibi_grid::scalar_expression(&catalog, table, &target_key)
+                types.push((path.clone(), column.ty));
+                let expression = bilibi_grid::scalar_expression(&catalog, table, path)
                     .map_err(|_| Error::Invalid)?;
-                reached.push(format!("({expression}) IS NOT NULL"));
+                let expression = if matches!(
+                    column.ty,
+                    bilibi_grid::FieldType::Integer
+                        | bilibi_grid::FieldType::Decimal
+                        | bilibi_grid::FieldType::Float
+                ) {
+                    format!("({expression})::text")
+                } else {
+                    expression
+                };
+                expressions.push(format!("to_jsonb({expression})"));
             }
-            types.push((path.clone(), column.ty));
-            let expression = bilibi_grid::scalar_expression(&catalog, table, path)
+            let key = bilibi_grid::scalar_expression(&catalog, table, root.key())
                 .map_err(|_| Error::Invalid)?;
-            let expression = if matches!(
-                column.ty,
-                bilibi_grid::FieldType::Integer
-                    | bilibi_grid::FieldType::Decimal
-                    | bilibi_grid::FieldType::Float
-            ) {
-                format!("({expression})::text")
+            let values = if expressions.is_empty() {
+                "NULL::jsonb".into()
             } else {
-                expression
+                expressions.join(",")
             };
-            expressions.push(format!("to_jsonb({expression})"));
-        }
-        let key = bilibi_grid::scalar_expression(&catalog, table, root.key())
-            .map_err(|_| Error::Invalid)?;
-        let values = if expressions.is_empty() {
-            "NULL::jsonb".into()
-        } else {
-            expressions.join(",")
-        };
-        let reachable = if reached.is_empty() {
-            "true".into()
-        } else {
-            reached.join(" AND ")
-        };
-        let statement = format!("SELECT {values} FROM {} r WHERE ({key})::text=$3 AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND ({reachable}) LIMIT 1", root.scoped_source());
-        let Some(row) = client
-            .query_opt(&statement, &[&scope.tenant(), &scope.user(), &subject])
-            .await?
-        else {
-            return Ok(Err("subject_unavailable"));
-        };
-        let facts = fields
-            .iter()
-            .enumerate()
-            .map(|(i, path)| {
-                (
-                    path.clone(),
-                    row.get::<_, Option<Value>>(i).unwrap_or(Value::Null),
+            let reachable = if reached.is_empty() {
+                "true".into()
+            } else {
+                reached.join(" AND ")
+            };
+            let shape = client
+                .prepare(&format!("SELECT {key} FROM {} r", root.scoped_source()))
+                .await?;
+            let key_type = shape.columns()[0].type_();
+            let cast = format!(
+                "\"{}\".\"{}\"",
+                key_type.schema().replace('"', "\"\""),
+                key_type.name().replace('"', "\"\"")
+            );
+            let statement = format!("SELECT {values} FROM {} r WHERE {key}=$3::text::{cast} AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND ({reachable}) LIMIT 1", root.scoped_source());
+            let explain: Value = client
+                .query_one(
+                    &format!("EXPLAIN (FORMAT JSON) {statement}"),
+                    &[&scope.tenant(), &scope.user(), &subject],
                 )
-            })
-            .collect();
-        Ok(Ok((facts, types)))
+                .await?
+                .get(0);
+            let cost = explain[0]["Plan"]["Total Cost"]
+                .as_f64()
+                .ok_or(Error::Internal)?;
+            if !cost.is_finite() || cost > bilibi_grid::MAX_ESTIMATED_COST {
+                return Err(Error::Refused(
+                    "The rule's record read exceeds its cost bound".into(),
+                ));
+            }
+            let Some(row) = client
+                .query_opt(&statement, &[&scope.tenant(), &scope.user(), &subject])
+                .await?
+            else {
+                return Ok(Err("subject_unavailable"));
+            };
+            let facts = fields
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    (
+                        path.clone(),
+                        row.get::<_, Option<Value>>(i).unwrap_or(Value::Null),
+                    )
+                })
+                .collect();
+            Ok(Ok((facts, types)))
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(u64::from(
+                bilibi_grid::Bounds::default().statement_ms,
+            )),
+            read,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                client
+                    .client()
+                    .cancel_token()
+                    .cancel_query(tokio_postgres::NoTls)
+                    .await?;
+                Err(Error::Refused(
+                    "The rule's record read exceeded its time bound".into(),
+                ))
+            }
+        }
     }
 
     /// What a rule may use here: the triggers with the fields the reader may

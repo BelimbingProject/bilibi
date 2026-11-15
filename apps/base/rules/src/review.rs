@@ -96,7 +96,21 @@ impl Rules {
         let fields: Option<Vec<Value>> = paths.iter().map(|path| {
             let column = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)).ok()?;
             let field = column.field?;
-            Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key()}))
+            let hops: Option<Vec<Value>> = column.hops.iter().map(|link| {
+                let from = grid.table(link.decl.from)?;
+                let to = grid.table(link.to())?;
+                let join = match link.decl.join {
+                    bilibi_grid::Join::On { from_field, to_field } => json!({
+                        "from": from.field(from_field)?.source_key(),
+                        "to": to.field(to_field)?.source_key(),
+                    }),
+                    bilibi_grid::Join::Edge(source) => json!({"edge": source.sql, "tenant_scoped": source.tenant_scoped}),
+                };
+                Some(json!({"id": link.id(), "from": from.id(), "to": to.id(), "kind": format!("{:?}", link.kind()),
+                    "join": join, "source": to.source().sql, "tenant_scoped": to.source().tenant_scoped,
+                    "key": to.key(), "key_column": to.key_field().source_key(), "capability": to.capability()}))
+            }).collect();
+            Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key(), "hops": hops?}))
         }).collect();
         let actions: Option<Vec<Value>> = definition.actions.iter().map(|call| {
             let action = self.action(&call.operation)?;
@@ -105,7 +119,7 @@ impl Rules {
         }).collect();
         Some(digest(
             &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
-            "subject": trigger.subject, "version": trigger.version, "source": root.source().sql, "key": root.key(),
+            "subject": trigger.subject, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
             "capability": root.capability(), "fields": fields?, "actions": actions?}),
             &Value::Null,
         ))

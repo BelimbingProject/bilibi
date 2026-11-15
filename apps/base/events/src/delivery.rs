@@ -256,18 +256,11 @@ async fn hand_off(
         Some(handoff.principal),
     )
     .await?;
-    match handoff.at {
-        Some(at) => events
-            .queue
-            .enqueue_system_at_within(tx, &scope, handoff.worker, handoff.args, at)
-            .await
-            .map(|_| ()),
-        None => events
-            .queue
-            .enqueue_system_within(tx, &scope, handoff.worker, handoff.args)
-            .await
-            .map(|_| ()),
-    }
+    events
+        .queue
+        .enqueue_system_within(tx, &scope, handoff.worker, handoff.args)
+        .await
+        .map(|_| ())
 }
 /// Bounded failure codes; a subscriber's messages and SQL are never stored.
 fn code(error: &Error) -> &'static str {

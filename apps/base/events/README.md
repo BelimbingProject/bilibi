@@ -144,7 +144,7 @@ A Base subscriber that reacts to whatever owners offer it (Base Rules' `base/rul
 
 ### Handing work to your own worker
 
-A handler that must do more than write its copy (run as its own principal, take its own transaction) returns a `Handoff` from `Subscribe::handoff(event, changes)`: a worker of the subscriber's own module, a principal and arguments, and an optional first instant. Events enqueues it in the delivery transaction (`Queue::enqueue_system_within`), so the job commits with the receipt or not at all, and runs after that commit under the principal's own grants. A worker or principal another module owns is refused.
+A handler that must do more than write its copy (run as its own principal, take its own transaction) returns a `Handoff` from `Subscribe::handoff(event, changes)`: a worker of the subscriber's own module, a principal and arguments. Events enqueues it in the delivery transaction (`Queue::enqueue_system_within`), so the job commits with the receipt or not at all, and runs after that commit under the principal's own grants. A worker or principal another module owns is refused.
 
 ### The cause of an event
 

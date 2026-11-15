@@ -85,12 +85,11 @@ pub type SubscriberFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<Change>>>
 /// Work a subscriber hands to its own Queue worker after [`Subscribe::handle`]:
 /// enqueued in the delivery transaction as the subscriber module's own named
 /// principal, so it commits with the receipt or not at all, and runs after
-/// that commit under the principal's own grants. `at` delays the first try.
+/// that commit under the principal's own grants.
 pub struct Handoff {
     pub worker: &'static str,
     pub principal: &'static str,
     pub args: Value,
-    pub at: Option<std::time::SystemTime>,
 }
 /// Implement on the subscriber's own type. Write only in the supplied
 /// transaction and return every mutation; the receipt commits with them.

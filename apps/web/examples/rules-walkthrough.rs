@@ -631,6 +631,38 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         "both approved rules acted, with no AI call",
     );
 
+    let imprecise = json!({"name": "Unrepresentable decimal", "trigger": OPENED,
+        "conditions": [{"field": "amount", "op": "eq", "value": "1.00000000000000000000000000001"}],
+        "actions": [{"operation": "rule_cases.cases.flag", "input": "{}"}],
+        "examples": [{"facts": json!({"amount": "1.00"}).to_string(), "expect": "match"}]});
+    check(
+        proof
+            .write(&one, "base.rules.draft", imprecise)
+            .await
+            .is_err_and(|why| why.contains("representable exactly")),
+        "an unrepresentable decimal is refused rather than rounded to one",
+    );
+    let exact = json!({"name": "Exact decimal boundary", "trigger": OPENED,
+        "conditions": [{"field": "amount", "op": "eq", "value": "1.0000000000000000000000000001"}],
+        "actions": [{"operation": "rule_cases.cases.flag", "input": "{}"}],
+        "examples": [{"facts": json!({"amount": "1.00"}).to_string(), "expect": "no_match"},
+            {"facts": json!({"amount": "1.0000000000000000000000000001"}).to_string(), "expect": "match"}]});
+    let (exact_rule, exact_version) = proof.draft(&one, exact).await?;
+    check(
+        proof.approve(&one, exact_rule, exact_version).await.is_ok(),
+        "an exactly representable decimal retains its last digit",
+    );
+    let one_unit = proof.open(&one, 1, "Exact amount", "low", "1.00").await?;
+    proof.settled().await?;
+    check(
+        proof.case(one_unit).await?.2 == 0,
+        "one does not equal one plus 10 to the power minus 28",
+    );
+    proof
+        .switch(&one, exact_rule, false)
+        .await
+        .map_err(|_| Error::Internal)?;
+
     println!("\n== A denied capability stops the effect");
     proof
         .grant(&one, "rules", "rule-cases.case.route", Some(false))
