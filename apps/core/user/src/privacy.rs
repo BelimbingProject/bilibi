@@ -1,5 +1,5 @@
 //! User's personal-data store (ADR 05, `base/personal_data`): the accounts linked to
-//! the person and their notifications. Erasure closes each account the way
+//! the person, their notifications and action evidence. Erasure closes accounts as
 //! `delete_account` does (sessions ended, step-up factors removed, reset
 //! tokens dropped) and anonymises it: the row, its ID and its links stay, the
 //! name and sign-in email do not. Single sign-on links, pending sign-ins and
@@ -37,6 +37,7 @@ const NOTIFICATION_KIND: &str = "notification";
 /// The certificate's name for an account's retained sign-in history; not an
 /// audit record kind, so no store erases it.
 const SIGN_IN_HISTORY_KIND: &str = "session.sign_in_history";
+const AUDIT_ACTIONS_KIND: &str = "audit.account_actions";
 /// A membership invitation: the invitee's address, and the name on the
 /// account prepared for it, which has no sign-in yet.
 pub(crate) const INVITATION_KIND: &str = "user.invitation";
@@ -104,8 +105,23 @@ impl Handler for Accounts {
                 )
                 .await?
                 .get(0);
+            let users: Vec<i64> = client
+                .query(
+                    "SELECT id FROM users WHERE tenant_id=$1 AND person_id=$2",
+                    &[&scope.tenant(), &subject.person.get()],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            let actions = bilibi_audit::count_account_actions(client, scope, &users).await?;
             Ok(Located {
                 kinds: vec![
+                    KindCount {
+                        kind: AUDIT_ACTIONS_KIND.into(),
+                        by_person: actions,
+                        by_identifier: 0,
+                    },
                     KindCount {
                         kind: INVITATION_KIND.into(),
                         by_person: 0,
@@ -148,6 +164,8 @@ impl Handler for Accounts {
                 .await?;
             let bound = BOUND.get().ok_or(Error::Internal)?;
             let user_ids: Vec<i64> = accounts.iter().map(|row| row.get(0)).collect();
+            let actions =
+                bilibi_audit::export_account_actions(client, scope, grant, &user_ids).await?;
             let sign_ins = bound
                 .sessions
                 .sign_in_history(client, scope, grant, &user_ids)
@@ -202,7 +220,7 @@ impl Handler for Accounts {
                 })
                 .collect();
             Ok(Exported {
-                records: json!({"accounts": records, "invitations": invitations}),
+                records: json!({"accounts": records, "invitations": invitations, "audit_actions": actions}),
                 files: Vec::new(),
             })
         })
@@ -249,6 +267,18 @@ impl Handler for Accounts {
                     row.get(5),
                     row.get(6),
                 );
+                // Actions remain evidence under the operator's retention policy,
+                // including on repeat erasure of an already anonymised account.
+                // No fixed deadline: retention can be disabled or bookmarked.
+                if bilibi_audit::count_account_actions(tx.sql(), scope, &[user]).await? > 0 {
+                    erased.kept.push(Kept {
+                        kind: AUDIT_ACTIONS_KIND.into(),
+                        id: user.to_string(),
+                        reason: KeptReason::RetainedUntil,
+                        until: None,
+                        hold: None,
+                    });
+                }
                 if let Some(hold) = held_users.get(&user) {
                     erased.kept.push(Kept::held(USER_KIND, user, *hold));
                     continue;
