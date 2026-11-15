@@ -391,6 +391,7 @@ fn reason_text(reason: KeptReason) -> &'static str {
         KeptReason::RetainedUntil => "Retained record",
         KeptReason::LegalMinimum => "Legal minimum period",
         KeptReason::Shared => "Shared with another party",
+        KeptReason::Evidence => "Audit evidence under its retention policy",
     }
 }
 

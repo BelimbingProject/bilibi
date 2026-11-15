@@ -309,6 +309,9 @@ pub enum KeptReason {
     LegalMinimum,
     /// The record also belongs to another party (a company's address).
     Shared,
+    /// Audit evidence that its own retention and removal policies govern,
+    /// with no end the store can promise; no cleanup is owed for it.
+    Evidence,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Deferral {
