@@ -1,10 +1,12 @@
 services:
   web:
     # Amp assigns $PORT and the portal's $PUBLIC_URL; the app takes both from env.
+    # PUBLIC_URL ends in "/", but APP_ORIGIN must be the bare origin or sign-in is refused.
+    # systemd expands every ${...} in this command before bash runs, so strip it with sed.
     command: >-
       . "$HOME/.cargo/env" &&
       export DATABASE_URL="${DATABASE_URL:-postgres://bilibi:bilibi@127.0.0.1:5438/bilibi}" &&
-      export APP_ORIGIN="$PUBLIC_URL" BIND_ADDR="0.0.0.0:$PORT" &&
+      export APP_ORIGIN="$(printf '%s' "$PUBLIC_URL" | sed 's:/*$::')" BIND_ADDR="0.0.0.0:$PORT" &&
       cargo run -p bilibi-web --locked -- migrate &&
       cargo run -p bilibi-web --locked -- seed &&
       cargo run -p bilibi-web --locked -- run

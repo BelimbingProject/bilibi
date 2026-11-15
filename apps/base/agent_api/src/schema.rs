@@ -31,6 +31,44 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         "array" => &["items"],
         _ => return Err(format!("unknown schema type {kind}")),
     };
+    if let Some(reference) = node.get("x-bilibi-field") {
+        let field = reference
+            .as_str()
+            .and_then(bilibi_ui::record_field)
+            .ok_or("unknown record field vocabulary reference")?;
+        let expected = field.schema();
+        for key in [
+            "type",
+            "title",
+            "format",
+            "x-bilibi-picklist",
+            "x-bilibi-personal-data",
+        ] {
+            if node.get(key) != expected.get(key) {
+                return Err(format!(
+                    "{} disagrees with vocabulary {} ({key})",
+                    field.id, field.vocabulary
+                ));
+            }
+        }
+        // A particular operation may accept fewer of the owner's choices (e.g. creation).
+        if let Some(values) = expected.get("enum").and_then(Value::as_array) {
+            if node
+                .get("enum")
+                .and_then(Value::as_array)
+                .is_none_or(|actual| {
+                    actual.is_empty() || actual.iter().any(|value| !values.contains(value))
+                })
+            {
+                return Err(format!(
+                    "{} disagrees with vocabulary choices",
+                    field.vocabulary
+                ));
+            }
+        }
+    } else if node.get("x-bilibi-personal-data").is_some() {
+        return Err("personal-data metadata needs a record field reference".into());
+    }
     for key in object.keys() {
         if ![
             "type",
@@ -40,6 +78,8 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
             "x-bilibi-reference",
             "x-bilibi-picklist",
             "x-bilibi-money",
+            "x-bilibi-field",
+            "x-bilibi-personal-data",
         ]
         .contains(&key.as_str())
             && !keywords.contains(&key.as_str())
@@ -86,7 +126,16 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
             Some(v) => v.as_object().ok_or("properties must be an object")?.clone(),
             None => Default::default(),
         };
-        for child in properties.values() {
+        for (key, child) in &properties {
+            if let Some(field) = child
+                .get("x-bilibi-field")
+                .and_then(Value::as_str)
+                .and_then(bilibi_ui::record_field)
+            {
+                if key != field.id {
+                    return Err(format!("property {key} refers to field {}", field.id));
+                }
+            }
             check_node(child, depth + 1)?;
         }
         if let Some(required) = node.get("required") {

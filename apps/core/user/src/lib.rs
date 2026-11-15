@@ -413,13 +413,13 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_reg
 }) }
 
 // Columns extend the list vocabulary.
-bilibi_ui::record_fields! { pub(crate) mod record_fields {
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    EMAIL: bilibi_ui::RecordField::new("email", "Email"),
-    PERSON_ID: bilibi_ui::RecordField::new("person_id", "Person").path("person.name"),
-    EMAIL_VERIFIED_AT: bilibi_ui::RecordField::new("email_verified_at", "Email Verified"),
-    CREATED_AT: bilibi_ui::RecordField::new("created_at", "Created"),
-    UPDATED_AT: bilibi_ui::RecordField::new("updated_at", "Updated"),
+bilibi_ui::record_fields! { "core/user", pub(crate) mod record_fields {
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    EMAIL: bilibi_ui::RecordField::new("email", "Email", bilibi_ui::RecordFieldType::String),
+    PERSON_ID: bilibi_ui::RecordField::new("person_id", "Person", bilibi_ui::RecordFieldType::Integer).path("person.name"),
+    EMAIL_VERIFIED_AT: bilibi_ui::RecordField::new("email_verified_at", "Email Verified", bilibi_ui::RecordFieldType::DateTime),
+    CREATED_AT: bilibi_ui::RecordField::new("created_at", "Created", bilibi_ui::RecordFieldType::DateTime),
+    UPDATED_AT: bilibi_ui::RecordField::new("updated_at", "Updated", bilibi_ui::RecordFieldType::DateTime),
 } }
 
 pub use accounts::{validate_input, LANDING_KEY, NAME_MAX};
