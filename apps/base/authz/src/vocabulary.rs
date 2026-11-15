@@ -34,6 +34,10 @@ pub struct CapabilityDefinition {
     pub audience: Audience,
     /// The owner proves an explicit company for every record access.
     pub company_scoped: bool,
+    /// A role may give it with a reach narrower than all (#683): the owner
+    /// applies `Reach::predicate` on its owner field in every read and
+    /// rechecks `reach_admits` in every write (`with_reach`).
+    pub reach: bool,
 }
 impl CapabilityDefinition {
     pub const fn tenant(key: &'static str) -> Self {
@@ -41,6 +45,7 @@ impl CapabilityDefinition {
             key,
             audience: Audience::Tenant,
             company_scoped: false,
+            reach: false,
         }
     }
     pub const fn platform(key: &'static str) -> Self {
@@ -48,6 +53,7 @@ impl CapabilityDefinition {
             key,
             audience: Audience::Platform,
             company_scoped: false,
+            reach: false,
         }
     }
     /// A capability only a customer account may hold, on portal routes,
@@ -57,6 +63,7 @@ impl CapabilityDefinition {
             key,
             audience: Audience::Portal,
             company_scoped: false,
+            reach: false,
         }
     }
     pub fn is_platform(&self) -> bool {
@@ -70,6 +77,18 @@ impl CapabilityDefinition {
             key,
             audience: Audience::Tenant,
             company_scoped: true,
+            reach: false,
+        }
+    }
+    /// Opt in to record reach (#683) only after every owner path applies it:
+    /// a Grid table names its owner field (`TableDecl::owner`), and every
+    /// other read and write of the records applies `Reach::predicate` or
+    /// rechecks `reach_admits`. Then a role may give the key with reach
+    /// `own` or `team` as well as `all`. A tenant capability only.
+    pub const fn with_reach(self) -> Self {
+        Self {
+            reach: true,
+            ..self
         }
     }
     /// Whether an account of `kind` may ever hold this capability: a
@@ -244,6 +263,12 @@ impl Vocabulary {
             }
         }
         for cap in result.capabilities.values() {
+            if cap.definition.reach && cap.definition.audience != Audience::Tenant {
+                return Err(invalid(format!(
+                    "{} supports record reach, which only a tenant capability may",
+                    cap.definition.key
+                )));
+            }
             let mut parts = cap.definition.key.split('.');
             if !result.domains.contains(parts.next().unwrap())
                 || !result.verbs.contains(parts.next_back().unwrap())

@@ -1958,6 +1958,7 @@ version = "0.2.1"
 dependencies = [
  "askama",
  "axum",
+ "bilibi-activity",
  "bilibi-address",
  "bilibi-agent",
  "bilibi-agent-api",
@@ -1980,6 +1981,7 @@ dependencies = [
  "bilibi-records",
  "bilibi-security",
  "bilibi-step-up",
+ "bilibi-team",
  "bilibi-tenancy",
  "bilibi-tenant",
  "bilibi-ui",

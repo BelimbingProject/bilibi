@@ -1,6 +1,6 @@
 # Authorization owner contract
 
-**Use it for:** declaring capabilities, checking them, roles and grants (including roles a group you own, such as a team, gives its members), and masking fields some readers must not see.
+**Use it for:** declaring capabilities, checking them, roles and grants (including roles a group you own, such as a team, gives its members), how far a grant reaches into its records (mine, my team's or all), and masking fields some readers must not see.
 
 **Not for:** role tables, permission flags in code or `is admin` checks of your own.
 
@@ -227,6 +227,30 @@ A group another module owns (a Core team) can carry roles; its members hold them
 - **Live.** Decisions read the rows; there is no cache, job or sign-in step.
 - **Explainable.** `effective_principal_roles` and `authz_roles_for` carry `via` ("team:12", the group's source and id, never its name; null for manual and provider memberships). A decision only a group's role allowed logs reason `group_role_capability` with `via`. The decision log resolves it when shown: the group's name when the reader works in its company, otherwise "a team in a company you do not work in".
 - Direct denies win over group roles, as over every other grant.
+
+## Record reach
+
+A role gives a capability with a reach: **mine** (`own`), **my team's** (`team`) or **all** (`all`, the default) ([ADR 30](../../../docs/architecture/decisions/30-record-reach-on-grants.md), #683). It is the `reach` of the role's grant (`role_capabilities`, migration `base-authz-017-grant-reach`), or of a direct allow (`principal_capabilities`).
+
+| Reach | Records it admits |
+| --- | --- |
+| Mine | Owned by the account |
+| My team's | Mine, owned by someone who shares a Core team with the account, or filed under one of its teams |
+| All | Every record the capability opens |
+
+- **Opt in.** Only a key declared `CapabilityDefinition::tenant(KEY).with_reach()` may carry less than all; `Grants` refuses the rest ("always reaches all records"). Opt in only after every read of the records applies the reach and every write rechecks it.
+- **Widest wins.** An account's reach is the widest grant that gives it the key, in the same company context as the decision. Grant-all reaches all; a team role carries its role's reach.
+- **A restriction on the user wins over the team.** A direct deny removes the key. A direct allow's reach is the account's reach for the key: it caps what roles and team roles give, and gives the key at that reach.
+- **Reach only narrows.** It applies on top of the owner's tenant and company filters ([ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md)), never instead of them. Read live; nothing is cached.
+- **Apply it.** A Grid table names its owner field (`TableDecl::owner`, optional `team`) and Grid filters every read (`apps/base/grid/README.md`, "Record reach"). Your own SQL uses `Reach::predicate(owner, team)` with tenant `$1` and reader `$2`, after `reach_proof(client, scope, key)`; a write rechecks `reach_admits(client, scope, key, owner, team)` in its transaction. `effective_grants` returns the held keys and `Effective::reach_of` for a catalog.
+- **A grant gives no more reach than the actor holds.** `set_role_capability_in` (`grant: Option<Reach>`), `set_direct_in` (`Direct::Allow(reach)`), `validate_assignment`, group roles, new members of a group that carries roles, and provider role bounds need the actor to hold each key at least as far as it reaches (`Effective::reaches`). A system principal's grant needs all.
+- **Joining a team gives the member the team's reach.** Team management defines who shares "my team's" records; a membership change is not a grant and runs no reach check. A direct deny or a narrower direct allow on the user caps what the team gives.
+- **One rule for a user's direct rule.** An allow needs the actor to hold the key as far as it reaches. Clearing a direct rule on a key that supports reach (an allow, a deny or none) needs the actor to hold the key as far as the account reaches once it is gone, on their own account too, so neither a cap nor a deny-then-clear lifts it; a clear that leaves the key unheld needs nothing more (`Grants::validate_direct`, also run by the agent review). Setting a deny only narrows and checks no reach.
+- **Taking over an account needs all.** `holds_everything_of` treats a key the actor reaches only partly as covering nobody else's grant of it.
+- **Impersonating:** a key that supports reach is held only when the operator reaches all of it (`denied_impersonation_reach`), with the viewed account's reach.
+- **System principals** reach all of what they are granted; `reach_proof` holds nothing for them, as `holds_proof`.
+- **Where it shows.** The role page lists each grant's reach beside its key. `base.authz_agent.role_capability.set` and, for an allow, `base.authz_agent.principal_capability.set` take `reach` (`own`, `team`, `all`).
+- Proof: `BILIBI_RECORD_REACH=disposable cargo run -p bilibi-web --example record-reach` (`scripts/run-walkthroughs.sh record-reach`).
 
 ## Restrictions on a caller's read connection
 

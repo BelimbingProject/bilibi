@@ -183,7 +183,12 @@ INSERT INTO base_grid_ref_movements(id,tenant_id,item_id,delta,moved_on) VALUES 
         )
         .await?;
     grants
-        .set_direct(&admin, viewer.user(), "grid.reference.view", Some(false))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            "grid.reference.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     println!(
         "revoked: {:?}",

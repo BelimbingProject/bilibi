@@ -360,7 +360,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "Exact-company revocation, future start and inclusive end dates recheck retained scopes."
     );
     grants
-        .set_direct(&proof.admin, second.user(), VIEW, Some(false))
+        .set_direct(
+            &proof.admin,
+            second.user(),
+            VIEW,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     proof.read(&second, 2, false).await?;
     grants
@@ -416,7 +421,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             &proof.admin,
             first.user(),
             "admin.authz.role.update",
-            Some(true),
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
         )
         .await?;
     grants
@@ -424,7 +431,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             &proof.admin,
             first.user(),
             "admin.authz.system-principal.grant",
-            Some(true),
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
         )
         .await?;
     let client = db.get().await?;
@@ -434,7 +443,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     drop(client);
     assert!(matches!(
         grants
-            .set_direct(&delegated, second.user(), VIEW, Some(true))
+            .set_direct(
+                &delegated,
+                second.user(),
+                VIEW,
+                Some(bilibi_authz::grants::Direct::Allow(
+                    bilibi_authz::Reach::All
+                ))
+            )
             .await,
         Err(Error::Forbidden)
     ));
@@ -498,7 +514,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 &delegated,
                 proof.admin.user(),
                 "companies.view",
-                Some(false)
+                Some(bilibi_authz::grants::Direct::Deny)
             )
             .await,
         Err(Error::Forbidden)

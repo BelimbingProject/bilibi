@@ -54,6 +54,15 @@ joins, a link id that shadows a field, wrong source shape, claimed record types)
 and the Ready check refuses a table naming a capability Authz does not declare.
 Nothing executes a source at boot.
 
+## Record reach
+
+A table whose capability supports record reach (`CapabilityDefinition::with_reach`, `apps/base/authz/README.md`, "Record reach") names the integer field holding each row's owner, and optionally its Core team: `TableDecl::new(...).owner("owner_user_id").team("team_id")`.
+
+- The scoped catalog reads the reader's reach on the table's capability (`effective_grants`) with its grants. When it is narrower than all, every read wraps the source in `Reach::predicate` on those fields: projections, row pages, summaries, stats, lenses, scalar joins, text search, Base Search and Base Records. `Table::reach` says which; `Table::scoped_source` is the statement. Put `scoped_source()`, never `source().sql`, into a statement that reads rows.
+- Boot refuses a table read under a key with reach that names no owner field, and an owner field on a table whose key has none.
+- A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
+- A parent's oversight read skips a table it reaches only partly.
+
 ## Detail fields become columns
 
 A scalar field shown on a record can also be added to its list, under the same label.
@@ -123,6 +132,7 @@ chained one-link after a many-link, an enum, decimals, dates, and a restrictable
 field (`reference_items.unit_cost`). Managers, viewers and staff gain the
 capability through the contributed role extension; run `authz-reconcile` after
 deploying. The tables are empty unless a walkthrough or fixture fills them.
+`reference_tasks` (`base_grid_ref_tasks`, capability `grid.reference.task.view`, which supports reach) has an owner and a team for the record reach walkthrough; no role holds it.
 
 ## Running evidence
 

@@ -96,7 +96,7 @@ pub fn validate_capabilities(
     vocabulary: &bilibi_authz::Vocabulary,
 ) -> Result<()> {
     for table in installed.tables() {
-        if !vocabulary.capabilities.contains_key(table.capability()) {
+        let Some(capability) = vocabulary.capabilities.get(table.capability()) else {
             return Err(RegistryError::Contribution(format!(
                 "grid table {} from {} ({}:{}) names undeclared capability {}",
                 table.id(),
@@ -104,6 +104,28 @@ pub fn validate_capabilities(
                 table.provenance.source,
                 table.provenance.line,
                 table.capability()
+            )));
+        };
+        // Reach is applied through the owner field: a table read under a key
+        // that supports reach without one would show every row (#683).
+        if capability.definition.reach != table.decl.owner.is_some() {
+            return Err(RegistryError::Contribution(format!(
+                "grid table {} from {} ({}:{}): {} {}, so the table {} an owner field",
+                table.id(),
+                table.owner,
+                table.provenance.source,
+                table.provenance.line,
+                table.capability(),
+                if capability.definition.reach {
+                    "supports record reach"
+                } else {
+                    "does not support record reach"
+                },
+                if capability.definition.reach {
+                    "must declare"
+                } else {
+                    "cannot declare"
+                },
             )));
         }
     }
@@ -150,6 +172,7 @@ inventory::submit! {
         migrations: &[
             ("base-grid-001", include_str!("../migrations/001-reference.sql")),
             ("base-grid-002", include_str!("../migrations/002-reference-recorded-at.sql")),
+            ("base-grid-003-reference-tasks", include_str!("../migrations/003-reference-tasks.sql")),
         ],
         services: &[Service { id: PAGE_VIEWS, factory: page_views::service }, Service { id: OVERSIGHT_QUERIES, factory: oversight::service }],
     }

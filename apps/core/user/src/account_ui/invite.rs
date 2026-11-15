@@ -91,12 +91,9 @@ impl Invite {
             .into_iter()
             .filter(|role| match grants.get(&role.id) {
                 Some((true, _)) => actor.grant_all,
-                Some((false, capabilities)) => {
-                    actor.grant_all
-                        || capabilities
-                            .iter()
-                            .all(|key| actor.allowed.contains(key.as_str()))
-                }
+                Some((false, capabilities)) => capabilities
+                    .iter()
+                    .all(|(key, reach)| actor.reaches(key, *reach)),
                 None => false,
             })
             .collect())

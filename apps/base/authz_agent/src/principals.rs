@@ -1,6 +1,8 @@
 //! Reviewed administration of the installed vocabulary's named principals.
 use crate::{Bound, SYSTEM_LIST};
-use bilibi_authz::{authorize_key, effective_capabilities_in_company, effective_system, Effective};
+use bilibi_authz::{
+    authorize_key, effective_capabilities_in_company, effective_system, Effective, Reach,
+};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -37,7 +39,7 @@ pub(crate) async fn list(
                 "principal": principal.name, "capability": key,
                 "rule": rule(&current, key), "granted": current.allowed.contains(key),
                 "standing": vocabulary.standing(principal.name, key),
-                "can_allow": actor.allowed.contains(GRANT) && actor.allowed.contains(key),
+                "can_allow": actor.allowed.contains(GRANT) && actor.reaches(key, Reach::All),
                 "can_deny": actor.allowed.contains(GRANT),
                 "can_clear": actor.allowed.contains(REVOKE),
             }));
@@ -93,8 +95,7 @@ pub(crate) async fn review(
     if next == "allow"
         && !effective_capabilities_in_company(client, scope, scope.user(), None)
             .await?
-            .allowed
-            .contains(key)
+            .reaches(key, Reach::All)
     {
         return Err(Error::Forbidden.into());
     }

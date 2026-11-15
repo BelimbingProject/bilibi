@@ -718,7 +718,7 @@ pub(crate) fn field(alias: &str, table: &Table, id: &str) -> String {
     )
 }
 pub(crate) fn source(table: &Table) -> String {
-    format!("({})", table.source().sql)
+    table.scoped_source()
 }
 fn condition(link: &Link, parent: &Table, target: &Table, p: &str, t: &str) -> String {
     match link.decl.join {

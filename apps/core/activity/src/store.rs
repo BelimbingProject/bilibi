@@ -8,7 +8,7 @@ use crate::{
     Activity, Conflict, Direction, GuestRow, Invites, Patch, Priority, Reference, WriteError,
     WriteResult, GUEST_RECORD, MANAGE, MANAGE_ALL, RECORD, SERIES_RECORD, VIEW, VIEW_ALL,
 };
-use bilibi_authz::{authorize_proof, holds_proof};
+use bilibi_authz::{authorize_proof, holds_proof, reach_admits, reach_proof, Reach};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_events::{Events, NewEvent};
 use bilibi_party_ids::PersonId;
@@ -131,18 +131,39 @@ fn filing_company(scope: &Scope) -> Option<i64> {
         .map(|company| company.get())
 }
 
-/// Who is reading, and whether they hold the tenant-wide oversight read.
+/// Who is reading, and how far their oversight read (`core.activity.all.view`)
+/// reaches: every activity, their teams' (by assignee, #683), or none
+/// beyond those they take part in.
 struct Reader {
     tenant: i64,
     user: i64,
+    /// `$3`: the oversight read reaches every activity.
     all: bool,
+    /// It reaches the activities assigned to someone in one of their teams.
+    team: bool,
+}
+impl Reader {
+    /// The activities `a` the oversight read reaches, binding `$1` tenant,
+    /// `$2` reader and `$3` [`Reader::all`].
+    fn oversees(&self) -> String {
+        if self.team {
+            format!(
+                "($3 OR {})",
+                Reach::Team.predicate("a.assignee_user_id", None)
+            )
+        } else {
+            "$3".to_owned()
+        }
+    }
 }
 async fn reader(client: &dyn ProofClient, scope: &Scope) -> Result<Reader> {
     authorize_proof(client, scope, VIEW).await?;
+    let reach = reach_proof(client, scope, VIEW_ALL).await?;
     Ok(Reader {
         tenant: scope.tenant(),
         user: scope.user(),
-        all: holds_proof(client, scope, VIEW_ALL).await?,
+        all: reach == Some(Reach::All),
+        team: reach == Some(Reach::Team),
     })
 }
 
@@ -176,7 +197,8 @@ pub(crate) async fn get(client: &dyn ProofClient, scope: &Scope, id: i64) -> Res
 async fn visible(client: &dyn ProofClient, scope: &Scope, id: i64, lock: bool) -> Result<Activity> {
     let reader = reader(client, scope).await?;
     let sql = format!(
-        "SELECT {COLUMNS}, ($3 OR {MINE}) AS mine FROM core_activities a WHERE a.tenant_id=$1 AND a.id=$4 AND a.deleted_at IS NULL{}",
+        "SELECT {COLUMNS}, ({} OR {MINE}) AS mine FROM core_activities a WHERE a.tenant_id=$1 AND a.id=$4 AND a.deleted_at IS NULL{}",
+        reader.oversees(),
         if lock { " FOR UPDATE OF a" } else { "" }
     );
     let Some(row) = client
@@ -251,7 +273,7 @@ pub(crate) async fn conflicts(
     let except = except.unwrap_or(0);
     let rows = client
         .query(
-            &format!("SELECT p.user_id,a.id,a.subject,a.starts_at,a.ends_at,($3 OR {MINE}) AS visible
+            &format!("SELECT p.user_id,a.id,a.subject,a.starts_at,a.ends_at,({oversees} OR {MINE}) AS visible
                FROM core_activities a
                JOIN LATERAL (
                     SELECT a.assignee_user_id AS user_id
@@ -261,7 +283,7 @@ pub(crate) async fn conflicts(
                ) p ON p.user_id = ANY($4)
               WHERE a.tenant_id=$1 AND a.deleted_at IS NULL AND a.kind IN ('call','meeting') AND a.status='scheduled'
                 AND a.starts_at < $6 AND a.ends_at > $5 AND a.id<>$7
-              ORDER BY a.starts_at,a.id,p.user_id LIMIT 50"),
+              ORDER BY a.starts_at,a.id,p.user_id LIMIT 50", oversees = reader.oversees()),
             &[
                 &reader.tenant,
                 &reader.user,
@@ -298,20 +320,36 @@ pub(crate) async fn may_edit(
     activity: &Activity,
 ) -> Result<bool> {
     Ok(holds_proof(client, scope, MANAGE).await?
-        && (own(scope, activity) || holds_proof(client, scope, MANAGE_ALL).await?))
+        && (own(scope, activity) || oversees_edit(client, scope, activity).await?))
+}
+/// Whether `core.activity.all.manage` reaches `activity`: everyone's, or,
+/// with "my team's" reach, one assigned to someone in the actor's teams.
+async fn oversees_edit(
+    client: &dyn ProofClient,
+    scope: &Scope,
+    activity: &Activity,
+) -> Result<bool> {
+    reach_admits(
+        client,
+        scope,
+        MANAGE_ALL,
+        Some(activity.assignee_user_id),
+        None,
+    )
+    .await
 }
 fn own(scope: &Scope, activity: &Activity) -> bool {
     activity.created_by == scope.user() || activity.assignee_user_id == scope.user()
 }
 /// `core.activity.manage` on an activity the actor created or is assigned,
-/// and with `core.activity.all.manage` on anyone's.
+/// and with `core.activity.all.manage` on any it reaches (#683).
 async fn authorize_edit(
     client: &dyn ProofClient,
     scope: &Scope,
     activity: &Activity,
 ) -> WriteResult<()> {
     authorize_proof(client, scope, MANAGE).await?;
-    if own(scope, activity) || holds_proof(client, scope, MANAGE_ALL).await? {
+    if own(scope, activity) || oversees_edit(client, scope, activity).await? {
         Ok(())
     } else {
         Err(WriteError::Forbidden)

@@ -57,6 +57,13 @@ pub struct TableDecl {
     /// The audit `auditable_type` values rows are recorded under, so a field
     /// restriction reaches the audit views of those rows. One table claims a type.
     pub record_types: &'static [&'static str],
+    /// The field holding the account that owns a row (a deal's owner, a
+    /// case's assignee), for record reach (#683). Required exactly when the
+    /// table's capability supports reach (`CapabilityDefinition::with_reach`).
+    pub owner: Option<&'static str>,
+    /// The field holding the Core team a row is filed under (a case's queue
+    /// team), which "my team's" reach also admits. Needs `owner`.
+    pub team: Option<&'static str>,
 }
 impl TableDecl {
     pub const fn new(
@@ -77,6 +84,8 @@ impl TableDecl {
             time_field: None,
             fields,
             record_types: &[],
+            owner: None,
+            team: None,
         }
     }
     pub const fn label_field(self, field: &'static str) -> Self {
@@ -94,6 +103,22 @@ impl TableDecl {
     pub const fn record_types(self, types: &'static [&'static str]) -> Self {
         Self {
             record_types: types,
+            ..self
+        }
+    }
+    /// Names the integer field holding the account that owns a row. Grid
+    /// then keeps a reader to the rows their reach on the table's capability
+    /// admits (#683).
+    pub const fn owner(self, field: &'static str) -> Self {
+        Self {
+            owner: Some(field),
+            ..self
+        }
+    }
+    /// Names the integer field holding the Core team a row is filed under.
+    pub const fn team(self, field: &'static str) -> Self {
+        Self {
+            team: Some(field),
             ..self
         }
     }
@@ -215,6 +240,9 @@ pub struct Table {
     fields: Vec<Field>,
     links: Vec<Link>,
     protected: BTreeSet<&'static str>,
+    /// In a scoped catalog: the reader's reach on an owner-declaring table
+    /// when it is narrower than all (#683).
+    reach: Option<bilibi_authz::Reach>,
 }
 impl Table {
     pub fn id(&self) -> &'static str {
@@ -276,6 +304,44 @@ impl Table {
     /// Whether an operator may never restrict the field.
     pub fn is_protected(&self, field: &str) -> bool {
         self.protected.contains(field)
+    }
+    /// In a scoped catalog, how far the reader reaches into this table's
+    /// rows when it is narrower than all; `None` is every row the source
+    /// returns.
+    pub fn reach(&self) -> Option<bilibi_authz::Reach> {
+        self.reach
+    }
+    pub(crate) fn with_reach(mut self, reach: bilibi_authz::Reach) -> Self {
+        self.reach = (reach != bilibi_authz::Reach::All).then_some(reach);
+        self
+    }
+    /// The owner's statement for the rows this reader may read, as a
+    /// parenthesized subquery: the source itself, or, when the reader's reach
+    /// is narrower than all, the source kept to the rows the reach admits.
+    /// It binds the tenant as `$1` and the reader as `$2`, as every Grid
+    /// statement does. Put this, never `source().sql`, into a statement that
+    /// reads rows.
+    pub fn scoped_source(&self) -> String {
+        let sql = self.decl.source.sql;
+        match (self.reach, self.decl.owner) {
+            (Some(reach), Some(owner)) => {
+                let column = |id: &'static str| {
+                    let key = self
+                        .decl
+                        .fields
+                        .iter()
+                        .find(|field| field.id == id)
+                        .map_or(id, Field::source_key);
+                    format!("grid_reach.\"{}\"", key.replace('"', "\"\""))
+                };
+                let team = self.decl.team.map(column);
+                format!(
+                    "(SELECT * FROM ({sql}) grid_reach WHERE {})",
+                    reach.predicate(&column(owner), team.as_deref())
+                )
+            }
+            _ => format!("({sql})"),
+        }
     }
     /// A link to a table the actor cannot read does not exist for them: a path
     /// through it is refused exactly as an unknown one is, revealing nothing.
@@ -540,6 +606,19 @@ impl Table {
         {
             return Err(bad("time field must be a date or datetime".into()));
         }
+        for (name, id) in [("owner", decl.owner), ("team", decl.team)] {
+            if id.is_some_and(|id| {
+                decl.fields
+                    .iter()
+                    .find(|f| f.id == id)
+                    .is_none_or(|field| field.ty != FieldType::Integer)
+            }) {
+                return Err(bad(format!("{name} must be a declared integer field")));
+            }
+        }
+        if decl.team.is_some() && decl.owner.is_none() {
+            return Err(bad("a team field needs an owner field".into()));
+        }
         let mut kinds = BTreeSet::new();
         if !decl
             .record_types
@@ -566,6 +645,7 @@ impl Table {
             fields: decl.fields.to_vec(),
             links: Vec::new(),
             protected,
+            reach: None,
         })
     }
 }

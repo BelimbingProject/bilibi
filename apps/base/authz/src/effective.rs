@@ -5,23 +5,29 @@
 //! capability also needs the operator identity) but writes no decision-log row:
 //! a hidden table is not an access attempt. Enforcement of an action still calls
 //! `authorize_key`.
+use crate::Reach;
 use bilibi_database::Result;
 use bilibi_tenancy::{AccountKind, Scope};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tokio_postgres::GenericClient;
 
 pub async fn effective_capabilities(
     client: &impl GenericClient,
     scope: &Scope,
 ) -> Result<BTreeSet<&'static str>> {
+    Ok(effective_grants(client, scope).await?.allowed)
+}
+
+/// What the scope's actor holds right now and how far each key reaches, in
+/// one read, for a catalog that filters records by reach (Grid). The same
+/// rules as [`effective_capabilities`]; an impersonated scope holds a key
+/// that supports reach only where the operator reaches all of it, with the
+/// viewed account's reach, as `decide` rules it.
+pub async fn effective_grants(client: &impl GenericClient, scope: &Scope) -> Result<Effective> {
     if let Some(principal) = scope.principal() {
-        return Ok(effective_system(client, scope.tenant(), principal)
-            .await?
-            .allowed);
+        return effective_system(client, scope.tenant(), principal).await;
     }
-    let mut allowed = effective_capabilities_of(client, scope, scope.user())
-        .await?
-        .allowed;
+    let mut effective = effective_capabilities_of(client, scope, scope.user()).await?;
     if let Some(impersonator) = scope.impersonator() {
         let operator = effective_capabilities_in_company(
             client,
@@ -30,9 +36,15 @@ pub async fn effective_capabilities(
             scope.current_company().map(|id| id.get()),
         )
         .await?;
-        allowed.retain(|key| operator.allowed.contains(key));
+        // `reach_of` is `All` for a held key without reach, so this is the
+        // intersection, minus keys the operator reaches only partly.
+        effective
+            .allowed
+            .retain(|key| operator.reach_of(key) == Some(Reach::All));
+        let allowed = effective.allowed.clone();
+        effective.reach.retain(|key, _| allowed.contains(key));
     }
-    Ok(allowed)
+    Ok(effective)
 }
 
 /// What a named system principal holds in `tenant` right now (SP1): its
@@ -163,6 +175,22 @@ pub struct Effective {
     pub direct_allowed: BTreeSet<String>,
     pub direct_denied: BTreeSet<String>,
     pub grant_all: bool,
+    /// How far each allowed key that supports reach reaches (#683). A held
+    /// key absent here reaches all; read it through [`Effective::reach_of`].
+    pub reach: BTreeMap<&'static str, Reach>,
+}
+impl Effective {
+    /// How far `key` reaches: `None` when it is not held.
+    pub fn reach_of(&self, key: &str) -> Option<Reach> {
+        self.allowed
+            .contains(key)
+            .then(|| self.reach.get(key).copied().unwrap_or(Reach::All))
+    }
+    /// Whether `key` is held at least as far as `reach`: what giving `key`
+    /// with `reach` to another account or role requires (#683).
+    pub fn reaches(&self, key: &str, reach: Reach) -> bool {
+        self.reach_of(key).is_some_and(|held| held >= reach)
+    }
 }
 
 pub async fn effective_capabilities_of(
@@ -186,6 +214,27 @@ pub async fn effective_capabilities_in_company(
     user: i64,
     company: Option<i64>,
 ) -> Result<Effective> {
+    effective_in_company(client, scope, user, company, None).await
+}
+/// How far `user` would reach `key` tenant-wide without its direct rule on
+/// `key`: what clearing that rule leaves (#683). `None` when not held then.
+pub(crate) async fn reach_without_direct(
+    client: &impl GenericClient,
+    scope: &Scope,
+    user: i64,
+    key: &str,
+) -> Result<Option<Reach>> {
+    Ok(effective_in_company(client, scope, user, None, Some(key))
+        .await?
+        .reach_of(key))
+}
+async fn effective_in_company(
+    client: &impl GenericClient,
+    scope: &Scope,
+    user: i64,
+    company: Option<i64>,
+    without: Option<&str>,
+) -> Result<Effective> {
     let vocabulary = crate::vocabulary()?;
     let live = client
         .query_opt(
@@ -199,13 +248,13 @@ pub async fn effective_capabilities_in_company(
     }
     let direct = client
         .query(
-            "SELECT capability,is_allowed FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2",
-            &[&scope.tenant(), &user],
+            "SELECT capability,is_allowed,reach FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability IS DISTINCT FROM $3",
+            &[&scope.tenant(), &user, &without],
         )
         .await?;
     let granted = client
         .query(
-            "SELECT r.capability,bool_or(p.company_id IS NULL) FROM authz_roles_for($1,$2,$3) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 GROUP BY r.capability",
+            &format!("SELECT r.capability,bool_or(p.company_id IS NULL),max({rank}) FILTER (WHERE p.company_id IS NULL),max({rank}) FROM authz_roles_for($1,$2,$3) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 GROUP BY r.capability", rank = crate::reach::RANK_SQL),
             &[&scope.tenant(), &user, &company],
         )
         .await?;
@@ -227,23 +276,27 @@ pub async fn effective_capabilities_in_company(
         .filter(|row| !row.get::<_, bool>(1))
         .map(|row| row.get(0))
         .collect();
-    let allowed: BTreeSet<String> = direct
+    let direct_reach: BTreeMap<String, Reach> = direct
         .iter()
         .filter(|row| row.get::<_, bool>(1))
-        .map(|row| row.get(0))
+        .map(|row| (row.get(0), Reach::parse(row.get(2)).unwrap_or(Reach::All)))
         .collect();
-    let roles: BTreeSet<String> = granted
+    let allowed: BTreeSet<String> = direct_reach.keys().cloned().collect();
+    // A company-bounded role counts only for a key that supports company
+    // scope; its reach then counts as well.
+    let roles: BTreeMap<String, Reach> = granted
         .iter()
-        .filter(|row| {
-            row.get::<_, bool>(1)
-                || vocabulary
-                    .capabilities
-                    .get(row.get::<_, &str>(0))
-                    .is_some_and(|c| c.definition.company_scoped)
+        .filter_map(|row| {
+            let scoped = vocabulary
+                .capabilities
+                .get(row.get::<_, &str>(0))
+                .is_some_and(|c| c.definition.company_scoped);
+            let rank: Option<i32> = if scoped { row.get(3) } else { row.get(2) };
+            (row.get::<_, bool>(1) || scoped)
+                .then(|| (row.get(0), Reach::from_rank(rank.unwrap_or(2))))
         })
-        .map(|row| row.get(0))
         .collect();
-    let effective = vocabulary
+    let effective: BTreeSet<&'static str> = vocabulary
         .capabilities
         .iter()
         .filter(|(key, owned)| {
@@ -252,15 +305,34 @@ pub async fn effective_capabilities_in_company(
                 && !denied.contains(**key)
                 && ((grant_all && owned.definition.audience != crate::Audience::Portal)
                     || allowed.contains(**key)
-                    || roles.contains(**key))
+                    || roles.contains_key(**key))
         })
         .map(|(key, _)| *key)
+        .collect();
+    // A direct allow's reach caps every role; else grant-all reaches all,
+    // then the widest role.
+    let reach = effective
+        .iter()
+        .filter(|key| vocabulary.capabilities[**key].definition.reach)
+        .map(|key| {
+            let reach = if let Some(direct) = direct_reach.get(*key) {
+                *direct
+            } else if grant_all
+                && vocabulary.capabilities[*key].definition.audience != crate::Audience::Portal
+            {
+                Reach::All
+            } else {
+                roles.get(*key).copied().unwrap_or(Reach::All)
+            };
+            (*key, reach)
+        })
         .collect();
     Ok(Effective {
         allowed: effective,
         direct_allowed: allowed,
         direct_denied: denied,
         grant_all,
+        reach,
     })
 }
 
@@ -272,7 +344,8 @@ pub async fn effective_capabilities_in_company(
 /// one account set another's password or sign-in address, delete it or act as
 /// it checks it first, so the account is not a way around that rule. A named
 /// system principal compares its own grants and never covers a full-access
-/// account. A read, not a decision: nothing is logged.
+/// account. A key the actor holds with a reach narrower than all covers no
+/// other account's grant of it. A read, not a decision: nothing is logged.
 pub async fn holds_everything_of(
     client: &impl GenericClient,
     scope: &Scope,
@@ -300,7 +373,15 @@ pub async fn holds_everything_of(
             Some(grants) => grants.clone(),
             None => effective_capabilities_in_company(client, scope, scope.user(), company).await?,
         };
-        if (held.grant_all && !actor.grant_all) || !held.allowed.is_subset(&actor.allowed) {
+        // Taking over an account hands over its records: a key the actor
+        // reaches only partly (mine, my team's) never covers another
+        // account's grant of it, whatever that account's reach (#683).
+        if (held.grant_all && !actor.grant_all)
+            || !held
+                .allowed
+                .iter()
+                .all(|key| actor.reach_of(key) == Some(Reach::All))
+        {
             return Ok(false);
         }
     }

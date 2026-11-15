@@ -144,7 +144,8 @@ impl Catalog {
         reveal: Option<(&str, &str)>,
     ) -> Result<Self, CatalogError> {
         let installed = crate::installed().map_err(|_| Error::Internal)?;
-        let allowed = bilibi_authz::effective_capabilities(client, scope).await?;
+        // One read for what the reader holds and how far it reaches (#683).
+        let grants = bilibi_authz::effective_grants(client, scope).await?;
         let restricted = bilibi_authz::fields::restricted(client, scope).await?;
         let masked = bilibi_authz::fields::masked(client, scope).await?;
         // A record owner can expose a field stored in a linked Extension table.
@@ -195,9 +196,9 @@ impl Catalog {
         let mut tables = BTreeMap::new();
         let mut masks = BTreeMap::new();
         for (id, table) in installed.map() {
-            if !allowed.contains(table.capability()) {
+            let Some(reach) = grants.reach_of(table.capability()) else {
                 continue;
-            }
+            };
             let mut own = masked.get(*id).cloned().unwrap_or_default();
             own.extend(
                 contributed_masks
@@ -221,7 +222,15 @@ impl Catalog {
                 .filter(|field| !masked.get(*id).is_some_and(|m| m.contains_key(*field)))
                 .collect();
             hidden.extend(contributed_hidden.get(*id).into_iter().flatten().copied());
-            tables.insert(*id, table.without(&hidden));
+            let table = table.without(&hidden);
+            tables.insert(
+                *id,
+                if table.decl.owner.is_some() {
+                    table.with_reach(reach)
+                } else {
+                    table
+                },
+            );
             if !own.is_empty() {
                 masks.insert(*id, own);
             }
@@ -253,7 +262,9 @@ impl Catalog {
         let mut catalog = Self::for_scope(client, &parent).await?;
         let mut tables = BTreeMap::new();
         for table in catalog.tables.values() {
-            if !table.oversight_classified() {
+            // A child's rows have no owner in the parent's teams: a parent
+            // that reaches a table only partly reads none of it (#683).
+            if !table.oversight_classified() || table.reach().is_some() {
                 continue;
             }
             let rule = &grant.tables()[table.id()];

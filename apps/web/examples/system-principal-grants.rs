@@ -198,7 +198,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await;
     grants
-        .set_direct(&admin, admin.user(), CAPABILITY, Some(false))
+        .set_direct(
+            &admin,
+            admin.user(),
+            CAPABILITY,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     attempt(
         &plans,
@@ -241,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &admin,
             admin.user(),
             "admin.authz.system-principal.revoke",
-            Some(false),
+            Some(bilibi_authz::grants::Direct::Deny),
         )
         .await?;
     println!(

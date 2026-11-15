@@ -79,6 +79,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [21 One sign-in owns credentials over separate tenant memberships](./21-one-sign-in-several-tenant-memberships.md) | Accepted; implementation in progress |
 | [09 The current company is a session choice, never a grant](./09-current-company-is-a-session-choice.md) | Superseded by ADR 19 |
 | [27 A public visitor session is its own credential, bound to an origin and a Domain's records](./27-visitor-sessions-are-a-separate-credential.md) | Proposed |
+| [30 Record reach is part of a role's grant, applied by the record's owner through Grid](./30-record-reach-on-grants.md) | Proposed |
 | [16 Customer accounts are a kind of account, kept out of the staff application by three barriers](./16-customer-accounts-and-portal.md) | Proposed |
 
 ### Personal data

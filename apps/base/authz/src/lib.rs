@@ -6,6 +6,7 @@ mod effective;
 pub mod field_catalog;
 pub mod fields;
 pub mod grants;
+mod reach;
 pub mod restrictions;
 mod restrictions_web;
 pub mod roles;
@@ -18,9 +19,10 @@ use bilibi_database::{Error, Result};
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, Scope};
 pub use effective::{
     effective_capabilities, effective_capabilities_in_company, effective_capabilities_of,
-    effective_system, has_effective_role, holder_page, holders, holds_everything_of, role_page,
-    Effective, RoleChoice,
+    effective_grants, effective_system, has_effective_role, holder_page, holders,
+    holds_everything_of, role_page, Effective, RoleChoice,
 };
+pub use reach::{reach_admits, reach_proof, Reach, TEAM_SOURCE};
 use std::{
     collections::HashSet,
     sync::{Arc, OnceLock},
@@ -231,20 +233,46 @@ async fn user_decision_proof(
 ) -> Result<(Decision, Option<String>)> {
     user_decision(&Proof(client), scope, key, company).await
 }
-/// One live user decision on either database connection shape. An
-/// impersonated scope is the intersection of the viewed account and the
-/// operator for the same company. A direct deny on either account therefore
-/// wins, even when the other account has a direct allow or grant-all role.
-/// The text beside the decision names the group a role came from ("team Line
-/// 2 crew") when only a group role allowed it, for the decision log.
 async fn user_decision(
     client: &impl Reader,
     scope: &Scope,
     key: &str,
     company: Option<i64>,
 ) -> Result<(Decision, Option<String>)> {
+    let judged = user_judgement(client, scope, key, company).await?;
+    Ok((judged.decision, judged.via))
+}
+/// One live user decision and the reach it carries.
+pub(crate) struct Judged {
+    pub(crate) decision: Decision,
+    /// The group a role came from, for the decision log.
+    pub(crate) via: Option<String>,
+    /// How far an allow reaches (`All` for a key without reach, or a deny).
+    pub(crate) reach: Reach,
+}
+/// One live user decision on either database connection shape. An
+/// impersonated scope is the intersection of the viewed account and the
+/// operator for the same company. A direct deny on either account therefore
+/// wins, even when the other account has a direct allow or grant-all role.
+/// The text beside the decision names the group a role came from ("team Line
+/// 2 crew") when only a group role allowed it, for the decision log. The
+/// reach is the widest of the grants that allow it; while impersonating, a
+/// key that supports reach is refused unless the operator reaches all of it
+/// (`denied_impersonation_reach`): the viewed account's records are not the
+/// operator's own or team's.
+pub(crate) async fn user_judgement(
+    client: &impl Reader,
+    scope: &Scope,
+    key: &str,
+    company: Option<i64>,
+) -> Result<Judged> {
+    let denied = |reason| Judged {
+        decision: Decision::deny(reason),
+        via: None,
+        reach: Reach::All,
+    };
     Ok(match vocabulary()?.capabilities.get(key) {
-        None => (Decision::deny("denied_unknown_capability"), None),
+        None => denied("denied_unknown_capability"),
         Some(cap) => {
             let live = client
                 .one(LIVE_TENANT_SQL, &[&scope.tenant()])
@@ -256,48 +284,46 @@ async fn user_decision(
                     .await?
                     .is_some();
             if !live {
-                (Decision::deny("denied_invalid_actor_context"), None)
+                denied("denied_invalid_actor_context")
             } else if !cap.definition.admits(scope.actor().kind()) {
-                (Decision::deny("denied_audience"), None)
+                denied("denied_audience")
             } else if !operator {
-                (Decision::deny("denied_platform_scope"), None)
+                denied("denied_platform_scope")
             } else {
+                let company = company.filter(|_| cap.definition.company_scoped);
+                let portal = cap.definition.audience == Audience::Portal;
                 let row = client
                     .one(
                         GRANTS_SQL,
-                        &[
-                            &scope.tenant(),
-                            &scope.user(),
-                            &key,
-                            &company.filter(|_| cap.definition.company_scoped),
-                        ],
+                        &[&scope.tenant(), &scope.user(), &key, &company],
                     )
                     .await?
                     .ok_or(Error::Internal)?;
-                let viewed = judge(&row, cap.definition.audience == Audience::Portal);
-                let viewed_via = via(&row, viewed);
+                let viewed = judge(&row, portal, cap.definition.reach);
                 match scope.impersonator() {
-                    None => (viewed, viewed_via),
+                    None => viewed,
                     Some(impersonator) => {
                         let row = client
                             .one(
                                 GRANTS_SQL,
-                                &[
-                                    &scope.tenant(),
-                                    &impersonator.user(),
-                                    &key,
-                                    &company.filter(|_| cap.definition.company_scoped),
-                                ],
+                                &[&scope.tenant(), &impersonator.user(), &key, &company],
                             )
                             .await?
                             .ok_or(Error::Internal)?;
-                        let operator = judge(&row, cap.definition.audience == Audience::Portal);
-                        let operator_via = via(&row, operator);
-                        let decision = intersection(viewed, operator);
-                        let via = (decision.reason == GROUP_ROLE)
-                            .then(|| viewed_via.or(operator_via))
-                            .flatten();
-                        (decision, via)
+                        let operator = judge(&row, portal, cap.definition.reach);
+                        let decision = intersection(viewed.decision, operator.decision);
+                        if decision.allowed && operator.reach != Reach::All {
+                            denied("denied_impersonation_reach")
+                        } else {
+                            let via = (decision.reason == GROUP_ROLE)
+                                .then(|| viewed.via.or(operator.via))
+                                .flatten();
+                            Judged {
+                                decision,
+                                via,
+                                reach: viewed.reach,
+                            }
+                        }
                     }
                 }
             }
@@ -325,7 +351,7 @@ pub async fn authorize_proof(client: &dyn ProofClient, scope: &Scope, key: &str)
 const LIVE_TENANT_SQL: &str =
     "SELECT id FROM tenants WHERE id=$1 AND status='active' AND deleted_at IS NULL";
 const OPERATOR_SQL: &str = "SELECT o.tenant_id FROM platform_operator o JOIN tenants t ON t.id=o.tenant_id WHERE o.singleton AND o.tenant_id=$1 AND t.status='active' AND t.deleted_at IS NULL";
-const GRANTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND NOT is_allowed), EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.grant_all AND p.company_id IS NULL), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NULL), (SELECT min(p.via) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NOT NULL)";
+const GRANTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND NOT is_allowed), (SELECT CASE reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN roles r ON r.tenant_id=p.tenant_id AND r.id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.grant_all AND p.company_id IS NULL), EXISTS(SELECT 1 FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NULL), (SELECT min(p.via) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3 AND p.via IS NOT NULL), (SELECT max(CASE r.reach WHEN 'all' THEN 2 WHEN 'team' THEN 1 ELSE 0 END) FROM authz_roles_for($1,$2,$4) p JOIN role_capabilities r ON r.tenant_id=p.tenant_id AND r.role_id=p.role_id WHERE p.tenant_id=$1 AND p.user_id=$2 AND r.capability=$3)";
 const SYSTEM_GRANT_SQL: &str = "SELECT is_allowed FROM authz_system_grants WHERE tenant_id=$1 AND principal=$2 AND capability=$3";
 const LOG_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal,via) VALUES($1,$2,$3,$4,$5,$6,$7,$8)";
 const LOG_RETURNING_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_id,capability,allowed,reason,principal_type,system_principal,via) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id";
@@ -333,27 +359,41 @@ const LOG_RETURNING_SQL: &str = "INSERT INTO authz_decision_log(tenant_id,user_i
 const GROUP_ROLE: &str = "group_role_capability";
 /// Deny wins over every allow; an allow names the grant that carried it.
 /// Grant-all is a staff role: it never satisfies a portal capability, which
-/// needs a direct allow or a role that lists it (ADR 16).
-fn judge(row: &tokio_postgres::Row, portal: bool) -> Decision {
-    if row.get::<_, bool>(0) {
-        Decision::deny("denied_explicitly")
-    } else if row.get::<_, bool>(1) {
-        Decision::allow("direct_capability")
+/// needs a direct allow or a role that lists it (ADR 16). When the key
+/// supports reach, a direct allow reaches as far as it says, capping every
+/// role and team role; otherwise grant-all reaches all and a role grant as
+/// far as the widest role that gives the key.
+fn judge(row: &tokio_postgres::Row, portal: bool, ranged: bool) -> Judged {
+    let ranked = |rank: Option<i32>| {
+        if ranged {
+            Reach::from_rank(rank.unwrap_or(2))
+        } else {
+            Reach::All
+        }
+    };
+    let role_reach = || ranked(row.get::<_, Option<i32>>(5));
+    let direct = row.get::<_, Option<i32>>(1);
+    let (decision, reach) = if row.get::<_, bool>(0) {
+        (Decision::deny("denied_explicitly"), Reach::All)
+    } else if direct.is_some() {
+        (Decision::allow("direct_capability"), ranked(direct))
     } else if row.get::<_, bool>(2) && !portal {
-        Decision::allow("grant_all")
+        (Decision::allow("grant_all"), Reach::All)
     } else if row.get::<_, bool>(3) {
-        Decision::allow("role_capability")
+        (Decision::allow("role_capability"), role_reach())
     } else if row.get::<_, Option<String>>(4).is_some() {
-        Decision::allow(GROUP_ROLE)
+        (Decision::allow(GROUP_ROLE), role_reach())
     } else {
-        Decision::deny("denied_missing_capability")
-    }
-}
-/// The group a [`GROUP_ROLE`] allow came from, as the decision log names it.
-fn via(row: &tokio_postgres::Row, decision: Decision) -> Option<String> {
-    (decision.reason == GROUP_ROLE)
+        (Decision::deny("denied_missing_capability"), Reach::All)
+    };
+    let via = (decision.reason == GROUP_ROLE)
         .then(|| row.get::<_, Option<String>>(4))
-        .flatten()
+        .flatten();
+    Judged {
+        decision,
+        via,
+        reach,
+    }
 }
 /// Both identities must allow the capability. Preserve an explicit denial as
 /// the reason even when the other identity also lacks the capability.
@@ -465,7 +505,7 @@ pub async fn decide_system(
 }
 /// The one read the named-principal rule needs, so the same decision runs on
 /// a pooled client, a transaction or Tenancy's sealed proof connection.
-trait Reader {
+pub(crate) trait Reader {
     async fn one(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Option<Row>>;
 }
 impl<T: GenericClient> Reader for T {
@@ -473,7 +513,7 @@ impl<T: GenericClient> Reader for T {
         Ok(self.query_opt(sql, params).await?)
     }
 }
-struct Proof<'a>(&'a dyn ProofClient);
+pub(crate) struct Proof<'a>(pub(crate) &'a dyn ProofClient);
 impl Reader for Proof<'_> {
     async fn one(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Option<Row>> {
         self.0.query_opt(sql, params).await
@@ -696,7 +736,7 @@ pub async fn restrictions_for(
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/authz",layer:bilibi_module_registry::Layer::Base,
     dependencies:&["base/module_registry","base/database","base/tenancy","base/audit","base/menu","base/settings","base/ui","base/locale","base/datetime","base/step_up"],
-    migrations:&[("base-authz-012-external-roles",include_str!("../migrations/012-external-roles.sql")),("007-authz-policy",include_str!("../migrations/007-policy.sql")),("base-authz-008-decision-log-restrictions",include_str!("../migrations/008-decision-log-restrictions.sql")),("base-authz-009-roles-admin",include_str!("../migrations/009-roles-admin.sql")),("base-authz-010-decision-log-retention",include_str!("../migrations/010-decision-log-retention.sql")),("base-authz-011-role-company",include_str!("../migrations/011-role-company.sql")),("base-authz-013-field-masks",include_str!("../migrations/013-field-masks.sql")),("base-authz-014-assignment-bounds",include_str!("../migrations/014-assignment-bounds.sql")),("base-authz-015-optional-engagement-dates",include_str!("../migrations/015-optional-engagement-dates.sql")),("base-authz-016-group-roles",include_str!("../migrations/016-group-roles.sql"))],
+    migrations:&[("base-authz-012-external-roles",include_str!("../migrations/012-external-roles.sql")),("007-authz-policy",include_str!("../migrations/007-policy.sql")),("base-authz-008-decision-log-restrictions",include_str!("../migrations/008-decision-log-restrictions.sql")),("base-authz-009-roles-admin",include_str!("../migrations/009-roles-admin.sql")),("base-authz-010-decision-log-retention",include_str!("../migrations/010-decision-log-retention.sql")),("base-authz-011-role-company",include_str!("../migrations/011-role-company.sql")),("base-authz-013-field-masks",include_str!("../migrations/013-field-masks.sql")),("base-authz-014-assignment-bounds",include_str!("../migrations/014-assignment-bounds.sql")),("base-authz-015-optional-engagement-dates",include_str!("../migrations/015-optional-engagement-dates.sql")),("base-authz-016-group-roles",include_str!("../migrations/016-group-roles.sql")),("base-authz-017-grant-reach",include_str!("../migrations/017-grant-reach.sql"))],
     services:&[bilibi_module_registry::Service {id:"base/authz.grants",factory:|services| Ok(Arc::new(grants::Grants::new(
         services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
         services.get("base/database.mutations")?, vocabulary::Vocabulary::from_inventory()?, services.get("base/tenancy.authentication")?,
