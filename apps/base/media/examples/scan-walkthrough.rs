@@ -673,9 +673,29 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
         show(label, result.map(|rows| rows[0].state));
     }
     println!("== notices for the quarantined file");
-    for row in client.query("SELECT user_id,title,coalesce(url,'') FROM notifications WHERE type='media.quarantined' ORDER BY user_id", &[]).await? {
-        println!("user {}: {} {}", row.get::<_, i64>(0), row.get::<_, String>(1), row.get::<_, String>(2));
+    let notices = client.query("SELECT user_id,title,coalesce(url,''),body FROM notifications WHERE type='media.quarantined' ORDER BY user_id", &[]).await?;
+    for row in &notices {
+        println!(
+            "user {}: {} {} — {}",
+            row.get::<_, i64>(0),
+            row.get::<_, String>(1),
+            row.get::<_, String>(2),
+            row.get::<_, String>(3)
+        );
     }
+    // A file name can be personal data and a notice is never erased, so the
+    // notice names the file by id and the record it is attached to (#702).
+    let named = format!("File {infected_id}, attached to {TICKET} 1,");
+    if notices.is_empty()
+        || notices.iter().any(|row| {
+            let body: String = row.get(3);
+            body.contains("invoice.txt") || !body.starts_with(&named)
+        })
+    {
+        println!("  FAIL every quarantine notice names {named} and never invoice.txt");
+        return Err(bilibi_database::Error::Internal);
+    }
+    println!("  ok: every quarantine notice names {named} and not the file name");
 
     println!("== quarantine list per tenant");
     let attention = [ScanState::Infected, ScanState::Failed];

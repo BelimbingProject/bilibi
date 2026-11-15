@@ -89,21 +89,21 @@ static REQUESTS_SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     .expect("customer requests list spec")
 });
 
-bilibi_ui::record_fields! { mod fields {
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    EMAIL: bilibi_ui::RecordField::new("email", "Email"),
-    COMPANY: bilibi_ui::RecordField::new("company", "Company"),
-    STATUS: bilibi_ui::RecordField::new("status", "Status"),
-    EXPIRES: bilibi_ui::RecordField::new("expires", "Link expires"),
-    PERSON: bilibi_ui::RecordField::new("person_id", "Person").excluded("Chosen in the invite dialog; the list names the invitation"),
-    AFFILIATION: bilibi_ui::RecordField::new("affiliation_id", "Signs in under").excluded("Shown as the company column"),
-    ADDRESS: bilibi_ui::RecordField::new("address", "Portal address").excluded("A fact of the portal site, not of an invitation"),
-    TITLE: bilibi_ui::RecordField::new("title", "Portal title").excluded("A fact of the portal site, not of an invitation"),
-    ENABLED: bilibi_ui::RecordField::new("enabled", "Portal is on").excluded("A fact of the portal site, not of an invitation"),
-    ACCESS: bilibi_ui::RecordField::new("access", "Portal access"),
-    REGISTRATION: bilibi_ui::RecordField::new("registration", "Customers may request an account").excluded("A fact of the portal site, not of an invitation"),
-    COMPANY_NAME: bilibi_ui::RecordField::new("company_name", "Company (as typed)"),
-    REQUESTED: bilibi_ui::RecordField::new("requested", "Request"),
+bilibi_ui::record_fields! { "core/portal", pub(crate) mod fields {
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    EMAIL: bilibi_ui::RecordField::new("email", "Email", bilibi_ui::RecordFieldType::String),
+    COMPANY: bilibi_ui::RecordField::new("company", "Company", bilibi_ui::RecordFieldType::String),
+    STATUS: bilibi_ui::RecordField::new("status", "Status", bilibi_ui::RecordFieldType::String),
+    EXPIRES: bilibi_ui::RecordField::new("expires", "Link expires", bilibi_ui::RecordFieldType::DateTime),
+    PERSON: bilibi_ui::RecordField::new("person_id", "Person", bilibi_ui::RecordFieldType::Integer).excluded("Chosen in the invite dialog; the list names the invitation"),
+    AFFILIATION: bilibi_ui::RecordField::new("affiliation_id", "Signs in under", bilibi_ui::RecordFieldType::Integer).excluded("Shown as the company column"),
+    ADDRESS: bilibi_ui::RecordField::new("address", "Portal address", bilibi_ui::RecordFieldType::String).excluded("A fact of the portal site, not of an invitation"),
+    TITLE: bilibi_ui::RecordField::new("title", "Portal title", bilibi_ui::RecordFieldType::String).excluded("A fact of the portal site, not of an invitation"),
+    ENABLED: bilibi_ui::RecordField::new("enabled", "Portal is on", bilibi_ui::RecordFieldType::Boolean).excluded("A fact of the portal site, not of an invitation"),
+    ACCESS: bilibi_ui::RecordField::new("access", "Portal access", bilibi_ui::RecordFieldType::String),
+    REGISTRATION: bilibi_ui::RecordField::new("registration", "Customers may request an account", bilibi_ui::RecordFieldType::Boolean).excluded("A fact of the portal site, not of an invitation"),
+    COMPANY_NAME: bilibi_ui::RecordField::new("company_name", "Company (as typed)", bilibi_ui::RecordFieldType::String),
+    REQUESTED: bilibi_ui::RecordField::new("requested", "Request", bilibi_ui::RecordFieldType::String),
 } }
 
 fn request_builtins() -> Vec<BuiltinColumn> {

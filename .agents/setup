@@ -20,6 +20,10 @@ cargo build -p bilibi-web --locked
 # Dependencies for the CI lint gate; check artifacts are separate from build ones.
 # Claude Code cloud only snapshots a setup that finishes in about 5 minutes, and the
 # workspace clippy run would push it over, so there the task runs clippy itself.
+# The warm-up only saves the first lint run time: two jobs keep it inside an orb's
+# memory, and a failure or out-of-memory kill only warns, because CI runs the full gate.
 if [[ ${CLAUDE_CODE_REMOTE:-} != true ]]; then
-    cargo clippy --workspace --all-targets --locked -- -D warnings
+    if ! cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings; then
+        echo "warning: the clippy warm-up did not finish; the first clippy run will build the rest" >&2
+    fi
 fi
