@@ -716,6 +716,18 @@ impl Detail {
                 let value = entry
                     .and_then(|entry| entry.value.clone())
                     .unwrap_or_default();
+                let value = if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                ) {
+                    crate::mapping::convert(field, &value)
+                        .ok()
+                        .flatten()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
                 let mut input = bilibi_ui::Field::in_form("map", &format!("v_{}", field.name))
                     .id(format!("{id}-value"))
                     .label("Value")
@@ -730,12 +742,20 @@ impl Detail {
                         .kind(InputKind::Select)
                         .prompt("Choose")
                         .options(choices(&options))
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Boolean)
+                ) {
+                    input.kind(InputKind::Switch)
                 } else if field.kind == Kind::Boolean {
                     input
                         .kind(InputKind::Select)
                         .prompt("Choose")
                         .options(choices(&[("Yes", "yes"), ("No", "no")]))
-                } else if field.kind == Kind::Date {
+                } else if matches!(
+                    field.kind,
+                    Kind::Date | Kind::Custom(bilibi_custom_fields::Kind::Date)
+                ) {
                     input.kind(InputKind::Date)
                 } else {
                     input

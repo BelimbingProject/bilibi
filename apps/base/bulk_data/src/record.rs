@@ -133,11 +133,25 @@ pub struct Lookup {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
+    /// Tenant-defined values retain their exact string representation.
+    Custom(bilibi_custom_fields::Kind),
     Text,
     Date,
     Integer,
     Number,
     Boolean,
+}
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom(kind) => kind.as_str(),
+            Self::Text => "text",
+            Self::Date => "date",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+        }
+    }
 }
 
 /// A field a column (or a fixed value) can fill.
@@ -153,6 +167,7 @@ pub struct Field {
 
 /// A record type as boot accepted it.
 pub(crate) struct Registered {
+    pub custom: Option<&'static crate::CustomImport>,
     pub key: &'static str,
     pub definition: &'static RecordType,
     pub fields: Vec<Field>,
@@ -552,6 +567,7 @@ pub(crate) fn register(
         types.insert(
             entry.id,
             Registered {
+                custom: None,
                 key: entry.id,
                 definition: record,
                 fields,

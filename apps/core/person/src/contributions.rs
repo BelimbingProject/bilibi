@@ -106,6 +106,10 @@ inventory::submit! { Contribution::new(bilibi_bulk_data::IMPORT_UNDO, "core/pers
 }) }
 
 // Core has a contact directory, with no employee-type or employment controls.
+inventory::submit! { Contribution::new(bilibi_bulk_data::CUSTOM_IMPORTS, "core/person.contacts", Provenance { module: "core/person", source: file!(), line: line!() }, &bilibi_bulk_data::CustomImport {
+    record_type: "person", create_field: "custom", update_field: "custom",
+}) }
+
 macro_rules! page {
     ($id:literal, $path:literal, $operation:literal, $cap:expr) => {
         inventory::submit! { Contribution::new(
