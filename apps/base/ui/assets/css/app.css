@@ -1262,10 +1262,13 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
   [data-page-header-actions] [data-icon-label] {
     display: inline;
   }
-  .flex-table [data-viewport] > table > tbody > tr > td a[href] {
+  .flex-table [data-viewport] > table > tbody > tr > td :is(a[href], [data-record-select]) {
     display: inline-flex;
     align-items: center;
     min-height: 44px;
     min-width: 44px;
+  }
+  .flex-table [data-viewport] > table > tbody > tr > td a[href].ui-icon-button {
+    justify-content: center;
   }
 }
