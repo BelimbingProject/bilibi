@@ -1240,3 +1240,32 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
     }
   }
 }
+
+[data-icon-label] { display: none; }
+
+/* Header actions need words where hover tooltips are unavailable. Keep the
+ * same controls and event wiring, including disabled and destructive states. */
+@media (pointer: coarse), (width < 640px) {
+  [data-page-header-actions] :is(.ui-icon-button, .nav-icon-button):has([data-icon-label]) {
+    display: inline-flex;
+    align-items: center;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    min-height: 44px;
+    min-width: 44px;
+    padding-inline: 8px;
+    gap: 8px;
+    white-space: normal;
+    text-align: start;
+  }
+  [data-page-header-actions] [data-icon-label] {
+    display: inline;
+  }
+  .flex-table [data-viewport] > table > tbody > tr > td a[href] {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    min-width: 44px;
+  }
+}

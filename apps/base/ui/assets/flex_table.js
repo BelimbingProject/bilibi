@@ -22,6 +22,9 @@
 (() => {
   const FlexTable = {
     mounted() {
+      this.phone = window.matchMedia('(width < 640px)')
+      this.onPhoneChange = () => this.orderColumns()
+      this.phone.addEventListener('change', this.onPhoneChange)
       this.drag = null
 
       this.onDragStart = (event) => this.dragStart(event)
@@ -40,14 +43,17 @@
       this.el.addEventListener('keydown', this.onKeyDown)
       this.el.addEventListener('click', this.onClick)
 
+      this.orderColumns()
       this.applyBars()
     },
 
     updated() {
+      this.orderColumns()
       this.applyBars()
     },
 
     destroyed() {
+      this.phone.removeEventListener('change', this.onPhoneChange)
       clearTimeout(this.opReset)
       this.el.removeEventListener('dragstart', this.onDragStart)
       this.el.removeEventListener('dragover', this.onDragOver)
@@ -56,6 +62,20 @@
       this.el.removeEventListener('dragend', this.onDragEnd)
       this.el.removeEventListener('keydown', this.onKeyDown)
       this.el.removeEventListener('click', this.onClick)
+    },
+
+    // Move the actual cells so reading and keyboard order match the display.
+    // Column indices restore the server's saved arrangement at desktop width.
+    orderColumns() {
+      for (const row of this.el.querySelectorAll('[data-viewport] > table > thead > tr, [data-viewport] > table > tbody > tr')) {
+        const cells = Array.from(row.children).filter(cell => cell.hasAttribute('data-column-index'))
+        if (!cells.length) continue
+        const end = cells[cells.length - 1].nextSibling
+        const original = [...cells]
+        cells.sort((a, b) => (this.phone.matches ? Number(a.dataset.phoneRank) - Number(b.dataset.phoneRank) : 0) || Number(a.dataset.columnIndex) - Number(b.dataset.columnIndex))
+        if (cells.every((cell, index) => cell === original[index])) continue
+        for (const cell of cells) row.insertBefore(cell, end)
+      }
     },
 
     push(payload) {

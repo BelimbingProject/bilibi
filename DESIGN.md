@@ -164,6 +164,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 - **State:** `ListState` keeps page, search, filters, sort and page size in the URL. Reload and shared links reopen the same view.
 - **Toolbar:** search sits first, with filter boxes to its right, above the table in the open. A list a person reads whole (exchange rates) has no search box. Leave 12 px between the page header and the toolbar. On a phone (below `sm`) only search stays in the row, beside one "Filters" button that says how many filters are set ("Filters (2)"); it opens the filters as a sheet along the bottom, and each set filter shows under search as a chip whose × clears it (as Gmail, Linear and Shopify Admin do). Filters apply as they change, so the sheet stays open until Done, Close, Escape or a tap outside. Desktop is unchanged. No second card.
+- **Phone column order:** A list may name its most useful column specs with `FlexTable::phone_columns`. Below `sm` these visible columns come first; the rest keep their order. Desktop and saved arrangements stay unchanged.
+- **Row links:** On a narrow screen or a coarse pointer, every row link has a real tap target at least 44 × 44 px; targets never overlap.
 - **Rows:** `py-0.5`, `px-2`. Headers `py-1`, sunken background, `text-xs font-semibold`.
 - **Numbers:** tabular numerals for IDs, counts, dates and amounts.
 - **Dates:** one date format, "6 Nov 2026", and one date and time format, "6 Nov 2026, 09:13" plus the zone, on every page, in every field and in every display mode the top bar offers. Never ISO `2026-11-06`, `06/11/2026` or the browser's own order. A calendar heading or a day tile may name the weekday or spell the month out ("Wed 3 November 2026"); it keeps the day, month, year order. A time alone is "14:30" (24-hour). Show a date through `bilibi_datetime` (`render_date`, `render`, the `instant` markup) and take one with the shared date, date-and-time or time input, which reads "6 Nov 2026", "6/11/2026" (day first), "2026-11-06" or "2:30 pm" and shows what it understood.
@@ -188,6 +190,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - Catalog and field contract: `apps/base/grid/README.md`.
 
 ## Record pages
+
+- **Named actions on phones:** Header icon actions show their names beside the icons below `sm` or on a coarse pointer. The same controls keep their events, links, disabled states and destructive colours; no action depends on a hover tooltip.
 
 *Read first, edit in place.* No Edit button and no separate edit route for the same facts.
 

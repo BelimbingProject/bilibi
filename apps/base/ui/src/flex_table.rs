@@ -764,6 +764,8 @@ pub struct Cost {
 pub struct FlexTable<'a> {
     pub id: &'a str,
     pub columns: Vec<FlexColumn>,
+    /// Column specs to place first below 640 px; other columns keep their order.
+    pub phone_columns: Vec<&'a str>,
     pub rows: Vec<FlexRow>,
     /// The height of a row, one of [`ZOOM_STEPS`]; it decides the mode.
     pub zoom: u16,
@@ -803,6 +805,7 @@ impl<'a> FlexTable<'a> {
         Self {
             id,
             columns,
+            phone_columns: Vec::new(),
             rows,
             zoom: DEFAULT_ZOOM,
             event: "grid",
@@ -822,6 +825,20 @@ impl<'a> FlexTable<'a> {
             empty: None,
             selection: None,
         }
+    }
+
+    /// Put these visible column specs first on a phone. Missing specs are ignored;
+    /// unlisted columns follow in their current order. Desktop and saved views stay intact.
+    pub fn phone_columns(mut self, specs: &[&'a str]) -> Self {
+        self.phone_columns = specs.to_vec();
+        self
+    }
+
+    pub fn phone_rank(&self, column: &FlexColumn) -> usize {
+        self.phone_columns
+            .iter()
+            .position(|spec| *spec == column.spec)
+            .unwrap_or(self.phone_columns.len())
     }
 
     pub fn sorted(mut self, sort_by: Option<&'a str>, sort_dir: Option<SortDir>) -> Self {
