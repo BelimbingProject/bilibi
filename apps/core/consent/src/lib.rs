@@ -6,6 +6,7 @@ mod agent_operations;
 mod contributions;
 mod model;
 mod privacy;
+mod retention;
 mod store;
 mod web;
 
@@ -638,12 +639,13 @@ impl Consent {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/locale", "base/menu", "base/party_ids", "base/personal_data", "base/picklists", "base/privacy", "base/principal_directory", "base/records", "base/settings", "base/tenancy", "base/ui", "core/company", "core/person", "core/user"],
     migrations: &[
         ("core-consent-001-decisions", include_str!("../migrations/001-decisions.sql")),
         ("core-consent-002-suppressions", include_str!("../migrations/002-suppressions.sql")),
         ("core-consent-003-log", include_str!("../migrations/003-log.sql")),
         ("core-consent-004-personal-data", include_str!("../migrations/004-personal-data.sql")),
+        ("core-consent-005-search-and-retention", include_str!("../migrations/005-search-and-retention.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let consent = Arc::new(Consent {

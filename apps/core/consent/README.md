@@ -31,7 +31,7 @@ All tables carry `tenant_id` and `company_id`. A subject is either one Core pers
 | `core_consent_decisions` | Every decision version, including source, capture channel and evidence |
 | `core_consent_current` | The latest decision per company, subject, purpose and channel |
 | `core_consent_suppressions` | Active and lifted suppressions per company, subject and channel; an erased address keeps only its keyed hash |
-| `core_consent_log` | Every fresh dispatch-time answer, its caller and correlation key |
+| `core_consent_log` | Every fresh dispatch-time answer, its caller and correlation key; after the company's retention period, without its address and key |
 | `core_consent_keys` | One sealed key per tenant for hashing erased addresses |
 
 ## Privacy requests
@@ -55,6 +55,19 @@ All tables carry `tenant_id` and `company_id`. A subject is either one Core pers
 - An erased address's decisions no longer answer for it; only its suppressions do.
 - A Domain that keeps a do-not-contact record of its own copies this pattern: keep the reason, replace the address with the keyed hash, and match the hash where it checks.
 - Runtime proof: `cargo run -p bilibi-consent --example consent-walkthrough --locked` (`seed` first; same variables as the [`base/privacy`](../../base/privacy/README.md#runtime-checks) walkthroughs) on a disposable database. It checks that locate offers one candidate per matched address without showing it; the access export holds every decision version, suppression, lift reason and check of the person and confirmed addresses, nothing of another person's address or tenant 2; erasure leaves no address, evidence or correlation key in the four tables or their audit evidence and keeps both active address suppressions as keyed hashes that still answer `suppressed` on their own channel only; the lifted suppression keeps no hash; tenant 2's rows are untouched and it gets no key.
+
+## Retention
+
+**The dispatch log is the record class `core/consent.dispatch_log` (`src/retention.rs`, action Anonymise): a company that turns it on keeps every check and clears its address and correlation key once its period has passed since the check.**
+
+- Kept: company, person, channel, purpose, outcome, caller and times, as an erasure keeps them. The check stays the proof that a send was allowed or refused.
+- Cleared: the address and the key (`[erased]`), also from the check's audit evidence.
+- Skipped: a check a legal hold names, by record or by its person. Nothing is swept until a company turns the class on and sets a period in System Settings (`base/privacy`, "Retention").
+
+## Indexes
+
+- The privacy locate's address match (an email exactly, a phone's digits anywhere) and the Suppressions search (part of an address) read indexes, so neither scans a whole table. The digits and search indexes are `pg_trgm` trigram indexes ([ADR 29](../../../docs/architecture/decisions/29-pg-trgm-is-allowed.md)).
+- Runtime proof of both sections: `cargo run -p bilibi-consent --example search-retention-proof --locked` (`seed` first, `BILIBI_DISPOSABLE_CONSENT_DEMO=yes`) on a disposable database.
 
 ## Eligibility order
 
