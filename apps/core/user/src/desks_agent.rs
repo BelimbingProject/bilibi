@@ -65,7 +65,7 @@ impl WriteHandler for Set {
     }
 }
 fn schema() -> Value {
-    json!({"type":"object","required":["company_id","person_id","assigned"],"properties":{"company_id":{"type":"integer","minimum":1},"person_id":{"type":"integer","minimum":1},"assigned":{"type":"boolean"}}})
+    json!({"type":"object","required":["company_id","person_id","assigned"],"properties":{"company_id":{"type":"integer","minimum":1},"person_id":crate::record_fields::PERSON_ID.input(json!({"minimum":1})),"assigned":{"type":"boolean"}}})
 }
 fn output() -> Value {
     json!({"type":"object"})

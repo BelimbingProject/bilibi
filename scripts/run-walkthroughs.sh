@@ -58,6 +58,7 @@ cd "$root"
 #   database, separated by `;`. `-` is a run without arguments. `@/x` and @model as above.
 # kind: `serve` for a walkthrough that ends by serving the app (see above).
 WALKTHROUGHS=(
+  'web|field-vocabulary|apps/web|field-vocabulary|none||-'
   'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|agent-write|apps/base/agent_api|write-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|artifacts|apps/base/artifacts|artifacts-walkthrough|migrate|BILIBI_DISPOSABLE_ARTIFACTS_DEMO=yes BILIBI_ARTIFACTS_DEMO_ROOT=@/artifacts|-;recover'
@@ -99,6 +100,7 @@ WALKTHROUGHS=(
   'privacy|privacy-holds|apps/base/privacy|holds-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-;report'
   'privacy|privacy-masking|apps/base/privacy|masking-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-'
   'privacy|privacy-retention|apps/base/privacy|retention-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|seed;-'
+  'privacy|privacy-sweep-reads|apps/base/privacy|sweep-reads-proof|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|seed;-'
   'privacy|privacy-swept-files|apps/base/privacy|swept-files-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy|seed;-'
   'privacy|consent|apps/core/consent|consent-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|document-privacy|apps/core/document|privacy-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'

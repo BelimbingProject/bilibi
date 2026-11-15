@@ -210,16 +210,16 @@ struct View {
 }
 
 // The job panel and history use one schema.
-bilibi_ui::record_fields! { mod job_fields {
-    ID: bilibi_ui::RecordField::new("id", "Job"),
-    KIND: bilibi_ui::RecordField::new("kind", "What"),
-    STATE: bilibi_ui::RecordField::new("state", "Outcome"),
-    SUMMARY: bilibi_ui::RecordField::new("summary", "Change"),
-    REQUESTED_AT: bilibi_ui::RecordField::new("requested_at", "Requested"),
-    FINISHED_AT: bilibi_ui::RecordField::new("finished_at", "Finished"),
-    WORKER: bilibi_ui::RecordField::new("worker", "Worker"),
-    STEPS: bilibi_ui::RecordField::new("steps", "Steps").excluded("Nested progress and developer details stay on the job panel"),
-    RESULT: bilibi_ui::RecordField::new("result", "Result").excluded("Long outcome messages stay on the job panel"),
+bilibi_ui::record_fields! { "base/software", mod job_fields {
+    ID: bilibi_ui::RecordField::new("id", "Job", bilibi_ui::RecordFieldType::Integer),
+    KIND: bilibi_ui::RecordField::new("kind", "What", bilibi_ui::RecordFieldType::String),
+    STATE: bilibi_ui::RecordField::new("state", "Outcome", bilibi_ui::RecordFieldType::String),
+    SUMMARY: bilibi_ui::RecordField::new("summary", "Change", bilibi_ui::RecordFieldType::String),
+    REQUESTED_AT: bilibi_ui::RecordField::new("requested_at", "Requested", bilibi_ui::RecordFieldType::DateTime),
+    FINISHED_AT: bilibi_ui::RecordField::new("finished_at", "Finished", bilibi_ui::RecordFieldType::DateTime),
+    WORKER: bilibi_ui::RecordField::new("worker", "Worker", bilibi_ui::RecordFieldType::String),
+    STEPS: bilibi_ui::RecordField::new("steps", "Steps", bilibi_ui::RecordFieldType::Array).excluded("Nested progress and developer details stay on the job panel"),
+    RESULT: bilibi_ui::RecordField::new("result", "Result", bilibi_ui::RecordFieldType::Object).excluded("Long outcome messages stay on the job panel"),
 } }
 
 fn history_columns() -> Vec<BuiltinColumn> {
