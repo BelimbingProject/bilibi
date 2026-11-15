@@ -214,6 +214,27 @@ pub async fn effective_capabilities_in_company(
     user: i64,
     company: Option<i64>,
 ) -> Result<Effective> {
+    effective_in_company(client, scope, user, company, None).await
+}
+/// How far `user` would reach `key` tenant-wide without its direct rule on
+/// `key`: what clearing that rule leaves (#683). `None` when not held then.
+pub(crate) async fn reach_without_direct(
+    client: &impl GenericClient,
+    scope: &Scope,
+    user: i64,
+    key: &str,
+) -> Result<Option<Reach>> {
+    Ok(effective_in_company(client, scope, user, None, Some(key))
+        .await?
+        .reach_of(key))
+}
+async fn effective_in_company(
+    client: &impl GenericClient,
+    scope: &Scope,
+    user: i64,
+    company: Option<i64>,
+    without: Option<&str>,
+) -> Result<Effective> {
     let vocabulary = crate::vocabulary()?;
     let live = client
         .query_opt(
@@ -227,8 +248,8 @@ pub async fn effective_capabilities_in_company(
     }
     let direct = client
         .query(
-            "SELECT capability,is_allowed,reach FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2",
-            &[&scope.tenant(), &user],
+            "SELECT capability,is_allowed,reach FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability IS DISTINCT FROM $3",
+            &[&scope.tenant(), &user, &without],
         )
         .await?;
     let granted = client

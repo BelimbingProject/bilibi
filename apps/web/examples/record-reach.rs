@@ -556,6 +556,45 @@ async fn main() -> Result<(), Failure> {
             .is_err_and(|why| why.contains("always reaches all")),
     )?;
 
+    // Lifting a cap on the user is a widening: the actor must hold the key as
+    // far as the account then reaches.
+    grants.assign_role(&admin, 2, readers, false).await?;
+    proof.team_role(&admin, team, team_readers, true).await?;
+    proof
+        .direct(&admin, Some(Direct::Allow(Reach::Own)))
+        .await?;
+    prove(
+        "an actor holding mine cannot clear the user's cap of mine when the team role gives my team's",
+        matches!(
+            grants.set_direct(&manager, 2, TASKS, None).await,
+            Err(Error::Forbidden)
+        ),
+    )?;
+    prove(
+        "the refused clear leaves the user at mine",
+        proof.tasks(&viewer).await? == lee,
+    )?;
+    grants.assign_role(&admin, 1, scratch, true).await?;
+    grants
+        .set_direct(&admin, 1, TASKS, Some(Direct::Allow(Reach::Own)))
+        .await?;
+    prove(
+        "an actor capped at mine cannot clear their own cap",
+        matches!(
+            grants.set_direct(&manager, 1, TASKS, None).await,
+            Err(Error::Forbidden)
+        ),
+    )?;
+    grants.set_direct(&admin, 1, TASKS, None).await?;
+    grants.assign_role(&admin, 1, scratch, false).await?;
+    proof.direct(&admin, None).await?;
+    prove(
+        "an actor holding all clears the user's cap, and the user is back at my team's",
+        proof.tasks(&viewer).await? == team_tasks,
+    )?;
+    proof.team_role(&admin, team, team_readers, false).await?;
+    grants.assign_role(&admin, 2, readers, true).await?;
+
     // Core Activity: the oversight read and edit follow reach on the assignee.
     db.get().await?.batch_execute(
         "INSERT INTO core_activities(tenant_id,company_id,kind,subject,status,priority,assignee_user_id,created_by) VALUES \

@@ -459,9 +459,6 @@ impl Grants {
         if rule.is_some() {
             self.staff_key(key)?;
         }
-        if let Some(Direct::Allow(reach)) = rule {
-            self.reach_supported(key, reach)?;
-        }
         self.verify_user(tx.sql(), actor, actor.user()).await?;
         authorize_key(tx.sql(), actor, "admin.authz.role.update").await?;
         self.verify_user(tx.sql(), actor, user).await?;
@@ -475,14 +472,8 @@ impl Grants {
                 &format!("user:{user} capability:{key} {rule:?}"),
             )
             .await?;
-        if let Some(Direct::Allow(reach)) = rule {
-            if !crate::effective_capabilities_in_company(tx.sql(), actor, actor.user(), None)
-                .await?
-                .reaches(key, reach)
-            {
-                return Err(Error::Forbidden);
-            }
-        }
+        self.validate_direct(tx.sql(), actor, user, key, rule)
+            .await?;
         let tenant = actor.tenant();
         let key = key.to_owned();
         let allowed = rule.map(|rule| rule != Direct::Deny);
@@ -501,6 +492,53 @@ impl Grants {
             Ok(((),vec![Change{kind:"authz.principal_capability".into(),id:user,old:json!({"capability":key,"allowed":old.map(|(allowed,_)|allowed),"reach":old_reach}),new:json!({"capability":key,"allowed":allowed,"reach":reach})}]))
         })).await?;
         Ok(())
+    }
+    /// Whether the actor may set `rule` for `key` on `user`, for both the
+    /// write and an agent review: a rule gives no more reach than the actor
+    /// holds (#683). An allow needs the key at least as far as it reaches.
+    /// Clearing an allow that capped the account below what its roles and
+    /// team roles give is a widening, so the actor must hold the key as far
+    /// as the account then reaches, their own account included. A deny, and
+    /// clearing one, check no reach.
+    pub async fn validate_direct(
+        &self,
+        client: &(impl GenericClient + Sync),
+        actor: &Scope,
+        user: i64,
+        key: &str,
+        rule: Option<Direct>,
+    ) -> Result<()> {
+        let needed = match rule {
+            Some(Direct::Deny) => return Ok(()),
+            Some(Direct::Allow(reach)) => {
+                self.reach_supported(key, reach)?;
+                reach
+            }
+            None => {
+                let capped = client
+                    .query_opt(
+                        "SELECT reach FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability=$3 AND is_allowed",
+                        &[&actor.tenant(), &user, &key],
+                    )
+                    .await?
+                    .map(|row| Reach::parse(row.get(0)).unwrap_or(Reach::All));
+                let Some(capped) = capped else {
+                    return Ok(());
+                };
+                match crate::effective::reach_without_direct(client, actor, user, key).await? {
+                    Some(after) if after > capped => after,
+                    _ => return Ok(()),
+                }
+            }
+        };
+        if crate::effective_capabilities_in_company(client, actor, actor.user(), None)
+            .await?
+            .reaches(key, needed)
+        {
+            Ok(())
+        } else {
+            Err(Error::Forbidden)
+        }
     }
     /// Give `key` on a custom role with `grant` reach, change how far it
     /// reaches, or take it away (`None`). Reach narrower than all needs a key

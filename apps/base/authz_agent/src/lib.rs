@@ -240,10 +240,15 @@ async fn review(
                 ));
             }
             bound.grants.verify_principal(client, scope, user).await?;
-            if rule == "allow" {
-                bound.grants.reach_supported(key, reach)?;
-                guard(client, scope, key, reach).await?;
-            }
+            let direct = match rule {
+                "allow" => Some(Direct::Allow(reach)),
+                "deny" => Some(Direct::Deny),
+                _ => None,
+            };
+            bound
+                .grants
+                .validate_direct(client, scope, user, key, direct)
+                .await?;
             let target = effective_capabilities_of(client, scope, user).await?;
             let current_reach = target
                 .direct_allowed

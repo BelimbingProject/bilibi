@@ -24,7 +24,7 @@
 
 **A grant gives no more reach than the actor holds.** Giving a role a key, assigning a role, giving a team a role or adding members to a team that carries roles, setting a provider's role bound, and a direct allow each need the actor to hold every key at least as far as it reaches. A system principal's grant needs `all`.
 
-**Joining a team gives the member the team's reach.** Team management defines who shares "my team's" records; a membership change is not a grant and runs no reach check. To keep one member narrower, set a direct deny or a narrower direct allow on that user.
+**Joining a team gives the member the team's reach.** Team management defines who shares "my team's" records; a membership change is not a grant and runs no reach check. To keep one member narrower, set a direct deny or a narrower direct allow on that user. Clearing that narrower allow widens the account again, so it needs the actor to hold the key as far as the account then reaches; clearing a deny checks no reach.
 
 **Taking over an account needs `all`.** `holds_everything_of` (password, sign-in address, delete, impersonate) treats a key the actor reaches only partly as covering nobody else's grant of it: the account's own records are not the actor's.
 
