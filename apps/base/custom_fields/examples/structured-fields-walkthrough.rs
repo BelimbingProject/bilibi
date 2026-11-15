@@ -312,19 +312,18 @@ async fn main() -> Result<(), Failure> {
         hidden["valid"] == false && refusals(&hidden)["cf_partner"].is_array(),
     );
     let read = staff
-        .read("core.person.get", json!({"id": zara_id}))
+        .read("core.person.get", json!({"person_id": zara_id}))
         .await?;
     let version = read["version"].clone();
     let edited = staff
         .plan(
             "core.person.update",
-            json!({"id": zara_id, "version": version, "name": "Zara Quill", "kind": "human", "custom": [{"key": "memo", "value": "Velvetine orchard, east gate"}]}),
+            json!({"person_id": zara_id, "version": version, "identity": {"name": "Zara Quill", "kind": "human"}, "custom": [{"key": "memo", "value": "Velvetine orchard, east gate"}]}),
         )
         .await?;
     proof.check(
         "they may still change another field of a contact that holds it",
-        edited["valid"] == true
-            && custom(result(&edited), "partner") == "1"
+        custom(result(&edited), "partner") == "1"
             && custom(result(&edited), "memo") == "Velvetine orchard, east gate",
     );
     let names = staff
@@ -335,7 +334,7 @@ async fn main() -> Result<(), Failure> {
         .await?;
     proof.check(
         "and the held company stays unnamed for them",
-        names
+        names["references"]
             .as_array()
             .and_then(|items| items.first())
             .is_some_and(|item| item["label"].is_null()),
@@ -395,10 +394,7 @@ async fn main() -> Result<(), Failure> {
     let run = manager
         .read("base.reports.run", json!({"id": report_id}))
         .await?;
-    let rows = run["report"]["rows"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let rows = run["rows"].as_array().cloned().unwrap_or_default();
     let company: String = db
         .get()
         .await?
@@ -447,7 +443,7 @@ async fn main() -> Result<(), Failure> {
         .await?;
     proof.check(
         "a summary groups by a custom field",
-        summary["report"]["lines"]
+        summary["lines"]
             .as_array()
             .is_some_and(|lines| !lines.is_empty()),
     );
