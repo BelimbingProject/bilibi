@@ -1524,14 +1524,14 @@ fn task_status_kind(task: &Task) -> BadgeKind {
 }
 // Schedule board facts: a cell's second line is hidden in compact rows,
 // so each scalar it carries is also a column.
-bilibi_ui::record_fields! { mod task_fields {
-    OVERLAP: bilibi_ui::RecordField::new("overlap", "Overlap policy"),
-    MISFIRE: bilibi_ui::RecordField::new("misfire", "Misfire policy"),
-    LAST_RUNTIME: bilibi_ui::RecordField::new("last_runtime", "Last runtime"),
+bilibi_ui::record_fields! { "base/schedule", mod task_fields {
+    OVERLAP: bilibi_ui::RecordField::new("overlap", "Overlap policy", bilibi_ui::RecordFieldType::String),
+    MISFIRE: bilibi_ui::RecordField::new("misfire", "Misfire policy", bilibi_ui::RecordFieldType::String),
+    LAST_RUNTIME: bilibi_ui::RecordField::new("last_runtime", "Last runtime", bilibi_ui::RecordFieldType::String),
 } }
-bilibi_ui::record_fields! { mod run_fields {
-    RUNTIME: bilibi_ui::RecordField::new("runtime", "Runtime"),
-    TRIGGER: bilibi_ui::RecordField::new("trigger", "Trigger"),
+bilibi_ui::record_fields! { "base/schedule", mod run_fields {
+    RUNTIME: bilibi_ui::RecordField::new("runtime", "Runtime", bilibi_ui::RecordFieldType::String),
+    TRIGGER: bilibi_ui::RecordField::new("trigger", "Trigger", bilibi_ui::RecordFieldType::String),
 } }
 
 fn duration(milliseconds: Option<i32>) -> String {
