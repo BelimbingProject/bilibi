@@ -502,11 +502,14 @@ fn address_schema() -> Value {
         ("parser_version", 255),
         ("parse_confidence", 16),
     ] {
-        properties.insert(key.into(), json!({"type":"string","maxLength":max}));
+        properties.insert(
+            key.into(),
+            crate::web::fields::get(key).input(json!({"maxLength":max})),
+        );
     }
     properties.insert(
         "verification_status".into(),
-        json!({"type":"string","enum":["unverified","suggested","verified"]}),
+        crate::web::fields::VERIFICATION_STATUS.input(json!({})),
     );
     json!({"type":"object","properties":properties})
 }

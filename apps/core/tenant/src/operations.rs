@@ -121,7 +121,7 @@ impl ReadHandler for Read {
 }
 fn create_schema() -> Value {
     json!({"type":"object","required":["name","primary_company"],"properties":{
-        "name":{"type":"string","maxLength":255},"parent_id":{"type":"integer","minimum":1},        "primary_company":{"type":"string","maxLength":160},"additional_companies":{"type":"array","items":{"type":"string","maxLength":160}}
+        "name":crate::web::fields::NAME.input(json!({"maxLength":255})),"parent_id":crate::web::fields::PARENT.input(json!({"minimum":1})),        "primary_company":crate::web::fields::PRIMARY_COMPANY.input(json!({"maxLength":160})),"additional_companies":crate::web::fields::ADDITIONAL_COMPANIES.input(json!({"items":{"type":"string","maxLength":160}}))
     }})
 }
 fn list_schema() -> Value {
