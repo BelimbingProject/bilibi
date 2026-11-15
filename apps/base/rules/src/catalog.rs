@@ -30,6 +30,7 @@ pub struct Trigger {
     pub table: &'static str,
     /// JSON pointer to that record's key in the event payload (`/case`).
     pub subject: &'static str,
+    pub version: &'static str,
 }
 
 /// A write contract of the contributor's own that a rule may run on the
@@ -44,6 +45,7 @@ pub struct Action {
     /// The input property that receives the trigger's record key. A rule
     /// never supplies it: the runner binds it.
     pub subject: &'static str,
+    pub version: &'static str,
     /// The events its commit may record, so an approval can refuse a rule
     /// that would trigger itself.
     pub records: &'static [&'static str],
@@ -126,6 +128,12 @@ impl Offers {
                     format!("{} is not a Grid table", trigger.table),
                 ));
             };
+            if table
+                .field(trigger.version)
+                .is_none_or(|f| f.ty != bilibi_grid::FieldType::Integer)
+            {
+                return Err(refuse(entry, "needs an integer record version field"));
+            }
             if !bounds.contains(&table.capability()) {
                 return Err(refuse(
                     entry,
@@ -186,6 +194,14 @@ impl Offers {
                 return Err(refuse(
                     entry,
                     format!("{} is not a Grid table", action.table),
+                ));
+            }
+            if action.version == action.subject
+                || registered.input["properties"][action.version]["type"] != "integer"
+            {
+                return Err(refuse(
+                    entry,
+                    "needs a separate integer expected-version input",
                 ));
             }
             if registered.input["properties"].get(action.subject).is_none() {

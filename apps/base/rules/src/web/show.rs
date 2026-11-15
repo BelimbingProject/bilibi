@@ -44,11 +44,12 @@ fn sentence(text: &str) -> String {
 /// Why a run ended as it did, in words.
 fn reason(code: &str) -> &'static str {
     match code {
+        "catalog_changed" => "Not run: the installed fields or actions changed. Draft a new version for review.",
+        "record_changed" => "Skipped: the record changed after the rule matched.",
         "chain_budget" => "Stopped: another rule started it, and the chain reached the limit of rules in a row.",
         "rule_off" => "Not run: the rule was switched off.",
         "stale_version" => "Not run: a newer version was approved after this event, so this one no longer runs.",
         "action_limit" => "Not run: it has more actions than allowed per run.",
-        "trigger_unmounted" => "Not run: its trigger is no longer installed.",
         "read_refused" => "Not run: automation may not read these records yet. An administrator allows it in Automation access.",
         "restricted_field" => "Not run: a condition reads a field that is hidden from automation.",
         "subject_unavailable" => "Not run: the record is gone or out of reach.",
@@ -63,6 +64,7 @@ fn effect_reason(code: &str) -> &'static str {
         "invalid" => "refused by the record's owner",
         "refused" => "refused by the record's owner",
         "not_found" => "refused: the record is gone",
+        "record_changed" => "skipped: the record changed after the rule matched",
         "conflict" => "refused: the record changed",
         "actor_refused" => "refused: automation was stopped",
         _ => "refused",
@@ -470,6 +472,7 @@ impl Show {
             ..Header::default()
         })?;
         let runs_now = match view.summary.state {
+            RuleState::NeedsReview => Html::text("Needs review: draft and approve a new version"),
             RuleState::Draft => Html::text("Not yet: approve a version first"),
             state if can_approve => render(Toggle {
                 on: state == RuleState::On,

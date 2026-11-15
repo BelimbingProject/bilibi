@@ -21,7 +21,7 @@
 //! committed; an agent drafts a second rule that a person approves; a denied
 //! capability, a restricted field, an archived company, a suspended tenant,
 //! a stale version and a switched-off rule each stop the effect; a rule that
-//! would start itself is refused at approval, and a two-rule loop stops at
+//! would start itself is refused at approval, and a two-rule loop is refused and a noncyclic chain stops at
 //! the chain budget; a threshold change is a new approved version, no
 //! release; and a burst in one tenant waits its turn while the other tenant's
 //! rule runs at once. Every check prints `ok` or `FAIL`; one failure ends the
@@ -665,6 +665,14 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         proof.approve(&one, r4, v4).await.is_ok(),
         "a rule on the margin is approved while nobody restricts it",
     );
+    let historical_margin = proof
+        .open(&one, 1, "Previously readable margin", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    check(
+        proof.case(historical_margin).await?.2 == 1,
+        "the margin rule records a successful match before restrictions change",
+    );
     let restrictions = proof
         .services
         .get::<bilibi_authz::restrictions::FieldRestrictions>("base/authz.field_restrictions")?;
@@ -700,7 +708,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         .await
         .map_err(|_| Error::Internal)?;
 
-    println!("\n== Cycles: one is refused at approval, one stops at the chain budget");
+    println!("\n== Cycles are refused at approval; a chain stops at the depth budget");
     let selfish = json!({"name": "Reroute forever", "trigger": ROUTED, "conditions": [],
         "actions": [{"operation": "rule_cases.cases.route", "input": json!({"queue": "again"}).to_string()}],
         "examples": [{"facts": "{}", "expect": "match"}]});
@@ -720,21 +728,14 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         proof.approve(&one, ra, va).await.is_ok(),
         "\"flag routed cases\" is approved",
     );
-    let review = proof
-        .review(
-            &one,
-            "base.rules.approve",
-            json!({"rule_id": rb, "version": vb}),
-        )
-        .await;
     check(
-        review.to_string().contains("chain of rules stops after"),
-        "approving its partner warns that the pair can loop and the chain budget stops it",
+        proof
+            .approve(&one, rb, vb)
+            .await
+            .is_err_and(|why| why.contains("cycle")),
+        "the second rule of the routed-to-flagged-to-routed cycle is refused",
     );
-    check(
-        proof.approve(&one, rb, vb).await.is_ok(),
-        "\"route flagged cases\" is approved",
-    );
+    proof.setting(&one, "rules.chain_depth", json!(1)).await?;
     let looped = proof
         .open(&one, 1, "Loop starter", "urgent", "1500.00")
         .await?;
@@ -758,17 +759,14 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     let (_, routed, flags) = proof.case(looped).await?;
     println!("     the loop ran {routed} route(s) and {flags} flag(s), deepest run {depth}");
     check(
-        budget && depth == 4 && routed == 2 && flags == 1,
-        "the loop stopped at the third rule in a row with a visible chain_budget refusal",
+        budget && depth == 2 && routed == 1 && flags == 0,
+        "the noncyclic opened-to-route-to-flag chain stopped with a visible chain_budget refusal",
     );
     proof
         .switch(&one, ra, false)
         .await
         .map_err(|_| Error::Internal)?;
-    proof
-        .switch(&one, rb, false)
-        .await
-        .map_err(|_| Error::Internal)?;
+    proof.setting(&one, "rules.chain_depth", json!(3)).await?;
 
     println!("\n== An archived company stops the effect");
     proof.stop().await;
@@ -1000,6 +998,74 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         mine.iter()
             .any(|r| r.facts.is_object() && r.facts.get("restricted").is_none()),
         "the administrator, who may read cases, sees the facts",
+    );
+    proof
+        .services
+        .get::<Grants>("base/authz.grants")?
+        .set_direct(
+            &one,
+            2,
+            "rule-cases.case.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
+        .await?;
+    let client = proof.db.get().await?;
+    let visible = proof.rules.runs(&**client, &viewer, Some(r4), 50).await?;
+    check(
+        visible.iter().any(|run| {
+            run.subject == historical_margin.to_string() && run.facts.get("margin").is_some()
+        }),
+        "the receipt is visible while its field is readable",
+    );
+    drop(client);
+    restrictions.put(&one, "rule_cases", "margin", &[2]).await?;
+    let client = proof.db.get().await?;
+    let hidden = proof.rules.runs(&**client, &viewer, Some(r4), 50).await?;
+    check(hidden.iter().any(|run| run.state == "done" && run.facts == json!({"restricted": true}) && run.outcomes == json!({"restricted": true})), "a later field restriction hides historical facts and outcomes despite the record read grant");
+    drop(client);
+    restrictions.remove(&one, "rule_cases", "margin").await?;
+    let before = proof.case(historical_margin).await?;
+    for (operation, input) in [
+        (
+            "rule_cases.cases.route",
+            json!({"case_id": historical_margin, "expected_version": 1, "queue": "stale destination"}),
+        ),
+        (
+            "rule_cases.cases.flag",
+            json!({"case_id": historical_margin, "expected_version": 1}),
+        ),
+    ] {
+        check(
+            proof.write(&one, operation, input).await.is_err(),
+            "the owner refuses an outdated record version",
+        );
+    }
+    check(
+        proof.case(historical_margin).await? == before,
+        "stale route and flag calls preserve the newer record",
+    );
+    for _ in 0..21 {
+        let mut draft = urgent_rule("Pending threshold review", "priority-desk", "1000");
+        draft["rule_id"] = json!(r1);
+        proof.draft(&one, draft).await?;
+    }
+    let client = proof.db.get().await?;
+    let view = proof.rules.get(&**client, &one, r1).await?;
+    check(
+        view.versions
+            .iter()
+            .any(|version| Some(version.number) == view.summary.running),
+        "the active definition survives more than twenty newer drafts",
+    );
+    check(
+        view.runs.iter().all(|run| {
+            view.versions
+                .iter()
+                .any(|version| version.number == run.version)
+        }),
+        "every returned receipt has its version definition",
     );
     Ok(())
 }

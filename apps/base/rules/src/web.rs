@@ -100,6 +100,7 @@ fn instant(display: &DisplayContext, at: Timestamp) -> Instant {
 }
 fn state_badge(state: RuleState, pending: bool) -> Result<Html> {
     render(match (state, pending) {
+        (RuleState::NeedsReview, _) => Badge::status(BadgeKind::Warning, "Needs review"),
         (RuleState::Draft, _) => Badge::status(BadgeKind::Neutral, "Awaiting approval"),
         (RuleState::On, true) => {
             Badge::status(BadgeKind::Success, "On, new version awaiting approval")

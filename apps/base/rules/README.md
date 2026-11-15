@@ -27,12 +27,13 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | Step | Contract | Capability | What it checks |
 | --- | --- | --- | --- |
 | Draft | `base.rules.draft` | `admin.rules.manage` | Installed trigger; fields the drafter may read, values of their type; installed actions on the trigger's record with inputs their contract accepts; examples come out as stated |
-| Approve | `base.rules.approve` | `admin.rules.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds the trigger table's and every action's capability; no condition field is restricted or masked for the `rules` principal; no action records the rule's own trigger; the tenant's limits hold |
+| Approve | `base.rules.approve` | `admin.rules.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds the trigger table's and every action's capability; no condition field is restricted or masked for the `rules` principal; its actions close no cycle in the active rules' declared events; the tenant's limits hold |
 | Switch | `base.rules.switch` | `admin.rules.approve` | On again re-runs the approval checks on the running version |
 
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
 - **Drafting runs nothing.** A new version of a running rule runs only once approved; until then the earlier version keeps running.
 - **A queued run keeps its pinned version.** If another version is approved or the rule is switched off before the run acts, the run is refused (`stale_version`, `rule_off`); nothing silently swaps in the new rule.
+- **Installed bindings are pinned.** Approval stores the condition fields' types and choices, trigger bindings and action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the rule **Needs review** until a new version is approved.
 - **Approval never delegates more.** The approver must hold what the rule does; a rule cannot reach a field the principal may not read.
 
 ## How a run works
@@ -42,7 +43,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 1. The owner records its event in its `MutationTransaction` (`base/events`).
 2. Events hands it to the `base/rules.triggers` subscriber. In the delivery transaction it writes one `queued` run per rule switched on for that event in the tenant, pinned to the approved version, and hands the event to the `base/rules-run` worker (`Subscribe::handoff`).
 3. The worker runs as the `rules` principal. Per run it checks the chain budget, the version and the switch, reads the conditions' fields through Grid, evaluates them and records `matched` (with the facts and each condition's outcome) or `no_match`.
-4. Each action calls the owner's contract through the job door (`JobContracts::commit`) in a transaction that also writes its receipt, keyed `(tenant, version, event, position)`. A retry after a crash finds the receipt and does nothing twice.
+4. Before each outstanding action, including after a retry, the worker rechecks the principal's current record and field access. The evaluated record version is bound into the action; its owner checks it under the record lock and refuses a changed record (`record_changed`). Successful actions advance the next action's expected version in the same transaction; the original version remains in the saved facts. Each action calls the owner's contract through the job door (`JobContracts::commit`) in a transaction that also writes its receipt, keyed `(tenant, version, event, position)`. A retry after a crash finds the receipt and does nothing twice.
 5. The run ends `done`, `partial` or `refused`, with a bounded reason code.
 
 | Reason | Means |
@@ -51,8 +52,10 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | `stale_version`, `rule_off` | The rule changed before the run acted |
 | `read_refused`, `restricted_field` | The principal may not read the record or a condition's field |
 | `subject_unavailable` | The record is gone or out of reach |
-| `action_limit`, `trigger_unmounted` | The run is over the tenant's action limit, or its trigger is no longer installed |
+| `action_limit` | The run is over the tenant's action limit |
 | `actor_refused` | Queue refused the principal (a suspended tenant, a withdrawn grant); told through Queue's `EndingBinding` |
+| `catalog_changed` | Installed fields, trigger bindings or action schemas changed, or an owner was unmounted; draft and approve a new version |
+| `record_changed` | Skipped: the record changed after the rule matched |
 | `action_refused` | An action's owner refused it; the effect's receipt keeps the owner's own words |
 
 ## Authority
@@ -85,10 +88,10 @@ The chain follows causes, not traces: the worker names its run as the cause of t
 
 ```rust,ignore
 inventory::submit! { Contribution::new(bilibi_rules::TRIGGERS, CASE_OPENED, provenance!(), &bilibi_rules::Trigger {
-    on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case",
+    on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case", version: "version",
 }) }
 inventory::submit! { Contribution::new(bilibi_rules::ACTIONS, "cx.cases.route", provenance!(), &bilibi_rules::Action {
-    title: "Send the case to a queue", table: "cases", subject: "case_id", records: &[CASE_ROUTED],
+    title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED],
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::job::PRINCIPAL_WRITES, "cx.cases.route", provenance!(), &PrincipalWrite { principals: &["rules"] }) }
 inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rules:cx/cases", provenance!(), &OfferedCapabilities {
@@ -96,21 +99,21 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rule
 }) }
 ```
 
-Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability and record rules in its commit; a company's write also holds `require_writable`.
+Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
 
 ## Pages and agents
 
 - **Administration › Rules** (`/rules`, `admin.rules.view`): every rule, its trigger, whether it is on, the running version and the last run. `/rules/{id}`: the rule, the version awaiting approval (with the approval review's problems and warnings, and Approve through a confirmation), the running version, the on/off switch and the latest 25 receipts (which conditions held, what each action did or why it was refused). Both call the contracts agents call.
-- **Receipts and privacy**: a receipt's facts and condition outcomes are the record's values; a reader who may not read the trigger's records sees them as restricted. The `rules` principal never reads a restricted or masked field, so a receipt never holds one.
+- **Receipts and privacy**: a receipt's facts and condition outcomes are the record's values; current record reach and field restrictions apply to every read, including values collected before a restriction changed. A reader who cannot read the subject or any recorded field sees the evidence as restricted. Protected facts and condition outcomes are kept out of audit metadata.
 - **Agents**: `base.rules.vocabulary` (installed triggers with their fields, actions with their inputs, operators, limits), `base.rules.list`, `base.rules.get`, `base.rules.runs`, `base.rules.draft`, `base.rules.approve`, `base.rules.switch`, and the guide `base.rules`. An agent's draft records `drafted_via: agent`; it runs only once a person approves it.
 
 ## Tables
 
-`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migration `base-rules-001-rules`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules` and `base-rules-002-approval-bindings`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
-`apps/web/examples/rules-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/rule_cases` mounted (never a Platform member), it proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off rule, a self-trigger refused at approval and a loop stopped at the chain budget, a threshold change as a new version, and a burst held to its tenant's bound while the other tenant runs at once.
+`apps/web/examples/rules-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/rule_cases` mounted (never a Platform member), it proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off rule, self-triggering and multi-rule cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst held to its tenant's bound while the other tenant runs at once.
 
 ## Not yet
 

@@ -32,6 +32,7 @@ pub struct Rules {
 pub enum RuleState {
     /// No version approved yet: nothing runs.
     Draft,
+    NeedsReview,
     /// An approved version runs on every new trigger event.
     On,
     /// Switched off: the approved version is kept but nothing runs.
@@ -41,6 +42,7 @@ impl RuleState {
     pub fn key(self) -> &'static str {
         match self {
             Self::Draft => "draft",
+            Self::NeedsReview => "needs_review",
             Self::On => "on",
             Self::Off => "off",
         }
@@ -125,7 +127,7 @@ fn time_opt(row: &tokio_postgres::Row, i: usize) -> Option<Timestamp> {
         .and_then(|at| Timestamp::try_from(at).ok())
 }
 
-const SUMMARY: &str = "SELECT r.id,r.name,r.trigger,(r.active_version_id IS NOT NULL),(r.disabled_at IS NOT NULL),a.number,l.number,(l.approved_at IS NULL),(SELECT max(created_at) FROM base_rule_runs u WHERE u.tenant_id=r.tenant_id AND u.rule_id=r.id),r.updated_at,r.version FROM base_rules r LEFT JOIN base_rule_versions a ON a.tenant_id=r.tenant_id AND a.id=r.active_version_id JOIN LATERAL (SELECT number,approved_at FROM base_rule_versions v WHERE v.tenant_id=r.tenant_id AND v.rule_id=r.id ORDER BY number DESC LIMIT 1) l ON true";
+const SUMMARY: &str = "SELECT r.id,r.name,r.trigger,(r.active_version_id IS NOT NULL),(r.disabled_at IS NOT NULL),a.number,l.number,(l.approved_at IS NULL),(SELECT max(created_at) FROM base_rule_runs u WHERE u.tenant_id=r.tenant_id AND u.rule_id=r.id),r.updated_at,r.version,r.needs_review FROM base_rules r LEFT JOIN base_rule_versions a ON a.tenant_id=r.tenant_id AND a.id=r.active_version_id JOIN LATERAL (SELECT number,approved_at FROM base_rule_versions v WHERE v.tenant_id=r.tenant_id AND v.rule_id=r.id ORDER BY number DESC LIMIT 1) l ON true";
 
 impl Rules {
     pub(crate) fn trigger(&self, event: &str) -> Option<&OfferedTrigger> {
@@ -144,10 +146,11 @@ impl Rules {
                 .trigger(&trigger)
                 .map_or_else(|| trigger.clone(), |t| t.definition.title.to_owned()),
             trigger,
-            state: match (approved, off) {
-                (false, _) => RuleState::Draft,
-                (true, false) => RuleState::On,
-                (true, true) => RuleState::Off,
+            state: match (approved, off, row.get::<_, bool>(11)) {
+                (false, _, _) => RuleState::Draft,
+                (true, _, true) => RuleState::NeedsReview,
+                (true, false, false) => RuleState::On,
+                (true, true, false) => RuleState::Off,
             },
             running: row.get(5),
             latest: row.get(6),
@@ -230,9 +233,15 @@ impl Rules {
             .await?
             .ok_or(Error::NotFound)?;
         let summary = self.summary(&row);
+        let runs = self.runs(client, scope, Some(id), 25).await?;
+        let referenced: Vec<i32> = runs
+            .iter()
+            .map(|run| run.version)
+            .chain(summary.running)
+            .collect();
         let rows = client.query(
-            "SELECT id,number,definition,examples,explanation,digest,drafted_via,drafted_by,drafted_at,approved_by,approved_at FROM base_rule_versions WHERE tenant_id=$1 AND rule_id=$2 ORDER BY number DESC LIMIT 20",
-            &[&tenant, &id],
+            "SELECT id,number,definition,examples,explanation,digest,drafted_via,drafted_by,drafted_at,approved_by,approved_at FROM base_rule_versions WHERE tenant_id=$1 AND rule_id=$2 AND (id IN (SELECT id FROM base_rule_versions WHERE tenant_id=$1 AND rule_id=$2 ORDER BY number DESC LIMIT 20) OR number=ANY($3)) ORDER BY number DESC",
+            &[&tenant, &id, &referenced],
         ).await?;
         let mut people = Vec::new();
         for row in &rows {
@@ -286,7 +295,6 @@ impl Rules {
                 approved_at: time_opt(row, 10),
             })
             .collect();
-        let runs = self.runs(client, scope, Some(id), 25).await?;
         Ok(RuleView {
             summary,
             versions,
@@ -305,7 +313,7 @@ impl Rules {
         bilibi_authz::authorize_key(client, scope, VIEW).await?;
         let tenant = scope.tenant();
         let rows = client.query(
-            "SELECT u.id,u.rule_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at FROM base_rule_runs u JOIN base_rule_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.rule_id=$2) ORDER BY u.id DESC LIMIT $3",
+            "SELECT u.id,u.rule_id,v.number,u.event_id,u.event_name,u.subject,u.depth,u.state,u.reason,u.facts,u.outcomes,u.created_at,u.finished_at,v.definition,v.catalog_digest FROM base_rule_runs u JOIN base_rule_versions v ON v.tenant_id=u.tenant_id AND v.id=u.version_id WHERE u.tenant_id=$1 AND ($2::bigint IS NULL OR u.rule_id=$2) ORDER BY u.id DESC LIMIT $3",
             &[&tenant, &rule, &limit.clamp(1, 200)],
         ).await?;
         let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
@@ -313,31 +321,36 @@ impl Rules {
             "SELECT run_id,position,operation,state,reason,result FROM base_rule_effects WHERE tenant_id=$1 AND run_id=ANY($2) ORDER BY run_id,position",
             &[&tenant, &ids],
         ).await?;
-        // A receipt's facts and outcomes are the record's values: shown only
-        // to a reader who may read the trigger's records themselves.
-        let grid = bilibi_grid::installed()?;
-        let mut readable: std::collections::BTreeMap<String, bool> = Default::default();
+        let mut readable = std::collections::BTreeMap::new();
         for row in &rows {
-            let event: String = row.get(4);
-            if readable.contains_key(&event) {
-                continue;
-            }
-            let capability = self
-                .trigger(&event)
-                .and_then(|t| grid.table(t.definition.table))
-                .map(|table| table.capability());
-            let allowed = match capability {
-                Some(key) => bilibi_authz::decide(client, scope, key).await?.allowed,
+            let event: &str = row.get(4);
+            let facts: Option<Value> = row.get(9);
+            let fields: Vec<String> = facts
+                .as_ref()
+                .and_then(Value::as_object)
+                .map(|facts| facts.keys().cloned().collect())
+                .unwrap_or_default();
+            let definition =
+                definition::Definition::parse(&row.get::<_, Value>(13), &mut Vec::new());
+            let compatible = definition.as_ref().is_some_and(|definition| {
+                let saved: Option<String> = row.get(14);
+                saved.is_some() && saved == self.catalog_digest(event, definition)
+            });
+            let allowed = match self.trigger(event).filter(|_| compatible) {
+                Some(trigger) => self
+                    .read_facts(client, scope, trigger.definition.table, row.get(5), &fields)
+                    .await?
+                    .is_ok(),
                 None => false,
             };
-            readable.insert(event, allowed);
+            readable.insert(row.get::<_, i64>(0), allowed);
         }
         let hidden = json!({"restricted": true});
         Ok(rows
             .iter()
             .map(|row| {
                 let shown = readable
-                    .get(row.get::<_, &str>(4))
+                    .get(&row.get::<_, i64>(0))
                     .copied()
                     .unwrap_or(false);
                 let id: i64 = row.get(0);
@@ -347,7 +360,7 @@ impl Rules {
                     version: row.get(2),
                     event_id: row.get(3),
                     event_name: row.get(4),
-                    subject: row.get(5),
+                    subject: if shown { row.get(5) } else { String::new() },
                     depth: row.get(6),
                     state: row.get(7),
                     reason: row.get(8),
@@ -371,12 +384,108 @@ impl Rules {
                             operation: e.get(2),
                             state: e.get(3),
                             reason: e.get(4),
-                            result: e.get::<_, Option<Value>>(5).unwrap_or(Value::Null),
+                            result: if shown {
+                                e.get::<_, Option<Value>>(5).unwrap_or(Value::Null)
+                            } else {
+                                hidden.clone()
+                            },
                         })
                         .collect(),
                 }
             })
             .collect())
+    }
+
+    pub(crate) async fn read_facts(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        table: &str,
+        subject: &str,
+        fields: &[String],
+    ) -> Result<
+        std::result::Result<
+            (
+                serde_json::Map<String, Value>,
+                Vec<(String, bilibi_grid::FieldType)>,
+            ),
+            &'static str,
+        >,
+    > {
+        let catalog = Catalog::for_scope(client, scope)
+            .await
+            .map_err(Error::from)?;
+        let Some(root) = catalog.table(table) else {
+            return Ok(Err("read_refused"));
+        };
+        let mut types = Vec::new();
+        let mut expressions = Vec::new();
+        let mut reached = Vec::new();
+        for path in fields {
+            let column = match catalog.resolve(root, path) {
+                Ok(column)
+                    if column.agg.is_none()
+                        && column.many.is_none()
+                        && column
+                            .field
+                            .is_some_and(|field| !catalog.masked(column.table, field.id)) =>
+                {
+                    column
+                }
+                _ => return Ok(Err("restricted_field")),
+            };
+            if let Some((prefix, _)) = path.rsplit_once('.') {
+                let target = catalog.table(column.table).ok_or(Error::Invalid)?;
+                let target_key = format!("{prefix}.{}", target.key());
+                let expression = bilibi_grid::scalar_expression(&catalog, table, &target_key)
+                    .map_err(|_| Error::Invalid)?;
+                reached.push(format!("({expression}) IS NOT NULL"));
+            }
+            types.push((path.clone(), column.ty));
+            let expression = bilibi_grid::scalar_expression(&catalog, table, path)
+                .map_err(|_| Error::Invalid)?;
+            let expression = if matches!(
+                column.ty,
+                bilibi_grid::FieldType::Integer
+                    | bilibi_grid::FieldType::Decimal
+                    | bilibi_grid::FieldType::Float
+            ) {
+                format!("({expression})::text")
+            } else {
+                expression
+            };
+            expressions.push(format!("to_jsonb({expression})"));
+        }
+        let key = bilibi_grid::scalar_expression(&catalog, table, root.key())
+            .map_err(|_| Error::Invalid)?;
+        let values = if expressions.is_empty() {
+            "NULL::jsonb".into()
+        } else {
+            expressions.join(",")
+        };
+        let reachable = if reached.is_empty() {
+            "true".into()
+        } else {
+            reached.join(" AND ")
+        };
+        let statement = format!("SELECT {values} FROM {} r WHERE ({key})::text=$3 AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND ({reachable}) LIMIT 1", root.scoped_source());
+        let Some(row) = client
+            .query_opt(&statement, &[&scope.tenant(), &scope.user(), &subject])
+            .await?
+        else {
+            return Ok(Err("subject_unavailable"));
+        };
+        let facts = fields
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                (
+                    path.clone(),
+                    row.get::<_, Option<Value>>(i).unwrap_or(Value::Null),
+                )
+            })
+            .collect();
+        Ok(Ok((facts, types)))
     }
 
     /// What a rule may use here: the triggers with the fields the reader may
@@ -416,9 +525,10 @@ impl Rules {
                 let mut input = a.input.clone();
                 if let Some(properties) = input["properties"].as_object_mut() {
                     properties.remove(a.definition.subject);
+                    properties.remove(a.definition.version);
                 }
                 if let Some(required) = input["required"].as_array_mut() {
-                    required.retain(|r| r.as_str() != Some(a.definition.subject));
+                    required.retain(|r| r.as_str() != Some(a.definition.subject) && r.as_str() != Some(a.definition.version));
                 }
                 json!({"operation": a.key, "title": a.title, "summary": a.summary, "table": a.definition.table,
                     "subject": a.definition.subject, "records": a.definition.records, "input": input})

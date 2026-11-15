@@ -6,7 +6,7 @@
 use crate::catalog::OfferedTrigger;
 use crate::definition::{self, Definition, Example, Problems};
 use crate::store::Rules;
-use crate::{ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, APPROVE, CHAIN_DEPTH, MANAGE};
+use crate::{ACTIONS_PER_RUN, ACTIVE_PER_TRIGGER, APPROVE, MANAGE};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_grid::{Catalog, FieldType};
 use bilibi_tenancy::Scope;
@@ -87,6 +87,45 @@ fn digest(definition: &Value, examples: &Value) -> String {
 }
 
 impl Rules {
+    pub(crate) fn catalog_digest(&self, event: &str, definition: &Definition) -> Option<String> {
+        let trigger = self.trigger(event)?.definition;
+        let grid = bilibi_grid::installed().ok()?;
+        let root = grid.table(trigger.table)?;
+        let mut paths = definition.fields();
+        paths.push(trigger.version.to_owned());
+        let fields: Option<Vec<Value>> = paths.iter().map(|path| {
+            let column = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)).ok()?;
+            let field = column.field?;
+            Some(json!({"path": path, "table": column.table, "type": format!("{:?}", column.ty), "values": field.values, "column": field.source_key()}))
+        }).collect();
+        let actions: Option<Vec<Value>> = definition.actions.iter().map(|call| {
+            let action = self.action(&call.operation)?;
+            Some(json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
+                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability}))
+        }).collect();
+        Some(digest(
+            &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
+            "subject": trigger.subject, "version": trigger.version, "source": root.source().sql, "key": root.key(),
+            "capability": root.capability(), "fields": fields?, "actions": actions?}),
+            &Value::Null,
+        ))
+    }
+
+    pub(crate) async fn lock_admission(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<()> {
+        let key = format!("base/rules:{}", scope.tenant());
+        client
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&key],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// The checks a draft passes: a mounted trigger, fields the drafter may
     /// read with values of their type, installed actions on the same record
     /// with inputs their contract accepts, and examples that come out as
@@ -211,7 +250,9 @@ impl Rules {
                     ),
                 ));
             }
-            if call.input.contains_key(action.definition.subject) {
+            if call.input.contains_key(action.definition.subject)
+                || call.input.contains_key(action.definition.version)
+            {
                 problems.push((
                     at("input"),
                     format!(
@@ -221,6 +262,7 @@ impl Rules {
                 ));
             }
             let mut input = call.input.clone();
+            input.insert(action.definition.version.into(), json!(1));
             input.insert(
                 action.definition.subject.into(),
                 placeholder(&action.input, action.definition.subject),
@@ -314,6 +356,8 @@ impl Rules {
             let mut changes = Vec::new();
             let id = match rule_id {
                 Some(id) => {
+                    let old = sql.query_one("SELECT name,version,updated_at::text FROM base_rules WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
+                    changes.push(Change { kind: "base/rules.rule".into(), id, old: json!({"name": old.get::<_, String>(0), "version": old.get::<_, i32>(1), "updated_at": old.get::<_, String>(2)}), new: json!({"name": name, "version": old.get::<_, i32>(1) + 1}) });
                     sql.execute("UPDATE base_rules SET name=$3,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &name]).await?;
                     id
                 }
@@ -366,6 +410,22 @@ impl Rules {
             problems.push(("version".into(), "this version already runs".into()));
         }
         let trigger: String = row.get(1);
+        if row.get::<_, bool>(4) {
+            let definition = Definition::parse(&row.get::<_, Value>(2), &mut Vec::new())
+                .ok_or(Error::Invalid)?;
+            let saved = client.query_one("SELECT v.catalog_digest,r.needs_review FROM base_rule_versions v JOIN base_rules r ON r.tenant_id=v.tenant_id AND r.id=v.rule_id WHERE v.tenant_id=$1 AND v.rule_id=$2 AND v.number=$3", &[&tenant, &rule, &number]).await?;
+            let fingerprint: Option<String> = saved.get(0);
+            if saved.get::<_, bool>(1)
+                || fingerprint.is_none()
+                || fingerprint != self.catalog_digest(&trigger, &definition)
+            {
+                problems.push((
+                    "version".into(),
+                    "the installed fields or actions changed; draft a new version for review"
+                        .into(),
+                ));
+            }
+        }
         let mut draft = Draft {
             rule_id: None,
             name: row.get(0),
@@ -471,12 +531,12 @@ impl Rules {
             ));
         }
         let active = client.query(
-            "SELECT id,name,trigger FROM base_rules WHERE tenant_id=$1 AND id<>$2 AND active_version_id IS NOT NULL AND disabled_at IS NULL AND (trigger=$3 OR trigger=ANY($4))",
-            &[&tenant, &rule, &trigger, &records],
+            "SELECT r.id,r.name,r.trigger,v.definition FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id<>$2 AND r.disabled_at IS NULL",
+            &[&tenant, &rule],
         ).await?;
         let same = active
             .iter()
-            .filter(|r| r.get::<_, String>(2) == trigger)
+            .filter(|row| row.get::<_, &str>(2) == trigger)
             .count() as i64;
         let most = self.limit(client, scope, ACTIVE_PER_TRIGGER).await?;
         if same >= most {
@@ -485,15 +545,36 @@ impl Rules {
                 format!("{most} rules already run on this trigger, the most allowed"),
             ));
         }
-        let depth = self.limit(client, scope, CHAIN_DEPTH).await?;
-        for other in active
-            .iter()
-            .filter(|r| records.contains(&r.get::<_, &str>(2)))
-        {
-            review.warnings.push(format!(
-                "Its action can start the rule \u{201c}{}\u{201d}; a chain of rules stops after {depth} in a row.",
-                other.get::<_, String>(1)
-            ));
+        let mut graph: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for row in &active {
+            let mut ignored = Vec::new();
+            if let Some(other) = Definition::parse(&row.get::<_, Value>(3), &mut ignored) {
+                let edges = graph.entry(row.get(2)).or_default();
+                edges.extend(
+                    other
+                        .actions
+                        .iter()
+                        .filter_map(|call| self.action(&call.operation))
+                        .flat_map(|action| {
+                            action
+                                .definition
+                                .records
+                                .iter()
+                                .map(|event| (*event).to_owned())
+                        }),
+                );
+            }
+        }
+        let mut pending: Vec<String> = records.iter().map(|event| (*event).to_owned()).collect();
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(event) = pending.pop() {
+            if event == trigger {
+                problems.push(("actions".into(), "its actions close a cycle of rules; change the actions or switch off a rule in the cycle".into()));
+                break;
+            }
+            if visited.insert(event.clone()) {
+                pending.extend(graph.get(&event).into_iter().flatten().cloned());
+            }
         }
         review.problems = problems;
         Ok(review)
@@ -510,6 +591,7 @@ impl Rules {
         number: i32,
     ) -> Result<Review> {
         let tenant = scope.tenant();
+        self.lock_admission(tx.sql(), scope).await?;
         tx.sql()
             .query_opt(
                 "SELECT 1 FROM base_rules WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
@@ -521,22 +603,41 @@ impl Rules {
         if !review.ok() {
             return Err(Error::Invalid);
         }
+        let approved = tx.sql().query_one("SELECT definition FROM base_rule_versions WHERE tenant_id=$1 AND rule_id=$2 AND number=$3", &[&tenant, &rule, &number]).await?;
+        let definition = Definition::parse(&approved.get::<_, Value>(0), &mut Vec::new())
+            .ok_or(Error::Invalid)?;
+        let event: String = tx
+            .sql()
+            .query_one(
+                "SELECT trigger FROM base_rules WHERE tenant_id=$1 AND id=$2",
+                &[&tenant, &rule],
+            )
+            .await?
+            .get(0);
+        let catalog_digest = self
+            .catalog_digest(&event, &definition)
+            .ok_or(Error::Invalid)?;
         let user = scope.user();
         tx.mutate(move |sql| Box::pin(async move {
+            let previous = sql.query_one("SELECT id,approved_by,approved_at::text,catalog_digest FROM base_rule_versions WHERE tenant_id=$1 AND rule_id=$2 AND number=$3", &[&tenant, &rule, &number]).await?;
             let version: i64 = sql.query_one(
-                "UPDATE base_rule_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,now()) WHERE tenant_id=$1 AND rule_id=$2 AND number=$3 RETURNING id",
-                &[&tenant, &rule, &number, &user],
+                "UPDATE base_rule_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,now()),catalog_digest=COALESCE(catalog_digest,$5) WHERE tenant_id=$1 AND rule_id=$2 AND number=$3 RETURNING id",
+                &[&tenant, &rule, &number, &user, &catalog_digest],
             ).await?.get(0);
             let old: Option<i64> = sql.query_one(
                 "SELECT active_version_id FROM base_rules WHERE tenant_id=$1 AND id=$2",
                 &[&tenant, &rule],
             ).await?.get(0);
             sql.execute(
-                "UPDATE base_rules SET active_version_id=$3,disabled_at=NULL,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
+                "UPDATE base_rules SET active_version_id=$3,disabled_at=NULL,needs_review=false,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2",
                 &[&tenant, &rule, &version],
             ).await?;
+            let evidence = sql.query_one("SELECT approved_by,approved_at::text,catalog_digest FROM base_rule_versions WHERE tenant_id=$1 AND id=$2", &[&tenant, &version]).await?;
             Ok(((), vec![Change { kind: "base/rules.rule".into(), id: rule,
-                old: json!({"active_version": old}), new: json!({"active_version": version, "number": number, "approved": true}) }]))
+                old: json!({"active_version": old}), new: json!({"active_version": version, "number": number, "approved": true}) },
+                Change { kind: "base/rules.version".into(), id: previous.get(0),
+                    old: json!({"approved_by": previous.get::<_, Option<i64>>(1), "approved_at": previous.get::<_, Option<String>>(2), "catalog_digest": previous.get::<_, Option<String>>(3)}),
+                    new: json!({"approved_by": evidence.get::<_, Option<i64>>(0), "approved_at": evidence.get::<_, Option<String>>(1), "catalog_digest": evidence.get::<_, Option<String>>(2)}) }]))
         })).await?;
         Ok(review)
     }
@@ -553,6 +654,7 @@ impl Rules {
     ) -> Result<Option<Review>> {
         bilibi_authz::authorize_key(tx.sql(), scope, APPROVE).await?;
         let tenant = scope.tenant();
+        self.lock_admission(tx.sql(), scope).await?;
         let row = tx.sql().query_opt(
             "SELECT r.disabled_at IS NOT NULL,v.number FROM base_rules r LEFT JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=r.active_version_id WHERE r.tenant_id=$1 AND r.id=$2 FOR UPDATE OF r",
             &[&tenant, &rule],

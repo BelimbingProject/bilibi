@@ -166,7 +166,7 @@ inventory::submit! {
     Module {
         id: "base/rules", layer: Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql"))],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let rules = Arc::new(build(services)?);

@@ -79,8 +79,9 @@ inventory::submit! { Contribution::new(EVENTS, FLAGGED, provenance!(), &EventTyp
 static GRID: GridContribution = GridContribution {
     record_fields: &[],
     tables: &[TableDecl::new("rule_cases", "Cases", VIEW,
-        Source::tenant("SELECT id,title,priority,amount,margin,queue,routed,flags,company_id,created_at FROM rule_cases_cases WHERE tenant_id=$1"), "id", &[
+        Source::tenant("SELECT id,title,priority,amount,margin,queue,routed,flags,company_id,created_at,version FROM rule_cases_cases WHERE tenant_id=$1"), "id", &[
             Field::new("id", "ID", FieldType::Integer).protected(),
+            Field::new("version", "Version", FieldType::Integer).protected(),
             Field::new("title", "Title", FieldType::String).protected(),
             Field::choice("priority", "Priority", &["low", "normal", "urgent"]).protected(),
             Field::new("amount", "Amount", FieldType::Decimal).protected(),
@@ -97,19 +98,19 @@ static GRID: GridContribution = GridContribution {
 bilibi_grid::contribute!("rule_cases/cases", "rule_cases/cases.grid", &GRID);
 
 inventory::submit! { Contribution::new(TRIGGERS, OPENED, provenance!(), &Trigger {
-    on: On { event: OPENED, versions: &[1] }, title: "A case is opened", table: TABLE, subject: "/case",
+    on: On { event: OPENED, versions: &[1] }, title: "A case is opened", table: TABLE, subject: "/case", version: "version",
 }) }
 inventory::submit! { Contribution::new(TRIGGERS, ROUTED, provenance!(), &Trigger {
-    on: On { event: ROUTED, versions: &[1] }, title: "A case is routed to a queue", table: TABLE, subject: "/case",
+    on: On { event: ROUTED, versions: &[1] }, title: "A case is routed to a queue", table: TABLE, subject: "/case", version: "version",
 }) }
 inventory::submit! { Contribution::new(TRIGGERS, FLAGGED, provenance!(), &Trigger {
-    on: On { event: FLAGGED, versions: &[1] }, title: "A case is flagged", table: TABLE, subject: "/case",
+    on: On { event: FLAGGED, versions: &[1] }, title: "A case is flagged", table: TABLE, subject: "/case", version: "version",
 }) }
 inventory::submit! { Contribution::new(ACTIONS, "rule_cases.cases.route", provenance!(), &Action {
-    title: "Send the case to a queue", table: TABLE, subject: "case_id", records: &[ROUTED],
+    title: "Send the case to a queue", table: TABLE, subject: "case_id", version: "expected_version", records: &[ROUTED],
 }) }
 inventory::submit! { Contribution::new(ACTIONS, "rule_cases.cases.flag", provenance!(), &Action {
-    title: "Flag the case", table: TABLE, subject: "case_id", records: &[FLAGGED],
+    title: "Flag the case", table: TABLE, subject: "case_id", version: "expected_version", records: &[FLAGGED],
 }) }
 inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "rule_cases.cases.route", provenance!(), &PrincipalWrite { principals: &["rules"] }) }
 inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "rule_cases.cases.flag", provenance!(), &PrincipalWrite { principals: &["rules"] }) }
@@ -251,12 +252,18 @@ impl WriteHandler for Change2 {
             let tenant = scope.tenant();
             let id = input["case_id"].as_i64().unwrap_or_default();
             let row = tx.sql()
-                .query_opt("SELECT company_id,queue,routed,flags FROM rule_cases_cases WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &id])
+                .query_opt("SELECT company_id,queue,routed,flags,version FROM rule_cases_cases WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &id])
                 .await
                 .map_err(Error::from)?
                 .ok_or_else(|| invalid("case_id", "is not a case of this tenant"))?;
             let (company, queue, routed, flags): (i64, Option<String>, i32, i32) =
                 (row.get(0), row.get(1), row.get(2), row.get(3));
+            if input["expected_version"]
+                .as_i64()
+                .is_some_and(|expected| expected != i64::from(row.get::<_, i32>(4)))
+            {
+                return Err(Error::Conflict.into());
+            }
             writable(tx.sql(), tenant, company).await?;
             let (name, key, payload) = match self {
                 Self::Route => {
@@ -312,12 +319,14 @@ fn open_schema() -> Value {
 fn route_schema() -> Value {
     json!({"type":"object","required":["case_id","queue"],"properties":{
         "case_id":{"type":"integer","minimum":1},
+        "expected_version":{"type":"integer","minimum":1},
         "queue":{"type":"string","maxLength":60,"description":"The queue the case goes to"}
     }})
 }
 fn flag_schema() -> Value {
     json!({"type":"object","required":["case_id"],"properties":{
         "case_id":{"type":"integer","minimum":1},
+        "expected_version":{"type":"integer","minimum":1},
         "note":{"type":"string","maxLength":200}
     }})
 }

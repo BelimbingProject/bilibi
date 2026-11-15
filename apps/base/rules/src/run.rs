@@ -24,7 +24,7 @@ use bilibi_grid::FieldType;
 use bilibi_module_registry::Catalog;
 use bilibi_queue::{Ended, Ending, EndingFuture, Execution, Handler, HandlerFuture, Outcome};
 use bilibi_tenancy::Scope;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokio_postgres::Transaction;
@@ -40,8 +40,6 @@ fn rules() -> Result<&'static Arc<Rules>> {
 
 /// The cause the worker names for events its actions record.
 const CAUSE: &str = "base/rules.run:";
-/// Queued runs one job takes in a pass.
-const BATCH: i64 = 100;
 
 pub(crate) struct Triggers;
 pub(crate) static TRIGGERS: Triggers = Triggers;
@@ -86,7 +84,7 @@ impl Subscribe for Triggers {
             };
             let (cause_id, depth) = (cause.map(|c| c.0), cause.map_or(1, |c| c.1 + 1));
             let rows = sql.query(
-                "INSERT INTO base_rule_runs(tenant_id,rule_id,version_id,event_id,event_name,subject,cause_run_id,depth,state) SELECT tenant_id,id,active_version_id,$3,$2::varchar,$4,$5,$6,'queued' FROM base_rules WHERE tenant_id=$1 AND trigger=$2::varchar AND active_version_id IS NOT NULL AND disabled_at IS NULL ORDER BY id LIMIT 100 ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING RETURNING id,rule_id",
+                "INSERT INTO base_rule_runs(tenant_id,rule_id,version_id,event_id,event_name,subject,cause_run_id,depth,state) SELECT tenant_id,id,active_version_id,$3,$2::varchar,$4,$5,$6,'queued' FROM base_rules WHERE tenant_id=$1 AND trigger=$2::varchar AND active_version_id IS NOT NULL AND disabled_at IS NULL ORDER BY id ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING RETURNING id,rule_id",
                 &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth],
             ).await?;
             Ok(rows
@@ -174,24 +172,29 @@ impl Worker {
             rules.limit(&**client, &scope, ACTIONS_PER_RUN).await?,
         );
         let runs: Vec<Run> = client.query(
-            "SELECT id,rule_id,version_id,event_id,subject,depth,state FROM base_rule_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id LIMIT $3",
-            &[&tenant, &event, &BATCH],
+            "SELECT id,rule_id,version_id,event_id,subject,depth,state FROM base_rule_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
+            &[&tenant, &event],
         ).await?.iter().map(|row| Run {
             id: row.get(0), rule: row.get(1), version: row.get(2), event: row.get(3),
             subject: row.get(4), depth: row.get(5), state: row.get(6),
         }).collect();
         drop(client);
-        for run in runs {
+        for mut run in runs {
             let mut client = rules.db.get().await?;
-            // The tenant's work bound: runs started in the last minute. Past
-            // it the event's runs wait for a later job, so one tenant's burst
-            // never holds the shared queue.
-            let started: i64 = client.query_one(
+            let mut tx = execution.begin(&mut client, "rules.run.admitted").await?;
+            rules.lock_admission(tx.sql(), &scope).await?;
+            let current = tx.sql().query_one("SELECT started_at IS NOT NULL,state FROM base_rule_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &run.id]).await?;
+            let admitted: bool = current.get(0);
+            run.state = current.get(1);
+            if run.state != "queued" && run.state != "matched" {
+                tx.rollback().await?;
+                continue;
+            }
+            let started: i64 = tx.sql().query_one(
                 "SELECT count(*) FROM base_rule_runs WHERE tenant_id=$1 AND started_at > now() - interval '1 minute'",
                 &[&tenant],
             ).await?.get(0);
-            if run.state == "queued" && started >= per_minute {
-                let mut tx = execution.begin(&mut client, "rules.run.deferred").await?;
+            if !admitted && started >= per_minute {
                 let system =
                     SystemScope::rehydrate(tx.sql(), tenant, Some(crate::PRINCIPAL)).await?;
                 rules
@@ -207,6 +210,14 @@ impl Worker {
                 tx.commit().await?;
                 return Ok(());
             }
+            if !admitted {
+                let id = run.id;
+                tx.mutate(move |sql| Box::pin(async move {
+                    let started: String = sql.query_one("UPDATE base_rule_runs SET started_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING started_at::text", &[&tenant, &id]).await?.get(0);
+                    Ok(((), vec![Change { kind: "base/rules.run".into(), id, old: json!({"started_at": null}), new: json!({"started_at": started}) }]))
+                })).await?;
+            }
+            tx.commit().await?;
             drop(client);
             self.run(execution, &scope, run, depth, actions).await?;
         }
@@ -225,7 +236,7 @@ impl Worker {
         let tenant = scope.tenant();
         let mut client = rules.db.get().await?;
         let row = client.query_opt(
-            "SELECT r.trigger,r.active_version_id,r.disabled_at IS NOT NULL,v.definition FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2",
+            "SELECT r.trigger,r.active_version_id,r.disabled_at IS NOT NULL,v.definition,v.catalog_digest,r.needs_review FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2",
             &[&tenant, &run.rule, &run.version],
         ).await?.ok_or(Error::NotFound)?;
         let (trigger, active, off): (String, Option<i64>, bool) =
@@ -233,6 +244,32 @@ impl Worker {
         let mut problems = Vec::new();
         let definition =
             Definition::parse(&row.get::<_, Value>(3), &mut problems).ok_or(Error::Invalid)?;
+        let approved_digest: Option<String> = row.get(4);
+        if row.get::<_, bool>(5)
+            || approved_digest.is_none()
+            || approved_digest != rules.catalog_digest(&trigger, &definition)
+        {
+            let mut tx = execution
+                .begin(&mut client, "rules.review_required")
+                .await?;
+            let rule = run.rule;
+            let version = run.version;
+            tx.mutate(move |sql| Box::pin(async move {
+                let changed = sql.execute("UPDATE base_rules SET needs_review=true,updated_at=now(),version=version+1 WHERE tenant_id=$1 AND id=$2 AND active_version_id=$3 AND NOT needs_review", &[&tenant, &rule, &version]).await?;
+                let changes = if changed == 0 { Vec::new() } else { vec![Change { kind: "base/rules.rule".into(), id: rule, old: json!({"needs_review": false}), new: json!({"needs_review": true}) }] };
+                Ok(((), changes))
+            })).await?;
+            tx.commit().await?;
+            return self
+                .finish(
+                    execution,
+                    &mut client,
+                    &run,
+                    Stop::Refused("catalog_changed"),
+                    None,
+                )
+                .await;
+        }
         let stop = if i64::from(run.depth) > depth {
             Some(Stop::Refused("chain_budget"))
         } else if off {
@@ -247,17 +284,7 @@ impl Worker {
         if let Some(stop) = stop {
             return self.finish(execution, &mut client, &run, stop, None).await;
         }
-        let Some(offered) = rules.trigger(&trigger) else {
-            return self
-                .finish(
-                    execution,
-                    &mut client,
-                    &run,
-                    Stop::Refused("trigger_unmounted"),
-                    None,
-                )
-                .await;
-        };
+        let offered = rules.trigger(&trigger).ok_or(Error::Invalid)?;
         // Facts and the decision are kept once taken, so a retry after a
         // crash acts on what was decided, never on a second reading.
         let (facts, outcomes) = if run.state == "matched" {
@@ -272,12 +299,17 @@ impl Worker {
                 saved.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
             )
         } else {
-            // Grid's read takes a connection of its own: hold none meanwhile.
-            drop(client);
-            let read = self
-                .facts(scope, offered.definition.table, &run.subject, &definition)
+            let mut fields = definition.fields();
+            fields.push(offered.definition.version.into());
+            let read = rules
+                .read_facts(
+                    &**client,
+                    scope,
+                    offered.definition.table,
+                    &run.subject,
+                    &fields,
+                )
                 .await?;
-            client = rules.db.get().await?;
             let (facts, types) = match read {
                 Ok(read) => read,
                 Err(code) => {
@@ -286,6 +318,10 @@ impl Worker {
                         .await
                 }
             };
+            let subject_version = facts
+                .get(offered.definition.version)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                .ok_or(Error::Invalid)?;
             let (matched, outcomes) = definition.evaluate(&facts, &|path| {
                 types
                     .iter()
@@ -298,7 +334,8 @@ impl Worker {
                     .finish(execution, &mut client, &run, Stop::NoMatch, Some(decided))
                     .await;
             }
-            self.decide(execution, &mut client, &run, &decided).await?;
+            self.decide(execution, &mut client, &run, &decided, subject_version)
+                .await?;
             decided
         };
         let mut refused = 0;
@@ -338,70 +375,6 @@ impl Worker {
         .await
     }
 
-    /// The conditions' fields of the subject, read through Grid as the
-    /// `rules` principal. A field it may not read, or reads masked, refuses
-    /// the run: a rule never reads a restricted field.
-    async fn facts(
-        &self,
-        scope: &Scope,
-        table: &str,
-        subject: &str,
-        definition: &Definition,
-    ) -> Result<std::result::Result<(Map<String, Value>, Vec<(String, FieldType)>), &'static str>>
-    {
-        let fields = definition.fields();
-        if fields.is_empty() {
-            return Ok(Ok((Map::new(), Vec::new())));
-        }
-        let mut types = Vec::new();
-        {
-            let client = self.rules.db.get().await?;
-            let catalog = bilibi_grid::Catalog::for_scope(&**client, scope)
-                .await
-                .map_err(Error::from)?;
-            let Some(root) = catalog.table(table) else {
-                return Ok(Err("read_refused"));
-            };
-            for path in &fields {
-                match catalog.resolve(root, path) {
-                    Ok(column)
-                        if column.agg.is_none()
-                            && column.many.is_none()
-                            && column
-                                .field
-                                .is_some_and(|f| !catalog.masked(column.table, f.id)) =>
-                    {
-                        types.push((path.clone(), column.ty));
-                    }
-                    _ => return Ok(Err("restricted_field")),
-                }
-            }
-        }
-        let key = match subject.parse::<i64>() {
-            Ok(id) => json!(id),
-            Err(_) => json!(subject),
-        };
-        let projection =
-            match bilibi_grid::project(&self.rules.db, scope, table, &[key], &fields).await {
-                Ok(projection) => projection,
-                Err(bilibi_grid::QueryError::Database(error)) => return Err(error),
-                Err(bilibi_grid::QueryError::ForbiddenRoot) => return Ok(Err("read_refused")),
-                Err(_) => return Ok(Err("restricted_field")),
-            };
-        let Some(row) = projection.rows.first() else {
-            return Ok(Err("subject_unavailable"));
-        };
-        let mut facts = Map::new();
-        for path in &fields {
-            let id = bilibi_grid::column::dom_id(path);
-            facts.insert(
-                path.clone(),
-                row.cells.get(&id).cloned().unwrap_or(Value::Null),
-            );
-        }
-        Ok(Ok((facts, types)))
-    }
-
     /// Records that the run matched, with the facts and outcomes.
     async fn decide(
         &self,
@@ -409,6 +382,7 @@ impl Worker {
         client: &mut tokio_postgres::Client,
         run: &Run,
         decided: &(Value, Value),
+        subject_version: i64,
     ) -> Result<()> {
         let mut tx = execution.begin(client, "rules.run.matched").await?;
         let (tenant, id, facts, outcomes) = (
@@ -419,10 +393,10 @@ impl Worker {
         );
         tx.mutate(move |sql| Box::pin(async move {
             sql.execute(
-                "UPDATE base_rule_runs SET state='matched',facts=$3,outcomes=$4,started_at=COALESCE(started_at,now()) WHERE tenant_id=$1 AND id=$2 AND state='queued'",
-                &[&tenant, &id, &facts, &outcomes],
+                "UPDATE base_rule_runs SET state='matched',facts=$3,outcomes=$4,subject_version=$5,started_at=COALESCE(started_at,now()) WHERE tenant_id=$1 AND id=$2 AND state='queued'",
+                &[&tenant, &id, &facts, &outcomes, &subject_version],
             ).await?;
-            Ok(((), vec![Change { kind: "base/rules.run".into(), id, old: json!({"state": "queued"}), new: json!({"state": "matched", "facts": facts, "outcomes": outcomes}) }]))
+            Ok(((), vec![Change { kind: "base/rules.run".into(), id, old: json!({"state": "queued"}), new: json!({"state": "matched"}) }]))
         })).await?;
         tx.commit().await
     }
@@ -476,10 +450,8 @@ impl Worker {
     ) -> Result<Acted> {
         let rules = &self.rules;
         let tenant = execution.tenant();
-        let Some(action) = rules.action(&call.operation) else {
-            return Ok(Acted::Stopped("action_unmounted"));
-        };
-        let Some(input) = crate::review::bind(
+        let action = rules.action(&call.operation).ok_or(Error::Invalid)?;
+        let Some(mut input) = crate::review::bind(
             &action.input,
             action.definition.subject,
             &run.subject,
@@ -497,6 +469,7 @@ impl Worker {
             tx.rollback().await?;
             return Ok(Acted::Stopped("stale_version"));
         }
+        let saved = tx.sql().query_one("SELECT subject_version FROM base_rule_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &run.id]).await?;
         if let Some(row) = tx.sql().query_opt(
             "SELECT state FROM base_rule_effects WHERE tenant_id=$1 AND version_id=$2 AND event_id=$3 AND position=$4",
             &[&tenant, &run.version, &run.event, &position],
@@ -504,6 +477,37 @@ impl Worker {
             // Already acted (a retry after a crash): never twice.
             tx.rollback().await?;
             return Ok(if row.get::<_, &str>(0) == "done" { Acted::Done } else { Acted::Refused });
+        }
+        let expected: Option<i64> = saved.get(0);
+        let Some(expected) = expected else {
+            tx.rollback().await?;
+            return Ok(Acted::Stopped("record_changed"));
+        };
+        input[action.definition.version] = json!(expected);
+        let scope = rules.principal(tx.sql(), tenant).await?;
+        let version = tx.sql().query_one("SELECT r.trigger,v.definition,v.catalog_digest FROM base_rules r JOIN base_rule_versions v ON v.tenant_id=r.tenant_id AND v.id=$3 WHERE r.tenant_id=$1 AND r.id=$2", &[&tenant, &run.rule, &run.version]).await?;
+        let trigger: String = version.get(0);
+        let definition = Definition::parse(&version.get::<_, Value>(1), &mut Vec::new())
+            .ok_or(Error::Invalid)?;
+        if version.get::<_, Option<String>>(2) != rules.catalog_digest(&trigger, &definition) {
+            tx.rollback().await?;
+            return Ok(Acted::Stopped("catalog_changed"));
+        }
+        let trigger = rules.trigger(&trigger).ok_or(Error::Invalid)?;
+        let mut fields = definition.fields();
+        fields.push(trigger.definition.version.into());
+        if let Err(code) = rules
+            .read_facts(
+                tx.sql(),
+                &scope,
+                trigger.definition.table,
+                &run.subject,
+                &fields,
+            )
+            .await?
+        {
+            tx.rollback().await?;
+            return Ok(Acted::Stopped(code));
         }
         rules
             .events
@@ -515,6 +519,26 @@ impl Worker {
             .await;
         let refusal = match outcome {
             Ok(result) => {
+                if let Ok((facts, _)) = rules
+                    .read_facts(
+                        tx.sql(),
+                        &scope,
+                        trigger.definition.table,
+                        &run.subject,
+                        &[trigger.definition.version.to_owned()],
+                    )
+                    .await?
+                {
+                    let next = facts
+                        .get(trigger.definition.version)
+                        .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+                        .ok_or(Error::Invalid)?;
+                    let id = run.id;
+                    tx.mutate(move |sql| Box::pin(async move {
+                        sql.execute("UPDATE base_rule_runs SET subject_version=$3 WHERE tenant_id=$1 AND id=$2", &[&tenant, &id, &next]).await?;
+                        Ok(((), vec![Change { kind: "base/rules.run".into(), id, old: json!({"subject_version": expected}), new: json!({"subject_version": next}) }]))
+                    })).await?;
+                }
                 self.receipt(
                     &mut tx,
                     run,
@@ -586,7 +610,7 @@ fn refusal(error: bilibi_agent_api::Error) -> Result<(&'static str, Value)> {
         E::Backend(Error::Invalid) => ("invalid", Value::Null),
         E::Backend(Error::Refused(why)) => ("refused", json!({"refusal": why})),
         E::NotFound | E::Backend(Error::NotFound) => ("not_found", Value::Null),
-        E::Backend(Error::Conflict) => ("conflict", Value::Null),
+        E::Backend(Error::Conflict) => ("record_changed", Value::Null),
         E::WritesNotEnabled | E::ChannelNotAllowed | E::UnknownOperation => {
             ("not_callable", Value::Null)
         }
