@@ -179,8 +179,10 @@ impl Mapping {
     }
 }
 
-/// A cell's text as a field's value: `None` when blank. Choices match
-/// without regard to case; whole numbers, numbers and yes/no are parsed.
+/// A cell's text as a field's value: `None` when blank.
+/// Built-in choices match without regard to case; numbers and yes/no are parsed.
+/// Custom values stay strings for owner validation, with exact decimal checks
+/// and yes/no normalization here.
 pub fn convert(field: &Field, text: &str) -> Result<Option<Value>, String> {
     let text = text.trim();
     if text.is_empty() {

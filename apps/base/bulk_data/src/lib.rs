@@ -1,7 +1,7 @@
 //! CSV import for any module that opts in (issue 133).
 //!
 //! A module contributes a `RecordType` naming its write contracts; a person
-//! uploads a CSV file, maps its columns to the create contract's fields,
+//! uploads a CSV file, maps its columns to the offered fields,
 //! checks it in a dry run and runs it in the background. Every row is one
 //! call to the owner's contract as that person, from a queued job
 //! (`bilibi_agent_api::job`, ADR 10), each in its own short transaction with

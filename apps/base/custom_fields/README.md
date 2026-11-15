@@ -70,7 +70,7 @@ Each write is a reviewed safe write: the preview runs the facade's checks withou
 
 ## CSV import
 
-Owners that offer imports may register `bilibi_bulk_data::CustomImport` beside their import type. Bulk Data discovers the tenant's active fields and maps CSV columns to the owner's existing custom patch; the owner still validates every value in its transaction. Contacts opt in. See [Bulk Data](../bulk_data/README.md#tenant-defined-fields-in-csv-import). Several choices, record references and dynamic report/search fields remain outside the current contract.
+The owner opt-in and mapping contract lives in [Bulk Data](../bulk_data/README.md#tenant-defined-fields-in-csv-import). Several choices, record references and dynamic report/search fields remain outside the current contract.
 
 ## Storage
 
