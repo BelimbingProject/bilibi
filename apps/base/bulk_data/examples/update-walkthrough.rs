@@ -194,10 +194,15 @@ async fn main() -> Result<(), Failure> {
     let (manager, viewer, other) = (person(0), person(1), person(2));
     let sql = db.get().await?;
     // 500 contacts to change, and another tenant's contact named alike.
+    // ANALYZE as autovacuum would on a running system: until it does, the
+    // planner takes `persons` for one row and the contacts search count
+    // nests semi joins over every contact, minutes per read, so an update
+    // started before autovacuum got there never settled (#717).
     sql.batch_execute(
         "INSERT INTO persons(tenant_id,code,name,kind,email)
            SELECT 1, 'bulk_' || n, 'Bulk ' || lpad(n::text, 3, '0'), 'human', 'bulk' || n || '@bulk.test' FROM generate_series(1,500) n;
-         INSERT INTO persons(tenant_id,code,name,kind) VALUES (2,'bulk_other_tenant','Bulk Other Tenant','human');",
+         INSERT INTO persons(tenant_id,code,name,kind) VALUES (2,'bulk_other_tenant','Bulk Other Tenant','human');
+         ANALYZE persons;",
     )
     .await?;
     let ids = |names: &[&str]| {
