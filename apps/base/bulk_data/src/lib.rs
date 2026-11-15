@@ -20,6 +20,7 @@ mod mapping;
 mod privacy;
 mod record;
 mod result;
+mod stats;
 mod store;
 mod undo;
 mod update;
