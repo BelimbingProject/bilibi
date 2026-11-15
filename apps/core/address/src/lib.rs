@@ -190,7 +190,7 @@ impl AddressService {
             .begin(&mut client, scope.mutation_context("address.update"))
             .await?;
         let scope = self.fresh(tx.sql(), scope).await?;
-        let result = store::update(&mut tx, &scope, id, update.version, &input).await?;
+        let result = store::update(&mut tx, &scope, id, update.version, &input, false).await?;
         tx.commit().await?;
         Ok(result)
     }

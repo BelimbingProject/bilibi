@@ -28,6 +28,10 @@ pub(crate) struct QuickDocument {
     options: Options,
 }
 impl QuickDocument {
+    /// Closing without adding removes the file the dialog stored.
+    pub async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        self.state.discard(pages, scope).await;
+    }
     pub async fn new(pages: &Pages, scope: &Scope, fixed: Option<Resolved>) -> Result<Self> {
         let mut state = State::default();
         state.values.insert("source".into(), "internal".into());

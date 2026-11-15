@@ -40,13 +40,21 @@ bilibi-picklists.workspace = true
 bilibi-settings.workspace = true
 bilibi-settings-editor.workspace = true
 bilibi-records.workspace = true
+bilibi-personal-data.workspace = true
 jiff.workspace = true
 
 [dev-dependencies]
+bilibi-base.workspace = true
+bilibi-core.workspace = true
+bilibi-privacy.workspace = true
 bilibi-walkthrough-fixture = { path = "../../../fixtures/walkthrough" }
 bilibi-web = { path = "../../web" }
+bilibi-workflow.workspace = true
 bilibi-address = { path = "../address" }
+hmac.workspace = true
+sha1.workspace = true
 tokio.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

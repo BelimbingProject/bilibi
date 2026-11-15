@@ -286,14 +286,19 @@ impl ReadHandler for Lookup {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
+            let mut client = db()?.get().await.map_err(bilibi_database::Error::from)?;
             let value = match self {
                 Self::Duplicates => {
                     let query = serde_json::from_value(input.clone())
                         .map_err(|_| bilibi_database::Error::Invalid)?;
-                    serde_json::to_value(
-                        crate::duplicates::duplicates(&**client, scope, &query).await?,
-                    )
+                    // In a transaction, so matching runs under its timeout.
+                    let raw: &mut tokio_postgres::Client = &mut client;
+                    let tx = raw
+                        .transaction()
+                        .await
+                        .map_err(bilibi_database::Error::from)?;
+                    let found = crate::duplicates::duplicates(&tx, scope, &query).await;
+                    serde_json::to_value(crate::duplicates::settle(tx, found).await?)
                 }
                 Self::Hierarchy => serde_json::to_value(
                     crate::hierarchy::hierarchy(
@@ -313,8 +318,8 @@ impl ReadHandler for Lookup {
 }
 fn duplicates_schema() -> Value {
     json!({"type":"object","properties":{
-        "name":{"type":"string","maxLength":160}, "website":text(), "email":{"type":"string","maxLength":254},
-        "phone":{"type":"string","maxLength":64},"registration_number":text(),
+        "name":crate::web::fields::NAME.input(json!({"maxLength":160})), "website":crate::web::fields::WEBSITE.input(json!({"maxLength":255})), "email":crate::web::fields::EMAIL.input(json!({"maxLength":254})),
+        "phone":{"type":"string","maxLength":64},"registration_number":crate::web::fields::REGISTRATION_NUMBER.input(json!({"maxLength":255})),
         "except_id":{"type":"integer","minimum":1}, "limit":{"type":"integer","minimum":1,"maximum":100}
     }})
 }
@@ -624,13 +629,10 @@ async fn authorize_update_target(
     Ok(row.get(0))
 }
 
-fn text() -> Value {
-    json!({"type":"string","maxLength":255})
-}
 fn list_schema() -> Value {
     json!({"type":"object","properties":{
-        "search":{"type":"string","maxLength":200,"description":"Words, each matched as the start of a word in the name, code or legal name; all must match."},
-        "status":{"type":"string","enum":STATUSES},
+        "search":{"type":"string","maxLength":200,"description":"Words, each matched as the start of a word in the name, code or legal name; all must match. A full name or code with dots, dashes or slashes (amazon.com, PO-2024-001) also matches as typed; \"a phrase\" matches in order and -word excludes."},
+        "status":crate::web::fields::STATUS.input(json!({"enum":STATUSES})),
         "page":{"type":"integer","minimum":1},
         "page_size":{"type":"integer","minimum":1,"maximum":100}
     }})
@@ -640,16 +642,16 @@ fn get_schema() -> Value {
 }
 fn create_schema() -> Value {
     let mut schema = json!({"type":"object","required":["name"],"properties":{
-        "name":{"type":"string","maxLength":160},
-        "code":{"type":"string","maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit company-only (M) markers and trailing legal forms such as Sdn Bhd, Berhad, Pte, Ltd, PLT, Inc, LLC and Corp; append _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."},"legal_name":text(),"registration_number":text(),
-        "tax_id":{"type":"string","maxLength":64},
-        "jurisdiction":{"type":"string","maxLength":2},
-        "email":{"type":"string","maxLength":254},
+        "name":crate::web::fields::NAME.input(json!({"maxLength":160})),
+        "code":crate::web::fields::CODE.input(json!({"maxLength":255,"description":"Propose a code of at most 12 characters from whole name words, except truncate the first word to fit the limit. Omit company-only (M) markers and trailing legal forms such as Sdn Bhd, Berhad, Pte, Ltd, PLT, Inc, LLC and Corp; append _2, _3 and so on for collisions within 12 characters. The person may choose another code, including a longer one."})),"legal_name":crate::web::fields::LEGAL_NAME.input(json!({"maxLength":255})),"registration_number":crate::web::fields::REGISTRATION_NUMBER.input(json!({"maxLength":255})),
+        "tax_id":crate::web::fields::TAX_ID.input(json!({"maxLength":64})),
+        "jurisdiction":crate::web::fields::JURISDICTION.input(json!({"maxLength":2})),
+        "email":crate::web::fields::EMAIL.input(json!({"maxLength":254})),
         "phone":{"type":"string","maxLength":64},
-        "website":text(),
-        "status":{"type":"string","enum":INITIAL_STATUSES},
-        "parent_id":{"type":"integer","minimum":1,"title":"Parent company","x-bilibi-reference":"company"},
-        "legal_entity_type_id":{"type":"integer","minimum":1},
+        "website":crate::web::fields::WEBSITE.input(json!({"maxLength":255})),
+        "status":crate::web::fields::STATUS.input(json!({"enum":INITIAL_STATUSES})),
+        "parent_id":crate::web::fields::PARENT_ID.input(json!({"minimum":1,"x-bilibi-reference":"company"})),
+        "legal_entity_type_id":crate::web::fields::LEGAL_ENTITY_TYPE_ID.input(json!({"minimum":1})),
         "create_anyway":{"type":"object","required":["candidate_ids","reason"],"properties":{
             "candidate_ids":{"type":"array","items":{"type":"integer","minimum":1}},
             "reason":{"type":"string","maxLength":500}

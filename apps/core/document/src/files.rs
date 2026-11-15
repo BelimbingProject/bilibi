@@ -92,21 +92,31 @@ impl SubjectOwner for DocumentFiles {
                 .await?
                 .map(|row| from_row(&row))
                 .ok_or(Error::NotFound)?;
-            let allowed = row.state == "reserved"
-                && row.stored_by == scope.user()
-                && scope.current_company().map(|company| company.get()) == Some(row.company_id)
+            let own = row.stored_by == scope.user()
+                && scope.current_company().map(|company| company.get()) == Some(row.company_id);
+            // A held upload: attached, its bytes still only in Media.
+            let held = row.state == "attached"
+                && row.artifact_id.is_none()
+                && row.media_public_id.is_some();
+            let allowed = own
+                && !scanner
+                && ((row.state == "reserved"
+                    && matches!(
+                        action,
+                        SubjectAction::Upload
+                            | SubjectAction::Download
+                            | SubjectAction::Inspect
+                            | SubjectAction::Discard
+                    ))
+                    // Its uploader retains the draft as the file is attached.
+                    || (held && matches!(action, SubjectAction::Retain)));
+            // The scanner reads it and releases it once the scan settles.
+            let scanner_allowed = scanner
+                && held
                 && matches!(
                     action,
-                    SubjectAction::Upload
-                        | SubjectAction::Download
-                        | SubjectAction::Inspect
-                        | SubjectAction::Discard
+                    SubjectAction::Download | SubjectAction::Inspect | SubjectAction::Retain
                 );
-            let scanner_allowed = scanner
-                && row.state == "attached"
-                && row.artifact_id.is_none()
-                && row.media_public_id.is_some()
-                && matches!(action, SubjectAction::Download | SubjectAction::Inspect);
             if allowed || scanner_allowed {
                 Ok(())
             } else {
@@ -523,10 +533,11 @@ pub(crate) async fn upload_limit(
 }
 
 /// Checks the upload, commits its reserved ledger row, stores the bytes
-/// through `base/artifacts` and marks the row stored.
+/// through `base/artifacts` and marks the row stored. It takes the pool, not
+/// a connection: while the scanner works it holds none between its looks.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
-    client: &mut Client,
+    db: &bilibi_database::Db,
     scope: &Scope,
     boundary: &MutationBoundary,
     artifacts: &Artifacts,
@@ -535,6 +546,8 @@ pub(crate) async fn store(
     queue: &bilibi_queue::Queue,
     upload: Upload<'_>,
 ) -> WriteResult<StoredFile> {
+    let mut pooled = db.get().await.map_err(Error::from)?;
+    let client: &mut Client = &mut pooled;
     authorize_proof(&*client, scope, MANAGE).await?;
     let company = scope.current_company().ok_or(WriteError::field(
         "file",
@@ -627,17 +640,24 @@ pub(crate) async fn store(
     let mut verdict = staged.scan_state;
     // A quick verdict keeps the existing clean upload path. Slow scans still
     // produce a document: the later Queue settlement promotes only clean bytes.
-    for _ in 0..120 {
-        if verdict != MediaScanState::Pending {
-            break;
+    // The wait holds no pooled connection, only one for each look.
+    if verdict == MediaScanState::Pending {
+        drop(pooled);
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let look = db.get().await.map_err(Error::from)?;
+            verdict = media
+                .inspect_attachment(&**look, scope, &staged.public_id)
+                .await
+                .map_err(media_error)?
+                .scan_state;
+            if verdict != MediaScanState::Pending {
+                break;
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        verdict = media
-            .inspect_attachment(client, scope, &staged.public_id)
-            .await
-            .map_err(media_error)?
-            .scan_state;
+        pooled = db.get().await.map_err(Error::from)?;
     }
+    let client: &mut Client = &mut pooled;
     let metadata = if verdict == MediaScanState::Clean {
         let clean = media
             .download_attachment(client, scope, &staged.public_id)

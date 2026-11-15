@@ -50,8 +50,10 @@ mod page_search;
 pub mod params;
 mod record_fields;
 mod record_reference;
-pub use record_fields::RecordField;
-pub use record_reference::{PickerHit, RecordPicker, RecordState, RelatedRecord};
+pub use record_fields::{
+    record_field, PersonalDataClass, RecordField, RecordFieldType, RECORD_FIELDS,
+};
+pub use record_reference::{NamedKind, PickerHit, RecordPicker, RecordState, RelatedRecord};
 mod portal;
 mod search_multi;
 pub use search_multi::{SearchMultiOption, SearchMultiSelect};

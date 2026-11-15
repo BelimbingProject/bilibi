@@ -10,7 +10,7 @@
 //! Dates are shown through the request's `DisplayContext`. The list reads one
 //! period at a time (`period::ListPeriod`, the last 30 days by default), counts
 //! its matches only up to `bilibi_audit::MAX_COUNT` and orders by time alone,
-//! because the ledger only grows.
+//! because the ledger can be large.
 use crate::{
     period::{Changed, ListPeriod},
     present::{self, Presentation},

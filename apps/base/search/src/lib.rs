@@ -17,7 +17,7 @@ mod query;
 mod web;
 
 pub use model::{Kind, Searchable, State};
-pub use query::{MAX_KIND_HITS, MAX_TEXT, MAX_WORDS};
+pub use query::{terms, Terms, MAX_KIND_HITS, MAX_TEXT, MAX_WORDS};
 
 use bilibi_authz::authorize_key;
 use bilibi_database::{Db, Error, MutationBoundary, Result};
@@ -454,6 +454,7 @@ impl Search {
         let prefix = terms.prefix.as_deref();
         let (tenant, user) = (scope.tenant(), scope.user());
         let pattern = prefix.unwrap_or_default();
+        let plain = terms.plain.as_deref().unwrap_or_default();
         let (sql, filter, limit, offset) = match mode {
             Mode::Suggest => (
                 query::suggestions(&planned, tuning.suggestions, prefix.is_some()),
@@ -473,7 +474,7 @@ impl Search {
             ),
         };
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            vec![&tenant, &user, &words, &pattern];
+            vec![&tenant, &user, &words, &pattern, &plain];
         if matches!(mode, Mode::Page { .. }) {
             params.extend([
                 &filter as &(dyn tokio_postgres::types::ToSql + Sync),

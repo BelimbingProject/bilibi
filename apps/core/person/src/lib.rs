@@ -74,6 +74,7 @@ pub struct PersonService {
     authentication: Arc<Authentication>,
     settings: Arc<bilibi_settings::Settings>,
     picklists: Arc<bilibi_picklists::PickLists>,
+    bulk: Arc<bilibi_bulk_data::BulkData>,
 }
 impl PersonService {
     pub fn subscribe(&self) -> broadcast::Receiver<PersonChanged> {
@@ -222,6 +223,7 @@ inventory::submit! {
             ("core-person-005-contact-lookup", include_str!("../migrations/005-contact-lookup.sql")),
             ("core-person-006-custom-fields", include_str!("../migrations/006-custom-fields.sql")),
             ("core-person-007-code-suffix", include_str!("../migrations/007-code-suffix.sql")),
+            ("core-person-008-search-trigram", include_str!("../migrations/008-search-trigram.sql")),
         ],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let parties = services.get::<bilibi_tenancy::PartyProofs>("base/tenancy.parties")?;
@@ -236,7 +238,7 @@ inventory::submit! {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             custom::bind(services.get(bilibi_custom_fields::SERVICE)?)?;
             step_up::bind(services.get(bilibi_step_up::SERVICE)?)?;
-            let persons = Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")?, settings: services.get("base/settings.store")?, picklists: services.get(bilibi_picklists::SERVICE)? });
+            let persons = Arc::new(PersonService { db, mutations: services.get("base/database.mutations")?, authentication: services.get("base/tenancy.authentication")?, settings: services.get("base/settings.store")?, picklists: services.get(bilibi_picklists::SERVICE)?, bulk: services.get(bilibi_bulk_data::SERVICE)? });
             agent_operations::bind(persons.clone())?;
             Ok(persons)
         }}, bilibi_module_registry::Service { id: web::SERVICE, factory: |services| {

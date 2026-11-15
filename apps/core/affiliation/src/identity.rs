@@ -249,6 +249,32 @@ pub async fn unlink(
     let masked = fields(tx.sql(), scope).await?;
     save(tx, scope, old, input, true, masked).await
 }
+
+pub(crate) async fn undo_import(
+    tx: &mut MutationTransaction<'_>,
+    scope: &Scope,
+    id: AffiliationId,
+    version: i64,
+) -> Result<()> {
+    check_context(tx, scope)?;
+    authorize_key(tx.sql(), scope, IMPORT).await?;
+    let old = lock_existing(tx, scope, id, version, IMPORT).await?;
+    let tenant = scope.tenant();
+    let changed = old.clone();
+    tx.mutate(move |sql| Box::pin(async move {
+        match sql.query_opt(&format!("DELETE FROM person_affiliations WHERE tenant_id=$1 AND id=$2 AND version=$3 RETURNING {COLUMNS}"), &[&tenant, &id.get(), &version]).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(Error::Conflict),
+            Err(error) if error.code() == Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) => {
+                return Err(Error::refused("Another record now uses this affiliation, so it was left alone."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(((), vec![Change { kind: "affiliation".into(), id: id.get(), old: old.audit_values(), new: Value::Null }]))
+    })).await?;
+    publish(tx, tenant, &changed);
+    Ok(())
+}
 async fn save(
     tx: &mut MutationTransaction<'_>,
     scope: &Scope,

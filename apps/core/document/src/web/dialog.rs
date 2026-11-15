@@ -150,7 +150,10 @@ impl State {
                     .into_iter()
                     .map(|d| (d.id, d.name))
                     .collect();
-                self.stored = Some(stored);
+                // The file this one replaces is never attached now.
+                if let Some(replaced) = self.stored.replace(stored) {
+                    discard(pages, scope, replaced).await;
+                }
             }
             Err(error) => {
                 self.duplicates.clear();
@@ -158,6 +161,12 @@ impl State {
             }
         }
         Ok(())
+    }
+    /// Discards the file the dialog holds, when it is closed without filing.
+    async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        if let Some(stored) = self.stored.take() {
+            discard(pages, scope, stored).await;
+        }
     }
     /// Keeps a refused contract call's reasons on their fields.
     fn refused(&mut self, error: bilibi_agent_api::Error, failed: &str) -> Result<()> {
@@ -302,6 +311,25 @@ struct Options {
     statuses: Vec<Choice>,
 }
 
+/// Removes a stored file the dialog let go of (replaced by another upload,
+/// or the dialog closed) at once, rather than when its 24-hour discard job
+/// runs (#699). That job stays the way out when this fails or the tab closes,
+/// so a failure is only logged, by the file's token.
+async fn discard(pages: &Pages, scope: &Scope, stored: StoredFile) {
+    match pages
+        .documents
+        .discard_files(scope, std::slice::from_ref(&stored.artifact_id))
+        .await
+    {
+        Ok(failed) => {
+            for (token, error) in failed {
+                eprintln!("warning: document dialog could not discard file {token}: {error:?}");
+            }
+        }
+        Err(error) => eprintln!("warning: document dialog could not discard a file: {error:?}"),
+    }
+}
+
 /// A new document, written in the dialog.
 pub(crate) struct NewDocument {
     state: State,
@@ -313,6 +341,10 @@ pub(crate) struct NewDocument {
     options: Options,
 }
 impl NewDocument {
+    /// Closing without creating removes the file the dialog stored.
+    pub async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        self.state.discard(pages, scope).await;
+    }
     pub async fn new(pages: &Pages, scope: &Scope, fixed: Option<Resolved>) -> Result<Self> {
         let mut state = State::default();
         state.values.insert("source".into(), "internal".into());
@@ -693,6 +725,10 @@ pub(crate) struct NewRevision {
     prior: Vec<Choice>,
 }
 impl NewRevision {
+    /// Closing without adding the revision removes the file it stored.
+    pub async fn discard(&mut self, pages: &Pages, scope: &Scope) {
+        self.state.discard(pages, scope).await;
+    }
     pub fn new(source: Source, latest: i32, revisions: &[Revision]) -> Self {
         let mut state = State::default();
         state

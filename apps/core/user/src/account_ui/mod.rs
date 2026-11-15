@@ -68,6 +68,54 @@ impl Flash {
     }
 }
 
+/// Companies as a picker names them (`RecordPicker::named`).
+pub(crate) const COMPANY: bilibi_ui::NamedKind<'static> = bilibi_ui::NamedKind {
+    kind: "core/company",
+    prefix: "company",
+    label: "Company",
+    page: Some("/companies"),
+};
+/// A type-ahead over the companies a page may offer, instead of a list of
+/// every company. The owner still proves the chosen company on save.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn company_picker(
+    id: &str,
+    form: &str,
+    key: &str,
+    label: &str,
+    query: &str,
+    hits: &[bilibi_tenancy::NamedOrganisation],
+    chosen: Option<&bilibi_tenancy::NamedOrganisation>,
+    events: (&str, &str),
+    errors: Vec<String>,
+) -> Result<Html> {
+    let hits: Vec<(i64, String)> = hits
+        .iter()
+        .map(|company| (company.id.get(), company.name.clone()))
+        .collect();
+    render(&bilibi_ui::RecordPicker::named(
+        COMPANY,
+        id,
+        form,
+        key,
+        label,
+        query,
+        &hits,
+        chosen.map(|company| (company.id.get(), company.name.as_str())),
+        events,
+        errors,
+    ))
+}
+/// The company a picker hit raised (`record=company:<id>`).
+pub(crate) fn picked_company(event: &Value) -> Result<bilibi_party_ids::OrganisationId> {
+    event
+        .get("record")
+        .and_then(Value::as_str)
+        .and_then(|record| COMPANY.picked(record))
+        .and_then(|id| bilibi_party_ids::OrganisationId::new(id).ok())
+        .ok_or(Error::Invalid)
+}
+
 pub(crate) fn render(template: &impl Template) -> Result<Html> {
     Html::render(template).map_err(|_| Error::Internal)
 }

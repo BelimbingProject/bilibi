@@ -1221,6 +1221,41 @@ pub struct NamedOrganisation {
     /// Equivalent to `status == "archived"` for summaries from Core Company.
     pub archived: bool,
 }
+/// What a company picker asks the directory for, so it never reads every
+/// company of the tenant: part of a name, legal name or code (case-insensitive,
+/// `%` and `_` taken literally; empty matches every company), optionally only
+/// among `among`, and at most `limit` companies, sorted by the displayed name.
+#[derive(Clone, Copy, Debug)]
+pub struct OrganisationSearch<'a> {
+    pub text: &'a str,
+    pub among: Option<&'a [OrganisationId]>,
+    pub limit: usize,
+}
+impl<'a> OrganisationSearch<'a> {
+    /// The hits a picker shows for typed text.
+    pub const HITS: usize = 20;
+    /// At most `HITS` companies matching `text`.
+    pub fn text(text: &'a str) -> Self {
+        Self {
+            text,
+            among: None,
+            limit: Self::HITS,
+        }
+    }
+    /// At most `limit` instead of `HITS`.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+    /// Which of `ids` qualify, whatever their names.
+    pub fn among(ids: &'a [OrganisationId]) -> Self {
+        Self {
+            text: "",
+            among: Some(ids),
+            limit: ids.len(),
+        }
+    }
+}
 /// Core Company's naming half of the organisation seam, bound beside `OrganisationProvider` so Base
 /// pickers and binders never query the `companies` table. Every method keeps
 /// to the actor's own tenant; a missing or cross-tenant id is `NotFound` and
@@ -1243,14 +1278,24 @@ pub trait OrganisationDirectory: Send + Sync {
         scope: &'a Scope,
         ids: &'a [OrganisationId],
     ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
-    /// The unarchived companies this actor may target with `capability`:
-    /// none without the capability, the current company, or every company of
-    /// the tenant with Company's tenant-wide management reach.
+    /// The unarchived companies this actor may target with `capability` that
+    /// `search` matches: none without the capability, the current company, or
+    /// any company of the tenant with Company's tenant-wide management reach.
     fn selectable<'a>(
         &'a self,
         client: &'a dyn ProofClient,
         scope: &'a Scope,
         capability: &'a str,
+        search: OrganisationSearch<'a>,
+    ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
+    /// The live, unarchived companies of the tenant that `search` matches,
+    /// whatever the actor's reach: for a caller whose write proves the chosen
+    /// company itself (a role's owner company).
+    fn find<'a>(
+        &'a self,
+        client: &'a dyn ProofClient,
+        scope: &'a Scope,
+        search: OrganisationSearch<'a>,
     ) -> ProofFuture<'a, Vec<NamedOrganisation>>;
     /// One company as the target of `capability`: `Forbidden` without the
     /// capability or the reach, `NotFound` when missing or in another tenant.
@@ -1421,9 +1466,27 @@ impl PartyProofs {
         client: &dyn ProofClient,
         scope: &Scope,
         capability: &str,
+        search: OrganisationSearch<'_>,
     ) -> Result<Vec<NamedOrganisation>> {
         match self.directory.get() {
-            Some(directory) => directory.selectable(client, scope, capability).await,
+            Some(directory) => {
+                directory
+                    .selectable(client, scope, capability, search)
+                    .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+    /// The live, unarchived companies `search` matches
+    /// (`OrganisationDirectory::find`); none when no Company owner is installed.
+    pub async fn find_organisations(
+        &self,
+        client: &dyn ProofClient,
+        scope: &Scope,
+        search: OrganisationSearch<'_>,
+    ) -> Result<Vec<NamedOrganisation>> {
+        match self.directory.get() {
+            Some(directory) => directory.find(client, scope, search).await,
             None => Ok(Vec::new()),
         }
     }

@@ -27,6 +27,11 @@ use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{PartyProofs, Scope};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
+
+/// Every company the call may offer: these checks count them all.
+fn every() -> bilibi_tenancy::OrganisationSearch<'static> {
+    bilibi_tenancy::OrganisationSearch::text("").limit(usize::MAX)
+}
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -114,7 +119,7 @@ async fn main() -> Result<(), Error> {
     );
     const SETTINGS_MANAGE: &str = "base.settings.company.manage";
     let selectable = parties
-        .selectable_organisations(sql, &admin, SETTINGS_MANAGE)
+        .selectable_organisations(sql, &admin, SETTINGS_MANAGE, every())
         .await?;
     show(
         "selectable(admin, settings.company.manage): count, archived offered",
@@ -123,14 +128,14 @@ async fn main() -> Result<(), Error> {
     show(
         "selectable(manager, settings.company.manage)",
         parties
-            .selectable_organisations(sql, &manager, SETTINGS_MANAGE)
+            .selectable_organisations(sql, &manager, SETTINGS_MANAGE, every())
             .await
             .map(|c| c.len()),
     );
     show(
         "selectable(viewer, settings.company.manage)",
         parties
-            .selectable_organisations(sql, &viewer, SETTINGS_MANAGE)
+            .selectable_organisations(sql, &viewer, SETTINGS_MANAGE, every())
             .await
             .map(|c| c.len()),
     );

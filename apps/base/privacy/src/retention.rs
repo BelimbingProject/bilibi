@@ -704,15 +704,32 @@ impl Privacy {
             if !listed.contains(&primary.get()) {
                 listed.push(primary.get());
             }
+            let live: std::collections::HashSet<i64> = listed.iter().copied().collect();
             let listed: Arc<[i64]> = listed.into();
-            for &id in listed.iter() {
-                let company = OrganisationId::new(id).map_err(|_| Error::Internal)?;
-                let companies = Companies {
-                    company,
-                    primary: company == primary,
-                    listed: Arc::clone(&listed),
+            for (key, (_, class)) in &self.classes.by_key {
+                // The settings exist at company scope only and are off by default,
+                // so only a company that turned the class on itself can be due.
+                let on = match self
+                    .settings
+                    .company_values(&*client, &scope, &setting_keys(key)[0])
+                    .await
+                {
+                    Ok(on) => on,
+                    Err(_) => {
+                        failed = true;
+                        continue;
+                    }
                 };
-                for (key, (_, class)) in &self.classes.by_key {
+                for (id, _) in on
+                    .into_iter()
+                    .filter(|(id, value)| *value == Value::Bool(true) && live.contains(id))
+                {
+                    let company = OrganisationId::new(id).map_err(|_| Error::Internal)?;
+                    let companies = Companies {
+                        company,
+                        primary: company == primary,
+                        listed: Arc::clone(&listed),
+                    };
                     let policy = match self.policy(client, &scope, company, key).await {
                         Ok(policy) => policy,
                         Err(_) => {

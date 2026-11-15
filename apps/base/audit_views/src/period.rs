@@ -1,4 +1,4 @@
-//! The period an Audit list reads. Both ledgers only grow, so each list reads
+//! The period an Audit list reads. Both ledgers can be large, so each list reads
 //! one period at a time (the last 30 days unless the reader chooses another)
 //! and never the tenant's whole ledger. The control is the shared
 //! `bilibi_datetime::PeriodFilter`; this is the state a list keeps around it:

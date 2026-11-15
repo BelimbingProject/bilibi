@@ -8,7 +8,7 @@
 //! Queue's attempt timeout, and a retried attempt never records a row twice.
 use crate::{
     csv, files::FILES, mapping::convert, record::Registered, store, BulkData, Field, Mapping,
-    Outcome, Pass, Policy, Run, WORKER,
+    Outcome, Pass, Policy, Run, RunState, WORKER,
 };
 use bilibi_agent_api::Error as ContractError;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
@@ -85,6 +85,7 @@ enum Planned {
 type Answer = (
     Outcome,
     Option<String>,
+    Option<i64>,
     Option<String>,
     Vec<crate::ResultLink>,
 );
@@ -94,6 +95,7 @@ struct Recorded {
     row: i32,
     outcome: Outcome,
     record: Option<String>,
+    version: Option<i64>,
     key: Option<String>,
     message: Option<String>,
     links: Vec<crate::ResultLink>,
@@ -417,7 +419,12 @@ async fn current(
     job: i64,
 ) -> Result<Option<Run>> {
     let run = store::lock(tx.sql(), scope, run).await?;
-    Ok((run.state.working() && run.pass == Some(pass) && run.job_id == Some(job)).then_some(run))
+    Ok(
+        (matches!(run.state, RunState::Previewing | RunState::Running)
+            && run.pass == Some(pass)
+            && run.job_id == Some(job))
+        .then_some(run),
+    )
 }
 
 async fn record(
@@ -432,7 +439,7 @@ async fn record(
         Box::pin(async move {
             let mut changes = Vec::with_capacity(results.len());
             for result in results {
-                let id: i64 = sql.query_one("INSERT INTO base_bulk_data_rows(tenant_id,run_id,pass,row_number,outcome,record_id,source_key,message,links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id", &[&tenant, &run, &pass.as_str(), &result.row, &result.outcome.as_str(), &result.record, &result.key, &result.message, &json!(result.links)]).await?.get(0);
+                let id: i64 = sql.query_one("INSERT INTO base_bulk_data_rows(tenant_id,run_id,pass,row_number,outcome,record_id,record_version,source_key,message,links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id", &[&tenant, &run, &pass.as_str(), &result.row, &result.outcome.as_str(), &result.record, &result.version, &result.key, &result.message, &json!(result.links)]).await?.get(0);
                 changes.push(Change { kind: "base/bulk_data.row".into(), id, old: Value::Null, new: json!({"run": run, "pass": pass.as_str(), "row": result.row, "outcome": result.outcome.as_str(), "record_id": result.record}) });
             }
             sql.execute("UPDATE base_bulk_data_runs SET next_row=$3,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2", &[&tenant, &run, &next]).await?;
@@ -451,7 +458,10 @@ impl BulkData {
         let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
         let run = store::load(&*client, &scope, id, false).await?;
-        if !run.state.working() || run.pass != Some(pass) || run.job_id != Some(execution.job_id) {
+        if !matches!(run.state, RunState::Previewing | RunState::Running)
+            || run.pass != Some(pass)
+            || run.job_id != Some(execution.job_id)
+        {
             return Ok(());
         }
         let registered = self
@@ -669,6 +679,19 @@ impl Work<'_> {
         answer: &Value,
         preview: bool,
     ) -> Result<Answer> {
+        let created_version = |outcome| -> Result<Option<i64>> {
+            if preview || outcome != Outcome::Create {
+                return Ok(None);
+            }
+            let Some(undo) = self.registered.undo else {
+                return Ok(None);
+            };
+            answer["result"][undo.created_version]
+                .as_i64()
+                .filter(|version| *version > 0)
+                .map(Some)
+                .ok_or(Error::Internal)
+        };
         if contract == self.registered.definition.import.create {
             if let Some(results) = self.registered.results {
                 let result = (results.interpret)(&answer["result"])?;
@@ -678,7 +701,13 @@ impl Work<'_> {
                     crate::ImportOutcome::Update => Outcome::Update,
                     crate::ImportOutcome::Action => Outcome::Action,
                 };
-                return Ok((outcome, result.record_id, result.message, result.links));
+                return Ok((
+                    outcome,
+                    result.record_id,
+                    created_version(outcome)?,
+                    result.message,
+                    result.links,
+                ));
             }
         }
         Ok((
@@ -688,6 +717,7 @@ impl Work<'_> {
             } else {
                 text_id(&answer["result"][self.registered.definition.import.id])
             },
+            created_version(outcome)?,
             None,
             Vec::new(),
         ))
@@ -701,11 +731,12 @@ impl Work<'_> {
         row: i32,
         key: Option<String>,
     ) -> Result<Recorded> {
-        let (outcome, record, message, links) = match planned {
-            Planned::Refused(message) => (Outcome::Error, None, Some(message), Vec::new()),
+        let (outcome, record, version, message, links) = match planned {
+            Planned::Refused(message) => (Outcome::Error, None, None, Some(message), Vec::new()),
             Planned::Skip(id) => (
                 Outcome::Skip,
                 Some(id),
+                None,
                 Some("Matches an existing record, which is left alone.".into()),
                 Vec::new(),
             ),
@@ -722,7 +753,7 @@ impl Work<'_> {
                 {
                     Ok(answer) => self.answer(contract, outcome, &answer, true)?,
                     Err(error) => match refusal(&error, &self.offered) {
-                        Some(message) => (Outcome::Error, None, Some(message), Vec::new()),
+                        Some(message) => (Outcome::Error, None, None, Some(message), Vec::new()),
                         None => return Err(error_of(error)),
                     },
                 }
@@ -732,6 +763,7 @@ impl Work<'_> {
             row,
             outcome,
             record,
+            version,
             key,
             message: message.map(bounded),
             links,
@@ -777,6 +809,7 @@ impl Work<'_> {
                 row,
                 outcome: Outcome::Error,
                 record: None,
+                version: None,
                 links: Vec::new(),
                 key,
                 message: Some(format!(
@@ -790,6 +823,7 @@ impl Work<'_> {
                     row,
                     outcome: Outcome::Error,
                     record: None,
+                    version: None,
                     links: Vec::new(),
                     key,
                     message: Some(bounded(message)),
@@ -798,6 +832,7 @@ impl Work<'_> {
                     row,
                     outcome: Outcome::Skip,
                     record: Some(id),
+                    version: None,
                     links: Vec::new(),
                     key,
                     message: Some("Matched an existing record, which was left alone.".into()),
@@ -814,12 +849,13 @@ impl Work<'_> {
                         .await
                     {
                         Ok(answer) => {
-                            let (outcome, record, message, links) =
+                            let (outcome, record, version, message, links) =
                                 self.answer(contract, outcome, &answer, false)?;
                             Recorded {
                                 row,
                                 outcome,
                                 record,
+                                version,
                                 key,
                                 message,
                                 links,
@@ -854,6 +890,7 @@ impl Work<'_> {
                                 row,
                                 outcome: Outcome::Error,
                                 record: None,
+                                version: None,
                                 links: Vec::new(),
                                 key,
                                 message: Some(bounded(message)),

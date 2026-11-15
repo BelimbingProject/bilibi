@@ -2,7 +2,9 @@
 //! roles that carry it, the Company pages' routes and the Companies menu
 //! entry. Web owns dispatch and scope guards; a route here bypasses nothing.
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
-use bilibi_grid::{Field, FieldType::*, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
+use bilibi_grid::{
+    Field, FieldType::*, GridContribution, LinkDecl, LinkKind, PersonalKind, Source, TableDecl,
+};
 use bilibi_menu::{MenuItem, Requirement};
 use bilibi_module_registry::{
     contributions::{Access, Method, Route, ROUTES},
@@ -125,18 +127,18 @@ static GRID: GridContribution = GridContribution {
         "id",
         &[
             Field::new("id", "ID", Integer),
-            Field::new("code", "Code", String).protected(),
-            Field::new("legal_name", "Legal Name", String).protected(),
-            Field::new("registration_number", "Registration Number", String),
-            Field::new("jurisdiction", "Jurisdiction", String),
-            Field::new("website", "Website", String),
-            Field::new("parent_id", "Parent", Integer).hidden(),
-            Field::new("legal_entity_type_id", "Legal entity type", Integer).hidden(),
-            Field::new("name", "Name", String),
-            Field::choice("status", "Status", &["active", "suspended", "pending", "archived"]).protected(),
-            Field::new("email", "Email", String),
-            Field::new("phone", "Phone", String),
-            Field::new("tax_id", "Tax ID", String),
+            Field::record(crate::web::fields::CODE).protected(),
+            Field::record(crate::web::fields::LEGAL_NAME).protected(),
+            Field::record(crate::web::fields::REGISTRATION_NUMBER),
+            Field::record(crate::web::fields::JURISDICTION),
+            Field::record(crate::web::fields::WEBSITE),
+            Field::record(crate::web::fields::PARENT_ID).hidden(),
+            Field::record(crate::web::fields::LEGAL_ENTITY_TYPE_ID).hidden(),
+            Field::record(crate::web::fields::NAME),
+            Field::record(crate::web::fields::STATUS).protected(),
+            Field::record(crate::web::fields::EMAIL),
+            Field::new("phone", "Phone", String).personal(PersonalKind::Phone),
+            Field::record(crate::web::fields::TAX_ID),
             Field::new("revenue", "Revenue", Integer),
             Field::new("created_at", "Created", DateTime),
             Field::new("updated_at", "Updated", DateTime),

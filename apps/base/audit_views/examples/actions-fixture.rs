@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
         if r.event == "console.command" && r.payload["exit_code"] == 2 {
             client
                 .execute(
-                    "INSERT INTO base_audit_action_metadata(action_id,is_retained) VALUES($1,true)",
+                    "INSERT INTO base_audit_action_metadata(action_id,is_retained,partition_month) SELECT id,true,partition_month FROM base_audit_actions WHERE id=$1",
                     &[&id],
                 )
                 .await?;

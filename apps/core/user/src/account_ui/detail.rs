@@ -19,14 +19,15 @@ use bilibi_authz::{
 use bilibi_database::Error;
 use bilibi_party_ids::PersonId;
 use bilibi_tenancy::OrganisationDirectory;
+use bilibi_tenancy::OrganisationSearch;
 use bilibi_ui::{
     lists::RecordLink,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, PanelSpec},
     ActionLink, Alert, BackLink, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card,
-    Choice, Combobox, CommitStates, CommitStatus, ConfirmDialog, EmptyState, Fact, Facts, Field,
-    FlashGroup, FlexRow, FlexTable, Header, IconButton, InlineChoice, InlineEdit, InlineField,
-    InputKind, ListColumns, Modal, ModalWidth, PageVariant, SecretInput, SectionHeading,
-    StatusKind, StepUp, TableEmpty,
+    Choice, CommitStates, CommitStatus, ConfirmDialog, EmptyState, Fact, Facts, Field, FlashGroup,
+    FlexRow, FlexTable, Header, IconButton, InlineChoice, InlineEdit, InlineField, InputKind,
+    ListColumns, Modal, ModalWidth, PageVariant, SecretInput, SectionHeading, StatusKind, StepUp,
+    TableEmpty,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -227,6 +228,8 @@ struct AccessUi {
     role_search: String,
     selected_roles: Vec<String>,
     assignment_company: String,
+    /// The grant company's search text; its hits are read for each view.
+    assignment_query: String,
     assignment_from: String,
     assignment_until: String,
     assignment_purpose: String,
@@ -479,7 +482,8 @@ impl Detail {
     }
 
     fn read_assignment(&mut self, value: &Value) {
-        self.access.assignment_company = text(value, "assignment_company");
+        self.access.assignment_company = text(value, "assignment[company]");
+        self.access.assignment_query = text(value, "assignment[company_search]");
         self.access.assignment_from = text(value, "assignment_from");
         self.access.assignment_until = text(value, "assignment_until");
         self.access.assignment_purpose = text(value, "assignment_purpose");
@@ -502,23 +506,43 @@ impl Detail {
         client: &(impl tokio_postgres::GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Html> {
-        let companies = self
-            .pages
-            .grants
-            .assignable_companies(client, scope)
-            .await?;
-        let mut body = render(
-            &Combobox::new("role-assignment-company", "assignment_company")
-                .label("Company")
-                .placeholder("Every assigned workplace")
-                .value(&self.access.assignment_company)
-                .options(
-                    companies
-                        .into_iter()
-                        .map(|c| Choice::new(c.name, c.id.get().to_string()))
-                        .collect(),
-                )
-                .hint("Leave empty for every workplace. A company grant does not add a desk."),
+        let grants = &self.pages.grants;
+        let chosen = match self
+            .access
+            .assignment_company
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .and_then(|id| bilibi_party_ids::OrganisationId::new(id).ok())
+        {
+            Some(id) => {
+                let ids = [id];
+                grants
+                    .assignable_companies(client, scope, OrganisationSearch::among(&ids))
+                    .await?
+                    .into_iter()
+                    .next()
+            }
+            None => None,
+        };
+        let query = &self.access.assignment_query;
+        let hits = if chosen.is_none() && !query.trim().is_empty() {
+            grants
+                .assignable_companies(client, scope, OrganisationSearch::text(query))
+                .await?
+        } else {
+            Vec::new()
+        };
+        let mut body = super::company_picker(
+            "role-assignment-company",
+            "assignment",
+            "company",
+            "Company (empty: every workplace; a grant adds no desk)",
+            query,
+            &hits,
+            chosen.as_ref(),
+            ("pick_assignment_company", "change_assignment_company"),
+            Vec::new(),
         )?;
         body.push(&render(
             &Field::named("assignment_from")
@@ -549,6 +573,7 @@ impl Detail {
         can_edit: bool,
         records: &[bilibi_authz::roles::RoleAssignment],
         providers: &[RoleSummary],
+        groups: &[bilibi_authz::roles::GroupAssignment],
     ) -> Result<Html> {
         let mut rows = Vec::new();
         for record in records {
@@ -625,6 +650,47 @@ impl Detail {
                     .slot("state", Html::text("Managed by sign-in provider")),
             );
         }
+        // A role held through a team says which team, unless the team is one
+        // the reader may not see (a company they do not work in): then only
+        // that it comes from one. Its company is the role's scope.
+        let reach: Vec<i64> = if groups.is_empty() {
+            Vec::new()
+        } else {
+            bilibi_company::Directory
+                .reachable(client, scope)
+                .await?
+                .into_iter()
+                .map(|c| c.id.get())
+                .collect()
+        };
+        for held in groups {
+            let company = match held.company_id {
+                Some(id) => bilibi_company::Directory
+                    .lookup(
+                        client,
+                        scope,
+                        bilibi_party_ids::OrganisationId::new(id).map_err(|_| Error::Invalid)?,
+                    )
+                    .await?
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| format!("Company {id}")),
+                None => "Every assigned workplace".into(),
+            };
+            let state = if held.company_id.is_none_or(|id| reach.contains(&id)) {
+                format!("Via {} {}", held.source, held.label)
+            } else {
+                format!("Via a {} in a company you do not work in", held.source)
+            };
+            rows.push(
+                FlexRow::new(format!(
+                    "{}-{}-{}",
+                    held.source, held.group_id, held.role.id
+                ))
+                .slot("role", Html::text(&held.role.name))
+                .slot("company", Html::text(&company))
+                .slot("state", Html::text(&state)),
+            );
+        }
         let mut table = FlexTable::new(
             "user-role-assignments",
             self.assignment_columns.flex_columns(),
@@ -646,6 +712,7 @@ impl Detail {
             bilibi_authz::effective_capabilities_of(&**client, scope, user).await?;
         let assignments = bilibi_authz::roles::assignments(&**client, scope, user).await?;
         let providers = bilibi_authz::roles::provider_assignments(&**client, scope, user).await?;
+        let groups = bilibi_authz::roles::group_assignments(&**client, scope, user).await?;
         let actor = bilibi_authz::effective_capabilities_of(&**client, scope, scope.user()).await?;
         let companies = self
             .pages
@@ -870,7 +937,7 @@ impl Detail {
         let heading = render(&SectionHeading {
             id: "user-roles-heading",
             title: "Roles & Permissions",
-            count: Some(assignments.len() + providers.len()),
+            count: Some(assignments.len() + providers.len() + groups.len()),
             description:
                 "Roles set what this user can do; effective permissions show the combined result.",
             ..SectionHeading::default()
@@ -884,6 +951,7 @@ impl Detail {
                     loaded.can_edit_roles(),
                     &assignments,
                     &providers,
+                    &groups,
                 )
                 .await?,
             assignment_fields: if loaded.can_edit_roles() {
@@ -1733,6 +1801,7 @@ impl Detail {
             "toggle_assign_roles" => {
                 if !self.access.show_assign {
                     self.access.assignment_company.clear();
+                    self.access.assignment_query.clear();
                     self.access.assignment_from.clear();
                     self.access.assignment_until.clear();
                     self.access.assignment_purpose.clear();
@@ -1741,6 +1810,11 @@ impl Detail {
                 self.access.show_assign = !self.access.show_assign;
             }
             "search_roles" => self.access.role_search = text(value, "value"),
+            "pick_assignment_company" => {
+                self.access.assignment_company = super::picked_company(value)?.get().to_string();
+                self.access.assignment_query.clear();
+            }
+            "change_assignment_company" => self.access.assignment_company.clear(),
             "select_roles" => {
                 self.access.selected_roles = list(value, "role_ids[]");
                 self.read_assignment(value);

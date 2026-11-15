@@ -49,6 +49,10 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
                     "all",
                 ),
             ),
+            (
+                "undo".into(),
+                Filter::one_of(&["all", "left", "removed", "edited", "error"], "all"),
+            ),
         ]),
         omit_defaults: true,
         ..ListSpec::default()
@@ -65,6 +69,7 @@ fn builtins() -> Vec<BuiltinColumn> {
         BuiltinColumn::new("key", "Key"),
         BuiltinColumn::new("outcome", "Result"),
         BuiltinColumn::new("record", "Record"),
+        BuiltinColumn::new("undo", "Undo result"),
         BuiltinColumn::new("message", "Why"),
     ]
 }
@@ -72,6 +77,7 @@ fn builtins() -> Vec<BuiltinColumn> {
 enum Confirm {
     Start,
     Cancel,
+    Undo,
 }
 
 pub(super) struct Detail {
@@ -337,11 +343,24 @@ impl Detail {
                 self.flash = None;
                 self.confirm = Some(Confirm::Start);
             }
-            "request_cancel" if self.run.as_ref().is_some_and(|run| run.state.working()) => {
+            "request_cancel"
+                if self.run.as_ref().is_some_and(|run| {
+                    matches!(run.state, RunState::Previewing | RunState::Running)
+                }) =>
+            {
                 self.flash = None;
                 self.confirm = Some(Confirm::Cancel);
             }
-            "request_start" | "request_cancel" => {}
+            "request_undo"
+                if self.run.as_ref().is_some_and(|run| {
+                    run.state == RunState::Completed
+                        || (run.state == RunState::Undoing && run.stopped)
+                }) =>
+            {
+                self.flash = None;
+                self.confirm = Some(Confirm::Undo);
+            }
+            "request_start" | "request_cancel" | "request_undo" => {}
             "dismiss_confirm" => self.confirm = None,
             "cancel" => {
                 self.confirm = None;
@@ -361,6 +380,26 @@ impl Detail {
                         StatusKind::Success,
                         "Stopped. Rows already written stay, and are listed below.",
                     );
+                }
+            }
+            "undo" => {
+                self.confirm = None;
+                let Some(run) = &self.run else { return Ok(()) };
+                let input = json!({"run_id": run.id, "version": run.version});
+                if self
+                    .submit(
+                        scope,
+                        credential,
+                        "undo",
+                        "base.bulk_data.import.undo",
+                        input,
+                    )
+                    .await?
+                {
+                    self.state.filters.insert("pass".into(), "run".into());
+                    self.state.filters.insert("undo".into(), "left".into());
+                    self.state.put_page(None);
+                    self.say(StatusKind::Success, "Undo started. Records changed since the import are left alone and listed here.");
                 }
             }
             "apply_mapping" => {
@@ -469,6 +508,7 @@ impl Detail {
             self.parents = pages.bulk.parents(client, scope, &run.record_type).await?;
         }
         let display = pages.display(client, scope).await?;
+        let undo = pages.bulk.undo_availability(client, scope, &run).await?;
         let pass = match self.state.filters["pass"].as_str() {
             "preview" => Pass::Preview,
             "run" => Pass::Run,
@@ -476,6 +516,10 @@ impl Detail {
             _ => Pass::Preview,
         };
         let outcome = Outcome::parse(&self.state.filters["outcome"]);
+        let undo_filter = match self.state.filters["undo"].as_str() {
+            "all" => None,
+            value => Some(value),
+        };
         let (results, total) = pages
             .bulk
             .rows(
@@ -484,6 +528,7 @@ impl Detail {
                 run.id,
                 pass,
                 outcome,
+                undo_filter,
                 self.state.offset() as i64,
                 self.state.page_size as i64,
             )
@@ -533,8 +578,16 @@ impl Detail {
                 })?),
             }
         }
-        if run.state.working() || run.stopped {
+        if (run.state.working() || run.stopped) && run.state != RunState::Undoing {
             parts.push(self.working(&run, may_create)?);
+        }
+        if undo.supported
+            && matches!(
+                run.state,
+                RunState::Completed | RunState::Undoing | RunState::Undone
+            )
+        {
+            parts.push(self.undo_section(&run, undo, may_create, &display)?);
         }
         let counts = if pass == Pass::Run {
             run.run
@@ -561,7 +614,9 @@ impl Detail {
         label: &str,
         display: &bilibi_datetime::DisplayContext,
     ) -> Result<Html> {
-        let progress = if run.state.working() {
+        let progress = if run.state == RunState::Undoing {
+            format!("{} of {} created records", run.undo.done(), run.run.create)
+        } else if run.state.working() {
             format!("{} of {} rows", run.progress(), run.row_count)
         } else {
             run.row_count.to_string()
@@ -920,6 +975,108 @@ impl Detail {
         })
     }
 
+    fn undo_section(
+        &self,
+        run: &Run,
+        availability: crate::undo::Availability,
+        may_create: bool,
+        display: &bilibi_datetime::DisplayContext,
+    ) -> Result<Html> {
+        let mut body = match run.state {
+            RunState::Undoing => render(Alert {
+                kind: if run.stopped {
+                    StatusKind::Warning
+                } else {
+                    StatusKind::Info
+                },
+                id: "import-undo-progress",
+                class: "",
+                body: Html::text(if run.stopped {
+                    "Undo stopped before it finished. Records already removed stay removed."
+                } else {
+                    "Untouched records created by this import are being removed. Changed records stay."
+                }),
+            })?,
+            RunState::Undone => render(Alert {
+                kind: if run.undo.left() > 0 {
+                    StatusKind::Warning
+                } else {
+                    StatusKind::Info
+                },
+                id: "import-undo-finished",
+                class: "",
+                body: Html::text(&format!(
+                    "{} removed. {} changed and {} other records were left in place.",
+                    run.undo.removed, run.undo.edited, run.undo.error
+                )),
+            })?,
+            RunState::Completed if run.erased => render(Alert {
+                kind: StatusKind::Info,
+                id: "import-undo-erased",
+                class: "",
+                body: Html::text(
+                    "This import cannot be undone because its import details were erased.",
+                ),
+            })?,
+            RunState::Completed if !availability.available => {
+                let message = availability.deadline.map_or_else(
+                    || "This import created no records that can be undone.".to_owned(),
+                    |deadline| {
+                        format!(
+                            "The undo period ended {}.",
+                            display
+                                .render(
+                                    deadline,
+                                    bilibi_datetime::Format::DateTime,
+                                    bilibi_datetime::Precision::Minute
+                                )
+                                .text
+                        )
+                    },
+                );
+                render(Alert {
+                    kind: StatusKind::Info,
+                    id: "import-undo-expired",
+                    class: "",
+                    body: Html::text(&message),
+                })?
+            }
+            RunState::Completed => {
+                let deadline = availability.deadline.ok_or(Error::Internal)?;
+                render(Alert {
+                    kind: StatusKind::Info,
+                    id: "import-undo-available",
+                    class: "",
+                    body: Html::text(&format!("Available until {}. Only records this import created and nobody changed are removed.", display.render(deadline, bilibi_datetime::Format::DateTime, bilibi_datetime::Precision::Minute).text)),
+                })?
+            }
+            _ => Html::EMPTY,
+        };
+        if ((run.state == RunState::Completed) || (run.state == RunState::Undoing && run.stopped))
+            && availability.available
+            && may_create
+        {
+            body.push(&render(Button {
+                variant: ButtonVariant::Danger,
+                id: "import-undo",
+                button_type: "button",
+                event: "request_undo",
+                body: Html::text(if run.state == RunState::Undoing {
+                    "Resume undo"
+                } else {
+                    "Undo import"
+                }),
+                ..Button::default()
+            })?);
+        }
+        render(Card {
+            id: "import-undo-card",
+            title: "Undo",
+            body,
+            ..Card::default()
+        })
+    }
+
     fn results(
         &mut self,
         run: &Run,
@@ -1050,6 +1207,19 @@ impl Detail {
                     ]),
                 ),
                 ToolbarControl::select(
+                    "import-results-undo",
+                    "undo",
+                    "Filter by undo result",
+                    &form["undo"],
+                    choices(&[
+                        ("All", "all"),
+                        ("Left in place", "left"),
+                        ("Removed", "removed"),
+                        ("Changed", "edited"),
+                        ("Could not remove", "error"),
+                    ]),
+                ),
+                ToolbarControl::select(
                     "import-results-outcome",
                     "outcome",
                     "Filter by result",
@@ -1103,6 +1273,19 @@ impl Detail {
                 })?);
             }
             let message = result.message.clone().unwrap_or_default();
+            let undo = match result.undo_outcome {
+                Some(crate::UndoOutcome::Removed) => {
+                    render(Badge::status(BadgeKind::Success, "Removed"))?
+                }
+                Some(crate::UndoOutcome::Edited) => {
+                    render(Badge::status(BadgeKind::Warning, "Changed; left in place"))?
+                }
+                Some(crate::UndoOutcome::Error) => {
+                    render(Badge::status(BadgeKind::Danger, "Could not remove"))?
+                }
+                None => Html::text("—"),
+            };
+            let message = result.undo_message.clone().unwrap_or(message);
             let message = if compact && message.chars().count() > 80 {
                 format!("{}…", message.chars().take(79).collect::<String>())
             } else {
@@ -1116,6 +1299,7 @@ impl Detail {
                 )
                 .slot("outcome", render(badge)?)
                 .slot("record", record)
+                .slot("undo", undo)
                 .slot("message", Html::text(&message));
             row.dom_id = Some(format!("import-row-{key}"));
             rows.push(row);
@@ -1178,6 +1362,16 @@ impl Detail {
                 confirm: "Stop",
                 working: "Stopping…",
                 confirm_event: "cancel",
+                cancel_event: "dismiss_confirm",
+                banner,
+            })?,
+            Confirm::Undo => render(Confirmation {
+                id: "import-undo-confirm",
+                consequence: "Undo this import?",
+                detail: "Records this import created are removed only when nobody changed them. Changed or referenced records stay and are listed when the undo finishes.",
+                confirm: "Undo import",
+                working: "Starting…",
+                confirm_event: "undo",
                 cancel_event: "dismiss_confirm",
                 banner,
             })?,

@@ -593,8 +593,13 @@ pub(crate) async fn suppressions(
     };
     let page_size = filter.page_size.clamp(1, 100);
     let offset = (filter.page.max(1) - 1) * page_size;
-    const WHERE: &str = "tenant_id=$1 AND company_id=$2 AND ($3::text IS NULL OR lower(address) LIKE $3 OR person_id::text=$7) AND ($4::text IS NULL OR channel=$4) AND ($5::text IS NULL OR reason=$5) AND ($6='all' OR ($6='active')=(lifted_at IS NULL))";
-    let search = search.as_str();
+    const WHERE: &str = "tenant_id=$1 AND company_id=$2 AND ($3::text IS NULL OR lower(address) LIKE $3 OR person_id=$7) AND ($4::text IS NULL OR channel=$4) AND ($5::text IS NULL OR reason=$5) AND ($6='all' OR ($6='active')=(lifted_at IS NULL))";
+    // A search that is a person's id as written also matches that person;
+    // compared as a number, so the person index serves it.
+    let person: Option<i64> = search
+        .parse()
+        .ok()
+        .filter(|id: &i64| id.to_string() == search);
     let params: [&(dyn ToSql + Sync); 9] = [
         &scope.tenant(),
         &company_id,
@@ -602,7 +607,7 @@ pub(crate) async fn suppressions(
         &channel,
         &reason,
         &state,
-        &search,
+        &person,
         &page_size,
         &offset,
     ];

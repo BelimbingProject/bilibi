@@ -575,7 +575,11 @@ impl Detail {
                     ));
                 }
             }
-            "close_modal" => self.dialog = None,
+            "close_modal" => {
+                if let Some(mut dialog) = self.dialog.take() {
+                    dialog.discard(&self.pages, scope).await;
+                }
+            }
             "add_revision" => {
                 let document = self.pages.documents.get(scope, self.id).await?;
                 let pages = self.pages.shared();

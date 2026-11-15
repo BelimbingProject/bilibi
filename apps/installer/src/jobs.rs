@@ -563,6 +563,23 @@ pub async fn restore_history(
                         .collect()
                 })
                 .unwrap_or_default();
+            if AUDIT_TABLES.iter().any(|(name, _)| *name == table) {
+                if let Some(month) = kept.get("partition_month").and_then(Value::as_str) {
+                    if month != "infinity" {
+                        let chain = if table == "base_audit_actions" {
+                            "actions"
+                        } else {
+                            "mutations"
+                        };
+                        client
+                            .execute(
+                                "SELECT base_audit_create_partition($1,$2::text::date)",
+                                &[&chain, &month],
+                            )
+                            .await?;
+                    }
+                }
+            }
             let inserted = client
                 .execute(
                     &format!("INSERT INTO {table} OVERRIDING SYSTEM VALUE SELECT * FROM jsonb_populate_record(NULL::{table}, $1)"),

@@ -21,6 +21,7 @@ mod privacy;
 mod record;
 mod result;
 mod store;
+mod undo;
 mod update;
 mod web;
 
@@ -32,7 +33,10 @@ pub use record::{
     RECORD_TYPES,
 };
 pub use result::{ImportOutcome, ImportResult, ImportResults, ResultLink, IMPORT_RESULTS};
-pub use store::{Counts, Outcome, Pass, RowResult, Run, RunState, SavedMapping};
+pub use store::{
+    Counts, Outcome, Pass, RowResult, Run, RunState, SavedMapping, UndoCounts, UndoOutcome,
+};
+pub use undo::{ImportUndo, IMPORT_UNDO};
 pub use update::{Offers, UpdateRow, UpdateRun, UpdateState};
 
 use bilibi_agent_api::job::JobContracts;
@@ -66,6 +70,8 @@ pub const EXPORT_MAX_ROWS: &str = "bulk_data.export_max_rows";
 pub const FILE_DAYS: &str = "bulk_data.file_days";
 /// The most records one bulk update takes.
 pub const UPDATE_MAX_RECORDS: &str = "bulk_data.update_max_records";
+/// Days after a completed import during which its created records may be removed.
+pub const UNDO_DAYS: &str = "bulk_data.import_undo_days";
 pub(crate) const WORKER: &str = "base/bulk_data-import";
 
 /// A record type the person may import, with what they may fill.
@@ -80,6 +86,7 @@ pub struct TypeInfo {
     pub restricted: Vec<String>,
     /// The fields a row is matched on, when the type finds duplicates.
     pub matches: Vec<&'static str>,
+    pub undo: bool,
 }
 
 /// A refused write, typed for the contracts and pages.
@@ -151,6 +158,11 @@ pub enum Action {
     },
     /// Stop a run that is working; rows already written stay.
     Cancel {
+        run: i64,
+        version: i64,
+    },
+    /// Remove untouched records this completed run created.
+    Undo {
         run: i64,
         version: i64,
     },
@@ -319,6 +331,7 @@ impl BulkData {
                 .as_ref()
                 .map(|duplicates| duplicates.fields.to_vec())
                 .unwrap_or_default(),
+            undo: registered.undo.is_some(),
         })
     }
 
@@ -531,6 +544,7 @@ impl BulkData {
         run: i64,
         pass: Pass,
         outcome: Option<Outcome>,
+        undo: Option<&str>,
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<RowResult>, i64)> {
@@ -541,8 +555,8 @@ impl BulkData {
             run.id,
             pass,
             outcome,
-            offset.max(0),
-            limit.clamp(1, 100),
+            undo,
+            (offset.max(0), limit.clamp(1, 100)),
         )
         .await?;
         if run.erased {
@@ -551,6 +565,8 @@ impl BulkData {
             for row in &mut rows {
                 row.source_key = None;
                 row.message = None;
+                row.record_version = None;
+                row.undo_message = None;
             }
         }
         Ok((rows, total))
@@ -773,6 +789,15 @@ impl BulkData {
                     json!({"summary": format!("Stop {} of {}; rows already written stay", if run.state == RunState::Running { "the import" } else { "the check" }, run.file_name), "run_id": run.id, "version": run.version, "done": run.next_row, "rows": run.row_count}),
                 )
             }
+            Action::Undo { run, version } => {
+                let run = self.ready_undo(client, scope, *run, *version).await?;
+                Ok(json!({
+                    "summary": format!("{} the undo of {}; only records it created and nobody changed are removed", if run.state == RunState::Undoing { "Resume" } else { "Start" }, run.file_name),
+                    "run_id": run.id,
+                    "version": run.version,
+                    "created": run.run.create,
+                }))
+            }
             Action::SaveMapping {
                 record_type,
                 name,
@@ -925,6 +950,22 @@ impl BulkData {
                 })).await?;
                 run.json(&label)
             }
+            Action::Undo { run, version } => {
+                let old = self.ready_undo(tx.sql(), scope, *run, *version).await?;
+                let resuming = old.state == RunState::Undoing;
+                let job = self
+                    .queue
+                    .enqueue_for(tx, scope, undo::WORKER, json!({"run": old.id}))
+                    .await?;
+                let id = old.id;
+                let label = self.label(&old.record_type).to_owned();
+                let run = tx.mutate(move |sql| Box::pin(async move {
+                    let row = sql.query_one(&format!("UPDATE base_bulk_data_runs SET state='undoing',undo_next_row=CASE WHEN $4 THEN undo_next_row ELSE 0 END,job_id=$3,undo_started_at=CASE WHEN $4 THEN undo_started_at ELSE clock_timestamp() END,undo_finished_at=NULL,version=version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 RETURNING {}", store::COLUMNS), &[&tenant, &id, &job.id(), &resuming]).await?;
+                    let run = Run::from_row(&row)?;
+                    Ok((run.clone(), vec![Change { kind: "base/bulk_data.run".into(), id, old: evidence(&old), new: evidence(&run) }]))
+                })).await?;
+                run.json(&label)
+            }
             Action::SaveMapping {
                 record_type,
                 name,
@@ -1039,7 +1080,7 @@ impl BulkData {
         if run.version != version {
             return Err(WriteError::Stale);
         }
-        if !run.state.working() {
+        if !matches!(run.state, RunState::Previewing | RunState::Running) {
             return Err(refused("run_id", "is not being checked or imported"));
         }
         Ok(())
@@ -1157,6 +1198,7 @@ inventory::submit! { bilibi_module_registry::Module {
         ("base-bulk-data-004-export-erasure", include_str!("../migrations/004-export-erasure.sql")),
         ("base-bulk-data-005-import-results", include_str!("../migrations/005-import-results.sql")),
         ("base-bulk-data-006-import-erasure", include_str!("../migrations/006-import-erasure.sql")),
+        ("base-bulk-data-007-import-undo", include_str!("../migrations/007-import-undo.sql")),
     ],
     services: &[
         bilibi_module_registry::Service { id: SERVICE, factory: |services| {
@@ -1180,6 +1222,9 @@ inventory::submit! { bilibi_module_registry::Module {
         }},
         bilibi_module_registry::Service { id: import::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(import::ImportJob(services.get(SERVICE)?)))))
+        }},
+        bilibi_module_registry::Service { id: undo::SERVICE, factory: |services| {
+            Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(undo::UndoJob(services.get(SERVICE)?)))))
         }},
         bilibi_module_registry::Service { id: export::SERVICE, factory: |services| {
             Ok(Arc::new(bilibi_queue::HandlerService(Arc::new(export::ExportJob(services.get(SERVICE)?)))))

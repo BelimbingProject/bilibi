@@ -9,7 +9,7 @@
 //!
 //! The list reads one period at a time (`period::ListPeriod`, the last 30 days
 //! by default), counts its matches only up to `bilibi_audit::MAX_COUNT` and
-//! orders by time alone, because the ledger only grows.
+//! orders by time alone, because the ledger can be large.
 //!
 //! The table streams up to 300 rows. Rendering every old and new value inline
 //! made each row about 15 KB in the source, so a row's details cell paints the

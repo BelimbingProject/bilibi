@@ -7,6 +7,7 @@ use crate::{
     AccountError,
 };
 use bilibi_party_ids::{OrganisationId, PersonId};
+use bilibi_tenancy::{NamedOrganisation, OrganisationSearch};
 use bilibi_ui::{
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
     BackLink, Button, ButtonVariant, Choice, Field, Header, InputKind, PageVariant, SecretInput,
@@ -29,17 +30,17 @@ pub(crate) struct PersonChoice {
     pub id: PersonId,
     pub label: String,
 }
-pub(crate) struct DeskChoice {
-    pub id: OrganisationId,
-    pub label: String,
-}
-
 pub(crate) struct Create {
     pages: Pages,
     input: AccountInput,
     errors: Vec<FieldError>,
     notice: String,
     created: Option<i64>,
+    /// The first desk's search text; its hits are read for each view.
+    desk_query: String,
+    /// The creator chose or cleared the first desk, so the current company
+    /// is no longer offered as its default.
+    desk_touched: bool,
 }
 impl Create {
     pub fn new(pages: Pages) -> Self {
@@ -49,6 +50,8 @@ impl Create {
             errors: Vec::new(),
             notice: String::new(),
             created: None,
+            desk_query: String::new(),
+            desk_touched: false,
         }
     }
     fn errors_for(&self, field: &str) -> Vec<String> {
@@ -70,7 +73,11 @@ impl Create {
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
         let can_create = self.pages.allowed(scope, CREATE).await?;
         let persons = self.pages.person_choices(scope).await?;
-        let desks = self.pages.desk_choices(scope).await?;
+        let any_desk = !self
+            .pages
+            .desk_choices(scope, OrganisationSearch::text("").limit(1))
+            .await?
+            .is_empty();
         let field = |key: &str, label: &str| {
             let mut field = Field::in_form("user", key)
                 .id(format!("user-{key}"))
@@ -112,31 +119,49 @@ impl Create {
                     ),
             )?,
         };
-        let mut desk_field = field("company_id", "First desk")
-            .kind(InputKind::Select)
-            .prompt("Choose a desk…")
-            .value(
-                self.input
-                    .company
-                    .or(scope.current_company())
-                    .map(|id| id.get().to_string())
-                    .unwrap_or_default(),
-            )
-            .options(
-                desks
-                    .iter()
-                    .map(|desk| Choice::new(&desk.label, desk.id.get().to_string()))
-                    .collect(),
-            );
-        if desks.is_empty() {
-            desk_field = desk_field
-                .disabled()
-                .hint("A company manager must assign the first desk for this account.");
+        let desk = if any_desk && can_create {
+            let chosen = match self.input.company.or(if self.desk_touched {
+                None
+            } else {
+                scope.current_company()
+            }) {
+                Some(id) => {
+                    let ids = [id];
+                    self.pages
+                        .desk_choices(scope, OrganisationSearch::among(&ids))
+                        .await?
+                        .into_iter()
+                        .next()
+                }
+                None => None,
+            };
+            let hits = if chosen.is_none() && !self.desk_query.trim().is_empty() {
+                self.pages
+                    .desk_choices(scope, OrganisationSearch::text(&self.desk_query))
+                    .await?
+            } else {
+                Vec::new()
+            };
+            super::company_picker(
+                "user-company-id",
+                "user",
+                "company_id",
+                "First desk",
+                &self.desk_query,
+                &hits,
+                chosen.as_ref(),
+                ("pick_desk", "change_desk"),
+                self.errors_for("company_id"),
+            )?
         } else {
-            desk_field = desk_field
-                .hint("The account belongs to this tenant. This is the person’s first desk.");
-        }
-        let desk = render(&desk_field)?;
+            render(
+                &field("company_id", "First desk")
+                    .kind(InputKind::Select)
+                    .prompt("Choose a desk…")
+                    .disabled()
+                    .hint("A company manager must assign the first desk for this account."),
+            )?
+        };
         let name = render(
             &field("name", "Name")
                 .value(&self.input.name)
@@ -236,11 +261,24 @@ impl LiveState<Scope, Error> for Create {
         Box::pin(async move {
             if let LiveInput::Event(value) = request.input {
                 let action = event(value)?;
-                if !["validate", "create"].contains(&action) {
-                    return Err(Error::Invalid);
-                }
                 if self.created.is_some() {
                     return self.view(request.scope).await;
+                }
+                match action {
+                    "validate" | "create" => {}
+                    "pick_desk" => {
+                        self.input.company = Some(super::picked_company(value)?);
+                        self.desk_touched = true;
+                        self.desk_query.clear();
+                        self.errors.retain(|e| e.field != "company_id");
+                        return self.view(request.scope).await;
+                    }
+                    "change_desk" => {
+                        self.input.company = None;
+                        self.desk_touched = true;
+                        return self.view(request.scope).await;
+                    }
+                    _ => return Err(Error::Invalid),
                 }
                 let fields = bilibi_ui::params::form_values_checked(
                     value,
@@ -251,6 +289,11 @@ impl LiveState<Scope, Error> for Create {
                 let person = optional_id(fields.get("person_id"), |id| PersonId::new(id).ok())?;
                 let company =
                     optional_id(fields.get("company_id"), |id| OrganisationId::new(id).ok())?;
+                self.desk_query = fields.get("company_id_search").cloned().unwrap_or_default();
+                if company.is_none() && fields.contains_key("company_id_search") {
+                    // The search box shows only when no desk is chosen.
+                    self.desk_touched = true;
+                }
                 self.input = AccountInput {
                     name: fields.get("name").cloned().unwrap_or_default(),
                     email: fields.get("email").cloned().unwrap_or_default(),
@@ -343,18 +386,17 @@ impl Pages {
             Err(error) => Err(error),
         }
     }
-    /// Live companies the creator may administer, for the first desk.
-    pub(crate) async fn desk_choices(&self, scope: &Scope) -> Result<Vec<DeskChoice>> {
+    /// The live companies the creator may administer that `search` matches,
+    /// for the first desk.
+    pub(crate) async fn desk_choices(
+        &self,
+        scope: &Scope,
+        search: OrganisationSearch<'_>,
+    ) -> Result<Vec<NamedOrganisation>> {
         use bilibi_tenancy::OrganisationDirectory;
         let client = self.db.get().await?;
-        Ok(bilibi_company::Directory
-            .selectable(&**client, scope, bilibi_company::UPDATE)
-            .await?
-            .into_iter()
-            .map(|company| DeskChoice {
-                id: company.id,
-                label: company.name,
-            })
-            .collect())
+        bilibi_company::Directory
+            .selectable(&**client, scope, bilibi_company::UPDATE, search)
+            .await
     }
 }

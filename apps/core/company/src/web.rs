@@ -1218,7 +1218,7 @@ impl CompanyPage {
                 self.duplicate_reason = get("reason").to_owned();
             }
             "create_company" | "confirm_create_anyway" if self.operation == "create" => {
-                let client = self.db.get().await?;
+                let mut client = self.db.get().await?;
                 bilibi_authz::authorize_key(&**client, scope, crate::CREATE).await?;
                 let anyway = get("type") == "confirm_create_anyway";
                 if !anyway {
@@ -1250,9 +1250,12 @@ impl CompanyPage {
                 }
                 self.errors = errors;
                 let preview = if self.errors.is_empty() {
-                    match crate::preview_create_with_fields(&**client, scope, &new, &company_fields)
-                        .await?
-                    {
+                    // In a transaction, so duplicate matching runs under its timeout.
+                    let raw: &mut tokio_postgres::Client = &mut client;
+                    let tx = raw.transaction().await?;
+                    let previewed =
+                        crate::preview_create_with_fields(&tx, scope, &new, &company_fields).await;
+                    match crate::duplicates::settle(tx, previewed).await? {
                         Ok(preview) => Some(preview),
                         Err(errors) => {
                             self.errors = errors;
@@ -1356,18 +1359,23 @@ impl LiveState<Scope, Error> for CompanyPage {
 }
 
 // Columns extend the list vocabulary.
-bilibi_ui::record_fields! { pub(crate) mod fields {
-    NAME: bilibi_ui::RecordField::new("name", "Name"),
-    CODE: bilibi_ui::RecordField::new("code", "Code"),
-    LEGAL_NAME: bilibi_ui::RecordField::new("legal_name", "Legal Name"),
-    STATUS: bilibi_ui::RecordField::new("status", "Status"),
-    LEGAL_ENTITY_TYPE_ID: bilibi_ui::RecordField::new("legal_entity_type_id", "Legal Entity Type").path("legal_entity_type.name"),
-    REGISTRATION_NUMBER: bilibi_ui::RecordField::new("registration_number", "Registration Number"),
-    TAX_ID: bilibi_ui::RecordField::new("tax_id", "Tax ID"),
-    JURISDICTION: bilibi_ui::RecordField::new("jurisdiction", "Jurisdiction"),
-    EMAIL: bilibi_ui::RecordField::new("email", "Email"),
-    WEBSITE: bilibi_ui::RecordField::new("website", "Website"),
-    PARENT_ID: bilibi_ui::RecordField::new("parent_id", "Parent Company").path("parent.name").slot("parent_name"),
-    ACTIVITIES: bilibi_ui::RecordField::new("scope_activities", "Business Activities").excluded("Nested collection"),
-    METADATA: bilibi_ui::RecordField::new("metadata", "Metadata").excluded("Long structured text"),
+bilibi_ui::record_fields! { "core/company", pub(crate) mod fields {
+    NAME: bilibi_ui::RecordField::new("name", "Name", bilibi_ui::RecordFieldType::String),
+    CODE: bilibi_ui::RecordField::new("code", "Code", bilibi_ui::RecordFieldType::String),
+    LEGAL_NAME: bilibi_ui::RecordField::new("legal_name", "Legal Name", bilibi_ui::RecordFieldType::String),
+    STATUS: bilibi_ui::RecordField::new("status", "Status", bilibi_ui::RecordFieldType::Enum).choices(&crate::organisation::STATUSES),
+    LEGAL_ENTITY_TYPE_ID: bilibi_ui::RecordField::new("legal_entity_type_id", "Legal Entity Type", bilibi_ui::RecordFieldType::Integer).path("legal_entity_type.name"),
+    REGISTRATION_NUMBER: bilibi_ui::RecordField::new("registration_number", "Registration Number", bilibi_ui::RecordFieldType::String),
+    TAX_ID: bilibi_ui::RecordField::new("tax_id", "Tax ID", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Identifier),
+    JURISDICTION: bilibi_ui::RecordField::new("jurisdiction", "Jurisdiction", bilibi_ui::RecordFieldType::String),
+    EMAIL: bilibi_ui::RecordField::new("email", "Email", bilibi_ui::RecordFieldType::String).personal(bilibi_ui::PersonalDataClass::Email),
+    WEBSITE: bilibi_ui::RecordField::new("website", "Website", bilibi_ui::RecordFieldType::String),
+    PARENT_ID: bilibi_ui::RecordField::new("parent_id", "Parent Company", bilibi_ui::RecordFieldType::Integer).path("parent.name").slot("parent_name"),
+    ACTIVITIES: bilibi_ui::RecordField::new("scope_activities", "Business Activities", bilibi_ui::RecordFieldType::Array).excluded("Nested collection"),
+    METADATA: bilibi_ui::RecordField::new("metadata", "Metadata", bilibi_ui::RecordFieldType::Object).excluded("Long structured text"),
+} }
+
+bilibi_ui::record_fields! { "core/company", pub(crate) mod link_fields {
+    EFFECTIVE_FROM: bilibi_ui::RecordField::new("effective_from", "Effective From", bilibi_ui::RecordFieldType::Date),
+    EFFECTIVE_TO: bilibi_ui::RecordField::new("effective_to", "Effective To", bilibi_ui::RecordFieldType::Date),
 } }
