@@ -692,6 +692,7 @@ struct DetailBody<'a> {
     id: i64,
     panels: &'a [String],
     header: Html,
+    facts: Html,
     chain: Html,
     notice: Html,
     card: Html,
@@ -716,6 +717,7 @@ fn operation_name(op: crate::lifecycle::Operation) -> (&'static str, &'static st
 /// What the detail page's live state hands its view: commit outcomes, the
 /// open dialog, the notice and the Departments table arrangement.
 pub(super) struct DetailState<'a> {
+    pub facts: &'a [bilibi_ports::RecordFactValue],
     pub statuses: &'a CommitStates,
     pub pending: Option<&'a Pending>,
     pub notice: &'a str,
@@ -736,6 +738,7 @@ pub(super) async fn detail(
     state: DetailState<'_>,
 ) -> Result<String> {
     let DetailState {
+        facts: key_facts,
         statuses,
         pending,
         notice,
@@ -1408,6 +1411,13 @@ pub(super) async fn detail(
             id,
             panels,
             header,
+            facts: render(&bilibi_ui::RecordFacts {
+                id: "company-key-facts",
+                items: key_facts
+                    .iter()
+                    .map(|fact| bilibi_ui::StatItem::text(&fact.label, &fact.value))
+                    .collect(),
+            })?,
             chain,
             notice: notices,
             card: content,

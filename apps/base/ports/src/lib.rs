@@ -26,6 +26,46 @@ use tokio_postgres::{Client, Transaction};
 pub const PORTS: &str = "base/ports.ports";
 /// The `Ports` service consumers resolve, after declaring `base/ports`.
 pub const SERVICE: &str = "base/ports.directory";
+/// Contributions of bounded facts for record pages.
+pub const RECORD_FACTS: &str = "base/ports.record_facts";
+
+/// A fact provider is an ordinary port accepting `{ "id": "..." }` and
+/// returning a `RecordFactValue`. It must authorize the reader itself.
+pub struct RecordFact {
+    pub record_kind: &'static str,
+    pub port: &'static str,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RecordFactValue {
+    pub label: String,
+    pub value: String,
+}
+
+const MAX_FACTS_PER_KIND: usize = 8;
+
+fn validate_facts(entries: &[Entry]) -> RegistryResult<()> {
+    let mut per_kind = BTreeMap::<&str, usize>::new();
+    for entry in entries {
+        let fact = entry.get::<RecordFact>()?;
+        if fact.record_kind.is_empty() || !port_name(entry.provenance.module, fact.port) {
+            return Err(RegistryError::Contribution(format!(
+                "invalid record fact {}",
+                entry.id
+            )));
+        }
+        let count = per_kind.entry(fact.record_kind).or_default();
+        *count += 1;
+        if *count > MAX_FACTS_PER_KIND {
+            return Err(RegistryError::Contribution(format!(
+                "record fact {} exceeds {MAX_FACTS_PER_KIND} facts for record kind {}",
+                entry.id, fact.record_kind
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<RecordFact>(RECORD_FACTS, "base/ports", validate_facts) }
 
 pub type PortFuture<'a> = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 
@@ -149,6 +189,7 @@ inventory::submit! { Consumer::new::<Port>(PORTS, "base/ports", validate) }
 #[derive(Default)]
 pub struct Ports {
     providers: BTreeMap<&'static str, &'static dyn PortProvider>,
+    facts: Vec<&'static RecordFact>,
 }
 impl Ports {
     /// A provider must depend on `base/ports`, so the graph shows which
@@ -167,7 +208,65 @@ impl Ports {
             }
             providers.insert(entry.id, entry.get::<Port>()?.provider);
         }
-        Ok(Self { providers })
+        let mut facts = Vec::new();
+        for entry in catalog.entries::<RecordFact>(RECORD_FACTS)? {
+            let fact = entry.get::<RecordFact>()?;
+            if !providers.contains_key(fact.port) {
+                return Err(RegistryError::Contribution(format!(
+                    "record fact {} names missing port {}",
+                    entry.id, fact.port
+                )));
+            }
+            facts.push(fact);
+        }
+        Ok(Self { providers, facts })
+    }
+    /// Read every fact for `kind` concurrently (boot allows at most eight per
+    /// kind), omitting failures and timeouts.
+    /// Each provider receives a separate read-only transaction with a database
+    /// statement timeout; pool acquisition and all calls share the deadline.
+    pub async fn record_facts(
+        &self,
+        db: &bilibi_database::Db,
+        scope: &Scope,
+        kind: &str,
+        id: &str,
+    ) -> Vec<RecordFactValue> {
+        use futures_util::future::join_all;
+        use std::time::Duration;
+        let reads = self
+            .facts
+            .iter()
+            .filter(|fact| fact.record_kind == kind)
+            .map(|fact| async move {
+                tokio::time::timeout(Duration::from_millis(100), async {
+                    let mut client = db.get().await.ok()?;
+                    let tx = client
+                        .build_transaction()
+                        .read_only(true)
+                        .start()
+                        .await
+                        .ok()?;
+                    tx.batch_execute("SET LOCAL statement_timeout = '75ms'")
+                        .await
+                        .ok()?;
+                    let value: RecordFactValue = self
+                        .call(&tx, scope, fact.port, &serde_json::json!({"id": id}))
+                        .await
+                        .ok()?;
+                    if value.label.is_empty()
+                        || value.label.chars().count() > 80
+                        || value.value.chars().count() > 160
+                    {
+                        return None;
+                    }
+                    Some(value)
+                })
+                .await
+                .ok()
+                .flatten()
+            });
+        join_all(reads).await.into_iter().flatten().collect()
     }
     /// Whether a mounted module provides `id`, for a page that withholds a
     /// control rather than offering one that would answer `Unavailable`.

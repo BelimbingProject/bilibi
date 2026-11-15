@@ -16,6 +16,10 @@ List toolbars put search first and filter boxes to its right, and on a phone fol
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
 
+## Record facts
+
+Use `RecordFacts` for the read-only strip at the top of a record page, with facts gathered through [`base/ports`](../ports/README.md#record-facts). It hides itself when no facts are available.
+
 ## Record field vocabulary
 
 Declare a field once so record labels, Grid columns and operation inputs use the same meaning.

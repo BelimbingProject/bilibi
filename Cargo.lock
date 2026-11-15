@@ -684,6 +684,7 @@ dependencies = [
  "bilibi-person",
  "bilibi-personal-data",
  "bilibi-picklists",
+ "bilibi-ports",
  "bilibi-principal-directory",
  "bilibi-privacy",
  "bilibi-records",
@@ -1381,10 +1382,12 @@ dependencies = [
  "bilibi-module-registry",
  "bilibi-tenancy",
  "deadpool-postgres",
+ "futures-util",
  "inventory",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "tokio-postgres",
 ]
 

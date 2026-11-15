@@ -8,6 +8,7 @@ mod contributions;
 mod departments;
 mod duplicates;
 mod eligibility;
+mod facts;
 mod field_contributions;
 mod identity_directory;
 mod list_fields;
@@ -825,7 +826,7 @@ async fn finish(tx: bilibi_database::MutationTransaction<'_>, saved: bool) -> Re
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/company",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/database","base/security","base/ui","base/notifications","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/personal_data","core/party","core/geonames","core/person"],
+        dependencies:&["base/database","base/security","base/ui","base/notifications","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/ports","base/personal_data","core/party","core/geonames","core/person"],
         migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql")), ("core-company-013-search-trigram",include_str!("../migrations/013-search-trigram.sql"))],
         services: &[
             bilibi_module_registry::Service { id: SERVICE, factory: |services| {
@@ -850,7 +851,7 @@ inventory::submit! {
                 }))
             } },
             bilibi_module_registry::Service { id: "core/company.pages", factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::Pages {
-                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, views: services.get(bilibi_grid::PAGE_VIEWS)?, datetime: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, picklists: services.get(bilibi_picklists::SERVICE)?, records: services.get(bilibi_records::SERVICE)?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, record_panels: web::record_panels()?,
+                db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, views: services.get(bilibi_grid::PAGE_VIEWS)?, datetime: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, picklists: services.get(bilibi_picklists::SERVICE)?, records: services.get(bilibi_records::SERVICE)?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, facts: services.get(bilibi_ports::SERVICE)?, record_panels: web::record_panels()?,
             })))) },
             bilibi_module_registry::Service { id: web::relationships::SERVICE, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService(Arc::new(web::relationships::RelationshipPages {
                 db: services.get::<Db>("base/database.pool")?.as_ref().clone(), company: services.get(SERVICE)?, records: services.get(bilibi_records::SERVICE)?,
