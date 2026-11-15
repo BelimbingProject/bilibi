@@ -8,6 +8,7 @@ use bilibi_bulk_data::{BulkData, Run};
 use bilibi_database::{pool, Db};
 use bilibi_queue::{Config, Executor};
 use bilibi_tenancy::{ProofFuture, Scope};
+use bilibi_ui::page::{LiveBody, LiveInput, LiveRequest, LiveState, PageRequest, PageService};
 use serde_json::{json, Value};
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
 use tokio_postgres::Transaction;
@@ -36,6 +37,47 @@ struct Person<'a> {
     db: &'a Db,
 }
 impl Person<'_> {
+    async fn page(
+        &self,
+        id: i64,
+    ) -> Result<Box<dyn LiveState<Scope, bilibi_database::Error>>, Failure> {
+        let service = self
+            .app
+            .services
+            .get::<PageService<Scope, bilibi_database::Error>>("base/bulk_data.pages")?;
+        let mut page = service
+            .0
+            .mount(PageRequest {
+                operation: "detail",
+                scope: Some(&self.scope),
+                path: &std::collections::HashMap::from([("id".into(), id.to_string())]),
+                query: &std::collections::HashMap::new(),
+                body: &[],
+                framed: false,
+            })
+            .await?
+            .ok_or("import page did not mount")?;
+        page.update(LiveRequest {
+            scope: &self.scope,
+            credential: self.token,
+            input: LiveInput::Refresh,
+        })
+        .await?;
+        Ok(page)
+    }
+    async fn event(
+        &self,
+        page: &mut dyn LiveState<Scope, bilibi_database::Error>,
+        event: Value,
+    ) -> Result<LiveBody, Failure> {
+        Ok(page
+            .update(LiveRequest {
+                scope: &self.scope,
+                credential: self.token,
+                input: LiveInput::Event(&event),
+            })
+            .await?)
+    }
     async fn write(&self, key: &str, input: Value) -> Result<Value, Failure> {
         let plans = self.app.services.get::<Plans>("base/agent_api.plans")?;
         let browser = Browser {
@@ -305,6 +347,42 @@ async fn main() -> Result<(), Failure> {
         "governed pick-list code reaches owner storage",
         value(&record, "category") == Some(&json!(choice["code"])),
     )?;
+    let fixed = manager
+        .upload(
+            "fixed.csv",
+            "Name,Email\nFixed Boolean,fixed-boolean@example.test\n",
+        )
+        .await?;
+    let mut page = manager.page(fixed).await?;
+    manager.event(&mut *page, json!({"type":"map", "map[f_name]":"c0", "map[f_email]":"c1", "map[f_kind]":"fixed", "map[v_kind]":"human", "map[f_cf_vip]":"fixed"})).await?;
+    manager.event(&mut *page, json!({"type":"start"})).await?;
+    let fixed_run = manager.settle(fixed).await?;
+    check(
+        "untouched fixed Off switch imports false",
+        fixed_run.run.create == 1
+            && fixed_run.mapping.as_ref().is_some_and(|mapping| {
+                mapping
+                    .fields
+                    .iter()
+                    .any(|field| field.field == "cf_vip" && field.value.as_deref() == Some("false"))
+            }),
+    )?;
+    let fixed_records = manager
+        .read(
+            "core.person.duplicates",
+            json!({"email":"fixed-boolean@example.test"}),
+        )
+        .await?;
+    let fixed_record = manager
+        .read(
+            "core.person.get",
+            json!({"person_id":fixed_records[0]["id"]}),
+        )
+        .await?;
+    check(
+        "fixed Off reaches the owner's stored custom value",
+        value(&fixed_record, "vip") == Some(&json!("false")),
+    )?;
     manager
         .write(
             "base.bulk_data.mapping.save",
@@ -413,10 +491,37 @@ async fn main() -> Result<(), Failure> {
     let stale = manager
         .upload(
             "stale.csv",
-            "Name,Email,Note\nStale Import,stale-import@example.test,Must refuse\n",
+            "Name,Email,Note,Amount,VIP\nStale Import,stale-import@example.test,Must refuse,1,No\n",
         )
         .await?;
     check("saved mapping with archived key is refused before writing", manager.write("base.bulk_data.import.start",json!({"run_id":stale,"version":manager.run(stale).await?.version,"mapping":update_mapping})).await.is_err())?;
+    let saved = manager
+        .read(
+            "base.bulk_data.mapping.list",
+            json!({"record_type":"core/person.contacts"}),
+        )
+        .await?;
+    let mut page = manager.page(stale).await?;
+    let applied = manager.event(&mut *page, json!({"type":"apply_mapping", "saved[id]":saved[0]["id"].as_i64().ok_or("saved mapping id")?.to_string()})).await?;
+    check(
+        "applying an archived mapping shows its unavailable field and refusal",
+        applied.html.contains("cf_note (unavailable)")
+            && applied.html.contains("needs fixing first"),
+    )?;
+    manager.event(&mut *page, json!({"type":"map", "map[f_name]":"c0", "map[f_email]":"c1", "map[f_kind]":"fixed", "map[v_kind]":"human", "map[duplicates]":"update"})).await?;
+    for action in ["preview", "start"] {
+        manager.event(&mut *page, json!({"type":action})).await?;
+        check(
+            "editing another control retains the archived mapping and refuses use",
+            manager.run(stale).await?.pass.is_none(),
+        )?;
+    }
+    manager.event(&mut *page, json!({"type":"map", "map[f_name]":"c0", "map[f_email]":"c1", "map[f_kind]":"fixed", "map[v_kind]":"human", "map[f_cf_note]":""})).await?;
+    manager.event(&mut *page, json!({"type":"preview"})).await?;
+    check(
+        "explicitly removing the unavailable mapping allows checking",
+        manager.run(stale).await?.pass == Some(bilibi_bulk_data::Pass::Preview),
+    )?;
     check(
         "other tenant cannot reuse this custom mapping",
         other
@@ -438,6 +543,10 @@ async fn main() -> Result<(), Failure> {
     )?;
     let (stop, receive) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(async move { executor.run(receive).await });
+    check(
+        "checking after explicit removal succeeds",
+        manager.settle(stale).await?.preview.create == 1,
+    )?;
     check(
         "field archived after queueing refuses the row instead of dropping its value",
         manager.settle(queued).await?.run.error == 1,
