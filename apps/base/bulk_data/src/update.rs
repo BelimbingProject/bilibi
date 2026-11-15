@@ -16,6 +16,7 @@
 //! writes a record twice. Cancelling keeps what was written.
 use crate::export::{maybe_stamp, stamp, Failed};
 use crate::import::{bounded, error_of, refusal, text_id};
+use crate::stats::Written;
 use crate::store::instant;
 use crate::{
     mapping::convert, record::Registered, refused, BulkData, Counts, Field, Outcome, WriteError,
@@ -756,16 +757,27 @@ impl BulkData {
         let targets = targets(&*client, &scope, id).await?;
         let started = Instant::now();
         let mut next = usize::try_from(run.progress).map_err(|_| Error::Internal)?;
+        let mut written = Written::default();
         while next < targets.len() && started.elapsed() < SLICE {
             let (record, version) = targets[next].clone();
             let row = next as i32 + 1;
             if !self
                 .write_one(
-                    execution, client, &scope, registered, bulk, &fields, &run, row, &record,
+                    execution,
+                    client,
+                    &scope,
+                    registered,
+                    bulk,
+                    &fields,
+                    &run,
+                    row,
+                    &record,
                     version,
+                    &mut written,
                 )
                 .await?
             {
+                written.analyze(client).await;
                 return Ok(());
             }
             next += 1;
@@ -775,6 +787,7 @@ impl BulkData {
             }
         }
         self.wake(scope.tenant(), scope.user());
+        written.analyze(client).await;
         if next < targets.len() {
             self.continue_update(execution, client, &scope, id).await
         } else {
@@ -879,6 +892,7 @@ impl BulkData {
         row: i32,
         record: &str,
         version: Option<i64>,
+        written: &mut Written,
     ) -> Result<bool> {
         // What the row will do, read before the write's transaction.
         let planned: std::result::Result<Option<Value>, String> = match version {
@@ -990,6 +1004,7 @@ impl BulkData {
             })
         })
         .await?;
+        written.add(tx.sql()).await?;
         tx.commit().await?;
         Ok(true)
     }
