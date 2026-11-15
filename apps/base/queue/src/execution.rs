@@ -766,9 +766,9 @@ impl Executor {
         let beat = lease / 3;
         let mut heartbeat = tokio::time::interval(beat);
         // A renewal that waits (behind the row lock of an owner's fenced
-        // transaction, or for a busy pool) is never cancelled and never ends
-        // the attempt: it stays in flight and answers when it can. Only its
-        // answer that the lease is gone stops the handler.
+        // transaction, or for a busy pool) must not time out independently:
+        // keep it in flight while the attempt runs. Its answer that the lease
+        // is gone stops the handler; the attempt deadline still applies.
         let mut beats = JoinSet::new();
         let mut renewed_at = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(self.config.max_runtime);
