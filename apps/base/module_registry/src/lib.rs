@@ -7,7 +7,7 @@ use std::{
 };
 mod composition;
 pub mod contributions;
-pub use composition::{Composition, Container, PinState};
+pub use composition::{Composition, Container, ExtensionCode, PinState};
 pub use contributions::{Catalog, Consumer, Contribution, Entry, Provenance};
 
 pub type Value = Arc<dyn Any + Send + Sync>;
@@ -179,6 +179,24 @@ pub fn verify_composition(
     modules: &[&'static Module],
     domains: &[(&str, &str)],
     extensions: &[(&str, &str)],
+    extension_code: &[(&str, &str)],
+    installation_mode: &str,
+) -> Result<()> {
+    verify_descriptors(modules, domains, extensions, extension_code)?;
+    composition::validate_admission(
+        installation_mode,
+        extension_code
+            .iter()
+            .filter(|(_, code)| *code == "customer")
+            .map(|(id, _)| *id),
+    )
+}
+
+pub fn verify_descriptors(
+    modules: &[&'static Module],
+    domains: &[(&str, &str)],
+    extensions: &[(&str, &str)],
+    extension_code: &[(&str, &str)],
 ) -> Result<()> {
     let expected = |layer| match layer {
         Layer::Domains => domains,
@@ -211,6 +229,32 @@ pub fn verify_composition(
             return Err(RegistryError::Graph(format!(
                 "{:?} descriptor {} matches no mounted module crate",
                 module.layer, module.id
+            )));
+        }
+    }
+    let mut declared = BTreeSet::new();
+    for (id, code) in extension_code {
+        if !declared.insert(*id) || composition::ExtensionCode::parse(code).is_none() {
+            return Err(RegistryError::Graph(format!(
+                "Extension {id} has a duplicate or invalid code declaration {code:?}"
+            )));
+        }
+    }
+    for (module, _) in extensions {
+        let id = module.split('/').next().unwrap_or(module);
+        if !declared.contains(id) {
+            return Err(RegistryError::Graph(format!(
+                "Extension {id} must declare its code as reviewed or customer"
+            )));
+        }
+    }
+    for id in declared {
+        if !extensions
+            .iter()
+            .any(|(module, _)| module.split('/').next().unwrap_or(module) == id)
+        {
+            return Err(RegistryError::Graph(format!(
+                "Extension code declaration {id} matches no mounted module crate"
             )));
         }
     }

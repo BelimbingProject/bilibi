@@ -175,7 +175,7 @@ The matrix comes from `scripts/compatibility.py`, reading `domains` and optional
 
 ## Versions inside the program
 
-**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, and each mounted Domain's commit and release in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status`, the status bar and anything else that asks. Nothing is read from a file or the database at run time, so the shown versions cannot drift from the running code.
+**The program is the truth about what it contains.** `scripts/discover-modules.py --pin` records the Platform commit, its version and release tag, each mounted Domain or Extension's commit and release, and each Extension's reviewed/customer code declaration in `.local/composition/manifest.txt`. The executable host's build script (`apps/web/build.rs`) compiles that manifest into the program, and `bilibi_web::composition` hands it to `bilibi-web status`, the status bar and anything else that asks. Nothing is read from a file or the database at run time, so the shown versions cannot drift from the running code.
 
 Pin, then build:
 
@@ -186,6 +186,8 @@ cargo build --release --locked -p bilibi-web
 ```
 
 The pin is read at build time, so **pin before you build**. The build also checks the pin against the checkouts it compiles: when Git is available and the Platform or a Domain is at another commit than the pin recorded, the pin is reported stale instead of shown.
+
+Customer-code Extensions require a saved isolated installation at discovery, pinning and restoration: supply `DATABASE_URL` for `psql` to read `installation.mode`. No saved isolated policy means refusal; prepare a code-free release instead. Runtime composition verification reads the setting again, independently of build-time admission.
 
 **Platform-only setups can be pinned too.** With no Domains or Extensions mounted, `--pin` records the Platform revision, version and resolved `Cargo.lock`, with an empty `[containers]` table. On a checkout at that Platform revision, copy `.local/composition/` into place and run `python3 scripts/discover-modules.py --restore` to restore the lockfile. The same checks apply: a changed Platform revision, an altered pinned lockfile or a mounted container absent from the pin is refused.
 

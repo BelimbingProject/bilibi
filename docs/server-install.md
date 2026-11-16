@@ -300,6 +300,8 @@ Local builds are for development checks. They are not server releases. An applic
 
 **Prepare application releases from the outer application repository.** Create it from your trial with `./bilibi new <name>`. Commit and push component changes in their own repositories. Run `./bilibi check` with a separate empty disposable database, then `./bilibi build`. Each asks whether to use new commits and saves the record when you accept. Commit and review that record on the application's default branch, then run `./bilibi release` to create the protected tag and start the release workflow. GitHub builds from that record. The builder verifies the source selection and saved lock; the application's README describes publication. See [application workspaces](application-workspaces.md) for the directory layout and migration.
 
+Before preparing a release with customer code, follow the [installation policy](../apps/base/system/README.md#installation-policy-srcinstallation_editorrs) and [build-time admission requirements](versions.md#versions-inside-the-program). The [installer contract](../apps/installer/README.md) covers admission, rollback and preservation of the owner's policy during recovery.
+
 ### Focused component builds
 
 Direct Platform and component clones remain supported for focused contributions. A local Bilibi checkout and an optional coding agent are the operator’s build tools. Find a Domain or Extension in Software or through MCP, read which release accepts this server and which commits CI recorded as tested together, then follow its `local_steps` in that checkout. For example:

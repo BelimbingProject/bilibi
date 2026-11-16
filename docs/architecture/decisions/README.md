@@ -109,7 +109,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [08 Currencies as Core master data, and conversion always names its rate](./08-currencies-as-core-master-data.md) | Accepted; implemented |
 | [11 Record references across modules](./11-record-references.md) | Proposed |
 | [21 Tenant-defined custom fields stay "lite" and live in the owner's row](./21-tenant-defined-custom-fields.md) | Accepted; implemented |
-| [28 Tenant customisation is data on shared servers; customer code needs its own server](./28-tenant-customisation-is-data-on-shared-servers.md) | Accepted; implementation in progress |
+| [28 Tenant customisation is data on shared servers; customer code needs its own server](./28-tenant-customisation-is-data-on-shared-servers.md) | Accepted; implemented |
 | [31 Tenant rules run after commit as one bounded principal that owners offer their own keys to](./31-tenant-rules-run-after-commit-as-one-bounded-principal.md) | Proposed |
 | [22 Shared products in Core, selling rules in Domains](./22-shared-products-in-core.md) | Accepted |
 | [23 Shared documents in Core, business workflows in Domains](./23-shared-documents-in-core.md) | Accepted |

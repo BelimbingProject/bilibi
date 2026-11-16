@@ -341,6 +341,35 @@ pub async fn database_size(client: &impl GenericClient) -> Result<i64, tokio_pos
         .await?;
     Ok(row.get(0))
 }
+pub async fn lock_installation(client: &impl GenericClient) -> Result<(), tokio_postgres::Error> {
+    client
+        .batch_execute(
+            "SELECT pg_advisory_lock_shared(hashtextextended('base/system.installation-mode',0))",
+        )
+        .await
+}
+
+/// The installation-owned code admission policy. No stored row means the safe default.
+pub async fn installation_mode(
+    client: &impl GenericClient,
+) -> Result<String, tokio_postgres::Error> {
+    if !client
+        .query_one("SELECT to_regclass('base_settings') IS NOT NULL", &[])
+        .await?
+        .get::<_, bool>(0)
+    {
+        return Ok("shared".into());
+    }
+    let row = client
+        .query_opt(
+            "SELECT value #>> '{}' FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[],
+        )
+        .await?;
+    Ok(row
+        .and_then(|row| row.get::<_, Option<String>>(0))
+        .unwrap_or_else(|| "shared".into()))
+}
 /// What was entered after an instant, from the audit trail: the number of
 /// recorded changes and how they split by kind of record. Software jobs are
 /// left out, because they are what asked for this.
@@ -382,7 +411,8 @@ pub async fn now(client: &impl GenericClient) -> Result<String, tokio_postgres::
 /// The software history (jobs, steps, add-ons) as JSON, taken before a
 /// restore so the restore cannot erase what it is part of: for each table
 /// its columns (so the table can be made again) and its rows.
-const HISTORY_TABLES: [&str; 3] = [
+const HISTORY_TABLES: [&str; 4] = [
+    "base_settings",
     "base_software_jobs",
     "base_software_steps",
     "base_software_plugins",
@@ -418,7 +448,12 @@ pub async fn history(
             } else {
                 "id"
             };
-            (*table, format!("SELECT row_to_json(t)::jsonb FROM {table} t ORDER BY {order}"), false)
+            let predicate = if *table == "base_settings" {
+                " WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0"
+            } else {
+                ""
+            };
+            (*table, format!("SELECT row_to_json(t)::jsonb FROM {table} t{predicate} ORDER BY {order}"), false)
         })
         .chain(AUDIT_TABLES.iter().map(|(table, which)| {
             (
@@ -508,6 +543,18 @@ pub async fn restore_history(
     client: &impl GenericClient,
     history: &Value,
 ) -> Result<(i64, Vec<String>), tokio_postgres::Error> {
+    let policy = history["base_settings"]["rows"]
+        .as_array()
+        .and_then(|rows| rows.first());
+    if let Some(row) = policy {
+        client.execute(
+            "WITH removed AS (DELETE FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0 RETURNING id) INSERT INTO base_settings OVERRIDING SYSTEM VALUE SELECT r.* FROM (SELECT count(*) FROM removed) d CROSS JOIN LATERAL jsonb_populate_record(NULL::base_settings, jsonb_set($1, '{id}', to_jsonb((SELECT COALESCE(max(id),0)+1 FROM base_settings)))) r",
+            &[row],
+        ).await?;
+    } else {
+        client.execute("DELETE FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0", &[]).await?;
+    }
+    client.execute("SELECT setval(pg_get_serial_sequence('base_settings', 'id'), coalesce((SELECT max(id) FROM base_settings), 0) + 1, false)", &[]).await?;
     let mut carried = 0;
     let mut problems = Vec::new();
     let mut present = Vec::new();
@@ -535,12 +582,12 @@ pub async fn restore_history(
     for table in present
         .iter()
         .rev()
-        .filter(|table| HISTORY_TABLES.contains(table))
+        .filter(|table| **table != "base_settings" && HISTORY_TABLES.contains(table))
     {
         client.execute(&format!("DELETE FROM {table}"), &[]).await?;
     }
     for table in all.iter().copied() {
-        if !present.contains(&table) {
+        if table == "base_settings" || !present.contains(&table) {
             continue;
         }
         let columns: Vec<String> = client
