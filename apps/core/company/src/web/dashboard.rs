@@ -17,6 +17,7 @@ use crate::{
 use askama::Template;
 use bilibi_dashboard::PanelArgs;
 use bilibi_database::{Db, Error, Result};
+use bilibi_grid::RecordWords;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, PageRequest},
@@ -76,10 +77,11 @@ async fn summary(
     })
 }
 
-/// The last read, whether its link may show, and when; `refresh` from the
-/// dashboard says how long it stands.
+/// The last read, whether its link may show, the tenant's words for the
+/// company's fields, and when; `refresh` from the dashboard says how long it
+/// stands.
 struct Cache {
-    read: Option<(Summary, bool, Instant)>,
+    read: Option<(Summary, bool, RecordWords, Instant)>,
 }
 impl Cache {
     async fn summary(
@@ -89,19 +91,20 @@ impl Cache {
         args: &PanelArgs,
         link: &str,
         counts: bool,
-    ) -> Result<(&Summary, bool)> {
+    ) -> Result<(&Summary, bool, &RecordWords)> {
         let fresh = self
             .read
             .as_ref()
-            .is_some_and(|(_, _, at)| args.refresh.is_zero() || at.elapsed() < args.refresh);
+            .is_some_and(|(_, _, _, at)| args.refresh.is_zero() || at.elapsed() < args.refresh);
         if !fresh {
             let client = db.get().await?;
             let read = summary(&**client, scope, counts).await?;
             let linked = allowed(&**client, scope, link).await?;
-            self.read = Some((read, linked, Instant::now()));
+            let words = RecordWords::load(&**client, scope, "companies").await?;
+            self.read = Some((read, linked, words, Instant::now()));
         }
-        let (read, linked, _) = self.read.as_ref().ok_or(Error::Internal)?;
-        Ok((read, *linked))
+        let (read, linked, words, _) = self.read.as_ref().ok_or(Error::Internal)?;
+        Ok((read, *linked, words))
     }
 }
 
@@ -148,7 +151,7 @@ impl LiveState<Scope, Error> for Stats {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
             only_refresh(&request.input)?;
-            let (read, linked) = self
+            let (read, linked, _) = self
                 .cache
                 .summary(&self.db, request.scope, &self.args, LIST, true)
                 .await?;
@@ -201,7 +204,7 @@ impl LiveState<Scope, Error> for CurrentCompany {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
             only_refresh(&request.input)?;
-            let (read, linked) = self
+            let (read, linked, words) = self
                 .cache
                 .summary(&self.db, request.scope, &self.args, VIEW, false)
                 .await?;
@@ -248,19 +251,19 @@ impl LiveState<Scope, Error> for CurrentCompany {
                         id: "dashboard-company-facts",
                         items: vec![
                             Fact {
-                                title: "Name",
+                                title: words.field("name", "Name"),
                                 id: "dashboard-company-name",
                                 value: Html::text(&company.name),
                             },
                             Fact {
-                                title: "Code",
+                                title: words.field("code", "Code"),
                                 id: "",
                                 value: render(&Code {
                                     code: &company.code,
                                 })?,
                             },
                             Fact {
-                                title: "Status",
+                                title: words.field("status", "Status"),
                                 id: "",
                                 value: render(&Badge {
                                     kind: if company.status == "active" {

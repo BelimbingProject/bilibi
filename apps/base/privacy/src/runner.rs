@@ -743,10 +743,15 @@ async fn finish_failed(
 
 /// Holds the request's finish guard on its own connection; dropping it
 /// without `release` closes the connection, which ends the guard.
-struct FinishGuard(Option<deadpool_postgres::Object>, i64);
+struct FinishGuard(Option<bilibi_database::Connection>, i64);
 impl FinishGuard {
     async fn take(db: &Db, id: i64) -> Result<Self> {
-        let client = db.get().await?;
+        let client = db
+            .get_detached(
+                "holds the request's finish guard, a session lock, while the finish reads and \
+                 writes on other connections; one per request being finished",
+            )
+            .await?;
         let taken: bool = client
             .query_one(
                 "SELECT pg_try_advisory_lock($1,$2::bigint::int)",
@@ -774,7 +779,7 @@ impl FinishGuard {
 impl Drop for FinishGuard {
     fn drop(&mut self) {
         if let Some(client) = self.0.take() {
-            drop(deadpool_postgres::Object::take(client));
+            drop(bilibi_database::Connection::take(client));
         }
     }
 }

@@ -146,7 +146,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         services.get::<bilibi_core::company::CompanyService>(bilibi_core::company::SERVICE)?;
     let users = services.get::<UserService>("core/user.accounts")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Approving a connection ties it to a real browser session, so give each
     // stand-in login the session row its sign-in would have written.
     for (tenant, user) in [(1_i64, 1_i64), (1, 3), (1, 4), (1, 6), (2, 5)] {
@@ -397,7 +399,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?
         .map_or(0, |row| row.get(0));
     let operations = [reference_operation(91, version)];
-    let mut held_client = db.get().await?;
+    let mut held_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let held_company = held_client.transaction().await?;
     held_company
         .query_one(
@@ -480,7 +484,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     users.logout(&browser.token, &browser.csrf).await?;
-    let mut desk_client = db.get().await?;
+    let mut desk_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let held_desk = desk_client.transaction().await?;
     held_desk
         .query_one(

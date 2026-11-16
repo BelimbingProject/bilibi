@@ -169,7 +169,9 @@ async fn main() -> Result<()> {
     }
     let (gone, gone_file) = deleted[0].clone();
     let (held, held_file) = deleted[1].clone();
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     for (id, file) in &deleted {
         let jobs: i64 = client.query_one(
             "SELECT count(*) FROM base_queue_jobs WHERE tenant_id=$1 AND worker_id='core/document-delete' AND args->>'document'=$2::text AND state='available' AND system_principal='document-deleter'",

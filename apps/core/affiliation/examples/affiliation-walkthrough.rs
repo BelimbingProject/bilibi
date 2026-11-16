@@ -59,7 +59,9 @@ async fn main() -> Result<(), Failure> {
     let staff = app.security.guard(&staff_login.token).await?;
     let deskless = app.security.guard(&deskless_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let before: i64 = client
         .query_one("SELECT count(*) FROM users", &[])
@@ -187,7 +189,9 @@ async fn main() -> Result<(), Failure> {
             .await,
     );
 
-    let mut connection = db.get().await?;
+    let mut connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = boundary
         .begin(
             &mut connection,
@@ -247,7 +251,9 @@ async fn main() -> Result<(), Failure> {
             .await,
     );
     client.execute("DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=$1 AND capability='admin.company.tenant-wide.manage'", &[&manager.user()]).await?;
-    let mut contender = db.get().await?;
+    let mut contender = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut blocked = boundary
         .begin(
             &mut contender,

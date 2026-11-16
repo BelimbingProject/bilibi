@@ -136,7 +136,9 @@ async fn main() -> Result<(), Failure> {
         token: &logins[1].token,
     };
     let mut proof = Proof::default();
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     println!("-- definitions");
     // Fixture setup: the fixture tenant gets its pick-lists as a new tenant

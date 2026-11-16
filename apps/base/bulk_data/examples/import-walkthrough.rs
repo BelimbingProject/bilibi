@@ -65,7 +65,11 @@ impl Person<'_> {
             .map_err(|error| error.to_string())
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self.db.get().await.map_err(|error| error.to_string())?;
+        let client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await
+            .map_err(|error| error.to_string())?;
         self.registry
             .call(&**client, &self.scope, key, &input)
             .await
@@ -223,7 +227,9 @@ async fn main() -> Result<(), Failure> {
         .get();
     println!("the manager files under workplace {company}");
     let (mut stop, mut worker) = start(&app, 3)?;
-    let sql = db.get().await?;
+    let sql = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // An unseeded database names no private document folder: keep the
     // uploads under this directory, as a local checkout's seed would.
     let root = std::env::current_dir()?.join("data/artifacts");

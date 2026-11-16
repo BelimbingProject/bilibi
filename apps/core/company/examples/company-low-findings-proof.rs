@@ -60,7 +60,9 @@ async fn main() -> Result<()> {
         .reconcile()
         .await?;
     let companies = app.services.get::<CompanyService>(SERVICE)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Tenant 2's manager holds the create capability in its own tenant.
     client
         .batch_execute("INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(2,5,'admin.company.create') ON CONFLICT DO NOTHING")

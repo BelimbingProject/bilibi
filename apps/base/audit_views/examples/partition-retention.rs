@@ -118,7 +118,9 @@ async fn main() -> Outcome {
         .get::<MutationBoundary>("base/database.mutations")?;
     let settings = app.services.get::<Settings>("base/settings.store")?;
     let partitions = app.services.get::<Partitions>(PARTITIONS_SERVICE)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.execute("INSERT INTO platform_operator(singleton,tenant_id) VALUES(true,1) ON CONFLICT DO NOTHING",&[]).await?;
     check("both ledgers are partitioned",yes(&client,"SELECT count(*)=2 FROM pg_class WHERE oid IN ('base_audit_actions'::regclass,'base_audit_mutations'::regclass) AND relkind='p'").await?)?;
     for month in ["2019-01-01", "2019-02-01", "2019-03-01", "2019-01-01"] {

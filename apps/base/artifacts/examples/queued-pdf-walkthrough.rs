@@ -298,7 +298,9 @@ async fn main() -> Result<()> {
     let router = bilibi_web::router(app.clone());
     tokio::spawn(async move { axum::serve(listener, router).await });
 
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.batch_execute("CREATE TABLE IF NOT EXISTS walkthrough_pdf_subjects(subject text PRIMARY KEY,tenant_id bigint,company_id bigint,account_id bigint);
         CREATE TABLE IF NOT EXISTS walkthrough_pdf_requests(request_id text PRIMARY KEY,subject text NOT NULL,mode text NOT NULL,password text,fail_after int NOT NULL DEFAULT 0,revoke boolean NOT NULL DEFAULT false);
         CREATE TABLE IF NOT EXISTS walkthrough_pdf_completions(request_id text PRIMARY KEY,artifact_id text NOT NULL,job_id bigint NOT NULL,deliveries int NOT NULL);
@@ -436,7 +438,9 @@ async fn main() -> Result<()> {
     wait(&db, 1, job).await?;
     let done = client.query_one("SELECT artifact_id,deliveries FROM walkthrough_pdf_completions WHERE request_id='req-inline'", &[]).await?;
     let (artifact, deliveries): (String, i32) = (done.get(0), done.get(1));
-    let mut c2 = db.get().await?;
+    let mut c2 = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let read = documents.read(&mut c2, &artifact).await?;
     let file = out.join("queued-inline-protected.pdf");
     std::fs::write(&file, &read.bytes)?;

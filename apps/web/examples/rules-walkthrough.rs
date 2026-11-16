@@ -356,7 +356,9 @@ async fn main() -> Result<()> {
         .await?;
     // Tenant 2's manager becomes its administrator (a grant-all role), as a
     // tenant's owner would be.
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.batch_execute(
         "INSERT INTO roles(tenant_id,name,grant_all) SELECT 2,'Walkthrough administrator',true WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id=2 AND name='Walkthrough administrator');
          INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 2,5,id FROM roles WHERE tenant_id=2 AND name='Walkthrough administrator' ON CONFLICT DO NOTHING;",

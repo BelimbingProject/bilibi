@@ -209,7 +209,10 @@ impl Proof {
         ))
     }
     async fn prune(&self, now: SystemTime) -> Result<u64> {
-        let mut client = self.db.get().await?;
+        let mut client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         self.events.prune(&mut client, now).await
     }
     /// Sets the tenant's own keep time, as the settings page would.

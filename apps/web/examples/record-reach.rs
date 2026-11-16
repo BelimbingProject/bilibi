@@ -204,7 +204,10 @@ impl Proof {
         role: i64,
         attach: bool,
     ) -> Result<(), Failure> {
-        let mut client = self.db.get().await?;
+        let mut client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         let mut tx = self
             .boundary
             .begin(

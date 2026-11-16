@@ -1430,7 +1430,7 @@ const LOCATE_TIMEOUT: &str = "SET statement_timeout = '20s'";
 /// returns it to the pool; dropped otherwise (a cancelled read, a failed
 /// reset), the connection is closed, so the timeout never reaches another
 /// caller of the pool.
-struct Bounded(Option<deadpool_postgres::Object>);
+struct Bounded(Option<bilibi_database::Connection>);
 impl Bounded {
     async fn open(db: &bilibi_database::Db) -> Result<Self> {
         let bounded = Self(Some(db.get().await?));
@@ -1449,7 +1449,7 @@ impl Bounded {
                 .await
                 .is_err()
             {
-                drop(deadpool_postgres::Object::take(client));
+                drop(bilibi_database::Connection::take(client));
             }
         }
     }
@@ -1457,7 +1457,7 @@ impl Bounded {
 impl Drop for Bounded {
     fn drop(&mut self) {
         if let Some(client) = self.0.take() {
-            drop(deadpool_postgres::Object::take(client));
+            drop(bilibi_database::Connection::take(client));
         }
     }
 }

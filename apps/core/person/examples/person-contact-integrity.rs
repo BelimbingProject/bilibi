@@ -154,7 +154,9 @@ async fn main() -> Result<(), Box<dyn Failure>> {
             .map_err(|e| format!("{e:?}"))?;
     }
     db.resize(1);
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let before = rows_read(&stats, "base_custom_fields").await?;
     let tx = client.transaction().await?;
     let listed = read(

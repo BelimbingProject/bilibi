@@ -28,10 +28,10 @@
 {#- One toolbar control in its cell. data-filter-control names the control a
     chip's × resets. -#}
 {% macro toolbar_control(control) %}
-{% if control.is_search() %}<div class="min-w-52 flex-1 basis-64">{% call toolbar_label(id=control.id, label=control.label) %}{% endcall %}<div class="relative">{% call ui::icon(name="search", class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-faint") %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>{% if !control.hint.is_empty() %}<p class="mt-1.5 text-xs text-ink-subtle">{{ control.hint }}</p>{% endif %}</div>
+{% if control.is_search() %}<div class="min-w-52 flex-1 basis-64">{% call toolbar_label(id=control.id, label=control.label_text()) %}{% endcall %}<div class="relative">{% call ui::icon(name="search", class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-ink-faint") %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>{% if !control.hint.is_empty() %}<p class="mt-1.5 text-xs text-ink-subtle">{{ control.hint }}</p>{% endif %}</div>
 {% elif let Some(multi) = control.multi() %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto sm:min-w-36">{% call forms::multi_select(control=multi) %}{% endcall %}</div>
-{% elif control.is_date() %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto">{% call toolbar_label(id=control.id, label=control.label) %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>
-{% else %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto sm:min-w-36">{% call toolbar_label(id=control.id, label=control.label) %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>
+{% elif control.is_date() %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto">{% call toolbar_label(id=control.id, label=control.label_text()) %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>
+{% else %}<div data-filter-control="{{ control.id }}" class="w-full min-w-0 sm:w-auto sm:min-w-36">{% call toolbar_label(id=control.id, label=control.label_text()) %}{% endcall %}{% call forms::input(field=control.field) %}{% endcall %}</div>
 {% endif %}
 {% endmacro %}
 

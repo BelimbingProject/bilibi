@@ -17,7 +17,7 @@ const ROLE_UPDATE: &str = "admin.authz.role.update";
 
 pub(super) fn member_columns() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("name", "Name"),
+        BuiltinColumn::new("name", "Name").grid_field("users.name"),
         BuiltinColumn::new("lead", "Lead"),
         BuiltinColumn::new("added", "Added"),
     ]

@@ -137,7 +137,13 @@ pub(super) struct EnforcementPolicy {
 impl bilibi_step_up::Enforcement for EnforcementPolicy {
     fn enforced(&self) -> bilibi_tenancy::ProofFuture<'_, bool> {
         Box::pin(async move {
-            let client = self.db.get().await?;
+            let client = self
+                .db
+                .get_detached(
+                    "step-up asks this from inside the caller's write, through a hook that \
+                     carries no client; one short read",
+                )
+                .await?;
             Ok(Instance::resolve(&self.settings, &**client).await?.role != Role::Dev)
         })
     }

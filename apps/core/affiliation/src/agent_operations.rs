@@ -215,6 +215,97 @@ enum Write {
     Unlink,
     ImportUndo,
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let bound = bound()?;
+        let value = match self {
+            Self::Create => {
+                let input =
+                    identity::preview_create(client, scope, &bound.proofs, &create_input(input)?)
+                        .await
+                        .map_err(shape)?;
+                json!({"summary":format!("Affiliate person {} with organisation {}; no account, employment or grant follows", input.person_id, input.organisation_id),"affiliation":input})
+            }
+            Self::Contact => {
+                let (person, facts) = contact_input(input)?;
+                let person = bilibi_person::preview_person(client, scope, &person)
+                    .await
+                    .map_err(person_error)?;
+                let facts = identity::preview_contact(client, scope, &facts)
+                    .await
+                    .map_err(shape)?;
+                json!({"summary":format!("Create contact {} affiliated with organisation {}; no account, employment or grant follows", person.identity.name, facts.organisation_id),"person":person,"affiliation":facts})
+            }
+            Self::Update => {
+                let before = identity::preview_write(
+                    client,
+                    scope,
+                    id(input)?,
+                    positive(input, "version")?,
+                    UPDATE,
+                )
+                .await
+                .map_err(not_found)?;
+                let update = update_input(&before, input)?;
+                json!({"summary":"Replace an affiliation's title, visible work contacts and dates","before":record(before).encode(),"affiliation":update.affiliation,"version":update.version})
+            }
+            Self::End => {
+                let before = identity::preview_write(
+                    client,
+                    scope,
+                    id(input)?,
+                    positive(input, "version")?,
+                    UPDATE,
+                )
+                .await
+                .map_err(not_found)?;
+                let to = date(input, "effective_to")?
+                    .ok_or_else(|| bilibi_agent_api::invalid("effective_to", "is required"))?;
+                json!({"summary":format!("End an affiliation on {}; identity, contacts and history are kept", to.as_str()),"before":record(before).encode(),"effective_to":to})
+            }
+            Self::Unlink => {
+                let before = identity::preview_write(
+                    client,
+                    scope,
+                    id(input)?,
+                    positive(input, "version")?,
+                    UNLINK,
+                )
+                .await
+                .map_err(not_found)?;
+                json!({"summary":"Unlink an affiliation; the dated record is retained and refuses further edits","before":record(before).encode()})
+            }
+            Self::ImportUndo => {
+                let (run, affiliation, version) = (
+                    positive(input, "run_id")?,
+                    id(input)?,
+                    positive(input, "version")?,
+                );
+                bound
+                    .bulk
+                    .preview_undo(
+                        client,
+                        scope,
+                        "core/affiliation.affiliations",
+                        run,
+                        &affiliation.get().to_string(),
+                        version,
+                    )
+                    .await?;
+                let before = identity::preview_write(client, scope, affiliation, version, IMPORT)
+                    .await
+                    .map_err(not_found)?;
+                json!({"summary":"Remove the unchanged affiliation created by this import","before":record(before).encode()})
+            }
+        };
+        Ok(value.into())
+    }
+}
 impl WriteHandler for Write {
     fn creates(&self) -> Option<bilibi_agent_api::CreatedRecord> {
         match self {
@@ -306,100 +397,20 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let bound = bound()?;
-            let client = bound.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let value = match self {
-                Self::Create => {
-                    let input = identity::preview_create(
-                        client,
-                        scope,
-                        &bound.proofs,
-                        &create_input(input)?,
-                    )
-                    .await
-                    .map_err(shape)?;
-                    json!({"summary":format!("Affiliate person {} with organisation {}; no account, employment or grant follows", input.person_id, input.organisation_id),"affiliation":input})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::Contact => {
-                    let (person, facts) = contact_input(input)?;
-                    let person = bilibi_person::preview_person(client, scope, &person)
-                        .await
-                        .map_err(person_error)?;
-                    let facts = identity::preview_contact(client, scope, &facts)
-                        .await
-                        .map_err(shape)?;
-                    json!({"summary":format!("Create contact {} affiliated with organisation {}; no account, employment or grant follows", person.identity.name, facts.organisation_id),"person":person,"affiliation":facts})
-                }
-                Self::Update => {
-                    let before = identity::preview_write(
-                        client,
-                        scope,
-                        id(input)?,
-                        positive(input, "version")?,
-                        UPDATE,
-                    )
-                    .await
-                    .map_err(not_found)?;
-                    let update = update_input(&before, input)?;
-                    json!({"summary":"Replace an affiliation's title, visible work contacts and dates","before":record(before).encode(),"affiliation":update.affiliation,"version":update.version})
-                }
-                Self::End => {
-                    let before = identity::preview_write(
-                        client,
-                        scope,
-                        id(input)?,
-                        positive(input, "version")?,
-                        UPDATE,
-                    )
-                    .await
-                    .map_err(not_found)?;
-                    let to = date(input, "effective_to")?
-                        .ok_or_else(|| bilibi_agent_api::invalid("effective_to", "is required"))?;
-                    json!({"summary":format!("End an affiliation on {}; identity, contacts and history are kept", to.as_str()),"before":record(before).encode(),"effective_to":to})
-                }
-                Self::Unlink => {
-                    let before = identity::preview_write(
-                        client,
-                        scope,
-                        id(input)?,
-                        positive(input, "version")?,
-                        UNLINK,
-                    )
-                    .await
-                    .map_err(not_found)?;
-                    json!({"summary":"Unlink an affiliation; the dated record is retained and refuses further edits","before":record(before).encode()})
-                }
-                Self::ImportUndo => {
-                    let (run, affiliation, version) = (
-                        positive(input, "run_id")?,
-                        id(input)?,
-                        positive(input, "version")?,
-                    );
-                    bound
-                        .bulk
-                        .preview_undo(
-                            client,
-                            scope,
-                            "core/affiliation.affiliations",
-                            run,
-                            &affiliation.get().to_string(),
-                            version,
-                        )
-                        .await?;
-                    let before =
-                        identity::preview_write(client, scope, affiliation, version, IMPORT)
-                            .await
-                            .map_err(not_found)?;
-                    json!({"summary":"Remove the unchanged affiliation created by this import","before":record(before).encode()})
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(

@@ -92,6 +92,8 @@ pub struct ToolbarControl {
     pub label: String,
     pub hint: String,
     pub field: Field,
+    /// The Grid field identity behind `label`; empty keeps the owner's word.
+    identity: String,
 }
 
 impl ToolbarControl {
@@ -167,7 +169,20 @@ impl ToolbarControl {
             label,
             hint: String::new(),
             field: Field::default(),
+            identity: String::new(),
         }
+    }
+
+    /// The `table.field` Grid identity this filter narrows, so its label and
+    /// chip show the tenant's word for that field. The filter key and DOM ID
+    /// are not field identities.
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.identity = identity.into();
+        self
+    }
+
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.identity, &self.label)
     }
 
     /// Helper text below the control.
@@ -189,6 +204,7 @@ impl ToolbarControl {
             label: label.into(),
             hint: String::new(),
             field,
+            identity: String::new(),
         }
     }
 
@@ -274,7 +290,7 @@ impl ToolbarControl {
         };
         Some(FilterChip {
             id: self.id.clone(),
-            label: self.label.clone(),
+            label: self.label_text(),
             value,
         })
     }

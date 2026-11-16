@@ -1,14 +1,72 @@
 //! Manual pool walkthrough on any reachable PostgreSQL database; no test
 //! harness. It reads and writes no table: every statement is `SELECT 1`.
-use bilibi_database::{pool, pool_with, Db, Error, PoolLimits, Result};
+use bilibi_database::{pool, pool_with, Connection, Db, Error, PoolLimits, Result};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(1);
 
+/// Why this walkthrough holds several connections in one task: it fills the
+/// pool by hand to prove the limits, which is not what a caller does.
+const BY_HAND: &str = "the pool walkthrough fills the pool by hand";
+
 /// One caller's answer from the pool, without keeping the connection.
 async fn ask(db: &Db) -> Result<()> {
-    db.get().await.map(|_| ()).map_err(Error::from)
+    db.get_detached(BY_HAND)
+        .await
+        .map(|_| ())
+        .map_err(Error::from)
+}
+
+/// What a task that asks for a second connection gets, run as a child so
+/// that its log lines are read here and not mistaken for a real hit.
+async fn second_connection(url: &str) -> Result<()> {
+    let db = pool_with(
+        url,
+        PoolLimits {
+            size: 4,
+            wait: WAIT,
+        },
+    )?;
+    let held = db.get().await?;
+    // Asked three times from one line: logged once.
+    for _ in 0..3 {
+        drop(db.get().await?);
+    }
+    println!("second=served");
+    // None of these is a second connection of this task.
+    let detached = db.get_detached(BY_HAND).await?;
+    let other_task = tokio::spawn({
+        let db = db.clone();
+        async move { db.get().await.is_ok() }
+    });
+    assert!(other_task.await.map_err(|_| Error::Internal)?);
+    drop((held, detached));
+    drop(db.get().await?);
+    let closed = Connection::take(db.get().await?);
+    drop(db.get().await?);
+    drop(closed);
+    // A connection kept detached does not count against later asks.
+    let kept = db.get_detached(BY_HAND).await?;
+    drop(db.get().await?);
+    drop(kept);
+    println!("others=served");
+    Ok(())
+}
+
+/// The child's verdict lines and its log.
+fn second_connection_of(url: &str) -> Result<(bool, String, String)> {
+    let mut child = Command::new(std::env::current_exe().map_err(|_| Error::Internal)?);
+    child
+        .arg("second-connection")
+        .env("DATABASE_URL", url)
+        .env_remove("RUST_BACKTRACE");
+    let output = child.output().map_err(|_| Error::Internal)?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
 }
 
 /// The limits a child process reads from its environment, as it prints them.
@@ -44,6 +102,9 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if std::env::args().nth(1).as_deref() == Some("second-connection") {
+        return second_connection(&url).await;
+    }
 
     let db = pool_with(
         &url,
@@ -52,18 +113,23 @@ async fn main() -> Result<()> {
             wait: WAIT,
         },
     )?;
-    let first = db.get().await?;
-    let second = db.get().await?;
+    let first = db.get_detached(BY_HAND).await?;
+    let second = db.get_detached(BY_HAND).await?;
     let started = Instant::now();
     let refused = ask(&db).await;
     let waited = started.elapsed();
     assert!(matches!(&refused, Err(error) if error.is_pool_exhausted()));
     assert!(waited >= WAIT && waited < WAIT * 3);
     println!("PASS empty pool: the third caller is refused after {waited:.1?}, not left waiting");
+    let started = Instant::now();
+    let refused = db.try_get_detached(BY_HAND).await.map_err(Error::from);
+    assert!(matches!(&refused, Err(error) if error.is_pool_exhausted()));
+    assert!(started.elapsed() < WAIT / 2);
+    println!("PASS empty pool: a caller that will not wait is refused at once");
 
     first.query_one("SELECT 1", &[]).await?;
     drop(second);
-    let third = db.get().await?;
+    let third = db.get_detached(BY_HAND).await?;
     third.query_one("SELECT 1", &[]).await?;
     println!("PASS a returned connection serves the next caller");
 
@@ -84,7 +150,7 @@ async fn main() -> Result<()> {
     for _ in 0..6 {
         let db = db.clone();
         callers.spawn(async move {
-            let Ok(held) = db.get().await else {
+            let Ok(held) = db.get_detached(BY_HAND).await else {
                 return (false, false);
             };
             let nested = ask(&db).await;
@@ -142,6 +208,19 @@ async fn main() -> Result<()> {
     ] {
         assert_eq!(limits_of(&url, size, wait)?, None);
     }
+
+    let here = concat!(file!(), ":");
+    let (ok, verdict, log) = second_connection_of(&url)?;
+    let warnings: Vec<&str> = log
+        .lines()
+        .filter(|line| line.starts_with("warning: second pooled connection: "))
+        .collect();
+    assert!(ok && verdict.contains("second=served") && verdict.contains("others=served"));
+    assert_eq!(warnings.len(), 1, "{log}");
+    assert_eq!(warnings[0].matches(here).count(), 2, "{log}");
+    assert!(warnings[0].contains("get_detached"));
+    println!("PASS a task that holds a connection and asks for another is served and logged once, with both call sites:\n  {}", warnings[0]);
+    println!("PASS not logged: another task, a detached connection, a connection taken out of the pool, an ask after the first was returned");
     println!("PASS environment: defaults 16 and 5 s, DATABASE_POOL_SIZE=3 and DATABASE_POOL_WAIT_SECONDS=2 are used, values outside the range refuse the start");
     Ok(())
 }

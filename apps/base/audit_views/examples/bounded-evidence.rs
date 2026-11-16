@@ -98,7 +98,9 @@ async fn main() -> Outcome {
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
     let queue = app.services.get::<Queue>(bilibi_queue::SERVICE)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut second = db.get().await?;
 
     println!("== #576: one chain per tenant, linked in one pass as the transaction commits");

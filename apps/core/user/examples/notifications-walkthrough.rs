@@ -41,7 +41,9 @@ async fn main() -> Result<()> {
         .login("manager@example.test", "bilibi-dev")
         .await
         .map_err(|_| Error::Unauthorized)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let scope = guard(&**client, &login.token, &sessions).await?;
     let ids: Vec<i64> = client
         .query(

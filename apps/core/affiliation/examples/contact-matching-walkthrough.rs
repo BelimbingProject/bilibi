@@ -59,7 +59,9 @@ async fn main() -> Result<()> {
     let fields = app
         .services
         .get::<FieldRestrictions>("base/authz.field_restrictions")?;
-    let mut connection = db.get().await?;
+    let mut connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let manager = auth
         .authenticate(&**connection, 1, 1, String::new())
         .await?;

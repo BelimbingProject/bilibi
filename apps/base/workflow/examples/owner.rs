@@ -249,7 +249,9 @@ async fn main() -> Result<()> {
             client.execute("INSERT INTO workflow_reference_approval_facts(record_id,tenant_id,company_id,prepared_by) SELECT id,tenant_id,1,1 FROM workflow_reference_records WHERE tenant_id=1 ON CONFLICT DO NOTHING",&[]).await?;
             client.execute("INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 1,1,id FROM roles WHERE tenant_id=1 AND code='admin' ON CONFLICT DO NOTHING",&[]).await?;
             drop(client);
-            let mut client = db.get().await?;
+            let mut client = db
+                .get_detached("the walkthrough's own checking connection")
+                .await?;
             let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
             let mut tx = boundary
                 .begin(

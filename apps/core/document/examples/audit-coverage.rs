@@ -414,7 +414,9 @@ async fn main() -> Result<()> {
         ),
     ];
     for (label, input) in &refusals {
-        let client = db.get().await?;
+        let client = db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         if let Ok(grant) = documents
             .preview_share(&**client, &delegate, a.id, input)
             .await
@@ -450,7 +452,9 @@ async fn main() -> Result<()> {
         .iter()
         .find(|grant| grant.user_id == scope.user())
         .ok_or("the creator's grant is gone")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     if documents
         .preview_unshare(&**client, &delegate, a.id, creator.id)
         .await
@@ -458,7 +462,9 @@ async fn main() -> Result<()> {
     {
         return Err("a delegated sharer could remove the creator's grant".into());
     }
-    let mut owned = db.get().await?;
+    let mut owned = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = app
         .mutations
         .begin(
@@ -517,7 +523,9 @@ async fn main() -> Result<()> {
             version: shared.version,
         }],
     );
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     if documents
         .preview_merge(&**client, &delegate, survivor, &source)
         .await
@@ -526,7 +534,9 @@ async fn main() -> Result<()> {
     {
         return Err("a delegate could merge a document they hold less on into their own".into());
     }
-    let mut owned = db.get().await?;
+    let mut owned = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = app
         .mutations
         .begin(&mut owned, delegate.mutation_context("core.document.merge"))

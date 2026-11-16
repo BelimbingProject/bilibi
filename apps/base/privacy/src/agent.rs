@@ -233,47 +233,64 @@ fn confirm(input: &Value) -> bilibi_agent_api::Result<Vec<ConfirmedRecord>> {
         }),
     }
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let privacy = privacy()?;
+        let facts = match self {
+            Self::Receive => {
+                let new = new_request(input)?;
+                json!({"summary": format!("Record a {} request for person {}, filed under company {}", new.kind.as_str(), new.person.get(), new.company.get())})
+            }
+            Self::Verify | Self::Approve | Self::Submit | Self::Refuse | Self::RunAgain => {
+                let request = privacy.request(client, scope, id(input, "id")?).await?;
+                let verb = match self {
+                    Self::Verify => "Verify",
+                    Self::Approve => "Approve and run",
+                    Self::Submit => "Send for approval",
+                    Self::RunAgain => "Run again",
+                    _ => "Refuse",
+                };
+                json!({"summary": format!("{verb} {} request {} for person {} (now {})", request.kind.as_str(), request.id, request.person.get(), request.status), "request": request_json(&request)})
+            }
+            Self::PlaceHold => {
+                let target = hold_target(input)?;
+                json!({"summary": format!("Place a legal hold on {}", match &target { HoldTarget::Person { person } => format!("person {person}"), HoldTarget::Record { kind, id } => format!("{kind} {id}") })})
+            }
+            Self::ReleaseHold => {
+                json!({"summary": format!("Release legal hold {}", id(input, "id")?)})
+            }
+            Self::Reveal => {
+                json!({"summary": format!("Reveal {}.{} of record {} (recorded with the reason)", text(input, "table")?, text(input, "field")?, reveal_record(input)?), "step_up": [STEP_UP_REVEAL]})
+            }
+        };
+        Ok(facts.into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "base/privacy"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let privacy = privacy()?;
-            let client = privacy.db.get().await.map_err(Error::from)?;
-            let facts = match self {
-                Self::Receive => {
-                    let new = new_request(input)?;
-                    json!({"summary": format!("Record a {} request for person {}, filed under company {}", new.kind.as_str(), new.person.get(), new.company.get())})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = privacy()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::Verify | Self::Approve | Self::Submit | Self::Refuse | Self::RunAgain => {
-                    let request = privacy.request(&**client, scope, id(input, "id")?).await?;
-                    let verb = match self {
-                        Self::Verify => "Verify",
-                        Self::Approve => "Approve and run",
-                        Self::Submit => "Send for approval",
-                        Self::RunAgain => "Run again",
-                        _ => "Refuse",
-                    };
-                    json!({"summary": format!("{verb} {} request {} for person {} (now {})", request.kind.as_str(), request.id, request.person.get(), request.status), "request": request_json(&request)})
-                }
-                Self::PlaceHold => {
-                    let target = hold_target(input)?;
-                    json!({"summary": format!("Place a legal hold on {}", match &target { HoldTarget::Person { person } => format!("person {person}"), HoldTarget::Record { kind, id } => format!("{kind} {id}") })})
-                }
-                Self::ReleaseHold => {
-                    json!({"summary": format!("Release legal hold {}", id(input, "id")?)})
-                }
-                Self::Reveal => {
-                    json!({"summary": format!("Reveal {}.{} of record {} (recorded with the reason)", text(input, "table")?, text(input, "field")?, reveal_record(input)?), "step_up": [STEP_UP_REVEAL]})
-                }
-            };
-            Ok(facts.into())
+            }
         })
     }
     fn commit<'a>(

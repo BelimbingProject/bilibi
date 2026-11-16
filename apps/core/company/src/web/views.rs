@@ -264,7 +264,8 @@ pub(super) async fn list(
                     ("Pending", "pending"),
                     ("Archived", "archived"),
                 ]),
-            ),
+            )
+            .grid_field("companies.status"),
         ],
     ))?;
     toolbar.push(&field_filter_controls(&extension_fields, data)?);

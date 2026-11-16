@@ -315,7 +315,9 @@ async fn main() -> Result<()> {
             .await?;
         Ok(app.security.guard(&login.token).await?)
     }
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Tenant 2's manager records consent for its own company.
     client
         .batch_execute("INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(2,5,'core.consent.view'),(2,5,'core.consent.record'),(2,5,'core.consent.check') ON CONFLICT DO NOTHING")

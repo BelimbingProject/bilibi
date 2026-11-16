@@ -83,8 +83,8 @@ impl<'a> From<&'a Client> for PortClient<'a> {
         Self::Client(client)
     }
 }
-impl<'a> From<&'a deadpool_postgres::Object> for PortClient<'a> {
-    fn from(client: &'a deadpool_postgres::Object) -> Self {
+impl<'a> From<&'a bilibi_database::Connection> for PortClient<'a> {
+    fn from(client: &'a bilibi_database::Connection) -> Self {
         Self::Client(client)
     }
 }

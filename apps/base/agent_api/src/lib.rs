@@ -112,10 +112,10 @@ impl OperationClient for TransactionRead<'_, '_, '_> {
 /// never waits on a pool its own callers have filled.
 struct Pooled<'a> {
     db: &'a bilibi_database::Db,
-    connection: tokio::sync::OnceCell<deadpool_postgres::Object>,
+    connection: tokio::sync::OnceCell<bilibi_database::Connection>,
 }
 impl Pooled<'_> {
-    async fn connection(&self) -> bilibi_database::Result<&deadpool_postgres::Object> {
+    async fn connection(&self) -> bilibi_database::Result<&bilibi_database::Connection> {
         self.connection
             .get_or_try_init(|| async { Ok(self.db.get().await?) })
             .await

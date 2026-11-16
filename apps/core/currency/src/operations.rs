@@ -185,64 +185,80 @@ enum Write {
     SetRate,
     DeleteRate,
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let bound = bound()?;
+        let currencies = &bound.currencies;
+        let value = match self {
+            Self::Base => {
+                let code = input["code"].as_str();
+                let base = checked(
+                    currencies
+                        .preview_base(client, scope, code)
+                        .await
+                        .map_err(found)?,
+                )?;
+                let whose = if company(input)?.is_some() {
+                    "the company's"
+                } else {
+                    "the tenant's"
+                };
+                json!({"summary": match &base { Some(base) => format!("Make {} {whose} base currency", base.label()), None => format!("Clear {whose} base currency") }, "base": base.map(|currency| currency.to_json())})
+            }
+            Self::SetRate => {
+                let (before, after) = checked(
+                    currencies
+                        .preview_set_rate(client, scope, &rate_input(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary": format!("{} 1 {} = {} {} from {}", if before.is_some() { "Change" } else { "Add" }, after.from, after.rate, after.to, after.effective_on),
+                    "before": before.map(|rate| rate.to_json()),
+                    "after": {"from": after.from, "to": after.to, "effective_on": after.effective_on.to_string(), "rate": after.rate.to_string(), "source_note": after.source_note}})
+            }
+            Self::DeleteRate => {
+                let rate = checked(
+                    currencies
+                        .preview_delete_rate(
+                            client,
+                            scope,
+                            input["id"].as_i64().ok_or(Error::Invalid)?,
+                            input["version"].as_i64().ok_or(Error::Invalid)?,
+                        )
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary": format!("Delete the rate 1 {} = {} {} from {}; conversions already stored keep what they used", rate.from, rate.rate, rate.to, rate.effective_on), "before": rate.to_json()})
+            }
+        };
+        Ok(value.into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "core/currency"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let bound = bound()?;
-            let currencies = &bound.currencies;
-            let client = bound.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let value = match self {
-                Self::Base => {
-                    let code = input["code"].as_str();
-                    let base = checked(
-                        currencies
-                            .preview_base(client, scope, code)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    let whose = if company(input)?.is_some() {
-                        "the company's"
-                    } else {
-                        "the tenant's"
-                    };
-                    json!({"summary": match &base { Some(base) => format!("Make {} {whose} base currency", base.label()), None => format!("Clear {whose} base currency") }, "base": base.map(|currency| currency.to_json())})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::SetRate => {
-                    let (before, after) = checked(
-                        currencies
-                            .preview_set_rate(client, scope, &rate_input(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary": format!("{} 1 {} = {} {} from {}", if before.is_some() { "Change" } else { "Add" }, after.from, after.rate, after.to, after.effective_on),
-                        "before": before.map(|rate| rate.to_json()),
-                        "after": {"from": after.from, "to": after.to, "effective_on": after.effective_on.to_string(), "rate": after.rate.to_string(), "source_note": after.source_note}})
-                }
-                Self::DeleteRate => {
-                    let rate = checked(
-                        currencies
-                            .preview_delete_rate(
-                                client,
-                                scope,
-                                input["id"].as_i64().ok_or(Error::Invalid)?,
-                                input["version"].as_i64().ok_or(Error::Invalid)?,
-                            )
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary": format!("Delete the rate 1 {} = {} {} from {}; conversions already stored keep what they used", rate.from, rate.rate, rate.to, rate.effective_on), "before": rate.to_json()})
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(

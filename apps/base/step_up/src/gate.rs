@@ -407,11 +407,24 @@ impl StepUp {
         })
         .await
     }
+    /// Step-up's own connection. An owner asks `require` from inside its
+    /// write, and what the check leaves behind (a spent code, an opened
+    /// window, the audited outcome) must stay when that write rolls back, so
+    /// none of it can ride the caller's transaction.
+    async fn connection(&self) -> Result<bilibi_database::Connection> {
+        Ok(self
+            .db
+            .get_detached(
+                "step-up is asked from inside the caller's write and keeps its evidence when \
+                 that write rolls back; each call returns the connection before the next",
+            )
+            .await?)
+    }
     /// Whether one provider holds an enrollment for the scope's account holder.
     /// The connection is released on return, so a caller may then ask the
     /// provider for destinations that read through its owner's facade.
     async fn provider_enrolled(&self, provider: &dyn Provider, scope: &Scope) -> Result<bool> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         provider
             .enrolled(
                 &**client,
@@ -840,7 +853,7 @@ impl StepUp {
     /// Opens (or restarts) the window of this agent connection for its
     /// holder, after the holder's code was accepted.
     async fn open_agent_window(&self, scope: &Scope, connection: i64) -> Result<()> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         client
             .execute(
                 "DELETE FROM base_step_up_agent_windows WHERE tenant_id=$1 AND checked_at<now()-interval '1 day'",
@@ -864,7 +877,7 @@ impl StepUp {
         cap_seconds: i64,
         extend: bool,
     ) -> Result<WindowState> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         let row = client
             .query_opt(
                 "SELECT checked_at>now()-make_interval(secs => $5::double precision), used_at>now()-make_interval(secs => $4::double precision) FROM base_step_up_agent_windows WHERE tenant_id=$1 AND user_id=$2 AND connection_id=$3",
@@ -923,7 +936,7 @@ impl StepUp {
                 fields.insert("on_behalf_of".into(), json!(scope.user()));
             }
         }
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         record_action(
             &**client,
             &Attribution::from_scope(scope),
@@ -942,7 +955,7 @@ impl StepUp {
     }
 
     async fn stored(&self, scope: &Scope) -> Result<(Map<String, Value>, Map<String, Value>)> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         self.stored_on(&**client, scope).await
     }
 
@@ -990,7 +1003,7 @@ impl StepUp {
 
     /// The tenant's web window after the installation limits.
     pub async fn window(&self, scope: &Scope) -> Result<Window> {
-        let client = self.db.get().await?;
+        let client = self.connection().await?;
         let int = |value: Value| value.as_i64().ok_or(Error::Internal);
         let tenant_window = int(self
             .settings

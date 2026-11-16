@@ -411,7 +411,9 @@ async fn main() -> Result<()> {
     let search = app
         .services
         .get::<bilibi_base::search::Search>(bilibi_base::search::SERVICE)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!(
         "erasure approval rules published for company 1: policy {}",
         erasure_approval::publish_rules(&app, &mut client, &admin.scope, 1).await?
@@ -802,7 +804,9 @@ async fn main() -> Result<()> {
     )
     .await?;
     // Hold the request's finish guard so the export is staged but not built.
-    let guard = db.get().await?;
+    let guard = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     guard
         .execute(
             "SELECT pg_advisory_lock(841331,$1::bigint::int)",
