@@ -33,7 +33,10 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 // Shared with requests-walkthrough, which also recalls a round.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the shared erasure support module serves several walkthroughs, and each uses a different part of it"
+)]
 #[path = "support/erasure.rs"]
 mod erasure_approval;
 

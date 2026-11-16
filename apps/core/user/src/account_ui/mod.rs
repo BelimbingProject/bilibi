@@ -77,7 +77,6 @@ pub(crate) const COMPANY: bilibi_ui::NamedKind<'static> = bilibi_ui::NamedKind {
 };
 /// A type-ahead over the companies a page may offer, instead of a list of
 /// every company. The owner still proves the chosen company on save.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn company_picker(
     id: &str,
     form: &str,

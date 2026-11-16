@@ -552,7 +552,6 @@ impl BulkData {
         store::list(client, scope, offset, limit.clamp(1, 100)).await
     }
     /// One pass's row results of the person's run.
-    #[allow(clippy::too_many_arguments)]
     pub async fn rows(
         &self,
         client: &impl GenericClient,

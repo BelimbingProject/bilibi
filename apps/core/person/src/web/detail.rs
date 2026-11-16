@@ -447,7 +447,6 @@ impl Detail {
     /// outcome on its fact; `true` when it was saved. A record field's
     /// refusal is the contract's own sentence (never the id); another
     /// field's repeats what was typed.
-    #[allow(clippy::too_many_arguments)]
     async fn save_custom(
         &mut self,
         scope: &Scope,
@@ -771,13 +770,18 @@ impl Detail {
             }
             "close_reveal" => self.reveal = None,
             "reveal" => {
+                let reason = bilibi_ui::params::form_values_checked(
+                    value,
+                    "reveal",
+                    bilibi_ui::params::FIELD_LIMIT,
+                )
+                .map_err(Error::refused)?
+                .get("reason")
+                .cloned()
+                .unwrap_or_default();
                 let Some(open) = self.reveal.take() else {
                     return Ok(());
                 };
-                let reason = bilibi_ui::params::form_values(value, "reveal")
-                    .get("reason")
-                    .cloned()
-                    .unwrap_or_default();
                 let version = self.pages.persons.read(scope, self.id).await?.version;
                 // The privacy contract checks the capability, reason and Step-up
                 // and records the reveal before it answers.

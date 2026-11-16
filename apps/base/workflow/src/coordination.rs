@@ -428,7 +428,6 @@ pub(super) async fn completable(
     }
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
 async fn administer(
     sql: &Transaction<'_>,
     run: &Run,

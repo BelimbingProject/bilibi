@@ -56,8 +56,10 @@ impl Default for Draft {
 }
 
 impl Draft {
-    pub fn read(&mut self, value: &Value) {
-        let fields = bilibi_ui::params::form_values(value, "sched");
+    pub fn read(&mut self, value: &Value) -> Result<()> {
+        let fields =
+            bilibi_ui::params::form_values_checked(value, "sched", bilibi_ui::params::FIELD_LIMIT)
+                .map_err(bilibi_database::Error::refused)?;
         let get = |key: &str| fields.get(key).cloned().unwrap_or_default();
         self.frequency = get("frequency");
         self.at = get("at");
@@ -88,6 +90,7 @@ impl Draft {
                     .collect()
             })
             .unwrap_or_default();
+        Ok(())
     }
     /// The contract's input, in the agent dialect.
     pub fn input(&self, report: i64) -> Value {

@@ -38,7 +38,7 @@ struct LineRequest {
     line_id: i64,
 }
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Printed through Debug only.
+#[expect(dead_code, reason = "the field is printed through Debug only")]
 struct Line {
     order_number: String,
     quantity: String,
@@ -48,7 +48,10 @@ struct Line {
 }
 /// A shape the provider does not answer.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the shape is only parsed to prove the provider answers a different one"
+)]
 struct Receipts {
     received_quantity: String,
 }

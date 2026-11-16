@@ -373,7 +373,8 @@ impl Show {
         match get("type").ok_or(Error::Invalid)? {
             "clear-flash" => clear_flash(&mut self.flash, value),
             "answer" => {
-                let posted = params::form_values(value, "ask");
+                let posted = params::form_values_checked(value, "ask", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 self.answers = answer_keys(&posted);
                 self.page = 0;
             }
@@ -391,7 +392,10 @@ impl Show {
                     "summary"
                 };
                 if let Some((_, host)) = self.hosts.get_mut(tab) {
-                    if let ColumnsOutcome::Sort(_) = host.handle(&params::string_values(value)) {
+                    if let ColumnsOutcome::Sort(_) = host.handle(
+                        &params::string_values_checked(value, params::FIELD_LIMIT)
+                            .map_err(Error::refused)?,
+                    ) {
                         return Err(Error::Invalid);
                     }
                 }
@@ -438,7 +442,7 @@ impl Show {
             }
             "open_schedule" if self.pages.can(scope).await?.schedule => self.schedule.open = true,
             "close_schedule" => self.schedule = schedule::Draft::default(),
-            "edit_schedule" => self.schedule.read(value),
+            "edit_schedule" => self.schedule.read(value)?,
             "subscribe" => {
                 self.schedule.errors.clear();
                 let input = self.schedule.input(report.id);

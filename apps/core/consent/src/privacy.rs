@@ -390,7 +390,6 @@ fn change(kind: &str, id: i64, fields: &[&str], row: &Row) -> Change {
 /// Clears `fields` of the subject's rows of one kind that still hold a value,
 /// keeping held rows. `select` reads `id` and the fields for `$1` tenant, `$2`
 /// person and `$3` addresses; `update` clears them for `$1` tenant, `$2` ids.
-#[allow(clippy::too_many_arguments)]
 async fn anonymise(
     tx: &mut MutationTransaction<'_>,
     grant: &Erasure,

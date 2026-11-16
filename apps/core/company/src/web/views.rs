@@ -169,7 +169,6 @@ struct CompanyName<'a> {
     link: Html,
     legal: Option<&'a str>,
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn list(
     db: &bilibi_database::Db,
     scope: &Scope,

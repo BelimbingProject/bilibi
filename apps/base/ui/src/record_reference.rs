@@ -164,7 +164,6 @@ impl RecordPicker {
 
     /// `form` and `key` name the posted fields: the typed text as
     /// `{form}[{key}_search]`, the choice as `{form}[{key}]`.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
         form: &str,
@@ -277,7 +276,6 @@ impl RecordPicker {
     /// pairs of one `kind` (a directory search rather than Base Records): each
     /// hit raises `record=<prefix>:<id>` and the chosen record posts its bare
     /// id as `{form}[{key}]`.
-    #[allow(clippy::too_many_arguments)]
     pub fn named(
         kind: NamedKind<'_>,
         id: &str,

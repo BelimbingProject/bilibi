@@ -1849,8 +1849,13 @@ impl Detail {
                 self.read_assignment(value);
             }
             "assignment_grid" => {
-                self.assignment_columns
-                    .handle(&bilibi_ui::params::string_values(value));
+                self.assignment_columns.handle(
+                    &bilibi_ui::params::string_values_checked(
+                        value,
+                        bilibi_ui::params::FIELD_LIMIT,
+                    )
+                    .map_err(Error::refused)?,
+                );
             }
             "assign_selected_roles" => {
                 self.read_assignment(value);
