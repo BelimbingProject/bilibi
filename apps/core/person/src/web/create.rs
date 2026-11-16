@@ -54,6 +54,20 @@ pub(super) struct Draft {
 }
 
 impl Draft {
+    fn reconcile(&mut self, definitions: &[bilibi_custom_fields::Definition]) {
+        let active: std::collections::BTreeSet<String> = definitions
+            .iter()
+            .map(|d| crate::custom::name(&d.key))
+            .collect();
+        self.custom.retain(|name, _| active.contains(name));
+        self.codes.retain(|name, _| active.contains(name));
+        self.picking.retain(|name, _| active.contains(name));
+        self.custom_labels.retain(|name, _| active.contains(name));
+        self.custom_kinds.retain(|name, _| active.contains(name));
+        self.errors
+            .retain(|(name, _)| !name.starts_with("cf_") || active.contains(name));
+    }
+
     pub fn clear_hits(&mut self) {
         for picking in self.picking.values_mut() {
             picking.hits.clear();
@@ -113,7 +127,7 @@ impl Draft {
             .iter()
             .filter(|(_, kind)| **kind == Kind::Choices)
             .map(|(name, _)| {
-                let ticked = value
+                let ticked: Vec<String> = value
                     .get(format!("person[{name}][]"))
                     .and_then(Value::as_array)
                     .map(|codes| {
@@ -125,6 +139,16 @@ impl Draft {
                             .collect()
                     })
                     .unwrap_or_default();
+                let held = self.codes.get(name).map_or(&[][..], Vec::as_slice);
+                let ticked = if ticked.len() > bilibi_picklists::VALUES_MAX {
+                    ticked
+                } else {
+                    held.iter()
+                        .filter(|code| ticked.contains(code))
+                        .chain(ticked.iter().filter(|code| !held.contains(code)))
+                        .cloned()
+                        .collect()
+                };
                 (name.clone(), ticked)
             })
             .collect();
@@ -181,6 +205,7 @@ impl Draft {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         self.read(value)?;
+        self.reconcile(&super::custom::active(pages, scope).await?);
         self.search(pages, scope).await?;
         if !create && self.input.name != previous_name && !self.code_edited {
             let client = pages.db.get().await?;
@@ -355,6 +380,8 @@ impl Draft {
     }
 
     pub async fn form(&mut self, pages: &Pages, scope: &Scope) -> Result<Html> {
+        let definitions = super::custom::active(pages, scope).await?;
+        self.reconcile(&definitions);
         let client = pages.db.get().await?;
         let restricted = bilibi_authz::restrictions_for(&**client, scope, "persons").await?;
         drop(client);
@@ -440,7 +467,7 @@ impl Draft {
         // The tenant's own fields, posted as `cf_<key>`.
         self.custom_labels.clear();
         self.custom_kinds.clear();
-        for definition in super::custom::active(pages, scope).await? {
+        for definition in definitions {
             let name = crate::custom::name(&definition.key);
             let label = definition.label.clone();
             let errors = self

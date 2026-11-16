@@ -357,6 +357,9 @@ pub(crate) async fn summarize_catalog(
             Agg::Count => resolve_any(catalog, root, &measure.column, &mut hops)?,
             _ => resolve(catalog, root, &measure.column, &mut hops)?,
         };
+        if column.reference.is_some() && measure.agg != Agg::Count {
+            return Err(unsupported(&column, "record fields support count only"));
+        }
         let fits = match measure.agg {
             Agg::Count => true,
             Agg::Sum | Agg::Avg => column.ty.number(),

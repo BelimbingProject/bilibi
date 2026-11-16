@@ -393,6 +393,24 @@ async fn main() -> Result<(), Failure> {
     let report_id = result(&report)["id"]
         .as_i64()
         .ok_or_else(|| format!("no report: {report}"))?;
+    let reports = app
+        .services
+        .get::<bilibi_base::reports::Reports>(bilibi_base::reports::SERVICE)?;
+    let access = reports.access(&manager.scope, report_id).await?;
+    proof.check(
+        "reference report access is stable with unchanged permissions",
+        access == reports.access(&manager.scope, report_id).await?,
+    );
+    for agg in ["sum", "avg", "min", "max"] {
+        let refused = manager.plan("base.reports.create", json!({
+            "name": "Refused reference measure", "record_type": "persons", "kind": "summary",
+            "definition": {"measures": [{"column": "cf_partner", "agg": agg}]}
+        })).await?;
+        proof.check(
+            &format!("a reference {agg} measure is refused"),
+            refused["valid"] == false,
+        );
+    }
     let run = manager
         .read("base.reports.run", json!({"id": report_id}))
         .await?;
@@ -465,7 +483,7 @@ async fn main() -> Result<(), Failure> {
             "base.reports.create",
             json!({"name": "Contacts by tags", "record_type": "persons", "kind": "summary", "definition": {
                 "groupings": [{"column": "cf_tags"}],
-                "measures": [{"column": "id", "agg": "count"}],
+                "measures": [{"column": "cf_partner", "agg": "count"}],
             }}),
         )
         .await?;
@@ -474,10 +492,11 @@ async fn main() -> Result<(), Failure> {
         .read("base.reports.run", json!({"id": grouped_id}))
         .await?;
     proof.check(
-        "a summary groups by a custom field",
+        "a summary groups by a custom field and counts its one stored reference",
         summary["lines"]
             .as_array()
-            .is_some_and(|lines| !lines.is_empty()),
+            .is_some_and(|lines| !lines.is_empty())
+            && summary["total"][1][0] == 1,
     );
 
     println!("-- global search");

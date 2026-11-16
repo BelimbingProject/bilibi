@@ -352,15 +352,35 @@ fn list_state(values: &HashMap<String, String>, custom_sorts: &[String]) -> Resu
 }
 /// The several-choices fields a form posted (`cf_<key>[]`, one value per
 /// tick), each kept as its codes joined by commas (a code never holds one).
-fn ticked(payload: &Value) -> Vec<(String, String)> {
+fn ticked(payload: &Value, previous: &HashMap<String, String>) -> Vec<(String, String)> {
     payload
         .as_object()
         .into_iter()
         .flatten()
         .filter(|(key, _)| key.starts_with("cf_") && key.ends_with("[]"))
         .filter_map(|(key, value)| {
-            let codes: Vec<&str> = value.as_array()?.iter().filter_map(Value::as_str).collect();
-            Some((key.clone(), codes.join(",")))
+            let codes: Vec<&str> = value
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|code| !code.is_empty())
+                .collect();
+            let held: Vec<&str> = previous
+                .get(key)
+                .map_or("", String::as_str)
+                .split(',')
+                .filter(|code| !code.is_empty())
+                .collect();
+            let ordered = if codes.len() > bilibi_picklists::VALUES_MAX {
+                codes
+            } else {
+                held.iter()
+                    .filter(|code| codes.contains(code))
+                    .chain(codes.iter().filter(|code| !held.contains(code)))
+                    .copied()
+                    .collect()
+            };
+            Some((key.clone(), ordered.join(",")))
         })
         .collect()
 }
@@ -468,6 +488,33 @@ struct CompanyPage {
     custom_pickers: views::CustomPickers,
 }
 impl CompanyPage {
+    fn reconcile_custom(&mut self, definitions: &[bilibi_custom_fields::Definition]) {
+        let active: std::collections::BTreeSet<String> = definitions
+            .iter()
+            .map(|d| format!("cf_{}", d.key))
+            .collect();
+        self.form.retain(|name, _| {
+            let field = name
+                .strip_prefix("custom_reference[")
+                .or_else(|| name.strip_prefix("custom_reference_search["))
+                .and_then(|field| field.strip_suffix(']'))
+                .unwrap_or(name);
+            !field.starts_with("cf_") || active.contains(field.strip_suffix("[]").unwrap_or(field))
+        });
+        self.custom_pickers
+            .chosen
+            .retain(|name, _| active.contains(name));
+        self.custom_pickers
+            .queries
+            .retain(|name, _| active.contains(name));
+        self.custom_pickers
+            .hits
+            .retain(|name, _| active.contains(name));
+        self.errors.retain(|error| {
+            !error.field.starts_with("cf_") || active.contains(error.field.as_ref())
+        });
+    }
+
     /// Companies whose name contains `query`, without this company itself.
     async fn search_parents(&mut self, scope: &Scope, query: &str) -> Result<()> {
         let query: String = query.chars().take(100).collect();
@@ -761,6 +808,19 @@ impl CompanyPage {
     }
     async fn draw(&mut self, scope: &Scope) -> Result<LiveBody> {
         self.columns.refresh_views(scope).await?;
+        if self.operation == "create" {
+            let definitions = {
+                let client = self.db.get().await?;
+                crate::field_contributions::custom_fields()?
+                    .active(
+                        &**client,
+                        scope,
+                        crate::field_contributions::CUSTOM_RECORD_TYPE,
+                    )
+                    .await?
+            };
+            self.reconcile_custom(&definitions);
+        }
         let mut chosen: Vec<_> = self.custom_pickers.chosen.values_mut().collect();
         for chunk in chosen.chunks_mut(100) {
             let references: Vec<_> = chunk.iter().map(|held| held.reference.clone()).collect();
@@ -1417,7 +1477,7 @@ impl CompanyPage {
                     })
                     .filter(|(key, _)| key != "type")
                     .collect();
-                values.extend(ticked(value));
+                values.extend(ticked(value, &self.form));
                 let name = values.get("name").cloned().unwrap_or_default();
                 let query = values
                     .get("parent[parent_search]")
@@ -1474,13 +1534,21 @@ impl CompanyPage {
                         .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.into())))
                         .filter(|(k, _)| k != "type" && k != "intent")
                         .collect();
-                    values.extend(ticked(value));
+                    values.extend(ticked(value, &self.form));
                     self.form = values;
                     self.duplicate_reason.clear();
                     self.confirming_duplicate = false;
                     self.duplicate_candidates.clear();
                     self.duplicate_likely = false;
                 }
+                let definitions = crate::field_contributions::custom_fields()?
+                    .active(
+                        &**client,
+                        scope,
+                        crate::field_contributions::CUSTOM_RECORD_TYPE,
+                    )
+                    .await?;
+                self.reconcile_custom(&definitions);
                 match &self.parent_chosen {
                     Some((id, _)) => self.form.insert("parent_id".into(), id.to_string()),
                     None => self.form.remove("parent_id"),

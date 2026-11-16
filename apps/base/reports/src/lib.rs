@@ -361,11 +361,12 @@ fn grid(error: QueryError) -> ReportError {
     }
 }
 
-fn access_key(catalog: &Catalog, report: &Report) -> String {
+fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Records) -> String {
     let Some(root) = catalog.table(&report.record_type) else {
         return format!("{}:unreadable", report.version);
     };
     let d = &report.definition;
+    let mut references = std::collections::BTreeSet::new();
     let seen: String = d
         .columns
         .iter()
@@ -376,17 +377,25 @@ fn access_key(catalog: &Catalog, report: &Report) -> String {
         // A masked column still resolves; its values are read partial, so
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
-            Ok(column) if column.reference.is_some() => 'r',
-            Ok(column) if catalog.mask(&column).is_some() => 'm',
-            Ok(_) => '1',
+            Ok(column) => match column.reference {
+                Some(kind) => {
+                    let readable = records
+                        .kind(kind)
+                        .is_some_and(|kind| catalog.table(kind.table).is_some());
+                    references.insert(format!("ref:{}:{kind}:{}", column.spec, u8::from(readable)));
+                    'r'
+                }
+                None if catalog.mask(&column).is_some() => 'm',
+                None => '1',
+            },
             Err(_) => '0',
         })
         .collect();
-    if seen.contains('r') {
-        format!("{}:{seen}:{}", report.version, jiff::Timestamp::now())
-    } else {
-        format!("{}:{seen}", report.version)
-    }
+    format!(
+        "{}:{seen}:{}",
+        report.version,
+        references.into_iter().collect::<Vec<_>>().join(":")
+    )
 }
 
 impl Reports {
@@ -814,7 +823,7 @@ impl Reports {
         let catalog = Catalog::for_scope(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
-        Ok(access_key(&catalog, &report))
+        Ok(access_key(&catalog, &report, &self.records))
     }
 
     /// One dashboard update shares a fresh catalog across all placed reports.
@@ -838,7 +847,7 @@ impl Reports {
                 let access = if report.definition.oversight {
                     format!("{}:oversight:{}", report.version, jiff::Timestamp::now())
                 } else {
-                    access_key(&catalog, &report)
+                    access_key(&catalog, &report, &self.records)
                 };
                 (report, access)
             })
