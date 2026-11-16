@@ -326,7 +326,10 @@ impl Catalog {
                     } => table.field(from_field).is_some() && target.field(to_field).is_some(),
                     Join::Edge(source) => {
                         source.tenant_scoped
-                            && describe_source(client, link.id(), &source).await?.parameters == 1
+                            && describe_source(client, link.id(), &source)
+                                .await?
+                                .parameters
+                                == 1
                     }
                 };
                 if safe {
