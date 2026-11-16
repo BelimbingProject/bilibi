@@ -205,7 +205,7 @@ There are no unit tests. Every change must pass these and then be tried in the r
 ```sh
 python3 scripts/discover-modules.py --check
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --release --locked
 ```
 

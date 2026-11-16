@@ -60,7 +60,7 @@ jobs:
       - if: steps.decide.outputs.affected == 'true'
         run: cargo fmt --all -- --check
       - if: steps.decide.outputs.affected == 'true'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Release build (main and tags only)
         if: >-
           steps.decide.outputs.affected == 'true' &&
