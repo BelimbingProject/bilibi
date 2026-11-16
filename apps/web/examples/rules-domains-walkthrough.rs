@@ -58,7 +58,7 @@ async fn wait_for_runs(db: &Db, events: &[i64], rules: &[i64]) -> Result<()> {
     for _ in 0..300 {
         let client = db.get().await?;
         let row = client.query_one(
-            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND r.state='done'), count(*) FILTER (WHERE r.state NOT IN ('queued','matched','done')) FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) rule(id) LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/rules.triggers' LEFT JOIN base_rule_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.rule_id=rule.id",
+            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND r.state='done' AND EXISTS(SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/rules-run' AND j.args->>'event_id'=e.id::text AND j.state='completed')), count(*) FILTER (WHERE r.state NOT IN ('queued','matched','done')) FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) rule(id) LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/rules.triggers' LEFT JOIN base_rule_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.rule_id=rule.id",
             &[&events, &rules],
         ).await?;
         if row.get::<_, i64>(2) != 0 {
@@ -74,6 +74,95 @@ async fn wait_for_runs(db: &Db, events: &[i64], rules: &[i64]) -> Result<()> {
         false,
         "timed out waiting for every source delivery and successful rule run",
     )
+}
+async fn source_events(db: &Db, event: &str, subject: &str, source: i64) -> Result<Vec<i64>> {
+    Ok(db
+        .get()
+        .await?
+        .query(
+            "SELECT id,payload FROM base_events WHERE tenant_id=1 AND name=$1 ORDER BY id",
+            &[&event],
+        )
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            let payload: Value = row.get(1);
+            let id = payload.pointer(subject)?;
+            (id.as_i64() == Some(source) || id.as_str() == Some(source.to_string().as_str()))
+                .then(|| row.get(0))
+        })
+        .collect())
+}
+async fn run_until(services: &Services, db: &Db, events: &[i64], rules: &[i64]) -> Result<()> {
+    let executor = Executor::from_services(
+        services,
+        Config {
+            concurrency: 2,
+            poll_interval: Duration::from_millis(100),
+            lease_seconds: 30,
+            max_runtime: Duration::from_secs(60),
+        },
+    )?;
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(async move { executor.run(shutdown).await });
+    let result = wait_for_runs(db, events, rules).await;
+    let _ = stop.send(true);
+    let stopped = worker.await.map_err(|_| Error::Internal)?;
+    result?;
+    stopped
+}
+async fn source_change(mode: &str, source: i64) -> Result<()> {
+    let helper = std::env::var_os("BILIBI_RULES_SOURCE_HELPER").ok_or_else(|| {
+        eprintln!("Supply Chain requires BILIBI_RULES_SOURCE_HELPER from its rules-followup.sh");
+        Error::Invalid
+    })?;
+    let status = tokio::process::Command::new(helper)
+        .arg(mode)
+        .arg(source.to_string())
+        .status()
+        .await
+        .map_err(|error| {
+            eprintln!("source helper {mode}: {error}");
+            Error::Invalid
+        })?;
+    check(
+        status.success(),
+        "the source helper completed its supported write",
+    )
+}
+async fn snapshot_tasks(
+    db: &Db,
+    events: &[i64],
+    rules: &[i64],
+    tasks: i64,
+    revisions: i64,
+) -> Result<()> {
+    let client = db.get().await?;
+    for rule in rules {
+        let row = client.query_one(
+            "SELECT count(*),count(DISTINCT f.result->>'activity_id'),count(DISTINCT r.logical_event),count(DISTINCT r.facts->>'revision') FROM base_rule_runs r JOIN base_rule_effects f ON f.tenant_id=r.tenant_id AND f.run_id=r.id WHERE r.tenant_id=1 AND r.rule_id=$1 AND r.event_id=ANY($2) AND r.state='done' AND f.state='done'",
+            &[rule, &events],
+        ).await?;
+        check(
+            row.get::<_, i64>(0) == events.len() as i64
+                && row.get::<_, i64>(1) == tasks
+                && row.get::<_, i64>(2) == tasks
+                && row.get::<_, i64>(3) == revisions,
+            "each rule has the expected task, immutable snapshot and evaluated revision counts",
+        )?;
+        let snapshots = client.query(
+            "SELECT count(*),count(DISTINCT f.result->>'activity_id') FROM base_rule_runs r JOIN base_rule_effects f ON f.tenant_id=r.tenant_id AND f.run_id=r.id WHERE r.tenant_id=1 AND r.rule_id=$1 AND r.event_id=ANY($2) AND r.state='done' AND f.state='done' GROUP BY r.logical_event",
+            &[rule, &events],
+        ).await?;
+        check(
+            snapshots.len() as i64 == tasks
+                && snapshots
+                    .iter()
+                    .all(|row| row.get::<_, i64>(0) >= 2 && row.get::<_, i64>(1) == 1),
+            "all parts of each approval snapshot return exactly one task",
+        )?;
+    }
+    Ok(())
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -162,8 +251,8 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let (source, revision, company): (i64, i64, i64) = if let Some(id) = draft_order {
-        (id, 2, 1)
+    let (source, company): (i64, i64) = if let Some(id) = draft_order {
+        (id, 1)
     } else {
         let row = db
             .get()
@@ -174,7 +263,7 @@ async fn main() -> Result<()> {
                 eprintln!("Run the {domain} source walkthrough first; no approved source remains.");
                 Error::Invalid
             })?;
-        (row.get(0), row.get(1), row.get(2))
+        (row.get(0), row.get(2))
     };
     let recipient = 4_i64;
     let draft = json!({
@@ -214,27 +303,12 @@ async fn main() -> Result<()> {
         .find(|entry| entry.id == event)
         .ok_or(Error::Invalid)?
         .get::<bilibi_base::rules::Trigger>()?;
-    let expected_events: Vec<i64> = db
-        .get()
-        .await?
-        .query(
-            "SELECT id,payload FROM base_events WHERE tenant_id=1 AND name=$1 ORDER BY id",
-            &[&event],
-        )
-        .await?
-        .into_iter()
-        .filter_map(|row| {
-            let payload: Value = row.get(1);
-            let id = payload.pointer(trigger.subject)?;
-            (id.as_i64() == Some(source) || id.as_str() == Some(source.to_string().as_str()))
-                .then(|| row.get(0))
-        })
-        .collect();
+    let expected_events = source_events(&db, event, trigger.subject, source).await?;
     check(
         !expected_events.is_empty(),
         "the source recorded its expected events",
     )?;
-    if domain == "commerce" {
+    if domain == "commerce" || domain == "supply_chain" {
         check(
             expected_events.len() == 2,
             "the two-line order recorded both source parts",
@@ -258,31 +332,35 @@ async fn main() -> Result<()> {
             rule_ids[0], expected_events[0],
         ))
         .await?;
-    let executor = Executor::from_services(
-        &services,
-        Config {
-            concurrency: 2,
-            poll_interval: Duration::from_millis(100),
-            lease_seconds: 30,
-            max_runtime: Duration::from_secs(60),
-        },
-    )?;
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let worker = tokio::spawn(async move { executor.run(shutdown).await });
     let result: Result<()> = async {
-        wait_for_runs(&db, &expected_events, &rule_ids).await?;
-        let retry_completed = async {
-            for _ in 0..300 {
-                let row = db.get().await?.query_one(
-                    "SELECT EXISTS(SELECT 1 FROM base_queue_jobs WHERE tenant_id=1 AND worker_id='base/rules-run' AND args->>'event_id'=$1 AND state='completed' AND attempt>=2), (SELECT last_value FROM rules_followup_retry_probe)",
-                    &[&expected_events[0].to_string()],
-                ).await?;
-                if row.get::<_,bool>(0) && row.get::<_,i64>(1)>=2 { return Ok::<_,Error>(true); }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Ok(false)
-        }.await?;
-        check(retry_completed, "the worker retried after the committed effect and completed successfully")?;
+        if domain == "supply_chain" {
+            let mut client = db.get().await?;
+            let held = client.transaction().await?;
+            held.query(
+                "SELECT id FROM base_queue_jobs WHERE tenant_id=1 AND worker_id='base/events-delivery' AND args->>'event_id'<>$1 FOR UPDATE",
+                &[&expected_events[0].to_string()],
+            ).await?;
+            run_until(&services, &db, &expected_events[..1], &rule_ids).await?;
+            let second = held.query_one(
+                "SELECT d.delivered_at IS NULL, NOT EXISTS(SELECT 1 FROM base_rule_runs r WHERE r.tenant_id=1 AND r.event_id=d.event_id) FROM base_events_deliveries d WHERE d.event_id=$1 AND d.subscriber='base/rules.triggers'",
+                &[&expected_events[1]],
+            ).await?;
+            check(second.get(0) && second.get(1), "the second source part has neither delivered nor evaluated")?;
+            check(task_count(&db, kind, source).await? == 2, "part one created exactly one task per independent rule")?;
+            source_change("amend-header", source).await?;
+            held.rollback().await?;
+            drop(client);
+            run_until(&services, &db, &expected_events, &rule_ids).await?;
+            snapshot_tasks(&db, &expected_events, &rule_ids, 1, 2).await?;
+            check(task_count(&db, kind, source).await? == 2, "a header amendment between parts leaves exactly one task per rule")?;
+        } else {
+            run_until(&services, &db, &expected_events, &rule_ids).await?;
+        }
+        let retry = db.get().await?.query_one(
+            "SELECT EXISTS(SELECT 1 FROM base_queue_jobs WHERE tenant_id=1 AND worker_id='base/rules-run' AND args->>'event_id'=$1 AND state='completed' AND attempt>=2), (SELECT last_value FROM rules_followup_retry_probe)",
+            &[&expected_events[0].to_string()],
+        ).await?;
+        check(retry.get::<_,bool>(0) && retry.get::<_,i64>(1)>=2, "the worker retried after the committed effect and completed successfully")?;
         check(task_count(&db, kind, source).await? == 2, "each independent rule created one task across all source parts")?;
         let client = db.get().await?;
         let rows = client.query("SELECT shared,created_by,assignee_user_id,id FROM core_activities WHERE tenant_id=1 AND related_kind=$1 AND related_id=$2 ORDER BY id", &[&kind,&source.to_string()]).await?;
@@ -293,14 +371,44 @@ async fn main() -> Result<()> {
             check(row.get::<_,i64>(0)==1 && row.get::<_,i64>(1)==expected_events.len() as i64, "every part of one rule returned the same task")?;
         }
         drop(client);
+        let mut rule_tasks = 2;
+        if domain == "supply_chain" {
+            source_change("reapprove", source).await?;
+            source_change("reapprove", source).await?;
+            let approvals: Vec<i64> = source_events(&db, event, trigger.subject, source).await?
+                .into_iter().filter(|id| !expected_events.contains(id)).collect();
+            let client = db.get().await?;
+            let snapshots = client.query(
+                "SELECT count(*),count(DISTINCT payload->>'part_index'),min((payload->>'part_index')::bigint),max((payload->>'part_index')::bigint),min((payload->>'part_count')::bigint),max((payload->>'part_count')::bigint) FROM base_events WHERE tenant_id=1 AND id=ANY($1) GROUP BY payload->>'snapshot_key'",
+                &[&approvals],
+            ).await?;
+            check(snapshots.len()==2 && snapshots.iter().all(|row| {
+                let count: i64 = row.get(0);
+                count>=2 && row.get::<_,i64>(1)==count && row.get::<_,i64>(2)==1 && row.get::<_,i64>(3)==count && row.get::<_,i64>(4)==count && row.get::<_,i64>(5)==count
+            }), "two real reapprovals recorded every declared snapshot part, including retained line generations")?;
+            let undelivered: i64 = client.query_one(
+                "SELECT count(*) FROM base_events_deliveries d JOIN base_events e ON e.id=d.event_id WHERE e.tenant_id=1 AND e.id=ANY($1) AND d.subscriber='base/rules.triggers' AND d.delivered_at IS NULL",
+                &[&approvals],
+            ).await?.get(0);
+            let evaluated: i64 = client.query_one("SELECT count(*) FROM base_rule_runs WHERE tenant_id=1 AND event_id=ANY($1)", &[&approvals]).await?.get(0);
+            check(undelivered==approvals.len() as i64 && evaluated==0, "both approval snapshots wait until after the latest approval")?;
+            drop(client);
+            run_until(&services, &db, &approvals, &rule_ids).await?;
+            snapshot_tasks(&db, &approvals, &rule_ids, 2, 1).await?;
+            rule_tasks += 4;
+            check(task_count(&db, kind, source).await? == rule_tasks, "two delayed approval snapshots create two new tasks per rule at one live revision")?;
+        }
         let replay = write(&plans, &admin, "base.events.replay", json!({"subscriber":"base/rules.triggers","from_event":expected_events[0],"limit":1000})).await?;
         check(replay["created"] == 0 && replay["pending"] == 0, "replay of delivered parts is a no-op, not duplicate execution")?;
-        check(task_count(&db, kind, source).await? == 2, "no-op replay leaves task counts unchanged")?;
+        check(task_count(&db, kind, source).await? == rule_tasks, "no-op replay leaves task counts unchanged")?;
+        let row = db.get().await?.query_one(source_query, &[]).await?;
+        check(row.get::<_,i64>(0)==source, "manual checks still target the same live source")?;
+        let revision: i64 = row.get(1);
         let valid = json!({"record_id":source,"expected_revision":revision,"assignee_user_id":recipient,"title":"Review the approved record"});
         write(&plans, &admin, action, valid.clone()).await?;
-        check(task_count(&db, kind, source).await? == 3, "a manual request is independent of both rules")?;
+        check(task_count(&db, kind, source).await? == rule_tasks + 1, "a manual request is independent of both rules")?;
         write(&plans, &admin, action, valid.clone()).await?;
-        check(task_count(&db, kind, source).await? == 4, "identical manual requests create independent tasks")?;
+        check(task_count(&db, kind, source).await? == rule_tasks + 2, "identical manual requests create independent tasks")?;
         let mut stale = valid.clone(); stale["expected_revision"] = json!(revision+1);
         check(write(&plans,&admin,action,stale).await.is_err(), "a stale source revision is refused")?;
         let mut foreign = valid.clone(); foreign["assignee_user_id"] = json!(5);
@@ -311,15 +419,13 @@ async fn main() -> Result<()> {
         grants.set_direct(&admin, 2, "core.activity.view", Some(Direct::Allow(bilibi_authz::Reach::All))).await?;
         let activities = services.get::<bilibi_activity::Activities>(bilibi_activity::SERVICE)?;
         check(activities.get(&viewer, task).await.is_err(), "an uninvolved viewer cannot read the private follow-up")?;
-        check(task_count(&db, kind, source).await? == 4, "refused writes left no extra task")?;
+        check(task_count(&db, kind, source).await? == rule_tasks + 2, "refused writes left no extra task")?;
         let version = activities.get(&admin, task).await.map_err(|_| Error::Invalid)?.version;
         write(&plans, &admin, "core.activity.delete", json!({"id":task,"version":version})).await?;
         write(&plans, &admin, action, valid).await?;
-        check(task_count(&db, kind, source).await? == 5, "deleting a rule task does not suppress a later request")?;
+        check(task_count(&db, kind, source).await? == rule_tasks + 3, "deleting a rule task does not suppress a later request")?;
         Ok(())
     }.await;
-    let _ = stop.send(true);
-    let _ = worker.await;
     db.get().await?.batch_execute(
         "DROP TRIGGER rules_followup_retry_probe ON base_rule_runs; DROP FUNCTION rules_followup_retry_probe(); DROP SEQUENCE rules_followup_retry_probe;",
     ).await?;
