@@ -8,7 +8,7 @@
 //! owner table directly and the owner never learns its holders. No method
 //! holds a pooled connection while Grid takes one, so concurrent callers
 //! cannot fill the pool and wait on each other.
-use crate::declaration::{Access, Holder, RecordKind};
+use crate::declaration::{Access, Holder, PortalStepUp, RecordKind};
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_grid::{
     query::text_search_sql, FieldType, Filter, QueryError, SummarySpec, Test, BOUNDS, MAX_CHOICES,
@@ -126,9 +126,28 @@ pub struct Records {
     pub(crate) kinds: BTreeMap<&'static str, (&'static RecordKind, &'static str)>,
     pub(crate) holders: Vec<&'static Holder>,
     pub(crate) drop_targets: Vec<&'static crate::DropTarget>,
+    pub(crate) portal_step_up: BTreeMap<&'static str, &'static PortalStepUp>,
+    pub(crate) step_up: Arc<bilibi_step_up::StepUp>,
 }
 
 impl Records {
+    /// Portal record rules whose step-up operation this session does not hold.
+    /// Call before taking a pooled connection; checking a browser session may
+    /// read the session store. A holder then asks each returned owner, in one
+    /// batch, which of its referenced records currently need that operation.
+    pub async fn unverified_portal_rules(
+        &self,
+        portal: &bilibi_tenancy::PortalScope,
+    ) -> Result<Vec<&'static PortalStepUp>> {
+        let mut rules = Vec::new();
+        for rule in self.portal_step_up.values() {
+            if !self.step_up.holds(portal.scope(), rule.operation).await? {
+                rules.push(*rule);
+            }
+        }
+        Ok(rules)
+    }
+
     /// The mounted kinds.
     pub fn kinds(&self) -> impl Iterator<Item = &'static RecordKind> + '_ {
         self.kinds.values().map(|(kind, _)| *kind)

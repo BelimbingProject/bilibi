@@ -20,10 +20,14 @@ use bilibi_audit::{record_action, Attribution};
 use bilibi_authz::authorize_proof;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_party_ids::OrganisationId;
+use bilibi_records::PortalStepUp;
 use bilibi_tenancy::{PortalScope, ProofClient, ReadClient, Scope};
 use jiff::{civil::Date, Timestamp};
 use serde_json::{json, Value};
-use std::time::SystemTime;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::SystemTime,
+};
 use tokio_postgres::{types::ToSql, Client, Row, Transaction};
 
 /// A customer's own read of the documents shared with them, on the portal.
@@ -389,6 +393,7 @@ pub(crate) async fn list(
     client: &Client,
     portal: &PortalScope,
     filter: &PortalFilter,
+    rules: &[&PortalStepUp],
 ) -> Result<SharedPage> {
     let (tenant, person, company) = customer(portal.scope())?;
     let page_size = filter.page_size.clamp(1, 100);
@@ -414,7 +419,67 @@ pub(crate) async fn list(
     };
     let conditions =
         format!("{SHARED} AND {related_condition} AND ($6::text = '' OR d.name ILIKE $7::text)");
-    let params: [&(dyn ToSql + Sync); 7] = [
+    let kinds = rules.iter().map(|rule| rule.kind).collect::<Vec<_>>();
+    let guarded_rows = if kinds.is_empty() {
+        Vec::new()
+    } else {
+        let guarded_params: [&(dyn ToSql + Sync); 8] = [
+            &tenant,
+            &person,
+            &company,
+            &related_kind,
+            &related_id,
+            &search,
+            &pattern,
+            &kinds,
+        ];
+        client
+            .query(
+                &format!(
+                    "SELECT d.id,l.record_kind,l.record_id FROM core_documents d
+                     JOIN core_document_links l ON l.tenant_id=d.tenant_id AND l.document_id=d.id
+                     WHERE {conditions} AND l.record_kind=ANY($8)"
+                ),
+                &guarded_params,
+            )
+            .await?
+    };
+    let mut requested: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    let mut documents_by_record: BTreeMap<(String, String), BTreeSet<i64>> = BTreeMap::new();
+    for row in guarded_rows {
+        let document: i64 = row.get(0);
+        let kind: String = row.get(1);
+        let id: String = row.get(2);
+        if let Some(rule) = rules.iter().find(|rule| rule.kind == kind) {
+            requested.entry(rule.kind).or_default().insert(id.clone());
+            documents_by_record
+                .entry((kind, id))
+                .or_default()
+                .insert(document);
+        }
+    }
+    let mut blocked: BTreeSet<i64> = BTreeSet::new();
+    for rule in rules {
+        let ids = requested
+            .get(rule.kind)
+            .map(|ids| ids.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if ids.is_empty() {
+            continue;
+        }
+        let protected = rule.protection.protected(client, portal, &ids).await?;
+        if protected.iter().any(|id| !ids.contains(id)) {
+            return Err(Error::Internal);
+        }
+        for id in protected {
+            if let Some(documents) = documents_by_record.get(&(rule.kind.to_owned(), id)) {
+                blocked.extend(documents);
+            }
+        }
+    }
+    let blocked = blocked.into_iter().collect::<Vec<_>>();
+    let visible = format!("{conditions} AND NOT (d.id=ANY($8::bigint[]))");
+    let visible_params: [&(dyn ToSql + Sync); 8] = [
         &tenant,
         &person,
         &company,
@@ -422,11 +487,12 @@ pub(crate) async fn list(
         &related_id,
         &search,
         &pattern,
+        &blocked,
     ];
     let total: i64 = client
         .query_one(
-            &format!("SELECT count(*) FROM core_documents d WHERE {conditions}"),
-            &params,
+            &format!("SELECT count(*) FROM core_documents d WHERE {visible}"),
+            &visible_params,
         )
         .await?
         .get(0);
@@ -443,9 +509,9 @@ pub(crate) async fn list(
                 "SELECT d.id,d.name,d.publish_date::text AS publish_date,d.revision,d.last_revision_at,r.file_name,r.byte_size,r.scan_status,{SHARED_UNTIL} AS shared_until
                  FROM core_documents d
                  LEFT JOIN core_document_revisions r ON r.tenant_id=d.tenant_id AND r.document_id=d.id AND r.revision=d.revision
-                 WHERE {conditions} ORDER BY {order} {direction}, d.id {direction} LIMIT {page_size} OFFSET {offset}"
+                 WHERE {visible} ORDER BY {order} {direction}, d.id {direction} LIMIT {page_size} OFFSET {offset}"
             ),
-            &params,
+            &visible_params,
         )
         .await?;
     let entries = rows
@@ -529,6 +595,7 @@ pub(crate) async fn read(
     artifacts: &Artifacts,
     portal: &PortalScope,
     id: i64,
+    rules: &[&PortalStepUp],
 ) -> WriteResult<File> {
     if let Err(error) = bilibi_authz::authorize_portal(&*client, portal, PORTAL_VIEW).await {
         if matches!(error, Error::Forbidden) {
@@ -553,6 +620,37 @@ pub(crate) async fn read(
         refused(client, portal, id, None, reason).await?;
         return Err(WriteError::NotFound);
     };
+    if !rules.is_empty() {
+        let links = client
+            .query(
+                "SELECT record_kind,record_id FROM core_document_links WHERE tenant_id=$1 AND document_id=$2 AND record_kind=ANY($3)",
+                &[&tenant, &id, &rules.iter().map(|rule| rule.kind).collect::<Vec<_>>()],
+            )
+            .await
+            .map_err(Error::from)?;
+        for rule in rules {
+            let ids = links
+                .iter()
+                .filter(|row| row.get::<_, String>(0) == rule.kind)
+                .map(|row| row.get::<_, String>(1))
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                continue;
+            }
+            let protected = rule
+                .protection
+                .protected(client, portal, &ids)
+                .await
+                .map_err(WriteError::from)?;
+            if protected.iter().any(|protected| !ids.contains(protected)) {
+                return Err(WriteError::from(Error::Internal));
+            }
+            if !protected.is_empty() {
+                refused(client, portal, id, None, "record_step_up").await?;
+                return Err(WriteError::NotFound);
+            }
+        }
+    }
     let (company_id, revision): (i64, i32) = (row.get(0), row.get(1));
     let (artifact_id, file_name, scan_status): (Option<String>, Option<String>, Option<String>) =
         (row.get(2), row.get(3), row.get(4));

@@ -37,7 +37,8 @@ use bilibi_document::{
 use bilibi_media::{Media, ScanFacts, ScanFuture, Scanner, Verdict};
 use bilibi_party_ids::{AffiliationId, PersonId};
 use bilibi_queue::{Config, Executor};
-use bilibi_tenancy::{Authentication, PortalScope, Scope};
+use bilibi_records::{PortalProtection, PortalStepUp};
+use bilibi_tenancy::{Authentication, PortalScope, ProofClient, ProofFuture, Scope};
 use bilibi_walkthrough_fixture::PASSWORD;
 use serde_json::json;
 use std::{collections::BTreeSet, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
@@ -46,6 +47,29 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const RECORD_STEP_UP: &str = "core.document.walkthrough.record";
+struct ProtectedRecord;
+static PROTECTED_RECORD: ProtectedRecord = ProtectedRecord;
+impl PortalProtection for ProtectedRecord {
+    fn protected<'a>(
+        &'a self,
+        _client: &'a dyn ProofClient,
+        _portal: &'a PortalScope,
+        ids: &'a [String],
+    ) -> ProofFuture<'a, BTreeSet<String>> {
+        Box::pin(async move { Ok(ids.iter().cloned().collect()) })
+    }
+}
+bilibi_step_up::declare!(
+    "core/document",
+    bilibi_step_up::Operation::new(RECORD_STEP_UP, "Read the walkthrough protected record")
+        .always()
+);
+bilibi_records::portal_step_up!(
+    "core/document",
+    PortalStepUp::new(bilibi_document::RECORD, RECORD_STEP_UP, &PROTECTED_RECORD)
+);
 
 /// Fixture scanner, not a production adapter.
 struct FixtureScanner;
@@ -78,6 +102,40 @@ fn check(ok: bool, what: &str) -> Result<()> {
     } else {
         Err(format!("FAIL {what}").into())
     }
+}
+
+/// The authenticator code for `key` (base32) at `offset` 30-second steps.
+fn code(key: &str, offset: i64) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut secret = Vec::new();
+    let (mut buffer, mut bits) = (0u64, 0u32);
+    for c in key.chars().filter(|c| c.is_ascii_alphanumeric()) {
+        let value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+            .find(c.to_ascii_uppercase())
+            .expect("base32") as u64;
+        buffer = buffer << 5 | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            secret.push((buffer >> bits) as u8);
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    let step = (now / 30 + offset) as u64;
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&secret).expect("key");
+    mac.update(&step.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let at = usize::from(digest[digest.len() - 1] & 0x0f);
+    let binary = u32::from_be_bytes([
+        digest[at] & 0x7f,
+        digest[at + 1],
+        digest[at + 2],
+        digest[at + 3],
+    ]);
+    format!("{:06}", binary % 1_000_000)
 }
 
 /// A Person, optionally affiliated with `company`, given a customer account
@@ -365,6 +423,7 @@ async fn main() -> Result<()> {
         ("revoked", &b"clean: shared, then revoked"[..]),
         ("ended", &b"clean: shared, then ended"[..]),
         ("expired", &b"clean: past its expiry date"[..]),
+        ("protected", &b"clean: protected record"[..]),
     ] {
         let stored = documents
             .store_file(
@@ -427,6 +486,33 @@ async fn main() -> Result<()> {
         &app,
         &documents,
         &admin,
+        ids["protected"],
+        Recipient::Person(ann_person),
+    )
+    .await?;
+    {
+        let mut client = app.db.get().await?;
+        let mut tx = app
+            .mutations
+            .begin(&mut client, admin.mutation_context("core.document.link"))
+            .await?;
+        documents
+            .link(
+                &mut tx,
+                &admin,
+                ids["protected"],
+                &bilibi_document::Reference::new(
+                    bilibi_document::RECORD,
+                    ids["private"].to_string(),
+                ),
+            )
+            .await?;
+        tx.commit().await?;
+    }
+    share(
+        &app,
+        &documents,
+        &admin,
         ids["company"],
         Recipient::Company(2),
     )
@@ -458,9 +544,44 @@ async fn main() -> Result<()> {
     // Who sees what.
     let set = |keys: &[&str]| keys.iter().map(|key| ids[*key]).collect::<BTreeSet<i64>>();
     check(
+        listed(&documents, &ann).await? == set(&["ann", "pending", "infected", "revoked", "ended"]),
+        "before step-up, Ann does not list the shared document linked to a protected record",
+    )?;
+    check(
+        matches!(
+            documents.read_shared_file(&ann, ids["protected"]).await,
+            Err(WriteError::NotFound)
+        ),
+        "before step-up, Ann cannot download the protected record's document",
+    )?;
+    let enrollment = app
+        .user
+        .begin_two_factor(ann.scope(), PASSWORD)
+        .await
+        .map_err(|error| format!("begin customer two-factor: {error:?}"))?;
+    app.user
+        .confirm_two_factor(ann.scope(), &code(&enrollment.key, -1))
+        .await
+        .map_err(|error| format!("confirm customer two-factor: {error:?}"))?;
+    check(
         listed(&documents, &ann).await?
-            == set(&["ann", "pending", "infected", "revoked", "ended"]),
-        "Ann lists exactly what was shared with her (not the private, company, Ben's or expired document)",
+            == set(&[
+                "ann",
+                "pending",
+                "infected",
+                "revoked",
+                "ended",
+                "protected",
+            ]),
+        "after step-up, Ann lists the shared document linked to the protected record",
+    )?;
+    check(
+        documents
+            .read_shared_file(&ann, ids["protected"])
+            .await?
+            .bytes
+            == b"clean: protected record",
+        "after step-up, Ann downloads the protected record's document",
     )?;
     check(
         listed(&documents, &ben).await? == set(&["company", "ben"]),
@@ -512,7 +633,10 @@ async fn main() -> Result<()> {
         )
         .await?
         .get(0);
-    check(audited == 1, "the download is audited as Ann, a customer")?;
+    check(
+        audited == 2,
+        "both downloads are audited as Ann, a customer",
+    )?;
     check(
         documents
             .read_shared_file(&ben, ids["company"])
@@ -572,7 +696,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     check(
-        listed(&documents, &ann).await? == set(&["ann", "pending", "infected"]),
+        listed(&documents, &ann).await? == set(&["ann", "pending", "infected", "protected"]),
         "a revoked and an ended share leave Ann's list",
     )?;
     for (key, refused) in [("revoked", "not_shared"), ("ended", "share_ended")] {

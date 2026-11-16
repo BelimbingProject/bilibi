@@ -8,6 +8,7 @@ One way for any module to point at a record that another module owns, including 
 - **A holder stores `(record_kind, record_id)`, both text.** No foreign key crosses a module boundary, and the owner never learns who points at its records.
 - **An owner registers each kind of record once:** its key, Grid table, page path and an access check.
 - **Names follow the reader's own permissions.** A record the reader cannot see stays unnamed; the pill, the picker and linking all follow the owner's own access check.
+- **Portal step-up follows the record owner.** A kind whose portal page conditionally asks for Base Step-up contributes one batched `PortalStepUp`; holders can then hide references to protected records until that portal session holds the same operation.
 - **Every page shows a reference the same way,** with the `RelatedRecord` pill and `RecordPicker` from `base/ui`. Why a Base module, and why one key per kind: [ADR 11](../../../docs/architecture/decisions/11-record-references.md).
 
 ## Register a kind (owner)
@@ -96,6 +97,19 @@ let page = format!("SELECT id FROM notes WHERE {predicate} ORDER BY id LIMIT $4 
 - **Cost:** the reverse redirect index serves the predecessor relation; no holder or tenant scan is required to discover aliases. The holder owns admission for its complete SQL: use Grid's `BOUNDS` (statement/lock timeouts), `MAX_ESTIMATED_COST`, `MAX_ROWS` and `MAX_OFFSET`, as in [`text_search_sql`](../grid/README.md). A timeout, cost refusal or database error must fail the read, never produce a partial count/page. `matching` does not change transaction settings or admit arbitrary holder SQL for you.
 
 ## Behaviour
+
+### Portal step-up
+
+A record owner whose portal page conditionally requires a second factor declares the same rule for holders:
+
+```rust
+bilibi_records::portal_step_up!(
+    "domain/module",
+    PortalStepUp::new(RECORD, PORTAL_READ, &PORTAL_PROTECTION)
+);
+```
+
+`PortalProtection::protected(client, portal, ids)` returns only the requested ids that currently require `PORTAL_READ`, in one owner query. Base checks whether the portal session holds that declared Step-up operation before it calls the owner. A holder such as Core Document asks `Records::unverified_portal_rules` before taking its connection, then hides references to the protected ids from both counts and rows. The contributor must own the registered record kind, and the operation must be declared; boot refuses otherwise. A record whose portal read never asks Step-up declares nothing.
 
 - **Ids are text,** at most 64 bytes in one path segment (`workspace::record_id`). A kind whose Grid key is a number only accepts numeric ids, so a forged id never reaches the owner's source as an error.
 - **One spelling per id:** a number key is read as plain decimal everywhere. `check` returns `01` as `1` for the holder to store, and `resolve`, `redirect` and `referrers` read `01` as `1` too.
