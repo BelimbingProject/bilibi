@@ -32,11 +32,9 @@ use bilibi_authz::grants::Grants;
 use bilibi_base::events::{Events, DELIVER, PRINCIPAL as DELIVERY_PRINCIPAL};
 use bilibi_base::queue::{Config, Executor};
 use bilibi_base::rules::{Rules, SERVICE};
-use bilibi_base::system::InstallationMode;
+use bilibi_base::system::{InstallationMode, Instances};
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
-use bilibi_module_registry::{
-    verify_composition, Composition, Container, ExtensionCode, Layer, PinState, Services,
-};
+use bilibi_module_registry::{Composition, Container, ExtensionCode, Layer, PinState, Services};
 use bilibi_tenancy::{Authentication, ProofFuture, Scope};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -330,12 +328,7 @@ async fn main() -> Result<()> {
     bilibi_extensions::link();
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let modules = bilibi_module_registry::discover()?;
-    verify_composition(
-        &modules,
-        bilibi_domains::MODULES,
-        bilibi_extensions::MODULES,
-        bilibi_extensions::CODE,
-    )?;
+    bilibi_web::verify_composition(&db).await?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
@@ -427,37 +420,69 @@ async fn main() -> Result<()> {
             extension_code: Some(ExtensionCode::Customer),
         }],
     };
+    let mut customer_services = Services::default();
+    customer_services.provide("bootstrap.database", Arc::new(db.clone()))?;
+    customer_services.provide("bootstrap.composition", Arc::new(customer_release))?;
+    customer_services.install(&modules)?;
+    let customer_instances = customer_services.get::<Instances>(bilibi_base::system::SERVICE)?;
+    let client = db.get().await?;
+    client.execute(
+        "INSERT INTO user_bootstrap(id,tenant_name,company_name,company_code,admin_email,tenant_id,user_id,company_id,affiliation_settled_at) VALUES(1,'Walkthrough','Company 001','C001','admin@example.test',1,4,1,now()) ON CONFLICT DO NOTHING",
+        &[],
+    ).await?;
+    bilibi_tenancy::prove_owner(&**client, &proof.one).await?;
+    drop(client);
+    installation_mode(&db, InstallationMode::Shared).await?;
     check(
-        !InstallationMode::Shared.admits(&customer_release),
-        "startup refuses a customer code Extension on a Shared service",
+        customer_instances
+            .validate_composition()
+            .await
+            .is_err_and(|error| {
+                matches!(&error, Error::Registry(_))
+                    && error.to_string().contains("customer_example")
+            }),
+        "startup validation names and refuses the customer Extension in Shared service",
+    );
+    installation_mode(&db, InstallationMode::Isolated).await?;
+    check(
+        customer_instances.validate_composition().await.is_ok(),
+        "startup validation admits the same customer Extension in Isolated installation",
     );
     check(
-        !InstallationMode::Shared.admits(&customer_release),
-        "switching to Shared service refuses while customer code is composed",
+        matches!(
+            customer_instances
+                .change_installation_mode(
+                    &proof.one,
+                    InstallationMode::Isolated,
+                    InstallationMode::Shared,
+                )
+                .await,
+            Err(Error::Invalid)
+        ),
+        "the protected owner mutation refuses Shared service while customer code is composed",
     );
     check(
-        InstallationMode::Isolated.admits(&customer_release),
-        "an Isolated installation admits the same customer code Extension",
+        customer_instances.installation_mode().await? == InstallationMode::Isolated,
+        "the refused owner mutation preserves Isolated installation",
     );
-    let (shared_vocabulary, isolated_vocabulary) = {
+    check(
+        matches!(
+            customer_instances
+                .change_installation_mode(
+                    &proof.two,
+                    InstallationMode::Isolated,
+                    InstallationMode::Shared,
+                )
+                .await,
+            Err(Error::Forbidden)
+        ),
+        "a tenant administrator cannot change installation policy",
+    );
+    installation_mode(&db, InstallationMode::Shared).await?;
+    let vocabulary = {
         let client = db.get().await?;
-        client.execute(
-            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('installation.mode',0,'global',0,'\"shared\"'::jsonb,false) ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=excluded.value",
-            &[],
-        ).await?;
-        let shared = proof.rules.vocabulary(&**client, &proof.one).await?;
-        client.execute(
-            "UPDATE base_settings SET value='\"isolated\"'::jsonb WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0",
-            &[],
-        ).await?;
-        let isolated = proof.rules.vocabulary(&**client, &proof.one).await?;
-        (shared, isolated)
+        proof.rules.vocabulary(&**client, &proof.one).await?
     };
-    check(
-        shared_vocabulary == isolated_vocabulary,
-        "the data rules engine has the same vocabulary in both installation modes",
-    );
-    let vocabulary = isolated_vocabulary;
     println!(
         "vocabulary: triggers {} actions {}",
         vocabulary["triggers"],
@@ -488,6 +513,14 @@ async fn main() -> Result<()> {
     proof.stop().await;
     result?;
     finish()
+}
+
+async fn installation_mode(db: &Db, mode: InstallationMode) -> Result<()> {
+    db.get().await?.execute(
+        "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('installation.mode',0,'global',0,to_jsonb($1::text),false) ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=excluded.value",
+        &[&mode.as_str()],
+    ).await?;
+    Ok(())
 }
 
 fn finish() -> Result<()> {
@@ -546,6 +579,31 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         proof.approve(&one, r2, v2).await.is_err(),
         "tenant 1 cannot approve tenant 2's rule",
     );
+    for mode in InstallationMode::ALL {
+        installation_mode(&proof.db, mode).await?;
+        let urgent = proof
+            .open(&one, 1, "Mode parity urgent", "urgent", "1500.00")
+            .await?;
+        let normal = proof
+            .open(&one, 1, "Mode parity normal", "normal", "1500.00")
+            .await?;
+        proof.settled().await?;
+        check(
+            proof.case(urgent).await? == (Some("priority-desk".into()), 1, 0),
+            &format!(
+                "{}: the same approved rule routes an urgent 1500.00 case exactly once",
+                mode.label()
+            ),
+        );
+        check(
+            proof.case(normal).await? == (None, 0, 0),
+            &format!(
+                "{}: the same approved rule leaves a normal 1500.00 case unchanged",
+                mode.label()
+            ),
+        );
+    }
+    installation_mode(&proof.db, InstallationMode::Shared).await?;
     let limited_draft = urgent_rule("Condition budget proof", "priority-desk", "1000");
     let (limited_rule, limited_version) = proof.draft(&one, limited_draft.clone()).await?;
     proof.setting(&one, "rules.conditions", json!(1)).await?;

@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
-    bilibi_web::verify_composition()?;
+    bilibi_web::verify_descriptors()?;
     // What this program is made of needs no database (docs/versions.md).
     if std::env::args().nth(1).as_deref() == Some("status") {
         print!("{}", bilibi_web::status());
@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
     }
     let url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
     let db = pool(&url)?;
+    bilibi_web::verify_composition(&db).await?;
     match std::env::args().nth(1).as_deref() {
         Some("installation-check") => {
             let app = bilibi_web::App::new(db, "http://localhost")?;

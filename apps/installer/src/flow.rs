@@ -277,7 +277,8 @@ impl<'a> Run<'a> {
             // From the first moment: nothing may be entered while the
             // database is being decided on.
             if let Err(reason) = self.service.stop() {
-                self.log(&reason);
+                self.interrupted(&reason).await?;
+                return Ok(true);
             }
         }
         if self.failed_step().is_some() || self.step("switch_back").is_some() {
@@ -432,9 +433,6 @@ impl<'a> Run<'a> {
                 json!({"message": "Updating the database", "ledger_before": before}),
             )
             .await?;
-            if let Err(reason) = self.service.stop() {
-                self.log(&reason);
-            }
             match self.migrate(release, before).await {
                 Ok(detail) => self.done("migrate", detail).await?,
                 Err(reason) => {
@@ -842,6 +840,8 @@ impl<'a> Run<'a> {
     /// production seeds. `migrated` says whether the shape changed.
     async fn migrate(&self, release: u64, before: i64) -> Result<Value, String> {
         let program = self.layout.release(release).join("bilibi-web");
+        self.service.stop()?;
+        run_program(&program, "installation-check", MIGRATE_LIMIT_SECONDS)?;
         run_program(&program, "migrate", MIGRATE_LIMIT_SECONDS)?;
         run_program(&program, "seed-production", "600")?;
         let after = jobs::ledger_count(&*self.client)
@@ -861,9 +861,12 @@ impl<'a> Run<'a> {
                 self.layout.releases().display()
             ));
         }
-        if let Err(reason) = self.service.stop() {
-            self.log(&reason);
-        }
+        self.service.stop()?;
+        run_program(
+            &self.layout.release(release).join("bilibi-web"),
+            "installation-check",
+            MIGRATE_LIMIT_SECONDS,
+        )?;
         self.layout
             .point_current(release)
             .map_err(|error| format!("could not point current at release {release}: {error}"))?;
@@ -909,7 +912,8 @@ impl<'a> Run<'a> {
         }
         self.log(&label);
         if let Err(why) = self.service.stop() {
-            self.log(&why);
+            self.fail("switch_back", &why).await?;
+            return self.finish("failed", json!({"message": why})).await;
         }
         let mut restored = self.detail("switch_back")["restored"]
             .as_bool()
@@ -1099,7 +1103,10 @@ impl<'a> Run<'a> {
                 json!({"message": format!("Restoring the backup taken at {}", undone.since), "lost": lost}),
             )
             .await?;
-            let _ = self.service.stop();
+            if let Err(why) = self.service.stop() {
+                self.fail("restore", &why).await?;
+                return self.finish("failed", json!({"message": why})).await;
+            }
             let file = undone.original.clone().unwrap_or_default();
             match backup::restore(
                 &*self.client,

@@ -3,7 +3,7 @@
 //! database cases.
 use bilibi_base::session::{session_id, Sessions, PLACE_DATABASE_PATH_KEY};
 use bilibi_database::{pool, Db};
-use bilibi_module_registry::{verify_composition, Services};
+use bilibi_module_registry::Services;
 use mmdb_writer::Writer;
 use serde_json::json;
 use std::{error::Error, path::PathBuf, sync::Arc};
@@ -77,12 +77,7 @@ async fn main() -> Result<()> {
     bilibi_extensions::link();
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     let modules = bilibi_module_registry::discover()?;
-    verify_composition(
-        &modules,
-        bilibi_domains::MODULES,
-        bilibi_extensions::MODULES,
-        bilibi_extensions::CODE,
-    )?;
+    bilibi_web::verify_composition(&db).await?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     db.get().await?.execute(

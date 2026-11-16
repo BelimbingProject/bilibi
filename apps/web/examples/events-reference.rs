@@ -41,7 +41,7 @@ use bilibi_base::events::{
 use bilibi_base::queue::{Config, Executor, Queue};
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{
-    verify_composition, Catalog, Consumer, Contribution, Layer, Module, Provenance, Services,
+    Catalog, Consumer, Contribution, Layer, Module, Provenance, Services,
 };
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::{json, Value};
@@ -362,12 +362,7 @@ async fn main() -> Result<()> {
     bilibi_extensions::link();
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let modules = bilibi_module_registry::discover()?;
-    verify_composition(
-        &modules,
-        bilibi_domains::MODULES,
-        bilibi_extensions::MODULES,
-        bilibi_extensions::CODE,
-    )?;
+    bilibi_web::verify_composition(&db).await?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let mut services = Services::default();

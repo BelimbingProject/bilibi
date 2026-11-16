@@ -64,6 +64,10 @@ pub struct Composition {
     pub containers: Vec<Container>,
 }
 impl Composition {
+    pub fn validate_installation_mode(&self, mode: &str) -> crate::Result<()> {
+        validate_admission(mode, self.customer_extensions())
+    }
+
     /// `true` when this build is exactly the release `v<version>`.
     pub fn released(&self) -> bool {
         self.tag.is_some()
@@ -88,4 +92,23 @@ impl Container {
 }
 fn short(commit: &'static str) -> &'static str {
     commit.get(..12).unwrap_or(commit)
+}
+
+pub(super) fn validate_admission<'a>(
+    mode: &str,
+    customers: impl IntoIterator<Item = &'a str>,
+) -> crate::Result<()> {
+    if !matches!(mode, "shared" | "isolated") {
+        return Err(crate::RegistryError::Graph(
+            "Invalid installation.mode".into(),
+        ));
+    }
+    if mode == "shared" {
+        if let Some(id) = customers.into_iter().next() {
+            return Err(crate::RegistryError::Graph(format!(
+                "Extension {id} requires an isolated installation; use an isolated installation, or prepare a code-free release"
+            )));
+        }
+    }
+    Ok(())
 }

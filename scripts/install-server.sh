@@ -736,6 +736,10 @@ put_in_service() {
     dir=$(instance_dir "$instance")
     ensure_current_link "$instance"
     systemctl stop "$unit_name$instance"
+    if ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" installation-check; then
+        [[ -n $previous ]] && systemctl start "$unit_name$instance"
+        return 1
+    fi
     point_current "$instance" "$n"
     systemctl start "$unit_name$instance"
     if wait_healthy "$instance"; then
@@ -796,19 +800,15 @@ release() {
     fi
     rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
-    if [[ -n $previous ]] && ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" installation-check; then
-        fail "release $n does not satisfy this instance's installation policy" "prepare a code-free release before installing it on a Shared service"
-    fi
-    # The database must be up to date before the new program serves; nothing
-    # migrates on boot. The service pauses from here: Caddy shows the waiting page.
     [[ -n $previous ]] && systemctl stop "$unit_name$instance"
+    if ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" installation-check; then
+        [[ -n $previous ]] && systemctl start "$unit_name$instance"
+        fail "release $n does not satisfy this instance's installation policy" "use an isolated installation, or prepare a code-free release; a first release must be code-free"
+    fi
     if ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" migrate ||
         ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" seed-production; then
         [[ -n $previous ]] && systemctl start "$unit_name$instance"
         fail "release $n could not update the database" "see the output above; the previous release is back in service"
-    fi
-    if [[ -z $previous ]] && ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" installation-check; then
-        fail "release $n does not satisfy this instance's installation policy" "install a code-free first release; the installation owner can then choose Isolated installation before customer code is composed"
     fi
     put_in_service "$instance" "$n" "$previous"
     if [[ -z $previous ]]; then

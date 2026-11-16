@@ -25,16 +25,20 @@ bilibi_step_up::declare!(
 
 impl Instances {
     pub async fn installation_mode(&self) -> Result<InstallationMode> {
-        let client = self.db.get().await?;
-        InstallationMode::resolve(&self.settings, &**client).await
+        let mut client = self.db.get().await?;
+        let tx = client.transaction().await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            &[&"base/system.installation-mode"],
+        )
+        .await?;
+        InstallationMode::resolve(&self.settings, &*tx).await
     }
 
     /// Startup and installer policy: shared services never load customer code.
     pub async fn validate_composition(&self) -> Result<()> {
         let mode = self.installation_mode().await?;
-        if !mode.admits(&self.composition) {
-            return Err(Error::Invalid);
-        }
+        self.composition.validate_installation_mode(mode.as_str())?;
         Ok(())
     }
 
@@ -66,7 +70,11 @@ impl Instances {
         if mode == before {
             return Ok(());
         }
-        if !mode.admits(&self.composition) {
+        if self
+            .composition
+            .validate_installation_mode(mode.as_str())
+            .is_err()
+        {
             return Err(Error::Invalid);
         }
         self.step_up

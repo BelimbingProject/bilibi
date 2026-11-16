@@ -186,8 +186,25 @@ pub fn modules() -> Result<Vec<&'static bilibi_module_registry::Module>> {
 /// The product binary's boot check: the linked Domain and Extension descriptors
 /// must be exactly the mounted crates discovery found. Examples that link their
 /// own reference Extensions call `modules` instead.
-pub fn verify_composition() -> Result<()> {
+pub async fn verify_composition(db: &bilibi_database::Db) -> Result<()> {
+    verify_descriptors()?;
+    let app = App::new(db.clone(), "http://localhost")?;
+    let mode = app
+        .services
+        .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
+        .installation_mode()
+        .await?;
     Ok(bilibi_module_registry::verify_composition(
+        &modules()?,
+        bilibi_domains::MODULES,
+        bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
+        mode.as_str(),
+    )?)
+}
+
+pub fn verify_descriptors() -> Result<()> {
+    Ok(bilibi_module_registry::verify_descriptors(
         &modules()?,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,

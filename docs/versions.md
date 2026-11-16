@@ -187,6 +187,8 @@ cargo build --release --locked -p bilibi-web
 
 The pin is read at build time, so **pin before you build**. The build also checks the pin against the checkouts it compiles: when Git is available and the Platform or a Domain is at another commit than the pin recorded, the pin is reported stale instead of shown.
 
+Customer-code Extensions require a saved isolated installation at discovery, pinning and restoration: supply `DATABASE_URL` for `psql` to read `installation.mode`. No saved isolated policy means refusal; prepare a code-free release instead. Runtime composition verification reads the setting again, independently of build-time admission.
+
 **Platform-only setups can be pinned too.** With no Domains or Extensions mounted, `--pin` records the Platform revision, version and resolved `Cargo.lock`, with an empty `[containers]` table. On a checkout at that Platform revision, copy `.local/composition/` into place and run `python3 scripts/discover-modules.py --restore` to restore the lockfile. The same checks apply: a changed Platform revision, an altered pinned lockfile or a mounted container absent from the pin is refused.
 
 What you see in each state:

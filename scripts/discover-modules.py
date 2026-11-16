@@ -33,6 +33,7 @@ Cargo, so the gap shows as one plain line instead of a link or boot failure.
 """
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -67,6 +68,34 @@ def snake_id(value, what, where):
     if value in RESERVED_IDS:
         raise Refused(f'{where}: {what} {value!r} is reserved ({", ".join(sorted(RESERVED_IDS))})')
     return value
+
+
+def require_customer_admission(container):
+    hint = (f'Extension {container} requires an isolated installation; use an isolated '
+            'installation, or prepare a code-free release')
+    url = os.environ.get('DATABASE_URL')
+    if not url:
+        raise Refused(f'{hint}. Set DATABASE_URL to read its saved installation.mode')
+    env = dict(os.environ, PGDATABASE=url)
+
+    def query(sql):
+        try:
+            result = subprocess.run(['psql', '-X', '-w', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', sql],
+                                    env=env, capture_output=True, text=True)
+        except FileNotFoundError:
+            raise Refused('psql is required to read installation.mode') from None
+        if result.returncode:
+            raise Refused(f'{hint}. Could not read installation.mode')
+        return result.stdout.strip()
+
+    exists = query("SELECT to_regclass('base_settings') IS NOT NULL")
+    mode = 'shared'
+    if exists == 't':
+        mode = query("SELECT COALESCE((SELECT value #>> '{}' FROM base_settings "
+                     "WHERE key='installation.mode' AND tenant_id=0 "
+                     "AND scope_type='global' AND scope_id=0), 'shared')")
+    if mode != 'isolated':
+        raise Refused(f'{hint}. Saved installation.mode is {mode!r}')
 
 
 def container_modules(root, layer):
@@ -105,6 +134,8 @@ def container_modules(root, layer):
             code = declared.get('code')
             if code not in {'reviewed', 'customer'}:
                 raise Refused(f'{where}/{CONTAINER_FILE}: code must be "reviewed" or "customer"')
+            if code == 'customer':
+                require_customer_admission(container)
         for manifest in sorted(folder.glob('*/Cargo.toml')):
             module = manifest.parent
             if module.name.startswith('.') or module.name == 'fixtures':
@@ -407,6 +438,9 @@ def require_resolved_lock(root):
 
 def pin(root, modules, files):
     """Record the Platform and container HEADs and the resolved Cargo.lock under .local/composition."""
+    for container, code in modules['container_code'].items():
+        if code == 'customer':
+            require_customer_admission(container)
     changed = [line[3:] for line in git(root, 'status', '--porcelain', '--untracked-files=no').splitlines()]
     composition_files = {str(path.relative_to(root)) for path in files} | {'Cargo.lock'}
     unexpected = sorted(set(changed) - composition_files)

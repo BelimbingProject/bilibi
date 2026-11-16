@@ -6,16 +6,11 @@
 
 Renaming a module needs no declaration: the migration ledger accepts a changed owner when the SQL is unchanged (`apps/base/database/README.md`, "Renaming a module").
 
-Module IDs are `base/<module>` and `core/<module>` for the Platform layers, and
-`<name>/<module>`, where `<name>` is the Domain or Extension (both snake_case, `<name>` not `base`, `core`, `web`
-or `src`) for Domains and Extensions, matching the mounted folders; a mounted
-module names its migrations `<name>-<module>-NNN-<slug>`. The product
-binary calls `verify_composition` with the generated `bilibi_domains::MODULES`
-and `bilibi_extensions::MODULES` lists before any command, so a mounted crate
-whose descriptor is missing, extra or wrongly layered refuses to boot. Examples
-that link their own reference Extension descriptors skip that check.
+Module IDs are `base/<module>` and `core/<module>` for the Platform layers, and `<name>/<module>`, where `<name>` is the Domain or Extension (both snake_case, `<name>` not `base`, `core`, `web` or `src`) for Domains and Extensions, matching the mounted folders; a mounted module names its migrations `<name>-<module>-NNN-<slug>`. The product binary calls `verify_composition` with the generated `bilibi_domains::MODULES` and `bilibi_extensions::MODULES` lists and the saved installation mode before database commands, so a mounted crate whose descriptor is missing, extra or wrongly layered refuses to boot. The database-free `status` command uses `verify_descriptors` for structural checks only. Examples that link their own reference Extension descriptors skip that check.
 
 `Composition` tells a program what it is made of: the Platform version, its commit and release tag, and each mounted Domain or Extension with its commit and version. Every Extension also carries the `reviewed` or `customer` code declaration from its root `bilibi.container.toml`; `customer_extensions()` is the one admission-policy input. The executable host builds it and supplies it as `bootstrap.composition`; consumers use that value.
+
+Callers upgrading from declaration-only verification pass the saved installation mode as the final argument to `verify_composition`; the Web wrapper is now `verify_composition(&db).await`. `verify_descriptors` is only the database-free structural check for release metadata. `Composition::validate_installation_mode` is the admission check used by System startup validation and the protected mode mutation.
 
 The registry owns only the stable types, so a Git commit does not rebuild every registry consumer. Pin compilation and drift checks belong to `apps/web/build.rs` and `apps/web/src/composition.rs`. The scheme is `docs/versions.md`.
 

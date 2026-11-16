@@ -50,13 +50,17 @@ impl InstallationMode {
             Self::Isolated => "Isolated installation",
         }
     }
-    pub fn admits(self, composition: &bilibi_module_registry::Composition) -> bool {
-        self == Self::Isolated || composition.customer_extensions().is_empty()
-    }
     pub async fn resolve(
         settings: &Settings,
         client: &(impl GenericClient + Sync),
     ) -> bilibi_database::Result<Self> {
+        if !client
+            .query_one("SELECT to_regclass('base_settings') IS NOT NULL", &[])
+            .await?
+            .get::<_, bool>(0)
+        {
+            return Ok(Self::Shared);
+        }
         settings
             .get_global(client, INSTALLATION_MODE_KEY)
             .await?

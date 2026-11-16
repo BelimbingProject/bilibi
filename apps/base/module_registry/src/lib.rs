@@ -180,6 +180,23 @@ pub fn verify_composition(
     domains: &[(&str, &str)],
     extensions: &[(&str, &str)],
     extension_code: &[(&str, &str)],
+    installation_mode: &str,
+) -> Result<()> {
+    verify_descriptors(modules, domains, extensions, extension_code)?;
+    composition::validate_admission(
+        installation_mode,
+        extension_code
+            .iter()
+            .filter(|(_, code)| *code == "customer")
+            .map(|(id, _)| *id),
+    )
+}
+
+pub fn verify_descriptors(
+    modules: &[&'static Module],
+    domains: &[(&str, &str)],
+    extensions: &[(&str, &str)],
+    extension_code: &[(&str, &str)],
 ) -> Result<()> {
     let expected = |layer| match layer {
         Layer::Domains => domains,
