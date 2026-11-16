@@ -76,12 +76,11 @@ def require_customer_admission(container):
     url = os.environ.get('DATABASE_URL')
     if not url:
         raise Refused(f'{hint}. Set DATABASE_URL to read its saved installation.mode')
-    env = dict(os.environ, PGDATABASE=url)
 
     def query(sql):
         try:
-            result = subprocess.run(['psql', '-X', '-w', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', sql],
-                                    env=env, capture_output=True, text=True)
+            result = subprocess.run(['psql', '-d', url, '-X', '-w', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', sql],
+                                    capture_output=True, text=True)
         except FileNotFoundError:
             raise Refused('psql is required to read installation.mode') from None
         if result.returncode:

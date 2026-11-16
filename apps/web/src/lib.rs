@@ -187,15 +187,28 @@ pub fn modules() -> Result<Vec<&'static bilibi_module_registry::Module>> {
 /// must be exactly the mounted crates discovery found. Examples that link their
 /// own reference Extensions call `modules` instead.
 pub async fn verify_composition(db: &bilibi_database::Db) -> Result<()> {
+    use bilibi_base::settings::{Definitions, Encryption, Settings};
+
     verify_descriptors()?;
-    let app = App::new(db.clone(), "http://localhost")?;
-    let mode = app
-        .services
-        .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
-        .installation_mode()
-        .await?;
+    let modules = modules()?;
+    // Preflight reads only a non-secret global setting. Installing application
+    // services here would bind process-wide services again during dispatch.
+    let catalog = bilibi_module_registry::Catalog::discover(&modules)?;
+    let settings = Settings::new(
+        Definitions::from_catalog(&catalog)?,
+        Encryption::from_hex(None),
+        Arc::default(),
+    );
+    let mut client = db.get().await?;
+    let tx = client.transaction().await?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))",
+        &[&"base/system.installation-mode"],
+    )
+    .await?;
+    let mode = bilibi_base::system::InstallationMode::resolve(&settings, &*tx).await?;
     Ok(bilibi_module_registry::verify_composition(
-        &modules()?,
+        &modules,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,
         bilibi_extensions::CODE,
