@@ -51,9 +51,7 @@ pub(super) struct Detail {
     revealed: BTreeMap<String, (String, i64)>,
     /// The page is framed in a workspace tile.
     framed: bool,
-    /// Each record field's picker (`cf_<key>`): the text typed so far and
-    /// the hits it found.
-    picking: BTreeMap<String, (String, Vec<bilibi_ui::PickerHit>)>,
+    picking: BTreeMap<String, String>,
 }
 impl Detail {
     pub fn new(pages: Pages, id: PersonId, framed: bool) -> Self {
@@ -331,10 +329,15 @@ impl Detail {
             field.id = format!("person-field-{}", name.replace('_', "-"));
             field.save_event = "save_custom_field".into();
             field = field.allow_empty();
-            let picking = self.picking.get(&name);
+            let query = self.picking.get(&name).map_or("", String::as_str);
+            let hits = if editable && definition.kind == bilibi_custom_fields::Kind::Reference {
+                super::custom::hits(scope, definition, query).await?
+            } else {
+                Vec::new()
+            };
             let picking = editable.then(|| super::custom::Picking {
-                query: picking.map_or("", |(query, _)| query.as_str()),
-                hits: picking.map_or(&[], |(_, hits)| hits.as_slice()),
+                query,
+                hits: &hits,
                 errors: match self.statuses.get(&name) {
                     CommitStatus::Error(message) => vec![message],
                     _ => Vec::new(),
@@ -674,12 +677,9 @@ impl Detail {
                     let Some(name) = posted.strip_suffix("_search") else {
                         continue;
                     };
-                    let definition = reference_field(&definitions, name)?;
+                    reference_field(&definitions, name)?;
                     let query: String = query.chars().take(100).collect();
-                    if self.picking.get(name).map(|(typed, _)| typed) != Some(&query) {
-                        let hits = super::custom::hits(scope, definition, &query).await?;
-                        self.picking.insert(name.to_owned(), (query, hits));
-                    }
+                    self.picking.insert(name.to_owned(), query);
                 }
             }
             name @ (super::custom::PICK_EVENT | super::custom::CLEAR_EVENT) => {
@@ -825,9 +825,6 @@ impl Detail {
 impl LiveState<Scope, Error> for Detail {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            for (_, hits) in self.picking.values_mut() {
-                hits.clear();
-            }
             if let LiveInput::Event(value) = request.input {
                 self.handle(request.scope, request.credential, value)
                     .await?;

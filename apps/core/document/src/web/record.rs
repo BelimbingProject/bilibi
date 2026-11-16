@@ -20,7 +20,7 @@ use bilibi_ui::{
     ActionLink, BackLink, BuiltinColumn, Button, ButtonVariant, Card, Choice, CommitStates,
     CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, FlexRow, FlexTable, Form, Header,
     Html, IconButton, InlineChoice, InlineEdit, InlineField, InputKind, ListColumns, NO_FLASH,
-    PageVariant, PickerHit, RecordPicker, SectionHeading, StatusKind, TableEmpty, page::*, params,
+    PageVariant, RecordPicker, SectionHeading, StatusKind, TableEmpty, page::*, params,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -74,9 +74,7 @@ pub(crate) struct Detail {
     hits: Vec<Hit>,
     flash: Option<(StatusKind, String)>,
     customers: Sharing,
-    /// Each record custom field's picker: the typed text and its hits, by
-    /// control name (`cf_<key>`).
-    references: HashMap<String, (String, Vec<PickerHit>)>,
+    references: HashMap<String, String>,
 }
 
 /// The form a record custom field's picker posts its search in.
@@ -343,16 +341,7 @@ impl Detail {
             return Err(Error::Invalid);
         }
         let query: String = query.chars().take(100).collect();
-        let hits = if query.trim().is_empty() {
-            Vec::new()
-        } else {
-            self.pages
-                .documents
-                .custom_values()
-                .reference_hits(scope, &definition, &query)
-                .await?
-        };
-        self.references.insert(name.to_owned(), (query, hits));
+        self.references.insert(name.to_owned(), query);
         Ok(())
     }
 
@@ -990,12 +979,16 @@ impl Detail {
                         editor: render(editor)?,
                     })?
                 }
-                (Kind::Reference, _) => self.custom_reference(
-                    definition,
-                    &name,
-                    named.get(definition.key.as_str()),
-                    editable,
-                )?,
+                (Kind::Reference, _) => {
+                    self.custom_reference(
+                        scope,
+                        definition,
+                        &name,
+                        named.get(definition.key.as_str()),
+                        editable,
+                    )
+                    .await?
+                }
                 (Kind::Choice, Some(list)) => {
                     let shown = self.pages.label(scope, list, Some(&value)).await?;
                     let editor = bilibi_ui::Combobox::new(format!("{name}-input"), &name)
@@ -1056,8 +1049,9 @@ impl Detail {
     /// A record custom field: its pill, and for an editor the picker that
     /// saves a pick at once (`pick_custom_reference`) or clears it (`clear_custom_reference`,
     /// the picker's Remove). A refusal shows under the picker.
-    fn custom_reference(
+    async fn custom_reference(
         &self,
+        scope: &Scope,
         definition: &bilibi_custom_fields::Definition,
         name: &str,
         held: Option<&bilibi_records::Resolved>,
@@ -1075,12 +1069,16 @@ impl Detail {
             CommitStatus::Error(message) => vec![message],
             _ => Vec::new(),
         };
-        let (query, hits) = self
-            .references
-            .get(name)
-            .map_or(("", &[][..]), |(query, hits)| {
-                (query.as_str(), hits.as_slice())
-            });
+        let query = self.references.get(name).map_or("", String::as_str);
+        let hits = if query.trim().is_empty() {
+            Vec::new()
+        } else {
+            self.pages
+                .documents
+                .custom_values()
+                .reference_hits(scope, definition, query)
+                .await?
+        };
         let selected = held
             .zip(pill)
             .map(|(resolved, pill)| (format!("{}:{}", resolved.reference.kind, resolved.id), pill));
@@ -1091,7 +1089,7 @@ impl Detail {
                 name,
                 &definition.label,
                 query,
-                hits,
+                &hits,
                 selected
                     .as_ref()
                     .map(|(value, pill)| (value.as_str(), pill.clone())),
@@ -1866,9 +1864,6 @@ impl Detail {
 impl LiveState<Scope, Error> for Detail {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            for (_, hits) in self.references.values_mut() {
-                hits.clear();
-            }
             if let LiveInput::Event(value) = request.input {
                 if let Some(body) = self
                     .handle(request.scope, request.credential, value)

@@ -71,12 +71,6 @@ impl Draft {
             .retain(|(name, _)| !name.starts_with("cf_") || active.contains(name));
     }
 
-    pub fn clear_hits(&mut self) {
-        for picking in self.picking.values_mut() {
-            picking.hits.clear();
-        }
-    }
-
     pub fn new() -> Self {
         Self {
             input: PersonInput {
@@ -215,7 +209,6 @@ impl Draft {
             .unwrap_or(false);
         self.reconcile(&super::custom::active(pages, scope).await?);
         self.read(value)?;
-        self.search(pages, scope).await?;
         if !create && self.input.name != previous_name && !self.code_edited {
             let client = pages.db.get().await?;
             let suggestion = if self.input.name.trim().is_empty() {
@@ -318,20 +311,13 @@ impl Draft {
         }
     }
 
-    /// Finds the records each record field's typed text names (only when
-    /// it changed), among those the reader may select.
-    async fn search(&mut self, pages: &Pages, scope: &Scope) -> Result<()> {
-        let changed: Vec<String> = self
-            .picking
-            .iter()
-            .filter(|(_, picking)| picking.typed != picking.searched)
-            .map(|(name, _)| name.clone())
-            .collect();
-        if changed.is_empty() {
-            return Ok(());
-        }
-        let definitions = super::custom::active(pages, scope).await?;
-        for name in changed {
+    async fn search(
+        &mut self,
+        definitions: &[bilibi_custom_fields::Definition],
+        scope: &Scope,
+    ) -> Result<()> {
+        let names: Vec<String> = self.picking.keys().cloned().collect();
+        for name in names {
             let Some(definition) = definitions
                 .iter()
                 .find(|d| d.kind == Kind::Reference && crate::custom::name(&d.key) == name)
@@ -343,7 +329,6 @@ impl Draft {
                 continue;
             };
             picking.hits = super::custom::hits(scope, definition, &picking.typed).await?;
-            picking.searched = picking.typed.clone();
         }
         Ok(())
     }
@@ -391,6 +376,7 @@ impl Draft {
     pub async fn form(&mut self, pages: &Pages, scope: &Scope) -> Result<Html> {
         let definitions = super::custom::active(pages, scope).await?;
         self.reconcile(&definitions);
+        self.search(&definitions, scope).await?;
         let client = pages.db.get().await?;
         let restricted = bilibi_authz::restrictions_for(&**client, scope, "persons").await?;
         drop(client);
@@ -606,9 +592,7 @@ fn sentence(label: &str, message: &str) -> String {
 /// One record field's picker in the dialog.
 #[derive(Default)]
 struct Picking {
-    /// The text typed so far, and the text the hits were found for.
     typed: String,
-    searched: String,
     hits: Vec<bilibi_ui::PickerHit>,
     /// The record chosen, named with the reader's access.
     chosen: Option<bilibi_records::Resolved>,

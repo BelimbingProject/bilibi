@@ -517,12 +517,7 @@ impl CompanyPage {
     }
 
     /// Companies whose name contains `query`, without this company itself.
-    async fn search_parents(&mut self, scope: &Scope, query: &str) -> Result<()> {
-        let query: String = query.chars().take(100).collect();
-        if query == self.parent_query {
-            return Ok(());
-        }
-        self.parent_query = query;
+    async fn search_parents(&mut self, scope: &Scope) -> Result<()> {
         self.parent_hits = if self.parent_query.trim().is_empty() {
             Vec::new()
         } else {
@@ -622,10 +617,7 @@ impl CompanyPage {
             .into_iter()
             .find(|definition| definition.key == key))
     }
-    /// Searches each record field whose typed text changed (posted as
-    /// `custom_reference_search[cf_<key>]`), among the records of its kind
-    /// the reader may select.
-    async fn search_references(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+    async fn read_reference_queries(&mut self, scope: &Scope, value: &Value) -> Result<()> {
         let definitions = {
             let client = self.db.get().await?;
             crate::field_contributions::custom_fields()?
@@ -648,18 +640,7 @@ impl CompanyPage {
                 continue;
             };
             let query: String = query.chars().take(100).collect();
-            if self.custom_pickers.queries.get(&name) == Some(&query) {
-                continue;
-            }
-            let hits = if query.trim().is_empty() {
-                Vec::new()
-            } else {
-                crate::field_contributions::custom_fields()?
-                    .reference_hits(scope, definition, &query)
-                    .await?
-            };
             self.custom_pickers.queries.insert(name.to_owned(), query);
-            self.custom_pickers.hits.insert(name.to_owned(), hits);
         }
         Ok(())
     }
@@ -815,7 +796,7 @@ impl CompanyPage {
     }
     async fn draw(&mut self, scope: &Scope) -> Result<LiveBody> {
         self.columns.refresh_views(scope).await?;
-        if self.operation == "create" {
+        if self.operation != "list" {
             let definitions = {
                 let client = self.db.get().await?;
                 crate::field_contributions::custom_fields()?
@@ -826,7 +807,28 @@ impl CompanyPage {
                     )
                     .await?
             };
-            self.reconcile_custom(&definitions);
+            if self.operation == "create" {
+                self.reconcile_custom(&definitions);
+            }
+            self.custom_pickers.hits.clear();
+            for definition in definitions
+                .iter()
+                .filter(|d| d.kind == bilibi_custom_fields::Kind::Reference)
+            {
+                let name = format!("cf_{}", definition.key);
+                if let Some(query) = self
+                    .custom_pickers
+                    .queries
+                    .get(&name)
+                    .filter(|q| !q.trim().is_empty())
+                {
+                    let hits = crate::field_contributions::custom_fields()?
+                        .reference_hits(scope, definition, query)
+                        .await?;
+                    self.custom_pickers.hits.insert(name, hits);
+                }
+            }
+            self.search_parents(scope).await?;
         }
         let mut chosen: Vec<_> = self.custom_pickers.chosen.values_mut().collect();
         for chunk in chosen.chunks_mut(100) {
@@ -1247,7 +1249,7 @@ impl CompanyPage {
                     .await?;
             }
             "custom_reference_search" if self.operation == "detail" => {
-                self.search_references(scope, value).await?;
+                self.read_reference_queries(scope, value).await?;
             }
             views::CUSTOM_PICK if matches!(self.operation, "detail" | "create") => {
                 let name = get("key").to_owned();
@@ -1433,7 +1435,7 @@ impl CompanyPage {
                 )
                 .map_err(Error::refused)?;
                 let query = fields.get("parent_search").cloned().unwrap_or_default();
-                self.search_parents(scope, &query).await?;
+                self.parent_query = query.chars().take(100).collect();
             }
             "pick_parent" if matches!(self.operation, "detail" | "create") => {
                 let id: i64 = get("record")
@@ -1492,8 +1494,8 @@ impl CompanyPage {
                     .unwrap_or_default();
                 self.form = values;
                 self.errors = views::new_company(&self.form).4;
-                self.search_parents(scope, &query).await?;
-                self.search_references(scope, value).await?;
+                self.parent_query = query.chars().take(100).collect();
+                self.read_reference_queries(scope, value).await?;
                 if name != old_name && !self.code_edited {
                     let client = self.db.get().await?;
                     bilibi_authz::authorize_key(&**client, scope, crate::CREATE).await?;
@@ -1617,8 +1619,6 @@ impl CompanyPage {
 impl LiveState<Scope, Error> for CompanyPage {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            self.custom_pickers.hits.clear();
-            self.parent_hits.clear();
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {

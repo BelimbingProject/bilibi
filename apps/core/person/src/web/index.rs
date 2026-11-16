@@ -809,9 +809,6 @@ impl Index {
 impl LiveState<Scope, Error> for Index {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            if let Some(draft) = &mut self.draft {
-                draft.clear_hits();
-            }
             // A refused Export stays shown until the person moves the list
             // or acts again; a background refresh keeps it.
             if !matches!(request.input, LiveInput::Refresh) {

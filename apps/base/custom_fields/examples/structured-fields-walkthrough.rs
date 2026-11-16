@@ -365,6 +365,41 @@ async fn main() -> Result<(), Failure> {
             }),
         );
     }
+    let empty = std::collections::HashMap::new();
+    let mut draft = pages
+        .0
+        .mount(bilibi_ui::page::PageRequest {
+            operation: "create",
+            scope: Some(&manager.scope),
+            path: &empty,
+            query: &empty,
+            body: &[],
+            framed: false,
+        })
+        .await?
+        .ok_or("company create did not mount")?;
+    let search = json!({"type": "validate_company", "custom_reference_search[cf_partner]": "Company 001", "parent[parent_search]": "Company 002"});
+    let searched = draft
+        .update(bilibi_ui::page::LiveRequest {
+            scope: &manager.scope,
+            credential: &manager.token,
+            input: bilibi_ui::page::LiveInput::Event(&search),
+        })
+        .await?;
+    let refreshed = draft
+        .update(bilibi_ui::page::LiveRequest {
+            scope: &manager.scope,
+            credential: &manager.token,
+            input: bilibi_ui::page::LiveInput::Refresh,
+        })
+        .await?;
+    for record in ["company:1", "company:2"] {
+        let hit = format!("name=\"record\" value=\"{record}\"");
+        proof.check(
+            &format!("picker {record} survives refresh with fresh access and one connection"),
+            searched.html.contains(&hit) && refreshed.html.contains(&hit),
+        );
+    }
     db.resize(capacity);
 
     println!("-- fixture definitions retained after a pick-list module is removed");
@@ -614,6 +649,60 @@ async fn main() -> Result<(), Failure> {
             .is_some_and(|lines| !lines.is_empty())
             && summary["total"][1][0] == 1,
     );
+
+    for (partner, count) in [(1, 2), (2, 3)] {
+        for n in 0..count {
+            let created = admin
+                .plan(
+                    "core.person.create",
+                    json!({
+                        "name": format!("Chart partner {partner} {n}"), "kind": "human",
+                        "custom": [{"key": "partner", "value": partner.to_string()}],
+                    }),
+                )
+                .await?;
+            proof.check(
+                "chart fixture contact is created",
+                result(&created)["id"].is_number(),
+            );
+        }
+    }
+    let report_pages = app
+        .services
+        .get::<bilibi_ui::page::PageService<Scope, bilibi_database::Error>>("base/reports.pages")?;
+    for columns in [["cf_partner", "kind"], ["kind", "cf_partner"]] {
+        let grouped = manager.plan("base.reports.create", json!({
+            "name": "Restricted partner chart", "record_type": "persons", "kind": "summary",
+            "definition": { "groupings": [{"column": columns[0]}, {"column": columns[1]}],
+                "filters": [{"column": "name", "test": "contains", "value": "Chart partner"}],
+                "chart": "bar" }
+        })).await?;
+        let id = result(&grouped)["id"].as_i64().ok_or("no partner chart")?;
+        let path = std::collections::HashMap::from([("id".into(), id.to_string())]);
+        let page = report_pages
+            .0
+            .render(bilibi_ui::page::PageRequest {
+                operation: "show",
+                scope: Some(&manager.scope),
+                path: &path,
+                query: &empty,
+                body: &[],
+                framed: false,
+            })
+            .await?;
+        let figure = page
+            .html
+            .split("<figure")
+            .nth(1)
+            .and_then(|s| s.split("</figure>").next())
+            .unwrap_or("");
+        proof.check(
+            &format!("chart keeps both unnamed groups on the {} axis", columns[0]),
+            figure.matches("<rect ").count() == 2
+                && figure.contains(": 2</title>")
+                && figure.contains(": 3</title>"),
+        );
+    }
 
     println!("-- global search");
     proof.check(
