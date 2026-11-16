@@ -101,7 +101,9 @@ async fn main() -> Result<(), Failure> {
         .guard(&app.user.login("admin@example.test", password).await?.token)
         .await?;
     let mut proof = Proof::default();
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     println!("-- setup");
     // Fixture setup: the fixture tenant gets its pick-lists as a new tenant

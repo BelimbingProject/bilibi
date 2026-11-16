@@ -306,7 +306,9 @@ async fn main() -> Result<()> {
     );
     let swept = media
         .cleanup_drafts(
-            &mut *db.get().await?,
+            &mut *db
+                .get_detached("the walkthrough's own checking connection")
+                .await?,
             tenant,
             Duration::from_secs(24 * 3600),
         )

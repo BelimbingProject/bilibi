@@ -131,7 +131,7 @@ pub async fn execute_readonly_with_options(
         // when it ends: what a read-only transaction still allows to outlive
         // it (a session advisory lock, a session setting) dies with that
         // connection instead of reaching the next pooled caller.
-        let mut client = deadpool_postgres::Object::take(db.get().await?);
+        let mut client = bilibi_database::Connection::take(db.get().await?);
         run(&mut client, scope, &request, options).await
     }
     .await;

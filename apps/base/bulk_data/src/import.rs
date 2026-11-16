@@ -481,7 +481,7 @@ impl BulkData {
         if scope.principal().is_some() {
             return Err(Error::Forbidden);
         }
-        let mut object = self.db.get().await?;
+        let mut object = self.db.get_detached(crate::JOB_CONNECTION).await?;
         let client: &mut tokio_postgres::Client = &mut object;
         let run = store::load(&*client, &scope, id, false).await?;
         if !matches!(run.state, RunState::Previewing | RunState::Running)

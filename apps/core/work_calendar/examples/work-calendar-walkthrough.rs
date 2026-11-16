@@ -279,7 +279,9 @@ async fn main() -> Result<(), Failure> {
             )
             .await,
     );
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     show(
         "national set",
         admin

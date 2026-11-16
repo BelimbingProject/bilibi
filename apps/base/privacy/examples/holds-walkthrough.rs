@@ -113,7 +113,9 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let privacy = services.get::<Privacy>(SERVICE)?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     if std::env::args().nth(1).as_deref() == Some("report") {
         println!("== separate-process report: holds, events and audit");
         return report(&client).await;

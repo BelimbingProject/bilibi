@@ -136,7 +136,9 @@ async fn main() -> Result<()> {
         );
     }
     let (abandoned, attached) = (stored[0].artifact_id.clone(), stored[1].artifact_id.clone());
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = app
         .mutations
         .begin(&mut client, scope.mutation_context("core.document.create"))

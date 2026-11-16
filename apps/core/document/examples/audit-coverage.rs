@@ -414,7 +414,9 @@ async fn main() -> Result<()> {
         ),
     ];
     for (label, input) in &refusals {
-        let client = db.get().await?;
+        let client = db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         if let Ok(grant) = documents
             .preview_share(&**client, &delegate, a.id, input)
             .await
@@ -450,7 +452,9 @@ async fn main() -> Result<()> {
         .iter()
         .find(|grant| grant.user_id == scope.user())
         .ok_or("the creator's grant is gone")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     if documents
         .preview_unshare(&**client, &delegate, a.id, creator.id)
         .await

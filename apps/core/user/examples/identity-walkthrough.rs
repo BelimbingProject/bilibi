@@ -79,7 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let boundary = app
             .services
             .get::<bilibi_database::MutationBoundary>("base/database.mutations")?;
-        let mut client = db.get().await?;
+        let mut client = db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         let mut tx = boundary
             .begin(
                 &mut client,
@@ -307,7 +309,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get();
     users.set_desk(&manager, 1, person, true).await?;
     users.set_desk(&manager, 2, manager_person, true).await?;
-    let sql = db.get().await?;
+    let sql = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let chosen = authentication
         .authenticate_session(
             &**sql,

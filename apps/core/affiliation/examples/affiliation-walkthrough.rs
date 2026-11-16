@@ -59,7 +59,9 @@ async fn main() -> Result<(), Failure> {
     let staff = app.security.guard(&staff_login.token).await?;
     let deskless = app.security.guard(&deskless_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let before: i64 = client
         .query_one("SELECT count(*) FROM users", &[])

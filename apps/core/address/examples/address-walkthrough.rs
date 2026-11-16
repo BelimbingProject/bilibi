@@ -75,7 +75,9 @@ async fn main() -> Result<(), Failure> {
         .security
         .guard(&login("manager@other.example.test").await?.token)
         .await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     show(
         "Geonames sample present",

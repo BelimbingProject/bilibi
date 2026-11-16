@@ -273,7 +273,7 @@ async fn answer(
     id: i64,
     store: &str,
 ) -> Result<()> {
-    let mut client = privacy.db.get().await?;
+    let mut client = privacy.db.get_detached(JOB_CONNECTION).await?;
     let mut request = requests::load(&**client, scope.tenant(), id, false).await?;
     if request.status != "running" {
         return Ok(());
@@ -741,12 +741,20 @@ async fn finish_failed(
     tx.commit().await
 }
 
+/// Why a privacy job takes its working connection detached (`Db::get_detached`).
+pub(crate) const JOB_CONNECTION: &str = "a privacy job keeps this connection for its whole run while each step records on its own; one per Queue slot";
+
 /// Holds the request's finish guard on its own connection; dropping it
 /// without `release` closes the connection, which ends the guard.
-struct FinishGuard(Option<deadpool_postgres::Object>, i64);
+struct FinishGuard(Option<bilibi_database::Connection>, i64);
 impl FinishGuard {
     async fn take(db: &Db, id: i64) -> Result<Self> {
-        let client = db.get().await?;
+        let client = db
+            .get_detached(
+                "holds the request's finish guard, a session lock, while the finish reads and \
+                 writes on other connections; one per request being finished",
+            )
+            .await?;
         let taken: bool = client
             .query_one(
                 "SELECT pg_try_advisory_lock($1,$2::bigint::int)",
@@ -774,7 +782,7 @@ impl FinishGuard {
 impl Drop for FinishGuard {
     fn drop(&mut self) {
         if let Some(client) = self.0.take() {
-            drop(deadpool_postgres::Object::take(client));
+            drop(bilibi_database::Connection::take(client));
         }
     }
 }

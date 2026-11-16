@@ -50,7 +50,9 @@ async fn main() -> Result<(), Failure> {
         .await?;
     let manager = login(&app, "manager@example.test").await?;
     let registry = app.services.get::<Registry>("base/agent_api.registry")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     // A large tenant: explicit ids far above the fixture's, so the identity
     // sequence and the fixture rows never collide.

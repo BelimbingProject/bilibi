@@ -136,65 +136,81 @@ enum Write {
     Archive,
     Restore,
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let bound = bound()?;
+        let fields = &bound.fields;
+        let record_type = input["record_type"].as_str().unwrap_or_default();
+        let key = input["key"].as_str();
+        let value = match self {
+            Self::Define => {
+                let field = checked(
+                    fields
+                        .preview_define(client, scope, &new_field(input))
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Add the {} field “{}” ({}) to {}", field.kind, field.label, field.key, field.record_type),"field":field})
+            }
+            Self::Update => {
+                let key = key.ok_or(Error::Invalid)?;
+                let (before, after) = checked(
+                    fields
+                        .preview_update(client, scope, record_type, key, &update(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Change {key} on {record_type}; its key and type stay"),"before":before,"after":after})
+            }
+            Self::Archive => {
+                let key = key.ok_or(Error::Invalid)?;
+                let before = checked(
+                    fields
+                        .preview_archive(client, scope, record_type, key, version(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Archive {key} on {record_type}; records keep its values"),"before":before})
+            }
+            Self::Restore => {
+                let key = key.ok_or(Error::Invalid)?;
+                let before = checked(
+                    fields
+                        .preview_restore(client, scope, record_type, key, version(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({"summary":format!("Restore {key} on {record_type}"),"before":before})
+            }
+        };
+        Ok(value.into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "base/custom_fields"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let bound = bound()?;
-            let fields = &bound.fields;
-            let client = bound.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let record_type = input["record_type"].as_str().unwrap_or_default();
-            let key = input["key"].as_str();
-            let value = match self {
-                Self::Define => {
-                    let field = checked(
-                        fields
-                            .preview_define(client, scope, &new_field(input))
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Add the {} field “{}” ({}) to {}", field.kind, field.label, field.key, field.record_type),"field":field})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::Update => {
-                    let key = key.ok_or(Error::Invalid)?;
-                    let (before, after) = checked(
-                        fields
-                            .preview_update(client, scope, record_type, key, &update(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Change {key} on {record_type}; its key and type stay"),"before":before,"after":after})
-                }
-                Self::Archive => {
-                    let key = key.ok_or(Error::Invalid)?;
-                    let before = checked(
-                        fields
-                            .preview_archive(client, scope, record_type, key, version(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Archive {key} on {record_type}; records keep its values"),"before":before})
-                }
-                Self::Restore => {
-                    let key = key.ok_or(Error::Invalid)?;
-                    let before = checked(
-                        fields
-                            .preview_restore(client, scope, record_type, key, version(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({"summary":format!("Restore {key} on {record_type}"),"before":before})
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(

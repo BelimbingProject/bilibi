@@ -146,7 +146,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         services.get::<bilibi_core::company::CompanyService>(bilibi_core::company::SERVICE)?;
     let users = services.get::<UserService>("core/user.accounts")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Approving a connection ties it to a real browser session, so give each
     // stand-in login the session row its sign-in would have written.
     for (tenant, user) in [(1_i64, 1_i64), (1, 3), (1, 4), (1, 6), (2, 5)] {

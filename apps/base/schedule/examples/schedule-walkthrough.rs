@@ -469,7 +469,9 @@ async fn jobs(db: &Db) -> Result<()> {
 
 async fn prepare(services: &Services, db: &Db) -> Result<()> {
     let (schedule, admin) = admin(services, db).await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.batch_execute("INSERT INTO platform_operator(tenant_id) VALUES(1) ON CONFLICT DO NOTHING; DELETE FROM base_schedule_occurrences; DELETE FROM base_schedule_runs; DELETE FROM base_schedule_suppressions; DELETE FROM base_queue_jobs WHERE worker_id IN ('schedule/walkthrough','schedule/walkthrough-tenant','base/schedule-fan-out')").await?;
     for key in KEYS {
         schedule.review(&mut client, &admin, key, true).await?;
@@ -541,7 +543,9 @@ async fn overlap(services: &Services, db: &Db) -> Result<()> {
     poll(services, db, next).await?;
     poll(services, db, next).await?;
     println!("-- the operator cancels job {job} through Queue; the next poll reconciles the lease");
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
     let mut tx = boundary
         .begin(
@@ -814,7 +818,9 @@ async fn reconcile(services: &Services, db: &Db) -> Result<()> {
     only(services, db, &[ALLOW_KEY]).await?;
     let schedule = services.get::<Schedule>("base/schedule.store")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // User 5 administers tenant 2, which is not the operator tenant.
     client.execute(
         "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(2,5,$1,true) ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=true",
@@ -1200,7 +1206,9 @@ async fn live(services: &Services, db: &Db) -> Result<()> {
 }
 async fn inspect(services: &Services, db: &Db) -> Result<()> {
     let (schedule, admin) = admin(services, db).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!(
         "== operator tenant: {:?}",
         operator_tenant(&**client).await?

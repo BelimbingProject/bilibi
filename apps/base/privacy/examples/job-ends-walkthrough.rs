@@ -304,7 +304,9 @@ async fn main() -> Result<()> {
         .get::<MutationBoundary>("base/database.mutations")?;
     let settings = app.services.get::<Settings>("base/settings.store")?;
     let engine = app.services.get::<Engine>("base/workflow.engine")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!(
         "erasure approval rules published for company 1: policy {}",
         erasure_approval::publish_rules(&app, &mut client, &admin.scope, 1).await?

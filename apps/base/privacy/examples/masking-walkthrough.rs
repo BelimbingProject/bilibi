@@ -252,7 +252,9 @@ async fn main() -> Result<()> {
         .get::<Grants>("base/authz.grants")?
         .reconcile()
         .await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // The viewer may reveal and read history; staff may read history but not reveal.
     client
         .batch_execute(

@@ -178,7 +178,9 @@ async fn main() -> Result<()> {
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
     let media = app.services.get::<Media>("base/media.store")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Granting the scheduler is a Step-up operation; enrolling counts as a fresh check.
     let enrollment = app
         .user

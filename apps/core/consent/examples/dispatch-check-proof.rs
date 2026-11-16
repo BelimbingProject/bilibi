@@ -164,7 +164,9 @@ async fn main() -> Result<()> {
         boundary: &boundary,
         scope: &admin,
     };
-    let mut one = db.get().await?;
+    let mut one = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut two = db.get().await?;
     let mut three = db.get().await?;
 

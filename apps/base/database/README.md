@@ -64,7 +64,7 @@ than opening or committing an inner transaction.
 - These are environment values, not settings, because the pool exists before a setting can be read. A value outside its range refuses the start and names the variable.
 - System Info shows the size in use as Pool Size.
 - `pool_with(url, PoolLimits { size, wait })` is for a private host or a walkthrough that needs its own limits.
-- The timeout turns a lock-up into refusals; it does not make nested asks right. Code that holds a connection still must not ask for another (`apps/AGENTS.md`).
+- The timeout turns a lock-up into refusals; it does not make nested asks right. `Db::get` checks them: see the next section.
 
 Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 
@@ -72,7 +72,33 @@ Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 cargo run -p bilibi-database --example pool-walkthrough
 ```
 
-It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals.
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals. It also prints the second-connection check: the one log line with both call sites, the cases that are not logged, the refusal under `DATABASE_SECOND_CONNECTION=refuse`, and the start refused for any other value.
+
+## One connection per task
+
+**A task that holds a pooled connection must not ask the pool for another; `Db::get` checks it ([src/pool.rs](src/pool.rs)).**
+
+Why: once more callers than connections each hold one and ask for a second, every one of them waits out the pool and is refused (#406, #539).
+
+| You need | Use |
+| --- | --- |
+| A connection | `db.get().await?` |
+| To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
+| To call a service that takes its own | Drop your connection first |
+| A real exception: two at once, or one kept for a long task whose callees take their own | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
+| A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
+
+- **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.
+- **What a second ask gets** is `DATABASE_SECOND_CONNECTION`:
+
+| Value | A second ask |
+| --- | --- |
+| `warn` (default) | Is served. One line per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …` |
+| `refuse` | Is refused at once with `Error::Pool` ("Database unavailable") and logged with `error: second pooled connection refused: …` |
+
+- Set `RUST_BACKTRACE=1` to print the await chain between the two call sites under the line.
+- `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run while the default is `warn`.
+- The default becomes `refuse`, and the variable is removed, after two weeks of walkthrough runs on `main` whose only hits were real second connections, each fixed or named `get_detached`.
 
 # Schema ownership
 

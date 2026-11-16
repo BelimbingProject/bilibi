@@ -157,6 +157,7 @@ The launcher sets `BILIBI_ENV=development` unless you already set it, so the ins
 | `BIND_ADDR` | Listen address, default `127.0.0.1:3000` |
 | `DATABASE_POOL_SIZE` | Database connections one app process may hold, 1 to 1000, default 16. System Info shows it as Pool Size. Keep the total of every process under PostgreSQL's `max_connections` |
 | `DATABASE_POOL_WAIT_SECONDS` | How long a request or job waits for a free connection before it is refused (a page answers 503, a job retries), 1 to 300, default 5 |
+| `DATABASE_SECOND_CONNECTION` | What a task that holds a pooled connection gets when it asks for another: `warn` (default, served and logged) or `refuse`. See [One connection per task](apps/base/database/README.md#one-connection-per-task) |
 | `MAIL_HOST` | SMTP relay. Unset: write mail to `.local/mailbox/` |
 | `BILIBI_USER_SIGNING_KEY` | 64 hex characters, for email verification links. Unset: `./bilibi start` supplies one |
 | `BILIBI_SETTINGS_KEY` | 64 hex characters. Encrypts secret settings and authenticator keys. 2FA setup refuses without it. Unset: `./bilibi start` supplies one |

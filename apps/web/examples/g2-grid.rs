@@ -55,7 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get::<Authentication>("base/tenancy.authentication")?;
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let manager = auth
         .authenticate(client, 1, 1, std::string::String::new())

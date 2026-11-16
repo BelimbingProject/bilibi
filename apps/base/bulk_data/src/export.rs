@@ -685,7 +685,7 @@ impl BulkData {
         // exit, including cancellation. Do not return a session lock to the
         // pool or consume a second pooled connection just to hold the guard:
         // concurrent exports still need pool capacity for Grid projections.
-        let mut connection = deadpool_postgres::Object::take(self.db.get().await?);
+        let mut connection = bilibi_database::Connection::take(self.db.get().await?);
         let client: &mut tokio_postgres::Client = &mut connection;
         let run = load(&*client, &scope, id, false).await?;
         client

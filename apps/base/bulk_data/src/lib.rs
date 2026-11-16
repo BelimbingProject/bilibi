@@ -76,6 +76,8 @@ pub const UPDATE_MAX_RECORDS: &str = "bulk_data.update_max_records";
 /// Days after a completed import during which its created records may be removed.
 pub const UNDO_DAYS: &str = "bulk_data.import_undo_days";
 pub(crate) const WORKER: &str = "base/bulk_data-import";
+/// Why a run's worker takes its connection detached (`Db::get_detached`).
+pub(crate) const JOB_CONNECTION: &str = "a bulk run keeps this connection for the whole job while the contracts it calls for each row take their own; one per Queue slot";
 
 /// A record type the person may import, with what they may fill.
 #[derive(Clone, Debug)]

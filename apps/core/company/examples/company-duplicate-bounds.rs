@@ -73,7 +73,9 @@ async fn main() -> Result<(), Failure> {
 
     // A large tenant whose names all share the common word "trading", plus
     // the one real duplicate. Explicit ids stay clear of the fixture's.
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let started = Instant::now();
     client
         .execute(

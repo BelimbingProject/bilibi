@@ -30,7 +30,9 @@ pub async fn delivery(
     scope: &Scope,
     id: i64,
 ) -> Result<()> {
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client
         .execute(
             "UPDATE workflow_reference_listener_gate SET fail_second=false,wait_seconds=0 WHERE singleton",
@@ -181,7 +183,9 @@ pub async fn maintenance(db: &Db, engine: &Engine, scope: &Scope) -> Result<()> 
     )?;
     // One run per pass: each pass continues after the last one and the lap
     // starts again from the first running run.
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let running: Vec<i64> = client
         .query(RUNNING, &[])
         .await?

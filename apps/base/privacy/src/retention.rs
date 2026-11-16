@@ -810,7 +810,11 @@ impl Handler for SweepJob {
 }
 impl SweepJob {
     async fn run(&self) -> Result<()> {
-        let mut client = self.privacy.db.get().await?;
+        let mut client = self
+            .privacy
+            .db
+            .get_detached(crate::runner::JOB_CONNECTION)
+            .await?;
         // One tenant's failure does not stop the others; the run retries.
         let mut failed = false;
         for tenant in tenants(&client).await? {

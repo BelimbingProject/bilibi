@@ -190,7 +190,9 @@ async fn main() -> Result<()> {
     }
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client
         .batch_execute(
             "INSERT INTO role_capabilities(tenant_id,role_id,capability) VALUES(2,5,'privacy.retention.view') ON CONFLICT DO NOTHING",

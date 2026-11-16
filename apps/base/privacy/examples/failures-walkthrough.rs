@@ -408,7 +408,9 @@ async fn main() -> Result<()> {
     let search = app
         .services
         .get::<bilibi_base::search::Search>(bilibi_base::search::SERVICE)?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!(
         "erasure approval rules published for company 1: policy {}",
         erasure_approval::publish_rules(&app, &mut client, &admin.scope, 1).await?

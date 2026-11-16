@@ -202,7 +202,9 @@ async fn main() -> Result<(), Failure> {
         db: &db,
     };
     let (manager, viewer, other) = (person(0), person(1), person(2));
-    let sql = db.get().await?;
+    let sql = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let root = std::env::current_dir()?.join("data/artifacts");
     std::fs::DirBuilder::new()
         .recursive(true)

@@ -196,7 +196,9 @@ async fn main() -> Result<()> {
             .await?;
         Ok(app.security.guard(&login.token).await?)
     }
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let admin = login(&app, "admin@example.test").await?;
     let second = login(&app, "ai@agent.my").await?;
     let privacy = app.services.get::<Privacy>(SERVICE)?;

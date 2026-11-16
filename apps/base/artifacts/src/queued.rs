@@ -196,7 +196,15 @@ impl<O: QueuedPdfOwner> PdfRenderHandler<O> {
         let Some(scope) = execution.scope() else {
             return Outcome::Cancel("pdf_forbidden");
         };
-        let Ok(mut client) = self.artifacts.db.get().await else {
+        let Ok(mut client) = self
+            .artifacts
+            .db
+            .get_detached(
+                "the render job keeps this connection from its access check to the stored file \
+                 while the owner builds the request on its own; one per Queue slot",
+            )
+            .await
+        else {
             return Outcome::Retry("pdf_database_unavailable");
         };
         let owned = self.artifacts.for_owner(scope, job.company, &*self.owner);

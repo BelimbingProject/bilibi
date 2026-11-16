@@ -58,7 +58,9 @@ async fn main() -> Result<(), Failure> {
     let manager = login(&app, "admin@example.test").await?;
     let registry = app.services.get::<Registry>("base/agent_api.registry")?;
     let search = app.services.get::<Search>(bilibi_search::SERVICE)?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     for (id, (name, code)) in (3_000_001i64..).zip(COMPANIES) {
         client
             .execute(

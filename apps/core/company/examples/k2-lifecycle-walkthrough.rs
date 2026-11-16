@@ -67,7 +67,9 @@ async fn main() -> Result<(), Error> {
     let manager = app.security.guard(&manager_login.token).await?;
     let unassigned_staff = app.security.guard(&unassigned_staff_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let id = create(&companies, &manager, "K2 lifecycle specimen", "pending").await?;
     let org = OrganisationId::new(id)?;

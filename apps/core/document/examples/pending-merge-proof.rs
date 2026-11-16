@@ -155,7 +155,9 @@ async fn main() -> Result<()> {
         id: survivor.id,
         version: survivor.version,
     };
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let preview = docs.preview_merge(&**client, &scope, dst, &[src]).await;
     let preview_refused = matches!(preview, Err(WriteError::ScanPending));
     let mut client = app.db.get().await?;
