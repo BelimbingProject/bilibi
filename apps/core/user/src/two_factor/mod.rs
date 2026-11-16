@@ -49,10 +49,10 @@ pub(crate) const RESET_KEY: &str = "core.user.two_factor.reset";
 pub(crate) const RESET_EVENT: &str = "reset-two-factor";
 /// The page service that owns [`RESET_EVENT`].
 pub(crate) const PAGES: &str = "core/user.pages";
-/// The owner the sealed secret is bound to (`Settings::seal_owned`), with
-/// the sign-in's home tenant and identity id ([`SignIn`]).
 /// Why checking a code takes its connection detached (`Db::get_detached`).
 const STEP_UP_CONNECTION: &str = "a code is checked from inside the caller's write (step-up), and the spent code and failure count must stay when that write rolls back";
+/// The owner the sealed secret is bound to (`Settings::seal_owned`), with
+/// the sign-in's home tenant and identity id ([`SignIn`]).
 const OWNER: &str = "core/user.two_factor";
 const KIND: &str = "user_two_factor";
 /// The two-factor counter: five failed checks within fifteen minutes lock

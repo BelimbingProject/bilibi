@@ -78,6 +78,8 @@ It prints the refusal of a third caller on a two-connection pool after the wait,
 
 **A task that holds a pooled connection must not ask the pool for another; `Db::get` checks it ([src/pool.rs](src/pool.rs)).**
 
+`bilibi_database::Db` wraps the pool; it is no longer an alias for `deadpool_postgres::Pool`. Checkouts return `bilibi_database::Connection`, which dereferences to the client. `get`, `status`, `timeouts` and `resize` retain their calling forms; replace `deadpool_postgres::Object::take(connection)` with `bilibi_database::Connection::take(connection)`.
+
 Why: once more callers than connections each hold one and ask for a second, every one of them waits out the pool and is refused (#406, #539).
 
 | You need | Use |
@@ -89,8 +91,8 @@ Why: once more callers than connections each hold one and ask for a second, ever
 | A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
 
 - **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.
-- **A second ask is served**, with one warning per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …`
-- Set `RUST_BACKTRACE=1` to print the await chain between the two call sites under the line.
+- **A second ask warns, then attempts the checkout** under the normal pool limits; it can still time out. Each pool logs once per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …`
+- Set `RUST_BACKTRACE=1` to print the stack at the warning site under the line; it does not reconstruct the async await chain or the first checkout's stack.
 - `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run during this warning-only pilot.
 - Warnings become refusals in a later change after two weeks of CI walkthrough runs on `main` with no hit that was not a real nested take. Unresolved real nesting stays warned; only genuine single-purpose exceptions use `get_detached`.
 

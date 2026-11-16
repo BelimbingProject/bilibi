@@ -72,8 +72,8 @@ impl Held {
         }
     }
 }
-/// The await chain between the two sites, when the developer asked for
-/// backtraces (`RUST_BACKTRACE=1`); nothing otherwise.
+/// The stack at the warning site when backtraces are enabled
+/// (`RUST_BACKTRACE=1`); it does not reconstruct the async await chain.
 fn trace() {
     let trace = Backtrace::capture();
     if trace.status() == BacktraceStatus::Captured {
