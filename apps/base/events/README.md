@@ -138,6 +138,18 @@ You might be wondering why the handler doesn't get the publisher's user. **An ev
 > [!WARNING]
 > A handler must never open or commit another transaction, and must never do network or file IO. If you need either, put the work in your own outbox and key it by `Event::key`.
 
+### Reading events another catalog names
+
+A Base subscriber that reacts to whatever owners offer it (Base Rules' `base/rules.triggers`) lists no events itself: its handler's `Subscribe::reads(catalog)` returns `Some` of the `On`s its own catalog holds (each owner's `Trigger`). They join `Subscriber::events` at boot and pass the same checks below. While its catalog names nothing (no owner mounted), it reads nothing and gets no deliveries.
+
+### Handing work to your own worker
+
+A handler that must do more than write its copy (run as its own principal, take its own transaction) returns a `Handoff` from `Subscribe::handoff(event, changes)`: a worker of the subscriber's own module, a principal and arguments. Events enqueues it in the delivery transaction (`Queue::enqueue_system_within`), so the job commits with the receipt or not at all, and runs after that commit under the principal's own grants. A worker or principal another module owns is refused.
+
+### The cause of an event
+
+`Event::cause` says what a Platform edge named as the cause of the transaction that recorded the event, or `None` for an ordinary write. Base Rules names its run (`Events::cause(tx, "base/rules.run:42")`) before an action's commit, so the next run knows its chain; the cause lasts until that transaction ends (column `cause`, migration `base-events-005-cause`). It is evidence, never authority.
+
 ### What boot checks
 
 Boot refuses to start when:
@@ -145,6 +157,7 @@ Boot refuses to start when:
 - a subscriber or event type has a key outside the contributing module;
 - an event name isn't `<name>/<module>.<snake_case name>` (`<name>` is the publisher's Domain or Extension, or `base` or `core`);
 - a module subscribes to an event from its own Domain or Extension;
+- a subscriber lists no event and reads none through its catalog (`Subscribe::reads` answers `None`);
 - a contributor doesn't depend on `base/events`;
 - a subscriber reads from a mounted publisher that doesn't declare that event, or doesn't record a version the subscriber reads.
 

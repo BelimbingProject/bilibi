@@ -185,6 +185,9 @@ WALKTHROUGHS=(
   # Only the composition with nothing mounted; see NOT_RUN for the mounted ones.
   'web|events-unmounted|apps/web|events-reference|seed||-'
   'web|events-retention|apps/web|events-retention|seed|BILIBI_DISPOSABLE_EVENTS_DEMO=yes|-'
+  # Only the composition with nothing mounted; the reference owner's run needs
+  # fixtures/containers/rule_cases mounted (see NOT_RUN's note below).
+  'web|rules-unmounted|apps/web|rules-walkthrough|seed||-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
@@ -233,7 +236,8 @@ NOT_RUN=(
   'apps/web|step-up-reference|needs the cookie of a signed-in browser session'
   # It needs a fixture container mounted and the workspace rebuilt for each
   # composition (fixtures/containers). So do the mounted compositions of
-  # events-reference and ports-reference, whose unmounted runs are above.
+  # events-reference, ports-reference and rules-walkthrough, whose unmounted
+  # runs are above.
   'apps/web|session-ended-walkthrough|needs fixtures/containers/session_listener mounted'
 )
 

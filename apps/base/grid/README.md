@@ -365,3 +365,7 @@ A person saves the list they see as a named view (columns, lenses, row height, c
 Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls.
 
 The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, and saving filters after queued changes.
+
+## Scalar access predicates
+
+`scalar_access(catalog, root, path)` returns a predicate for the root row aliased `r`, using the same tenant/user binds as `scalar_expression`. It permits absent optional links and refuses a linked record excluded by the scoped catalog’s record reach at any hop. Combine it with the scoped root source when historical evidence or automation must distinguish absence from denied access.

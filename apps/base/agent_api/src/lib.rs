@@ -358,6 +358,9 @@ pub struct Registry {
     pub guides: BTreeMap<&'static str, RegisteredGuide>,
     /// By tool name.
     pub apps: BTreeMap<&'static str, RegisteredApp>,
+    /// Write contracts a named principal's job may call, with the principals
+    /// their owners admit (`job::PRINCIPAL_WRITES`).
+    pub principal_writes: BTreeMap<&'static str, &'static [&'static str]>,
 }
 fn contribution_error(reason: impl Into<String>) -> RegistryError {
     RegistryError::Contribution(reason.into())
@@ -626,6 +629,11 @@ impl Registry {
                 )));
             }
         }
+        registry.principal_writes = job::principal_writes(
+            &registry,
+            &vocabulary,
+            catalog.entries::<job::PrincipalWrite>(job::PRINCIPAL_WRITES)?,
+        )?;
         let step_up = catalog.entries::<bilibi_step_up::Operation>(bilibi_step_up::OPERATIONS)?;
         for op in registry.operations.values() {
             if let Some(key) = op
@@ -861,6 +869,8 @@ async fn authorize_read(
 }
 inventory::submit! { Consumer::new::<Definitions>(DEFINITIONS,"base/agent_api",|entries|Registry::from_entries(entries).map(|_|())) }
 inventory::submit! { Consumer::new::<App>(APPS,"base/agent_api",Registry::validate_apps) }
+// The contract and principal checks need the whole registry; `from_catalog` runs them.
+inventory::submit! { Consumer::new::<job::PrincipalWrite>(job::PRINCIPAL_WRITES,"base/agent_api",|entries| entries.iter().try_for_each(|entry| entry.get::<job::PrincipalWrite>().map(|_| ()))) }
 inventory::submit! { bilibi_module_registry::Module {
     id:"base/agent_api",layer:bilibi_module_registry::Layer::Base,
     dependencies:&["base/module_registry","base/authz","base/database","base/party_ids","base/settings","base/tenancy","base/step_up","base/session","base/system","base/queue","base/ui","base/notifications"], migrations:&[("agent-api-plans-v1",include_str!("../migrations/001-plans.sql")),("base-agent-api-002-plan-work-company",include_str!("../migrations/002-plan-work-company.sql")),("base-agent-api-003-reviews",include_str!("../migrations/003-reviews.sql")),("base-agent-api-004-drop-plans",include_str!("../migrations/004-drop-plans.sql"))],

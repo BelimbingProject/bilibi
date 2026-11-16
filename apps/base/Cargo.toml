@@ -40,6 +40,7 @@ bilibi-privacy = { path = "privacy" }
 bilibi-queue = { path = "queue" }
 bilibi-records = { path = "records" }
 bilibi-reports = { path = "reports" }
+bilibi-rules = { path = "rules" }
 bilibi-schedule = { path = "schedule" }
 bilibi-search = { path = "search" }
 bilibi-security = { path = "security" }
