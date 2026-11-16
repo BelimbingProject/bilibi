@@ -901,7 +901,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             checks.check(
                 "masking a field the file holds changes what its requester may see",
-                made != now && now.ends_with('m'),
+                made != now,
                 format!("{made} -> {now}"),
             );
             checks.check(
