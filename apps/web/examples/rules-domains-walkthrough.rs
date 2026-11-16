@@ -1,7 +1,6 @@
-//! Mounted proof of official Domain rules. On a fresh disposable database:
-//! `cargo run -p bilibi-web --example rules-domains-walkthrough -- commerce`.
-//! For supply_chain or people, first run that Domain's disposable walkthrough,
-//! leaving an approved purchase order or claim; then pass its Domain id here.
+//! Mounted proof of official Domain rules on fresh disposable databases.
+//! Run the companion scripts and source setup documented in
+//! `docs/rules-logical-event-handoff.md`; Supply Chain also requires its source hook.
 //! The real owner event is delivered by Events and Queue, never manufactured.
 use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
 use bilibi_authz::grants::{Direct, Grants};
@@ -510,6 +509,12 @@ async fn main() -> Result<()> {
             snapshot_tasks(&db, &approvals, &rule_ids, 2, 1).await?;
             rule_tasks += 4;
             check(task_count(&db, kind, source).await? == rule_tasks, "two delayed approval snapshots create two new tasks per rule at one live revision")?;
+            // The companion helper may relink its fixture administrator to a
+            // new Person. Resume human operations with the current actor proof.
+            let client = db.get().await?;
+            admin = auth
+                .authenticate(&**client, 1, 4, "rules-domains".into())
+                .await?;
         }
         let replay = write(&plans, &admin, "base.events.replay", json!({"subscriber":"base/rules.triggers","from_event":expected_events[0],"limit":1000})).await?;
         check(replay["created"] == 0 && replay["pending"] == 0, "replay of delivered parts is a no-op, not duplicate execution")?;

@@ -4,7 +4,7 @@ The mounted walkthrough contains executable amendment and approval regression ch
 
 ## Companion bindings
 
-Every `bilibi_rules::Trigger` initializer now supplies `logical_event: Option<&'static str>`. The pointer selects an immutable value from the recorded event payload, never from the current source row. The contract is in [Base Rules](../apps/base/rules/README.md#offering-a-trigger-and-an-action).
+The trigger identity contract is in [Base Rules](../apps/base/rules/README.md#offering-a-trigger-and-an-action).
 
 | Companion | File | Trigger binding | Existing immutable identity |
 | --- | --- | --- | --- |
@@ -28,10 +28,12 @@ These checks are implemented; this review does not claim they have run. The Test
 
 ## Required action adaptation
 
-All three companion follow-up `Action` initializers must add `approval_capabilities: &[bilibi_activity::MANAGE]`: Commerce `sales/src/follow_up.rs`, Supply Chain `purchasing/src/follow_up.rs`, and People `claims/src/follow_up.rs`. The executor owns these companion edits. This declaration is independent of `OfferedCapabilities` for the rules principal; keep its system-create permission and tenant consent checks. Other Actions use `&[]` only when their operation capability covers every human permission. The Platform reference actions have been updated.
+All three companion follow-up `Action` initializers must add `approval_capabilities: &[bilibi_activity::MANAGE]`: Commerce `sales/src/follow_up.rs`, Supply Chain `purchasing/src/follow_up.rs`, and People `claims/src/follow_up.rs`. The executor owns these companion edits. Follow the [Activities registration contract](../apps/core/activity/README.md#follow-up-operations-offered-by-record-owners) and the [Rules action contract](../apps/base/rules/README.md#offering-a-trigger-and-an-action). The Platform reference actions have been updated.
 
 The mounted walkthrough denies `core.activity.manage` directly on its otherwise authorized human approver. It requires approval to fail without activating the draft, then removes the deny and approves normally. It switches the rule off, reinstates the deny, requires re-enabling to fail without changing the switch, removes the deny, and re-enables normally. It changes no role permissions. Test must execute this proof after adapting the companions; review compilation alone is not runtime evidence.
 
 ## Upgrade notes for agents
 
-Add `Trigger::logical_event` and `Action::approval_capabilities` as above. `Rules::action_identity` retains its signature but now includes the captured event identity as well as rule version and action position. Do not parse the opaque identity or combine it with a live revision. `FollowUp` and its operation input schema retain their signatures. Approval fingerprints include the new trigger binding, so existing approved definitions require review. New migrations remove obsolete activity deduplication bindings without converting them; runs without a captured event identity refuse. Development databases remain disposable.
+Add `Trigger::logical_event` and `Action::approval_capabilities` to existing initializers using the contracts linked above. The new `FollowUp` handler and `Rules::action_identity` API are documented by their owning modules. Changed trigger and action declarations invalidate approval fingerprints; draft and approve a new version before running the rule.
+
+`bilibi_company::require_writable`, `require_writable_in` and `UserService::company_account_on` now take `&dyn bilibi_tenancy::ProofClient` instead of generic PostgreSQL clients. Concrete clients and transactions can still be passed directly; generic wrappers must satisfy `ProofClient` (PostgreSQL `GenericClient + Sync` supplies its blanket implementation).

@@ -109,7 +109,7 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rule
 
 Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
 
-`Action::approval_capabilities` declares additional capabilities a human needs to perform the action, including nested writes that use a different permission for the principal. Approval and re-enabling require the operation's own capability and every prerequisite with All reach; direct denies win. Boot checks the keys against the Authz vocabulary, and the approval fingerprint includes the declaration. This adds no principal bounds or consent: the executor and owner still check the principal's own permissions live. Use `&[]` when the operation capability suffices. Shared `core/activity::FollowUp` actions declare `approval_capabilities: &[bilibi_activity::MANAGE]` because a person needs activity management while the principal needs system task creation.
+`Action::approval_capabilities` declares additional capabilities a human needs to perform the action, including nested writes that use a different permission for the principal. Approval and re-enabling require the operation's own capability and every prerequisite with All reach; direct denies win. Boot checks the keys against the Authz vocabulary, and the approval fingerprint includes the declaration. This adds no principal bounds or consent: the executor and owner still check the principal's own permissions live. Use `&[]` when the operation capability suffices. Shared follow-up registration requirements belong to [Activities](../../core/activity/README.md#follow-up-operations-offered-by-record-owners).
 
 `Rules::action_identity(client, scope)` returns the executing rule version, action position and captured logical event key as an opaque identity, only inside a Rules action transaction under the `rules` principal. An owner may combine it with its source kind and ID to deduplicate multipart events without merging independent rules or manual requests. This identity grants no authority; owner checks still apply.
 
@@ -124,15 +124,16 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Tables
 
-`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules` , `base-rules-002-approval-bindings` and `base-rules-003-logical-events`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings` and `base-rules-003-logical-events`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
 `apps/web/examples/rules-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/rule_cases` mounted (never a Platform member), it proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off rule, self-triggering and multi-rule cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst held to its tenant's bound while the other tenant runs at once.
 
+The official Domain companion walkthrough is `apps/web/examples/rules-domains-walkthrough.rs`. See the [companion handoff](../../../docs/rules-logical-event-handoff.md) for mounts, source prerequisites and execution instructions.
+
 ## Not yet
 
-- Triggers and actions offered by the official Domains: [#729](https://github.com/BelimbingProject/bilibi/issues/729).
 - Tenant custom fields as conditions: [#730](https://github.com/BelimbingProject/bilibi/issues/730).
 - The installation setting that admits customer code (ADR 28): [#731](https://github.com/BelimbingProject/bilibi/issues/731).
 - Shadow runs against past records, configuration packs, a bounded text formula, AI observations as inputs and script or Wasm tooling for isolated installations: later items of [#682](https://github.com/BelimbingProject/bilibi/issues/682).
