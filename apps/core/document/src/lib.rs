@@ -1267,10 +1267,9 @@ impl Documents {
             .await
     }
 
-    /// A page of the documents shared with the signed-in portal customer
-    /// (`portal.document.view`): shared with their own Person, or with the
-    /// Company they sign in for, unended, in their tenant, keeping a file and
-    /// not past its expiry date. Nothing else is ever listed or counted.
+    /// A page of the documents visible to the signed-in portal customer
+    /// (`portal.document.view`). Visibility contract: `README.md`,
+    /// "Shared with portal customers".
     pub async fn shared_with_me(
         &self,
         portal: &PortalScope,
@@ -1292,8 +1291,8 @@ impl Documents {
 
     /// The latest file of a document shared with the signed-in portal
     /// customer, read through `base/artifacts` every time and audited as the
-    /// customer. A refusal (not shared, ended, revoked, expired, no file, a
-    /// file still being scanned or not clean) is audited too.
+    /// customer. Download restrictions and audited refusals: `README.md`,
+    /// "Shared with portal customers".
     pub async fn read_shared_file(&self, portal: &PortalScope, id: i64) -> WriteResult<File> {
         let rules = self
             .records

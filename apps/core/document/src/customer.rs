@@ -4,12 +4,9 @@
 //! customer reads what was shared with their own record through the portal,
 //! never through a staff session.
 //!
-//! A customer sees a document only while every one of these holds, rechecked
-//! on every read and again by the Artifacts owner when the bytes are read:
-//! the share is to the customer's own Person, or to the Company the customer
-//! signs in for; it has not ended or been revoked; the document is in the
-//! customer's tenant, keeps a file, is not being deleted and is not past its
-//! expiry date. A download also needs the latest revision's scan to be clean.
+//! Visibility and download rules: `README.md`, "Shared with portal customers".
+//! Linked-record protection is checked here before the Artifacts read;
+//! the Artifacts owner rechecks the share, scan and document inside that read.
 //! Every download is an Artifacts read audited as the customer, and every
 //! refused one a `core.document.download_refused` action naming the reason.
 use crate::files::{self, FILES};

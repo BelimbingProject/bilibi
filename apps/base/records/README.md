@@ -109,7 +109,7 @@ bilibi_records::portal_step_up!(
 );
 ```
 
-`PortalProtection::protected(client, portal, ids)` returns only the requested ids that currently require `PORTAL_READ`, in one owner query. Base checks whether the portal session holds that declared Step-up operation before it calls the owner. A holder such as Core Document asks `Records::unverified_portal_rules` before taking its connection, then hides references to the protected ids from both counts and rows. The contributor must own the registered record kind, and the operation must be declared; boot refuses otherwise. A record whose portal read never asks Step-up declares nothing.
+`PortalProtection::protected(client, portal, ids)` returns only the requested ids that currently require `PORTAL_READ`, in one owner query on the supplied client, preserving the holder's database snapshot. A holder asks `Records::unverified_portal_rules` before taking its connection; Base checks which declared Step-up operations the portal session lacks, then the holder calls those owners. Core Document's list and download behaviour is defined in [Shared with portal customers](../../core/document/README.md#shared-with-portal-customers). The contributor must own the registered record kind, and the operation must be declared; boot refuses otherwise. A record whose portal read never asks Step-up declares nothing.
 
 - **Ids are text,** at most 64 bytes in one path segment (`workspace::record_id`). A kind whose Grid key is a number only accepts numeric ids, so a forged id never reaches the owner's source as an error.
 - **One spelling per id:** a number key is read as plain decimal everywhere. `check` returns `01` as `1` for the holder to store, and `resolve`, `redirect` and `referrers` read `01` as `1` too.
