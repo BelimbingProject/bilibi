@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "the walkthrough imports installer modules whose complete production surface is not exercised"
+)]
 #[path = "../src/backup.rs"]
 mod backup;
 #[path = "../src/composition.rs"]
