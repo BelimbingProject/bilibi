@@ -817,6 +817,7 @@ impl Detail {
 
     fn inline(
         &self,
+        words: &bilibi_grid::RecordWords,
         d: &Document,
         key: &str,
         value: impl Into<String>,
@@ -825,7 +826,7 @@ impl Detail {
         let mut field = InlineField::new(
             format!("document-{}", key.replace('_', "-")),
             key,
-            format!("Edit {}", label(key).to_lowercase()),
+            format!("Edit {}", words.field(key, label(key)).to_lowercase()),
             value,
         )
         .version(d.version)
@@ -839,13 +840,14 @@ impl Detail {
     /// A select edited in place; `empty` adds a None choice that clears it.
     fn choice(
         &self,
+        words: &bilibi_grid::RecordWords,
         d: &Document,
         key: &str,
         current: (&str, &str),
         mut options: Vec<Choice>,
-        empty: bool,
         editable: bool,
     ) -> Result<Html> {
+        let empty = key != "status";
         if empty {
             options.insert(0, Choice::new("None", ""));
         }
@@ -853,7 +855,7 @@ impl Detail {
             // A retired code the document keeps.
             options.push(Choice::new(current.1, current.0));
         }
-        let mut field = self.inline(d, key, current.0, editable);
+        let mut field = self.inline(words, d, key, current.0, editable);
         if empty {
             field = field.allow_empty();
         }
@@ -861,7 +863,7 @@ impl Detail {
             Field::named(key)
                 .id(format!("document-{}-editor", key.replace('_', "-")))
                 .label_class("sr-only")
-                .label(label(key))
+                .label(words.field(key, label(key)))
                 .kind(InputKind::Select)
                 .value(current.0)
                 .options(options),
@@ -878,6 +880,7 @@ impl Detail {
     }
     fn date(
         &self,
+        words: &bilibi_grid::RecordWords,
         clock: &Clock,
         d: &Document,
         key: &str,
@@ -886,6 +889,7 @@ impl Detail {
     ) -> Result<Html> {
         let mut field = self
             .inline(
+                words,
                 d,
                 key,
                 value.map(|v| v.to_string()).unwrap_or_default(),
@@ -1111,6 +1115,7 @@ impl Detail {
     async fn facts(
         &self,
         scope: &Scope,
+        words: &bilibi_grid::RecordWords,
         clock: &Clock,
         d: &Document,
         editable: bool,
@@ -1133,13 +1138,20 @@ impl Detail {
                 "Name",
                 "name",
                 render(InlineEdit {
-                    field: self.inline(d, "name", d.name.clone(), editable),
+                    field: self.inline(words, d, "name", d.name.clone(), editable),
                 })?,
             ),
             (
                 "Publish date",
                 "publish-date",
-                self.date(clock, d, "publish_date", Some(d.publish_date), editable)?,
+                self.date(
+                    words,
+                    clock,
+                    d,
+                    "publish_date",
+                    Some(d.publish_date),
+                    editable,
+                )?,
             ),
             (
                 "Source",
@@ -1153,11 +1165,11 @@ impl Detail {
                 "Category",
                 "category",
                 self.choice(
+                    words,
                     d,
                     "category",
                     (d.category.as_deref().unwrap_or_default(), &category),
                     pages.choices(scope, LIST_CATEGORY, None).await?,
-                    true,
                     editable,
                 )?,
             ),
@@ -1167,13 +1179,13 @@ impl Detail {
                 "Sub-category",
                 "sub-category",
                 self.choice(
+                    words,
                     d,
                     "sub_category",
                     (d.sub_category.as_deref().unwrap_or_default(), &sub_category),
                     pages
                         .choices(scope, LIST_SUB_CATEGORY, Some(parent))
                         .await?,
-                    true,
                     editable,
                 )?,
             ));
@@ -1182,6 +1194,7 @@ impl Detail {
             "Type",
             "type",
             self.choice(
+                words,
                 d,
                 "document_type",
                 (
@@ -1189,7 +1202,6 @@ impl Detail {
                     &document_type,
                 ),
                 pages.choices(scope, LIST_TYPE, None).await?,
-                true,
                 editable,
             )?,
         ));
@@ -1197,16 +1209,16 @@ impl Detail {
             "Status",
             "status",
             self.choice(
+                words,
                 d,
                 "status",
                 (&d.status, &status),
                 pages.choices(scope, LIST_STATUS, None).await?,
-                false,
                 editable,
             )?,
         ));
         let expiry = {
-            let mut html = self.date(clock, d, "expires_on", d.expires_on, editable)?;
+            let mut html = self.date(words, clock, d, "expires_on", d.expires_on, editable)?;
             if d.expires_on.is_some_and(|on| on < clock.today()) {
                 html.push(&Html::text(" · Expired"));
             }
@@ -1223,6 +1235,7 @@ impl Detail {
             render(InlineEdit {
                 field: self
                     .inline(
+                        words,
                         d,
                         "sync_id",
                         d.sync_id.clone().unwrap_or_default(),
@@ -1246,7 +1259,7 @@ impl Detail {
         };
         let mut related = render(InlineEdit {
             field: self
-                .inline(d, "related_document_id", related_id, editable)
+                .inline(words, d, "related_document_id", related_id, editable)
                 .allow_empty()
                 .input_type("number"),
         })?;
@@ -1263,6 +1276,7 @@ impl Detail {
             "Relation",
             "relation",
             self.choice(
+                words,
                 d,
                 "relation",
                 (
@@ -1273,7 +1287,6 @@ impl Detail {
                     Choice::new("Supersedes", "supersedes"),
                     Choice::new("Replaces", "replaces"),
                 ],
-                true,
                 editable && d.related_document_id.is_some(),
             )?,
         ));
@@ -1316,7 +1329,19 @@ impl Detail {
             items: items
                 .into_iter()
                 .zip(&ids)
-                .map(|((title, _, value), id)| Fact { title, id, value })
+                .map(|((title, key, value), id)| Fact {
+                    title: words.field(
+                        match key {
+                            "link" => "external_url",
+                            "created-by" => "created_by",
+                            "type" => "document_type",
+                            _ => key,
+                        },
+                        title,
+                    ),
+                    id,
+                    value,
+                })
                 .collect(),
         })
     }
@@ -1658,6 +1683,10 @@ impl Detail {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "documents").await?;
+        drop(client);
+
         let clock = self.pages.clock(scope).await?;
         let d = self.pages.documents.get(scope, self.id).await?;
         let editable = self.pages.documents.may_change(scope, &d).await?;
@@ -1735,7 +1764,7 @@ impl Detail {
             title: "Details",
             ..SectionHeading::default()
         })?;
-        details.push(&self.facts(scope, &clock, &d, editable).await?);
+        details.push(&self.facts(scope, &words, &clock, &d, editable).await?);
         body.push(&render(Card {
             id: "document-details",
             role: "region",
@@ -1834,7 +1863,7 @@ impl Detail {
             })?);
         }
         if let Some(dialog) = &self.dialog {
-            body.push(&dialog.render(&self.uploads, "document-revision", "close_modal")?);
+            body.push(&dialog.render(&self.uploads, &words, "document-revision", "close_modal")?);
         }
         let region = render(Region {
             id: "document-region",

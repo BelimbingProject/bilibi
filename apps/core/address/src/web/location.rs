@@ -14,16 +14,10 @@ pub(super) struct Ids {
 }
 /// The nouns a caller puts on the labels.
 pub(super) struct Labels {
-    pub admin1: &'static str,
     pub admin1_prompt: &'static str,
-    pub postcode: &'static str,
-    pub locality: &'static str,
 }
 pub(super) const LABELS: Labels = Labels {
-    admin1: "State or province",
     admin1_prompt: "Choose a division",
-    postcode: "Postcode",
-    locality: "Locality",
 };
 
 #[derive(Template)]
@@ -78,6 +72,7 @@ impl LocationDraft {
         form: &str,
         ids: &Ids,
         labels: &Labels,
+        words: &bilibi_grid::RecordWords,
         countries: &[Choice],
         errors: &[FieldError],
     ) -> Result<Html> {
@@ -91,10 +86,13 @@ impl LocationDraft {
         };
         let country_blank = self.location.country_iso.trim().is_empty();
         let mut country = Combobox::new(ids.country, format!("{form}[country_iso]"))
-            .label("Country")
+            .label(words.get(&super::fields::COUNTRY_ISO))
             .value(&self.location.country_iso)
             .options(countries.to_vec())
-            .errors(errors_for("country_iso", "Country"));
+            .errors(errors_for(
+                "country_iso",
+                words.get(&super::fields::COUNTRY_ISO),
+            ));
         country.placeholder = "Choose a country".into();
         // One line says why the three fields after the country are off,
         // instead of three grey boxes that do not.
@@ -110,10 +108,13 @@ impl LocationDraft {
         let mut admin1 = Field::in_form(form, "admin1_code")
             .id(ids.admin1)
             .kind(InputKind::Select)
-            .label(labels.admin1)
+            .label(words.get(&super::fields::ADMIN1_CODE))
             .prompt(labels.admin1_prompt)
             .value(&self.location.admin1_code)
-            .errors(errors_for("admin1_code", labels.admin1));
+            .errors(errors_for(
+                "admin1_code",
+                words.get(&super::fields::ADMIN1_CODE),
+            ));
         if admin1_options.is_empty() {
             admin1 = admin1.disabled();
             if !country_blank {
@@ -144,7 +145,7 @@ impl LocationDraft {
             postcode: text(
                 "postcode",
                 format!("{}-postcode", ids.prefix),
-                labels.postcode,
+                words.get(&super::fields::POSTCODE),
                 &self.location.postcode,
                 format!("{}-postcode-options", ids.prefix),
             ),
@@ -152,7 +153,7 @@ impl LocationDraft {
                 let locality = text(
                     "locality",
                     format!("{}-locality", ids.prefix),
-                    labels.locality,
+                    words.get(&super::fields::LOCALITY),
                     &self.location.locality,
                     format!("{}-locality-options", ids.prefix),
                 );

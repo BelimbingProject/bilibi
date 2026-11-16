@@ -1315,6 +1315,8 @@ impl LinksPage {
     }
     async fn draw(&mut self, scope: &Scope, workspace: bool) -> Result<LiveBody> {
         let client = self.shared.db.get().await?;
+        let words =
+            bilibi_grid::RecordWords::load(&**client, scope, "company_relationships").await?;
         let company = organisation::identity(&**client, scope, self.company.get())
             .await?
             .ok_or(Error::NotFound)?;
@@ -1448,7 +1450,7 @@ impl LinksPage {
             ..Card::default()
         })?);
         if let Some(modal) = &self.modal {
-            html.push(&self.link_modal(&company.display_name, modal)?);
+            html.push(&self.link_modal(&company.display_name, modal, &words)?);
         } else if let Some(entry) = &self.pending_unlink {
             html.push(&render(&ConfirmDialog {
                 id: "unlink-rel-confirm",
@@ -1470,7 +1472,12 @@ impl LinksPage {
             ..LiveBody::default()
         })
     }
-    fn link_modal(&self, company: &str, modal: &LinkModal) -> Result<Html> {
+    fn link_modal(
+        &self,
+        company: &str,
+        modal: &LinkModal,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
         let value = |key: &str| modal.values.get(key).cloned().unwrap_or_default();
         let mut fields = Vec::new();
         let mut save_disabled = false;
@@ -1530,7 +1537,7 @@ impl LinksPage {
             )?);
         }
         for key in [link_fields::EFFECTIVE_FROM.id, link_fields::EFFECTIVE_TO.id] {
-            let label = link_fields::get(key).label;
+            let label = words.get(&link_fields::get(key));
             if modal.ending && key == "effective_from" {
                 continue;
             }
@@ -1555,7 +1562,10 @@ impl LinksPage {
         let (title, description) = match &modal.editing {
             Some(entry) if modal.ending => (
                 "End Relationship".to_owned(),
-                format!("The relationship with {} ends on the chosen date, inclusive; its history is kept.", entry.other_name),
+                format!(
+                    "The relationship with {} ends on the chosen date, inclusive; its history is kept.",
+                    entry.other_name
+                ),
             ),
             Some(entry) => (
                 "Edit Relationship Dates".to_owned(),
@@ -1566,9 +1576,7 @@ impl LinksPage {
             ),
             None => (
                 "Add Relationship".to_owned(),
-                format!(
-                    "Link {company} to another company or a person."
-                ),
+                format!("Link {company} to another company or a person."),
             ),
         };
         render(&Modal {

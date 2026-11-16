@@ -550,14 +550,18 @@ impl State {
         }
         Ok(())
     }
-    fn view(&self) -> Result<String> {
+    async fn view(&self, scope: &Scope) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "teams").await?;
+        drop(client);
+
         let (header, sections, variant) = match &self.record {
-            Some(record) => record::view(self, record)?,
+            Some(record) => record::view(self, record, &words)?,
             None => list::view(self)?,
         };
         let mut dialog = Html::EMPTY;
         if let Some(draft) = &self.create {
-            dialog.push(&dialogs::create(self, draft)?);
+            dialog.push(&dialogs::create(self, draft, &words)?);
         }
         if let Some(draft) = &self.add {
             dialog.push(&dialogs::add(self, draft)?);
@@ -654,7 +658,7 @@ impl LiveState<Scope, Error> for State {
             }
             self.load(r.scope).await?;
             Ok(LiveBody {
-                html: self.view()?,
+                html: self.view(r.scope).await?,
                 query: {
                     let mut q = self.list.to_params();
                     q.extend(self.columns.params());

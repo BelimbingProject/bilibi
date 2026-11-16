@@ -247,6 +247,10 @@ impl Panel {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "activities").await?;
+        drop(client);
+
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let state = if self.history {
             State::Closed
@@ -369,6 +373,7 @@ impl Panel {
             content.push(&dialog.render(
                 &self.pages,
                 &clock,
+                &words,
                 &format!("{anchor}-new"),
                 "close_modal",
                 self.framed,

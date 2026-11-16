@@ -188,15 +188,11 @@ impl Create {
             });
         }
         let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "addresses").await?;
         let masked = bilibi_authz::restrictions_for(&**client, scope, "addresses").await?;
         drop(client);
         let can_create = self.pages.allowed(scope, CREATE).await?;
-        let label_of = |key: &str| {
-            FIELDS
-                .iter()
-                .find(|(field, _, _)| *field == key)
-                .map_or("", |(_, _, label)| *label)
-        };
+        let label_of = |key: &str| words.get(&super::fields::get(key));
         let errors = |key: &str| -> Vec<String> {
             self.errors
                 .iter()
@@ -206,17 +202,17 @@ impl Create {
         };
         let mut summary = ErrorSummary::new("address-problems");
         if self.attempted {
-            for (key, id, label) in FIELDS {
+            for (key, id, _) in FIELDS {
                 for error in self.errors.iter().filter(|e| e.field == *key) {
-                    summary.push(*id, error_sentence(label, &error.message));
+                    summary.push(*id, error_sentence(label_of(key), &error.message));
                 }
             }
         }
         let value = |v: &Option<String>| v.clone().unwrap_or_default();
-        let field = |key: &str, label: &str, v: &Option<String>| {
+        let field = |key: &str, v: &Option<String>| {
             Field::in_form("address", key)
                 .id(format!("address-{}", key.replace('_', "-")))
-                .label(label)
+                .label(label_of(key))
                 .value(value(v))
                 .attr("data-debounce", "300")
                 .errors(errors(key))
@@ -226,21 +222,19 @@ impl Create {
             f
         };
         let i = &self.input;
-        let mut contact = vec![bounded(field("label", "Label", &i.label))];
+        let mut contact = vec![bounded(field("label", &i.label))];
         let mut restricted = Vec::new();
         // A restricted phone renders no input and is never written.
         if masked.contains("phone") {
-            restricted.push(RestrictedField::new("address-phone", "Phone"));
+            restricted.push(RestrictedField::new("address-phone", label_of("phone")));
         } else {
-            contact.push(bounded(
-                field("phone", "Phone", &i.phone).kind(InputKind::Tel),
-            ));
+            contact.push(bounded(field("phone", &i.phone).kind(InputKind::Tel)));
         }
         let shown = self.shown_lines();
         let lines: Vec<Field> = [
-            field("line1", "Address line 1", &i.line1),
-            field("line2", "Address line 2", &i.line2),
-            field("line3", "Address line 3", &i.line3),
+            field("line1", &i.line1),
+            field("line2", &i.line2),
+            field("line3", &i.line3),
         ]
         .into_iter()
         .take(shown)
@@ -252,24 +246,19 @@ impl Create {
                 "add_line",
             )
         });
-        let mut confidence = field("parse_confidence", "Parse confidence", &i.parse_confidence)
-            .kind(InputKind::Number);
+        let mut confidence = field("parse_confidence", &i.parse_confidence).kind(InputKind::Number);
         confidence.attrs.min = Some("0".into());
         confidence.attrs.max = Some("1".into());
         confidence.attrs.step = Some("0.0001".into());
         let provenance = vec![
-            bounded(field("source", "Source", &i.source)),
-            bounded(field("source_ref", "Source reference", &i.source_ref)),
-            bounded(field("parser_version", "Parser version", &i.parser_version)),
+            bounded(field("source", &i.source)),
+            bounded(field("source_ref", &i.source_ref)),
+            bounded(field("parser_version", &i.parser_version)),
             confidence,
-            field(
-                "verification_status",
-                "Verification status",
-                &i.verification_status,
-            )
-            .kind(InputKind::Select)
-            .options(bilibi_ui::choices(&VERIFICATION))
-            .required(),
+            field("verification_status", &i.verification_status)
+                .kind(InputKind::Select)
+                .options(bilibi_ui::choices(&VERIFICATION))
+                .required(),
         ];
         // The folded provenance still reads true: what it holds now, and
         // whether something in it needs fixing (which also opens it).
@@ -316,13 +305,14 @@ impl Create {
                 "address",
                 &IDS,
                 &LABELS,
+                &words,
                 &self.countries,
                 &self.errors,
             )?,
             provenance,
             provenance_summary,
             provenance_open,
-            raw_input: field("raw_input", "Raw input", &i.raw_input)
+            raw_input: field("raw_input", &i.raw_input)
                 .kind(InputKind::Textarea)
                 .attr("maxlength", "10000"),
             submit: render(Button {

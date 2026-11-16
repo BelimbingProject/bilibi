@@ -818,6 +818,10 @@ impl Index {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "activities").await?;
+        drop(client);
+
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let may_create = self.pages.activities.may_create(scope).await?;
         let mut actions = Html::EMPTY;
@@ -1003,6 +1007,7 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 &clock,
+                &words,
                 "activities-new",
                 "close_modal",
                 self.framed,

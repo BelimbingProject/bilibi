@@ -195,7 +195,16 @@ enum AuthzRule {
 impl AuthzRule {
     fn consequence(&self) -> String {
         match self {
-            Self::SetRoles { ids, bounds } => format!("Change {} role assignment(s) on your account for {}, from {} through {}? This may end your access.",ids.len(),bounds.company_id.map(|id|format!("company {id}")).unwrap_or_else(||"every assigned workplace".into()),bounds.valid_from.as_deref().unwrap_or("no start date"),bounds.valid_until.as_deref().unwrap_or("no end date")),
+            Self::SetRoles { ids, bounds } => format!(
+                "Change {} role assignment(s) on your account for {}, from {} through {}? This may end your access.",
+                ids.len(),
+                bounds
+                    .company_id
+                    .map(|id| format!("company {id}"))
+                    .unwrap_or_else(|| "every assigned workplace".into()),
+                bounds.valid_from.as_deref().unwrap_or("no start date"),
+                bounds.valid_until.as_deref().unwrap_or("no end date")
+            ),
             Self::RemoveRole { name, .. } => {
                 format!("The {name} role will be removed from your account.")
             }
@@ -342,6 +351,9 @@ impl Detail {
     }
 
     async fn details(&self, scope: &Scope, loaded: &Loaded) -> Result<Html> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "users").await?;
+        drop(client);
         let display = self.pages.display(scope).await?;
         let account = &loaded.account;
         let editable = loaded.can_edit();
@@ -375,7 +387,12 @@ impl Detail {
             }
             _ => render(&Muted { text: "None" })?,
         };
-        let mut person_field = self.inline(loaded, "person", "Edit person", &person_value);
+        let mut person_field = self.inline(
+            loaded,
+            "person",
+            words.get(&crate::record_fields::PERSON_ID),
+            &person_value,
+        );
         person_field = person_field.allow_empty();
         let person_editor = match &loaded.persons {
             Some(persons) if person_editable => {
@@ -397,7 +414,7 @@ impl Detail {
                             .value(&person_value)
                             .prompt("None")
                             .options(options)
-                            .aria_label("Person")
+                            .aria_label(words.get(&crate::record_fields::PERSON_ID))
                             .wrapper_class("mb-0"),
                     )?,
                     note: Html::EMPTY,
@@ -416,25 +433,35 @@ impl Detail {
             })?,
             None => render(&Badge::status(BadgeKind::Warning, "unverified"))?,
         };
-        let mut email_field = self.inline(loaded, "email", "Email", &account.email);
+        let mut email_field = self.inline(
+            loaded,
+            "email",
+            words.get(&crate::record_fields::EMAIL),
+            &account.email,
+        );
         if !account.home {
             email_field = email_field.readonly();
         }
         let items = vec![
             Fact {
-                title: crate::record_fields::get("name").label,
+                title: words.get(&crate::record_fields::get("name")),
                 id: "user-view-name",
                 value: render(&InlineEdit {
-                    field: self.inline(loaded, "name", "Name", &account.name),
+                    field: self.inline(
+                        loaded,
+                        "name",
+                        words.get(&crate::record_fields::get("name")),
+                        &account.name,
+                    ),
                 })?,
             },
             Fact {
-                title: crate::record_fields::EMAIL.label,
+                title: words.get(&crate::record_fields::EMAIL),
                 id: "user-view-email",
                 value: render(&InlineEdit { field: email_field })?,
             },
             Fact {
-                title: crate::record_fields::PERSON_ID.label,
+                title: words.get(&crate::record_fields::PERSON_ID),
                 id: "user-view-person",
                 value: render(&InlineChoice {
                     field: person_field,
@@ -443,19 +470,19 @@ impl Detail {
                 })?,
             },
             Fact {
-                title: crate::record_fields::EMAIL_VERIFIED_AT.label,
+                title: words.get(&crate::record_fields::EMAIL_VERIFIED_AT),
                 id: "user-view-email-verified",
                 value: verified,
             },
             Fact {
-                title: crate::record_fields::CREATED_AT.label,
+                title: words.get(&crate::record_fields::CREATED_AT),
                 id: "user-view-created",
                 value: render(&Stamp {
                     value: datetime(&display, "user-created-at", account.created_at)?,
                 })?,
             },
             Fact {
-                title: crate::record_fields::UPDATED_AT.label,
+                title: words.get(&crate::record_fields::UPDATED_AT),
                 id: "user-view-updated",
                 value: render(&Stamp {
                     value: datetime(&display, "user-updated-at", account.updated_at)?,
@@ -1756,7 +1783,7 @@ impl Detail {
                             return Ok(());
                         }
                         Err(AccountError::Access(Error::Unauthorized)) => {
-                            return Err(Error::Unauthorized)
+                            return Err(Error::Unauthorized);
                         }
                         Err(AccountError::Access(Error::Forbidden)) => self
                             .flash
@@ -1791,7 +1818,7 @@ impl Detail {
                             .flash
                             .success(format!("{person} was unlinked from {name}.")),
                         Err(LinkError::Access(Error::Unauthorized)) => {
-                            return Err(Error::Unauthorized)
+                            return Err(Error::Unauthorized);
                         }
                         Err(LinkError::Access(Error::Forbidden)) => self.flash.error(FORBIDDEN),
                         Err(_) => self.flash.error(format!(

@@ -158,6 +158,9 @@ impl Countries {
     }
 
     pub async fn view(&mut self, scope: &Scope, requery: bool) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "countries").await?;
+        drop(client);
         if requery || self.shown.is_none() {
             self.load(scope).await?;
         }
@@ -193,9 +196,13 @@ impl Countries {
             row.dom_id = Some(format!("country-{id}"));
             let name = if can_update {
                 let field_id = format!("country-{id}-name");
-                let mut field =
-                    InlineField::new(&field_id, "country", "Country name", &country.country)
-                        .status(self.statuses.get(&field_id));
+                let mut field = InlineField::new(
+                    &field_id,
+                    "country",
+                    words.field("country", "Country name"),
+                    &country.country,
+                )
+                .status(self.statuses.get(&field_id));
                 field.id_value = id.to_string();
                 field.save_event = "save-country-name".into();
                 render(InlineEdit { field })?

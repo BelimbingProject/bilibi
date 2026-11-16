@@ -614,17 +614,27 @@ impl Record {
 
     // ------------------------------------------------------------ the view
 
-    fn facts(&self, calendar: &Calendar, manage: bool) -> Result<Html> {
-        let mut name = InlineField::new("work-calendar-name", "name", "Edit name", &calendar.name)
-            .version(calendar.version)
-            .status(self.statuses.get("name"));
+    fn facts(
+        &self,
+        calendar: &Calendar,
+        manage: bool,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
+        let mut name = InlineField::new(
+            "work-calendar-name",
+            "name",
+            words.field("name", "Edit name"),
+            &calendar.name,
+        )
+        .version(calendar.version)
+        .status(self.statuses.get("name"));
         name.id_value = calendar.code.clone();
         name.save_event = "save_calendar".into();
         let substitute = calendar.substitute.as_str();
         let mut choice = InlineField::new(
             "work-calendar-substitute",
             "substitute",
-            "Edit holidays on a day off",
+            words.field("substitute", "Edit holidays on a day off"),
             substitute,
         )
         .version(calendar.version)
@@ -644,7 +654,7 @@ impl Record {
             Field::named("substitute")
                 .id("work-calendar-substitute-select")
                 .label_class("sr-only")
-                .label("Holidays on a day off")
+                .label(words.field("substitute", "Holidays on a day off"))
                 .kind(InputKind::Select)
                 .value(substitute)
                 .options(options),
@@ -659,22 +669,22 @@ impl Record {
             id: "work-calendar-facts",
             items: vec![
                 Fact {
-                    title: "Code",
+                    title: words.field("code", "Code"),
                     id: "work-calendar-code",
                     value: Html::text(&calendar.code),
                 },
                 Fact {
-                    title: "Name",
+                    title: words.field("name", "Name"),
                     id: "work-calendar-name-fact",
                     value: render(InlineEdit { field: name })?,
                 },
                 Fact {
-                    title: "Status",
+                    title: words.field("status", "Status"),
                     id: "work-calendar-status",
                     value: super::calendars::status_badge(&calendar.status)?,
                 },
                 Fact {
-                    title: "Holidays on a day off",
+                    title: words.field("substitute", "Holidays on a day off"),
                     id: "work-calendar-substitute-fact",
                     value: render(InlineChoice {
                         field: choice,
@@ -683,7 +693,7 @@ impl Record {
                     })?,
                 },
                 Fact {
-                    title: "Zone today",
+                    title: words.field("timezone", "Zone today"),
                     id: "work-calendar-zone",
                     value: Html::text(zone),
                 },
@@ -1137,7 +1147,11 @@ impl Record {
         }
     }
 
-    fn view(&self) -> Result<String> {
+    async fn view(&self, scope: &Scope) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "work_calendars").await?;
+        drop(client);
+
         let calendar = self.calendar()?;
         let manage = self.manage;
         let mut actions = render(BackLink {
@@ -1189,7 +1203,7 @@ impl Record {
             record_id: &calendar.code,
             header,
             sections: vec![
-                self.facts(calendar, manage)?,
+                self.facts(calendar, manage, &words)?,
                 self.rules_card(calendar, manage)?,
                 self.sets_card(calendar, manage)?,
                 self.exceptions_card(calendar, manage)?,
@@ -1225,7 +1239,7 @@ impl LiveState<Scope, Error> for Record {
                 }
             }
             self.load(request.scope).await?;
-            let html = self.view()?;
+            let html = self.view(request.scope).await?;
             let mut query = HashMap::new();
             if self.page > 1 {
                 query.insert("page".into(), self.page.to_string());

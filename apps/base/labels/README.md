@@ -10,11 +10,9 @@ A label override is data (ADR 28): a short plain text kept per tenant against a 
 | --- | --- | --- |
 | `menu` | A staff menu item ID (`base/menu`); portal items are excluded | The sidebar, in place of the item's own label. The workspace page picker and the Menu Inspector still show the module's word. |
 | `record` | A Grid table ID (`base/grid`) | The record types Reports offers, in place of the table's own label. |
-| `field` | `<table>.<field>`: a Grid table ID, a dot and a Grid field ID. Hidden fields are excluded | Every Grid column the tenant's readers see: list column heads, the add-a-column picker, filters, saved and shared views, Reports and exports. A record page or form that draws `RecordWords` shows it too. |
+| `field` | `<table>.<field>`: a Grid table ID, a dot and a Grid field ID. Hidden fields are excluded | Every Grid column the tenant's readers see: list column heads, the add-a-column picker, filters, saved and shared views, Reports and exports. Record pages, forms and inline editors resolve the same words through `RecordWords`. |
 
-A field label replaces the field's own word only; a column reached through a link still names the link in front (`Company › Name`), and a record field read through a link (a parent company's name) is another record's field and keeps its own word. Admin screens that name a field by its stable identity (field restrictions) keep the module's word.
-
-Records, forms and inline editors that hand-write a field's label do not show a rename until they draw it with `bilibi_grid::RecordWords`; Company's record page does today.
+A field label replaces the field's own word only; a column reached through a link still names the link in front (`Company › Name`), and a record field read through a link uses the target field's override, falling back to its own declared word. Admin screens that name a field by its stable identity (field restrictions) keep the module's word.
 
 ## Show a label (owner)
 

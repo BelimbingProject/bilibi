@@ -378,6 +378,7 @@ impl Draft {
         self.reconcile(&definitions);
         self.search(&definitions, scope).await?;
         let client = pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "persons").await?;
         let restricted = bilibi_authz::restrictions_for(&**client, scope, "persons").await?;
         drop(client);
         // A newly restricted field discards its server-side draft as well as
@@ -392,21 +393,14 @@ impl Draft {
         let mut fields = Vec::new();
         let mut masked = Vec::new();
         let input = &self.input;
-        for (key, label, value) in [
-            ("name", "Name", input.name.as_str()),
-            ("code", "Code", self.code.as_str()),
-            ("kind", "Kind", model::kind_key(input.kind)),
-            (
-                "email",
-                "Personal email",
-                input.email.as_deref().unwrap_or(""),
-            ),
-            (
-                "phone",
-                "Personal phone",
-                input.phone.as_deref().unwrap_or(""),
-            ),
+        for (key, value) in [
+            ("name", input.name.as_str()),
+            ("code", self.code.as_str()),
+            ("kind", model::kind_key(input.kind)),
+            ("email", input.email.as_deref().unwrap_or("")),
+            ("phone", input.phone.as_deref().unwrap_or("")),
         ] {
+            let label = words.get(&super::fields::get(key));
             if restricted.contains(key) {
                 masked.push(RestrictedField::new(format!("person-{key}"), label));
                 continue;

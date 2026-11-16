@@ -493,6 +493,10 @@ impl Index {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "documents").await?;
+        drop(client);
+
         let clock = self.pages.clock(scope).await?;
         let mut page = self.pages.documents.list(scope, &self.filter()).await?;
         let total_pages = (page.total.max(0) as u64).div_ceil(self.list.page_size);
@@ -731,6 +735,7 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 &self.uploads,
+                &words,
                 "documents-new",
                 "close_modal",
                 self.framed,
@@ -739,6 +744,7 @@ impl Index {
         if let Some(quick) = &self.quick {
             body.push(&quick.render(
                 &self.uploads,
+                &words,
                 "documents-quick",
                 "close_quick",
                 self.framed,

@@ -100,12 +100,15 @@ impl Invite {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "users").await?;
+        drop(client);
         let can_invite = self.pages.allowed(scope, INVITE).await?;
         let roles = self.grantable_roles(scope).await?;
         let field = |key: &str, label: &str| {
             let field = Field::in_form("invitation", key)
                 .id(format!("invitation-{key}"))
-                .label(label)
+                .label(words.field(key, label))
                 .errors(self.errors_for(key))
                 .attr("data-debounce", "300");
             if can_invite {
@@ -247,14 +250,14 @@ impl LiveState<Scope, Error> for Invite {
                         }
                         Err(InvitationError::Validation(errors)) => self.errors = errors,
                         Err(InvitationError::Access(Error::Unauthorized)) => {
-                            return Err(Error::Unauthorized)
+                            return Err(Error::Unauthorized);
                         }
                         Err(InvitationError::Access(Error::Forbidden)) => {
                             self.notice =
                                 "You do not have permission to send this invitation.".into()
                         }
                         Err(InvitationError::Access(error @ Error::StepUpRequired { .. })) => {
-                            return Err(error)
+                            return Err(error);
                         }
                         Err(InvitationError::Access(Error::Refused(reason))) => {
                             self.notice = reason

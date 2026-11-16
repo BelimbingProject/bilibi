@@ -486,7 +486,12 @@ impl Panel {
         }
         field
     }
-    async fn add_form(&self, scope: &Scope, today: &str) -> Result<Html> {
+    async fn add_form(
+        &self,
+        scope: &Scope,
+        today: &str,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
         let client = self.pages.db.get().await?;
         let restricted =
             bilibi_authz::restrictions_for(&**client, scope, "person_affiliations").await?;
@@ -557,15 +562,15 @@ impl Panel {
         .errors(errors(&format!("{party}_id")));
         controls.push(render(combo)?);
         for (key, label, kind) in [
-            ("title", fields::TITLE.label, InputKind::Text),
+            ("title", words.get(&fields::TITLE), InputKind::Text),
             (
                 "work_email",
-                fields::get("work_email").label,
+                words.get(&fields::get("work_email")),
                 InputKind::Email,
             ),
             (
                 "work_phone",
-                fields::get("work_phone").label,
+                words.get(&fields::get("work_phone")),
                 InputKind::Tel,
             ),
             ("effective_from", "From", InputKind::Date),
@@ -614,6 +619,10 @@ impl Panel {
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
         let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "person_affiliations").await?;
+        drop(client);
+
+        let client = self.pages.db.get().await?;
         bilibi_authz::authorize_key(&**client, scope, VIEW).await?;
         drop(client);
         let today = self.today(scope).await?;
@@ -659,11 +668,11 @@ impl Panel {
                 })?,
             );
             for (column, label) in [
-                ("title", fields::TITLE.label),
-                ("work_email", fields::get("work_email").label),
-                ("work_phone", fields::get("work_phone").label),
-                ("from", "From"),
-                ("to", "To"),
+                ("title", words.get(&fields::TITLE)),
+                ("work_email", words.get(&fields::get("work_email"))),
+                ("work_phone", words.get(&fields::get("work_phone"))),
+                ("from", words.get(&fields::get("effective_from"))),
+                ("to", words.get(&fields::get("effective_to"))),
             ] {
                 let value = if entry.affiliation.masked.iter().any(|m| m == column) {
                     // A partial value is read-only: it is not the stored value.
@@ -751,7 +760,7 @@ impl Panel {
             ..SectionHeading::default()
         })?;
         if self.adding {
-            head.push(&self.add_form(scope, &today).await?);
+            head.push(&self.add_form(scope, &today, &words).await?);
         }
         let form = self.list.filters_form();
         let filters_id = self.dom("filters");

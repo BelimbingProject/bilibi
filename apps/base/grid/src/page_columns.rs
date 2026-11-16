@@ -213,22 +213,45 @@ impl PageColumns {
     }
 
     fn label_record_columns(&mut self) {
+        let builtin_words: BTreeMap<_, _> = self
+            .builtins
+            .iter()
+            .filter_map(|builtin| {
+                self.builtin_word(builtin)
+                    .map(|word| (builtin.id.clone(), word))
+            })
+            .collect();
         let root = self
             .catalog
             .as_ref()
             .and_then(|catalog| catalog.table(&self.table).map(|root| (catalog, root)));
         for column in self.columns.iter_mut().chain(&mut self.suggestions) {
-            if let Some(field) = self.record_fields.iter().find(|f| {
-                f.column == Some(column.spec.as_str()) || f.slot == Some(column.spec.as_str())
-            }) {
-                let word = root.map_or_else(
-                    || field.label.to_owned(),
-                    |(catalog, root)| crate::record_word(catalog, root, field),
-                );
+            let word = builtin_words.get(&column.spec).cloned().or_else(|| {
+                self.record_fields
+                    .iter()
+                    .find(|field| {
+                        field.column == Some(column.spec.as_str())
+                            || field.slot == Some(column.spec.as_str())
+                    })
+                    .map(|field| {
+                        root.map_or_else(
+                            || field.label.to_owned(),
+                            |(catalog, root)| crate::record_word(catalog, root, field),
+                        )
+                    })
+            });
+            if let Some(word) = word {
                 column.label = word.clone();
                 column.short_label = word;
             }
         }
+    }
+
+    fn builtin_word(&self, builtin: &BuiltinColumn) -> Option<String> {
+        let (catalog, root) = self.root()?;
+        self.builtin_field(builtin)
+            .map(|field| crate::record_word(catalog, root, field))
+            .or_else(|| catalog.field_name(root.id(), &builtin.id))
     }
 
     pub fn view(&self) -> &View {
@@ -311,17 +334,6 @@ impl PageColumns {
         };
         if let Some(root) = catalog.table(&self.table) {
             self.record_fields = root.record_fields.clone();
-            for builtin in &mut self.builtins {
-                if let Some(field) = self
-                    .record_fields
-                    .iter()
-                    .find(|field| field.slot_id().as_deref() == Some(builtin.id.as_str()))
-                {
-                    let word = crate::record_word(&catalog, root, field);
-                    builtin.label = word.clone();
-                    builtin.short_label = word;
-                }
-            }
         }
         let kept = self.split(&catalog);
         let builtins = &self.builtins;
@@ -774,7 +786,12 @@ impl PageColumns {
                         .catalog
                         .as_ref()
                         .is_none_or(|catalog| self.builtin_allowed(catalog, builtin))
-                    && (builtin.label.to_lowercase().contains(&wanted)
+                    && (self
+                        .builtin_word(builtin)
+                        .as_deref()
+                        .unwrap_or(&builtin.label)
+                        .to_lowercase()
+                        .contains(&wanted)
                         || builtin.id.contains(&wanted))
             })
             .collect()
@@ -788,11 +805,14 @@ impl PageColumns {
         }
         let wanted = text.to_lowercase();
         let shown = self.view.columns.clone();
-        if let Some(builtin) = self
-            .removed_builtins(&shown, text)
-            .into_iter()
-            .find(|b| b.label.to_lowercase() == wanted || b.id == wanted)
-        {
+        if let Some(builtin) = self.removed_builtins(&shown, text).into_iter().find(|b| {
+            self.builtin_word(b)
+                .as_deref()
+                .unwrap_or(&b.label)
+                .to_lowercase()
+                == wanted
+                || b.id == wanted
+        }) {
             return Some(builtin.id.clone());
         }
         if let Some(column) = self

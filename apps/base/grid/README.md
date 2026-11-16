@@ -75,7 +75,7 @@ A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declaratio
 
 ## Detail fields become columns
 
-A scalar field shown on a record can also be added to its list, under the same label. A tenant may rename a field (`base/labels`, kind `field`, subject `table.field`): `Catalog::resolve` and `column::resolve` give every column that word (pass `|_, _| None` to keep the module's), and a detail page draws its titles with `RecordWords::load(client, scope, table)` and `words.get(&field)` instead of `field.label`.
+A scalar field shown on a record can also be added to its list, under the same label. A tenant may rename a field (`base/labels`, kind `field`, subject `table.field`): `Catalog::resolve` and `column::resolve` give every column that word (pass `|_, _| None` to keep the module's), and record pages, create forms and inline editors draw their labels with `RecordWords::load(client, scope, table)` and `words.get(&field)` instead of `field.label`. For a Grid field without record vocabulary, use `words.field(id, default)`. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.
 
 For example, Contacts calls its email **Personal email** in both places. Work email comes from the Affiliations panel and becomes a Contacts column through that panel's Grid contribution.
 

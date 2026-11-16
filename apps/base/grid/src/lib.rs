@@ -218,8 +218,7 @@ inventory::submit! {
 }
 
 /// A record field's word: the tenant's label for the Grid field it reads, or
-/// the owner's own. A field reached through a link is another record's field,
-/// so only an own field takes the tenant's word.
+/// the owner's own.
 pub(crate) fn record_word(
     catalog: &Catalog,
     root: &Table,
@@ -228,7 +227,6 @@ pub(crate) fn record_word(
     field
         .column
         .and_then(|path| catalog.resolve(root, path).ok())
-        .filter(|column| column.kind == ColumnKind::Field && column.hops.is_empty())
         .and_then(|column| {
             let id = column.field.as_ref()?.id;
             catalog.field_name(column.table, id)
@@ -256,29 +254,40 @@ impl RecordWords {
         let Some(root) = installed.table(table) else {
             return Ok(Self::default());
         };
-        Ok(Self(
-            root.record_fields
-                .iter()
-                .filter_map(|field| {
-                    let column = field
-                        .column
-                        .and_then(|path| {
-                            column::resolve(path, root, &|id| installed.table(id), &|_, _| None)
-                                .ok()
-                        })
-                        .filter(|column| {
-                            column.kind == ColumnKind::Field && column.hops.is_empty()
-                        })?;
-                    let word = names.get(column.table, column.field.as_ref()?.id)?;
-                    Some((field.vocabulary, word.to_owned()))
-                })
-                .collect(),
-        ))
+        let mut words: std::collections::BTreeMap<_, _> = root
+            .visible_fields()
+            .filter_map(|field| {
+                names
+                    .get(root.id(), field.id)
+                    .map(|word| (field.id, word.to_owned()))
+            })
+            .collect();
+        for field in &root.record_fields {
+            let Some(column) = field.column.and_then(|path| {
+                column::resolve(path, root, &|id| installed.table(id), &|_, _| None).ok()
+            }) else {
+                continue;
+            };
+            let Some(word) = column
+                .field
+                .as_ref()
+                .and_then(|field| names.get(column.table, field.id))
+            else {
+                continue;
+            };
+            words.insert(field.vocabulary, word.to_owned());
+            words.insert(field.id, word.to_owned());
+        }
+        Ok(Self(words))
+    }
+    /// The tenant's word for a Grid field without record vocabulary.
+    pub fn field<'a>(&'a self, id: &str, default: &'a str) -> &'a str {
+        self.0.get(id).map_or(default, String::as_str)
     }
     /// The tenant's word for `field`, or the owner's own.
     pub fn get<'a>(&'a self, field: &bilibi_ui::RecordField) -> &'a str {
         self.0
             .get(field.vocabulary)
-            .map_or(field.label, String::as_str)
+            .map_or_else(|| self.field(field.id, field.label), String::as_str)
     }
 }

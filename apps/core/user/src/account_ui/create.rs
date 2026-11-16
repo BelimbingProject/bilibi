@@ -71,6 +71,9 @@ impl Create {
             .collect()
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "users").await?;
+        drop(client);
         let can_create = self.pages.allowed(scope, CREATE).await?;
         let persons = self.pages.person_choices(scope).await?;
         let any_desk = !self
@@ -81,7 +84,7 @@ impl Create {
         let field = |key: &str, label: &str| {
             let mut field = Field::in_form("user", key)
                 .id(format!("user-{key}"))
-                .label(label)
+                .label(words.field(key, label))
                 .errors(self.errors_for(key))
                 .attr("data-debounce", "300");
             if !can_create {
@@ -338,7 +341,7 @@ impl LiveState<Scope, Error> for Create {
                             }]
                         }
                         Err(AccountError::Access(Error::Unauthorized)) => {
-                            return Err(Error::Unauthorized)
+                            return Err(Error::Unauthorized);
                         }
                         Err(AccountError::Access(Error::Forbidden)) => {
                             self.notice = "You do not have permission to create users.".into()

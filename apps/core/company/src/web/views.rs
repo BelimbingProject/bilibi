@@ -793,7 +793,9 @@ fn parent_picker(
         errors,
     ))
 }
+#[allow(clippy::too_many_arguments)]
 fn choice(
+    words: &bilibi_grid::RecordWords,
     id: &str,
     name: &str,
     value: String,
@@ -813,7 +815,7 @@ fn choice(
                 .value(&value)
                 .options(options.clone())
                 .placeholder("None")
-                .aria_label("Jurisdiction")
+                .aria_label(words.get(&fields::JURISDICTION))
                 .wrapper_class("mb-0"),
         )?
     } else {
@@ -824,7 +826,7 @@ fn choice(
                 .value(&value)
                 .prompt("None")
                 .options(options.clone())
-                .aria_label(name)
+                .aria_label(words.get(&fields::get(name)))
                 .wrapper_class("mb-0"),
         )?
     };
@@ -833,10 +835,15 @@ fn choice(
     } else {
         Html::text(display)
     };
-    let mut field = InlineField::new(id, name, format!("Edit {}", name.replace('_', " ")), value)
-        .version(company.version)
-        .status(status)
-        .allow_empty();
+    let mut field = InlineField::new(
+        id,
+        name,
+        format!("Edit {}", words.get(&fields::get(name))),
+        value,
+    )
+    .version(company.version)
+    .status(status)
+    .allow_empty();
     field.id_value = company.id.to_string();
     field.editable = editable;
     render(&InlineChoice {
@@ -1026,7 +1033,15 @@ pub(super) async fn detail(
         facts.push(Fact {
             title: words.get(&fields::get(name)),
             id: "",
-            value: text_fact(&company, name, value, editable, false, statuses.get(name))?,
+            value: text_fact(
+                &words,
+                &company,
+                name,
+                value,
+                editable,
+                false,
+                statuses.get(name),
+            )?,
         });
     }
     facts.push(Fact {
@@ -1049,6 +1064,7 @@ pub(super) async fn detail(
         title: words.get(&fields::LEGAL_ENTITY_TYPE_ID),
         id: "detail-legal-entity-type",
         value: choice(
+            &words,
             "company-legal-entity-type",
             "legal_entity_type_id",
             company
@@ -1072,6 +1088,7 @@ pub(super) async fn detail(
             title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(
+                &words,
                 &company,
                 name,
                 value,
@@ -1088,6 +1105,7 @@ pub(super) async fn detail(
             restricted("company-jurisdiction-restricted")?
         } else {
             choice(
+                &words,
                 "company-jurisdiction",
                 "jurisdiction",
                 company.jurisdiction.clone().unwrap_or_default(),
@@ -1106,6 +1124,7 @@ pub(super) async fn detail(
             title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(
+                &words,
                 &company,
                 name,
                 value,
@@ -1143,7 +1162,7 @@ pub(super) async fn detail(
             let mut field = InlineField::new(
                 id_attr,
                 definition.id,
-                format!("Edit {}", definition.label),
+                format!("Edit {}", words.field(definition.id, definition.label)),
                 value,
             )
             .version(company.version)
@@ -1179,7 +1198,7 @@ pub(super) async fn detail(
             let mut field = InlineField::new(
                 id_attr,
                 definition.id,
-                format!("Edit {}", definition.label),
+                format!("Edit {}", words.field(definition.id, definition.label)),
                 value,
             )
             .version(company.version)
@@ -1195,7 +1214,7 @@ pub(super) async fn detail(
             render(&InlineEdit { field })?
         };
         facts.push(Fact {
-            title: definition.label,
+            title: words.field(definition.id, definition.label),
             id: definition.id,
             value: value_html,
         });
@@ -1401,7 +1420,7 @@ pub(super) async fn detail(
             change: true,
             body: parent_picker(
                 &parent,
-                "Company",
+                words.get(&fields::PARENT_ID),
                 selected,
                 ("pick_parent", "change_parent"),
                 errors,
@@ -1426,10 +1445,7 @@ pub(super) async fn detail(
             &[&scope.tenant(), &id],
         )
         .await?;
-    for (index, name, label) in [
-        (0, "scope_activities", "Business Activities"),
-        (1, "metadata", "Metadata"),
-    ] {
+    for (index, name) in [(0, "scope_activities"), (1, "metadata")] {
         let value: Option<Value> = context.get(index);
         if name == "scope_activities" && value.as_ref().is_none_or(|value| value.is_array()) {
             let activities = value
@@ -1441,7 +1457,7 @@ pub(super) async fn detail(
             let mut field = InlineField::new(
                 "company-new-activity",
                 "scope_activities",
-                "Add business activity",
+                format!("Add {}", words.get(&fields::ACTIVITIES)),
                 "",
             )
             .version(company.version)
@@ -1465,7 +1481,7 @@ pub(super) async fn detail(
         let mut field = InlineField::new(
             format!("company-{name}"),
             name,
-            format!("Edit {label}"),
+            format!("Edit {}", words.get(&fields::get(name))),
             value
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
                 .unwrap_or_default(),
@@ -1710,6 +1726,7 @@ fn restricted(id: &str) -> Result<Html> {
     render(&Restricted::new(id))
 }
 fn text_fact(
+    words: &bilibi_grid::RecordWords,
     company: &Company,
     name: &str,
     value: &str,
@@ -1721,9 +1738,14 @@ fn text_fact(
     if masked {
         return restricted(&id);
     }
-    let mut field = InlineField::new(id, name, format!("Edit {}", name.replace('_', " ")), value)
-        .version(company.version)
-        .status(status);
+    let mut field = InlineField::new(
+        id,
+        name,
+        format!("Edit {}", words.get(&fields::get(name))),
+        value,
+    )
+    .version(company.version)
+    .status(status);
     field.id_value = company.id.to_string();
     field.editable = editable;
     field.class = match name {
@@ -1793,36 +1815,27 @@ pub(super) async fn create(
     } = state;
     bilibi_authz::authorize_key(client, scope, crate::CREATE).await?;
     let masked = crate::field_contributions::effective_restrictions(client, scope).await?;
+    let words = bilibi_grid::RecordWords::load(client, scope, "companies").await?;
     let opts = options(client, true).await?;
     let mut fields = Vec::new();
-    for (name, label, kind, placeholder) in [
-        ("parent_id", fields::PARENT_ID.label, InputKind::Select, ""),
-        ("status", "Status", InputKind::Select, ""),
-        ("name", "Name", InputKind::Text, "Company display name"),
-        ("code", "Code", InputKind::Text, ""),
+    for (name, kind, placeholder) in [
+        ("parent_id", InputKind::Select, ""),
+        ("status", InputKind::Select, ""),
+        ("name", InputKind::Text, "Company display name"),
+        ("code", InputKind::Text, ""),
         (
             "legal_name",
-            "Legal Name",
             InputKind::Text,
             "Registered legal entity name",
         ),
-        (
-            "legal_entity_type_id",
-            "Legal Entity Type",
-            InputKind::Select,
-            "",
-        ),
-        (
-            "registration_number",
-            "Registration Number",
-            InputKind::Text,
-            "",
-        ),
-        ("tax_id", "Tax ID", InputKind::Text, ""),
-        ("jurisdiction", "Jurisdiction", InputKind::Select, ""),
-        ("email", "Email", InputKind::Email, ""),
-        ("website", "Website", InputKind::Text, "example.com"),
+        ("legal_entity_type_id", InputKind::Select, ""),
+        ("registration_number", InputKind::Text, ""),
+        ("tax_id", InputKind::Text, ""),
+        ("jurisdiction", InputKind::Select, ""),
+        ("email", InputKind::Email, ""),
+        ("website", InputKind::Text, "example.com"),
     ] {
+        let label = words.get(&fields::get(name));
         let id = format!("company-{}", name.replace('_', "-"));
         if masked.contains(name) {
             fields.push(render(&RestrictedField::new(&id, label))?);
@@ -1894,13 +1907,13 @@ pub(super) async fn create(
         if masked.contains(definition.id) {
             extension_fields.push(render(&RestrictedField::new(
                 format!("company-{}", definition.id),
-                definition.label,
+                words.field(definition.id, definition.label),
             ))?);
             continue;
         }
         let mut field = Field::named(definition.id)
             .id(format!("company-{}", definition.id))
-            .label(definition.label)
+            .label(words.field(definition.id, definition.label))
             .value(values.get(definition.id).cloned().unwrap_or_default())
             .errors(
                 errors
@@ -1930,7 +1943,7 @@ pub(super) async fn create(
                 };
                 extension_fields.push(render(
                     &Combobox::new(format!("company-{}", definition.id), definition.id)
-                        .label(definition.label)
+                        .label(words.field(definition.id, definition.label))
                         .value(value)
                         .options(choices)
                         .errors(
@@ -2079,33 +2092,31 @@ pub(super) async fn create(
             additional_fields.push(&render(&field)?);
         }
     }
-    let context = [
-        ("scope_activities", "Business Activities (JSON)"),
-        ("metadata", "Metadata (JSON)"),
-    ]
-    .into_iter()
-    .map(|(name, label)| {
-        render(
-            &Field::named(name)
-                .id(format!("company-{name}"))
-                .label(label)
-                .kind(InputKind::Textarea)
-                .placeholder(if name == "metadata" {
-                    r#"{"employee_count":120}"#
-                } else {
-                    r#"{"industry":"Manufacturing"}"#
-                })
-                .value(values.get(name).cloned().unwrap_or_default())
-                .errors(
-                    errors
-                        .iter()
-                        .filter(|e| e.field == name)
-                        .map(|e| e.message.clone())
-                        .collect(),
-                ),
-        )
-    })
-    .collect::<Result<Vec<_>>>()?;
+    let context = ["scope_activities", "metadata"]
+        .into_iter()
+        .map(|name| {
+            let label = words.get(&fields::get(name));
+            render(
+                &Field::named(name)
+                    .id(format!("company-{name}"))
+                    .label(label)
+                    .kind(InputKind::Textarea)
+                    .placeholder(if name == "metadata" {
+                        r#"{"employee_count":120}"#
+                    } else {
+                        r#"{"industry":"Manufacturing"}"#
+                    })
+                    .value(values.get(name).cloned().unwrap_or_default())
+                    .errors(
+                        errors
+                            .iter()
+                            .filter(|e| e.field == name)
+                            .map(|e| e.message.clone())
+                            .collect(),
+                    ),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
     let header = render(&Header {
         title: Html::text("Create Company"),
         subtitle: "",

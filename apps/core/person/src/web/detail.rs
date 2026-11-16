@@ -94,6 +94,7 @@ impl Detail {
     pub async fn contacts(
         &self,
         scope: &Scope,
+        words: &bilibi_grid::RecordWords,
         person: &Person,
         prefix: &str,
         revealable: bool,
@@ -111,20 +112,13 @@ impl Detail {
                 .map(|(value, _)| value.as_str())
         };
         let mut items = Vec::new();
-        for (key, label, value) in [
-            (
-                "email",
-                "Personal email",
-                person.email.as_deref().unwrap_or(""),
-            ),
-            (
-                "phone",
-                "Personal phone",
-                person.phone.as_deref().unwrap_or(""),
-            ),
+        for (key, value) in [
+            ("email", person.email.as_deref().unwrap_or("")),
+            ("phone", person.phone.as_deref().unwrap_or("")),
         ] {
+            let label = words.get(&super::fields::get(key));
             items.push(Fact {
-                title: super::fields::get(key).label,
+                title: words.get(&super::fields::get(key)),
                 value: if person.masked.iter().any(|m| m == key) {
                     // A partial value, or the full one revealed in this view.
                     let full = revealed(key);
@@ -171,6 +165,9 @@ impl Detail {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "persons").await?;
+        drop(client);
         let person = self.pages.persons.read(scope, self.id).await?;
         self.active_panels.clear();
         for panel in &self.pages.person_panels {
@@ -228,7 +225,7 @@ impl Detail {
         let kind_field = self.inline(
             &person,
             "kind",
-            "Kind",
+            words.get(&super::fields::KIND),
             kind,
             editable && person.system_key.is_none(),
             "person-field",
@@ -237,7 +234,7 @@ impl Detail {
             Field::named("kind")
                 .id("person-kind-editor")
                 .label_class("sr-only")
-                .label("Kind")
+                .label(words.get(&super::fields::KIND))
                 .kind(InputKind::Select)
                 .value(kind)
                 .options(bilibi_ui::choices(&[
@@ -247,17 +244,17 @@ impl Detail {
         )?;
         let mut items = vec![
             Fact {
-                title: super::fields::CODE.label,
+                title: words.get(&super::fields::CODE),
                 value: Html::text(&person.code),
                 ..Fact::default()
             },
             Fact {
-                title: super::fields::NAME.label,
+                title: words.get(&super::fields::NAME),
                 value: render(InlineEdit {
                     field: self.inline(
                         &person,
                         "name",
-                        "Name",
+                        words.get(&super::fields::NAME),
                         &person.name,
                         editable,
                         "person-field",
@@ -266,7 +263,7 @@ impl Detail {
                 ..Fact::default()
             },
             Fact {
-                title: super::fields::KIND.label,
+                title: words.get(&super::fields::KIND),
                 value: render(InlineChoice {
                     field: kind_field,
                     display: render(Badge {
@@ -278,7 +275,7 @@ impl Detail {
                 ..Fact::default()
             },
             Fact {
-                title: super::fields::IDENTITY.label,
+                title: words.get(&super::fields::IDENTITY),
                 value: render(Badge::status(
                     if person.retired_at.is_some() {
                         BadgeKind::Neutral
@@ -423,7 +420,7 @@ impl Detail {
             header,
             identity,
             contacts: self
-                .contacts(scope, &person, "person-contact", true)
+                .contacts(scope, &words, &person, "person-contact", true)
                 .await?,
             panels: self
                 .panels()
