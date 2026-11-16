@@ -19,7 +19,8 @@
 //! be recorded settling `failed`, a purge that cannot be recorded leaving the
 //! bytes, purge and its removal job, and the audit trail. `no-scanner` shows
 //! the policy without a scanner: `when_available` stores unscanned, `required`
-//! refuses. `serve` runs the real Bilibi host with the fixture scanner (unless
+//! refuses, and the quarantine list over more than 10,000 unscanned files
+//! counts at most that many while every file stays reachable by id. `serve` runs the real Bilibi host with the fixture scanner (unless
 //! `BILIBI_SCAN_FIXTURE=none`), the fixture ticket owner and the executor, for
 //! the Quarantined Files page and `/media/attachments/{public_id}`.
 //!
@@ -33,7 +34,8 @@ use bilibi_authz::{
 use bilibi_database::{pool, Context, MutationBoundary, Principal, Result as DbResult};
 use bilibi_media::{
     AttachmentSubject, Media, NewAsset, Placement, QuarantineQuery, Rules, ScanFacts, ScanFuture,
-    ScanState, Scanner, Subject, SubjectAction, SubjectOwner, Upload, Verdict, SUBJECTS,
+    ScanState, Scanner, Subject, SubjectAction, SubjectOwner, Upload, Verdict, QUARANTINE_LIST_CAP,
+    SUBJECTS,
 };
 use bilibi_module_registry::{Contribution, Provenance, Services};
 use bilibi_queue::{Config, Executor};
@@ -499,6 +501,69 @@ async fn no_scanner(db: bilibi_database::Db) -> DbResult<()> {
     let policy = json!("when_available");
     setting(&setup, &mut client, "media.scan.policy", policy).await?;
     println!("policy back to when_available");
+
+    // Issue 599: with no scanner every file is unscanned, and the list must
+    // not count all of them on each render. Rows only, no bytes: the list
+    // reads metadata.
+    println!("== the quarantine list counts at most {QUARANTINE_LIST_CAP} files");
+    let bulk = i32::try_from(QUARANTINE_LIST_CAP + 50).map_err(internal)?;
+    client.execute("INSERT INTO base_media_assets(tenant_id,disk,storage_key,original_filename,kind) \
+                    SELECT 1,'local','walkthrough/bulk-'||n,'bulk-'||n||'.txt','original' FROM generate_series(1,$1) n", &[&bulk]).await?;
+    let admin = actor(&setup, &client, 1, 6).await?;
+    let unscanned = [ScanState::Unscanned];
+    let window = |before, offset| QuarantineQuery {
+        states: &unscanned,
+        search: "",
+        before,
+        offset,
+        limit: 1_000,
+    };
+    let first = media
+        .quarantine(&**client, &admin, window(None, 0))
+        .await
+        .map_err(internal)?;
+    let past = media
+        .quarantine(&**client, &admin, window(None, QUARANTINE_LIST_CAP))
+        .await
+        .map_err(internal)?;
+    let (mut reached, mut before) = (0, None);
+    loop {
+        let page = media
+            .quarantine(&**client, &admin, window(before, 0))
+            .await
+            .map_err(internal)?;
+        let Some(last) = page.files.last() else { break };
+        reached += page.files.len();
+        before = Some(last.id);
+    }
+    let searched = media
+        .quarantine(
+            &**client,
+            &admin,
+            QuarantineQuery {
+                search: "UNSCANNED",
+                ..window(None, 0)
+            },
+        )
+        .await
+        .map_err(internal)?;
+    let stored = usize::try_from(bulk).map_err(internal)? + 1;
+    println!(
+        "first page: total {} more {}; window at offset {QUARANTINE_LIST_CAP}: {} files; read on by id: {reached} of {stored}; search \"UNSCANNED\": total {} more {}",
+        first.total, first.more, past.files.len(), searched.total, searched.more
+    );
+    if first.total != QUARANTINE_LIST_CAP
+        || !first.more
+        || !past.files.is_empty()
+        || reached != stored
+        || (searched.total, searched.more) != (1, false)
+    {
+        println!(
+            "  FAIL the count stops at {QUARANTINE_LIST_CAP} and every file stays reachable by id"
+        );
+        return Err(bilibi_database::Error::Internal);
+    }
+    println!("  ok: the count stops at {QUARANTINE_LIST_CAP} and every file stays reachable by id");
     Ok(())
 }
 
@@ -702,6 +767,7 @@ async fn prepare(db: bilibi_database::Db) -> DbResult<()> {
     let newest = QuarantineQuery {
         states: &attention,
         search: "",
+        before: None,
         offset: 0,
         limit: 100,
     };

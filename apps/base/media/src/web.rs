@@ -216,6 +216,7 @@ impl Index {
         let query = QuarantineQuery {
             states,
             search,
+            before: None,
             offset: i64::try_from(self.state.offset()).map_err(|_| Error::Invalid)?,
             limit: i64::try_from(self.state.page_size).map_err(|_| Error::Invalid)?,
         };
@@ -230,7 +231,7 @@ impl Index {
     }
     fn counts(&self, found: &QuarantinePage) -> PageCounts {
         let total = u64::try_from(found.total).unwrap_or(0);
-        PageCounts::new(self.state.page, self.state.page_size, total)
+        PageCounts::new(self.state.page, self.state.page_size, total).or_more(found.more)
     }
 
     /// Run one quarantine contract as the page's person and say how it went.

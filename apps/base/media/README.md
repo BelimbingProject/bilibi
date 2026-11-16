@@ -114,13 +114,13 @@ Tenant capabilities `admin.media.quarantine.view` and `admin.media.quarantine.ma
 
 | Call | Agent operation | What it does |
 | --- | --- | --- |
-| `quarantine(client, scope, QuarantineQuery)` | `base.media.quarantine.list` | This tenant's files in the given states whose name contains the search (any case), newest first: one window (offset, 1–1,000 rows) and the `total` that match |
+| `quarantine(client, scope, QuarantineQuery)` | `base.media.quarantine.list` | This tenant's files in the given states whose name contains the search (any case), newest first: one window (`before` an id, `offset`, 1–1,000 rows) and the `total` that match, counted up to 10,000 (`more` past that) |
 | `quarantined_file(client, scope, id)` | (the write previews) | One file, whatever its state |
 | `rescan(tx, scope, id)` | `base.media.quarantine.rescan` | A file that is not clean and not purged goes back to `pending` with a new job and scan generation; needs a bound scanner |
 | `purge(tx, scope, id)` | `base.media.quarantine.purge` | Purges an `infected` or `failed` file (below); the row, verdict, attachment binding and audit stay |
 
 - The reads take the caller's client (`&dyn ReadClient`). A write's preview passes the `OperationClient` its plan hands it, the plan's own transaction, so concurrent plans never wait on the pool for a second connection.
-- Search and paging run in SQL, so a file is reachable however many purged files the tenant keeps.
+- Search and paging run in SQL. A read counts and skips at most 10,000 matching files (`QUARANTINE_LIST_CAP`), so a render costs the same however many files the tenant keeps; the page then reads "of 10000+ results" and its pages stop there. Older files are reached by narrowing the search, or with `before` set to the last id read, which the agent operation pages by.
 
 Purge never deletes bytes inside the manager's transaction:
 
