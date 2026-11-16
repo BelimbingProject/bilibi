@@ -306,7 +306,6 @@ impl Show {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn data_tab(
         &mut self,
         client: &mut bilibi_database::Connection,

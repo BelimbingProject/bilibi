@@ -1,0 +1,34 @@
+# Checks that turn a repeated review correction into a deterministic rule, with no
+# compile: forbidden code (scripts/forbidden-code.py), ratchets that may only fall
+# (scripts/ratchets.py) and the list of new escape hatches the pull request body
+# must explain under "## Exceptions" (scripts/exceptions.py). Its own workflow so it
+# re-runs when the body is edited. Clippy rules are clippy.toml and Cargo.toml.
+name: Guard rails
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guard-rails-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard-rails:
+    name: Guard rails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: No unit tests, no window.confirm
+        run: python3 scripts/forbidden-code.py
+      - name: Escape hatches may only shrink
+        run: python3 scripts/ratchets.py --base "origin/${{ github.base_ref }}"
+      - name: New escape hatches are explained in the pull request
+        run: python3 scripts/exceptions.py --base "origin/${{ github.base_ref }}"
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}

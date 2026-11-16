@@ -82,7 +82,6 @@ fn check(ok: bool, what: &str) -> Result<()> {
 
 /// A Person, optionally affiliated with `company`, given a customer account
 /// (with the portal role when `role`), signed in to the portal.
-#[allow(clippy::too_many_arguments)]
 async fn customer(
     app: &bilibi_web::App,
     grants: &Grants,

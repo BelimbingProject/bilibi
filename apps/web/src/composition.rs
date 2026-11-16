@@ -24,7 +24,13 @@ struct Pin {
 /// since it was made) and `BUILT_FROM` (the commit Git reported at build time,
 /// set only for an unpinned build) and `BUILT_CONTAINERS` (the mounted checkouts' own commits and tags Git reported then), as `build.rs` generated them.
 mod generated {
-    #![allow(dead_code, unused_imports)]
+    // `expect` would fail in a composition that uses all of it, and the
+    // generated contents change with the mounted containers.
+    #![allow(
+        dead_code,
+        unused_imports,
+        reason = "the generated file holds every pinned container, and an unpinned build uses fewer of them"
+    )]
     use super::{Pin, PinnedContainer};
     include!(concat!(env!("OUT_DIR"), "/composition.rs"));
 }

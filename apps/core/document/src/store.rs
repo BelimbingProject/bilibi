@@ -1877,7 +1877,6 @@ pub(crate) fn write_error(error: Error) -> WriteError {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn insert_revision(
     sql: &Transaction<'_>,
     tenant: i64,

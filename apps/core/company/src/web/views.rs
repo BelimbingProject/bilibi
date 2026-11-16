@@ -169,7 +169,6 @@ struct CompanyName<'a> {
     link: Html,
     legal: Option<&'a str>,
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn list(
     db: &bilibi_database::Db,
     scope: &Scope,
@@ -793,7 +792,6 @@ fn parent_picker(
         errors,
     ))
 }
-#[allow(clippy::too_many_arguments)]
 fn choice(
     words: &bilibi_grid::RecordWords,
     id: &str,

@@ -424,7 +424,8 @@ impl Detail {
                 }
             }
             "apply_mapping" => {
-                let chosen = params::form_values(value, "saved")
+                let chosen = params::form_values_checked(value, "saved", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?
                     .get("id")
                     .and_then(|id| id.parse::<i64>().ok());
                 match self.saved.iter().find(|saved| Some(saved.id) == chosen) {
@@ -468,7 +469,8 @@ impl Detail {
                 }
             }
             "save_mapping" => {
-                let name = params::form_values(value, "save")
+                let name = params::form_values_checked(value, "save", params::FIELD_LIMIT)
+                    .map_err(Error::refused)?
                     .get("name")
                     .map(|name| name.trim().to_owned())
                     .unwrap_or_default();
@@ -504,11 +506,15 @@ impl Detail {
                     );
                 }
             }
-            FILTERS_FORM => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            FILTERS_FORM => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self.state.put_page(get("page")),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },

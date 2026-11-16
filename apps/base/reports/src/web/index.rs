@@ -121,11 +121,15 @@ impl Index {
     ) -> Result<Option<String>> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         match get("type").ok_or(Error::Invalid)? {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self.state.put_page(get("page")),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
@@ -147,7 +151,8 @@ impl Index {
         let Some(draft) = self.new.as_mut() else {
             return Ok(None);
         };
-        let fields = params::form_values(value, "report");
+        let fields = params::form_values_checked(value, "report", params::FIELD_LIMIT)
+            .map_err(Error::refused)?;
         draft.name = fields.get("name").cloned().unwrap_or_default();
         draft.record_type = fields.get("record_type").cloned().unwrap_or_default();
         draft.kind = fields.get("kind").cloned().unwrap_or_default();

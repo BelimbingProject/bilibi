@@ -541,7 +541,6 @@ pub(crate) async fn upload_limit(
 /// Checks the upload, commits its reserved ledger row, stores the bytes
 /// through `base/artifacts` and marks the row stored. It takes the pool, not
 /// a connection: while the scanner works it holds none between its looks.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
     db: &bilibi_database::Db,
     scope: &Scope,

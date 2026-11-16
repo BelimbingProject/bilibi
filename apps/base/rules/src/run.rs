@@ -654,7 +654,6 @@ impl Worker {
         Ok(Acted::Refused)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn receipt(
         &self,
         tx: &mut MutationTransaction<'_>,

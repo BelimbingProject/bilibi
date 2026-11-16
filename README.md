@@ -205,7 +205,7 @@ There are no unit tests. Every change must pass these and then be tried in the r
 ```sh
 python3 scripts/discover-modules.py --check
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
 cargo build --workspace --release --locked
 ```
 
@@ -218,6 +218,10 @@ CI warns about a Rust file over 800 lines that is new or got longer in your pull
 - Run `python3 scripts/file-length-ratchet.py` to see the list locally; it compares your branch with `origin/main`.
 - Files under `fixtures/`, `examples/`, `migrations/` and `generated/` are skipped.
 - CI runs it as `.github/workflows/file-length.yml`; editing the body re-runs it. The same script is copied unchanged into every Bilibi repository.
+
+### Guard rails
+
+The [contribution guard rails](CONTRIBUTING.md#guard-rails) describe the Clippy policy, escape-hatch ratchets and required PR explanations.
 
 ### Shared helpers
 

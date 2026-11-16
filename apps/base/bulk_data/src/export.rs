@@ -932,7 +932,6 @@ impl BulkData {
     /// a gap. Edits that leave a record in the list do not count: the last
     /// read's versions are the snapshot, and a bulk update's version fence
     /// reports a record edited after it.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn read_list(
         &self,
         execution: &Execution,

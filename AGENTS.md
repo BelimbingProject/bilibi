@@ -66,7 +66,7 @@ Bilibi has **no unit tests**. Do not add `#[test]`, `#[cfg(test)]` or a test cra
 ```sh
 python3 scripts/discover-modules.py --check
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
 ```
 
 - Then run the app (`./bilibi start`) and use the change. Prove behaviour in the running system, not by reading source. Evidence and parity checks: `docs/runtime-parity.md`.

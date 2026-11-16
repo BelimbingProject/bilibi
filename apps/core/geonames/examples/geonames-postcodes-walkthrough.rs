@@ -9,7 +9,6 @@
 //! record, a no-valid-rows payload with the cache restored, a country not
 //! imported, a malformed `--postcodes`, and the audit trail of the sidecar.
 #[path = "support/fixture.rs"]
-#[allow(dead_code)]
 mod fixture;
 
 use bilibi_database::{pool, Error, Result};

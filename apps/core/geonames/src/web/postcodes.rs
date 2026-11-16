@@ -588,7 +588,7 @@ impl Postcodes {
         if let Some(search) = event.get(PICKER_SEARCH).and_then(Value::as_str) {
             picker.search = search.chars().take(100).collect();
         }
-        // Read every `country[XX]` key here: `params::form_values` keeps
+        // Read every `country[XX]` key here: `params::form_values_checked` keeps
         // 64 fields, and an unfiltered grid posts one per country.
         let keys = event.as_object().into_iter().flatten();
         for (key, value) in keys {

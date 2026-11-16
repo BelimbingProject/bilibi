@@ -753,10 +753,12 @@ impl Index {
         let Some((field, _)) = &self.bulk else {
             return self.view(scope).await;
         };
-        let text = bilibi_ui::params::form_values(value, "bulk")
-            .get("value")
-            .cloned()
-            .unwrap_or_default();
+        let text =
+            bilibi_ui::params::form_values_checked(value, "bulk", bilibi_ui::params::FIELD_LIMIT)
+                .map_err(Error::refused)?
+                .get("value")
+                .cloned()
+                .unwrap_or_default();
         let mut input = json!({"record_type": EXPORT_TYPE, "field": field.name, "value": text});
         if !self.chosen(&mut input) {
             self.bulk = None;
