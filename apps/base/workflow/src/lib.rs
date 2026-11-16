@@ -24,8 +24,9 @@ pub use approval::{
     ApprovalOutcome, ApprovalSubject, ApprovalSummary, ApprovalVote,
 };
 pub use approval_contract::{
-    ApprovalContract, ApprovalContractKind, approval_decision_schema, approval_delegation_schema,
-    approval_policy_schema, approval_recall_schema, approval_review_schema, approval_revoke_schema,
+    approval_decision_schema, approval_delegation_schema, approval_policy_schema,
+    approval_recall_schema, approval_review_schema, approval_revoke_schema, ApprovalContract,
+    ApprovalContractKind,
 };
 pub use approval_policy::{
     ApprovalComparison, ApprovalCondition, ApprovalFact, ApprovalFactKind, ApprovalMode,
@@ -38,8 +39,8 @@ pub use approval_store::{
 use bilibi_database::{Change, Result};
 use bilibi_tenancy::Scope;
 pub use definitions::{
-    Action, CONTRIBUTIONS, Contribution, Edge, Flow, Guard, HumanAction, HumanActionHandler,
-    HumanOutcome, OwnedSubject, Registry, Status, Transition,
+    Action, Contribution, Edge, Flow, Guard, HumanAction, HumanActionHandler, HumanOutcome,
+    OwnedSubject, Registry, Status, Transition, CONTRIBUTIONS,
 };
 pub const SERVICE: &str = "base/workflow.engine";
 pub use engine::{Engine, Request};

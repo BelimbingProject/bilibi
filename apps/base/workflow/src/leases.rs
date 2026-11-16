@@ -3,7 +3,7 @@
 //! leases and timers on the saved graph, and leases the item only if it is
 //! still available. Every later worker call carries the claim's token.
 use super::*;
-use coordination::{Finish, finish_item, reason_text};
+use coordination::{finish_item, reason_text, Finish};
 
 const CLAIM_CANDIDATES: usize = 8;
 

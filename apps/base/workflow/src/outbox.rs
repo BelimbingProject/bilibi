@@ -2,12 +2,12 @@
 //! PostgreSQL effects in the supplied transaction and return every mutation.
 //! Receipt + effects + audit commit together. External delivery must insert an
 //! owner outbox here and use `event_key` as its remote idempotency key.
-use crate::{Engine, OwnerFuture, Transition, history::Fact};
+use crate::{history::Fact, Engine, OwnerFuture, Transition};
 use bilibi_authz::SystemScope;
 use bilibi_database::{Change, Error, Result};
 use bilibi_queue::{Execution, Handler, HandlerFuture, Outcome};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_postgres::Transaction;
 

@@ -8,7 +8,7 @@ use crate::{
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::{Channel, Scope};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{Row, Transaction};
@@ -1766,12 +1766,10 @@ impl Engine {
         if previous.is_none()
             || seat_routes.iter().any(|(key, now)| {
                 let before = seats.get(key).and_then(Value::as_array).map(|holders| {
-                    json!(
-                        holders
-                            .iter()
-                            .filter(|a| a.as_i64().is_none_or(|a| !decided.contains(&a)))
-                            .collect::<Vec<_>>()
-                    )
+                    json!(holders
+                        .iter()
+                        .filter(|a| a.as_i64().is_none_or(|a| !decided.contains(&a)))
+                        .collect::<Vec<_>>())
                 });
                 before.as_ref() != Some(now)
             })
