@@ -205,6 +205,7 @@ impl PageColumns {
             if let Some(builtin) = self.builtins.iter_mut().find(|b| b.id == column.id) {
                 builtin.label = column.label;
                 builtin.short_label = column.short_label;
+                builtin.field = column.field;
             } else {
                 self.builtins.push(column);
             }
@@ -251,6 +252,12 @@ impl PageColumns {
         let (catalog, root) = self.root()?;
         self.builtin_field(builtin)
             .map(|field| crate::record_word(catalog, root, field))
+            .or_else(|| {
+                builtin
+                    .field
+                    .split_once('.')
+                    .and_then(|(table, field)| catalog.field_name(table, field))
+            })
             .or_else(|| catalog.field_name(root.id(), &builtin.id))
     }
 

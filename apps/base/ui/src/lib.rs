@@ -46,8 +46,10 @@ mod mail_frame;
 pub use file_preview::FilePreview;
 pub use live_transport::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
 pub use mail_frame::MailFrame;
+mod field_labels;
 mod page_search;
 pub mod params;
+pub use field_labels::FieldLabels;
 mod record_fields;
 mod record_reference;
 pub use record_fields::{

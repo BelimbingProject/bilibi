@@ -99,15 +99,18 @@ impl Detail {
             revisions: ListColumns::mount(
                 "document-revisions",
                 vec![
-                    BuiltinColumn::new("revision", "Revision"),
-                    BuiltinColumn::new("label", "Label"),
-                    BuiltinColumn::new("replaces", "Replaces"),
-                    BuiltinColumn::new("file", "File"),
-                    BuiltinColumn::new("size", "Size"),
-                    BuiltinColumn::new("change_log", "Change log"),
+                    BuiltinColumn::new("revision", "Revision")
+                        .grid_field("document_revisions.revision"),
+                    BuiltinColumn::new("label", "Label").grid_field("document_revisions.label"),
+                    BuiltinColumn::new("replaces", "Replaces")
+                        .grid_field("document_revisions.replaces_revision_id"),
+                    BuiltinColumn::new("file", "File").grid_field("document_revisions.file_name"),
+                    BuiltinColumn::new("size", "Size").grid_field("document_revisions.byte_size"),
+                    BuiltinColumn::new("change_log", "Change log")
+                        .grid_field("document_revisions.change_log"),
                     BuiltinColumn::new("retention", "Retention"),
-                    BuiltinColumn::new("by", "By"),
-                    BuiltinColumn::new("at", "Added"),
+                    BuiltinColumn::new("by", "By").grid_field("document_revisions.created_by"),
+                    BuiltinColumn::new("at", "Added").grid_field("document_revisions.created_at"),
                 ],
             )
             .map_err(|_| Error::Internal)?,
@@ -1335,6 +1338,11 @@ impl Detail {
                             "link" => "external_url",
                             "created-by" => "created_by",
                             "type" => "document_type",
+                            "publish-date" => "publish_date",
+                            "sub-category" => "sub_category",
+                            "expires-on" => "expires_on",
+                            "sync-id" => "sync_id",
+                            "related-document" => "related_document_id",
                             _ => key,
                         },
                         title,
@@ -1685,6 +1693,8 @@ impl Detail {
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
         let client = self.pages.db.get().await?;
         let words = bilibi_grid::RecordWords::load(&**client, scope, "documents").await?;
+        let revision_words =
+            bilibi_grid::RecordWords::load(&**client, scope, "document_revisions").await?;
         drop(client);
 
         let clock = self.pages.clock(scope).await?;
@@ -1863,7 +1873,12 @@ impl Detail {
             })?);
         }
         if let Some(dialog) = &self.dialog {
-            body.push(&dialog.render(&self.uploads, &words, "document-revision", "close_modal")?);
+            body.push(&dialog.render(
+                &self.uploads,
+                &revision_words,
+                "document-revision",
+                "close_modal",
+            )?);
         }
         let region = render(Region {
             id: "document-region",

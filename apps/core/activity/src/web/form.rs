@@ -556,15 +556,16 @@ impl Dialog {
     ) -> Field {
         Field::in_form(FORM, key)
             .id(format!("{prefix}-{}", key.replace('_', "-")))
-            .label(words.field(
+            .grid_field(format!(
+                "activities.{}",
                 match key {
                     "title" => "subject",
                     "assignee" => "assignee_user_id",
                     "outcome" => "call_outcome",
                     _ => key,
-                },
-                label,
+                }
             ))
+            .label(label)
             .value(self.value(key))
             .errors(self.sentences(words, key))
             .attr("data-debounce", "300")

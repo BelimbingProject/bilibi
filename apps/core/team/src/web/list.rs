@@ -19,7 +19,14 @@ pub(super) fn columns() -> Vec<BuiltinColumn> {
         if k == "members" {
             BuiltinColumn::new(k, v).right()
         } else {
-            BuiltinColumn::new(k, v)
+            BuiltinColumn::new(k, v).grid_field(format!(
+                "teams.{}",
+                match k {
+                    "parent" => "parent_id",
+                    "company" => "company_id",
+                    _ => k,
+                }
+            ))
         }
     })
     .collect()

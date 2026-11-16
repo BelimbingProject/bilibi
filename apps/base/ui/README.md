@@ -262,3 +262,7 @@ See [`base/system`](../system/README.md) for Banner colour on Instance settings.
 The disposable `softphone-walkthrough` web example is a fake source for manual browser verification; it is not registered by the production application. Its state and action controls exercise the live transport without a phone system.
 
 Several-choice inline editors preserve held code order and append new selections in tick order; opening and leaving an untouched editor sends no write. Contact and Company create forms preserve held order across redraws; selections added within one form event follow checkbox option order.
+
+## Tenant field labels
+
+The host scopes `FieldLabels` to each render; shared form controls and `ListColumns` apply the tenant word at that boundary. Owners declare `grid_field("table.field")` when a slot or form input represents a Grid field, keeping its identity separate from presentation keys. Registered `RecordField` built-ins supply their identity automatically. UI has no dependency on Grid or the database, and a render without a tenant context uses the owner's default word.

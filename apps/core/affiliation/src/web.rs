@@ -270,12 +270,22 @@ impl Panel {
         let columns = ListColumns::mount(
             &format!("{anchor}-columns"),
             vec![
-                BuiltinColumn::new(party, party_label).sortable("party"),
-                BuiltinColumn::new("title", fields::TITLE.label).sortable("title"),
-                BuiltinColumn::new("work_email", fields::get("work_email").label),
-                BuiltinColumn::new("work_phone", fields::get("work_phone").label),
-                BuiltinColumn::new("from", "From").sortable("from"),
-                BuiltinColumn::new("to", "To").sortable("to"),
+                BuiltinColumn::new(party, party_label)
+                    .grid_field(format!("person_affiliations.{party}_id"))
+                    .sortable("party"),
+                BuiltinColumn::new("title", fields::TITLE.label)
+                    .grid_field("person_affiliations.title")
+                    .sortable("title"),
+                BuiltinColumn::new("work_email", fields::get("work_email").label)
+                    .grid_field("person_affiliations.work_email"),
+                BuiltinColumn::new("work_phone", fields::get("work_phone").label)
+                    .grid_field("person_affiliations.work_phone"),
+                BuiltinColumn::new("from", "From")
+                    .grid_field("person_affiliations.effective_from")
+                    .sortable("from"),
+                BuiltinColumn::new("to", "To")
+                    .grid_field("person_affiliations.effective_to")
+                    .sortable("to"),
                 BuiltinColumn::new("status", "Status").sortable("status"),
             ],
         )
@@ -556,6 +566,7 @@ impl Panel {
             format!("affiliation[{party}_id]"),
         )
         .label(party_label)
+        .grid_field(format!("person_affiliations.{party}_id"))
         .value(value(&format!("{party}_id")))
         .options(options)
         .placeholder(format!("Choose a {party}…"))
@@ -577,15 +588,19 @@ impl Panel {
             ("effective_to", "To", InputKind::Date),
         ] {
             if restricted.contains(key) {
-                controls.push(render(RestrictedField::new(
-                    self.dom(&format!("add-{}", key.replace('_', "-"))),
-                    label,
-                ))?);
+                controls.push(render(
+                    RestrictedField::new(
+                        self.dom(&format!("add-{}", key.replace('_', "-"))),
+                        label,
+                    )
+                    .grid_field(format!("person_affiliations.{key}")),
+                )?);
                 continue;
             }
             let mut field = Field::in_form("affiliation", key)
                 .id(self.dom(&format!("add-{}", key.replace('_', "-"))))
                 .label(label)
+                .grid_field(format!("person_affiliations.{key}"))
                 .kind(kind)
                 .value(value(key))
                 .errors(errors(key));

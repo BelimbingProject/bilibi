@@ -27,11 +27,12 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 });
 fn columns() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Name"),
-        BuiltinColumn::new("status", "Status"),
-        BuiltinColumn::new("timezone", "Zone"),
-        BuiltinColumn::new("holiday_sets", "Holiday sets"),
+        BuiltinColumn::new("code", "Code").grid_field("work_calendars.code"),
+        BuiltinColumn::new("name", "Name").grid_field("work_calendars.name"),
+        BuiltinColumn::new("status", "Status").grid_field("work_calendars.status"),
+        BuiltinColumn::new("timezone", "Zone").grid_field("work_calendars.timezone"),
+        BuiltinColumn::new("holiday_sets", "Holiday sets")
+            .grid_field("work_calendars.holiday_sets"),
     ]
 }
 /// The substitution choices, as the record offers them too.

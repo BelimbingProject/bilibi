@@ -12,6 +12,7 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuiltinColumn {
     pub id: String,
+    pub field: String,
     pub label: String,
     pub short_label: String,
     pub kind: ColumnType,
@@ -23,6 +24,7 @@ impl BuiltinColumn {
     pub fn new(id: &str, label: &str) -> Self {
         Self {
             id: id.into(),
+            field: String::new(),
             label: label.into(),
             short_label: label.into(),
             kind: ColumnType::String,
@@ -30,6 +32,13 @@ impl BuiltinColumn {
             sort_id: None,
             align_right: false,
         }
+    }
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
     }
     pub fn sortable(mut self, key: &str) -> Self {
         self.sort = Some(key.into());
@@ -73,11 +82,20 @@ impl ListColumns {
     pub fn projection(id: &str, builtins: Vec<BuiltinColumn>) -> Result<Self, SpecError> {
         Self::bounded(id, builtins, 2048)
     }
-    fn bounded(id: &str, builtins: Vec<BuiltinColumn>, limit: usize) -> Result<Self, SpecError> {
+    fn bounded(
+        id: &str,
+        mut builtins: Vec<BuiltinColumn>,
+        limit: usize,
+    ) -> Result<Self, SpecError> {
         if id.is_empty() || builtins.is_empty() || builtins.len() > limit {
             return Err(SpecError(
                 "a list needs an id and bounded, nonempty built-in columns",
             ));
+        }
+        for column in &mut builtins {
+            if column.field.is_empty() {
+                column.field = format!("{id}.{}", column.id);
+            }
         }
         let mut ids = Vec::new();
         for col in &builtins {
@@ -118,6 +136,7 @@ impl ListColumns {
             if let Some(existing) = self.builtins.iter_mut().find(|c| c.id == column.id) {
                 existing.label.clone_from(&column.label);
                 existing.short_label.clone_from(&column.short_label);
+                existing.field.clone_from(&column.field);
             } else {
                 self.builtins.push(column);
             }
@@ -228,7 +247,9 @@ impl ListColumns {
                 let wanted = query.to_lowercase();
                 let Some(column) = suggestions
                     .iter()
-                    .find(|c| c.id.to_lowercase() == wanted || c.label.to_lowercase() == wanted)
+                    .find(|c| {
+                        c.id.to_lowercase() == wanted || c.label_text().to_lowercase() == wanted
+                    })
                     .or(suggestions.first())
                 else {
                     return ColumnsOutcome::Noop;
@@ -281,7 +302,7 @@ impl ListColumns {
             .filter(|c| {
                 !self.unavailable.contains(&c.id)
                     && !shown.contains(&c.id.as_str())
-                    && (c.label.to_lowercase().contains(&wanted)
+                    && (c.label_text().to_lowercase().contains(&wanted)
                         || c.id.to_lowercase().contains(&wanted))
             })
             .cloned()
@@ -295,6 +316,11 @@ pub fn flex_column(builtin: &BuiltinColumn) -> FlexColumn {
         .short(&builtin.short_label)
         .typed(builtin.kind)
         .kind(ColumnKind::Slot);
+    let word = crate::field_labels::field_label(&builtin.field, "");
+    if !word.is_empty() {
+        column.label.clone_from(&word);
+        column.short_label = word;
+    }
     column.sortable = builtin.sortable_column();
     column.sort_key = builtin.sort.clone();
     column.align_right = builtin.align_right;

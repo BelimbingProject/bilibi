@@ -512,6 +512,7 @@ pub struct Field {
     pub id: String,
     pub name: String,
     pub label: String,
+    pub field: String,
     pub value: String,
     /// The selected values of a `multiple` select.
     pub values: Vec<String>,
@@ -533,6 +534,14 @@ pub struct Field {
 }
 
 impl Field {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     /// A field whose id is its name, as a field outside a form namespace.
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
@@ -1254,6 +1263,7 @@ pub struct Combobox {
     pub id: String,
     pub name: String,
     pub label: String,
+    pub field: String,
     pub value: String,
     pub options: Vec<Choice>,
     pub placeholder: String,
@@ -1266,6 +1276,14 @@ pub struct Combobox {
 }
 
 impl Combobox {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1799,11 +1817,20 @@ impl Restricted {
 pub struct RestrictedField {
     pub id: String,
     pub label: String,
+    pub field: String,
     pub reason: String,
     pub wrapper_class: String,
 }
 
 impl RestrictedField {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),

@@ -73,6 +73,12 @@ A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declaratio
 - `Table::custom_search_values` gives Base Search the tenant's searchable text fields. `Table::is_custom` tells a page that draws its own `cf_` columns which fields are tenant fields.
 - Keys never change and are never reused, so each distinct `cf_<key>` id is kept once for the process; labels are not.
 
+## Shared label rendering
+
+The Web host loads `render_labels` for every initial page, mount and live fragment; UI scopes the resulting `FieldLabels` to that render. Shared `ListColumns` headings and suggestions and shared form controls resolve the override automatically, without a page-specific label refresh. The context never survives a render or crosses tenants.
+
+`BuiltinColumn::grid_field("table.field")`, `Field::grid_field` and `Combobox::grid_field` name a stable Grid field independently of the column slot, input name or DOM id. `ListColumns::mount` uses `list_id.column_id` when both already match the Grid identities; a differently named slot declares its identity. `RecordField::builtin` supplies its registered vocabulary identity, resolved through the declared Grid path. Composite display columns without a single Grid field keep their owner's label.
+
 ## Detail fields become columns
 
 A scalar field shown on a record can also be added to its list, under the same label. A tenant may rename a field (`base/labels`, kind `field`, subject `table.field`): `Catalog::resolve` and `column::resolve` give every column that word (pass `|_, _| None` to keep the module's), and record pages, create forms and inline editors draw their labels with `RecordWords::load(client, scope, table)` and `words.get(&field)` instead of `field.label`. For a Grid field without record vocabulary, use `words.field(id, default)`. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.

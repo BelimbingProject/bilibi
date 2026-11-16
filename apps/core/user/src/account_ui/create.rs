@@ -84,7 +84,11 @@ impl Create {
         let field = |key: &str, label: &str| {
             let mut field = Field::in_form("user", key)
                 .id(format!("user-{key}"))
-                .label(words.field(key, label))
+                .label(if key == "person_id" {
+                    words.get(&crate::record_fields::PERSON_ID)
+                } else {
+                    words.field(key, label)
+                })
                 .errors(self.errors_for(key))
                 .attr("data-debounce", "300");
             if !can_create {

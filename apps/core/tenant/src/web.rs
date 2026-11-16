@@ -498,29 +498,21 @@ impl TenantsPage {
         render(table)
     }
 
-    fn form(
-        &self,
-        identities: &[TenantIdentity],
-        words: &bilibi_grid::RecordWords,
-    ) -> Option<CreateForm> {
+    fn form(&self, identities: &[TenantIdentity]) -> Option<CreateForm> {
         let draft = self.create.as_ref()?;
         let mut parents: Vec<&TenantIdentity> = identities.iter().collect();
         parents.sort_by_key(|identity| identity.id);
         let mut summary = bilibi_ui::ErrorSummary::new("tenant-create-errors");
         for (id, label, errors) in [
-            (
-                "tenant-name",
-                words.get(&fields::NAME),
-                draft.errors.name.clone(),
-            ),
+            ("tenant-name", fields::NAME.label, draft.errors.name.clone()),
             (
                 "tenant-parent",
-                words.get(&fields::PARENT),
+                fields::PARENT.label,
                 draft.errors.parent_id.clone(),
             ),
             (
                 "tenant-primary-company",
-                words.get(&fields::PRIMARY_COMPANY),
+                fields::PRIMARY_COMPANY.label,
                 draft
                     .company_errors
                     .get("primary_company")
@@ -529,7 +521,7 @@ impl TenantsPage {
             ),
             (
                 "tenant-additional-companies",
-                words.get(&fields::ADDITIONAL_COMPANIES),
+                fields::ADDITIONAL_COMPANIES.label,
                 draft
                     .company_errors
                     .iter()
@@ -546,7 +538,7 @@ impl TenantsPage {
             summary,
             primary_company: Field::in_form("tenant", "primary_company")
                 .id("tenant-primary-company")
-                .label(words.get(&fields::PRIMARY_COMPANY))
+                .label(fields::PRIMARY_COMPANY.label)
                 .required()
                 .attr("maxlength", "160")
                 .value(draft.primary_company.clone())
@@ -559,7 +551,7 @@ impl TenantsPage {
                 ),
             additional_companies: Field::in_form("tenant", "additional_companies")
                 .id("tenant-additional-companies")
-                .label(words.get(&fields::ADDITIONAL_COMPANIES))
+                .label(fields::ADDITIONAL_COMPANIES.label)
                 .kind(InputKind::Textarea)
                 .hint("One company name per line, up to 99.")
                 .value(draft.additional_companies.clone())
@@ -573,7 +565,7 @@ impl TenantsPage {
                 ),
             name: Field::in_form("tenant", "name")
                 .id("tenant-name")
-                .label(words.get(&fields::NAME))
+                .label(fields::NAME.label)
                 .placeholder("e.g. Acme Sdn Bhd")
                 .required()
                 .attr("maxlength", "255")
@@ -582,7 +574,7 @@ impl TenantsPage {
             parent: Field::in_form("tenant", "parent_id")
                 .id("tenant-parent")
                 .kind(InputKind::Select)
-                .label(words.get(&fields::PARENT))
+                .label(fields::PARENT.label)
                 .prompt("None (top-level tenant)")
                 .options(
                     parents
@@ -596,10 +588,6 @@ impl TenantsPage {
     }
 
     async fn body(&mut self, scope: &Scope, rows_changed: bool) -> Result<String> {
-        let client = self.pages.db.get().await?;
-        let words = bilibi_grid::RecordWords::load(&**client, scope, "tenants").await?;
-        drop(client);
-
         // Preserve the complete directory/parent picker while reading
         // through the bounded search contract in pages of at most 100.
         let mut identities = Vec::new();
@@ -685,7 +673,7 @@ impl TenantsPage {
             flash,
             actions,
             table: self.table(&rows, &display, may)?,
-            create: self.form(&identities, &words),
+            create: self.form(&identities),
             moving: self.moving.as_ref().map(MoveDraft::render).transpose()?,
         }
         .render()

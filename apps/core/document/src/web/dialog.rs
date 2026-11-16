@@ -194,7 +194,19 @@ impl State {
             .map(|messages| {
                 messages
                     .iter()
-                    .map(|m| error_sentence(words.field(key, label_of(key)), m))
+                    .map(|m| {
+                        error_sentence(
+                            words.field(
+                                if key == "revision_label" {
+                                    "label"
+                                } else {
+                                    key
+                                },
+                                label_of(key),
+                            ),
+                            m,
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -202,19 +214,40 @@ impl State {
     fn field(
         &self,
         words: &bilibi_grid::RecordWords,
+        table: &str,
         prefix: &str,
         key: &str,
         label: &str,
     ) -> Field {
         Field::in_form(FORM, key)
             .id(format!("{prefix}-{}", key.replace('_', "-")))
-            .label(words.field(key, label))
+            .grid_field(format!(
+                "{table}.{}",
+                if key == "revision_label" {
+                    "label"
+                } else {
+                    key
+                }
+            ))
+            .label(words.field(
+                if key == "revision_label" {
+                    "label"
+                } else {
+                    key
+                },
+                label,
+            ))
             .value(self.value(key))
             .errors(self.sentences(words, key))
             .attr("data-debounce", "300")
     }
     /// The summary of every error and the notice, above the fields.
-    fn feedback(&self, words: &bilibi_grid::RecordWords, prefix: &str) -> Result<Html> {
+    fn feedback(
+        &self,
+        words: &bilibi_grid::RecordWords,
+        revision_words: &bilibi_grid::RecordWords,
+        prefix: &str,
+    ) -> Result<Html> {
         let mut body = Html::EMPTY;
         if self.submitted && !self.errors.is_empty() {
             let mut summary = ErrorSummary::new(format!("{prefix}-errors"));
@@ -222,7 +255,14 @@ impl State {
                 for message in messages {
                     summary.push(
                         format!("{prefix}-{}", key.replace('_', "-")),
-                        error_sentence(words.field(key, label_of(key)), message),
+                        error_sentence(
+                            if key == "revision_label" {
+                                revision_words.field("label", label_of(key))
+                            } else {
+                                words.field(key, label_of(key))
+                            },
+                            message,
+                        ),
                     );
                 }
             }
@@ -562,22 +602,23 @@ impl NewDocument {
         &self,
         pages: &Pages,
         uploads: &Uploads,
-        words: &bilibi_grid::RecordWords,
+        words: (&bilibi_grid::RecordWords, &bilibi_grid::RecordWords),
         prefix: &str,
         cancel_event: &str,
         framed: bool,
     ) -> Result<Html> {
+        let (words, revision_words) = words;
         let state = &self.state;
-        let mut body = state.feedback(words, prefix)?;
+        let mut body = state.feedback(words, revision_words, prefix)?;
         let mut fields = vec![select(
-            state.field(words, prefix, "source", "Source"),
+            state.field(words, "documents", prefix, "source", "Source"),
             choices(&[("A file", "internal"), ("A link", "external")]),
             "",
         )];
         if self.source() == Source::External {
             fields.push(
                 state
-                    .field(words, prefix, "external_url", "Link")
+                    .field(words, "documents", prefix, "external_url", "Link")
                     .kind(InputKind::Url)
                     .required()
                     .attr("maxlength", "2000")
@@ -586,47 +627,53 @@ impl NewDocument {
         }
         fields.extend([
             state
-                .field(words, prefix, "name", "Name")
+                .field(words, "documents", prefix, "name", "Name")
                 .attr("maxlength", "255")
                 .hint("The file's name when left blank."),
             state
-                .field(words, prefix, "publish_date", "Publish date")
+                .field(words, "documents", prefix, "publish_date", "Publish date")
                 .kind(InputKind::Date)
                 .hint("Today when left blank."),
             select(
-                state.field(words, prefix, "category", "Category"),
+                state.field(words, "documents", prefix, "category", "Category"),
                 self.options.categories.clone(),
                 "None",
             ),
         ]);
         if !self.options.sub_categories.is_empty() {
             fields.push(select(
-                state.field(words, prefix, "sub_category", "Sub-category"),
+                state.field(words, "documents", prefix, "sub_category", "Sub-category"),
                 self.options.sub_categories.clone(),
                 "None",
             ));
         }
         fields.extend([
             select(
-                state.field(words, prefix, "document_type", "Type"),
+                state.field(words, "documents", prefix, "document_type", "Type"),
                 self.options.types.clone(),
                 "None",
             ),
             select(
-                state.field(words, prefix, "status", "Status"),
+                state.field(words, "documents", prefix, "status", "Status"),
                 self.options.statuses.clone(),
                 "",
             ),
             state
-                .field(words, prefix, "sync_id", "Integration sync ID")
+                .field(words, "documents", prefix, "sync_id", "Integration sync ID")
                 .attr("maxlength", "255")
                 .hint("Unique within this workspace when set."),
             state
-                .field(words, prefix, "related_document_id", "Related document ID")
+                .field(
+                    words,
+                    "documents",
+                    prefix,
+                    "related_document_id",
+                    "Related document ID",
+                )
                 .kind(InputKind::Number)
                 .hint("Optional document you can view."),
             select(
-                state.field(words, prefix, "relation", "Relation"),
+                state.field(words, "documents", prefix, "relation", "Relation"),
                 choices(&[
                     ("None", ""),
                     ("Supersedes", "supersedes"),
@@ -635,7 +682,13 @@ impl NewDocument {
                 "",
             ),
             state
-                .field(words, prefix, "revision_label", "First revision label")
+                .field(
+                    revision_words,
+                    "document_revisions",
+                    prefix,
+                    "revision_label",
+                    "First revision label",
+                )
                 .attr("maxlength", "100"),
         ]);
         let mut details = Html::EMPTY;
@@ -877,7 +930,7 @@ impl NewRevision {
         cancel_event: &str,
     ) -> Result<Html> {
         let state = &self.state;
-        let mut body = state.feedback(words, prefix)?;
+        let mut body = state.feedback(words, words, prefix)?;
         if self.source == Source::Internal {
             body.push(&state.upload(prefix, uploads)?);
         }
@@ -885,7 +938,7 @@ impl NewRevision {
         if self.source == Source::External {
             details.push(&render(
                 state
-                    .field(words, prefix, "external_url", "Link")
+                    .field(words, "document_revisions", prefix, "external_url", "Link")
                     .kind(InputKind::Url)
                     .required()
                     .attr("maxlength", "2000")
@@ -894,7 +947,7 @@ impl NewRevision {
         }
         details.push(&render(
             state
-                .field(words, prefix, "revision", "Revision")
+                .field(words, "document_revisions", prefix, "revision", "Revision")
                 .kind(InputKind::Number)
                 .attr("min", &(self.latest.saturating_add(1)).to_string())
                 .hint(format!(
@@ -904,19 +957,37 @@ impl NewRevision {
         )?);
         details.push(&render(
             state
-                .field(words, prefix, "label", "Revision label")
+                .field(
+                    words,
+                    "document_revisions",
+                    prefix,
+                    "label",
+                    "Revision label",
+                )
                 .attr("maxlength", "100"),
         )?);
         let mut prior = vec![Choice::new("None", "")];
         prior.extend(self.prior.clone());
         details.push(&render(select(
-            state.field(words, prefix, "replaces_revision_id", "Replaces revision"),
+            state.field(
+                words,
+                "document_revisions",
+                prefix,
+                "replaces_revision_id",
+                "Replaces revision",
+            ),
             prior,
             "",
         ))?);
         details.push(&render(
             state
-                .field(words, prefix, "change_log", "Change log")
+                .field(
+                    words,
+                    "document_revisions",
+                    prefix,
+                    "change_log",
+                    "Change log",
+                )
                 .kind(InputKind::Textarea)
                 .required()
                 .attr("rows", "3")

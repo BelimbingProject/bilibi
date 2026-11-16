@@ -1315,8 +1315,6 @@ impl LinksPage {
     }
     async fn draw(&mut self, scope: &Scope, workspace: bool) -> Result<LiveBody> {
         let client = self.shared.db.get().await?;
-        let words =
-            bilibi_grid::RecordWords::load(&**client, scope, "company_relationships").await?;
         let company = organisation::identity(&**client, scope, self.company.get())
             .await?
             .ok_or(Error::NotFound)?;
@@ -1450,7 +1448,7 @@ impl LinksPage {
             ..Card::default()
         })?);
         if let Some(modal) = &self.modal {
-            html.push(&self.link_modal(&company.display_name, modal, &words)?);
+            html.push(&self.link_modal(&company.display_name, modal)?);
         } else if let Some(entry) = &self.pending_unlink {
             html.push(&render(&ConfirmDialog {
                 id: "unlink-rel-confirm",
@@ -1472,12 +1470,7 @@ impl LinksPage {
             ..LiveBody::default()
         })
     }
-    fn link_modal(
-        &self,
-        company: &str,
-        modal: &LinkModal,
-        words: &bilibi_grid::RecordWords,
-    ) -> Result<Html> {
+    fn link_modal(&self, company: &str, modal: &LinkModal) -> Result<Html> {
         let value = |key: &str| modal.values.get(key).cloned().unwrap_or_default();
         let mut fields = Vec::new();
         let mut save_disabled = false;
@@ -1537,7 +1530,7 @@ impl LinksPage {
             )?);
         }
         for key in [link_fields::EFFECTIVE_FROM.id, link_fields::EFFECTIVE_TO.id] {
-            let label = words.get(&link_fields::get(key));
+            let label = link_fields::get(key).label;
             if modal.ending && key == "effective_from" {
                 continue;
             }

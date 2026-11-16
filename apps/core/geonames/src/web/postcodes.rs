@@ -890,12 +890,7 @@ impl Postcodes {
     }
 
     /// Typed controls debounce so the dialog validates as the person types, not only when a control loses focus.
-    fn form(
-        &self,
-        draft: &Draft,
-        countries: &[Choice],
-        words: &bilibi_grid::RecordWords,
-    ) -> Result<Html> {
+    fn form(&self, draft: &Draft, countries: &[Choice]) -> Result<Html> {
         let field = |key: &str| {
             Field::in_form(FORM, key)
                 .value(draft.values.get(key).cloned().unwrap_or_default())
@@ -911,29 +906,29 @@ impl Postcodes {
         };
         let mut postcode = field("postcode")
             .id("postcode-code")
-            .label(words.get(&fields::get("postcode")))
+            .label(fields::get("postcode").label)
             .required();
         postcode.attrs.maxlength = Some("20".into());
         let mut place_name = field("place_name")
             .id("postcode-place-name")
-            .label(words.get(&fields::PLACE_NAME))
+            .label(fields::PLACE_NAME.label)
             .required();
         place_name.attrs.maxlength = Some("180".into());
         let mut latitude = field("latitude")
             .id("postcode-latitude")
             .kind(InputKind::Number)
-            .label(words.get(&fields::LATITUDE));
+            .label(fields::LATITUDE.label);
         latitude.attrs.step = Some("0.0000001".into());
         let mut longitude = field("longitude")
             .id("postcode-longitude")
             .kind(InputKind::Number)
-            .label(words.get(&fields::LONGITUDE));
+            .label(fields::LONGITUDE.label);
         longitude.attrs.step = Some("0.0000001".into());
         render(FormView {
             country: field("country_iso")
                 .id("postcode-country")
                 .kind(InputKind::Select)
-                .label(words.get(&fields::COUNTRY))
+                .label(fields::COUNTRY.label)
                 .prompt("Select country...")
                 .options(countries.to_vec())
                 .required(),
@@ -942,7 +937,7 @@ impl Postcodes {
             admin1: field("admin1_code")
                 .id("postcode-admin1")
                 .kind(InputKind::Select)
-                .label(words.get(&fields::ADMIN1))
+                .label(fields::ADMIN1.label)
                 .prompt("None")
                 .options(draft.admin1_options.clone()),
             latitude,
@@ -950,7 +945,7 @@ impl Postcodes {
             accuracy: field("accuracy")
                 .id("postcode-accuracy")
                 .kind(InputKind::Select)
-                .label(words.get(&fields::ACCURACY))
+                .label(fields::ACCURACY.label)
                 .prompt("Unknown")
                 .options(
                     (1..=6)
@@ -961,10 +956,6 @@ impl Postcodes {
     }
 
     pub async fn view(&mut self, scope: &Scope, requery: bool) -> Result<String> {
-        let client = self.pages.db.get().await?;
-        let words = bilibi_grid::RecordWords::load(&**client, scope, "postcodes").await?;
-        drop(client);
-
         if requery || self.shown.is_none() {
             self.load(scope).await?;
         }
@@ -1168,7 +1159,7 @@ impl Postcodes {
                 description: "Your changes are kept when postcodes are next updated from GeoNames.",
                 role: "",
                 flash: Some(self.flash.map()),
-                body: self.form(draft, &shown.countries, &words)?,
+                body: self.form(draft, &shown.countries)?,
             })?,
             None => Html::EMPTY,
         };

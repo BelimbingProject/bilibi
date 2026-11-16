@@ -84,10 +84,11 @@ impl Panel {
             columns: ListColumns::mount(
                 &format!("{anchor}-table"),
                 vec![
-                    BuiltinColumn::new("name", "Name"),
-                    BuiltinColumn::new("category", "Category"),
-                    BuiltinColumn::new("revision", "Revision"),
-                    BuiltinColumn::new("publish_date", "Published"),
+                    BuiltinColumn::new("name", "Name").grid_field("documents.name"),
+                    BuiltinColumn::new("category", "Category").grid_field("documents.category"),
+                    BuiltinColumn::new("revision", "Revision").grid_field("documents.revision"),
+                    BuiltinColumn::new("publish_date", "Published")
+                        .grid_field("documents.publish_date"),
                 ],
             )
             .map_err(|_| Error::Internal)?,

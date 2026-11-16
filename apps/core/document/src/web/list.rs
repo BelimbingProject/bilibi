@@ -64,17 +64,23 @@ fn columns() -> Result<ListColumns> {
     ListColumns::mount(
         "documents",
         vec![
-            BuiltinColumn::new("name", "Name").sortable("name"),
-            BuiltinColumn::new("file", "Latest file"),
-            BuiltinColumn::new("category", "Category"),
-            BuiltinColumn::new("type", "Type"),
-            BuiltinColumn::new("status", "Status"),
+            BuiltinColumn::new("name", "Name")
+                .grid_field("documents.name")
+                .sortable("name"),
+            BuiltinColumn::new("file", "Latest file").grid_field("document_revisions.file_name"),
+            BuiltinColumn::new("category", "Category").grid_field("documents.category"),
+            BuiltinColumn::new("type", "Type").grid_field("documents.document_type"),
+            BuiltinColumn::new("status", "Status").grid_field("documents.status"),
             BuiltinColumn::new("marks", "Marks"),
-            BuiltinColumn::new("expires", "Expires"),
+            BuiltinColumn::new("expires", "Expires").grid_field("documents.expires_on"),
             BuiltinColumn::new("retention", "Retention ended"),
-            BuiltinColumn::new("revision", "Revision"),
-            BuiltinColumn::new("publish_date", "Published").sortable("publish_date"),
-            BuiltinColumn::new("last_revision", "Last revision").sortable("last_revision"),
+            BuiltinColumn::new("revision", "Revision").grid_field("documents.revision"),
+            BuiltinColumn::new("publish_date", "Published")
+                .grid_field("documents.publish_date")
+                .sortable("publish_date"),
+            BuiltinColumn::new("last_revision", "Last revision")
+                .grid_field("documents.last_revision_at")
+                .sortable("last_revision"),
         ],
     )
     .map_err(|_| Error::Internal)
@@ -495,6 +501,8 @@ impl Index {
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
         let client = self.pages.db.get().await?;
         let words = bilibi_grid::RecordWords::load(&**client, scope, "documents").await?;
+        let revision_words =
+            bilibi_grid::RecordWords::load(&**client, scope, "document_revisions").await?;
         drop(client);
 
         let clock = self.pages.clock(scope).await?;
@@ -735,7 +743,7 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 &self.uploads,
-                &words,
+                (&words, &revision_words),
                 "documents-new",
                 "close_modal",
                 self.framed,

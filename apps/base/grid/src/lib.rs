@@ -291,3 +291,29 @@ impl RecordWords {
             .map_or_else(|| self.field(field.id, field.label), String::as_str)
     }
 }
+
+pub async fn render_labels(
+    client: &impl tokio_postgres::GenericClient,
+    scope: &bilibi_tenancy::Scope,
+) -> std::result::Result<bilibi_ui::FieldLabels, bilibi_database::Error> {
+    let names = bilibi_labels::field_labels(client, scope).await?;
+    let installed = installed().map_err(|_| bilibi_database::Error::Internal)?;
+    let mut words = std::collections::BTreeMap::new();
+    for root in installed.tables() {
+        for field in root.visible_fields() {
+            if let Some(word) = names.get(root.id(), field.id) {
+                words.insert(format!("{}.{}", root.id(), field.id), word.to_owned());
+            }
+        }
+        for field in &root.record_fields {
+            if let Some(word) = field.column.and_then(|path| {
+                let column =
+                    column::resolve(path, root, &|id| installed.table(id), &|_, _| None).ok()?;
+                names.get(column.table, column.field.as_ref()?.id)
+            }) {
+                words.insert(field.vocabulary.to_owned(), word.to_owned());
+            }
+        }
+    }
+    Ok(bilibi_ui::FieldLabels(words))
+}

@@ -33,12 +33,15 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 });
 fn builtins() -> Vec<BuiltinColumn> {
     vec![
-        sortable("iso", "ISO", "countries-sort-iso"),
-        sortable("country", "Country", "countries-sort-country"),
-        sortable("capital", "Capital", "countries-sort-capital"),
-        sortable("phone", "Phone", "countries-sort-phone"),
-        sortable("currency_code", "Currency", "countries-sort-currency"),
-        sortable("population", "Population", "countries-sort-population").right(),
+        sortable("iso", "ISO", "countries-sort-iso").grid_field("countries.iso"),
+        sortable("country", "Country", "countries-sort-country").grid_field("countries.country"),
+        sortable("capital", "Capital", "countries-sort-capital").grid_field("countries.capital"),
+        sortable("phone", "Phone", "countries-sort-phone").grid_field("countries.phone"),
+        sortable("currency_code", "Currency", "countries-sort-currency")
+            .grid_field("countries.currency_code"),
+        sortable("population", "Population", "countries-sort-population")
+            .grid_field("countries.population")
+            .right(),
         sortable("updated_at", "Updated", "countries-sort-updated"),
     ]
 }
