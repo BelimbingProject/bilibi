@@ -876,7 +876,9 @@ async fn main() -> Result<()> {
     )?;
 
     println!("== #598: a hold placed while an erasure holds the guard gives up with try again");
-    let guard = db.get().await?;
+    let guard = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     guard
         .batch_execute("BEGIN; SELECT pg_advisory_xact_lock_shared(841330, 1)")
         .await?;

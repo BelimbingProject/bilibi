@@ -349,7 +349,9 @@ async fn main() -> Result<(), Failure> {
             .await
             .map(|p| p.id()),
     );
-    let mut connection = db.get().await?;
+    let mut connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = boundary
         .begin(
             &mut connection,

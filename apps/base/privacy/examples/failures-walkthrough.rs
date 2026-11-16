@@ -801,7 +801,9 @@ async fn main() -> Result<()> {
     )
     .await?;
     // Hold the request's finish guard so the export is staged but not built.
-    let guard = db.get().await?;
+    let guard = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     guard
         .execute(
             "SELECT pg_advisory_lock(841331,$1::bigint::int)",

@@ -189,7 +189,9 @@ async fn main() -> Result<(), Failure> {
             .await,
     );
 
-    let mut connection = db.get().await?;
+    let mut connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = boundary
         .begin(
             &mut connection,
@@ -249,7 +251,9 @@ async fn main() -> Result<(), Failure> {
             .await,
     );
     client.execute("DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=$1 AND capability='admin.company.tenant-wide.manage'", &[&manager.user()]).await?;
-    let mut contender = db.get().await?;
+    let mut contender = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut blocked = boundary
         .begin(
             &mut contender,

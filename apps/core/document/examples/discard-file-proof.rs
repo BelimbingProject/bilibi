@@ -230,7 +230,9 @@ async fn main() -> Result<()> {
         audited == 1,
         &format!("file {abandoned_id}: its removal is audited as System · document-file-cleaner"),
     )?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = app
         .mutations
         .begin(&mut client, scope.mutation_context("core.document.create"))

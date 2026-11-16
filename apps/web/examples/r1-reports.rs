@@ -146,7 +146,10 @@ async fn write<T>(
         &mut bilibi_database::MutationTransaction<'t>,
     ) -> Result<T, ReportError>,
 ) -> Result<T, ReportError> {
-    let mut client = db.get().await.map_err(bilibi_database::Error::from)?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await
+        .map_err(bilibi_database::Error::from)?;
     let mut tx = boundary
         .begin(&mut client, scope.mutation_context(action))
         .await?;

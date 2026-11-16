@@ -320,7 +320,11 @@ async fn main() -> Result<()> {
     );
     println!("-- the period and the minimum saved at the same moment");
     let (a, b) = {
-        let (mut first, mut second) = (db.get().await?, db.get().await?);
+        let (mut first, mut second) = (
+            db.get_detached("the walkthrough's own checking connection")
+                .await?,
+            db.get().await?,
+        );
         tokio::join!(
             put(
                 &boundary,

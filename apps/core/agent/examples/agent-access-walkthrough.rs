@@ -399,7 +399,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .await?
         .map_or(0, |row| row.get(0));
     let operations = [reference_operation(91, version)];
-    let mut held_client = db.get().await?;
+    let mut held_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let held_company = held_client.transaction().await?;
     held_company
         .query_one(
@@ -482,7 +484,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     users.logout(&browser.token, &browser.csrf).await?;
-    let mut desk_client = db.get().await?;
+    let mut desk_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let held_desk = desk_client.transaction().await?;
     held_desk
         .query_one(

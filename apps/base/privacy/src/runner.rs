@@ -805,7 +805,7 @@ async fn finish(
         Err(Error::Conflict) => return Ok(Finish::Busy),
         Err(error) => return Err(error),
     };
-    let mut client = privacy.db.get().await?;
+    let mut client = privacy.db.get_detached(JOB_CONNECTION).await?;
     let request = privacy.request(&**client, scope, id).await?;
     if request.status != "running" {
         guard.release().await?;

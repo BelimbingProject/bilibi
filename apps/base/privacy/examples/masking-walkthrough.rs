@@ -166,7 +166,10 @@ async fn page(
 /// Opens the person 1 update in the audit mutations page, as a reader expands
 /// it, and reports what the diff shows.
 async fn history(app: &bilibi_web::App, scope: &Scope, token: &str) -> Result<()> {
-    let client = app.db.get().await?;
+    let client = app
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let id: i64 = client
         .query_one(
             "SELECT id FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id='1' AND event='updated' ORDER BY id DESC LIMIT 1",

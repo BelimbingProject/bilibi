@@ -237,7 +237,9 @@ async fn main() -> Result<(), Error> {
         )
         .await?;
 
-    let mut first = db.get().await?;
+    let mut first = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = mutations
         .begin(
             &mut first,

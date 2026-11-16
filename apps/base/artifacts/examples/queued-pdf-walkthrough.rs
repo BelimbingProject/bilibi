@@ -438,7 +438,9 @@ async fn main() -> Result<()> {
     wait(&db, 1, job).await?;
     let done = client.query_one("SELECT artifact_id,deliveries FROM walkthrough_pdf_completions WHERE request_id='req-inline'", &[]).await?;
     let (artifact, deliveries): (String, i32) = (done.get(0), done.get(1));
-    let mut c2 = db.get().await?;
+    let mut c2 = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let read = documents.read(&mut c2, &artifact).await?;
     let file = out.join("queued-inline-protected.pdf");
     std::fs::write(&file, &read.bytes)?;

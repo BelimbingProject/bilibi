@@ -238,7 +238,9 @@ async fn main() -> Result<(), Failure> {
     let companies = app
         .services
         .get::<bilibi_company::CompanyService>(bilibi_company::SERVICE)?;
-    let mut holder = db.get().await?;
+    let mut holder = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let lock = holder.transaction().await?;
     lock.batch_execute("LOCK TABLE companies IN ACCESS EXCLUSIVE MODE")
         .await?;

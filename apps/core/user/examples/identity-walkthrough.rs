@@ -407,7 +407,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_desk(&manager, 2, person, true)
         .await
         .map_err(|error| format!("Could not restore company 2 desk for archive proof: {error}"))?;
-    let mut proof_client = db.get().await?;
+    let mut proof_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let proof = proof_client.transaction().await?;
     if !bilibi_company::reachable(&*proof, &chosen, OrganisationId::new(2)?).await? {
         return Err("Exact desk proof was refused".into());
@@ -661,7 +663,9 @@ async fn account_bounds(
     };
     let password = bilibi_walkthrough_fixture::PASSWORD;
     let (mallory_id, admin_id, staff_id, contractor_id) = (2_i64, 4_i64, 3_i64, 7_i64);
-    let sql = db.get().await?;
+    let sql = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let editor_role: i64 = sql
         .query_opt(
             "SELECT id FROM roles WHERE tenant_id=1 AND code='user_editor'",

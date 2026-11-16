@@ -913,7 +913,9 @@ async fn reconcile(services: &Services, db: &Db) -> Result<()> {
         "INSERT INTO base_schedule_occurrences(key,intended_at,trigger,state,tenant_id,job_id) VALUES($1,'2026-02-01T00:00:00Z','scheduled','queued',2,2147483000) RETURNING id",
         &[&ALLOW_KEY],
     ).await?.get(0);
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     schedule
         .review(&mut client, &admin(services, db).await?.1, ALLOW_KEY, false)
         .await?;

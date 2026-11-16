@@ -567,7 +567,9 @@ async fn main() -> Result<(), Error> {
     );
 
     println!("== retirement waits for an in-flight assignment, then refuses new ones");
-    let mut first_connection = db.get().await?;
+    let mut first_connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = mutations
         .begin(
             &mut first_connection,

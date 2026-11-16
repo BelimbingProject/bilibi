@@ -74,7 +74,9 @@ async fn main() -> Result<(), Failure> {
     let list = |text: &'static str| {
         let (registry, manager, db) = (registry.clone(), manager.clone(), db.clone());
         async move {
-            let client = db.get().await?;
+            let client = db
+                .get_detached("the walkthrough's own checking connection")
+                .await?;
             let value = registry
                 .call(
                     &**client,
