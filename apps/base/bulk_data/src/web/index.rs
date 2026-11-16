@@ -380,14 +380,20 @@ impl LiveState<Scope, Error> for Index {
                     let get = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
                     match get("type").ok_or(Error::Invalid)? {
                         "page" => self.state.put_page(get("page")),
-                        "grid" => match self.columns.handle(&params::string_values(value)) {
+                        "grid" => match self.columns.handle(
+                            &params::string_values_checked(value, params::FIELD_LIMIT)
+                                .map_err(Error::refused)?,
+                        ) {
                             ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                             ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                                 self.rows_changed = false
                             }
                         },
                         "exports-grid" => {
-                            match self.export_columns.handle(&params::string_values(value)) {
+                            match self.export_columns.handle(
+                                &params::string_values_checked(value, params::FIELD_LIMIT)
+                                    .map_err(Error::refused)?,
+                            ) {
                                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                                 ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                                     self.rows_changed = false
@@ -395,7 +401,10 @@ impl LiveState<Scope, Error> for Index {
                             }
                         }
                         "updates-grid" => {
-                            match self.update_columns.handle(&params::string_values(value)) {
+                            match self.update_columns.handle(
+                                &params::string_values_checked(value, params::FIELD_LIMIT)
+                                    .map_err(Error::refused)?,
+                            ) {
                                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                                 ColumnsOutcome::Update | ColumnsOutcome::Noop => {
                                     self.rows_changed = false

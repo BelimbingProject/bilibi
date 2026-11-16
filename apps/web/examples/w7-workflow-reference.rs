@@ -8,7 +8,10 @@
 //! `cargo run -p bilibi-workflow --example owner -- init`; see
 //! `apps/base/workflow/README.md`.
 #[path = "../../base/workflow/examples/reference/mod.rs"]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the shared reference module serves several walkthroughs, and each uses a different part of it"
+)]
 mod reference;
 use bilibi_database::{Error, Result};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();

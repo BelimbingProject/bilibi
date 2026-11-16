@@ -54,7 +54,7 @@ struct Disk {
     free: i64,
     total: i64,
 }
-#[allow(
+#[expect(
     unsafe_code,
     reason = "the standard library has no filesystem capacity call"
 )]

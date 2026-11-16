@@ -88,7 +88,7 @@ struct Browser {
     dir: PathBuf,
 }
 impl Drop for Browser {
-    #[allow(
+    #[expect(
         unsafe_code,
         reason = "the standard library cannot signal a process group"
     )]
@@ -102,7 +102,7 @@ impl Drop for Browser {
     }
 }
 impl Browser {
-    #[allow(
+    #[expect(
         unsafe_code,
         reason = "Chromium takes its command pipes on fixed descriptors, set between fork and exec"
     )]
@@ -175,7 +175,7 @@ impl Drop for DirGuard {
         }
     }
 }
-#[allow(
+#[expect(
     unsafe_code,
     reason = "the standard library has no close-on-exec pipe call"
 )]

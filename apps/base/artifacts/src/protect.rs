@@ -166,7 +166,7 @@ struct Run {
     pid: Option<u32>,
 }
 impl Drop for Run {
-    #[allow(
+    #[expect(
         unsafe_code,
         reason = "the standard library cannot signal a process group"
     )]

@@ -241,7 +241,6 @@ pub async fn reveal(
         .and_then(|mut row| row.cells.remove(field)))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn read<S: AsRef<str>>(
     db: &Db,
     scope: &Scope,

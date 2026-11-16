@@ -204,7 +204,7 @@ There are no unit tests. Every change must pass these and then be tried in the r
 ```sh
 python3 scripts/discover-modules.py --check
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
 cargo build --workspace --release --locked
 ```
 
@@ -217,6 +217,17 @@ CI warns about a Rust file over 800 lines that is new or got longer in your pull
 - Run `python3 scripts/file-length-ratchet.py` to see the list locally; it compares your branch with `origin/main`.
 - Files under `fixtures/`, `examples/`, `migrations/` and `generated/` are skipped.
 - CI runs it as `.github/workflows/file-length.yml`; editing the body re-runs it. The same script is copied unchanged into every Bilibi repository.
+
+### Guard rails
+
+Rules that were only prose are checks; each error says what to use instead and why.
+
+- `clippy.toml` bans calls (`Html::raw` outside `base/ui`). CI passes `-A clippy::disallowed_methods` while old sites remain, so it is a warning in your editor and `cargo clippy` and `scripts/ratchets.py` fails CI when the count grows. Once an entry has no caller, drop the `-A` and it blocks.
+- `Cargo.toml` turns on `clippy::allow_attributes` and `clippy::allow_attributes_without_reason`: write `#[expect(lint, reason = "…")]`, which fails once the exception is no longer needed.
+- `scripts/forbidden-code.py` fails on `#[test]`, `#[cfg(test)]` and `window.confirm`.
+- `scripts/ratchets.py` fails when `Html::raw(`, `|safe` outside `base/ui` or a `Pending::Every`/`Pending::Events` allowance grows.
+- `scripts/exceptions.py` lists every new escape hatch in the job summary and fails when `## Exceptions` in the pull request body has no `<path>: <hatch>: <reason>` line for one. Delete the section when CI lists none.
+- CI runs them as `.github/workflows/guard-rails.yml`; editing the body re-runs it.
 
 ### Shared helpers
 

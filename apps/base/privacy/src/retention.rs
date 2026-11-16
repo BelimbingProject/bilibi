@@ -124,7 +124,6 @@ pub trait Sweeper: Send + Sync {
     /// acted on. Purge or anonymise those `holds` does not name, writing
     /// through `tx` and returning every change; never open a second
     /// transaction. Count the held ones as kept.
-    #[allow(clippy::too_many_arguments)]
     fn sweep<'a>(
         &'a self,
         tx: &'a mut MutationTransaction<'_>,
@@ -502,7 +501,6 @@ impl Privacy {
 
     /// One class's run: batches in ID order until the class is done, each
     /// under the hold guard, with one summary for the whole run.
-    #[allow(clippy::too_many_arguments)]
     async fn sweep_class(
         &self,
         client: &mut Client,

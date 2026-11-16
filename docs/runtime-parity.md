@@ -66,7 +66,7 @@ Run the repository checks without invoking any unit-test runner:
 ```sh
 python3 scripts/discover-modules.py --check
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
 ```
 
 Then run the affected route or interaction in the app and attach the relevant evidence record. `cargo check`/Clippy and screenshots complement each other; neither replaces the live behavior check. Do not run `cargo test` or add Rust, browser-hook, or Python unit tests.

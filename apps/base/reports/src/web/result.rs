@@ -614,7 +614,6 @@ pub(crate) fn agg_label(agg: &str) -> &'static str {
 /// measure (or the record count). Two: a category per first group and a
 /// series per second group, of the first measure. None: the total as a
 /// number. With `drill`, each bar or slice names the line it draws.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn figure(
     id: &str,
     title: &str,

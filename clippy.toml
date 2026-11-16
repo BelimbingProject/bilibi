@@ -1,0 +1,17 @@
+# Clippy configuration for the Platform workspace (and every mounted Domain and
+# Extension, which builds inside it). Each rule here replaces prose that agents
+# kept breaking: the message says what to use instead and why. Cargo.toml
+# `[workspace.lints.clippy]` sets the levels.
+#
+# CI runs `cargo clippy -- -D warnings -A clippy::disallowed_methods`, so an
+# entry is a warning in the editor and `cargo clippy` but does not fail CI
+# while sites remain; scripts/ratchets.py fails CI when their count grows.
+# Once an entry has no caller, remove `-A clippy::disallowed_methods` from
+# .github/workflows/ci.yml and the entry blocks.
+
+# A facade with more arguments than this takes a request or options type.
+too-many-arguments-threshold = 12
+
+disallowed-methods = [
+    { path = "bilibi_ui::html::Html::raw", reason = "`Html::raw` skips escaping and is for shared components in `base/ui`. Render a component (`apps/base/ui/README.md`) or use `Html::text`; hand-built markup has already shipped unbalanced tags (#331)." },
+]

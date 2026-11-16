@@ -283,13 +283,17 @@ impl Requests {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self
                 .state
                 .put_page(value.get("page").and_then(Value::as_str)),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
@@ -302,7 +306,8 @@ impl Requests {
                 let Some(dialog) = self.dialog.as_mut() else {
                     return Ok(());
                 };
-                let values = params::form_values(value, REQUEST_FORM);
+                let values = params::form_values_checked(value, REQUEST_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 dialog.company_query = values.get("company_id_search").cloned().unwrap_or_default();
                 dialog.company = values
                     .get("company_id")
@@ -328,7 +333,8 @@ impl Requests {
                 let Some(dialog) = self.dialog.as_mut() else {
                     return Ok(());
                 };
-                let values = params::form_values(value, REQUEST_FORM);
+                let values = params::form_values_checked(value, REQUEST_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let list = |key: &str| -> Vec<String> {
                     values.get(key).map_or_else(Vec::new, |text| {
                         text.split([',', ';', '\n'])
@@ -811,7 +817,10 @@ impl RequestPage {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
@@ -851,7 +860,8 @@ impl RequestPage {
                 })
             }
             "export_reason" => {
-                let values = params::form_values(value, REVEAL_FORM);
+                let values = params::form_values_checked(value, REVEAL_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let reason = values.get("reason").map(|r| r.trim()).unwrap_or("");
                 if reason.is_empty() || reason.chars().count() > 255 {
                     self.dialog = Some(Dialog::Export {
@@ -877,7 +887,8 @@ impl RequestPage {
             "close_modal" | "cancel_approve" | "cancel_run_again" => self.dialog = None,
             "verify" | "refuse" => {
                 let verify = value["type"] == "verify";
-                let values = params::form_values(value, NOTE_FORM);
+                let values = params::form_values_checked(value, NOTE_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let note = values.get("note").cloned().unwrap_or_default();
                 let confirm: Vec<&ConfirmedRecord> = match &self.dialog {
                     Some(Dialog::Verify { candidates, .. }) if verify => candidates
@@ -1665,13 +1676,17 @@ impl Holds {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self
                 .state
                 .put_page(value.get("page").and_then(Value::as_str)),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },
@@ -1705,7 +1720,8 @@ impl Holds {
             }
             "close_modal" => self.dialog = None,
             "place" => {
-                let values = params::form_values(value, HOLD_FORM);
+                let values = params::form_values_checked(value, HOLD_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let number = |key: &str| {
                     values
                         .get(key)
@@ -1750,7 +1766,8 @@ impl Holds {
                     return Ok(());
                 };
                 let hold = *hold;
-                let values = params::form_values(value, NOTE_FORM);
+                let values = params::form_values_checked(value, NOTE_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 let input =
                     json!({"id": hold, "reason": values.get("note").cloned().unwrap_or_default()});
                 match self
@@ -2078,13 +2095,17 @@ impl Retention {
             .and_then(Value::as_str)
             .ok_or(Error::Invalid)?
         {
-            "filters" => self
-                .state
-                .apply_filters(&params::form_values(value, FILTERS_FORM)),
+            "filters" => self.state.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self
                 .state
                 .put_page(value.get("page").and_then(Value::as_str)),
-            "grid" => match self.columns.handle(&params::string_values(value)) {
+            "grid" => match self.columns.handle(
+                &params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ) {
                 ColumnsOutcome::Sort(_) => return Err(Error::Invalid),
                 ColumnsOutcome::Update | ColumnsOutcome::Noop => self.rows_changed = false,
             },

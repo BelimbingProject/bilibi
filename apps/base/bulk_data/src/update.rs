@@ -879,7 +879,6 @@ impl BulkData {
     /// One record: its current values read through the owner, then the
     /// owner's update with the resolved version and the result beside it,
     /// in one transaction. False when the update was cancelled or ended.
-    #[allow(clippy::too_many_arguments)]
     async fn write_one(
         &self,
         execution: &Execution,

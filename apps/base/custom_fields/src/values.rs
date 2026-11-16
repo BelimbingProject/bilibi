@@ -216,7 +216,6 @@ impl CustomFields {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn check_one(
         &self,
         client: &dyn ReadClient,

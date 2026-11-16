@@ -9,10 +9,19 @@ rust-version = "1.99"
 license = "MIT"
 
 # `deny`, not `forbid`: the few audited system calls opt out with
-# `#[allow(unsafe_code, reason = "…")]`, which `forbid` would refuse.
+# `#[expect(unsafe_code, reason = "…")]`, which `forbid` would refuse.
 # Every Platform crate inherits this with `[lints] workspace = true`.
 [workspace.lints.rust]
 unsafe_code = "deny"
+
+# The banned calls and their messages are in clippy.toml. CI passes
+# `-A clippy::disallowed_methods` while an entry still has callers that only
+# its ratchet (scripts/ratchets.py) counts down; see clippy.toml.
+[workspace.lints.clippy]
+disallowed_methods = "warn"
+# An exception states why, and fails once it is no longer needed.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
 icu_datetime = "2.3.0"

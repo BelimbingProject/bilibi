@@ -22,7 +22,6 @@ pub(super) fn member_columns() -> Vec<BuiltinColumn> {
         BuiltinColumn::new("added", "Added"),
     ]
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn read(
     pages: &Pages,
     client: &(impl GenericClient + Sync),

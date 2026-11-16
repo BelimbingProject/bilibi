@@ -8,7 +8,6 @@
 //! and unreachable fallbacks, `force` refusing fallback, a payload with no valid rows, a database failure in a late batch,
 //! the ETag-less cache lifetime and the capability-gated screen entry point.
 #[path = "support/fixture.rs"]
-#[allow(dead_code)]
 mod fixture;
 
 use bilibi_database::{pool, Error, Result};
