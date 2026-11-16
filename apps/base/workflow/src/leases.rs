@@ -378,15 +378,6 @@ async fn work(
                 old: json!({"lease_expires_at":fact.lease_expires_at}),
                 new: json!({"lease_expires_at":expires}),
             });
-            append_event(
-                sql,
-                run,
-                Some(fact.id),
-                "work.heartbeat",
-                json!({"lease_expires_at":expires}),
-                changes,
-            )
-            .await?;
             Ok(())
         }
         WorkCommand::Complete {

@@ -645,7 +645,7 @@ Policies contain ordered All/Any steps. All needs every seat, each filled by a d
 
 Money comparisons are exact and name the currency. A policy using amount thresholds must cover the submitted currency. A different currency never falls through by numerical comparison or an implicit exchange rate. Missing facts and unavailable routing refuse execution.
 
-New policy versions affect new requests. Pending requests keep their routing snapshot and original owner safety floors, while current stronger floors also apply immediately. An incompatible owner declaration refuses the round until recall and fresh submission. A change to the owner's revision needs a fresh, linked request and fresh decisions.
+New policy versions affect new requests. Pending requests keep their routing snapshot and original owner safety floors, while current stronger floors also apply immediately. An incompatible owner declaration refuses the round until recall and fresh submission. A change to the owner's revision needs a fresh, linked request and fresh decisions. Submitting it supersedes older waiting revisions and completes their wait runs without invoking the owner effect; recall refuses a request whose revision or company no longer matches the locked owner.
 
 ### Submission and decisions
 
@@ -692,6 +692,8 @@ cargo run -p bilibi-workflow --example owner -- approval-init 4
 cargo run -p bilibi-workflow --example owner -- approval-submit 1 1
 cargo run -p bilibi-workflow --example owner -- approval-inbox 4
 ```
+
+To check revision fencing, submit a request, change its reference fact `revision` in the disposable database, then attempt `approval-recall` with the old request ID and version. It must return `Conflict` without changing the owner. Submit the new revision with a fresh idempotency suffix and the old request ID as `prior`; the old request must be `superseded` with a completed run, and the new request must be `awaiting`. Heartbeats extend a live lease and remain in Audit, but do not append process events.
 
 The reference adds no real owner. Its facts and failure controls live in `workflow_reference_approval_facts`; use them only in the disposable database. Run `apps/web/examples/w7-workflow-reference.rs` at a private `BIND_ADDR` and matching `APP_ORIGIN` to exercise the shared pages in a browser.
 

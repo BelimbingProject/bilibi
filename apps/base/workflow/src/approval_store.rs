@@ -491,7 +491,22 @@ impl Engine {
             if let Some(prior)=prior {
                 let old=tx.sql().query_opt("SELECT * FROM base_workflow_approval_requests WHERE tenant_id=$1 AND id=$2 FOR UPDATE",&[&scope.tenant(),&prior]).await?.ok_or(Error::NotFound)?;
                 let old=request(&old)?;
-                if old.case!=case || old.subject_id!=id || old.company!=facts.company || old.state=="awaiting" || old.state=="approved" || old.revision==facts.revision {return Err(Error::Conflict);}
+                if old.case!=case || old.subject_id!=id || old.company!=facts.company || old.state=="approved" || old.revision==facts.revision {return Err(Error::Conflict);}
+            }
+            // The owner lock serializes submissions for this subject. Retire
+            // every older waiting revision before publishing the replacement.
+            let rows=tx.sql().query("SELECT * FROM base_workflow_approval_requests WHERE tenant_id=$1 AND case_key=$2 AND subject_type=$3 AND subject_id=$4 AND state='awaiting' AND revision<>$5 ORDER BY id FOR UPDATE",&[&scope.tenant(),&case,&declaration.subject,&id,&facts.revision]).await?;
+            for row in rows {
+                let old=request(&row)?;
+                engine.lock_approval_run(tx.sql(),&scope,&old).await?;
+                let retired_scope=scope.clone(); let retired=old.clone();
+                tx.mutate(move |sql|Box::pin(async move {
+                    sql.execute("UPDATE base_workflow_approval_requests SET state='superseded',version=version+1 WHERE tenant_id=$1 AND id=$2",&[&retired_scope.tenant(),&retired.id]).await?;
+                    let mut changes=vec![updated("workflow.approval_request",retired.id,json!({"state":"awaiting","version":retired.version}),json!({"state":"superseded","version":retired.version+1}))];
+                    event(sql,&retired_scope,retired.id,"superseded",json!({"reason":"Subject revision changed."}),&mut changes).await?;
+                    Ok(((),changes))
+                })).await?;
+                engine.finish_approval_run_in(tx,&scope,&old,"superseded").await?;
             }
             let activation_facts=facts.clone();
             let activation_subject=subject.clone();
@@ -639,7 +654,7 @@ impl Engine {
                 event(sql,&decide_scope,saved_clone.id,"decision",json!({"decision":decision,"state":outcome,"stage":vote_copy.stage,"seat":vote_copy.seat,"reason":vote_copy.reason,"identities":decision_ids_copy,"grantor":grantor,"agent_connection":decide_scope.agent().map(|a|a.connection()),"closed_unused":closed_unused}),&mut changes).await?;
                 Ok(((),changes))
             })).await?;
-            if let Some(outcome)=terminal {engine.finish_approval_run_in(tx,&scope,&saved,outcome).await?;}
+            if let Some(outcome)=terminal {engine.finish_approval_run_in(tx,&scope,&saved,outcome.as_str()).await?;}
             else if next_stage!=saved.stage_index {engine.notify_approval_stage_in(tx,&scope,case.key,&subject,&facts,saved.id).await?;}
             engine.approval.notices.as_ref().ok_or(Error::Internal)?.todos_changed(tx, &scope)?;
             Ok(result)
@@ -1191,11 +1206,11 @@ impl Engine {
             let candidate=request(&candidate)?;let case=engine.approval_case(&candidate.case)?;check_reason(&case,&reason,true)?;
             bilibi_authz::authorize_key(tx.sql(),&scope,case.recall_capability).await?;
             let subject=engine.load(tx.sql(),&scope,engine.registry.owned_subject(case.subject)?,candidate.subject_id,Load::Lock,Operation::ExecuteAction).await?;
-            let adapter=engine.adapter(case.key)?;adapter.inspect(tx.sql(),&scope,&subject,ApprovalAccess::Recall).await?;
+            let adapter=engine.adapter(case.key)?;let facts=adapter.inspect(tx.sql(),&scope,&subject,ApprovalAccess::Recall).await?;
             Self::policy_lock(tx.sql(),&scope,candidate.company,case.key,false).await?;
             let row=tx.sql().query_one("SELECT * FROM base_workflow_approval_requests WHERE tenant_id=$1 AND id=$2 FOR UPDATE",&[&scope.tenant(),&id]).await?;
             let saved=request(&row)?;
-            if saved.state!="awaiting" || saved.version!=version || saved.initiator!=scope.user() {return Err(Error::Conflict);}
+            if saved.state!="awaiting" || saved.version!=version || saved.initiator!=scope.user() || saved.revision!=facts.revision || saved.company!=facts.company {return Err(Error::Conflict);}
             engine.lock_approval_run(tx.sql(),&scope,&saved).await?;
             adapter.apply_in(tx,&scope,&subject,ApprovalOutcome::Recalled,&reason,&json!({})).await?;
             let recall_scope=scope.clone();
@@ -1203,7 +1218,7 @@ impl Engine {
                 sql.execute("UPDATE base_workflow_approval_requests SET state='recalled',version=version+1 WHERE tenant_id=$1 AND id=$2",&[&recall_scope.tenant(),&id]).await?;
                 let mut changes=vec![updated("workflow.approval_request",id,json!({"state":"awaiting","version":version}),json!({"state":"recalled","version":version+1}))];event(sql,&recall_scope,id,"recalled",json!({"reason":reason}),&mut changes).await?;Ok(((),changes))
             })).await?;
-            engine.finish_approval_run_in(tx,&scope,&saved,ApprovalOutcome::Recalled).await
+            engine.finish_approval_run_in(tx,&scope,&saved,ApprovalOutcome::Recalled.as_str()).await
         })).await
     }
     /// One-hop cover. Both people must remain independently eligible at vote
@@ -1566,19 +1581,33 @@ impl Engine {
             )
             .await?;
         bilibi_authz::authorize_key(tx.sql(), &scope, MAINTAIN).await?;
-        let ids=tx.mutate(move |sql|Box::pin(async move {
-            sql.execute("INSERT INTO base_workflow_approval_maintenance(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",&[&tenant]).await?;
-            let Some(row)=sql.query_opt("SELECT last_request FROM base_workflow_approval_maintenance WHERE tenant_id=$1 FOR UPDATE SKIP LOCKED",&[&tenant]).await? else {return Ok((Vec::new(),Vec::new()));};
-            let previous:i64=row.get(0);
-            let mut rows=sql.query("SELECT id FROM base_workflow_approval_requests WHERE tenant_id=$1 AND id>$2 AND state='awaiting' ORDER BY id LIMIT $3",&[&tenant,&previous,&limit]).await?;
-            if rows.is_empty() && previous>0 {
-                rows=sql.query("SELECT id FROM base_workflow_approval_requests WHERE tenant_id=$1 AND state='awaiting' ORDER BY id LIMIT $2",&[&tenant,&limit]).await?;
-            }
-            let ids=rows.iter().map(|r|r.get::<_,i64>(0)).collect::<Vec<_>>();
-            let next=ids.last().copied().unwrap_or(0);
-            sql.execute("UPDATE base_workflow_approval_maintenance SET last_request=$2 WHERE tenant_id=$1",&[&tenant,&next]).await?;
-            Ok((ids,vec![Change{kind:"workflow.approval_maintenance_cursor".into(),id:tenant,old:json!({"last_request":previous}),new:json!({"last_request":next})}]))
-        })).await?;
+        let inserted=tx.sql().execute("INSERT INTO base_workflow_approval_maintenance(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",&[&tenant]).await? != 0;
+        if inserted {
+            tx.record(Change {
+                kind: "workflow.approval_maintenance_cursor".into(),
+                id: tenant,
+                old: Value::Null,
+                new: json!({"last_request":0}),
+            })
+            .await?;
+        }
+        let Some(row)=tx.sql().query_opt("SELECT last_request FROM base_workflow_approval_maintenance WHERE tenant_id=$1 FOR UPDATE SKIP LOCKED",&[&tenant]).await? else {return Ok(Vec::new());};
+        let previous: i64 = row.get(0);
+        let mut rows=tx.sql().query("SELECT id FROM base_workflow_approval_requests WHERE tenant_id=$1 AND id>$2 AND state='awaiting' ORDER BY id LIMIT $3",&[&tenant,&previous,&limit]).await?;
+        if rows.is_empty() && previous > 0 {
+            rows=tx.sql().query("SELECT id FROM base_workflow_approval_requests WHERE tenant_id=$1 AND state='awaiting' ORDER BY id LIMIT $2",&[&tenant,&limit]).await?;
+        }
+        let ids = rows.iter().map(|r| r.get::<_, i64>(0)).collect::<Vec<_>>();
+        let next = ids.last().copied().unwrap_or(0);
+        if next == previous && !inserted {
+            return Ok(ids);
+        }
+        if next != previous {
+            tx.mutate(move |sql|Box::pin(async move {
+                sql.execute("UPDATE base_workflow_approval_maintenance SET last_request=$2 WHERE tenant_id=$1",&[&tenant,&next]).await?;
+                Ok(((),vec![Change{kind:"workflow.approval_maintenance_cursor".into(),id:tenant,old:json!({"last_request":previous}),new:json!({"last_request":next})}]))
+            })).await?;
+        }
         tx.commit().await?;
         Ok(ids)
     }
