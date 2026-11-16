@@ -11,7 +11,8 @@ pub const COLUMNS: &str =
     "id,code,name,kind,email,phone,system_key,retired_at,erased_at,version,created_at,updated_at,custom_fields";
 pub const CONTACT_FIELDS: &[&str] = &["email", "phone"];
 /// Tenant-defined custom field values by key (`base/custom_fields`): text, a
-/// decimal string, `YYYY-MM-DD` or a pick-list code.
+/// decimal string, `YYYY-MM-DD`, a pick-list code, an array of codes (several
+/// choices) or a record's id text (a record field).
 pub type Custom = serde_json::Map<String, serde_json::Value>;
 
 /// What this reader may not see of persons: every restricted field, and of
@@ -208,8 +209,9 @@ pub struct Search {
     /// Conditions on custom field values, all of which must hold.
     pub custom: Vec<CustomFilter>,
 }
-/// One condition on a custom field value: `contains` (text), `eq` (text or
-/// choice code), `gte` or `lte` (number or date).
+/// One condition on a custom field value: `contains` (text), `eq` (text,
+/// choice code or yes/no), `has` (several choices holding a code), `gte` or
+/// `lte` (number or date). A record field takes none.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CustomFilter {

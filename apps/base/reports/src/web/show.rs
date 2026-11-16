@@ -639,7 +639,7 @@ impl Show {
                         return Ok(Some((
                             super::INDEX.into(),
                             Some(format!("{} was deleted.", report.name)),
-                        )))
+                        )));
                     }
                     Err(error) => self.refused(refusal(error, DENIED_AUTHOR)?),
                 }
@@ -695,7 +695,7 @@ impl Show {
                     Some((min, max)) => ("range", json!({"min": min, "max": max})),
                     None => continue,
                 },
-                None => ("equals", key.clone()),
+                None => ("equals", key.get("stored_id").unwrap_or(key).clone()),
             };
             added.push(Drill {
                 filter: FilterDef {
@@ -1136,7 +1136,9 @@ impl Show {
                         .await
                         .map_err(page_error)?;
                     if *total as usize > cap {
-                        let message = format!("{total} rows is more than a download holds ({cap}). Prepare it as an export instead; you get a notice when it is ready.");
+                        let message = format!(
+                            "{total} rows is more than a download holds ({cap}). Prepare it as an export instead; you get a notice when it is ready."
+                        );
                         out.push(&alert("report-export-cap", StatusKind::Info, &message)?);
                     }
                 }
@@ -1164,7 +1166,10 @@ impl Show {
                     .then(|| result::matrix_columns(summary))
                     .flatten();
                 if report.kind == Kind::Matrix && matrix.is_none() && !report.definition.oversight {
-                    let message = format!("More than {} values run across, so this matrix is shown as a summary. Filter it, or group across a field with fewer values.", result::MAX_ACROSS);
+                    let message = format!(
+                        "More than {} values run across, so this matrix is shown as a summary. Filter it, or group across a field with fewer values.",
+                        result::MAX_ACROSS
+                    );
                     out.push(&alert("report-matrix-wide", StatusKind::Info, &message)?);
                 }
                 let (html, drillable) = match matrix {
@@ -1238,7 +1243,11 @@ impl Show {
     /// ask for one.
     async fn exports(&mut self, scope: &Scope, report: &Report) -> Result<Html> {
         if report.definition.oversight {
-            return alert("report-oversight-live",StatusKind::Info,"Oversight downloads are live and bounded. Prepared files and scheduled deliveries are unavailable: child data is not retained in this tenant.");
+            return alert(
+                "report-oversight-live",
+                StatusKind::Info,
+                "Oversight downloads are live and bounded. Prepared files and scheduled deliveries are unavailable: child data is not retained in this tenant.",
+            );
         }
         let display = self.pages.display(scope).await?;
         let list = self

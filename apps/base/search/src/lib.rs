@@ -474,7 +474,7 @@ impl Search {
             ),
         };
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            vec![&tenant, &user, &words, &pattern, &plain];
+            vec![&tenant, &user, &words, &pattern, &plain, &terms.candidates];
         if matches!(mode, Mode::Page { .. }) {
             params.extend([
                 &filter as &(dyn tokio_postgres::types::ToSql + Sync),

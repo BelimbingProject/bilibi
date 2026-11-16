@@ -203,6 +203,11 @@ pub fn convert(field: &Field, text: &str) -> Result<Option<Value>, String> {
             }
             Value::String(text.to_owned())
         }
+        // Several codes in one cell, separated by `;` (a pick-list code never
+        // holds one): the owner checks each against the list.
+        Kind::Custom(bilibi_custom_fields::Kind::Choices) => {
+            bilibi_custom_fields::codes_value(text.split(';'))
+        }
         Kind::Custom(_) => Value::String(text.to_owned()),
         Kind::Text | Kind::Date if !field.choices.is_empty() => field
             .choices

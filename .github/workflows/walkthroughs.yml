@@ -11,10 +11,10 @@
 # w7-workflow-reference, person-contact-panel, upload-resume-proof), the ones
 # that need something a person or another run supplies (sso-walkthrough,
 # delivery-walkthrough, import-results-walkthrough, owner-agent-standing,
-# step-up-reference), and the compositions that need a fixture container
-# mounted and a rebuild (session-ended-walkthrough, and the mounted runs of
-# events-reference and ports-reference). The script fails while an example is
-# in neither list.
+# step-up-reference). The compositions that need a fixture container mounted
+# and a rebuild (session-ended-walkthrough, and the mounted runs of
+# events-reference and ports-reference) are in WALKTHROUGHS too, in the group
+# `mounted`. The script fails while an example is in neither list.
 #
 # Known failures: the script's KNOWN_FAILURES list names the walkthroughs
 # that fail on main today, each with its issue (#614 to #624 when the list was
@@ -23,10 +23,21 @@
 # with "remove it from the known list", so the change that fixes it deletes
 # its line. A failure that is not listed fails the job.
 #
-# Its own workflow, and four groups side by side: each group builds the app
+# Its own workflow, and five groups side by side: each group builds the app
 # and its examples (every example is a whole linked app) and runs them, which
 # would more than double the wait of ci.yml's one job. `Run the walkthroughs`
 # is the one stable check for branch protection.
+#
+# The `mounted` group mounts a reference container from fixtures/containers
+# under apps/domains, rebuilds (not --locked), runs events-reference (the
+# publisher alone, both, the subscriber alone, on one database),
+# ports-reference, rules-walkthrough and session-ended-walkthrough, then unmounts. That changes
+# the checkout, so the script refuses to start unless nothing is mounted and no
+# tracked file is modified, and puts everything back after each walkthrough and
+# when it ends, however it ends. Bilibi is a public repository, so every group
+# runs on a GitHub-hosted runner: a disposable machine, which is why a pull
+# request from a fork may run it too and why nothing needs cleaning up after.
+# No group may run on a self-hosted runner.
 #
 # A pull request that cannot affect the build (docs, and the other paths
 # scripts/compatibility.py treats as harmless) passes without building.
@@ -94,7 +105,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [base, privacy, core, web]
+        group: [base, privacy, core, web, mounted]
 
     env:
       DATABASE_URL: postgres://bilibi:bilibi@localhost:5432/bilibi

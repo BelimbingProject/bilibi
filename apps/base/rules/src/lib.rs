@@ -222,7 +222,12 @@ inventory::submit! { Contribution::new(ROUTES, "base/rules.show", provenance!(),
 // The page's writes are the contracts agents call (ADR 01).
 inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageWrites {
     service: PAGES,
-    contracts: &[("approve", "base.rules.approve"), ("switch", "base.rules.switch")],
+    contracts: &[
+        ("approve", "base.rules.approve"),
+        ("switch", "base.rules.switch"),
+        ("draft_review", "base.rules.draft"),
+        ("draft_save", "base.rules.draft"),
+    ],
     pending: Pending::None,
 }) }
 bilibi_menu::contribute!(

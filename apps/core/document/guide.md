@@ -28,7 +28,7 @@ Use `core.document.customer_share` to let a customer see a document that keeps a
 
 ## Expiry and custom fields
 
-Set `expires_on` in `core.document.create` or `core.document.update` (an empty string clears it): you get a reminder task through Core Activity, due the tenant's lead time before, and the list filters `expiry` (`expired` or `soon`). Tenant-defined custom fields travel as `custom` `{key, value}` pairs on create and in `patch`; `core.document.get` returns them with labels and types.
+Set `expires_on` in `core.document.create` or `core.document.update` (an empty string clears it): you get a reminder task through Core Activity, due the tenant's lead time before, and the list filters `expiry` (`expired` or `soon`). Tenant-defined custom fields travel as `custom` pairs on create and in `patch`: `{key, value}` with text (null clears), or `{key, values}` with the codes of a several-choices field (an empty list clears). A record field's value is the record's ID, found with `base.records.search`. `core.document.get` returns them with labels, types and, for a record field, its `target` kind; it never names the record, so use `base.records.resolve`.
 
 ## Delete
 

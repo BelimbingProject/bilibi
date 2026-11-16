@@ -1443,6 +1443,10 @@ pub struct MultiSelect {
     /// Allow chips to wrap; false keeps complete chips on one line with an ellipsis.
     pub wrap_chips: bool,
     pub remove_event: String,
+    /// Inside a record page's fact, which draws its label in the heading's
+    /// place: the heading keeps its space, unseen, and still names the
+    /// trigger through `aria-labelledby`.
+    pub in_fact: bool,
     pub attrs: Attrs,
 }
 
@@ -1470,12 +1474,21 @@ impl MultiSelect {
             chips: false,
             wrap_chips: false,
             remove_event: String::new(),
+            in_fact: false,
             attrs: Attrs::default(),
         }
     }
 
     pub fn in_form(form: &str, key: &str) -> Self {
         Self::new(format!("{form}_{key}"), format!("{form}[{key}]"))
+    }
+
+    /// The editor of a record page's fact (inside `InlineChoice`): the fact
+    /// shows the label where the heading sits, so the heading is read, not
+    /// drawn, and the chips show the choices.
+    pub fn in_fact(mut self) -> Self {
+        self.in_fact = true;
+        self
     }
 
     pub fn id(mut self, id: impl Into<String>) -> Self {

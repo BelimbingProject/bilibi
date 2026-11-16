@@ -46,6 +46,7 @@ impl Format {
 /// A finished export.
 #[derive(Debug)]
 pub struct File {
+    pub(crate) reference_names: Vec<crate::ReferenceName>,
     pub filename: String,
     pub content_type: &'static str,
     pub bytes: Vec<u8>,
@@ -58,6 +59,7 @@ pub struct File {
 
 /// The result laid out as one table, whatever the format.
 pub(crate) struct Tabled {
+    reference_names: Vec<crate::ReferenceName>,
     pub name: String,
     pub description: String,
     pub headers: Vec<String>,
@@ -132,7 +134,11 @@ impl Reports {
             true,
         )
         .await?;
+        let mut reference_names = table.reference_names;
+        reference_names.sort();
+        reference_names.dedup();
         Ok(File {
+            reference_names,
             filename: format!("{}.{}", slug(&table.name), format.key()),
             content_type: format.content_type(),
             bytes,
@@ -166,6 +172,7 @@ impl Reports {
             first.report.kind,
         );
         let mut table = Tabled {
+            reference_names: first.reference_names.clone(),
             name,
             description,
             headers: Vec::new(),
@@ -198,10 +205,11 @@ impl Reports {
                     }
                     let mut offset = first_page;
                     while (offset as i64) < expected_total {
-                        let page = listing.page(&self.db, scope, offset, FILE_PAGE).await?;
+                        let page = listing.page(self, scope, offset, FILE_PAGE).await?;
                         if page.total != expected_total {
                             return Err(changed(background));
                         }
+                        table.reference_names.extend(page.reference_names);
                         push_rows(&mut table, page.rows);
                         offset += FILE_PAGE;
                     }
@@ -221,6 +229,7 @@ impl Reports {
                         {
                             return Err(ReportError::Refused("Oversight access or record counts changed during download. Refresh and download again.".into()));
                         }
+                        table.reference_names.extend(run.reference_names);
                         if let RunResult::Rows { rows, .. } = run.result {
                             push_rows(&mut table, rows);
                         }
@@ -384,7 +393,9 @@ fn too_many(total: i64, cap: usize, background: bool) -> ReportError {
             "This report has {total} rows; a prepared export holds at most {cap}. Add a filter."
         )
     } else {
-        format!("This report has {total} rows; a download holds at most {cap}. Prepare it as an export instead, or add a filter.")
+        format!(
+            "This report has {total} rows; a download holds at most {cap}. Prepare it as an export instead, or add a filter."
+        )
     })
 }
 

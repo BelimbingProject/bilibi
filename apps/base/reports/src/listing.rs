@@ -4,7 +4,6 @@
 //! pages with only the keys and the cells (`export::tabulate`), never a
 //! whole run per page.
 use crate::{grid, Outcome};
-use bilibi_database::Db;
 use bilibi_grid::{Bounds, Column, Filter, PageSpec, Sort};
 use bilibi_tenancy::Scope;
 use serde_json::Value;
@@ -22,6 +21,7 @@ pub(crate) struct Listing {
 /// One page of a list: the rows the reader may read, each its key and one
 /// cell per column, and how many rows the question matched when it was read.
 pub(crate) struct ListPage {
+    pub reference_names: Vec<crate::ReferenceName>,
     pub total: i64,
     pub columns: Vec<Column>,
     pub rows: Vec<(Value, Vec<Value>)>,
@@ -32,13 +32,13 @@ impl Listing {
     /// cells under the same bounds the keys were read under.
     pub(crate) async fn page(
         &self,
-        db: &Db,
+        reports: &crate::Reports,
         scope: &Scope,
         offset: usize,
         limit: usize,
     ) -> Outcome<ListPage> {
         let keys = bilibi_grid::page_keys(
-            db,
+            &reports.db,
             scope,
             &self.record_type,
             &PageSpec {
@@ -54,7 +54,7 @@ impl Listing {
         .map_err(grid)?;
         let specs: Vec<&str> = self.specs.iter().map(String::as_str).collect();
         let projection = bilibi_grid::project_within(
-            db,
+            &reports.db,
             scope,
             &self.record_type,
             &keys.keys,
@@ -63,7 +63,7 @@ impl Listing {
         )
         .await
         .map_err(grid)?;
-        let rows = projection
+        let mut rows: Vec<_> = projection
             .rows
             .into_iter()
             .map(|row| {
@@ -75,7 +75,16 @@ impl Listing {
                 (row.key, cells)
             })
             .collect();
+        let reference_names = reports
+            .name_references(
+                scope,
+                &projection.columns,
+                rows.iter_mut().map(|(_, cells)| cells),
+                false,
+            )
+            .await?;
         Ok(ListPage {
+            reference_names,
             total: keys.total,
             columns: projection.columns,
             rows,

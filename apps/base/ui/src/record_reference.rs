@@ -124,10 +124,10 @@ impl NamedKind<'_> {
 #[template(
     source = r#"{%- import "forms.html" as forms -%}<div id="{{ id }}" data-record-picker class="space-y-1">
 {%- if let Some(pill) = selected -%}
-<div class="flex flex-wrap items-center gap-2"><span class="text-xs text-ink-muted">{{ label }}</span>{{ pill }}{{ clear }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
+<div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
 {%- else -%}
-{{ search }}
-{%- if !hits.is_empty() -%}<ul id="{{ id }}-hits" aria-label="{{ label }}" class="space-y-1">{% for hit in hits %}<li>{{ hit }}</li>{% endfor %}</ul>
+{{ self.search_html() }}
+{%- if !hits.is_empty() -%}<ul id="{{ id }}-hits" aria-label="{{ label }}" class="space-y-1">{% for hit in self.hit_buttons() %}<li>{{ hit }}</li>{% endfor %}</ul>
 {%- else if !query.is_empty() -%}<p id="{{ id }}-none" class="text-xs text-ink-muted">No matching record you may see.</p>
 {%- endif -%}
 {%- endif -%}
@@ -139,14 +139,29 @@ pub struct RecordPicker {
     pub label: String,
     query: String,
     selected: Option<Html>,
-    search: Html,
+    search: Field,
     hidden: Html,
-    clear: Html,
-    hits: Vec<Html>,
+    clear_id: String,
+    clear_event: String,
+    clear_label: &'static str,
+    in_fact: bool,
+    pick_event: String,
+    /// Each hit's `kind:id` and text.
+    hits: Vec<(String, String)>,
+    /// Sent with a pick or a clear as `key`: the field this picker serves.
+    key: String,
     /// Shown under the chosen record; while searching, the search field shows them.
     errors: Vec<String>,
 }
 impl RecordPicker {
+    pub fn search_name(mut self, name: impl Into<String>) -> Self {
+        self.search.name = name.into();
+        self
+    }
+    fn search_html(&self) -> Html {
+        Html::render(&self.search).unwrap_or(Html::EMPTY)
+    }
+
     /// `form` and `key` name the posted fields: the typed text as
     /// `{form}[{key}_search]`, the choice as `{form}[{key}]`.
     #[allow(clippy::too_many_arguments)]
@@ -173,26 +188,14 @@ impl RecordPicker {
             .errors(errors.clone());
         let hits = hits
             .iter()
-            .enumerate()
-            .map(|(index, hit)| {
-                let body = Html::render(&HitLabel {
-                    text: format!("{} · {}", hit.label, hit.kind_label),
-                })
-                .unwrap_or(Html::EMPTY);
-                Html::render(&Button {
-                    id: &format!("{id}-hit-{index}"),
-                    button_type: "button",
-                    event: pick_event,
-                    name: "record",
-                    value: &hit.value,
-                    class: "w-full min-w-0 justify-start",
-                    body,
-                    ..Button::default()
-                })
-                .unwrap_or(Html::EMPTY)
+            .map(|hit| {
+                (
+                    hit.value.clone(),
+                    format!("{} · {}", hit.label, hit.kind_label),
+                )
             })
             .collect();
-        let (selected, hidden, clear) = match selected {
+        let (selected, hidden) = match selected {
             Some((value, pill)) => (
                 Some(Html::render(&pill).unwrap_or(Html::EMPTY)),
                 Html::render(
@@ -202,28 +205,73 @@ impl RecordPicker {
                         .value(value),
                 )
                 .unwrap_or(Html::EMPTY),
-                Html::render(&Button {
-                    id: &format!("{id}-clear"),
-                    button_type: "button",
-                    event: clear_event,
-                    body: Html::text("Change"),
-                    ..Button::default()
-                })
-                .unwrap_or(Html::EMPTY),
             ),
-            None => (None, Html::EMPTY, Html::EMPTY),
+            None => (None, Html::EMPTY),
         };
         Self {
             id: id.into(),
             label: label.into(),
             query: query.into(),
             selected,
-            search: Html::render(&search).unwrap_or(Html::EMPTY),
+            search,
             hidden,
-            clear,
+            clear_id: format!("{id}-clear"),
+            clear_event: clear_event.into(),
+            clear_label: "Change",
+            in_fact: false,
+            pick_event: pick_event.into(),
             hits,
+            key: String::new(),
             errors,
         }
+    }
+    /// The picker is a record page's fact, which already names it and saves
+    /// a pick or a clear at once: the label beside the chosen record is for
+    /// screen readers only, and the clear button says "Remove" rather than
+    /// "Change", a change it would not make by itself.
+    pub fn in_fact(mut self) -> Self {
+        self.in_fact = true;
+        self.clear_label = "Remove";
+        self
+    }
+    /// One page holding several pickers under the same events (a record's
+    /// custom fields): each pick and clear also sends `key`, so the events
+    /// stay fixed names a page can declare.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = key.into();
+        self
+    }
+    fn clear(&self) -> Html {
+        Html::render(&Button {
+            id: &self.clear_id,
+            button_type: "button",
+            event: &self.clear_event,
+            data_key: &self.key,
+            body: Html::text(self.clear_label),
+            ..Button::default()
+        })
+        .unwrap_or(Html::EMPTY)
+    }
+    fn hit_buttons(&self) -> Vec<Html> {
+        self.hits
+            .iter()
+            .enumerate()
+            .map(|(index, (value, text))| {
+                let body = Html::render(&HitLabel { text: text.clone() }).unwrap_or(Html::EMPTY);
+                Html::render(&Button {
+                    id: &format!("{}-hit-{index}", self.id),
+                    button_type: "button",
+                    event: &self.pick_event,
+                    name: "record",
+                    value,
+                    data_key: &self.key,
+                    class: "w-full min-w-0 justify-start",
+                    body,
+                    ..Button::default()
+                })
+                .unwrap_or(Html::EMPTY)
+            })
+            .collect()
     }
     /// A picker whose hits and choice the owner names itself, as `(id, name)`
     /// pairs of one `kind` (a directory search rather than Base Records): each

@@ -135,10 +135,10 @@ pub async fn search(
             .find(|d| d.key == filter.key)
             .ok_or(Error::Invalid)?;
         args.push(Box::new(filter.key.clone()));
-        let expression = crate::custom::expression(args.len(), definition.kind);
+        let key = args.len();
         args.push(Box::new(filter.value.trim().to_owned()));
-        let condition = crate::custom::condition(definition, filter, &expression, args.len())
-            .ok_or(Error::Invalid)?;
+        let condition =
+            crate::custom::condition(definition, filter, key, args.len()).ok_or(Error::Invalid)?;
         predicate.push_str(" AND ");
         predicate.push_str(&condition);
     }
@@ -161,7 +161,12 @@ pub async fn search(
     let direction = if query.descending { "DESC" } else { "ASC" };
     let sort = match custom_sort {
         Some(key) => {
-            let definition = active.iter().find(|d| d.key == key).ok_or(Error::Invalid)?;
+            // Several choices and a record have no order: refused as an
+            // unknown field is.
+            let definition = active
+                .iter()
+                .find(|d| d.key == key && crate::custom::sortable(d.kind))
+                .ok_or(Error::Invalid)?;
             args.push(Box::new(key.to_owned()));
             format!(
                 "{} {direction} NULLS LAST",

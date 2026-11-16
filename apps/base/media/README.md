@@ -60,6 +60,11 @@ refuse with `MimeDetectionUnavailable` instead of trusting the client.
   removes files. A file that cannot be removed reports `CleanupFailed`; the
   operator reconciles the disk. A legal hold (`base/privacy`) on any asset of the tree refuses it (`Held`).
 - A write whose registration fails removes the new file again, unless the failure was the commit itself: the server may have committed, so the file stays rather than leave a row naming a missing file.
+- When files and rows part anyway (a crash between them, `CleanupFailed`, a restored backup), list both sides with the host command below. It reads every mapped disk and every tenant and changes nothing; the operator removes or restores what it names.
+
+      bilibi-web media-reconcile
+
+  It prints each file no row needs (no asset names it, or its asset was purged, and no erased attachment still waits for its bytes to go), each asset with no file (not purged and not being purged), and each disk it could not read safely. Files younger than an hour (bytes are written before their row) and `staging/` (resumable uploads, swept separately) are skipped.
 - Every row is tenant-scoped through the sealed `Scope`; another tenant's id is
   `NotFound`. Audit records name the asset but never its storage key or metadata.
 
@@ -114,13 +119,13 @@ Tenant capabilities `admin.media.quarantine.view` and `admin.media.quarantine.ma
 
 | Call | Agent operation | What it does |
 | --- | --- | --- |
-| `quarantine(client, scope, QuarantineQuery)` | `base.media.quarantine.list` | This tenant's files in the given states whose name contains the search (any case), newest first: one window (offset, 1–1,000 rows) and the `total` that match |
+| `quarantine(client, scope, QuarantineQuery)` | `base.media.quarantine.list` | This tenant's files in the given states whose name contains the search (any case), newest first: one window (`before` an id, `offset`, 1–1,000 rows) and the `total` that match, counted up to 10,000 (`more` past that) |
 | `quarantined_file(client, scope, id)` | (the write previews) | One file, whatever its state |
 | `rescan(tx, scope, id)` | `base.media.quarantine.rescan` | A file that is not clean and not purged goes back to `pending` with a new job and scan generation; needs a bound scanner |
 | `purge(tx, scope, id)` | `base.media.quarantine.purge` | Purges an `infected` or `failed` file (below); the row, verdict, attachment binding and audit stay |
 
 - The reads take the caller's client (`&dyn ReadClient`). A write's preview passes the `OperationClient` its plan hands it, the plan's own transaction, so concurrent plans never wait on the pool for a second connection.
-- Search and paging run in SQL, so a file is reachable however many purged files the tenant keeps.
+- Search and paging run in SQL. A read counts and skips at most 10,000 matching files (`QUARANTINE_LIST_CAP`), so a render costs the same however many files the tenant keeps; the page then reads "of 10000+ results" and its pages stop there. Older files are reached by narrowing the search, or with `before` set to the last id read, which the agent operation pages by.
 
 Purge never deletes bytes inside the manager's transaction:
 
@@ -148,6 +153,7 @@ A live file input declared with `UploadSpec::resumable` keeps its chunks in a st
 - The first hash mismatch empties the file and the browser sends it again from the start; a second refuses.
 - An account keeps at most 20 staging files: opening another removes the account's files nobody wrote to within `media.upload.staging_hours`, then its least recently written.
 - The `base/media-staging-sweep` schedule runs hourly once an operator enables it on the Schedule board (and grants `scheduler` its `EXECUTE`, `apps/base/schedule/README.md`). It removes every staging file nobody wrote to within `media.upload.staging_hours`, in every tenant. Files on a disk the setting no longer names are left for the operator.
+- **Enable `base/media-staging-sweep` at install.** Until then nothing removes the staging files of an account that never uploads again; they stay on the staging disk, which is usually the disk that also holds attachments. It is off by default on purpose: no schedule runs until an operator reviews it (ADR 14, Schedule's review rule).
 - Staging files are transport, not records: nothing about them is audited, and they are never scanned. The bytes reach an owner only through `Uploads::consume`, and whatever the owner stores goes through the usual checks and scan.
 
 ## Reading bytes back

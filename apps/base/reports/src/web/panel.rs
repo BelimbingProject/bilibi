@@ -181,11 +181,19 @@ impl LiveState<Scope, Error> for Panel {
             if !matches!(request.input, LiveInput::Refresh) {
                 return Err(Error::Invalid);
             }
-            let html = match self.cache.fresh(&self.args) {
-                Some(html) => html.to_owned(),
-                _ => {
-                    let html = self.draw(request.scope).await?;
-                    self.cache.store(html)
+            let html = if self
+                .args
+                .revision()
+                .is_some_and(|revision| revision.contains(":ref:"))
+            {
+                self.draw(request.scope).await?
+            } else {
+                match self.cache.fresh(&self.args) {
+                    Some(html) => html.to_owned(),
+                    _ => {
+                        let html = self.draw(request.scope).await?;
+                        self.cache.store(html)
+                    }
                 }
             };
             Ok(LiveBody {

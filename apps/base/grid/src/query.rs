@@ -510,7 +510,7 @@ pub async fn stats<S: AsRef<str>>(
 /// row (#589). The term is a substring match, `LIKE` with `%`, `_` and `\`
 /// escaped, as `position` was.
 pub async fn text_search_sql(
-    client: &impl tokio_postgres::GenericClient,
+    client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
     root: &str,
     specs: &[&str],
@@ -759,6 +759,10 @@ pub fn scalar_join(catalog: &Catalog, root: &str, path: &str) -> Result<ScalarJo
 }
 
 pub(crate) fn field(alias: &str, table: &Table, id: &str) -> String {
+    // A tenant custom field reads its value from the row's JSON column.
+    if let Some(sql) = table.custom_sql(id, alias) {
+        return sql;
+    }
     format!(
         "{alias}.{}",
         ident(table.field(id).expect("resolved field").source_key())

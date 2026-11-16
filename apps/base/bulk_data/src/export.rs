@@ -188,7 +188,7 @@ impl ExportRun {
 
 /// The person's own export.
 pub(crate) async fn load(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: i64,
     lock: bool,
@@ -269,7 +269,7 @@ impl BulkData {
     /// capability and the Imports pages. Pages ask before showing Export.
     pub async fn may_export(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<bool> {
@@ -528,7 +528,7 @@ impl BulkData {
     /// The person's own export, marked as [`BulkData::mark`] says.
     pub async fn export(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         id: i64,
     ) -> Result<ExportRun> {
@@ -546,7 +546,7 @@ impl BulkData {
     /// every export given.
     async fn mark(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         runs: &mut [ExportRun],
     ) -> Result<()> {
@@ -591,7 +591,7 @@ impl BulkData {
     /// each export's table.
     async fn seeing(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         runs: &[ExportRun],
     ) -> Result<Seeing> {
@@ -1072,7 +1072,7 @@ impl BulkData {
     /// The person's newest exports, marked as their pages show them.
     pub async fn exports(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         limit: i64,
     ) -> Result<Vec<ExportRun>> {
