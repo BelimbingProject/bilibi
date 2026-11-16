@@ -102,6 +102,7 @@ Run commands from the clone's root. `./bilibi help` shows the same list. Your br
 | Command | What it does | When to use it |
 | --- | --- | --- |
 | `./bilibi start` | Installs anything missing, runs Bilibi, and opens it in your browser the first time you start this checkout | Every time you want to run Bilibi. Leave it running; it rebuilds when the code changes. |
+| `./bilibi stop` | Stops the Bilibi started from this clone, from any terminal: the launcher, cargo-watch, a build in progress and the app, then frees their ports. Says so when nothing is running. | When you want it off without finding its terminal. Closing the terminal, Ctrl-C and killing the launcher stop it the same way. |
 | `./bilibi add <name>` | Adds a Domain or Extension, such as `finance`. You can also paste the `add` command that the Software page shows. | When you want to try or develop a Domain or Extension. Run `start` again afterwards. |
 | `./bilibi update` | Gets the latest Bilibi changes, and moves the Domains and Extensions you added to their newest recommended versions, plus those from repositories you trust | Any time, including while `./bilibi start` runs in another terminal; it rebuilds and reloads by itself |
 | `./bilibi status` | Lists Bilibi and what you added, with each one's branch and uncommitted changes | When you want to see what you have changed |
