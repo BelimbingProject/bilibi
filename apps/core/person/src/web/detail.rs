@@ -774,9 +774,6 @@ impl Detail {
             }
             "close_reveal" => self.reveal = None,
             "reveal" => {
-                let Some(open) = self.reveal.take() else {
-                    return Ok(());
-                };
                 let reason = bilibi_ui::params::form_values_checked(
                     value,
                     "reveal",
@@ -786,6 +783,9 @@ impl Detail {
                 .get("reason")
                 .cloned()
                 .unwrap_or_default();
+                let Some(open) = self.reveal.take() else {
+                    return Ok(());
+                };
                 let version = self.pages.persons.read(scope, self.id).await?.version;
                 // The privacy contract checks the capability, reason and Step-up
                 // and records the reveal before it answers.

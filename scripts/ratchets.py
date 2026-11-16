@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail when an escape hatch that should only shrink grows.
 
-Counts the lines of each hatch at the merge base and at HEAD (comment lines
+Counts occurrences of each hatch at the merge base and at HEAD (comment lines
 excluded) and fails when HEAD has more. A pull request that removes some
 hatches prints the new, lower count. Each rule is a lint that cannot block yet
 because old sites remain; the count only falls until it reaches 0, and then the
@@ -75,9 +75,8 @@ def count(ref, ratchet):
             path.endswith(ratchet["suffixes"])
             and not path.startswith(ratchet["skip"])
             and not text.strip().startswith(COMMENT)
-            and ratchet["pattern"].search(text)
         ):
-            n += 1
+            n += len(ratchet["pattern"].findall(text))
     return n
 
 

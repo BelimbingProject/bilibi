@@ -69,10 +69,11 @@ def added_lines(base):
 
 def explained(section, path, hatch):
     for line in section.splitlines():
-        if path in line and re.search(rf"(?<![\w:]){re.escape(hatch)}(?![\w:])", line):
-            reason = line.replace(path, "").replace(hatch, "")
-            if len(re.findall(r"[A-Za-z]", reason)) >= 8:
-                return True
+        if re.fullmatch(
+            rf"\s*(?:-\s+)?`?{re.escape(path)}`?\s*:\s*`?{re.escape(hatch)}`?\s*:\s*\S.*",
+            line,
+        ):
+            return True
     return False
 
 

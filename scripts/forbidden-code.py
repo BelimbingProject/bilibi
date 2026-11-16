@@ -35,7 +35,7 @@ def main():
     failures = 0
     for path in filter(None, files):
         wanted = [rule for rule in RULES if path.endswith(rule[1])]
-        if not wanted or path.startswith(("target/", "scripts/")):
+        if not wanted or path.startswith("target/") or path == "scripts/forbidden-code.py":
             continue
         try:
             text = open(path, encoding="utf-8").read()
