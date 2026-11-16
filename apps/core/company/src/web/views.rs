@@ -264,7 +264,8 @@ pub(super) async fn list(
                     ("Pending", "pending"),
                     ("Archived", "archived"),
                 ]),
-            ),
+            )
+            .grid_field("companies.status"),
         ],
     ))?;
     toolbar.push(&field_filter_controls(&extension_fields, data)?);
@@ -792,7 +793,6 @@ fn parent_picker(
         errors,
     ))
 }
-#[allow(clippy::too_many_arguments)]
 fn choice(
     words: &bilibi_grid::RecordWords,
     id: &str,

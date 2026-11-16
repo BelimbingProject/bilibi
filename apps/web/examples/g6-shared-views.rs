@@ -361,7 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
             )
             .await?;
-        let (heading, form) = bilibi_web::render_fields(&app, Some(&admin), async {
+        let (heading, form, filters) = bilibi_web::render_fields(&app, Some(&admin), async {
             let columns = bilibi_ui::ListColumns::mount(
                 "renderer-proof",
                 vec![BuiltinColumn::new("display-slot", owner_word).grid_field(subject)],
@@ -377,6 +377,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|_| bilibi_database::Error::Internal)?,
                 ..bilibi_ui::Form::default()
             };
+            // A set filter: its toolbar label and its narrow-screen chip.
+            let filters = bilibi_ui::FilterToolbar::new(
+                "renderer-filters",
+                vec![bilibi_ui::ToolbarControl::select(
+                    "renderer-filter",
+                    "filter_key",
+                    owner_word,
+                    "set",
+                    vec![
+                        bilibi_ui::Choice::new("All", ""),
+                        bilibi_ui::Choice::new("Set", "set"),
+                    ],
+                )
+                .grid_field(subject)],
+            );
             Ok((
                 bilibi_ui::Html::render(&table)
                     .map_err(|_| bilibi_database::Error::Internal)?
@@ -384,9 +399,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bilibi_ui::Html::render(&form)
                     .map_err(|_| bilibi_database::Error::Internal)?
                     .to_string(),
+                bilibi_ui::Html::render(&filters)
+                    .map_err(|_| bilibi_database::Error::Internal)?
+                    .to_string(),
             ))
         })
         .await?;
+        assert!(
+            filters.contains(&format!(">{tenant_word}<"))
+                && filters.contains(&format!("{tenant_word}: Set"))
+                && !filters.contains(owner_word),
+            "the shared filter label and its chip use the saved tenant label for {subject}"
+        );
         assert!(
             heading.contains(tenant_word),
             "the shared list heading uses the saved tenant label for {subject}"
@@ -428,7 +452,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "clearing restores the owner word on the next render"
         );
     }
-    println!("PASS: a field label set by table.field shows in Grid columns for every reader of the tenant, a hidden field is refused, and clearing restores the module's word.");
+    println!("PASS: a field label set by table.field shows in Grid columns for every reader of the tenant and in shared filter labels and chips, a hidden field is refused, and clearing restores the module's word.");
     println!("PASS: company-scoped roles receive views only in their company; tenant-wide roles receive them everywhere; owners retain visibility; cross-tenant readers cannot see them.");
     println!(
         "PASS: shared-view save/delete and label set/list/clear finish with a one-connection pool."

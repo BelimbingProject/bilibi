@@ -635,21 +635,24 @@ impl Index {
                     "Category",
                     &form["category"],
                     with_all("All categories", self.categories.clone()),
-                ),
+                )
+                .grid_field("documents.category"),
                 ToolbarControl::select(
                     "documents-type",
                     "type",
                     "Type",
                     &form["type"],
                     with_all("All types", self.types.clone()),
-                ),
+                )
+                .grid_field("documents.document_type"),
                 ToolbarControl::select(
                     "documents-status",
                     "status",
                     "Status",
                     &form["status"],
                     with_all("All statuses", self.statuses.clone()),
-                ),
+                )
+                .grid_field("documents.status"),
                 ToolbarControl::select(
                     "documents-show",
                     "show",
@@ -667,7 +670,8 @@ impl Index {
                         Choice::new("Expired", "expired"),
                         Choice::new("Expiring in 30 days", "soon"),
                     ],
-                ),
+                )
+                .grid_field("documents.expires_on"),
             ],
         ))?);
         let mut table = FlexTable::new("documents", self.columns.flex_columns(), rows)
