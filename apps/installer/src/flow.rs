@@ -735,7 +735,7 @@ impl<'a> Run<'a> {
                 dst.display()
             ));
         }
-        let status = program_status(&dst).inspect_err(|_| {
+        let status = composition::status(&dst).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
         })?;
         let mode = jobs::installation_mode(&*self.client)
@@ -834,7 +834,7 @@ impl<'a> Run<'a> {
         }))
     }
     async fn admit_release(&self, release: u64) -> Result<(), String> {
-        let status = program_status(&self.layout.release(release))?;
+        let status = composition::status(&self.layout.release(release))?;
         let mode = jobs::installation_mode(&*self.client)
             .await
             .map_err(|error| jobs::short(&error))?;
@@ -917,6 +917,7 @@ impl<'a> Run<'a> {
                 file,
                 back.base["backup_at"].as_str().unwrap_or(""),
                 &self.history_file("switch_back"),
+                Some(&self.layout.release(back.to)),
             )
             .await
             {
@@ -1065,6 +1066,10 @@ impl<'a> Run<'a> {
                 return self.nothing_changed("backup", "the backup taken before the change is missing, so the database cannot be put back").await;
             }
         }
+        jobs::lock_installation(&*self.client).await?;
+        if let Err(reason) = self.admit_release(undone.previous).await {
+            return self.nothing_changed("backup", &reason).await;
+        }
         if !self.is_done("backup") {
             let detail = json!({"message": format!(
                 "{} pauses from here: the service stops and the database as it is now is backed up first.",
@@ -1105,6 +1110,7 @@ impl<'a> Run<'a> {
                 &file,
                 &undone.since,
                 &self.history_file("restore"),
+                Some(&self.layout.release(undone.previous)),
             )
             .await
             {
@@ -1255,27 +1261,10 @@ impl<'a> Run<'a> {
     }
 }
 
-/// `bilibi-web status` on a release folder: it proves the program runs on
-/// this machine, and its text names what the release holds.
-fn program_status(dir: &std::path::Path) -> Result<String, String> {
-    let out = Command::new("timeout")
-        .arg("30")
-        .arg(dir.join("bilibi-web"))
-        .arg("status")
-        .output()
-        .map_err(|error| format!("could not run the copied program: {error}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "the copied program does not run on this server: {}",
-            backup::tail(&out.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
 /// What a release folder's program says it is made of; null when it does not
 /// run.
 fn composition_of(dir: &std::path::Path) -> Value {
-    program_status(dir).map_or(Value::Null, |status| composition::parse(&status))
+    composition::status(dir).map_or(Value::Null, |status| composition::parse(&status))
 }
 /// What changes in the add-ons switched on, in words, or nothing when the
 /// release does not say or the list stays the same.

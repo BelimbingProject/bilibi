@@ -247,7 +247,7 @@ impl Installer {
                 eprintln!("bilibi-installer: job {id}: {why}");
                 return Ok(true);
             }
-            if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history).await {
+            if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history, None).await {
                 eprintln!("bilibi-installer: job {id}: the cut-off restore failed: {why}");
                 backup::set_aside(&history);
             }

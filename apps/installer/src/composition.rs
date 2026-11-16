@@ -222,3 +222,21 @@ fn older(a: &Value, b: &Value) -> bool {
     };
     matches!((numbers(a), numbers(b)), (Some(a), Some(b)) if a < b)
 }
+
+/// `bilibi-web status` on a release folder: it proves the program runs on
+/// this machine, and its text names what the release holds.
+pub fn status(dir: &std::path::Path) -> Result<String, String> {
+    let out = std::process::Command::new("timeout")
+        .arg("30")
+        .arg(dir.join("bilibi-web"))
+        .arg("status")
+        .output()
+        .map_err(|error| format!("could not run the copied program: {error}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "the copied program does not run on this server: {}",
+            crate::backup::tail(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}

@@ -13,23 +13,6 @@ async fn main() -> Result<()> {
     let db = pool(&url)?;
     bilibi_web::verify_composition(&db).await?;
     match std::env::args().nth(1).as_deref() {
-        Some("installation-check") => {
-            let app = bilibi_web::App::new(db, "http://localhost")?;
-            match app
-                .services
-                .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
-                .validate_composition()
-                .await
-            {
-                Ok(()) => {}
-                Err(Error::Invalid) => {
-                    eprintln!("Installation refused: this Shared service release contains a customer code Extension.");
-                    return Err(Error::Invalid);
-                }
-                Err(error) => return Err(error),
-            }
-            println!("Installation policy admits this release.");
-        }
         Some("migrate") => {
             let migrated = bilibi_web::migrate(&db).await?;
             println!("Migrations applied: {}", migrated.applied.len());
