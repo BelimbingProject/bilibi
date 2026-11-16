@@ -175,6 +175,7 @@ impl Pages {
             .filter(|field| crate::list_fields::custom_sortable(field.kind))
             .map(|field| crate::list_fields::custom_id(&field.key))
             .collect();
+        drop(client);
         let mut columns = views::columns(self.views.clone(), &masked, &custom)?;
         columns.from_params(scope, request.query).await?;
         Ok(CompanyPage {
@@ -876,26 +877,40 @@ impl CompanyPage {
                     query.page = self.params.page as i64;
                     page = crate::list(&mut client, scope, &query).await?;
                 }
-                // Rebuild built-ins under the fresh restrictions too: a retained
-                // built-in must never outlive its reader's field access.
-                if masked != self.masked {
-                    let query = self.columns.params();
-                    let custom = crate::field_contributions::custom_fields()?
-                        .active(
-                            &**client,
-                            scope,
-                            crate::field_contributions::CUSTOM_RECORD_TYPE,
-                        )
-                        .await?;
-                    self.columns = views::columns(self.views.clone(), &masked, &custom)?;
-                    self.columns.from_params(scope, &query).await?;
-                    self.masked = masked.clone();
-                }
+                let custom = if masked != self.masked {
+                    Some(
+                        crate::field_contributions::custom_fields()?
+                            .active(
+                                &**client,
+                                scope,
+                                crate::field_contributions::CUSTOM_RECORD_TYPE,
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 let locale = self.locales.resolve(&**client, scope, None).await?;
                 let display = self
                     .datetime
                     .display(&**client, scope, None, locale.locale)
                     .await?;
+                let company_ids = page
+                    .rows
+                    .iter()
+                    .map(|company| company.id)
+                    .collect::<Vec<_>>();
+                let extension_values =
+                    crate::field_contributions::read(&**client, scope, &company_ids).await?;
+                let custom_values =
+                    crate::field_contributions::custom_read(&**client, scope, &company_ids).await?;
+                drop(client);
+                if let Some(custom) = custom {
+                    let query = self.columns.params();
+                    self.columns = views::columns(self.views.clone(), &masked, &custom)?;
+                    self.columns.from_params(scope, &query).await?;
+                    self.masked = masked.clone();
+                }
                 self.columns
                     .load(
                         scope,
@@ -914,18 +929,9 @@ impl CompanyPage {
                 self.columns = loaded_columns
                     .with_record_slots(&views::record_slots(&masked)?)
                     .map_err(|_| Error::Internal)?;
-                let company_ids = page
-                    .rows
-                    .iter()
-                    .map(|company| company.id)
-                    .collect::<Vec<_>>();
-                let extension_values =
-                    crate::field_contributions::read(&**client, scope, &company_ids).await?;
-                let custom_values =
-                    crate::field_contributions::custom_read(&**client, scope, &company_ids).await?;
                 let add_to = self.records.add_to(scope, "company").await?;
                 views::list(
-                    &**client,
+                    &self.db,
                     scope,
                     &page,
                     &query,
@@ -963,12 +969,13 @@ impl CompanyPage {
                 self.active_panels = self.allowed_panels(&**client, scope, id).await?;
                 let anchors: Vec<String> =
                     self.active_panels.iter().map(|p| p.id.clone()).collect();
+                drop(client);
                 let facts = self
                     .facts
                     .record_facts(&self.db, scope, "core/company", &id.to_string())
                     .await;
                 views::detail(
-                    &client,
+                    &self.db,
                     scope,
                     id,
                     &self.picklists,

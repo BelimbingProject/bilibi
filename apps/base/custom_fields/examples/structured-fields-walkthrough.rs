@@ -309,6 +309,67 @@ async fn main() -> Result<(), Failure> {
         );
     }
 
+    println!("-- company reference pages with one connection");
+    let defined = admin.plan("base.custom_fields.define", json!({
+        "record_type": "company", "key": "partner", "label": "Partner", "kind": "reference", "target": "company"
+    })).await?;
+    proof.check(
+        "the company reference field is defined",
+        result(&defined)["key"] == "partner",
+    );
+    let company = manager
+        .read("core.company.get", json!({"company_id": 1}))
+        .await?;
+    let held = manager.plan("core.company.update", json!({"company_id": 1, "version": company["version"], "fields": {"custom": [{"key": "partner", "value": "1"}]}})).await?;
+    proof.check(
+        "the company holds its reference",
+        result(&held)["company_id"] == 1,
+    );
+    let pages = app
+        .services
+        .get::<bilibi_ui::page::PageService<Scope, bilibi_database::Error>>("core/company.pages")?;
+    let capacity = db.status().max_size;
+    db.resize(1);
+    for (operation, path, query) in [
+        (
+            "list",
+            std::collections::HashMap::new(),
+            std::collections::HashMap::from([("cols".into(), "name,cf_partner".into())]),
+        ),
+        (
+            "detail",
+            std::collections::HashMap::from([("id".into(), "1".into())]),
+            std::collections::HashMap::new(),
+        ),
+    ] {
+        let shown = pages
+            .0
+            .render(bilibi_ui::page::PageRequest {
+                operation,
+                scope: Some(&manager.scope),
+                path: &path,
+                query: &query,
+                body: &[],
+                framed: false,
+            })
+            .await;
+        proof.check(
+            &format!("company {operation} renders a reference with one connection"),
+            shown.as_ref().is_ok_and(|page| {
+                page.html.contains("data-related-record")
+                    && page.html.contains(if operation == "list" {
+                        "company-1-cf-partner"
+                    } else {
+                        "company-cf-partner"
+                    })
+            }),
+        );
+    }
+    db.resize(capacity);
+
+    println!("-- fixture definitions retained after a pick-list module is removed");
+    db.get().await?.execute("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,kind,picklist,position) VALUES (1,'person','orphan_choice','Retained choice','choice','walkthrough.unmounted_choices',80),(1,'person','orphan_choices','Retained choices','choices','walkthrough.unmounted_choices',81)", &[]).await?;
+
     println!("-- the record field follows the target's access");
     let hidden = staff
         .plan(
@@ -362,6 +423,12 @@ async fn main() -> Result<(), Failure> {
             .collect()
     };
     let offered = specs(&fields);
+    proof.check(
+        "Grid omits choice fields whose pick-list is no longer offered",
+        !offered
+            .iter()
+            .any(|spec| spec == "cf_orphan_choice" || spec == "cf_orphan_choices"),
+    );
     proof.check(
         "a report on contacts offers each active custom field as a column",
         ["cf_memo", "cf_tags", "cf_partner", "cf_old_note"]

@@ -78,64 +78,46 @@ pub(crate) struct Columns {
 impl CustomColumns for Columns {
     fn tables<'a>(&'a self, client: &'a dyn ReadClient, scope: &'a Scope) -> CustomFuture<'a> {
         Box::pin(async move {
-            if self.sources.is_empty() {
-                return Ok(Vec::new());
-            }
-            let record_types: Vec<&str> = self.sources.iter().map(|s| s.record_type).collect();
-            let rows = client
-                .query(
-                    "SELECT record_type,key,label,kind,target FROM base_custom_fields WHERE tenant_id=$1 AND record_type=ANY($2) AND archived_on IS NULL ORDER BY record_type,position,id",
-                    &[&scope.tenant(), &record_types],
-                )
-                .await?;
-            let mut tables: BTreeMap<&str, Vec<CustomColumn>> = BTreeMap::new();
-            for row in &rows {
-                let record_type: &str = row.get("record_type");
-                let key: String = row.get("key");
-                let Some(kind) = Kind::parse(row.get("kind")) else {
-                    continue;
-                };
-                // Keys are validated when defined; one that is not shaped never
-                // reaches SQL.
-                if !bilibi_grid::key_shaped(&key) {
-                    continue;
-                }
-                let target: Option<&str> = row.get("target");
-                let reference = match (kind, target) {
-                    (Kind::Reference, Some(target)) => match self.fields.records.kind(target) {
-                        Some(kind) => Some(kind.key),
-                        None => continue,
-                    },
-                    _ => None,
-                };
-                let (ty, value) = value(kind, &key);
-                let Some(source) = self.sources.iter().find(|s| s.record_type == record_type)
-                else {
-                    continue;
-                };
-                tables.entry(source.table).or_default().push(CustomColumn {
-                    key,
-                    label: row.get("label"),
-                    ty,
-                    value,
-                    reference,
-                    searchable: matches!(
-                        kind,
-                        Kind::Text | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email
-                    ),
+            let mut tables = Vec::with_capacity(self.sources.len());
+            for source in &self.sources {
+                let definitions = self
+                    .fields
+                    .active(client, scope, source.record_type)
+                    .await?;
+                let columns = definitions
+                    .into_iter()
+                    .filter(|definition| bilibi_grid::key_shaped(&definition.key))
+                    .map(|definition| {
+                        let reference = definition
+                            .target
+                            .as_deref()
+                            .and_then(|target| self.fields.records.kind(target))
+                            .map(|kind| kind.key);
+                        let (ty, value) = value(definition.kind, &definition.key);
+                        CustomColumn {
+                            key: definition.key,
+                            label: definition.label,
+                            ty,
+                            value,
+                            reference,
+                            searchable: matches!(
+                                definition.kind,
+                                Kind::Text
+                                    | Kind::LongText
+                                    | Kind::Link
+                                    | Kind::Phone
+                                    | Kind::Email
+                            ),
+                        }
+                    })
+                    .collect();
+                tables.push(CustomTable {
+                    table: source.table,
+                    column: source.column,
+                    columns,
                 });
             }
-            Ok(self
-                .sources
-                .iter()
-                .filter_map(|source| {
-                    tables.remove(source.table).map(|columns| CustomTable {
-                        table: source.table,
-                        column: source.column,
-                        columns,
-                    })
-                })
-                .collect())
+            Ok(tables)
         })
     }
 }

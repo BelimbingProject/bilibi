@@ -92,7 +92,7 @@ The owner opt-in and mapping contract lives in [Bulk Data](../bulk_data/README.m
 
 ## Reports, lists and search
 
-A fresh Grid catalog asks this module (the `bilibi_grid::CustomColumns` hook it binds at boot) for the tenant's active fields of each `GridSource` table, and they join that table as `cf_<key>` fields: report columns, filters, groupings, sorts and measures, and columns a list adds from its picker (except record fields), under the table's own capability, reach and tenant predicate, with no grant of their own.
+A fresh Grid catalog asks this module (the `bilibi_grid::CustomColumns` hook it binds at boot) for the tenant's active fields of each `GridSource` table using `CustomFields::active` on the catalog's connection, and they join that table as `cf_<key>` fields: report columns, filters, groupings, sorts and measures, and columns a list adds from its picker (except record fields), under the table's own capability, reach and tenant predicate, with no grant of their own.
 
 | Kind | In Grid |
 | --- | --- |

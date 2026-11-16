@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
-use tokio_postgres::{Client, GenericClient};
+use tokio_postgres::GenericClient;
 
 pub(crate) fn render(value: &impl Template) -> Result<Html> {
     Html::render(value).map_err(|_| Error::Internal)
@@ -167,7 +167,7 @@ struct CompanyName<'a> {
 }
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn list(
-    client: &(impl GenericClient + Sync),
+    db: &bilibi_database::Db,
     scope: &Scope,
     data: &crate::Page,
     params: &Params,
@@ -176,6 +176,23 @@ pub(super) async fn list(
     extension_fields: ExtensionListFields<'_>,
     add_to: &[bilibi_records::AddTo],
 ) -> Result<String> {
+    let custom_columns: Vec<&crate::list_fields::AvailableField> = extension_fields
+        .available
+        .iter()
+        .filter(|field| field.custom.is_some())
+        .filter(|field| columns.columns.iter().any(|column| column.id == field.id))
+        .collect();
+    let named = custom_references(
+        scope,
+        &custom_columns
+            .iter()
+            .filter_map(|field| field.custom.as_ref())
+            .collect::<Vec<_>>(),
+        &extension_fields.custom_values.values().collect::<Vec<_>>(),
+    )
+    .await?;
+    let connection = db.get().await?;
+    let client = &**connection;
     let mut actions = Html::EMPTY;
     if allowed(client, scope, crate::CREATE).await? {
         actions.push(&render(&CreateButton {
@@ -379,21 +396,6 @@ pub(super) async fn list(
             }
         }
     }
-    let custom_columns: Vec<&crate::list_fields::AvailableField> = extension_fields
-        .available
-        .iter()
-        .filter(|field| field.custom.is_some())
-        .filter(|field| columns.columns.iter().any(|column| column.id == field.id))
-        .collect();
-    let named = custom_references(
-        scope,
-        &custom_columns
-            .iter()
-            .filter_map(|field| field.custom.as_ref())
-            .collect::<Vec<_>>(),
-        &extension_fields.custom_values.values().collect::<Vec<_>>(),
-    )
-    .await?;
     let custom_fields = crate::field_contributions::custom_fields()?;
     for row in &mut rows {
         let id: i64 = row.key.parse().map_err(|_| Error::Internal)?;
@@ -885,7 +887,7 @@ pub(super) struct DetailState<'a> {
     pub custom: &'a CustomPickers,
 }
 pub(super) async fn detail(
-    client: &Client,
+    db: &bilibi_database::Db,
     scope: &Scope,
     id: i64,
     picklists: &bilibi_picklists::PickLists,
@@ -905,7 +907,26 @@ pub(super) async fn detail(
         parent,
         custom,
     } = state;
-    let (company, masked) = crate::detail(client, scope, id).await?;
+    let (company, masked, custom_defs, held) = {
+        let connection = db.get().await?;
+        let client = &**connection;
+        let (company, masked) = crate::detail(client, scope, id).await?;
+        let custom_defs = crate::field_contributions::custom_fields()?
+            .active(
+                client,
+                scope,
+                crate::field_contributions::CUSTOM_RECORD_TYPE,
+            )
+            .await?;
+        let held = crate::field_contributions::custom_read(client, scope, &[id])
+            .await?
+            .remove(&id)
+            .unwrap_or_default();
+        (company, masked, custom_defs, held)
+    };
+    let named = custom_references(scope, &custom_defs.iter().collect::<Vec<_>>(), &[&held]).await?;
+    let connection = db.get().await?;
+    let client = &**connection;
     let editable = allowed(client, scope, crate::UPDATE).await? && !company.archived();
     let can_target = allowed(client, scope, crate::TENANT_WIDE).await?
         || crate::organisation::reaches_without_tenant_wide(scope, id);
@@ -1175,22 +1196,7 @@ pub(super) async fn detail(
         });
     }
     let custom_fields = crate::field_contributions::custom_fields().map_err(|_| Error::Internal)?;
-    let custom_defs = custom_fields
-        .active(
-            client,
-            scope,
-            crate::field_contributions::CUSTOM_RECORD_TYPE,
-        )
-        .await?;
     if !custom_defs.is_empty() {
-        let held = crate::field_contributions::custom_read(client, scope, &[id])
-            .await?
-            .remove(&id)
-            .unwrap_or_default();
-        // Every record field on the page is named in one call, with the
-        // reader's own access.
-        let named =
-            custom_references(scope, &custom_defs.iter().collect::<Vec<_>>(), &[&held]).await?;
         for definition in &custom_defs {
             let name = crate::field_contributions::custom_name(&definition.key);
             let stored = held.get(&definition.key);
