@@ -31,10 +31,14 @@ pub(crate) const HANDLER: &str = "base/media.purge";
 pub(crate) const MAX_ATTEMPTS: i32 = 12;
 /// Most rows one read returns, newest first.
 pub const MAX_LISTED: i64 = 1_000;
+/// The most matching files one read counts or skips. A larger result says so
+/// ([`QuarantinePage::more`]); older files are reached by narrowing the
+/// search or reading on from an id ([`QuarantineQuery::before`]), so no
+/// render of the page counts every file a tenant holds (issue 599).
+pub const LIST_CAP: i64 = 10_000;
 const LISTED: &str = "a.id,a.original_filename,a.mime_type,a.file_size,a.scan_state,a.scanner,a.scanner_version,a.scan_signature,a.scan_reason,floor(extract(epoch FROM a.scanned_at))::bigint AS scanned_at,floor(extract(epoch FROM a.purge_requested_at))::bigint AS purge_requested_at,floor(extract(epoch FROM a.bytes_purged_at))::bigint AS purged_at,floor(extract(epoch FROM a.created_at))::bigint AS created_at,coalesce(t.uploaded_by_id,a.created_by_id) AS uploaded_by_id,coalesce(t.uploaded_by_principal,a.created_by_principal) AS uploaded_by_principal,t.subject_type,t.subject_id";
 const FROM: &str = "FROM base_media_assets a LEFT JOIN base_media_attachments t ON t.media_asset_id=a.id AND t.tenant_id=a.tenant_id WHERE a.tenant_id=$1 AND a.disk<>'external'";
-const MATCHING: &str =
-    " AND a.scan_state=ANY($2) AND ($3::text IS NULL OR a.original_filename ILIKE $3)";
+const MATCHING: &str = " AND a.scan_state=ANY($2) AND ($3::text IS NULL OR a.original_filename ILIKE $3) AND ($4::bigint IS NULL OR a.id<$4)";
 
 /// One stored file that is not clean, as a quarantine manager sees it: never
 /// its disk, key or bytes.
@@ -86,15 +90,23 @@ impl QuarantinedFile {
 pub struct QuarantineQuery<'a> {
     pub states: &'a [ScanState],
     pub search: &'a str,
+    /// Only files with a smaller id, such as the last id of the previous
+    /// window: reads on past [`LIST_CAP`] without skipping rows.
+    pub before: Option<i64>,
+    /// Matching files to skip; a window that starts at [`LIST_CAP`] or later
+    /// is empty.
     pub offset: i64,
     /// 1–1,000.
     pub limit: i64,
 }
-/// The files in a query's window, and how many match it in all.
+/// The files in a query's window, and how many match it.
 #[derive(Clone, Debug)]
 pub struct QuarantinePage {
     pub files: Vec<QuarantinedFile>,
+    /// Matching files, counted up to [`LIST_CAP`].
     pub total: i64,
+    /// More than [`LIST_CAP`] files match.
+    pub more: bool,
 }
 
 fn listed(row: &tokio_postgres::Row) -> QuarantinedFile {
@@ -139,8 +151,8 @@ fn containing(text: &str) -> Option<String> {
 
 impl Media {
     /// This tenant's stored files in the query's states whose name contains
-    /// its search, newest first, within its window, and how many match in
-    /// all. Needs `admin.media.quarantine.view`. Reads on the caller's
+    /// its search, newest first, within its window, and how many match, up
+    /// to [`LIST_CAP`]. Needs `admin.media.quarantine.view`. Reads on the caller's
     /// client: an agent operation passes the one its door hands it.
     pub async fn quarantine(
         &self,
@@ -154,28 +166,41 @@ impl Media {
         }
         let states: Vec<&str> = query.states.iter().map(|state| state.as_str()).collect();
         let search = containing(query.search);
-        let total = client
+        // Counted up to the cap and one more, never every file of the tenant.
+        let counted: i64 = client
             .query_opt(
-                &format!("SELECT count(*) {FROM}{MATCHING}"),
-                &[&scope.tenant(), &states, &search],
+                &format!(
+                    "SELECT count(*) FROM (SELECT 1 {FROM}{MATCHING} LIMIT {}) AS capped",
+                    LIST_CAP + 1
+                ),
+                &[&scope.tenant(), &states, &search, &query.before],
             )
             .await?
             .map_or(0, |row| row.get(0));
-        let rows = client
-            .query(
-                &format!("SELECT {LISTED} {FROM}{MATCHING} ORDER BY a.id DESC LIMIT $4 OFFSET $5"),
-                &[
-                    &scope.tenant(),
-                    &states,
-                    &search,
-                    &query.limit,
-                    &query.offset,
-                ],
-            )
-            .await?;
+        // A window past the cap holds nothing, so the skip is bounded too.
+        let rows = if query.offset >= LIST_CAP {
+            Vec::new()
+        } else {
+            client
+                .query(
+                    &format!(
+                        "SELECT {LISTED} {FROM}{MATCHING} ORDER BY a.id DESC LIMIT $5 OFFSET $6"
+                    ),
+                    &[
+                        &scope.tenant(),
+                        &states,
+                        &search,
+                        &query.before,
+                        &query.limit,
+                        &query.offset,
+                    ],
+                )
+                .await?
+        };
         Ok(QuarantinePage {
             files: rows.iter().map(listed).collect(),
-            total,
+            total: counted.min(LIST_CAP),
+            more: counted > LIST_CAP,
         })
     }
     /// One stored file of this tenant, whatever its state, for a review

@@ -31,8 +31,8 @@ pub use attachments::{
 };
 pub use owner::{Subject, SubjectAction, SubjectOwner, Subjects, SUBJECTS};
 pub use quarantine::{
-    QuarantinePage, QuarantineQuery, QuarantinedFile, MANAGE as QUARANTINE_MANAGE,
-    VIEW as QUARANTINE_VIEW,
+    QuarantinePage, QuarantineQuery, QuarantinedFile, LIST_CAP as QUARANTINE_LIST_CAP,
+    MANAGE as QUARANTINE_MANAGE, VIEW as QUARANTINE_VIEW,
 };
 pub use response::{Delivery, FileStream, StreamFile};
 pub use scan::{ScanFacts, ScanFuture, ScanState, Scanner, Verdict, PRINCIPAL, SCAN};
