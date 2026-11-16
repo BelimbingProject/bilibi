@@ -15,7 +15,7 @@ and `bilibi_extensions::MODULES` lists before any command, so a mounted crate
 whose descriptor is missing, extra or wrongly layered refuses to boot. Examples
 that link their own reference Extension descriptors skip that check.
 
-`Composition` tells a program what it is made of: the Platform version, its commit and release tag, and each mounted Domain or Extension with its commit and version. The executable host builds it and supplies it as `bootstrap.composition`; consumers use that value.
+`Composition` tells a program what it is made of: the Platform version, its commit and release tag, and each mounted Domain or Extension with its commit and version. Every Extension also carries the `reviewed` or `customer` code declaration from its root `bilibi.container.toml`; `customer_extensions()` is the one admission-policy input. The executable host builds it and supplies it as `bootstrap.composition`; consumers use that value.
 
 The registry owns only the stable types, so a Git commit does not rebuild every registry consumer. Pin compilation and drift checks belong to `apps/web/build.rs` and `apps/web/src/composition.rs`. The scheme is `docs/versions.md`.
 

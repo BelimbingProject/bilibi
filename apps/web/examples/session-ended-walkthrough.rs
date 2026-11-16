@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
         &modules,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
     )?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;

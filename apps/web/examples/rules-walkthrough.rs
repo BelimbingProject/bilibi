@@ -32,8 +32,11 @@ use bilibi_authz::grants::Grants;
 use bilibi_base::events::{Events, DELIVER, PRINCIPAL as DELIVERY_PRINCIPAL};
 use bilibi_base::queue::{Config, Executor};
 use bilibi_base::rules::{Rules, SERVICE};
+use bilibi_base::system::InstallationMode;
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
-use bilibi_module_registry::{verify_composition, Services};
+use bilibi_module_registry::{
+    verify_composition, Composition, Container, ExtensionCode, Layer, PinState, Services,
+};
 use bilibi_tenancy::{Authentication, ProofFuture, Scope};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -331,6 +334,7 @@ async fn main() -> Result<()> {
         &modules,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
     )?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
@@ -409,10 +413,51 @@ async fn main() -> Result<()> {
         "mounted subscribers: {:?}",
         events.subscribers().collect::<Vec<_>>()
     );
-    let vocabulary = {
-        let client = db.get().await?;
-        proof.rules.vocabulary(&**client, &proof.one).await?
+    let customer_release = Composition {
+        version: "walkthrough",
+        commit: None,
+        tag: None,
+        pin: PinState::Unpinned,
+        containers: vec![Container {
+            layer: Layer::Extensions,
+            id: "customer_example",
+            modules: vec!["customer_example/change"],
+            commit: None,
+            version: None,
+            extension_code: Some(ExtensionCode::Customer),
+        }],
     };
+    check(
+        !InstallationMode::Shared.admits(&customer_release),
+        "startup refuses a customer code Extension on a Shared service",
+    );
+    check(
+        !InstallationMode::Shared.admits(&customer_release),
+        "switching to Shared service refuses while customer code is composed",
+    );
+    check(
+        InstallationMode::Isolated.admits(&customer_release),
+        "an Isolated installation admits the same customer code Extension",
+    );
+    let (shared_vocabulary, isolated_vocabulary) = {
+        let client = db.get().await?;
+        client.execute(
+            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('installation.mode',0,'global',0,'\"shared\"'::jsonb,false) ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=excluded.value",
+            &[],
+        ).await?;
+        let shared = proof.rules.vocabulary(&**client, &proof.one).await?;
+        client.execute(
+            "UPDATE base_settings SET value='\"isolated\"'::jsonb WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[],
+        ).await?;
+        let isolated = proof.rules.vocabulary(&**client, &proof.one).await?;
+        (shared, isolated)
+    };
+    check(
+        shared_vocabulary == isolated_vocabulary,
+        "the data rules engine has the same vocabulary in both installation modes",
+    );
+    let vocabulary = isolated_vocabulary;
     println!(
         "vocabulary: triggers {} actions {}",
         vocabulary["triggers"],

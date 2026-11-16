@@ -1,6 +1,6 @@
 //! The executable owns the changing Git/pin facts; registry types stay stable.
 //! Bilibi-specific version contract (docs/versions.md).
-use bilibi_module_registry::{Composition, Container, Layer, PinState};
+use bilibi_module_registry::{Composition, Container, ExtensionCode, Layer, PinState};
 
 /// One mounted Domain or Extension as the pin recorded it.
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +52,13 @@ pub(super) fn composition() -> Composition {
                         modules: Vec::new(),
                         commit: None,
                         version: None,
+                        extension_code: (layer == Layer::Extensions).then(|| {
+                            bilibi_extensions::CODE
+                                .iter()
+                                .find(|(declared, _)| *declared == id)
+                                .and_then(|(_, code)| ExtensionCode::parse(code))
+                                .expect("verified Extension code declaration")
+                        }),
                     });
                     containers.len() - 1
                 });

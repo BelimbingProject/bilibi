@@ -341,6 +341,20 @@ pub async fn database_size(client: &impl GenericClient) -> Result<i64, tokio_pos
         .await?;
     Ok(row.get(0))
 }
+/// The installation-owned code admission policy. No stored row means the safe default.
+pub async fn installation_mode(
+    client: &impl GenericClient,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_opt(
+            "SELECT value #>> '{}' FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[],
+        )
+        .await?;
+    Ok(row
+        .and_then(|row| row.get::<_, Option<String>>(0))
+        .unwrap_or_else(|| "shared".into()))
+}
 /// What was entered after an instant, from the audit trail: the number of
 /// recorded changes and how they split by kind of record. Software jobs are
 /// left out, because they are what asked for this.

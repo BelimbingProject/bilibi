@@ -47,10 +47,13 @@ fn platform(line: &str) -> Option<Value> {
     Some(json!({"version": version, "release": release, "commit": commit}))
 }
 
-/// `  finance 0.1.0, commit abc, modules: a, b`, `  finance untagged,
+/// `  connector 0.1.0, commit abc, code: reviewed, modules: a, b`, `  finance untagged,
 /// commit abc, modules: a` or `  finance unpinned, modules: a`.
 fn container(line: &str) -> Option<Value> {
     let (id, rest) = line.split_once(", modules:")?.0.trim().split_once(' ')?;
+    let (rest, code) = rest
+        .rsplit_once(", code: ")
+        .map_or((rest, None), |(rest, code)| (rest, Some(code)));
     let (version, commit) = match rest {
         "unpinned" => (None, None),
         _ => match rest.split_once(", commit ") {
@@ -58,7 +61,7 @@ fn container(line: &str) -> Option<Value> {
             None => (None, None),
         },
     };
-    Some(json!({"id": id, "version": version, "commit": commit}))
+    Some(json!({"id": id, "version": version, "commit": commit, "code": code}))
 }
 
 /// What differs from one release to another: a Platform change as

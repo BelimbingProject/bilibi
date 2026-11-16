@@ -12,6 +12,23 @@ async fn main() -> Result<()> {
     let url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
     let db = pool(&url)?;
     match std::env::args().nth(1).as_deref() {
+        Some("installation-check") => {
+            let app = bilibi_web::App::new(db, "http://localhost")?;
+            match app
+                .services
+                .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
+                .validate_composition()
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::Invalid) => {
+                    eprintln!("Installation refused: this Shared service release contains a customer code Extension.");
+                    return Err(Error::Invalid);
+                }
+                Err(error) => return Err(error),
+            }
+            println!("Installation policy admits this release.");
+        }
         Some("migrate") => {
             let migrated = bilibi_web::migrate(&db).await?;
             println!("Migrations applied: {}", migrated.applied.len());
@@ -142,6 +159,19 @@ async fn main() -> Result<()> {
                 std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
             let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
             let mut app = bilibi_web::App::new(db, &origin)?;
+            match app
+                .services
+                .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
+                .validate_composition()
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::Invalid) => {
+                    eprintln!("Startup refused: this Shared service release contains a customer code Extension. Install a code-free release, or have the installation owner switch an isolated installation before composing customer code.");
+                    return Err(Error::Invalid);
+                }
+                Err(error) => return Err(error),
+            }
             match app.secure_origin().await {
                 Ok(true) => {}
                 Ok(false) => {

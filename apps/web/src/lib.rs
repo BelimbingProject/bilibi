@@ -191,6 +191,7 @@ pub fn verify_composition() -> Result<()> {
         &modules()?,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
     )?)
 }
 
@@ -247,8 +248,12 @@ pub fn status() -> String {
                 (None, Some(commit)) => format!("untagged, commit {commit}"),
                 (_, None) => "unpinned".to_owned(),
             };
+            let code = container
+                .extension_code
+                .map(|code| format!(", code: {}", code.as_str()))
+                .unwrap_or_default();
             text.push_str(&format!(
-                "  {} {at}, modules: {}\n",
+                "  {} {at}{code}, modules: {}\n",
                 container.id,
                 container.modules.join(", ")
             ));

@@ -11,6 +11,7 @@ use tokio_postgres::GenericClient;
 pub const INSTANCE_ROLE_KEY: &str = "instance.role";
 pub const INSTANCE_LABEL_KEY: &str = "instance.label";
 pub const INSTANCE_COLOUR_KEY: &str = "instance.colour";
+pub const INSTALLATION_MODE_KEY: &str = "installation.mode";
 /// Changing how the instance announces itself.
 pub const INSTANCE_MANAGE: &str = "admin.system.instance.manage";
 
@@ -20,6 +21,49 @@ pub enum Role {
     Dev,
     Staging,
     Production,
+}
+
+/// Whether this process serves unrelated customers or one isolated customer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallationMode {
+    Shared,
+    Isolated,
+}
+impl InstallationMode {
+    pub const ALL: [Self; 2] = [Self::Shared, Self::Isolated];
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "shared" => Some(Self::Shared),
+            "isolated" => Some(Self::Isolated),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Isolated => "isolated",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared service",
+            Self::Isolated => "Isolated installation",
+        }
+    }
+    pub fn admits(self, composition: &bilibi_module_registry::Composition) -> bool {
+        self == Self::Isolated || composition.customer_extensions().is_empty()
+    }
+    pub async fn resolve(
+        settings: &Settings,
+        client: &(impl GenericClient + Sync),
+    ) -> bilibi_database::Result<Self> {
+        settings
+            .get_global(client, INSTALLATION_MODE_KEY)
+            .await?
+            .as_str()
+            .and_then(Self::parse)
+            .ok_or(bilibi_database::Error::Invalid)
+    }
 }
 impl Role {
     /// The install seed's reading of `BILIBI_ENV`: `development`,
@@ -362,6 +406,13 @@ macro_rules! provenance {
     };
 }
 const GLOBAL: &[ScopeKind] = &[ScopeKind::Global];
+inventory::submit! { Contribution::new(DEFINITIONS, INSTALLATION_MODE_KEY, provenance!(), &Setting::Definition(Definition {
+    value_type: ValueType::String, scopes: GLOBAL, default: || json!("shared"), nullable: false, encrypted: false,
+    minimum: None, maximum: None,
+    validator: Some(Validator { accepts: |value: &Value| value.as_str().is_some_and(|mode| InstallationMode::parse(mode).is_some()), message: "Choose Shared service or Isolated installation." }),
+    // The owner-only Instance settings operation owns this protected setting.
+    editor: None,
+})) }
 inventory::submit! { Contribution::new(DEFINITIONS, INSTANCE_LABEL_KEY, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::String, scopes: GLOBAL, default: || json!(null), nullable: true, encrypted: false,
     minimum: None, maximum: None,

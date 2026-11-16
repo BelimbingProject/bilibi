@@ -739,6 +739,37 @@ impl<'a> Run<'a> {
         let status = program_status(&dst).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
         })?;
+        let mode = jobs::installation_mode(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
+        if !matches!(mode.as_str(), "shared" | "isolated") {
+            let _ = fs::remove_dir_all(&dst);
+            return Err("The installation mode is invalid. The installation owner must save Shared service or Isolated installation before another release can be installed.".into());
+        }
+        let candidate = composition::parse(&status);
+        if candidate["extensions"]
+            .as_array()
+            .is_some_and(|extensions| {
+                extensions.iter().any(|extension| {
+                    !matches!(extension["code"].as_str(), Some("reviewed" | "customer"))
+                })
+            })
+        {
+            let _ = fs::remove_dir_all(&dst);
+            return Err("The release has an Extension without a reviewed or customer code declaration. Prepare the release again with the current composition checks.".into());
+        }
+        if mode == "shared"
+            && candidate["extensions"]
+                .as_array()
+                .is_some_and(|extensions| {
+                    extensions
+                        .iter()
+                        .any(|extension| extension["code"] == "customer")
+                })
+        {
+            let _ = fs::remove_dir_all(&dst);
+            return Err("This server is a Shared service, so the release may not contain customer code Extensions. Prepare a code-free release first.".into());
+        }
         let plugins = layout::read_plugins(&dst).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
         })?;
@@ -749,7 +780,7 @@ impl<'a> Run<'a> {
             .chars()
             .take(200)
             .collect();
-        let now = composition::parse(&status);
+        let now = candidate;
         let changes = composition::diff(&composition_of(&self.layout.release(current)), &now);
         Ok(json!({
             "message": format!("Copied {} as release {n}. Bilibi version: {}.", source.text, now["platform"]["version"].as_str().unwrap_or("not recorded")),

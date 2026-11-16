@@ -30,6 +30,7 @@ pub struct Instances {
     pub(super) settings: Arc<Settings>,
     pub(super) boundary: Arc<MutationBoundary>,
     pub(super) step_up: Arc<StepUp>,
+    pub(super) composition: Arc<bilibi_module_registry::Composition>,
 }
 /// One complete settings submission. The expected role fences a stale page.
 pub struct InstanceSettings {
