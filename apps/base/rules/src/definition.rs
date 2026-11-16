@@ -408,7 +408,7 @@ fn boolean(value: &Value) -> Option<bool> {
     }
 }
 
-/// An exact number: a JSON number or a decimal string, never a float.
+/// An exact number: a JSON integer or a decimal string, never a float.
 fn decimal(value: &Value) -> Option<Decimal> {
     match value {
         Value::Number(number) if number.is_i64() || number.is_u64() => {

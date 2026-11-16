@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 static RULES: OnceLock<Arc<Rules>> = OnceLock::new();
-/// Bound once at boot by the `base/rules.agent` service.
+/// Bound once at boot by the `base/rules.rules` service.
 pub(crate) fn bind(rules: Arc<Rules>) -> bool {
     RULES.set(rules).is_ok()
 }

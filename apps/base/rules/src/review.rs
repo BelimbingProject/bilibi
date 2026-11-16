@@ -398,10 +398,10 @@ impl Rules {
 
     /// The approval review of version `number`: the draft checks again, now
     /// as the approver, plus what only an approval needs. The approver must
-    /// hold what the rule does (reading the trigger's record and each
-    /// action's capability); the `rules` principal must not meet a restricted
-    /// or masked field; no action may record the rule's own trigger; and the
-    /// tenant's limit on rules per trigger holds.
+    /// hold All reach for the root, linked tables and action capabilities;
+    /// the `rules` principal must not meet a restricted or masked field;
+    /// actions must not close a cycle through active rules; and the tenant's
+    /// configured limits hold.
     pub async fn review_approval(
         &self,
         client: &(impl GenericClient + Sync),
