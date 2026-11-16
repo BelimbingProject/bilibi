@@ -792,7 +792,6 @@ fn parent_picker(
         errors,
     ))
 }
-#[allow(clippy::too_many_arguments)]
 fn choice(
     words: &bilibi_grid::RecordWords,
     id: &str,
