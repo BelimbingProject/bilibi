@@ -104,7 +104,7 @@ pub async fn require_live(client: &impl GenericClient, scope: &Scope, id: i64) -
 /// compatible with Queue's `FOR KEY SHARE` workplace proof while still
 /// excluding company updates, archival and deletion.
 pub async fn require_writable(
-    client: &impl GenericClient,
+    client: &dyn ProofClient,
     scope: &Scope,
     id: i64,
     lock: bool,
@@ -113,7 +113,7 @@ pub async fn require_writable(
 }
 /// [`require_writable`] for a system principal with no account scope.
 pub async fn require_writable_in(
-    client: &impl GenericClient,
+    client: &dyn ProofClient,
     tenant: i64,
     id: i64,
     lock: bool,
@@ -128,7 +128,7 @@ pub async fn require_writable_in(
     let row = client
         .query_opt(&sql, &[&tenant, &id])
         .await
-        .map_err(Error::from)?
+        .map_err(WriteError::Access)?
         .ok_or(WriteError::NotFound)?;
     if row.get::<_, String>(0) == ARCHIVED {
         return Err(WriteError::Archived);

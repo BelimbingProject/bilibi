@@ -61,12 +61,11 @@ async fn list(
 /// unlinked from its Person, assigned elsewhere, in another tenant or no
 /// longer proven is `NotFound`, never a hint that it exists elsewhere.
 async fn get(
-    client: &impl GenericClient,
+    client: &dyn bilibi_tenancy::ProofClient,
     scope: &Scope,
     company: i64,
     user: i64,
 ) -> Result<CompanyAccount> {
-    require_live(client, scope, company).await?;
     client
         .query_opt(
             &format!("{SELECT} AND u.id=$3"),
@@ -90,7 +89,7 @@ impl UserService {
     }
     /// Same-connection account lookup for a caller that owns authorization.
     pub async fn company_account_on(
-        client: &(impl GenericClient + Sync),
+        client: &dyn bilibi_tenancy::ProofClient,
         scope: &Scope,
         company: i64,
         user: i64,

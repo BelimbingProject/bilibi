@@ -24,6 +24,7 @@ bilibi-person.workspace = true
 bilibi-principal-directory.workspace = true
 bilibi-queue.workspace = true
 bilibi-records.workspace = true
+bilibi-rules.workspace = true
 bilibi-schedule.workspace = true
 bilibi-settings.workspace = true
 bilibi-step-up.workspace = true
