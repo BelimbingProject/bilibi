@@ -60,6 +60,11 @@ refuse with `MimeDetectionUnavailable` instead of trusting the client.
   removes files. A file that cannot be removed reports `CleanupFailed`; the
   operator reconciles the disk. A legal hold (`base/privacy`) on any asset of the tree refuses it (`Held`).
 - A write whose registration fails removes the new file again, unless the failure was the commit itself: the server may have committed, so the file stays rather than leave a row naming a missing file.
+- When files and rows part anyway (a crash between them, `CleanupFailed`, a restored backup), list both sides with the host command below. It reads every mapped disk and every tenant and changes nothing; the operator removes or restores what it names.
+
+      bilibi-web media-reconcile
+
+  It prints each file no row needs (no asset names it, or its asset was purged, and no erased attachment still waits for its bytes to go), each asset with no file (not purged and not being purged), and each disk it could not read safely. Files younger than an hour (bytes are written before their row) and `staging/` (resumable uploads, swept separately) are skipped.
 - Every row is tenant-scoped through the sealed `Scope`; another tenant's id is
   `NotFound`. Audit records name the asset but never its storage key or metadata.
 

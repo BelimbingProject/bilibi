@@ -136,6 +136,7 @@ async fn main() -> Result<()> {
             };
             bilibi_web::media_cleanup(&db, tenant, hours).await?;
         }
+        Some("media-reconcile") => bilibi_web::media_reconcile(&db).await?,
         None | Some("run") => {
             let origin =
                 std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());

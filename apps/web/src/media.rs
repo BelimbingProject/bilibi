@@ -160,6 +160,19 @@ pub async fn attachment(
     }
 }
 
+/// The installed services for a host command that runs without the server.
+fn services(db: &bilibi_database::Db) -> bilibi_database::Result<bilibi_module_registry::Services> {
+    let modules = crate::modules()?;
+    let mut services = bilibi_module_registry::Services::default();
+    services.provide("bootstrap.database", std::sync::Arc::new(db.clone()))?;
+    services.provide(
+        "bootstrap.composition",
+        std::sync::Arc::new(crate::composition()),
+    )?;
+    services.install(&modules)?;
+    Ok(services)
+}
+
 /// `media-cleanup`: remove one tenant's abandoned attachment drafts now. The
 /// `base/media-draft-cleanup` schedule does the same hourly in every tenant
 /// that allows it, once an operator enables it.
@@ -168,17 +181,7 @@ pub async fn cleanup(
     tenant: i64,
     hours: u64,
 ) -> bilibi_database::Result<()> {
-    let services = {
-        let modules = crate::modules()?;
-        let mut services = bilibi_module_registry::Services::default();
-        services.provide("bootstrap.database", std::sync::Arc::new(db.clone()))?;
-        services.provide(
-            "bootstrap.composition",
-            std::sync::Arc::new(crate::composition()),
-        )?;
-        services.install(&modules)?;
-        services
-    };
+    let services = services(db)?;
     let media = services.get::<Media>("base/media.store")?;
     let mut client = db.get().await?;
     let report = media
@@ -191,6 +194,38 @@ pub async fn cleanup(
     println!(
         "Removed {} abandoned attachment draft(s); {} file(s) need disk reconciliation.",
         report.removed, report.file_failures
+    );
+    Ok(())
+}
+
+/// `media-reconcile`: list the files on the media disks that no row needs and
+/// the stored assets whose file is gone, in every tenant. Changes nothing.
+pub async fn reconcile(db: &bilibi_database::Db) -> bilibi_database::Result<()> {
+    let media = services(db)?.get::<Media>("base/media.store")?;
+    let client = db.get().await?;
+    let found = media.reconcile(&**client).await.map_err(|error| {
+        eprintln!("Media reconciliation failed: {error}");
+        bilibi_database::Error::Invalid
+    })?;
+    for disk in &found.unreadable_disks {
+        println!(
+            "unreadable disk: {disk} (not mapped, not 0700, or a symlink in its path; not checked)"
+        );
+    }
+    for (disk, key) in &found.unneeded_files {
+        println!("file no row needs: {disk}:{key}");
+    }
+    for file in &found.missing_files {
+        println!(
+            "asset with no file: {} (tenant {}) {}:{}",
+            file.id, file.tenant, file.disk, file.key
+        );
+    }
+    println!(
+        "{} file(s) no row needs, {} asset(s) with no file, {} unreadable disk(s). Nothing was changed.",
+        found.unneeded_files.len(),
+        found.missing_files.len(),
+        found.unreadable_disks.len()
     );
     Ok(())
 }
