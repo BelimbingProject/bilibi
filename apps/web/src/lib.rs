@@ -763,3 +763,18 @@ async fn upgrade(
 }
 
 pub mod seed;
+
+pub async fn render_fields<T>(
+    app: &App,
+    scope: Option<&bilibi_tenancy::Scope>,
+    render: impl std::future::Future<Output = bilibi_database::Result<T>>,
+) -> bilibi_database::Result<T> {
+    let words = match scope {
+        Some(scope) => {
+            let client = app.db.get().await?;
+            bilibi_base::grid::render_labels(&**client, scope).await?
+        }
+        None => bilibi_ui::FieldLabels::default(),
+    };
+    words.during(render).await
+}

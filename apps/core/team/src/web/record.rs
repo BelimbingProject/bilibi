@@ -164,9 +164,10 @@ fn choice_fact<'a>(
         ..Fact::default()
     })
 }
-fn facts(state: &State, record: &Record) -> Result<Html> {
+fn facts(state: &State, record: &Record, words: &bilibi_grid::RecordWords) -> Result<Html> {
     let team = &record.team;
-    let mut name = InlineField::new("team-name", "name", "Name", &team.name).version(team.version);
+    let mut name = InlineField::new("team-name", "name", words.field("name", "Name"), &team.name)
+        .version(team.version);
     name.editable = record.can_change;
     name.status = state.commits.get("name");
     let mut parents = vec![Choice::new("No parent team", "")];
@@ -190,7 +191,7 @@ fn facts(state: &State, record: &Record) -> Result<Html> {
     };
     let mut items = vec![
         Fact {
-            title: "Name",
+            title: words.field("name", "Name"),
             value: render(InlineEdit { field: name })?,
             ..Fact::default()
         },
@@ -198,7 +199,7 @@ fn facts(state: &State, record: &Record) -> Result<Html> {
             state,
             record,
             "kind",
-            "Kind",
+            words.field("kind", "Kind"),
             team.kind.clone(),
             record.kind_label.clone(),
             kinds,
@@ -207,7 +208,7 @@ fn facts(state: &State, record: &Record) -> Result<Html> {
             state,
             record,
             "parent_id",
-            "Parent team",
+            words.field("parent_id", "Parent team"),
             team.parent_id.map(|v| v.to_string()).unwrap_or_default(),
             record.parent_name.clone().unwrap_or_else(|| "—".into()),
             parents,
@@ -216,7 +217,7 @@ fn facts(state: &State, record: &Record) -> Result<Html> {
             state,
             record,
             "company_id",
-            "Company",
+            words.field("company_id", "Company"),
             team.company_id.map(|v| v.to_string()).unwrap_or_default(),
             record.company_name.clone().unwrap_or_else(|| "—".into()),
             record.companies.clone(),
@@ -424,7 +425,11 @@ fn sub_teams(state: &State, record: &Record) -> Result<Html> {
 )]
 struct HistoryAnchor;
 
-pub(super) fn view(state: &State, record: &Record) -> Result<(Html, Vec<Html>, PageVariant)> {
+pub(super) fn view(
+    state: &State,
+    record: &Record,
+    words: &bilibi_grid::RecordWords,
+) -> Result<(Html, Vec<Html>, PageVariant)> {
     let team = &record.team;
     let mut sections = vec![render(BackLink {
         href: crate::LIST_PATH,
@@ -437,7 +442,7 @@ pub(super) fn view(state: &State, record: &Record) -> Result<(Html, Vec<Html>, P
             "This team's company is archived, so the team cannot change.",
         ))?);
     }
-    sections.push(facts(state, record)?);
+    sections.push(facts(state, record, words)?);
     let add = if record.can_change {
         render(Button {
             id: "team-add-members",

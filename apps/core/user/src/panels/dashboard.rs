@@ -135,9 +135,10 @@ impl People {
             columns: ListColumns::mount(
                 "dashboard-users",
                 vec![
-                    BuiltinColumn::new("name", "Name"),
-                    BuiltinColumn::new("email", "Email"),
-                    BuiltinColumn::new("email_verified", "Email verified"),
+                    BuiltinColumn::new("name", "Name").grid_field("users.name"),
+                    BuiltinColumn::new("email", "Email").grid_field("users.email"),
+                    BuiltinColumn::new("email_verified", "Email verified")
+                        .grid_field("users.email_verified_at"),
                 ],
             )
             .map_err(|_| Error::Internal)?,

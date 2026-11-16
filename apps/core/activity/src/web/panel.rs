@@ -76,11 +76,12 @@ impl Panel {
             columns: ListColumns::mount(
                 &format!("{anchor}-activities"),
                 vec![
-                    BuiltinColumn::new("title", "Subject"),
-                    BuiltinColumn::new("kind", "Kind"),
-                    BuiltinColumn::new("status", "Status"),
+                    BuiltinColumn::new("title", "Subject").grid_field("activities.subject"),
+                    BuiltinColumn::new("kind", "Kind").grid_field("activities.kind"),
+                    BuiltinColumn::new("status", "Status").grid_field("activities.status"),
                     BuiltinColumn::new("when", "When"),
-                    BuiltinColumn::new("assignee", "Assigned to"),
+                    BuiltinColumn::new("assignee", "Assigned to")
+                        .grid_field("activities.assignee_user_id"),
                 ],
             )
             .map_err(|_| Error::Internal)?,
@@ -247,6 +248,10 @@ impl Panel {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "activities").await?;
+        drop(client);
+
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let state = if self.history {
             State::Closed
@@ -369,6 +374,7 @@ impl Panel {
             content.push(&dialog.render(
                 &self.pages,
                 &clock,
+                &words,
                 &format!("{anchor}-new"),
                 "close_modal",
                 self.framed,

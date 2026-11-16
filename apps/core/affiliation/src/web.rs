@@ -270,12 +270,22 @@ impl Panel {
         let columns = ListColumns::mount(
             &format!("{anchor}-columns"),
             vec![
-                BuiltinColumn::new(party, party_label).sortable("party"),
-                BuiltinColumn::new("title", fields::TITLE.label).sortable("title"),
-                BuiltinColumn::new("work_email", fields::get("work_email").label),
-                BuiltinColumn::new("work_phone", fields::get("work_phone").label),
-                BuiltinColumn::new("from", "From").sortable("from"),
-                BuiltinColumn::new("to", "To").sortable("to"),
+                BuiltinColumn::new(party, party_label)
+                    .grid_field(format!("person_affiliations.{party}_id"))
+                    .sortable("party"),
+                BuiltinColumn::new("title", fields::TITLE.label)
+                    .grid_field("person_affiliations.title")
+                    .sortable("title"),
+                BuiltinColumn::new("work_email", fields::get("work_email").label)
+                    .grid_field("person_affiliations.work_email"),
+                BuiltinColumn::new("work_phone", fields::get("work_phone").label)
+                    .grid_field("person_affiliations.work_phone"),
+                BuiltinColumn::new("from", "From")
+                    .grid_field("person_affiliations.effective_from")
+                    .sortable("from"),
+                BuiltinColumn::new("to", "To")
+                    .grid_field("person_affiliations.effective_to")
+                    .sortable("to"),
                 BuiltinColumn::new("status", "Status").sortable("status"),
             ],
         )
@@ -486,7 +496,12 @@ impl Panel {
         }
         field
     }
-    async fn add_form(&self, scope: &Scope, today: &str) -> Result<Html> {
+    async fn add_form(
+        &self,
+        scope: &Scope,
+        today: &str,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
         let client = self.pages.db.get().await?;
         let restricted =
             bilibi_authz::restrictions_for(&**client, scope, "person_affiliations").await?;
@@ -551,36 +566,41 @@ impl Panel {
             format!("affiliation[{party}_id]"),
         )
         .label(party_label)
+        .grid_field(format!("person_affiliations.{party}_id"))
         .value(value(&format!("{party}_id")))
         .options(options)
         .placeholder(format!("Choose a {party}…"))
         .errors(errors(&format!("{party}_id")));
         controls.push(render(combo)?);
         for (key, label, kind) in [
-            ("title", fields::TITLE.label, InputKind::Text),
+            ("title", words.get(&fields::TITLE), InputKind::Text),
             (
                 "work_email",
-                fields::get("work_email").label,
+                words.get(&fields::get("work_email")),
                 InputKind::Email,
             ),
             (
                 "work_phone",
-                fields::get("work_phone").label,
+                words.get(&fields::get("work_phone")),
                 InputKind::Tel,
             ),
             ("effective_from", "From", InputKind::Date),
             ("effective_to", "To", InputKind::Date),
         ] {
             if restricted.contains(key) {
-                controls.push(render(RestrictedField::new(
-                    self.dom(&format!("add-{}", key.replace('_', "-"))),
-                    label,
-                ))?);
+                controls.push(render(
+                    RestrictedField::new(
+                        self.dom(&format!("add-{}", key.replace('_', "-"))),
+                        label,
+                    )
+                    .grid_field(format!("person_affiliations.{key}")),
+                )?);
                 continue;
             }
             let mut field = Field::in_form("affiliation", key)
                 .id(self.dom(&format!("add-{}", key.replace('_', "-"))))
                 .label(label)
+                .grid_field(format!("person_affiliations.{key}"))
                 .kind(kind)
                 .value(value(key))
                 .errors(errors(key));
@@ -613,6 +633,10 @@ impl Panel {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "person_affiliations").await?;
+        drop(client);
+
         let client = self.pages.db.get().await?;
         bilibi_authz::authorize_key(&**client, scope, VIEW).await?;
         drop(client);
@@ -659,11 +683,11 @@ impl Panel {
                 })?,
             );
             for (column, label) in [
-                ("title", fields::TITLE.label),
-                ("work_email", fields::get("work_email").label),
-                ("work_phone", fields::get("work_phone").label),
-                ("from", "From"),
-                ("to", "To"),
+                ("title", words.get(&fields::TITLE)),
+                ("work_email", words.get(&fields::get("work_email"))),
+                ("work_phone", words.get(&fields::get("work_phone"))),
+                ("from", words.get(&fields::get("effective_from"))),
+                ("to", words.get(&fields::get("effective_to"))),
             ] {
                 let value = if entry.affiliation.masked.iter().any(|m| m == column) {
                     // A partial value is read-only: it is not the stored value.
@@ -751,7 +775,7 @@ impl Panel {
             ..SectionHeading::default()
         })?;
         if self.adding {
-            head.push(&self.add_form(scope, &today).await?);
+            head.push(&self.add_form(scope, &today, &words).await?);
         }
         let form = self.list.filters_form();
         let filters_id = self.dom("filters");
@@ -806,6 +830,7 @@ impl Panel {
             })?
         } else if let Some(pending) = &self.pending_end {
             let mut date = Field::in_form("end", "effective_to")
+                .grid_field("person_affiliations.effective_to")
                 .id(self.dom("end-date"))
                 .label("Last day")
                 .kind(InputKind::Date)

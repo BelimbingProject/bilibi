@@ -75,13 +75,21 @@ A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declaratio
 - `Table::custom_search_values` gives Base Search the tenant's searchable text fields. `Table::is_custom` tells a page that draws its own `cf_` columns which fields are tenant fields.
 - Keys never change and are never reused, so each distinct `cf_<key>` id is kept once for the process; labels are not.
 
+## Shared label rendering
+
+The Web host calls `render_labels` for initial pages, mounts and live fragments. Grid maps tenant overrides to visible Grid identities and registered record-field vocabulary through each field's declared column path. Shared controls consume the resulting map through [UI's tenant field labels](../ui/README.md#tenant-field-labels).
+
+`Catalog::resolve` applies the tenant's field overrides automatically. The lower-level `column::resolve` resolves structural paths with module defaults; use `Catalog::resolve` for tenant words. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.
+
+For fact titles, inline editors and other labels outside shared controls, load `RecordWords::load(client, scope, table)` once per render. `words.get(&field)` looks up the registered vocabulary, then the field ID, and falls back to `field.label`. `words.field(id, default)` handles a Grid field without record vocabulary. Load words for the owning table, including when a page contains another table's fields; DOM IDs and input names are not field identities.
+
 ## Detail fields become columns
 
-A scalar field shown on a record can also be added to its list, under the same label.
+A scalar field shown on a record can also be added to its list, under the same label. Tenant renaming is owned by [Labels](../labels/README.md); rendering uses the integration above.
 
 For example, Contacts calls its email **Personal email** in both places. Work email comes from the Affiliations panel and becomes a Contacts column through that panel's Grid contribution.
 
-- Declare the vocabulary once with `bilibi_ui::record_fields!`, including the owning module, key, label, type, choices or pick-list, and personal-data class; see [the vocabulary contract](../ui/README.md#record-field-vocabulary). Use its named fields or `get` for detail labels and `RecordField::fact` for a complete fact. Build corresponding Grid fields with `Field::record(fields::NAME)` and operation input properties with `fields::NAME.input(...)`, so boot can refuse disagreement. SQL source keys and read protection remain Grid declarations.
+- Declare the vocabulary once with `bilibi_ui::record_fields!`, including the owning module, key, label, type, choices or pick-list, and personal-data class; see [the vocabulary contract](../ui/README.md#record-field-vocabulary). Resolve detail titles through [shared label rendering](#shared-label-rendering). Build corresponding Grid fields with `Field::record(fields::NAME)` and operation input properties with `fields::NAME.input(...)`, so boot can refuse disagreement. SQL source keys and read protection remain Grid declarations.
 - Add `RecordFields { table, fields: fields::ALL }` to the owning `GridContribution.record_fields`. A panel may contribute fields to the table at its link's start. `PageColumns` collects them automatically.
 - An Extension that owns a scalar Company field contributes its own Grid table and a `One` link starting at `companies`, then contributes `RecordFields` on `companies` with a path through that link. Company reads the value through the Extension facade for its own page slots; Grid resolves the path for optional list columns. The Extension remains the only owner of its table and tenant predicate.
 - Use `.path("parent.name")` for a related readable value. Grid resolves the path against the reader's fresh catalog before offering or loading it.

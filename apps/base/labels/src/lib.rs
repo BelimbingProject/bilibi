@@ -1,12 +1,15 @@
 //! Tenant label overrides: plain text a tenant shows instead of a module's
-//! own word for a menu item or a record type, kept against the stable ID.
+//! own word for a menu item, a record type or a field, kept against the stable ID.
 //! Data only (ADR 28): it never renames an operation key, route or
 //! permission key. Contract: `README.md`.
 mod operations;
 mod store;
 mod web;
 
-pub use store::{Edit, Kind, LabelSet, Labels, Plan, Stored, Subject, MAX_LABEL};
+pub use store::{
+    field_labels, subject_id, Edit, FieldLabels, Kind, LabelSet, Labels, Plan, Stored, Subject,
+    SubjectSource, MAX_LABEL, SUBJECTS,
+};
 
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
@@ -44,13 +47,16 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/labels", provenance!(),
 inventory::submit! {
     Module {
         id: "base/labels", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/ui", "base/audit", "base/agent_api", "base/menu", "base/grid"],
-        migrations: &[("base-labels-001-labels", include_str!("../migrations/001-labels.sql"))],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/ui", "base/audit", "base/agent_api", "base/menu"],
+        migrations: &[("base-labels-001-labels", include_str!("../migrations/001-labels.sql")), ("base-labels-002-field-labels", include_str!("../migrations/002-field-labels.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
+                let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
+                let sources = catalog.entries::<SubjectSource>(SUBJECTS)?.iter().map(|entry| entry.get::<SubjectSource>()).collect::<Result<Vec<_>, _>>()?;
                 let labels = Arc::new(Labels::new(
                     services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
-                    bilibi_menu::Menu::from_catalog(&bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?)?,
+                    bilibi_menu::Menu::from_catalog(&catalog)?,
+                    sources,
                 ));
                 operations::bind(labels.clone())?;
                 Ok(labels)
@@ -62,6 +68,8 @@ inventory::submit! {
         ],
     }
 }
+
+inventory::submit! { bilibi_module_registry::Consumer::new::<SubjectSource>(SUBJECTS, "base/labels", |_| Ok(())) }
 
 inventory::submit! { Contribution::new(ROUTES, "base/labels.index", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
     method: Method::Get, path: web::INDEX, service: PAGES, operation: "index", access: Access::Capability(VIEW), framed: true,

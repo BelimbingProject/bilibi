@@ -88,7 +88,13 @@ fn last_day(end: Timestamp) -> String {
 
 fn columns(id: &str, sortable: bool) -> Result<ListColumns> {
     let sorted = |key: &str, label: &str| {
-        let column = BuiltinColumn::new(key, label);
+        let column = BuiltinColumn::new(key, label).grid_field(format!(
+            "documents.{}",
+            match key {
+                "updated" => "last_revision_at",
+                _ => key,
+            }
+        ));
         if !sortable {
             return column;
         }
@@ -102,7 +108,7 @@ fn columns(id: &str, sortable: bool) -> Result<ListColumns> {
             sorted("name", "Name"),
             sorted("publish_date", "Published"),
             sorted("updated", "Updated"),
-            BuiltinColumn::new("file", "File"),
+            BuiltinColumn::new("file", "File").grid_field("document_revisions.file_name"),
             BuiltinColumn::new("shared_until", "Available until"),
             BuiltinColumn::new("download", "Download"),
         ],

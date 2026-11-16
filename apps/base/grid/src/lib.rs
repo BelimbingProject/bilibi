@@ -171,11 +171,39 @@ inventory::submit! {
         &bilibi_authz::field_catalog::CatalogSource { snapshot: restriction_snapshot })
 }
 
+/// Grid supplies Labels' renamable record types and fields as data: every
+/// installed table, and each table's non-hidden fields by `table.field`.
+fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> {
+    use bilibi_labels::{subject_id, Kind, Subject};
+    let installed = installed().map_err(|error| error.to_string())?;
+    let mut subjects = Vec::new();
+    for table in installed.tables() {
+        subjects.push(Subject {
+            kind: Kind::Record,
+            id: table.id().to_owned(),
+            default: table.label().to_owned(),
+            trail: String::new(),
+        });
+        subjects.extend(table.visible_fields().map(|field| Subject {
+            kind: Kind::Field,
+            id: subject_id(table.id(), field.id),
+            default: field.label.to_owned(),
+            trail: table.label().to_owned(),
+        }));
+    }
+    Ok(subjects)
+}
+inventory::submit! {
+    Contribution::new(bilibi_labels::SUBJECTS, "base/grid.label_subjects",
+        Provenance { module: "base/grid", source: file!(), line: line!() },
+        &bilibi_labels::SubjectSource { snapshot: label_subjects })
+}
+
 inventory::submit! { Consumer::new::<GridContribution>(TABLES, "base/grid", |entries| Installed::from_entries(entries).map(|_| ())) }
 inventory::submit! {
     Module {
         id: "base/grid", layer: Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data", "base/agent_api"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data", "base/agent_api", "base/labels"],
         migrations: &[
             ("base-grid-001", include_str!("../migrations/001-reference.sql")),
             ("base-grid-002", include_str!("../migrations/002-reference-recorded-at.sql")),
@@ -187,4 +215,105 @@ inventory::submit! {
 }
 inventory::submit! {
     bilibi_module_registry::Ready { module: "base/grid", check: |_| installed().map(|_| ()) }
+}
+
+/// A record field's word: the tenant's label for the Grid field it reads, or
+/// the owner's own.
+pub(crate) fn record_word(
+    catalog: &Catalog,
+    root: &Table,
+    field: &bilibi_ui::RecordField,
+) -> String {
+    field
+        .column
+        .and_then(|path| catalog.resolve(root, path).ok())
+        .and_then(|column| {
+            let id = column.field.as_ref()?.id;
+            catalog.field_name(column.table, id)
+        })
+        .unwrap_or_else(|| field.label.to_owned())
+}
+
+/// The words a record page shows for its table's Grid and record fields under one
+/// tenant's field labels (`base/labels`). A detail page, form or inline
+/// editor draws its labels with [`RecordWords::get`] instead of
+/// `field.label`, so a rename shows there as it does in lists and exports.
+/// Load it once per render; never keep it across requests or tenants.
+#[derive(Clone, Debug, Default)]
+pub struct RecordWords(std::collections::BTreeMap<&'static str, String>);
+impl RecordWords {
+    /// One read of the tenant's field labels, applied to visible Grid fields
+    /// and registered record-field paths of `table`. An uninstalled table has no words.
+    pub async fn load(
+        client: &impl tokio_postgres::GenericClient,
+        scope: &bilibi_tenancy::Scope,
+        table: &str,
+    ) -> std::result::Result<Self, bilibi_database::Error> {
+        let names = bilibi_labels::field_labels(client, scope).await?;
+        let installed = installed().map_err(|_| bilibi_database::Error::Internal)?;
+        let Some(root) = installed.table(table) else {
+            return Ok(Self::default());
+        };
+        let mut words: std::collections::BTreeMap<_, _> = root
+            .visible_fields()
+            .filter_map(|field| {
+                names
+                    .get(root.id(), field.id)
+                    .map(|word| (field.id, word.to_owned()))
+            })
+            .collect();
+        for field in &root.record_fields {
+            let Some(column) = field
+                .column
+                .and_then(|path| column::resolve(path, root, &|id| installed.table(id)).ok())
+            else {
+                continue;
+            };
+            let Some(word) = column
+                .field
+                .as_ref()
+                .and_then(|field| names.get(column.table, field.id))
+            else {
+                continue;
+            };
+            words.insert(field.vocabulary, word.to_owned());
+            words.insert(field.id, word.to_owned());
+        }
+        Ok(Self(words))
+    }
+    /// The tenant's word for a Grid field without record vocabulary.
+    pub fn field<'a>(&'a self, id: &str, default: &'a str) -> &'a str {
+        self.0.get(id).map_or(default, String::as_str)
+    }
+    /// The tenant's word for `field`, or the owner's own.
+    pub fn get<'a>(&'a self, field: &bilibi_ui::RecordField) -> &'a str {
+        self.0
+            .get(field.vocabulary)
+            .map_or_else(|| self.field(field.id, field.label), String::as_str)
+    }
+}
+
+pub async fn render_labels(
+    client: &impl tokio_postgres::GenericClient,
+    scope: &bilibi_tenancy::Scope,
+) -> std::result::Result<bilibi_ui::FieldLabels, bilibi_database::Error> {
+    let names = bilibi_labels::field_labels(client, scope).await?;
+    let installed = installed().map_err(|_| bilibi_database::Error::Internal)?;
+    let mut words = std::collections::BTreeMap::new();
+    for root in installed.tables() {
+        for field in root.visible_fields() {
+            if let Some(word) = names.get(root.id(), field.id) {
+                words.insert(format!("{}.{}", root.id(), field.id), word.to_owned());
+            }
+        }
+        for field in &root.record_fields {
+            if let Some(word) = field.column.and_then(|path| {
+                let column = column::resolve(path, root, &|id| installed.table(id)).ok()?;
+                names.get(column.table, column.field.as_ref()?.id)
+            }) {
+                words.insert(field.vocabulary.to_owned(), word.to_owned());
+            }
+        }
+    }
+    Ok(bilibi_ui::FieldLabels(words))
 }

@@ -60,12 +60,16 @@ fn picker(id: &str, name: &str, label: &str, picker: &Picker) -> Result<Html> {
         .wrap_chips(),
     )
 }
-pub(super) fn create(state: &State, d: &CreateDraft) -> Result<Html> {
+pub(super) fn create(
+    state: &State,
+    d: &CreateDraft,
+    words: &bilibi_grid::RecordWords,
+) -> Result<Html> {
     let value = |k: &str| d.values.get(k).cloned().unwrap_or_default();
     let field = |k: &str, label: &str| {
         Field::in_form("team", k)
             .id(format!("team-new-{}", k.replace('_', "-")))
-            .label(label)
+            .label(words.field(k, label))
             .value(value(k))
             .errors(errors(&d.errors, k))
     };
@@ -88,7 +92,7 @@ pub(super) fn create(state: &State, d: &CreateDraft) -> Result<Html> {
     )?);
     body.push(&render(
         Combobox::new("team-new-parent-id", "team[parent_id]")
-            .label("Parent team")
+            .label(words.field("parent_id", "Parent team"))
             .value(value("parent_id"))
             .options(parents)
             .placeholder("No parent team")

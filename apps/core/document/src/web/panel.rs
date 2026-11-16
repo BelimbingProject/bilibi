@@ -84,10 +84,11 @@ impl Panel {
             columns: ListColumns::mount(
                 &format!("{anchor}-table"),
                 vec![
-                    BuiltinColumn::new("name", "Name"),
-                    BuiltinColumn::new("category", "Category"),
-                    BuiltinColumn::new("revision", "Revision"),
-                    BuiltinColumn::new("publish_date", "Published"),
+                    BuiltinColumn::new("name", "Name").grid_field("documents.name"),
+                    BuiltinColumn::new("category", "Category").grid_field("documents.category"),
+                    BuiltinColumn::new("revision", "Revision").grid_field("documents.revision"),
+                    BuiltinColumn::new("publish_date", "Published")
+                        .grid_field("documents.publish_date"),
                 ],
             )
             .map_err(|_| Error::Internal)?,
@@ -126,6 +127,10 @@ impl Panel {
     }
 
     async fn view(&self, scope: &Scope) -> Result<Html> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "documents").await?;
+        drop(client);
+
         let anchor = &self.anchor;
         let page = self
             .pages
@@ -238,6 +243,7 @@ impl Panel {
         if let Some(quick) = &self.quick {
             card.push(&quick.render(
                 &self.uploads,
+                &words,
                 &format!("{anchor}-quick"),
                 "close_quick",
                 self.framed,

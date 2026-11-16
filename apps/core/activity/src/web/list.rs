@@ -81,12 +81,16 @@ fn columns() -> Result<ListColumns> {
     ListColumns::mount(
         "activities",
         vec![
-            BuiltinColumn::new("title", "Subject").sortable("title"),
-            BuiltinColumn::new("kind", "Kind"),
-            BuiltinColumn::new("status", "Status").sortable("status"),
+            BuiltinColumn::new("title", "Subject")
+                .grid_field("activities.subject")
+                .sortable("title"),
+            BuiltinColumn::new("kind", "Kind").grid_field("activities.kind"),
+            BuiltinColumn::new("status", "Status")
+                .grid_field("activities.status")
+                .sortable("status"),
             BuiltinColumn::new("when", "When").sortable("when"),
-            BuiltinColumn::new("related", "Related to"),
-            BuiltinColumn::new("assignee", "Assigned to"),
+            BuiltinColumn::new("related", "Related to").grid_field("activities.related_id"),
+            BuiltinColumn::new("assignee", "Assigned to").grid_field("activities.assignee_user_id"),
         ],
     )
     .map_err(|_| Error::Internal)
@@ -818,6 +822,10 @@ impl Index {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "activities").await?;
+        drop(client);
+
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let may_create = self.pages.activities.may_create(scope).await?;
         let mut actions = Html::EMPTY;
@@ -1003,6 +1011,7 @@ impl Index {
             body.push(&dialog.render(
                 &self.pages,
                 &clock,
+                &words,
                 "activities-new",
                 "close_modal",
                 self.framed,

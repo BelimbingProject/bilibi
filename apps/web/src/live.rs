@@ -746,19 +746,20 @@ impl<S: Side> Session<S> {
             .admit(app, bound.route.access, token, path.clone())
             .await?;
         let scope = self.bound(scope)?;
-        let state = bound
-            .page
-            .0
-            .mount(PageRequest {
+        let state = crate::render_fields(
+            app,
+            Some(S::scope(&scope)),
+            bound.page.0.mount(PageRequest {
                 operation: bound.route.operation,
                 scope: Some(&scope),
                 path: params,
                 query: &query,
                 body: &[],
                 framed: self.framed,
-            })
-            .await?
-            .ok_or(Error::Invalid)?;
+            }),
+        )
+        .await?
+        .ok_or(Error::Invalid)?;
         // Old state/subscribers cannot survive a route change or receive queued wakes.
         self.panels.clear();
         self.generation += 1;
@@ -835,18 +836,20 @@ impl<S: Side> Session<S> {
             }
             let service: Arc<Service<S::Context>> = app.services.get(slot.embed.service)?;
             let empty = HashMap::new();
-            let state = service
-                .0
-                .mount(PageRequest {
+            let state = crate::render_fields(
+                app,
+                Some(S::scope(scope)),
+                service.0.mount(PageRequest {
                     operation: slot.embed.operation,
                     scope: Some(scope),
                     path: &empty,
                     query: &empty,
                     body: &[],
                     framed: false,
-                })
-                .await?
-                .ok_or(Error::Invalid)?;
+                }),
+            )
+            .await?
+            .ok_or(Error::Invalid)?;
             self.generation += 1;
             let mounted = Mounted::new(
                 state,
@@ -880,11 +883,15 @@ impl<S: Side> Session<S> {
             let event = page_event(app, page.service, &input)?;
             let mut body = permitted(
                 event,
-                page.state.update(LiveRequest {
-                    scope: &scope,
-                    credential: token,
-                    input,
-                }),
+                crate::render_fields(
+                    app,
+                    Some(S::scope(&scope)),
+                    page.state.update(LiveRequest {
+                        scope: &scope,
+                        credential: token,
+                        input,
+                    }),
+                ),
             )
             .await?;
             hold_flash(app, token, &mut body);
@@ -932,11 +939,15 @@ impl<S: Side> Session<S> {
         let event = page_event(app, panel.mounted.service, &input)?;
         let mut body = permitted(
             event,
-            panel.mounted.state.update(LiveRequest {
-                scope: &scope,
-                credential: token,
-                input,
-            }),
+            crate::render_fields(
+                app,
+                Some(S::scope(&scope)),
+                panel.mounted.state.update(LiveRequest {
+                    scope: &scope,
+                    credential: token,
+                    input,
+                }),
+            ),
         )
         .await?;
         hold_flash(app, token, &mut body);
@@ -1095,18 +1106,20 @@ impl<S: Side> Session<S> {
                         .get::<Embed>()?;
                     Self::check(app, embed.access, token).await?;
                     let service: Arc<Service<S::Context>> = app.services.get(embed.service)?;
-                    let state = service
-                        .0
-                        .mount(PageRequest {
+                    let state = crate::render_fields(
+                        app,
+                        Some(S::scope(scope)),
+                        service.0.mount(PageRequest {
                             operation: embed.operation,
                             scope: Some(scope),
                             path: &spec.path,
                             query: &spec.query,
                             body: &[],
                             framed: self.framed,
-                        })
-                        .await?
-                        .ok_or(Error::Invalid)?;
+                        }),
+                    )
+                    .await?
+                    .ok_or(Error::Invalid)?;
                     self.generation += 1;
                     let mounted = Mounted::new(
                         state,
@@ -1129,15 +1142,16 @@ impl<S: Side> Session<S> {
                 } else {
                     LiveInput::Refresh
                 };
-                panel
-                    .mounted
-                    .state
-                    .update(LiveRequest {
+                crate::render_fields(
+                    app,
+                    Some(S::scope(scope)),
+                    panel.mounted.state.update(LiveRequest {
                         scope,
                         credential: token,
                         input,
-                    })
-                    .await
+                    }),
+                )
+                .await
             }
             .await;
             let result = result.and_then(|body| {

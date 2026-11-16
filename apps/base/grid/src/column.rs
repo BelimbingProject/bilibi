@@ -242,7 +242,12 @@ pub fn resolve<'a>(
             });
         }
     }
-    build(spec, root, table, walk, parsed.agg)
+    let mut column = build(spec, root, table, walk, parsed.agg)?;
+    let word = column
+        .field
+        .map(|field| table.field_label(&field).to_owned());
+    column.set_labels(word.as_deref());
+    Ok(column)
 }
 
 fn build(
@@ -266,8 +271,8 @@ fn build(
         return Ok(Column {
             spec: spec.into(),
             id: dom_id(spec),
-            label: label(&hops, table.field_label(&field)),
-            short_label: short_label(&hops, table.field_label(&field)),
+            label: String::new(),
+            short_label: String::new(),
             ty: field.ty,
             kind: ColumnKind::Field,
             root: root.id(),
@@ -301,25 +306,7 @@ fn build(
         }
         _ => {}
     }
-    let links: Vec<Link> = hops
-        .iter()
-        .copied()
-        .chain([many])
-        .chain(tail.iter().copied())
-        .collect();
-    let short = field.map_or_else(
-        || Agg::Count.label().to_string(),
-        |f| format!("{} ({})", table.field_label(&f), agg.label()),
-    );
-    let heading = match field {
-        None => format!("{} {}", many.label(), Agg::Count.label().to_lowercase()),
-        Some(f) => format!(
-            "{} {} {}",
-            links.last().expect("many link").label(),
-            lower_first(table.field_label(&f)),
-            agg.label().to_lowercase()
-        ),
-    };
+    let depth = hops.len() + 1 + tail.len();
     let ty = match (agg, field) {
         (Agg::Count, _) => FieldType::Integer,
         (Agg::Avg, _) => FieldType::Float,
@@ -330,14 +317,14 @@ fn build(
     Ok(Column {
         spec: spec.into(),
         id: dom_id(spec),
-        label: label(&links, &short),
-        short_label: heading,
+        label: String::new(),
+        short_label: String::new(),
         ty,
         kind: ColumnKind::Rollup,
         root: root.id(),
         table: table.id(),
         reference: None,
-        depth: links.len(),
+        depth,
         hops,
         many: Some(many),
         time_field: if tail.is_empty() {
@@ -349,6 +336,41 @@ fn build(
         field,
         agg: Some(agg),
     })
+}
+
+impl Column {
+    /// Rebuilds display headings from a field word without changing the resolved path.
+    /// Pass `None` for a count, which has no field.
+    pub fn set_labels(&mut self, word: Option<&str>) {
+        let Some(many) = self.many else {
+            let word = word.expect("resolved field column");
+            self.label = label(&self.hops, word);
+            self.short_label = short_label(&self.hops, word);
+            return;
+        };
+        let agg = self.agg.expect("resolved rollup");
+        let links: Vec<Link> = self
+            .hops
+            .iter()
+            .copied()
+            .chain([many])
+            .chain(self.tail.iter().copied())
+            .collect();
+        let short = word.map_or_else(
+            || Agg::Count.label().to_string(),
+            |word| format!("{} ({})", word, agg.label()),
+        );
+        self.label = label(&links, &short);
+        self.short_label = match word {
+            None => format!("{} {}", many.label(), Agg::Count.label().to_lowercase()),
+            Some(word) => format!(
+                "{} {} {}",
+                links.last().expect("many link").label(),
+                lower_first(word),
+                agg.label().to_lowercase()
+            ),
+        };
+    }
 }
 
 fn label(links: &[Link], short: &str) -> String {

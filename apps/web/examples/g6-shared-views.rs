@@ -276,6 +276,159 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("missing cleared record label")?;
     assert!(label["label"].is_null());
     assert_eq!(label["version"], json!("0:0"));
+    // Field labels (#686): a rename shows in the catalog's columns (list heads,
+    // filters, pickers, exports), by the stable table.field ID, and clearing restores.
+    let catalog_label =
+        |catalog: &bilibi_grid::Catalog| -> Result<String, Box<dyn std::error::Error>> {
+            let root = catalog.table("reference_items").ok_or("missing table")?;
+            Ok(catalog.resolve(root, "quantity")?.label)
+        };
+    {
+        let client = db.get().await?;
+        let before = bilibi_grid::Catalog::for_scope(&**client, &admin).await?;
+        assert_eq!(catalog_label(&before)?, "Quantity");
+    }
+    contracts.submit(&label_call("base.labels.set"), json!({
+        "kind":"field", "subject":"reference_items.quantity", "label":"Stock on hand", "version":"0:0"
+    })).await?;
+    {
+        let client = db.get().await?;
+        let renamed = bilibi_grid::Catalog::for_scope(&**client, &admin).await?;
+        assert_eq!(catalog_label(&renamed)?, "Stock on hand");
+        let other = bilibi_grid::Catalog::for_scope(&**client, &reader).await?;
+        assert_eq!(
+            catalog_label(&other)?,
+            "Stock on hand",
+            "every reader of the tenant sees the rename"
+        );
+        let words = bilibi_grid::RecordWords::load(&**client, &admin, "reference_items").await?;
+        assert_eq!(
+            words.get(&bilibi_ui::RecordField::new(
+                "quantity",
+                "Quantity",
+                bilibi_ui::RecordFieldType::Integer,
+            )),
+            "Stock on hand"
+        );
+        assert_eq!(
+            words.get(&bilibi_ui::RecordField::new(
+                "unknown_field",
+                "Owner word",
+                bilibi_ui::RecordFieldType::String,
+            )),
+            "Owner word"
+        );
+    }
+    let refused = contracts
+        .submit(&label_call("base.labels.set"), json!({
+            "kind":"field", "subject":"reference_items.group_id", "label":"Hidden", "version":"0:0"
+        }))
+        .await;
+    assert!(
+        refused.is_err(),
+        "a hidden or unknown field cannot be renamed"
+    );
+    let listed = contracts
+        .read(
+            &admin,
+            "base.labels.list",
+            &json!({"kind":"field","search":"stock on hand"}),
+        )
+        .await?;
+    let field = listed["result"][0].clone();
+    assert_eq!(field["subject"], json!("reference_items.quantity"));
+    assert_eq!(field["default"], json!("Quantity"));
+    contracts
+        .submit(
+            &label_call("base.labels.clear"),
+            json!({"kind":"field", "subject":"reference_items.quantity", "version":field["version"]}),
+        )
+        .await?;
+    {
+        let client = db.get().await?;
+        let restored = bilibi_grid::Catalog::for_scope(&**client, &admin).await?;
+        assert_eq!(catalog_label(&restored)?, "Quantity");
+    }
+    for (subject, owner_word, tenant_word) in [
+        ("companies.tax_id", "Tax ID", "Tax reference"),
+        ("persons.email", "Personal email", "Mailbox"),
+    ] {
+        contracts
+            .submit(
+                &label_call("base.labels.set"),
+                json!({
+                    "kind":"field", "subject":subject, "label":tenant_word, "version":"0:0"
+                }),
+            )
+            .await?;
+        let (heading, form) = bilibi_web::render_fields(&app, Some(&admin), async {
+            let columns = bilibi_ui::ListColumns::mount(
+                "renderer-proof",
+                vec![BuiltinColumn::new("display-slot", owner_word).grid_field(subject)],
+            )
+            .map_err(|_| bilibi_database::Error::Internal)?;
+            let table = bilibi_ui::FlexTable::new("renderer-list", columns.flex_columns(), vec![]);
+            let field = bilibi_ui::Field::in_form("create", "input_key")
+                .grid_field(subject)
+                .label(owner_word);
+            let form = bilibi_ui::Form {
+                id: "renderer-create",
+                body: bilibi_ui::Html::render(&field)
+                    .map_err(|_| bilibi_database::Error::Internal)?,
+                ..bilibi_ui::Form::default()
+            };
+            Ok((
+                bilibi_ui::Html::render(&table)
+                    .map_err(|_| bilibi_database::Error::Internal)?
+                    .to_string(),
+                bilibi_ui::Html::render(&form)
+                    .map_err(|_| bilibi_database::Error::Internal)?
+                    .to_string(),
+            ))
+        })
+        .await?;
+        assert!(
+            heading.contains(tenant_word),
+            "the shared list heading uses the saved tenant label for {subject}"
+        );
+        assert!(
+            form.contains(tenant_word),
+            "the shared create-form label uses the saved tenant label for {subject}"
+        );
+        let labels = contracts
+            .read(&admin, "base.labels.list", &json!({"kind":"field"}))
+            .await?;
+        let version = &labels["result"]
+            .as_array()
+            .ok_or("missing labels")?
+            .iter()
+            .find(|label| label["subject"] == subject)
+            .ok_or("missing saved label")?["version"];
+        contracts
+            .submit(
+                &label_call("base.labels.clear"),
+                json!({
+                    "kind":"field", "subject":subject, "version":version,
+                }),
+            )
+            .await?;
+        let restored = bilibi_web::render_fields(&app, Some(&admin), async {
+            Ok(bilibi_ui::ListColumns::mount(
+                "renderer-proof",
+                vec![BuiltinColumn::new("display-slot", owner_word).grid_field(subject)],
+            )
+            .map_err(|_| bilibi_database::Error::Internal)?
+            .flex_columns()[0]
+                .label
+                .clone())
+        })
+        .await?;
+        assert_eq!(
+            restored, owner_word,
+            "clearing restores the owner word on the next render"
+        );
+    }
+    println!("PASS: a field label set by table.field shows in Grid columns for every reader of the tenant, a hidden field is refused, and clearing restores the module's word.");
     println!("PASS: company-scoped roles receive views only in their company; tenant-wide roles receive them everywhere; owners retain visibility; cross-tenant readers cannot see them.");
     println!(
         "PASS: shared-view save/delete and label set/list/clear finish with a one-connection pool."

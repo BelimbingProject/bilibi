@@ -40,6 +40,9 @@ impl LiveState<Scope, Error> for Contact {
                     .handle(request.scope, request.credential, value)
                     .await?;
             }
+            let client = self.detail.pages.db.get().await?;
+            let words = bilibi_grid::RecordWords::load(&**client, request.scope, "persons").await?;
+            drop(client);
             let person = self
                 .detail
                 .pages
@@ -60,7 +63,7 @@ impl LiveState<Scope, Error> for Contact {
                     link,
                     contacts: self
                         .detail
-                        .contacts(request.scope, &person, &self.anchor, false)
+                        .contacts(request.scope, &words, &person, &self.anchor, false)
                         .await?,
                 })?
                 .to_string(),

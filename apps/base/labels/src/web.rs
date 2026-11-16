@@ -41,7 +41,7 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         page_size_param: "per_page".into(),
         filters: BTreeMap::from([(
             "kind".into(),
-            bilibi_ui::Filter::one_of(&["all", "menu", "record"], "all"),
+            bilibi_ui::Filter::one_of(&["all", "menu", "record", "field"], "all"),
         )]),
         omit_blank: vec!["search".into()],
         omit_defaults: true,
@@ -313,7 +313,7 @@ impl Index {
         }
         let header = render(Header {
             title: Html::text("Labels"),
-            subtitle: "Show your own words for menu items and record types. Links and permissions keep working under their old names.",
+            subtitle: "Show your own words for menu items, record types and fields. Links and permissions keep working under their old names.",
             ..Header::default()
         })?;
         let form = self.state.filters_form();
@@ -336,6 +336,7 @@ impl Index {
                         Choice::new("All", "all"),
                         Choice::new("Menu items", "menu"),
                         Choice::new("Record types", "record"),
+                        Choice::new("Fields", "field"),
                     ],
                 ),
             ],
@@ -393,7 +394,7 @@ impl Index {
         table.actions = edits;
         if counts.total_entries == 0 {
             table.empty = Some(TableEmpty::Content(Html::text(
-                "No menu item or record type matches this search.",
+                "No menu item, record type or field matches this search.",
             )));
         }
         let mut body = render(table)?;

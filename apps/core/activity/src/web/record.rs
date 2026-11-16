@@ -811,6 +811,7 @@ impl Detail {
 
     fn inline(
         &self,
+        words: &bilibi_grid::RecordWords,
         a: &Activity,
         key: &str,
         value: impl Into<String>,
@@ -819,7 +820,20 @@ impl Detail {
         let mut field = InlineField::new(
             format!("activity-{}", key.replace('_', "-")),
             key,
-            format!("Edit {}", label(key).to_lowercase()),
+            format!(
+                "Edit {}",
+                words
+                    .field(
+                        match key {
+                            "title" => "subject",
+                            "outcome" => "call_outcome",
+                            "assignee" => "assignee_user_id",
+                            _ => key,
+                        },
+                        label(key)
+                    )
+                    .to_lowercase()
+            ),
             value,
         )
         .version(a.version)
@@ -832,18 +846,27 @@ impl Detail {
     }
     fn choice(
         &self,
+        words: &bilibi_grid::RecordWords,
         a: &Activity,
         key: &str,
         current: (&str, &str),
         options: &[(&str, &str)],
         editable: bool,
     ) -> Result<Html> {
-        let field = self.inline(a, key, current.0, editable);
+        let field = self.inline(words, a, key, current.0, editable);
         let editor = render(
             Field::named(key)
                 .id(format!("activity-{}-editor", key.replace('_', "-")))
                 .label_class("sr-only")
-                .label(label(key))
+                .label(words.field(
+                    match key {
+                        "title" => "subject",
+                        "outcome" => "call_outcome",
+                        "assignee" => "assignee_user_id",
+                        _ => key,
+                    },
+                    label(key),
+                ))
                 .kind(InputKind::Select)
                 .value(current.0)
                 .options(choices(options)),
@@ -856,6 +879,7 @@ impl Detail {
     }
     fn time(
         &self,
+        words: &bilibi_grid::RecordWords,
         clock: &Clock,
         a: &Activity,
         key: &str,
@@ -863,7 +887,7 @@ impl Detail {
         editable: bool,
     ) -> Result<Html> {
         let mut field = self
-            .inline(a, key, clock.local(at), editable)
+            .inline(words, a, key, clock.local(at), editable)
             .input_type("datetime-local");
         if let Some(at) = at {
             field = field.display_value(clock.text(at));
@@ -877,6 +901,7 @@ impl Detail {
     async fn facts(
         &self,
         scope: &Scope,
+        words: &bilibi_grid::RecordWords,
         clock: &Clock,
         a: &Activity,
         series: Option<&crate::Series>,
@@ -893,7 +918,7 @@ impl Detail {
             "Subject",
             "title".into(),
             render(InlineEdit {
-                field: self.inline(a, "title", a.title.clone(), editable),
+                field: self.inline(words, a, "title", a.title.clone(), editable),
             })?,
         ));
         let mut kind = render(Icon {
@@ -909,12 +934,12 @@ impl Detail {
                 .iter()
                 .map(|s| (s.label(), s.code()))
                 .collect();
-            let field = self.inline(a, "status", status.code(), editable);
+            let field = self.inline(words, a, "status", status.code(), editable);
             let editor = render(
                 Field::named("status")
                     .id("activity-status-editor")
                     .label_class("sr-only")
-                    .label("Status")
+                    .label(words.field("status", "Status"))
                     .kind(InputKind::Select)
                     .value(status.code())
                     .options(choices(&options)),
@@ -938,6 +963,7 @@ impl Detail {
                 "Priority",
                 "priority".into(),
                 self.choice(
+                    words,
                     a,
                     "priority",
                     (priority.code(), priority.label()),
@@ -955,6 +981,7 @@ impl Detail {
                 "Direction",
                 "direction".into(),
                 self.choice(
+                    words,
                     a,
                     "direction",
                     (direction.code(), direction.label()),
@@ -968,24 +995,24 @@ impl Detail {
                 items.push((
                     "Starts",
                     "starts_at".into(),
-                    self.time(clock, a, "starts_at", a.starts_at, editable)?,
+                    self.time(words, clock, a, "starts_at", a.starts_at, editable)?,
                 ));
                 items.push((
                     "Ends",
                     "ends_at".into(),
-                    self.time(clock, a, "ends_at", a.ends_at, editable)?,
+                    self.time(words, clock, a, "ends_at", a.ends_at, editable)?,
                 ));
             }
             Kind::Task => {
                 items.push((
                     "Due",
                     "due_at".into(),
-                    self.time(clock, a, "due_at", a.due_at, editable)?,
+                    self.time(words, clock, a, "due_at", a.due_at, editable)?,
                 ));
                 items.push((
                     "Start",
                     "start_at".into(),
-                    self.time(clock, a, "start_at", a.start_at, editable)?,
+                    self.time(words, clock, a, "start_at", a.start_at, editable)?,
                 ));
             }
             Kind::Note => {}
@@ -997,7 +1024,7 @@ impl Detail {
                 ("Meeting type", "meeting_type", a.meeting_type.clone()),
             ] {
                 let mut field = self
-                    .inline(a, key, value.unwrap_or_default(), editable)
+                    .inline(words, a, key, value.unwrap_or_default(), editable)
                     .allow_empty();
                 if key == "join_url" {
                     field = field.input_type("url");
@@ -1012,6 +1039,7 @@ impl Detail {
                 render(InlineEdit {
                     field: self
                         .inline(
+                            words,
                             a,
                             "outcome",
                             a.outcome.clone().unwrap_or_default(),
@@ -1031,6 +1059,7 @@ impl Detail {
             "Assigned to",
             "assignee".into(),
             self.choice(
+                words,
                 a,
                 "assignee",
                 (&assignee, &assignee_name),
@@ -1048,6 +1077,7 @@ impl Detail {
             "Who can see it",
             "shared".into(),
             self.choice(
+                words,
                 a,
                 "shared",
                 (visibility, visibility_label),
@@ -1066,6 +1096,7 @@ impl Detail {
                 "Reminders",
                 "reminders".into(),
                 self.choice(
+                    words,
                     a,
                     "reminders",
                     (&reminder_choices::code(own), &reminder_choices::label(own)),
@@ -1077,6 +1108,7 @@ impl Detail {
                 "Email reminders",
                 "reminder-email".into(),
                 self.choice(
+                    words,
                     a,
                     "reminder_email",
                     (
@@ -1130,7 +1162,21 @@ impl Detail {
         let facts: Vec<Fact> = items
             .into_iter()
             .zip(&ids)
-            .map(|((title, _, value), id)| Fact { title, id, value })
+            .map(|((title, key, value), id)| Fact {
+                title: words.field(
+                    match key.as_str() {
+                        "title" => "subject",
+                        "outcome" => "call_outcome",
+                        "assignee" => "assignee_user_id",
+                        "created-by" => "created_by",
+                        "closed" => "closed_at",
+                        _ => key.as_str(),
+                    },
+                    title,
+                ),
+                id,
+                value,
+            })
             .collect();
         render(Facts {
             id: "activity-facts",
@@ -1527,6 +1573,10 @@ impl Detail {
     }
 
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "activities").await?;
+        drop(client);
+
         let clock = Clock::new(&self.pages, scope, self.zone.zone.as_deref()).await?;
         let a = self.pages.activities.get(scope, self.id).await?;
         let editable = self.pages.activities.may_edit(scope, &a).await?;
@@ -1609,7 +1659,7 @@ impl Detail {
         })?;
         details.push(
             &self
-                .facts(scope, &clock, &a, series.as_ref(), editable)
+                .facts(scope, &words, &clock, &a, series.as_ref(), editable)
                 .await?,
         );
         body.push(&render(Card {
@@ -1630,6 +1680,7 @@ impl Detail {
             render(InlineLongText {
                 field: self
                     .inline(
+                        &words,
                         &a,
                         "description",
                         a.description.clone().unwrap_or_default(),
@@ -1646,6 +1697,7 @@ impl Detail {
                 render(InlineLongText {
                     field: self
                         .inline(
+                            &words,
                             &a,
                             "internal_notes",
                             a.internal_notes.clone().unwrap_or_default(),
@@ -1750,6 +1802,7 @@ impl Detail {
             body.push(&dialog.render(
                 &self.pages,
                 &clock,
+                &words,
                 "activity-new",
                 "close_modal",
                 self.framed,

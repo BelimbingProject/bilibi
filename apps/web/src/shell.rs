@@ -615,17 +615,19 @@ async fn permits(app: &App, scope: &Scope, access: Access) -> Result<bool> {
 async fn render_embed(app: &App, scope: &Scope, embed: &Embed) -> Result<Html> {
     let service: Arc<PageService<Scope, Error>> = app.services.get(embed.service)?;
     let empty = HashMap::new();
-    let body = service
-        .0
-        .render(PageRequest {
+    let body = crate::render_fields(
+        app,
+        Some(scope),
+        service.0.render(PageRequest {
             operation: embed.operation,
             scope: Some(scope),
             path: &empty,
             query: &empty,
             body: &[],
             framed: false,
-        })
-        .await?;
+        }),
+    )
+    .await?;
     // The owner rendered and escaped it, as for a page body.
     Ok(Html::raw(body.html))
 }
