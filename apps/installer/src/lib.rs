@@ -141,6 +141,13 @@ impl Installer {
     /// One job, if there is one for this worker: first the one it was running
     /// when last stopped, then the oldest waiting. True when it did some work.
     async fn scan(&self, client: &mut Client) -> Result<bool, tokio_postgres::Error> {
+        let result = self.scan_job(client).await;
+        client
+            .batch_execute("SELECT pg_advisory_unlock_all()")
+            .await?;
+        result
+    }
+    async fn scan_job(&self, client: &mut Client) -> Result<bool, tokio_postgres::Error> {
         if self.finish_cut_off_restores(&*client).await? {
             return Ok(true);
         }
@@ -235,7 +242,11 @@ impl Installer {
                 "job {id}: a restore was cut off by a restart; finishing it from {}",
                 dump.display()
             );
-            let _ = self.service.stop();
+            jobs::lock_installation(client).await?;
+            if let Err(why) = self.service.stop() {
+                eprintln!("bilibi-installer: job {id}: {why}");
+                return Ok(true);
+            }
             if let Err(why) = backup::restore(client, &self.pg, &dump, "", &history).await {
                 eprintln!("bilibi-installer: job {id}: the cut-off restore failed: {why}");
                 backup::set_aside(&history);

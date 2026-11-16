@@ -28,7 +28,7 @@ impl Instances {
         let mut client = self.db.get().await?;
         let tx = client.transaction().await?;
         tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))",
             &[&"base/system.installation-mode"],
         )
         .await?;

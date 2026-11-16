@@ -222,7 +222,7 @@ impl<'a> Run<'a> {
     async fn settle_clean_failure(&mut self) -> Db<()> {
         let mut message = format!("Nothing changed. {}.", self.failure_reason());
         if self.job.paused && self.service.state() != "active" {
-            let started = match self.service.start() {
+            let started = match self.start_current().await {
                 Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                 Err(why) => Err(why),
             };
@@ -274,6 +274,7 @@ impl<'a> Run<'a> {
     pub async fn resume(&mut self) -> Db<bool> {
         let paused = self.job.paused;
         if paused {
+            jobs::lock_installation(&*self.client).await?;
             // From the first moment: nothing may be entered while the
             // database is being decided on.
             if let Err(reason) = self.service.stop() {
@@ -302,7 +303,7 @@ impl<'a> Run<'a> {
         }
         if self.update_committed().await? {
             if self.is_done("switch") {
-                let answered = match self.service.start() {
+                let answered = match self.start_current().await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -314,7 +315,7 @@ impl<'a> Run<'a> {
             }
             return Ok(false);
         }
-        let back = match self.service.start() {
+        let back = match self.start_current().await {
             Ok(()) => match self.service.wait_healthy(HEALTH_LIMIT).await {
                 Ok(_) => "The release that was in service is back and answers.".to_owned(),
                 Err(why) => format!("The release that was in service was started again but does not answer: {why}. Check the service."),
@@ -459,7 +460,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching to release {release}"))
                 .await?;
-            if let Err(reason) = self.switch_to(release) {
+            if let Err(reason) = self.switch_to(release).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -740,34 +741,9 @@ impl<'a> Run<'a> {
         let mode = jobs::installation_mode(&*self.client)
             .await
             .map_err(|error| jobs::short(&error))?;
-        if !matches!(mode.as_str(), "shared" | "isolated") {
+        let candidate = composition::admit(&status, &mode).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
-            return Err("The installation mode is invalid. The installation owner must save Shared service or Isolated installation before another release can be installed.".into());
-        }
-        let candidate = composition::parse(&status);
-        if candidate["extensions"]
-            .as_array()
-            .is_some_and(|extensions| {
-                extensions.iter().any(|extension| {
-                    !matches!(extension["code"].as_str(), Some("reviewed" | "customer"))
-                })
-            })
-        {
-            let _ = fs::remove_dir_all(&dst);
-            return Err("The release has an Extension without a reviewed or customer code declaration. Prepare the release again with the current composition checks.".into());
-        }
-        if mode == "shared"
-            && candidate["extensions"]
-                .as_array()
-                .is_some_and(|extensions| {
-                    extensions
-                        .iter()
-                        .any(|extension| extension["code"] == "customer")
-                })
-        {
-            let _ = fs::remove_dir_all(&dst);
-            return Err("This server is a Shared service, so the release may not contain customer code Extensions. Prepare a code-free release first.".into());
-        }
+        })?;
         let plugins = layout::read_plugins(&dst).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
         })?;
@@ -816,6 +792,9 @@ impl<'a> Run<'a> {
     }
     /// The pause begins: stop the service, then dump the database.
     async fn backup(&mut self) -> Result<Value, String> {
+        jobs::lock_installation(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
         self.service.stop()?;
         let paused_epoch = jobs::epoch(&*self.client)
             .await
@@ -841,7 +820,7 @@ impl<'a> Run<'a> {
     async fn migrate(&self, release: u64, before: i64) -> Result<Value, String> {
         let program = self.layout.release(release).join("bilibi-web");
         self.service.stop()?;
-        run_program(&program, "installation-check", MIGRATE_LIMIT_SECONDS)?;
+        self.admit_release(release).await?;
         run_program(&program, "migrate", MIGRATE_LIMIT_SECONDS)?;
         run_program(&program, "seed-production", "600")?;
         let after = jobs::ledger_count(&*self.client)
@@ -854,7 +833,23 @@ impl<'a> Run<'a> {
             "ledger_before": before, "applied": applied, "migrated": applied > 0,
         }))
     }
-    fn switch_to(&self, release: u64) -> Result<(), String> {
+    async fn admit_release(&self, release: u64) -> Result<(), String> {
+        let status = program_status(&self.layout.release(release))?;
+        let mode = jobs::installation_mode(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
+        composition::admit(&status, &mode)?;
+        Ok(())
+    }
+    async fn start_current(&self) -> Result<(), String> {
+        let release = self
+            .layout
+            .current()
+            .ok_or("There is no current release to start.")?;
+        self.admit_release(release).await?;
+        self.service.start()
+    }
+    async fn switch_to(&self, release: u64) -> Result<(), String> {
         if !self.layout.release(release).join("bilibi-web").is_file() {
             return Err(format!(
                 "release {release} is missing from {}",
@@ -862,11 +857,7 @@ impl<'a> Run<'a> {
             ));
         }
         self.service.stop()?;
-        run_program(
-            &self.layout.release(release).join("bilibi-web"),
-            "installation-check",
-            MIGRATE_LIMIT_SECONDS,
-        )?;
+        self.admit_release(release).await?;
         self.layout
             .point_current(release)
             .map_err(|error| format!("could not point current at release {release}: {error}"))?;
@@ -879,7 +870,7 @@ impl<'a> Run<'a> {
         if matches!(self.state("switch_back"), "done" | "failed") {
             let mut result = self.detail("switch_back");
             if self.is_done("switch_back") {
-                let answered = match self.service.start() {
+                let answered = match self.start_current().await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -952,7 +943,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        let answered = match self.switch_to(back.to) {
+        let answered = match self.switch_to(back.to).await {
             Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
             Err(why) => Err(why),
         };
@@ -1136,7 +1127,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching back to release {previous}"))
                 .await?;
-            if let Err(reason) = self.switch_to(previous) {
+            if let Err(reason) = self.switch_to(previous).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }

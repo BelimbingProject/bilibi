@@ -29,6 +29,8 @@ You may already have questions: what if the new release does not work, what does
 | **Switch to the new program** | Stop the service, recheck admission, then point `releases/current` at the new release (the instance's `current` is a fixed link to it) and start the service. | **Switch back by itself.** See below. |
 | **Check that it works** | Wait up to 60 seconds for the program to answer on its own port. | **Switch back by itself.** See below. |
 
+Both installer paths admit targets from their `status` composition metadata, never by requiring a target-specific admission command. A release declaring no mounted Extensions remains admissible even when it predates installation policy. Missing or invalid Extension declarations fail closed. After any approval wait, a shared PostgreSQL advisory lock on `base/system.installation-mode` fences owner mode changes until the update or recovery finishes; startup readers share that lock. Resumed jobs reacquire it and reread admission before executing migrations or starting a release. Every completed or failed job releases its session locks; connection loss releases them in PostgreSQL.
+
 ### Going back
 
 When the switch or the check fails, or the database update failed after it changed the database, the installer adds a step to the job, **Switch back to release N**, and does this in it: stop, restore the backup if the database changed shape, point `current` at the previous release, start it, check that it answers. The step records what it did, so the page shows it and a restart in the middle can finish it. When the instance was never restarted during the job, nothing entered is lost, because the instance was paused the whole time.
