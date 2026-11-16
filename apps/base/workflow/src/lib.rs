@@ -24,9 +24,8 @@ pub use approval::{
     ApprovalOutcome, ApprovalSubject, ApprovalSummary, ApprovalVote,
 };
 pub use approval_contract::{
-    approval_decision_schema, approval_delegation_schema, approval_policy_schema,
-    approval_recall_schema, approval_review_schema, approval_revoke_schema, ApprovalContract,
-    ApprovalContractKind,
+    ApprovalContract, ApprovalContractKind, approval_decision_schema, approval_delegation_schema,
+    approval_policy_schema, approval_recall_schema, approval_review_schema, approval_revoke_schema,
 };
 pub use approval_policy::{
     ApprovalComparison, ApprovalCondition, ApprovalFact, ApprovalFactKind, ApprovalMode,
@@ -39,8 +38,8 @@ pub use approval_store::{
 use bilibi_database::{Change, Result};
 use bilibi_tenancy::Scope;
 pub use definitions::{
-    Action, Contribution, Edge, Flow, Guard, HumanAction, HumanActionHandler, HumanOutcome,
-    OwnedSubject, Registry, Status, Transition, CONTRIBUTIONS,
+    Action, CONTRIBUTIONS, Contribution, Edge, Flow, Guard, HumanAction, HumanActionHandler,
+    HumanOutcome, OwnedSubject, Registry, Status, Transition,
 };
 pub const SERVICE: &str = "base/workflow.engine";
 pub use engine::{Engine, Request};
@@ -163,7 +162,8 @@ inventory::submit! { bilibi_module_registry::Module {
         ("base-workflow-005-approvals", include_str!("../migrations/005-approvals.sql")),
         ("base-workflow-006-approval-controls",include_str!("../migrations/006-approval-controls.sql")),
         ("base-workflow-007-approval-exception-context",include_str!("../migrations/007-approval-exception-context.sql")),
-        ("base-workflow-008-maintenance-bounds",include_str!("../migrations/008-maintenance-bounds.sql"))],
+        ("base-workflow-008-maintenance-bounds",include_str!("../migrations/008-maintenance-bounds.sql")),
+        ("base-workflow-009-outbox-failure",include_str!("../migrations/009-outbox-failure.sql"))],
     services:&[bilibi_module_registry::Service {id:"base/workflow.engine",factory:|services| {
         Ok(Arc::new(Engine::new(
             services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),

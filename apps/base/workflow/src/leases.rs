@@ -3,11 +3,9 @@
 //! leases and timers on the saved graph, and leases the item only if it is
 //! still available. Every later worker call carries the claim's token.
 use super::*;
-use coordination::{finish_item, reason_text, Finish};
+use coordination::{Finish, finish_item, reason_text};
 
-/// Candidates refused under their lock are skipped; the claim gives up after
-/// this many, so retained unsupported runs never starve supported work.
-const CLAIM_ATTEMPTS: usize = 8;
+const CLAIM_CANDIDATES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,9 +197,9 @@ impl Engine {
         }
         let (mut skipped_items, mut skipped_runs): (Vec<i64>, Vec<i64>) = (Vec::new(), Vec::new());
         let mut client = self.db.get().await?;
-        for _ in 0..CLAIM_ATTEMPTS {
+        for _ in 0..CLAIM_CANDIDATES {
             // Unlocked selection: the database never chooses a lock order.
-            let candidate = client.query_opt("SELECT w.id,r.id FROM base_workflow_process_work_items w JOIN base_workflow_process_runs r ON r.id=w.run_id WHERE r.tenant_id=$1 AND w.tenant_id=$1 AND r.status='running' AND r.last_error IS NULL AND r.available_at<=now() AND NOT w.id=ANY($2) AND NOT r.id=ANY($3) AND ((w.status IN ('available','pending') AND w.available_at<=now()) OR (w.status='leased' AND w.lease_expires_at<=now())) AND (r.definition_key,r.definition_version,r.definition_fingerprint) IN (SELECT * FROM unnest($4::text[],$5::integer[],$6::text[])) AND ($7::text IS NULL OR r.definition_key=$7) AND ($8::text[] IS NULL OR w.executor_key=ANY($8)) AND ($9::bigint[] IS NULL OR r.id=ANY($9)) ORDER BY r.priority DESC,w.priority DESC,w.available_at,w.id LIMIT 1", &[&scope.tenant(),&skipped_items,&skipped_runs,&keys,&versions,&fingerprints,&options.definition_key,&options.executor_keys,&options.run_ids]).await?;
+            let candidate = client.query_opt("SELECT w.id,r.id FROM base_workflow_process_work_items w JOIN base_workflow_process_runs r ON r.id=w.run_id WHERE r.tenant_id=$1 AND w.tenant_id=$1 AND w.executor_key<>'approval.wait' AND r.status='running' AND r.last_error IS NULL AND r.available_at<=now() AND NOT w.id=ANY($2) AND NOT r.id=ANY($3) AND ((w.status IN ('available','pending') AND w.available_at<=now()) OR (w.status='leased' AND w.lease_expires_at<=now())) AND (r.definition_key,r.definition_version,r.definition_fingerprint) IN (SELECT * FROM unnest($4::text[],$5::integer[],$6::text[])) AND ($7::text IS NULL OR r.definition_key=$7) AND ($8::text[] IS NULL OR w.executor_key=ANY($8)) AND ($9::bigint[] IS NULL OR r.id=ANY($9)) ORDER BY r.priority DESC,w.priority DESC,w.available_at,w.id LIMIT 1", &[&scope.tenant(),&skipped_items,&skipped_runs,&keys,&versions,&fingerprints,&options.definition_key,&options.executor_keys,&options.run_ids]).await?;
             let Some(candidate) = candidate else {
                 return Ok(None);
             };

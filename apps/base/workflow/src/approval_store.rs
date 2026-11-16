@@ -8,7 +8,7 @@ use crate::{
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_tenancy::{Channel, Scope};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{Row, Transaction};
@@ -952,6 +952,9 @@ impl Engine {
         saved: ApprovalRequest,
         ids: &ApprovalIdentities,
     ) -> Result<ApprovalItem> {
+        if saved.state != "awaiting" {
+            return Err(Error::Conflict);
+        }
         let case = saved.enforce(self.approval_case(&saved.case)?)?;
         if case.forbid_impersonation && scope.impersonator().is_some() {
             return Err(Error::Forbidden);
@@ -1552,16 +1555,26 @@ impl Engine {
             let candidates = match self.approval_maintenance_page(tenant, limit).await {
                 Ok(ids) => ids,
                 Err(Error::Forbidden | Error::Unauthorized | Error::NotFound) => {
-                    eprintln!("workflow approval maintenance unavailable in tenant {tenant}: grant or tenant unavailable");
+                    eprintln!(
+                        "workflow approval maintenance unavailable in tenant {tenant}: grant or tenant unavailable"
+                    );
                     continue;
                 }
                 Err(e) => return Err(e),
             };
             for id in candidates {
-                match self.maintain_approval(tenant,id).await {
-                    Ok(())=>{},
-                    Err(Error::Forbidden|Error::NotFound|Error::Invalid|Error::Unauthorized|Error::Conflict)=>eprintln!("workflow approval maintenance deferred request {id}: permission, owner or routing unavailable"),
-                    Err(e)=>return Err(e),
+                match self.maintain_approval(tenant, id).await {
+                    Ok(()) => {}
+                    Err(
+                        Error::Forbidden
+                        | Error::NotFound
+                        | Error::Invalid
+                        | Error::Unauthorized
+                        | Error::Conflict,
+                    ) => eprintln!(
+                        "workflow approval maintenance deferred request {id}: permission, owner or routing unavailable"
+                    ),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -1674,12 +1687,38 @@ impl Engine {
             .await?;
         live_policy.validate(&case)?;
         policy.validate(&case)?;
+        let mut due = Vec::new();
+        for seat in &stage.seats {
+            if tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_decisions WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4)",&[&tenant,&id,&stage.key,&seat.key]).await?.get::<_,bool>(0){continue;}
+            let escalated:bool=tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_notices WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4 AND notice_key='escalated')",&[&tenant,&id,&stage.key,&seat.key]).await?.get(0);
+            let escalate = !escalated
+                && seat
+                    .escalation_hours
+                    .is_some_and(|hours| elapsed >= i64::from(hours));
+            let reminder = seat
+                .reminder_hours
+                .filter(|hours| elapsed >= i64::from(*hours))
+                .map(|hours| elapsed / i64::from(hours));
+            if !escalate && reminder.is_none() {
+                continue;
+            }
+            let notice_key = if escalate {
+                "escalated".into()
+            } else {
+                format!("reminder:{}", reminder.unwrap_or(0))
+            };
+            if !escalate && tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_notices WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4 AND routing_version=$5 AND notice_key=$6)",&[&tenant,&id,&stage.key,&seat.key,&saved.routing_version,&notice_key]).await?.get::<_,bool>(0) {
+                continue;
+            }
+            due.push((seat, escalated, escalate, notice_key));
+        }
+        if due.is_empty() {
+            return Ok(());
+        }
         let mut routed = Vec::new();
         let mut seat_routes = serde_json::Map::new();
-        for seat in &stage.seats {
-            if tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_decisions WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4)",&[&tenant,&id,&stage.key,&seat.key]).await?.get::<_,bool>(0) {continue;}
-            let escalated:bool=tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_notices WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4 AND notice_key='escalated')",&[&tenant,&id,&stage.key,&seat.key]).await?.get(0);
-            let selector = if escalated {
+        for (seat, escalated, _, _) in &due {
+            let selector = if *escalated {
                 seat.escalation.as_ref().ok_or(Error::Invalid)?
             } else {
                 &seat.selector
@@ -1727,10 +1766,12 @@ impl Engine {
         if previous.is_none()
             || seat_routes.iter().any(|(key, now)| {
                 let before = seats.get(key).and_then(Value::as_array).map(|holders| {
-                    json!(holders
-                        .iter()
-                        .filter(|a| a.as_i64().is_none_or(|a| !decided.contains(&a)))
-                        .collect::<Vec<_>>())
+                    json!(
+                        holders
+                            .iter()
+                            .filter(|a| a.as_i64().is_none_or(|a| !decided.contains(&a)))
+                            .collect::<Vec<_>>()
+                    )
                 });
                 before.as_ref() != Some(now)
             })
@@ -1770,25 +1811,7 @@ impl Engine {
                 )
                 .await?,
         )?;
-        for seat in &stage.seats {
-            if tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_decisions WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4)",&[&tenant,&id,&stage.key,&seat.key]).await?.get::<_,bool>(0){continue;}
-            let escalated:bool=tx.sql().query_one("SELECT EXISTS(SELECT 1 FROM base_workflow_approval_notices WHERE tenant_id=$1 AND request_id=$2 AND stage_key=$3 AND seat_key=$4 AND notice_key='escalated')",&[&tenant,&id,&stage.key,&seat.key]).await?.get(0);
-            let escalate = !escalated
-                && seat
-                    .escalation_hours
-                    .is_some_and(|hours| elapsed >= i64::from(hours));
-            let reminder = seat
-                .reminder_hours
-                .filter(|hours| elapsed >= i64::from(*hours))
-                .map(|hours| elapsed / i64::from(hours));
-            if !escalate && reminder.is_none() {
-                continue;
-            }
-            let notice_key = if escalate {
-                "escalated".into()
-            } else {
-                format!("reminder:{}", reminder.unwrap_or(0))
-            };
+        for (seat, escalated, escalate, notice_key) in due {
             let selector = if escalate || escalated {
                 seat.escalation.as_ref().ok_or(Error::Invalid)?
             } else {
@@ -1911,7 +1934,7 @@ impl Engine {
                     // staff capability, whatever its grants say (ADR 16).
                     Ok(i) if i.kind == bilibi_tenancy::AccountKind::Staff => i,
                     Ok(_) | Err(Error::Unauthorized | Error::NotFound | Error::Forbidden) => {
-                        continue
+                        continue;
                     }
                     Err(e) => return Err(e),
                 };
@@ -1944,7 +1967,7 @@ impl Engine {
                         {
                             Ok(i) => i,
                             Err(Error::Unauthorized | Error::NotFound | Error::Forbidden) => {
-                                continue
+                                continue;
                             }
                             Err(e) => return Err(e),
                         };
