@@ -22,8 +22,7 @@ pub fn trimmed(value: Option<&str>) -> Option<&str> {
     value.map(str::trim)
 }
 
-/// The default most characters one posted text value may hold: the bound
-/// [`form_values`] and [`string_values`] apply, and the usual `limit` for
+/// The default most characters one posted text value may hold: the usual `limit` for
 /// [`form_values_checked`] and [`string_values_checked`].
 pub const FIELD_LIMIT: usize = 1024;
 

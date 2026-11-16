@@ -450,7 +450,6 @@ impl Detail {
     /// outcome on its fact; `true` when it was saved. A record field's
     /// refusal is the contract's own sentence (never the id); another
     /// field's repeats what was typed.
-    #[allow(clippy::too_many_arguments)]
     async fn save_custom(
         &mut self,
         scope: &Scope,
