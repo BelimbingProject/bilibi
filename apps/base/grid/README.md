@@ -77,7 +77,7 @@ A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declaratio
 
 The Web host calls `render_labels` for initial pages, mounts and live fragments. Grid maps tenant overrides to visible Grid identities and registered record-field vocabulary through each field's declared column path. Shared controls consume the resulting map through [UI's tenant field labels](../ui/README.md#tenant-field-labels).
 
-`Catalog::resolve` applies the tenant's field overrides automatically. The lower-level `column::resolve` takes a label callback; pass `|table, field| catalog.field_name(table, field)` for tenant words or `|_, _| None` for module defaults. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.
+`Catalog::resolve` applies the tenant's field overrides automatically. The lower-level `column::resolve` resolves structural paths with module defaults; use `Catalog::resolve` for tenant words. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.
 
 For fact titles, inline editors and other labels outside shared controls, load `RecordWords::load(client, scope, table)` once per render. `words.get(&field)` looks up the registered vocabulary, then the field ID, and falls back to `field.label`. `words.field(id, default)` handles a Grid field without record vocabulary. Load words for the owning table, including when a page contains another table's fields; DOM IDs and input names are not field identities.
 

@@ -263,9 +263,10 @@ impl RecordWords {
             })
             .collect();
         for field in &root.record_fields {
-            let Some(column) = field.column.and_then(|path| {
-                column::resolve(path, root, &|id| installed.table(id), &|_, _| None).ok()
-            }) else {
+            let Some(column) = field
+                .column
+                .and_then(|path| column::resolve(path, root, &|id| installed.table(id)).ok())
+            else {
                 continue;
             };
             let Some(word) = column
@@ -307,8 +308,7 @@ pub async fn render_labels(
         }
         for field in &root.record_fields {
             if let Some(word) = field.column.and_then(|path| {
-                let column =
-                    column::resolve(path, root, &|id| installed.table(id), &|_, _| None).ok()?;
+                let column = column::resolve(path, root, &|id| installed.table(id)).ok()?;
                 names.get(column.table, column.field.as_ref()?.id)
             }) {
                 words.insert(field.vocabulary.to_owned(), word.to_owned());

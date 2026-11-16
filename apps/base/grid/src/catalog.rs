@@ -186,9 +186,7 @@ impl Catalog {
                 let Some(path) = record_field.column else {
                     continue;
                 };
-                let Ok(column) =
-                    column::resolve(path, root, &|id| installed.table(id), &|_, _| None)
-                else {
+                let Ok(column) = column::resolve(path, root, &|id| installed.table(id)) else {
                     continue;
                 };
                 if let Some(field) = column.field {
@@ -463,9 +461,13 @@ impl Catalog {
     /// or average of a field this account sees masked is refused: over one
     /// linked row it is the hidden value, and narrow rollups give it away.
     pub fn resolve(&self, root: &Table, spec: &str) -> Result<Column, ColumnError> {
-        let column = column::resolve(spec, root, &|id| self.table(id), &|table, field| {
-            self.field_name(table, field)
-        })?;
+        let mut column = column::resolve(spec, root, &|id| self.table(id))?;
+        if let Some(word) = column
+            .field
+            .and_then(|field| self.field_name(column.table, field.id))
+        {
+            column.set_labels(Some(&word));
+        }
         if matches!(column.agg, Some(Agg::Sum | Agg::Avg)) && self.mask(&column).is_some() {
             return Err(ColumnError::MaskedAggregate);
         }

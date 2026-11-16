@@ -405,7 +405,7 @@ fn resolved_grid_alias(
     let root = installed
         .table("companies")
         .ok_or_else(|| "Company's Grid table is not installed".to_owned())?;
-    let column = bilibi_grid::column::resolve(path, root, &|id| installed.table(id), &|_, _| None)
+    let column = bilibi_grid::column::resolve(path, root, &|id| installed.table(id))
         .map_err(|error| format!("invalid Company Extension field Grid path {path:?}: {error}"))?;
     if column.kind != bilibi_grid::ColumnKind::Field
         || column.many.is_some()
@@ -540,18 +540,14 @@ pub(crate) fn validate_grid() -> bilibi_module_registry::Result<()> {
                 field.id
             )));
         }
-        let column = bilibi_grid::column::resolve(
-            field.grid_column,
-            root,
-            &|id| installed.table(id),
-            &|_, _| None,
-        )
-        .map_err(|error| {
-            RegistryError::Contribution(format!(
-                "Company field {} has an invalid Grid path: {error}",
-                field.id
-            ))
-        })?;
+        let column =
+            bilibi_grid::column::resolve(field.grid_column, root, &|id| installed.table(id))
+                .map_err(|error| {
+                    RegistryError::Contribution(format!(
+                        "Company field {} has an invalid Grid path: {error}",
+                        field.id
+                    ))
+                })?;
         let expected = match field.kind {
             CompanyFieldKind::Text { .. } => bilibi_grid::FieldType::String,
             CompanyFieldKind::Date => bilibi_grid::FieldType::Date,

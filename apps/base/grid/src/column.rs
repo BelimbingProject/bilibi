@@ -208,14 +208,10 @@ struct Walk {
 /// Resolves `spec` against `root`, with `fetch` returning a visible table by id.
 /// Every table on the path must be visible, so a path through a table the account
 /// may not read fails exactly as an unknown one does.
-///
-/// `names` answers a tenant's own word for a field by table and field ID
-/// (`None` keeps the module's label); it never changes a spec or an ID.
 pub fn resolve<'a>(
     spec: &str,
     root: &Table,
     fetch: &dyn Fn(&str) -> Option<&'a Table>,
-    names: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Column, ColumnError> {
     let parsed = parse(spec)?;
     let mut walk = Walk::default();
@@ -246,7 +242,9 @@ pub fn resolve<'a>(
             });
         }
     }
-    build(spec, root, table, walk, parsed.agg, names)
+    let mut column = build(spec, root, table, walk, parsed.agg)?;
+    column.set_labels(column.field.map(|field| table.field_label(&field)));
+    Ok(column)
 }
 
 fn build(
@@ -255,7 +253,6 @@ fn build(
     table: &Table,
     walk: Walk,
     agg: Option<Agg>,
-    names: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Column, ColumnError> {
     let Walk {
         hops,
@@ -263,9 +260,6 @@ fn build(
         tail,
         field,
     } = walk;
-    // The field's word: the tenant's, or the module's.
-    let word =
-        |field: &Field| names(table.id(), field.id).unwrap_or_else(|| table.field_label(field).to_owned());
     let Some(many) = many else {
         let field = field.ok_or(ColumnError::NoField)?;
         if agg.is_some() {
@@ -274,8 +268,8 @@ fn build(
         return Ok(Column {
             spec: spec.into(),
             id: dom_id(spec),
-            label: label(&hops, &word(&field)),
-            short_label: short_label(&hops, &word(&field)),
+            label: String::new(),
+            short_label: String::new(),
             ty: field.ty,
             kind: ColumnKind::Field,
             root: root.id(),
@@ -309,25 +303,7 @@ fn build(
         }
         _ => {}
     }
-    let links: Vec<Link> = hops
-        .iter()
-        .copied()
-        .chain([many])
-        .chain(tail.iter().copied())
-        .collect();
-    let short = field.map_or_else(
-        || Agg::Count.label().to_string(),
-        |f| format!("{} ({})", word(&f), agg.label()),
-    );
-    let heading = match field {
-        None => format!("{} {}", many.label(), Agg::Count.label().to_lowercase()),
-        Some(f) => format!(
-            "{} {} {}",
-            links.last().expect("many link").label(),
-            lower_first(&word(&f)),
-            agg.label().to_lowercase()
-        ),
-    };
+    let depth = hops.len() + 1 + tail.len();
     let ty = match (agg, field) {
         (Agg::Count, _) => FieldType::Integer,
         (Agg::Avg, _) => FieldType::Float,
@@ -338,14 +314,14 @@ fn build(
     Ok(Column {
         spec: spec.into(),
         id: dom_id(spec),
-        label: label(&links, &short),
-        short_label: heading,
+        label: String::new(),
+        short_label: String::new(),
         ty,
         kind: ColumnKind::Rollup,
         root: root.id(),
         table: table.id(),
         reference: None,
-        depth: links.len(),
+        depth,
         hops,
         many: Some(many),
         time_field: if tail.is_empty() {
@@ -357,6 +333,41 @@ fn build(
         field,
         agg: Some(agg),
     })
+}
+
+impl Column {
+    /// Rebuilds display headings from a field word without changing the resolved path.
+    /// Pass `None` for a count, which has no field.
+    pub fn set_labels(&mut self, word: Option<&str>) {
+        let Some(many) = self.many else {
+            let word = word.expect("resolved field column");
+            self.label = label(&self.hops, word);
+            self.short_label = short_label(&self.hops, word);
+            return;
+        };
+        let agg = self.agg.expect("resolved rollup");
+        let links: Vec<Link> = self
+            .hops
+            .iter()
+            .copied()
+            .chain([many])
+            .chain(self.tail.iter().copied())
+            .collect();
+        let short = word.map_or_else(
+            || Agg::Count.label().to_string(),
+            |word| format!("{} ({})", word, agg.label()),
+        );
+        self.label = label(&links, &short);
+        self.short_label = match word {
+            None => format!("{} {}", many.label(), Agg::Count.label().to_lowercase()),
+            Some(word) => format!(
+                "{} {} {}",
+                links.last().expect("many link").label(),
+                lower_first(word),
+                agg.label().to_lowercase()
+            ),
+        };
+    }
 }
 
 fn label(links: &[Link], short: &str) -> String {
