@@ -243,7 +243,10 @@ pub fn resolve<'a>(
         }
     }
     let mut column = build(spec, root, table, walk, parsed.agg)?;
-    column.set_labels(column.field.map(|field| table.field_label(&field)));
+    let word = column
+        .field
+        .map(|field| table.field_label(&field).to_owned());
+    column.set_labels(word.as_deref());
     Ok(column)
 }
 
