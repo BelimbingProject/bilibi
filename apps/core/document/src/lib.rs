@@ -1267,33 +1267,46 @@ impl Documents {
             .await
     }
 
-    /// A page of the documents shared with the signed-in portal customer
-    /// (`portal.document.view`): shared with their own Person, or with the
-    /// Company they sign in for, unended, in their tenant, keeping a file and
-    /// not past its expiry date. Nothing else is ever listed or counted.
+    /// A page of the documents visible to the signed-in portal customer
+    /// (`portal.document.view`). Visibility contract: `README.md`,
+    /// "Shared with portal customers".
     pub async fn shared_with_me(
         &self,
         portal: &PortalScope,
         filter: &PortalFilter,
     ) -> Result<SharedPage> {
-        let client = self.db.get().await?;
+        let rules = self.records.unverified_portal_rules(portal).await?;
+        let mut client = self.db.get().await?;
         bilibi_authz::authorize_portal(&**client, portal, PORTAL_VIEW).await?;
-        customer::list(&client, portal, filter).await
+        let tx = client
+            .build_transaction()
+            .read_only(true)
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let page = customer::list(&tx, portal, filter, &rules).await?;
+        tx.commit().await?;
+        Ok(page)
     }
 
     /// The latest file of a document shared with the signed-in portal
     /// customer, read through `base/artifacts` every time and audited as the
-    /// customer. A refusal (not shared, ended, revoked, expired, no file, a
-    /// file still being scanned or not clean) is audited too.
+    /// customer. Download restrictions and audited refusals: `README.md`,
+    /// "Shared with portal customers".
     pub async fn read_shared_file(&self, portal: &PortalScope, id: i64) -> WriteResult<File> {
+        let rules = self
+            .records
+            .unverified_portal_rules(portal)
+            .await
+            .map_err(WriteError::from)?;
         let mut client = self.db.get().await.map_err(Error::from)?;
-        customer::read(&mut client, &self.artifacts, portal, id).await
+        customer::read(&mut client, &self.artifacts, portal, id, &rules).await
     }
 }
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/search", "base/settings", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
+    dependencies: &["base/agent_api", "base/artifacts", "base/audit", "base/authz", "base/custom_fields", "base/database", "base/datetime", "base/grid", "base/locale", "base/mail", "base/media", "base/menu", "base/notifications", "base/party_ids", "base/personal_data", "base/picklists", "base/principal_directory", "base/queue", "base/records", "base/search", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/activity", "core/company", "core/portal", "core/user"],
     migrations: &[
         ("core-document-001-documents", include_str!("../migrations/001-documents.sql")),
         ("core-document-002-marks", include_str!("../migrations/002-marks.sql")),

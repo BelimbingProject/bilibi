@@ -10,7 +10,10 @@ mod matching;
 mod operations;
 mod records;
 
-pub use declaration::{Access, Holder, RecordKind, RecordOwner, HOLDERS, KINDS};
+pub use declaration::{
+    Access, Holder, PortalProtection, PortalStepUp, RecordKind, RecordOwner, HOLDERS, KINDS,
+    PORTAL_STEP_UP,
+};
 pub use drops::{AddTo, DropRefusal, DropTarget, DROP_EVENT, DROP_PARAM, DROP_TARGETS, MAX_DROP};
 pub use matching::ReferenceMatch;
 pub use records::{
@@ -143,6 +146,35 @@ pub fn validate_installed(catalog: &Catalog) -> bilibi_module_registry::Result<(
             )));
         }
     }
+    let operations = catalog.entries::<bilibi_step_up::Operation>(bilibi_step_up::OPERATIONS)?;
+    for entry in catalog.entries::<PortalStepUp>(PORTAL_STEP_UP)? {
+        let rule = entry.get::<PortalStepUp>()?;
+        let kind = catalog
+            .entries::<RecordKind>(KINDS)?
+            .iter()
+            .find(|candidate| candidate.id == rule.kind)
+            .ok_or_else(|| {
+                RegistryError::Contribution(format!(
+                    "portal step-up rule {} at {}:{} names an unregistered record kind",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                ))
+            })?;
+        if kind.provenance.module != entry.provenance.module {
+            return Err(RegistryError::Contribution(format!(
+                "portal step-up rule {} at {}:{} is not contributed by record owner {}",
+                entry.id, entry.provenance.source, entry.provenance.line, kind.provenance.module
+            )));
+        }
+        if !operations
+            .iter()
+            .any(|operation| operation.id == rule.operation)
+        {
+            return Err(RegistryError::Contribution(format!(
+                "portal step-up rule {} at {}:{} names undeclared operation {}",
+                entry.id, entry.provenance.source, entry.provenance.line, rule.operation
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -166,6 +198,11 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
         .iter()
         .map(|entry| entry.get::<DropTarget>())
         .collect::<bilibi_module_registry::Result<_>>()?;
+    let portal_step_up = catalog
+        .entries::<PortalStepUp>(PORTAL_STEP_UP)?
+        .iter()
+        .map(|entry| entry.get::<PortalStepUp>().map(|rule| (rule.kind, rule)))
+        .collect::<bilibi_module_registry::Result<_>>()?;
     Ok(Records {
         db: services
             .get::<bilibi_database::Db>("base/database.pool")?
@@ -175,13 +212,15 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
         kinds,
         holders,
         drop_targets,
+        portal_step_up,
+        step_up: services.get(bilibi_step_up::SERVICE)?,
     })
 }
 
 inventory::submit! {
     Module {
         id: "base/records", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/grid", "base/ui", "base/settings", "base/agent_api"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/grid", "base/ui", "base/settings", "base/agent_api", "base/step_up"],
         migrations: &[("base-records-001-redirects", include_str!("../migrations/001-redirects.sql"))],
         services: &[Service { id: SERVICE, factory: |services| {
             let records = Arc::new(build(services)?);
