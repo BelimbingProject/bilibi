@@ -624,31 +624,37 @@ impl CompanyPage {
     /// Searches each record field whose typed text changed (posted as
     /// `custom_reference_search[cf_<key>]`), among the records of its kind
     /// the reader may select.
-    async fn search_references(
-        &mut self,
-        scope: &Scope,
-        fields: &HashMap<String, String>,
-    ) -> Result<()> {
-        for (posted, query) in fields {
-            let name = posted.as_str();
-            if !name.starts_with("cf_") {
-                continue;
-            }
-            let query: String = query.chars().take(100).collect();
-            if self.custom_pickers.queries.get(name) == Some(&query) {
-                continue;
-            }
-            let Some(definition) = self.custom_definition(scope, &name[3..]).await? else {
+    async fn search_references(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+        let definitions = {
+            let client = self.db.get().await?;
+            crate::field_contributions::custom_fields()?
+                .active(
+                    &**client,
+                    scope,
+                    crate::field_contributions::CUSTOM_RECORD_TYPE,
+                )
+                .await?
+        };
+        for definition in definitions
+            .iter()
+            .filter(|definition| definition.kind == bilibi_custom_fields::Kind::Reference)
+        {
+            let name = format!("cf_{}", definition.key);
+            let Some(query) = value
+                .get(format!("custom_reference_search[{name}]"))
+                .and_then(Value::as_str)
+            else {
                 continue;
             };
-            if definition.kind != bilibi_custom_fields::Kind::Reference {
+            let query: String = query.chars().take(100).collect();
+            if self.custom_pickers.queries.get(&name) == Some(&query) {
                 continue;
             }
             let hits = if query.trim().is_empty() {
                 Vec::new()
             } else {
                 crate::field_contributions::custom_fields()?
-                    .reference_hits(scope, &definition, &query)
+                    .reference_hits(scope, definition, &query)
                     .await?
             };
             self.custom_pickers.queries.insert(name.to_owned(), query);
@@ -1234,13 +1240,7 @@ impl CompanyPage {
                     .await?;
             }
             "custom_reference_search" if self.operation == "detail" => {
-                let fields = bilibi_ui::params::form_values_checked(
-                    value,
-                    "custom_reference_search",
-                    bilibi_ui::params::FIELD_LIMIT,
-                )
-                .map_err(Error::refused)?;
-                self.search_references(scope, &fields).await?;
+                self.search_references(scope, value).await?;
             }
             views::CUSTOM_PICK if matches!(self.operation, "detail" | "create") => {
                 let name = get("key").to_owned();
@@ -1486,13 +1486,7 @@ impl CompanyPage {
                 self.form = values;
                 self.errors = views::new_company(&self.form).4;
                 self.search_parents(scope, &query).await?;
-                let references = bilibi_ui::params::form_values_checked(
-                    value,
-                    "custom_reference_search",
-                    bilibi_ui::params::FIELD_LIMIT,
-                )
-                .map_err(Error::refused)?;
-                self.search_references(scope, &references).await?;
+                self.search_references(scope, value).await?;
                 if name != old_name && !self.code_edited {
                     let client = self.db.get().await?;
                     bilibi_authz::authorize_key(&**client, scope, crate::CREATE).await?;

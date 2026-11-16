@@ -125,3 +125,5 @@ Computed columns, XLSX, mail attachments, a read replica and owner summary table
 Custom record fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters retain the stored id while labels follow merges and show Restricted when unavailable. Reference rollups are not supported.
 
 Reports include each custom reference field’s target kind and its table’s readability in their stable access revision. Dashboard revisions and prepared-export downloads use the same fingerprint.
+
+Prepared files retain a deduplicated set of the reference ids and optional labels rendered in every page and group, within the export row cap. Downloads resolve them again as the requester and refuse a changed label or unavailable state. Reference panels rerun on refresh; their HTML is never reused from the panel cache.

@@ -63,7 +63,10 @@ impl Draft {
         self.codes.retain(|name, _| active.contains(name));
         self.picking.retain(|name, _| active.contains(name));
         self.custom_labels.retain(|name, _| active.contains(name));
-        self.custom_kinds.retain(|name, _| active.contains(name));
+        self.custom_kinds = definitions
+            .iter()
+            .map(|d| (crate::custom::name(&d.key), d.kind))
+            .collect();
         self.errors
             .retain(|(name, _)| !name.starts_with("cf_") || active.contains(name));
     }
@@ -98,28 +101,34 @@ impl Draft {
 
     /// Reads the posted form. An unknown kind is a tampered event.
     pub fn read(&mut self, value: &Value) -> Result<()> {
-        let fields =
-            bilibi_ui::params::form_values_checked(value, "person", bilibi_ui::params::FIELD_LIMIT)
-                .map_err(bilibi_database::Error::refused)?;
+        let fields: std::collections::HashMap<String, String> =
+            ["code", "name", "kind", "email", "phone"]
+                .into_iter()
+                .map(|name| {
+                    Ok((
+                        name.to_owned(),
+                        posted(value, &format!("person[{name}]"))?.to_owned(),
+                    ))
+                })
+                .collect::<Result<_>>()?;
         self.code = fields.get("code").cloned().unwrap_or_default();
         self.custom.clear();
-        for (name, text) in fields.iter().filter(|(name, _)| name.starts_with("cf_")) {
-            match self.custom_kinds.get(name) {
-                Some(Kind::Reference | Kind::Choices) => {}
-                Some(_) | None => {
-                    self.custom.insert(name.clone(), text.clone());
+        for (name, kind) in &self.custom_kinds {
+            match kind {
+                Kind::Reference => {
+                    let key = format!("person_search[{name}]");
+                    if value.get(&key).is_some() {
+                        self.picking.entry(name.clone()).or_default().typed =
+                            posted(value, &key)?.chars().take(100).collect();
+                    }
                 }
-            }
-        }
-        let searches = bilibi_ui::params::form_values_checked(
-            value,
-            "person_search",
-            bilibi_ui::params::FIELD_LIMIT,
-        )
-        .map_err(bilibi_database::Error::refused)?;
-        for (name, text) in searches {
-            if self.custom_kinds.get(&name) == Some(&Kind::Reference) {
-                self.picking.entry(name).or_default().typed = text.chars().take(100).collect();
+                Kind::Choices => {}
+                _ => {
+                    self.custom.insert(
+                        name.clone(),
+                        posted(value, &format!("person[{name}]"))?.to_owned(),
+                    );
+                }
             }
         }
         self.codes = self
@@ -204,8 +213,8 @@ impl Draft {
             .get("code_edited")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        self.read(value)?;
         self.reconcile(&super::custom::active(pages, scope).await?);
+        self.read(value)?;
         self.search(pages, scope).await?;
         if !create && self.input.name != previous_name && !self.code_edited {
             let client = pages.db.get().await?;
@@ -559,6 +568,16 @@ impl Draft {
         };
         pages.persons.duplicates(scope, &query).await
     }
+}
+
+fn posted<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+    let text = value.get(key).and_then(Value::as_str).unwrap_or_default();
+    if text.chars().count() > bilibi_ui::params::FIELD_LIMIT {
+        return Err(Error::refused(format!(
+            "The “{key}” field is too long. Shorten the text and try again."
+        )));
+    }
+    Ok(text)
 }
 
 fn label_for(field: &str) -> &'static str {

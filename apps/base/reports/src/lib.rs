@@ -35,7 +35,7 @@ use bilibi_datetime::DisplayPolicy;
 use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, SummarySpec, Test};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -46,7 +46,7 @@ const PREPARER: &str = "base/reports.preparer";
 const EXPORT_ENDED: &str = "base/reports.export_ended";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 7] = [
+const MIGRATIONS: [(&str, &str); 8] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -74,6 +74,10 @@ const MIGRATIONS: [(&str, &str); 7] = [
     (
         "base-reports-007-subscription-people",
         include_str!("../migrations/007-subscription-people.sql"),
+    ),
+    (
+        "base-reports-008-reference-names",
+        include_str!("../migrations/008-reference-names.sql"),
     ),
 ];
 const KIND: &str = "base_report";
@@ -189,8 +193,17 @@ pub struct ColumnInfo {
     pub ty: &'static str,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) struct ReferenceName {
+    kind: String,
+    id: String,
+    label: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Run {
+    #[serde(skip)]
+    pub(crate) reference_names: Vec<ReferenceName>,
     pub report: Report,
     /// Live child outcomes, empty for an ordinary tenant report.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -860,7 +873,8 @@ impl Reports {
         columns: &[Column],
         rows: impl Iterator<Item = &'a mut Vec<Value>>,
         group_keys: bool,
-    ) -> Outcome<()> {
+    ) -> Outcome<Vec<ReferenceName>> {
+        let mut names = Vec::new();
         let mut cells: std::collections::BTreeMap<&str, Vec<&mut Value>> = Default::default();
         for row in rows {
             for (column, value) in columns.iter().zip(row) {
@@ -878,6 +892,11 @@ impl Reports {
             let mut labels = std::collections::BTreeMap::new();
             for chunk in references.chunks(100) {
                 for resolved in self.records.resolve(scope, chunk).await? {
+                    names.push(ReferenceName {
+                        kind: kind.to_owned(),
+                        id: resolved.reference.id.clone(),
+                        label: resolved.label.clone(),
+                    });
                     labels.insert(
                         resolved.reference.id,
                         resolved.label.unwrap_or_else(|| "Restricted".into()),
@@ -894,7 +913,36 @@ impl Reports {
                 };
             }
         }
-        Ok(())
+        Ok(names)
+    }
+
+    async fn reference_names_current(
+        &self,
+        scope: &Scope,
+        names: &[ReferenceName],
+    ) -> Outcome<bool> {
+        let mut kinds: BTreeMap<&str, Vec<&ReferenceName>> = BTreeMap::new();
+        for name in names {
+            kinds.entry(&name.kind).or_default().push(name);
+        }
+        for (kind, names) in kinds {
+            for chunk in names.chunks(100) {
+                let references: Vec<_> = chunk
+                    .iter()
+                    .map(|name| bilibi_records::Reference::new(kind, &name.id))
+                    .collect();
+                let current = self.records.resolve(scope, &references).await?;
+                if current.len() != chunk.len()
+                    || current
+                        .iter()
+                        .zip(chunk)
+                        .any(|(now, before)| now.label != before.label)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Each row's own page, through Base Records: a kind its owner registers
@@ -1037,6 +1085,7 @@ impl Reports {
         }
         let as_rows = report.kind == Kind::Rows || input.as_rows;
         let mut kept = None;
+        let reference_names;
         let result = match report.kind {
             _ if as_rows => {
                 let specs: Vec<String> = if report.kind == Kind::Rows {
@@ -1095,6 +1144,7 @@ impl Reports {
                 let page = listing
                     .page(self, scope, input.page.saturating_mul(page_size), page_size)
                     .await?;
+                reference_names = page.reference_names;
                 let rows = page.rows;
                 // A file holds no links: the reader opens records from the page.
                 let pages = if file {
@@ -1184,13 +1234,14 @@ impl Reports {
                 .map_err(grid)?;
                 let group_columns: Vec<_> =
                     summary.groupings.iter().map(|(c, _)| c.clone()).collect();
-                self.name_references(
-                    scope,
-                    &group_columns,
-                    summary.lines.iter_mut().map(|l| &mut l.keys),
-                    true,
-                )
-                .await?;
+                reference_names = self
+                    .name_references(
+                        scope,
+                        &group_columns,
+                        summary.lines.iter_mut().map(|l| &mut l.keys),
+                        true,
+                    )
+                    .await?;
                 RunResult::Summary {
                     groupings: summary
                         .groupings
@@ -1213,6 +1264,7 @@ impl Reports {
             }
         };
         let run = Run {
+            reference_names,
             report,
             oversight: Vec::new(),
             left_out,

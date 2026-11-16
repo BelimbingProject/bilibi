@@ -21,6 +21,7 @@ pub(crate) struct Listing {
 /// One page of a list: the rows the reader may read, each its key and one
 /// cell per column, and how many rows the question matched when it was read.
 pub(crate) struct ListPage {
+    pub reference_names: Vec<crate::ReferenceName>,
     pub total: i64,
     pub columns: Vec<Column>,
     pub rows: Vec<(Value, Vec<Value>)>,
@@ -74,7 +75,7 @@ impl Listing {
                 (row.key, cells)
             })
             .collect();
-        reports
+        let reference_names = reports
             .name_references(
                 scope,
                 &projection.columns,
@@ -83,6 +84,7 @@ impl Listing {
             )
             .await?;
         Ok(ListPage {
+            reference_names,
             total: keys.total,
             columns: projection.columns,
             rows,

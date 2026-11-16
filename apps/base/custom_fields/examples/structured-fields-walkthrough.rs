@@ -5,7 +5,7 @@
 //! is `ok` or `FAIL`; the run fails if any check does.
 //!
 //! ```text
-//! BILIBI_CUSTOM_FIELDS_DEMO=disposable DATABASE_URL=… APP_ORIGIN=… \
+//! BILIBI_CUSTOM_FIELDS_DEMO=disposable BILIBI_CUSTOM_FIELDS_ROOT=… DATABASE_URL=… APP_ORIGIN=… \
 //!   cargo run -p bilibi-custom-fields --example structured-fields-walkthrough
 //! ```
 //!
@@ -19,6 +19,7 @@ use bilibi_agent_api::{
 use bilibi_database::{Db, pool};
 use bilibi_tenancy::{ProofFuture, Scope};
 use serde_json::{Value, json};
+use std::os::unix::fs::DirBuilderExt;
 use tokio_postgres::Transaction;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
@@ -123,6 +124,11 @@ async fn main() -> Result<(), Failure> {
     }
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     let origin = std::env::var("APP_ORIGIN")?;
+    let artifacts_root = std::env::var("BILIBI_CUSTOM_FIELDS_ROOT")?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&artifacts_root)?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let app = bilibi_web::App::new(db.clone(), &origin)?;
     app.services
@@ -136,10 +142,11 @@ async fn main() -> Result<(), Failure> {
         // administrator grants on the Roles page; and a direct deny that keeps
         // Sam Staff (user 3) from companies.
         bilibi_picklists::provision_deployment(&**client, 1).await?;
+        client.execute("INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('artifacts.storage_root',0,'global',0,to_jsonb($1::text),false) ON CONFLICT (key,tenant_id,scope_type,scope_id) DO UPDATE SET value=EXCLUDED.value", &[&artifacts_root]).await?;
         client
             .batch_execute(
                 "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES
-                 (1,1,'reports.view',true),(1,1,'reports.author',true),(1,1,'reports.share',true),(1,1,'base.records.view',true),(1,1,'base.search.records.list',true),
+                 (1,1,'reports.view',true),(1,1,'reports.author',true),(1,1,'reports.share',true),(1,1,'reports.export',true),(1,1,'base.records.view',true),(1,1,'base.search.records.list',true),
                  (1,3,'reports.view',true),(1,3,'base.records.view',true),(1,3,'base.search.records.list',true),
                  (2,5,'reports.view',true),(2,5,'base.search.records.list',true),
                  (1,3,'admin.company.view',false),(1,3,'admin.company.list',false) ON CONFLICT DO NOTHING",
@@ -467,10 +474,52 @@ async fn main() -> Result<(), Failure> {
             .is_some_and(|columns| columns.iter().any(|c| c["spec"] == "cf_partner"))
             && unnamed["rows"][0][1][3] == "Restricted",
     );
+    let prepared = manager
+        .plan(
+            "base.reports.prepare_export",
+            json!({"id": report_id, "format": "csv"}),
+        )
+        .await?;
+    let export = result(&prepared)["export"]
+        .as_i64()
+        .ok_or_else(|| format!("no prepared export: {prepared}"))?;
+    let executor = bilibi_base::queue::Executor::from_services(
+        &app.services,
+        bilibi_base::queue::Config::default(),
+    )?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let workers = tokio::spawn(executor.run(stopped));
+    let ready: Result<bool, Failure> = async {
+        for _ in 0..60 {
+            let exports = reports.exports(&manager.scope, Some(report_id)).await?;
+            if let Some(found) = exports
+                .into_iter()
+                .find(|entry| entry.id == export && entry.state != "queued")
+            {
+                return Ok(found.state == "ready" && found.path.is_some());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Ok(false)
+    }
+    .await;
+    let _ = stop.send(true);
+    workers.await??;
+    proof.check(
+        "a reference export is ready and downloadable before revocation",
+        ready? && reports.exported(&manager.scope, export).await.is_ok(),
+    );
     {
         let client = db.get().await?;
-        client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES (1,2,'admin.company.list',true),(1,2,'admin.company.view',false) ON CONFLICT (tenant_id,user_id,capability) DO UPDATE SET is_allowed=EXCLUDED.is_allowed", &[]).await?;
+        client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES (1,$1,'admin.company.list',true),(1,$1,'admin.company.view',false) ON CONFLICT (tenant_id,user_id,capability) DO UPDATE SET is_allowed=EXCLUDED.is_allowed", &[&manager.scope.user()]).await?;
     }
+    proof.check(
+        "a prepared reference export is refused after view access is revoked while list remains",
+        matches!(
+            reports.exported(&manager.scope, export).await,
+            Err(bilibi_base::reports::ReportError::Refused(_))
+        ),
+    );
     let unnamed = manager
         .read("base.reports.run", json!({"id": report_id}))
         .await?;
