@@ -1,8 +1,6 @@
 //! Manual pool walkthrough on any reachable PostgreSQL database; no test
 //! harness. It reads and writes no table: every statement is `SELECT 1`.
-use bilibi_database::{
-    pool, pool_with, Connection, Db, Error, PoolLimits, Result, SecondConnection,
-};
+use bilibi_database::{pool, pool_with, Connection, Db, Error, PoolLimits, Result};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -33,13 +31,7 @@ async fn second_connection(url: &str) -> Result<()> {
     let held = db.get().await?;
     // Asked three times from one line: logged once.
     for _ in 0..3 {
-        match db.get().await {
-            Ok(second) => drop(second),
-            Err(_) => {
-                println!("second=refused");
-                return Ok(());
-            }
-        }
+        drop(db.get().await?);
     }
     println!("second=served");
     // None of these is a second connection of this task.
@@ -63,16 +55,12 @@ async fn second_connection(url: &str) -> Result<()> {
 }
 
 /// The child's verdict lines and its log.
-fn second_connection_of(url: &str, mode: Option<&str>) -> Result<(bool, String, String)> {
+fn second_connection_of(url: &str) -> Result<(bool, String, String)> {
     let mut child = Command::new(std::env::current_exe().map_err(|_| Error::Internal)?);
     child
         .arg("second-connection")
         .env("DATABASE_URL", url)
-        .env_remove("RUST_BACKTRACE")
-        .env_remove(SecondConnection::ENV);
-    if let Some(mode) = mode {
-        child.env(SecondConnection::ENV, mode);
-    }
+        .env_remove("RUST_BACKTRACE");
     let output = child.output().map_err(|_| Error::Internal)?;
     Ok((
         output.status.success(),
@@ -217,7 +205,7 @@ async fn main() -> Result<()> {
     }
 
     let here = concat!(file!(), ":");
-    let (ok, verdict, log) = second_connection_of(&url, None)?;
+    let (ok, verdict, log) = second_connection_of(&url)?;
     let warnings: Vec<&str> = log
         .lines()
         .filter(|line| line.starts_with("warning: second pooled connection: "))
@@ -228,21 +216,6 @@ async fn main() -> Result<()> {
     assert!(warnings[0].contains("get_detached"));
     println!("PASS a task that holds a connection and asks for another is served and logged once, with both call sites:\n  {}", warnings[0]);
     println!("PASS not logged: another task, a detached connection, a connection taken out of the pool, an ask after the first was returned");
-    let (ok, verdict, log) = second_connection_of(&url, Some("refuse"))?;
-    assert!(ok && verdict.contains("second=refused") && !verdict.contains("served"));
-    assert!(log.lines().any(
-        |line| line.starts_with("error: second pooled connection refused: ")
-            && line.matches(here).count() == 2
-    ));
-    println!(
-        "PASS {}=refuse: the second ask is refused at once and logged",
-        SecondConnection::ENV
-    );
-    assert!(!second_connection_of(&url, Some("sometimes"))?.0);
-    println!(
-        "PASS {}: a value other than warn or refuse refuses the start",
-        SecondConnection::ENV
-    );
     println!("PASS environment: defaults 16 and 5 s, DATABASE_POOL_SIZE=3 and DATABASE_POOL_WAIT_SECONDS=2 are used, values outside the range refuse the start");
     Ok(())
 }

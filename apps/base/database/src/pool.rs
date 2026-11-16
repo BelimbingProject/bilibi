@@ -8,7 +8,7 @@
 //! for the future a `block_on` drives (a walkthrough's `main`), so no caller
 //! has to install a scope and a spawned task is covered like a request. The
 //! note is dropped with the connection, wherever that happens.
-use deadpool_postgres::{ClientWrapper, HookError, Object, Pool, PoolError, Status, Timeouts};
+use deadpool_postgres::{ClientWrapper, Object, Pool, PoolError, Status, Timeouts};
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     collections::{HashMap, HashSet},
@@ -19,37 +19,6 @@ use std::{
 };
 
 type Site = &'static Location<'static>;
-
-/// What `Db::get` does when the asking task already holds a pooled
-/// connection. `Warn` (today's default) logs both call sites once and serves
-/// the connection; `Refuse` logs and answers a pool error, so the page says
-/// "Database unavailable" at once instead of after the pool's wait under load.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SecondConnection {
-    Warn,
-    Refuse,
-}
-impl SecondConnection {
-    pub const ENV: &'static str = "DATABASE_SECOND_CONNECTION";
-    /// `DATABASE_SECOND_CONNECTION`: `warn` (default) or `refuse`. An
-    /// environment value like the pool's limits, because the pool exists
-    /// before a setting can be read. Any other value refuses the start.
-    pub fn from_env() -> crate::Result<Self> {
-        match std::env::var(Self::ENV) {
-            Err(std::env::VarError::NotPresent) => Ok(Self::Warn),
-            Ok(value) => match value.trim() {
-                "" | "warn" => Ok(Self::Warn),
-                "refuse" => Ok(Self::Refuse),
-                _ => Self::invalid(),
-            },
-            Err(_) => Self::invalid(),
-        }
-    }
-    fn invalid() -> crate::Result<Self> {
-        eprintln!("{} must be warn or refuse.", Self::ENV);
-        Err(crate::Error::Invalid)
-    }
-}
 
 /// Who holds a connection: a task, or the thread of a `block_on` future.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -76,12 +45,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 impl Held {
-    fn ask(&self, holder: Holder, asked: Site, mode: SecondConnection) -> Result<(), PoolError> {
+    fn ask(&self, holder: Holder, asked: Site) {
         let Some(held) = lock(&self.by)
             .get(&holder)
             .and_then(|sites| sites.first().copied())
         else {
-            return Ok(());
+            return;
         };
         let message = format!(
             "this task already holds a pooled connection (taken at {held}) and asked for another at {asked}. \
@@ -89,19 +58,9 @@ impl Held {
              when more callers than connections do this, each waits out the pool and is refused (#406, #539). \
              A real exception takes `Db::get_detached(\"why\")`"
         );
-        match mode {
-            SecondConnection::Warn => {
-                if lock(&self.reported).insert((held, asked)) {
-                    eprintln!("warning: second pooled connection: {message}");
-                    trace();
-                }
-                Ok(())
-            }
-            SecondConnection::Refuse => {
-                eprintln!("error: second pooled connection refused: {message}");
-                trace();
-                Err(PoolError::PostCreateHook(HookError::message(message)))
-            }
+        if lock(&self.reported).insert((held, asked)) {
+            eprintln!("warning: second pooled connection: {message}");
+            trace();
         }
     }
     fn mark(self: &Arc<Self>, holder: Holder, site: Site) -> Mark {
@@ -148,25 +107,23 @@ impl Drop for Mark {
 pub struct Db {
     pool: Pool,
     held: Arc<Held>,
-    second: SecondConnection,
 }
 impl Db {
-    pub(crate) fn new(pool: Pool, second: SecondConnection) -> Self {
+    pub(crate) fn new(pool: Pool) -> Self {
         Self {
             pool,
             held: Arc::default(),
-            second,
         }
     }
     /// A pooled connection, returned to the pool when dropped. A task that
-    /// still holds one and asks again is logged with both call sites, or
-    /// refused ([`SecondConnection`]): pass the connection you hold instead.
+    /// still holds one and asks again is logged with both call sites:
+    /// pass the connection you hold instead.
     #[track_caller]
     pub fn get(&self) -> impl Future<Output = Result<Connection, PoolError>> + Send + '_ {
         let site = Location::caller();
         async move {
             let holder = Holder::current();
-            self.held.ask(holder, site, self.second)?;
+            self.held.ask(holder, site);
             let object = self.pool.get().await?;
             Ok(Connection {
                 object,
@@ -174,12 +131,12 @@ impl Db {
             })
         }
     }
-    /// A pooled connection the check leaves alone: it is neither refused when
+    /// A pooled connection the check leaves alone: it is neither logged when
     /// the task holds another, nor counted against the task's later asks.
-    /// For the few places that must hold two at once, or that keep one for
-    /// the life of a long task whose callees take their own. `why` is the
-    /// reason, written for the reader of the call site; it still spends pool
-    /// capacity, so say why the pool cannot be starved by it.
+    /// For a single, named connection that must be separate, never a whole
+    /// job's working connection. `why` is the reason, written for the reader
+    /// of the call site; it still spends pool capacity, so say why the pool
+    /// cannot be starved by it.
     pub async fn get_detached(&self, why: &'static str) -> Result<Connection, PoolError> {
         debug_assert!(!why.trim().is_empty(), "get_detached needs its reason");
         let object = self.pool.get().await?;

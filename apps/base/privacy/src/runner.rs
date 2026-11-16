@@ -273,7 +273,7 @@ async fn answer(
     id: i64,
     store: &str,
 ) -> Result<()> {
-    let mut client = privacy.db.get_detached(JOB_CONNECTION).await?;
+    let mut client = privacy.db.get().await?;
     let mut request = requests::load(&**client, scope.tenant(), id, false).await?;
     if request.status != "running" {
         return Ok(());
@@ -741,9 +741,6 @@ async fn finish_failed(
     tx.commit().await
 }
 
-/// Why a privacy job takes its working connection detached (`Db::get_detached`).
-pub(crate) const JOB_CONNECTION: &str = "a privacy job keeps this connection for its whole run while each step records on its own; one per Queue slot";
-
 /// Holds the request's finish guard on its own connection; dropping it
 /// without `release` closes the connection, which ends the guard.
 struct FinishGuard(Option<bilibi_database::Connection>, i64);
@@ -805,7 +802,7 @@ async fn finish(
         Err(Error::Conflict) => return Ok(Finish::Busy),
         Err(error) => return Err(error),
     };
-    let mut client = privacy.db.get_detached(JOB_CONNECTION).await?;
+    let mut client = privacy.db.get().await?;
     let request = privacy.request(&**client, scope, id).await?;
     if request.status != "running" {
         guard.release().await?;

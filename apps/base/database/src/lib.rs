@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
-pub use pool::{Connection, Db, SecondConnection};
+pub use pool::{Connection, Db};
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -195,20 +195,18 @@ fn env_number(name: &str, default: u64, range: std::ops::RangeInclusive<u64>) ->
 pub fn pool(url: &str) -> Result<Db> {
     pool_with(url, PoolLimits::from_env()?)
 }
-/// A pool with explicit limits, for a private host or a walkthrough. What a
-/// task's second ask gets is still the operator's [`SecondConnection::from_env`].
+/// A pool with explicit limits, for a private host or a walkthrough.
 pub fn pool_with(url: &str, limits: PoolLimits) -> Result<Db> {
     if limits.size == 0 || limits.wait.is_zero() {
         return Err(Error::Invalid);
     }
-    let second = SecondConnection::from_env()?;
     let config = url.parse().map_err(|_| Error::Invalid)?;
     Pool::builder(Manager::new(config, NoTls))
         .max_size(limits.size)
         .wait_timeout(Some(limits.wait))
         .runtime(Runtime::Tokio1)
         .build()
-        .map(|pool| Db::new(pool, second))
+        .map(Db::new)
         .map_err(|_| Error::Internal)
 }
 

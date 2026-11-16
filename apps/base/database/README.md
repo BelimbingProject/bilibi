@@ -72,7 +72,7 @@ Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 cargo run -p bilibi-database --example pool-walkthrough
 ```
 
-It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals. It also prints the second-connection check: the one log line with both call sites, the cases that are not logged, the refusal under `DATABASE_SECOND_CONNECTION=refuse`, and the start refused for any other value.
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals. It also prints the second-connection check: the one log line with both call sites and the cases that are not logged.
 
 ## One connection per task
 
@@ -85,20 +85,14 @@ Why: once more callers than connections each hold one and ask for a second, ever
 | A connection | `db.get().await?` |
 | To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
 | To call a service that takes its own | Drop your connection first |
-| A real exception: two at once, or one kept for a long task whose callees take their own | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
+| A real exception: a single, named connection that must be separate, never a whole job | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
 | A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
 
 - **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.
-- **What a second ask gets** is `DATABASE_SECOND_CONNECTION`:
-
-| Value | A second ask |
-| --- | --- |
-| `warn` (default) | Is served. One line per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …` |
-| `refuse` | Is refused at once with `Error::Pool` ("Database unavailable") and logged with `error: second pooled connection refused: …` |
-
+- **A second ask is served**, with one warning per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …`
 - Set `RUST_BACKTRACE=1` to print the await chain between the two call sites under the line.
-- `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run while the default is `warn`.
-- The default becomes `refuse`, and the variable is removed, after two weeks of walkthrough runs on `main` whose only hits were real second connections, each fixed or named `get_detached`.
+- `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run during this warning-only pilot.
+- Warnings become refusals in a later change after two weeks of CI walkthrough runs on `main` with no hit that was not a real nested take. Unresolved real nesting stays warned; only genuine single-purpose exceptions use `get_detached`.
 
 # Schema ownership
 

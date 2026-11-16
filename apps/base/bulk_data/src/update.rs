@@ -699,7 +699,7 @@ impl BulkData {
         if scope.principal().is_some() {
             return Err(Error::Forbidden);
         }
-        let mut object = self.db.get_detached(crate::JOB_CONNECTION).await?;
+        let mut object = self.db.get().await?;
         let client: &mut tokio_postgres::Client = &mut object;
         let mut run = load(&*client, &scope, id, false).await?;
         let Ok((registered, bulk)) = self.updatable(&run.record_type) else {
