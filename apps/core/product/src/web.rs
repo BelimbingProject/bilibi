@@ -923,14 +923,16 @@ impl State {
                             ("Active", "active"),
                             ("Retired", "retired"),
                         ]),
-                    ),
+                    )
+                    .grid_field("products.status"),
                     ToolbarControl::search(
                         "product-category",
                         "category",
                         "Category",
                         &filters["category"],
                         "Category…",
-                    ),
+                    )
+                    .grid_field("products.category"),
                 ],
             ))?);
             sections.push(self.table(false)?);

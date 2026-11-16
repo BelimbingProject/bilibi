@@ -28,6 +28,7 @@ pub(super) fn dialog(dialog: &PersonDialog) -> Result<Html> {
         Field::in_form("person", "name")
             .id("activity-person-name")
             .label("Name")
+            .grid_field("persons.name")
             .required()
             .value(&dialog.name)
             .attr("maxlength", "200")

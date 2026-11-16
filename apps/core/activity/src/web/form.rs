@@ -846,7 +846,7 @@ impl Dialog {
             &format!("{prefix}-related"),
             FORM,
             "related",
-            "Related to",
+            words.field("related_id", "Related to"),
             &self.query,
             &pages.records.picker_hits(&self.hits),
             selected
