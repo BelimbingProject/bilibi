@@ -41,7 +41,7 @@ bilibi_ui::record_fields! { "core/person", pub(crate) mod fields {
 } }
 ```
 
-- Use `fields::EMAIL.fact(value)` on the record and `bilibi_grid::Field::record(fields::EMAIL)` in the Grid table. SQL source keys, protection and links stay in Grid.
+- `fields::EMAIL.fact(value)` supplies the module's default title; for tenant-aware record titles, follow [Grid's label rendering](../grid/README.md#shared-label-rendering). Use `bilibi_grid::Field::record(fields::EMAIL)` in the Grid table. SQL source keys, protection and links stay in Grid.
 - Use `fields::EMAIL.input(json!({"maxLength":254}))` for the corresponding operation property. Required fields, limits, null handling and record references stay with that operation.
 - Declare closed choices with `RecordFieldType::Enum` and `.choices(...)`, or an operator list with `RecordFieldType::String` and `.picklist("owner.list")`. An operation may narrow closed choices, but cannot introduce another choice.
 - Classify personal values with `PersonalDataClass`; `NonPersonal` means the owner reviewed the field. An absent class remains unknown, so adopting this vocabulary cannot enable oversight accidentally.
@@ -265,4 +265,6 @@ Several-choice inline editors preserve held code order and append new selections
 
 ## Tenant field labels
 
-The host scopes `FieldLabels` to each render; shared form controls and `ListColumns` apply the tenant word at that boundary. Owners declare `grid_field("table.field")` when a slot or form input represents a Grid field, keeping its identity separate from presentation keys. Registered `RecordField` built-ins supply their identity automatically. UI has no dependency on Grid or the database, and a render without a tenant context uses the owner's default word.
+The host scopes `FieldLabels` to each render; shared form controls and `ListColumns` apply the tenant word at that boundary. The context never survives a render or crosses tenants. UI has no dependency on Grid or the database, and a render without a tenant context uses the owner's default word.
+
+`BuiltinColumn`, `Field`, `Combobox` and `RestrictedField` accept `grid_field("table.field")`, keeping the field identity separate from the column slot, input name or DOM ID. `ListColumns::mount` and `projection` default to `list_id.column_id`; declare an explicit identity when those names differ from Grid. `RecordField::builtin` supplies its registered vocabulary identity, which [Grid resolves through the declared column path](../grid/README.md#shared-label-rendering). Composite display columns without a single Grid field keep their owner's label.

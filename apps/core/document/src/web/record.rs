@@ -840,7 +840,7 @@ impl Detail {
         }
         field
     }
-    /// A select edited in place; `empty` adds a None choice that clears it.
+    /// Status is required; other selects offer None to clear the value.
     fn choice(
         &self,
         words: &bilibi_grid::RecordWords,

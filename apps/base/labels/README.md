@@ -18,7 +18,7 @@ A field label replaces the field's own word only; a column reached through a lin
 
 Read the tenant's overrides once per render with `Labels::labels(client, scope)` (`Arc<Labels>` from `bilibi_labels::SERVICE`), then ask the set for each word: `set.menu(id, default)`, `set.record(table, default)` and `set.field(table, field, default)` return the override or `default`. Never cache a set across requests or tenants, and never read `base_labels` yourself.
 
-Grid reads field labels itself when it builds a catalog, so a column you resolve through `Catalog::resolve` already carries the tenant's word. A record page that draws labels from `RecordField` loads `bilibi_grid::RecordWords::load(client, scope, table)` once and calls `words.get(&field)` instead of `field.label`. `base/grid` contributes the renamable record types and fields to a `SubjectSource` (`SUBJECTS`), so this module never depends on Grid.
+For column and record-field rendering, follow [Grid's label integration](../grid/README.md#shared-label-rendering). `base/grid` contributes the renamable record types and fields to a `SubjectSource` (`SUBJECTS`), so this module never depends on Grid.
 
 ## Change a label
 

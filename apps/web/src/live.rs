@@ -838,7 +838,7 @@ impl<S: Side> Session<S> {
             let empty = HashMap::new();
             let state = crate::render_fields(
                 app,
-                Some(S::scope(&scope)),
+                Some(S::scope(scope)),
                 service.0.mount(PageRequest {
                     operation: slot.embed.operation,
                     scope: Some(scope),
@@ -1108,7 +1108,7 @@ impl<S: Side> Session<S> {
                     let service: Arc<Service<S::Context>> = app.services.get(embed.service)?;
                     let state = crate::render_fields(
                         app,
-                        Some(S::scope(&scope)),
+                        Some(S::scope(scope)),
                         service.0.mount(PageRequest {
                             operation: embed.operation,
                             scope: Some(scope),
@@ -1144,7 +1144,7 @@ impl<S: Side> Session<S> {
                 };
                 crate::render_fields(
                     app,
-                    Some(S::scope(&scope)),
+                    Some(S::scope(scope)),
                     panel.mounted.state.update(LiveRequest {
                         scope,
                         credential: token,
