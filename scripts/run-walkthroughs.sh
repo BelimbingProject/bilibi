@@ -74,6 +74,7 @@ cd "$root"
 #                    linked, so this proves the build holds the mounted module)
 #   @absent:TEXT     the previous step did not print TEXT
 WALKTHROUGHS=(
+  'base|report-periods|apps/base/datetime|report-periods|none||-'
   'web|field-vocabulary|apps/web|field-vocabulary|none||-'
   'base|agent|apps/base/agent_api|agent-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
   'base|agent-write|apps/base/agent_api|write-walkthrough|seed|BILIBI_AGENT_DEMO=disposable|-'
@@ -87,6 +88,7 @@ WALKTHROUGHS=(
   'base|audit-bounded-evidence|apps/base/audit_views|bounded-evidence|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-mutations|apps/base/audit_views|mutations-fixture|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-'
   'base|audit-history-kinds|apps/base/audit_views|history-kinds|migrate|BILIBI_DISPOSABLE_AUDIT_FIXTURE=yes|-|serve'
+  'base|bulk-custom-import|apps/base/bulk_data|custom-import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-import|apps/base/bulk_data|import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
@@ -113,6 +115,7 @@ WALKTHROUGHS=(
   'privacy|privacy-failures|apps/base/privacy|failures-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-job-ends|apps/base/privacy|job-ends-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-repairs|apps/base/privacy|repairs-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
+  'privacy|privacy-finish-reasons|apps/base/privacy|finish-reasons-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes BILIBI_PRIVACY_DEMO_ROOT=@/privacy BILIBI_PRIVACY_DEMO_CHROMIUM=@chromium|seed;-'
   'privacy|privacy-holds|apps/base/privacy|holds-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-;report'
   'privacy|privacy-masking|apps/base/privacy|masking-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|-'
   'privacy|privacy-retention|apps/base/privacy|retention-walkthrough|none|BILIBI_DISPOSABLE_PRIVACY_DEMO=yes|seed;-'
@@ -198,10 +201,13 @@ WALKTHROUGHS=(
   # Only the composition with nothing mounted; the `mounted` group runs the others.
   'web|events-unmounted|apps/web|events-reference|seed||-'
   'web|events-retention|apps/web|events-retention|seed|BILIBI_DISPOSABLE_EVENTS_DEMO=yes|-'
+  # Only the composition with nothing mounted; the `mounted` group runs the other.
+  'web|rules-unmounted|apps/web|rules-walkthrough|seed||-'
   'web|ports-unmounted|apps/web|ports-reference|none||-'
   'web|grid-catalog|apps/web|g1-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-summary|apps/web|g5-grid-summary|migrate|BILIBI_GRID_DEMO=disposable|-'
+  'web|grid-shared-views|apps/web|g6-shared-views|none|BILIBI_GRID_DEMO=disposable DATABASE_POOL_SIZE=1|-'
   'web|live-upload|apps/web|live-upload-walkthrough|none|BILIBI_DISPOSABLE_LIVE_UPLOAD_DEMO=yes|-'
   'web|live-wake|apps/web|live-wake-walkthrough|none|BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes|-'
   'web|reports|apps/web|r1-reports|migrate|BILIBI_GRID_DEMO=disposable|-'
@@ -212,6 +218,7 @@ WALKTHROUGHS=(
   'web|records|apps/web|records-reference|none|-APP_ORIGIN|-'
   'web|records-equivalence|apps/web|records-equivalence|none||-'
   'web|role-assignment-bounds|apps/web|role-assignment-bounds|seed|BILIBI_ASSIGNMENT_PROOF=disposable|-'
+  'web|record-reach|apps/web|record-reach|fixture-seed|BILIBI_RECORD_REACH=disposable|-'
   'web|system-principal-grants|apps/web|system-principal-grants|seed-app|BILIBI_PRINCIPAL_PROOF=disposable|-'
   'web|visitor|apps/web|visitor-walkthrough|migrate|BILIBI_DISPOSABLE_VISITOR_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'web|agent-edge|apps/web|agent-edge-walkthrough|migrate|BILIBI_DISPOSABLE_EDGE_DEMO=yes|-'
@@ -225,6 +232,8 @@ WALKTHROUGHS=(
   # later run also prints the event rows an earlier run left, which name the other.
   'mounted|events-mounted|apps/web|events-reference|seed||@mount:event_publisher;-;@expect:("event_publisher/receiving";@absent:("event_subscriber/payables";@mount:event_subscriber;-;@expect:("event_publisher/receiving";@expect:("event_subscriber/payables";@unmount:event_publisher;-;@expect:("event_subscriber/payables";@absent:("event_publisher/receiving"'
   'mounted|ports-mounted|apps/web|ports-reference|none||@mount:port_reference;-;@expect:port_reference/orders'
+  # The reference owner (rule_cases) mounted; the heading is printed only then.
+  'mounted|rules-mounted|apps/web|rules-walkthrough|seed||@mount:rule_cases;-;@expect:== Same facts, two tenants, two destinations'
   # `end`, then `deliver` in a new process: the notices outlive the first one.
   'mounted|session-ended|apps/web|session-ended-walkthrough|none||@mount:session_listener;end;@expect:session_listener/presence.sessions;deliver;@expect:session_listener/presence.sessions'
 )

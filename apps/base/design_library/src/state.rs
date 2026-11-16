@@ -1,5 +1,5 @@
 use bilibi_database::{Error, Result};
-use bilibi_datetime::{filter, DisplayContext, Period, PeriodFilter};
+use bilibi_datetime::{filter, DisplayContext, FinancialYears, Period, PeriodFilter};
 use bilibi_ui::{
     flex_sample::FlexSample, BuiltinColumn, CommitStates, CommitStatus, ListColumns, ListSpec,
     ListState, LocationReport, SortDir, UploadSpec, Uploads,
@@ -90,8 +90,15 @@ pub struct KeptFile {
     pub size: usize,
     pub sha256: String,
 }
-/// The specimen's upload name and limit, shared by the state and the card.
+/// The period specimen uses a financial year starting on 1 April.
+pub(crate) fn financial_years(today: jiff::civil::Date) -> FinancialYears {
+    let year = today.year() - i16::from(today.month() < 4);
+    let start = |year| jiff::civil::Date::new(year, 4, 1).expect("specimen year start");
+    FinancialYears::current(start(year), start(year + 1)).expect("ordered specimen year starts")
+}
+
 const PERIOD_FILTERS: [&str; 2] = ["example-period-filter", "design-library-filter-period"];
+/// The specimen's upload name and limit, shared by the state and the card.
 pub const SAMPLE_UPLOAD: &str = "sample_file";
 pub const SAMPLE_UPLOAD_BYTES: u64 = 256 * 1024;
 /// The resumable specimen: one file, staged on Media's disk while it arrives.
@@ -102,7 +109,11 @@ impl State {
             serde_json::from_str(include_str!("sample.json")).expect("copied specimen values");
         let list = ListState::parse(query, SPEC.clone()).map_err(|_| Error::Invalid)?;
         let clock = DisplayContext::anonymous().clock(None, jiff::Timestamp::now());
-        let period = Period::parse(|key| query.get(key).cloned(), clock.today);
+        let period = Period::parse_with_financial_years(
+            |key| query.get(key).cloned(),
+            clock.today,
+            Some(financial_years(clock.today)),
+        );
         let mut result = Self {
             area: area.into(),
             csrf: String::new(),
@@ -143,7 +154,10 @@ impl State {
             period: HashMap::new(),
             period_filters: PERIOD_FILTERS
                 .iter()
-                .map(|id| PeriodFilter::new(*id, period, &clock))
+                .map(|id| {
+                    PeriodFilter::new(*id, period, &clock)
+                        .financial_years(Some(financial_years(clock.today)))
+                })
                 .collect(),
             inline: BTreeMap::new(),
             statuses: CommitStates::default(),
@@ -492,9 +506,16 @@ impl State {
                 let clock = self
                     .display
                     .clock(self.browser_zone.as_deref(), jiff::Timestamp::now());
-                let period = Period::parse(|key| self.period.get(key).cloned(), clock.today);
+                let period = Period::parse_with_financial_years(
+                    |key| self.period.get(key).cloned(),
+                    clock.today,
+                    Some(financial_years(clock.today)),
+                );
                 let mut outcome = None;
                 for filter in &mut self.period_filters {
+                    *filter = filter
+                        .clone()
+                        .financial_years(Some(financial_years(clock.today)));
                     filter.set(period, &clock);
                     outcome = filter
                         .event_checked(&ty, event, &clock)

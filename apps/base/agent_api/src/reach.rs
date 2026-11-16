@@ -28,3 +28,15 @@ pub async fn capabilities(client: &impl GenericClient, scope: &Scope) -> Result<
         .map(str::to_owned)
         .collect())
 }
+
+pub fn signed_in(scope: &Scope) -> bool {
+    scope.user() > 0 && scope.principal().is_none()
+}
+
+pub fn allows(capability: &str, scope: &Scope, capabilities: &BTreeSet<String>) -> bool {
+    if capability == crate::SIGNED_IN {
+        signed_in(scope)
+    } else {
+        capabilities.contains(capability)
+    }
+}

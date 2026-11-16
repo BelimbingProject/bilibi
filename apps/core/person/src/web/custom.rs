@@ -47,6 +47,11 @@ pub(super) async fn shown(
                 None => value.to_owned(),
             }
         }
+        (Kind::Boolean, _) => match value {
+            "true" => "Yes".into(),
+            "false" => "No".into(),
+            _ => value.to_owned(),
+        },
         (Kind::Date, _) => match value.parse::<jiff::civil::Date>() {
             Ok(date) => display.render_date(date),
             Err(_) => value.to_owned(),
@@ -109,6 +114,31 @@ pub(super) async fn fact(
                 editor: render(editor)?,
             })
         }
+        (Kind::LongText, _) => render(bilibi_ui::InlineLongText { field, rows: 5 }),
+        (Kind::Boolean, _) => render(InlineChoice {
+            editor: render(
+                Field::named(&field.name)
+                    .id(format!("{}-select", field.id))
+                    .label(&definition.label)
+                    .kind(InputKind::Switch)
+                    .value(value),
+            )?,
+            field,
+            display: Html::text(match value {
+                "true" => "Yes",
+                "false" => "No",
+                _ => "—",
+            }),
+        }),
+        (Kind::Email, _) => render(InlineEdit {
+            field: field.input_type("email"),
+        }),
+        (Kind::Phone, _) => render(InlineEdit {
+            field: field.input_type("tel"),
+        }),
+        (Kind::Link, _) => render(InlineEdit {
+            field: field.input_type("url"),
+        }),
         (Kind::Date, _) => render(InlineEdit {
             field: field.input_type("date").display_value(display),
         }),
@@ -139,6 +169,11 @@ pub(super) async fn control(
             .options(options(pages, scope, list, value).await?),
         (Kind::Date, _) => field.kind(InputKind::Date),
         (Kind::Number, _) => field.kind(InputKind::Text).attr("inputmode", "decimal"),
+        (Kind::LongText, _) => field.kind(InputKind::Textarea).attr("rows", "5"),
+        (Kind::Boolean, _) => field.kind(InputKind::Switch),
+        (Kind::Email, _) => field.kind(InputKind::Email),
+        (Kind::Phone, _) => field.kind(InputKind::Tel),
+        (Kind::Link, _) => field.kind(InputKind::Url),
         _ => field.kind(InputKind::Text),
     })
 }
@@ -154,7 +189,10 @@ pub(super) const LIST_MAX: usize = 50;
 pub(super) fn filter_keys(definition: &Definition) -> Vec<(String, &'static str)> {
     let name = crate::custom::name(&definition.key);
     match definition.kind {
-        Kind::Text => vec![(name, "contains")],
+        Kind::Text | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email => {
+            vec![(name, "contains")]
+        }
+        Kind::Boolean => vec![(name, "eq")],
         Kind::Choice => vec![(name, "eq")],
         Kind::Number => vec![
             (format!("{name}-min"), "gte"),
@@ -256,6 +294,20 @@ pub(super) async fn controls(
                     options.extend(options_of(pages, scope, list).await?);
                     ToolbarControl::select(&id, &key, &label, value, options)
                 }
+                (Kind::Boolean, _) => ToolbarControl::select(
+                    &id,
+                    &key,
+                    &label,
+                    value,
+                    vec![
+                        bilibi_ui::Choice::new(
+                            format!("Any {}", definition.label.to_lowercase()),
+                            "",
+                        ),
+                        bilibi_ui::Choice::new("Yes", "true"),
+                        bilibi_ui::Choice::new("No", "false"),
+                    ],
+                ),
                 (Kind::Date, _) => ToolbarControl::date(&id, &key, &label, value),
                 (Kind::Number, _) => ToolbarControl::text(&id, &key, &label, value).numeric(),
                 _ => ToolbarControl::text(&id, &key, &label, value),

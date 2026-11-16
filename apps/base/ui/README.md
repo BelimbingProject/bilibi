@@ -8,6 +8,8 @@
 
 Use the typed models exported by the crate or their Askama macros; [`DESIGN.md`](../../../DESIGN.md) sets the design rules and [`AGENTS.md`](AGENTS.md) records the recurring mistakes. The DOM uses Bilibi's floating labels.
 
+`Field::kind(InputKind::Switch)` uses the shared Toggle for a form boolean, posting `"true"` or `"false"` through a hidden input. It also works inside `InlineChoice`; the owner keeps its usual save contract. Disabled and readonly switches cannot change the value.
+
 Single selects and multi-selects share the 16 px outline chevron and right alignment. Single selects retain native keyboard and popup behaviour; multi-row selects have no dropdown chevron.
 
 Multi-selects show the inset label and selected count above removable chips inside one field. The default keeps chips on one line with “…” for hidden selections; `.wrap_chips()` lets the field grow onto multiple lines. The empty prompt defaults to “Select options…”. Removal uses the checkbox's normal change event; `.chips(event)` can retain an owner's explicit remove event. Every selection remains available in the dropdown, including chips hidden by overflow.
@@ -15,6 +17,16 @@ Multi-selects show the inset label and selected count above removable chips insi
 List toolbars put search first and filter boxes to its right, and on a phone fold them into one Filters button that opens a sheet, with each set filter shown as a removable chip. `FilterToolbar::new` preserves the order of filters while placing search first. Controls are `ToolbarControl::search`, `select`, `multi_select`, `date` and `text` (a typed value in the sheet, such as a custom field's text; `.numeric()` gives a phone the decimal keypad). A toolbar label is screen-reader only, so a text control shows its label as the placeholder and a date control says what it bounds in its hint.
 
 Page headers include a pin for the current address in signed-in pages, including workspace tiles. The shell keeps its state with the account. Dialogs do not show it.
+
+## Phone lists and header actions
+
+Header action labels and row-link touch targets follow [DESIGN.md’s record-page](../../../DESIGN.md#record-pages) and [list rules](../../../DESIGN.md#lists).
+
+Declare a list’s phone order with `.phone_columns(&["number", "status", "date"])` on `FlexTable::new(...)`, using the visible columns’ exact `spec` values. Below 640 px, matching columns move first in that order; missing specs are ignored and unlisted columns retain their current order. The browser moves headings and cells together, including after live patches, and restores the server’s arrangement at desktop width. The default is empty, preserving every existing list’s column order and saved settings.
+
+## Record facts
+
+Use `RecordFacts` for the read-only strip at the top of a record page, with facts gathered through [`base/ports`](../ports/README.md#record-facts). It hides itself when no facts are available.
 
 ## Record field vocabulary
 

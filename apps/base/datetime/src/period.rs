@@ -10,15 +10,25 @@ use jiff::{civil::Date, tz::TimeZone, Timestamp, ToSpan};
 pub enum Preset {
     Today,
     ThisMonth,
+    LastMonth,
+    ThisQuarter,
+    YearToDate,
+    ThisFinancialYear,
+    LastFinancialYear,
     Last7Days,
     Last30Days,
     Last90Days,
     Custom,
 }
 impl Preset {
-    pub const ALL: [(&'static str, Preset); 6] = [
+    pub const ALL: [(&'static str, Preset); 11] = [
         ("Today", Self::Today),
         ("This month", Self::ThisMonth),
+        ("Last month", Self::LastMonth),
+        ("This quarter", Self::ThisQuarter),
+        ("Year to date", Self::YearToDate),
+        ("This financial year", Self::ThisFinancialYear),
+        ("Last financial year", Self::LastFinancialYear),
         ("Last 7 days", Self::Last7Days),
         ("Last 30 days", Self::Last30Days),
         ("Last 90 days", Self::Last90Days),
@@ -28,11 +38,19 @@ impl Preset {
         match self {
             Self::Today => "today",
             Self::ThisMonth => "this_month",
+            Self::LastMonth => "last_month",
+            Self::ThisQuarter => "this_quarter",
+            Self::YearToDate => "year_to_date",
+            Self::ThisFinancialYear => "this_financial_year",
+            Self::LastFinancialYear => "last_financial_year",
             Self::Last7Days => "last_7_days",
             Self::Last30Days => "last_30_days",
             Self::Last90Days => "last_90_days",
             Self::Custom => "custom",
         }
+    }
+    pub fn needs_financial_year(self) -> bool {
+        matches!(self, Self::ThisFinancialYear | Self::LastFinancialYear)
     }
     fn parse(value: &str) -> Option<Self> {
         Self::ALL
@@ -69,6 +87,49 @@ impl Clock {
     }
 }
 
+/// Caller-owned financial calendar: current boundaries and an optional previous start. Explicit
+/// boundaries support short and long financial years without guessing a month.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FinancialYears {
+    previous_start: Option<Date>,
+    current_start: Date,
+    next_start: Date,
+}
+impl FinancialYears {
+    pub fn new(
+        previous_start: Date,
+        current_start: Date,
+        next_start: Date,
+    ) -> Result<Self, &'static str> {
+        if previous_start >= current_start || current_start >= next_start {
+            return Err("Financial year starts must be in date order.");
+        }
+        Ok(Self {
+            previous_start: Some(previous_start),
+            current_start,
+            next_start,
+        })
+    }
+    /// A current year without a known immediately preceding year.
+    pub fn current(current_start: Date, next_start: Date) -> Result<Self, &'static str> {
+        if current_start >= next_start {
+            return Err("Financial year starts must be in date order.");
+        }
+        Ok(Self {
+            previous_start: None,
+            current_start,
+            next_start,
+        })
+    }
+    pub(crate) fn supports(self, preset: Preset, today: Date) -> bool {
+        self.contains(today)
+            && (preset != Preset::LastFinancialYear || self.previous_start.is_some())
+    }
+    pub fn contains(self, today: Date) -> bool {
+        self.current_start <= today && today < self.next_start
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Period {
     pub preset: Preset,
@@ -83,9 +144,26 @@ impl Period {
     /// Reads `period`, `from` and `to`. An unknown preset is the default;
     /// unparseable custom dates fall back to the default window's ends.
     pub fn parse(param: impl Fn(&str) -> Option<String>, today: Date) -> Self {
+        Self::parse_with_financial_years(param, today, None)
+    }
+
+    /// Like `parse`, with financial-year choices enabled only when the caller's
+    /// current year contains today. An unavailable financial-year preset uses
+    /// the default, including Last financial year without a previous start.
+    /// Year to date always means 1 January through today.
+    pub fn parse_with_financial_years(
+        param: impl Fn(&str) -> Option<String>,
+        today: Date,
+        years: Option<FinancialYears>,
+    ) -> Self {
+        let years = years.filter(|years| years.contains(today));
         let preset = param("period")
             .as_deref()
             .and_then(Preset::parse)
+            .filter(|preset| {
+                !preset.needs_financial_year()
+                    || years.is_some_and(|years| years.supports(*preset, today))
+            })
             .unwrap_or(Preset::Last30Days);
         let back = |days: i64| today.checked_sub(days.days()).unwrap_or(today);
         let date = |name: &str, fallback: Date| {
@@ -96,6 +174,38 @@ impl Period {
         let (from, to) = match preset {
             Preset::Today => (today, today),
             Preset::ThisMonth => (today.first_of_month(), today.last_of_month()),
+            Preset::LastMonth => {
+                let last = today.first_of_month().yesterday().unwrap_or(today);
+                (last.first_of_month(), last.last_of_month())
+            }
+            Preset::ThisQuarter => {
+                let start =
+                    Date::new(today.year(), ((today.month() - 1) / 3) * 3 + 1, 1).unwrap_or(today);
+                let end = start
+                    .checked_add(2.months())
+                    .unwrap_or(start)
+                    .last_of_month();
+                (start, end)
+            }
+            Preset::YearToDate => (today.first_of_year(), today),
+            Preset::ThisFinancialYear | Preset::LastFinancialYear => {
+                // The preset filter above admits these only with a valid calendar.
+                let years = years.expect("financial calendar checked above");
+                if preset == Preset::ThisFinancialYear {
+                    (
+                        years.current_start,
+                        years.next_start.yesterday().unwrap_or(years.current_start),
+                    )
+                } else {
+                    let previous = years
+                        .previous_start
+                        .expect("previous financial year checked above");
+                    (
+                        previous,
+                        years.current_start.yesterday().unwrap_or(previous),
+                    )
+                }
+            }
             Preset::Last7Days => (back(6), today),
             Preset::Last90Days => (back(89), today),
             Preset::Custom => (date("from", back(29)), date("to", today)),
@@ -118,7 +228,8 @@ impl Period {
         })
     }
 
-    /// The URL parameters that round-trip through `parse`.
+    /// URL parameters for `parse`, or `parse_with_financial_years` with the
+    /// caller's current calendar when using financial-year presets.
     pub fn params(&self) -> [(&'static str, String); 3] {
         [
             ("period", self.preset.as_str().to_owned()),

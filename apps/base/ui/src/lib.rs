@@ -89,8 +89,8 @@ pub use components::{
     ActionLink, AppFrame, BackLink, Badge, BadgeKind, Button, ButtonVariant, Card, Chrome,
     CreateButton, DayKind, DayMonth, DayTile, Fact, Facts, Fold, Header, Icon, IconButton,
     IconContext, IconKind, IdentityImage, IdentityImageKind, IdentityImageSize, Page, PageVariant,
-    SectionHeading, StatItem, StatKind, StatStrip, Toggle, DEMOTED_ACTION_CLASS, NO_COUNT,
-    WEEKDAYS,
+    RecordFacts, SectionHeading, StatItem, StatKind, StatStrip, Toggle, DEMOTED_ACTION_CLASS,
+    NO_COUNT, WEEKDAYS,
 };
 pub use error_page::{
     copy_for, debug_document, error_document, portal_copy_for, portal_error_document, DebugFrame,
@@ -104,7 +104,7 @@ pub use feedback::{
 pub use feedback_specimen::FeedbackSpecimen;
 pub use flex_table::{
     Cell, ColumnKind, ColumnType, Cost, FlexColumn, FlexRow, FlexTable, Instant, InstantView, Lens,
-    Plain, RowMode, Scale, Selection, Typed,
+    Plain, RowMode, Scale, Selection, Typed, ViewLink, ViewsBar,
 };
 pub use forms::{
     choices, described_by, error_sentence, field_base_class, field_class, field_inset_class,

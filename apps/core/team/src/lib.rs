@@ -74,7 +74,7 @@ inventory::submit! { Contribution::new(SEEDS, "core/team.picklists", provenance!
 macro_rules! route{($id:literal,$path:expr,$operation:literal)=>{inventory::submit!{Contribution::new(ROUTES,$id,provenance!(),&Route{company_scope:CompanyScope::Tenant,method:Method::Get,path:$path,service:PAGES,operation:$operation,access:Access::Capability(VIEW),framed:true})}};}
 route!("core/team.list", LIST_PATH, "list");
 route!("core/team.record", "/teams/{id}", "record");
-inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,provenance!(),&PageWrites{service:PAGES,contracts:&[
+inventory::submit! {Contribution::new(PAGE_WRITES,PAGES,provenance!(),&PageWrites{service:PAGES,contracts:&[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"),
     ("create",operations::CREATE),("save_field",operations::UPDATE),("add_members",operations::ADD_MEMBERS),
     ("confirm_remove",operations::REMOVE_MEMBERS),("set_lead",operations::SET_LEAD),
     ("add_role",operations::ADD_ROLE),("confirm_remove_role",operations::REMOVE_ROLE),

@@ -206,6 +206,9 @@ struct BoundEnding {
 }
 /// Ended jobs told per poll and process; the rest wait for the next poll.
 const ENDING_BATCH: i64 = 100;
+/// The most one owner's ending hook may take. It is one short transaction, so
+/// a stalled owner costs the endings behind it this, not a whole attempt.
+const ENDING_BOUND: Duration = Duration::from_secs(60);
 
 /// Who the job runs as, re-proven on every attempt and again in `begin`.
 #[derive(Clone, Debug)]
@@ -361,6 +364,12 @@ impl BoundHandler {
         })
     }
 }
+/// The loops one executor runs: the job slots and the endings teller.
+#[derive(Clone, Copy, Debug)]
+enum Loop {
+    Slot,
+    Endings,
+}
 pub struct Executor {
     db: Db,
     queue: Arc<Queue>,
@@ -459,30 +468,58 @@ impl Executor {
     /// One loop per slot, bounded by config; each app process runs independently.
     /// Stopping drops in-flight handlers (transactions roll back). Their leases
     /// remain durable and are recovered by a subsequent worker process.
+    /// A slot (or the endings loop) that ends while the process still runs, by
+    /// a panic or an unexpected return, is started again after a poll interval:
+    /// the pages keep serving, so a silently idle executor would go unnoticed.
     pub async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let mut slots = JoinSet::new();
+        let mut running = BTreeMap::new();
         for _ in 0..self.config.concurrency {
-            let executor = self.clone();
-            let stop = shutdown.clone();
-            slots.spawn(async move { executor.slot(stop).await });
+            self.start(&mut slots, &mut running, Loop::Slot, &shutdown, false);
         }
-        let executor = self.clone();
-        let stop = shutdown.clone();
-        slots.spawn(async move { executor.endings(stop).await });
+        self.start(&mut slots, &mut running, Loop::Endings, &shutdown, false);
         loop {
             if *shutdown.borrow() {
                 break;
             }
             tokio::select! {
                 change = shutdown.changed() => { if change.is_err() || *shutdown.borrow() { break; } }
-                result = slots.join_next() => {
-                    return match result { Some(Ok(result)) => result, _ => Err(Error::Internal) };
+                ended = slots.join_next_with_id() => {
+                    let Some(ended) = ended else { break };
+                    let id = match &ended { Ok((id, _)) => *id, Err(error) => error.id() };
+                    let Some(which) = running.remove(&id) else { continue };
+                    eprintln!("queue {which:?} loop ended; restarting it");
+                    self.start(&mut slots, &mut running, which, &shutdown, true);
                 }
             }
         }
         slots.abort_all();
         while slots.join_next().await.is_some() {}
         Ok(())
+    }
+    fn start(
+        self: &Arc<Self>,
+        slots: &mut JoinSet<Result<()>>,
+        running: &mut BTreeMap<tokio::task::Id, Loop>,
+        which: Loop,
+        shutdown: &watch::Receiver<bool>,
+        delayed: bool,
+    ) {
+        let executor = self.clone();
+        let mut stop = shutdown.clone();
+        let handle = slots.spawn(async move {
+            if delayed {
+                tokio::select! {
+                    _ = tokio::time::sleep(executor.config.poll_interval) => {}
+                    _ = stop.changed() => { return Ok(()); }
+                }
+            }
+            match which {
+                Loop::Slot => executor.slot(stop).await,
+                Loop::Endings => executor.endings(stop).await,
+            }
+        });
+        running.insert(handle.id(), which);
     }
     async fn slot(self: Arc<Self>, mut stop: watch::Receiver<bool>) -> Result<()> {
         loop {
@@ -538,7 +575,7 @@ impl Executor {
                             let executor = self.clone();
                             let told = tokio::spawn(async move {
                                 tokio::time::timeout(
-                                    executor.config.max_runtime,
+                                    executor.config.max_runtime.min(ENDING_BOUND),
                                     executor.tell(id, tenant, &worker),
                                 )
                                 .await
@@ -728,6 +765,11 @@ impl Executor {
         let lease = Duration::from_secs(self.config.lease_seconds as u64);
         let beat = lease / 3;
         let mut heartbeat = tokio::time::interval(beat);
+        // A renewal that waits (behind the row lock of an owner's fenced
+        // transaction, or for a busy pool) must not time out independently:
+        // keep it in flight while the attempt runs. Its answer that the lease
+        // is gone stops the handler; the attempt deadline still applies.
+        let mut beats = JoinSet::new();
         let mut renewed_at = tokio::time::Instant::now();
         let deadline = tokio::time::sleep(self.config.max_runtime);
         tokio::pin!(deadline);
@@ -735,22 +777,21 @@ impl Executor {
             tokio::select! {
                 result = child.join_next() => break match result {Some(Ok(outcome))=>outcome,_=>Outcome::Retry("worker_panicked")},
                 _ = &mut deadline => break Outcome::Retry("worker_timed_out"),
-                _ = heartbeat.tick() => {
+                _ = heartbeat.tick(), if beats.is_empty() => {
+                    let (db, token, seconds) = (self.db.clone(), token.clone(), self.config.lease_seconds);
                     let asked = tokio::time::Instant::now();
-                    match tokio::time::timeout(
-                        beat,
-                        store::heartbeat(&self.db,id,&token,self.config.lease_seconds),
-                    ).await {
-                        Ok(Ok(true)) => renewed_at = asked,
-                        Ok(Ok(false)) => return Ok(()),
-                        // A busy pool or database fails one renewal, not the
-                        // attempt: the handler keeps running while the next
-                        // beat still falls inside the lease it holds, and is
-                        // dropped before that lease can run out.
-                        _ if renewed_at.elapsed() + beat < lease => {}
-                        _ => return Err(Error::Internal),
-                    }
+                    beats.spawn(async move { (asked, store::heartbeat(&db, id, &token, seconds).await) });
                 }
+                Some(answer) = beats.join_next() => match answer {
+                    Ok((asked, Ok(true))) => renewed_at = asked,
+                    Ok((_, Ok(false))) => return Ok(()),
+                    // A database error fails one renewal, not the attempt: the
+                    // handler keeps running while the next beat still falls
+                    // inside the lease it holds, and is dropped before that
+                    // lease can run out.
+                    _ if renewed_at.elapsed() + beat < lease => {}
+                    _ => return Err(Error::Internal),
+                },
             }
         };
         child.abort_all();

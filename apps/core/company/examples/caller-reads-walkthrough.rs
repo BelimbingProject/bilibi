@@ -526,7 +526,12 @@ async fn main() -> Result<(), Failure> {
     )?;
     drop(client);
     grants
-        .set_direct(&admin, manager.user(), bilibi_company::LIST, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_company::LIST,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     let hidden = preview_create(&**client, &manager, &matching)
@@ -548,7 +553,12 @@ async fn main() -> Result<(), Failure> {
         .set_direct(&admin, manager.user(), bilibi_company::LIST, None)
         .await?;
     grants
-        .set_direct(&admin, manager.user(), bilibi_company::CREATE, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_company::CREATE,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     prove(
@@ -668,10 +678,20 @@ async fn main() -> Result<(), Failure> {
     )?;
     drop(client);
     grants
-        .set_direct(&admin, manager.user(), bilibi_company::VIEW, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_company::VIEW,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     grants
-        .set_direct(&admin, manager.user(), "admin.address.view", Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            "admin.address.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     prove(

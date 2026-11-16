@@ -125,7 +125,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     grants
-        .set_direct(&administrator, TARGET, NEW_CAPABILITY, Some(true))
+        .set_direct(
+            &administrator,
+            TARGET,
+            NEW_CAPABILITY,
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
         .await?;
     let client = db.get().await?;
     assert!(
@@ -145,7 +152,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(client);
     grants
-        .set_direct(&administrator, OPERATOR, REVOKED_CAPABILITY, Some(false))
+        .set_direct(
+            &administrator,
+            OPERATOR,
+            REVOKED_CAPABILITY,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     let client = db.get().await?;
     assert!(

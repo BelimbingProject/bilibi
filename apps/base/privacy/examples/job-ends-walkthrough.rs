@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
             &second.scope,
             admin.scope.user(),
             bilibi_privacy::REQUEST_APPROVE,
-            Some(false),
+            Some(bilibi_authz::grants::Direct::Deny),
         )
         .await?;
     println!(
@@ -397,7 +397,9 @@ async fn main() -> Result<()> {
             &admin.scope,
             second.scope.user(),
             bilibi_privacy::REQUEST_FAIL,
-            Some(true),
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
         )
         .await?;
     match engine

@@ -15,6 +15,8 @@ license = "MIT"
 unsafe_code = "deny"
 
 [workspace.dependencies]
+icu_datetime = "2.3.0"
+icu_locale = "2.3.1"
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"] }
 tower-http = { version = "0.6.11", features = ["compression-gzip", "compression-br"] }
 axum = { version = "0.8", features = ["ws", "form"] }
@@ -100,12 +102,14 @@ bilibi-perf = { path = "apps/base/perf" }
 bilibi-ports = { path = "apps/base/ports" }
 bilibi-queue = { path = "apps/base/queue" }
 bilibi-reports = { path = "apps/base/reports" }
+bilibi-rules = { path = "apps/base/rules" }
 bilibi-schedule = { path = "apps/base/schedule" }
 bilibi-search = { path = "apps/base/search" }
 bilibi-session = { path = "apps/base/session" }
 bilibi-settings = { path = "apps/base/settings" }
 bilibi-settings-editor = { path = "apps/base/settings_editor" }
 bilibi-custom-fields = { path = "apps/base/custom_fields" }
+bilibi-labels = { path = "apps/base/labels" }
 bilibi-picklists = { path = "apps/base/picklists" }
 bilibi-records = { path = "apps/base/records" }
 bilibi-step-up = { path = "apps/base/step_up" }

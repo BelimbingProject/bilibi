@@ -1,7 +1,7 @@
 //! Manual running-service walkthrough of data-subject requests (ADR 05):
 //! access and erasure through every mounted store, with the queue running.
 //! Explicit disposable DB only; prints real outcomes and durable state for
-//! inspection. Invitation regressions also check the exported and persisted
+//! inspection. Invitation and action regressions also check the exported and persisted
 //! state, failing the executable on a contract violation; no test harness.
 use bilibi_artifacts::{Artifacts, Reference};
 use bilibi_authz::grants::Grants;
@@ -25,6 +25,8 @@ bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[path = "support/audit_actions.rs"]
+mod audit_actions;
 #[path = "support/case_files.rs"]
 mod case_files;
 #[path = "support/erasure.rs"]
@@ -292,6 +294,7 @@ async fn main() -> Result<()> {
     let ada = PersonId::new(1)?;
     let kim = PersonId::new(2)?;
     invitations::prepare(&app, &mut client, &admin, &boundary, &privacy).await?;
+    audit_actions::prepare(&mut client, &admin).await?;
 
     println!("== stage 7 regression: detached, shared and held addresses");
     use bilibi_core::address::{AddressInput, AddressService, AttachmentInput, PartyId};
@@ -765,6 +768,7 @@ async fn main() -> Result<()> {
                 serde_json::from_str(&text).unwrap_or(Value::Null)
             };
             invitations::disclosure(&bundle)?;
+            audit_actions::disclosure(&bundle)?;
             for store in bundle["stores"].as_array().into_iter().flatten() {
                 if store["store"] == "core/user.accounts" {
                     println!("SCIM access disclosure: {}", store["records"]["accounts"]);
@@ -880,6 +884,7 @@ async fn main() -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let bundle: Value = serde_json::from_reader(zip.by_name("export.json")?)?;
     invitations::disclosure(&bundle)?;
+    audit_actions::disclosure(&bundle)?;
     println!(
         "invitation portability: linked invitation and registration exported without identifiers"
     );
@@ -1260,6 +1265,7 @@ async fn main() -> Result<()> {
 
     println!("== state after erasure");
     invitations::erased(&client).await?;
+    audit_actions::kept(&client, &erasure).await?;
     for row in &reservations {
         let id: String = row.get("public_id");
         let path = std::path::Path::new(row.get::<_, &str>("storage_root")).join(&id);

@@ -63,10 +63,20 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         && p.record_id() == person.id.get()
         && p.name == "Company 010"));
     grants
-        .set_direct(&admin, manager.user(), "admin.company.view", Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            "admin.company.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     grants
-        .set_direct(&admin, manager.user(), bilibi_person::VIEW, Some(false))
+        .set_direct(
+            &admin,
+            manager.user(),
+            bilibi_person::VIEW,
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     assert!(matches!(
         bilibi_person::read_person(&**client, &manager, person.id).await,

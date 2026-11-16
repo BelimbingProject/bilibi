@@ -314,7 +314,8 @@ impl FlexSample {
         instant: InstantRenderer,
     ) -> FlexTable<'a> {
         let mut table = FlexTable::new(id, self.columns.clone(), self.rows(limit, instant))
-            .sorted(Some(&self.sort_by), Some(self.sort_dir));
+            .sorted(Some(&self.sort_by), Some(self.sort_dir))
+            .phone_columns(&["name", "status"]);
         table.event = event;
         table.zoom = self.zoom;
         table.suggestions = self.suggestions.clone();

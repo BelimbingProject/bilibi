@@ -1,0 +1,3 @@
+id = "rule_cases"
+layer = "domain"
+# Reference rule trigger and action owner, mounted only by the rules proof; never a Platform member.

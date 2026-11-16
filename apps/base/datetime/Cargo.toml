@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+icu_datetime.workspace = true
+icu_locale.workspace = true
 askama.workspace = true
 bilibi-database.workspace = true
 bilibi-locale = { path = "../locale" }

@@ -396,12 +396,14 @@ impl Activities {
         store::may_create(&**client, scope).await
     }
     /// Whether the reader may change anyone's activities they can see
-    /// (`core.activity.manage` with `core.activity.all.manage`), so a page
-    /// with many rows asks once.
+    /// (`core.activity.manage` with `core.activity.all.manage` reaching all
+    /// of them), so a page with many rows asks once. With "my team's" reach
+    /// each activity's own page decides.
     pub async fn may_edit_all(&self, scope: &Scope) -> Result<bool> {
         let client = self.db.get().await?;
         Ok(store::may_create(&**client, scope).await?
-            && bilibi_authz::holds_proof(&**client, scope, MANAGE_ALL).await?)
+            && bilibi_authz::reach_proof(&**client, scope, MANAGE_ALL).await?
+                == Some(bilibi_authz::Reach::All))
     }
     /// The dates from `first` to `last` (at most 731 days) as the work
     /// calendar of the reader's company resolves them; empty when the

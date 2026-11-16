@@ -1,9 +1,11 @@
 //! Durable mutation and action evidence. Capture runs inside the owner's
 //! transaction and fails closed: a refused audit row refuses the business commit.
+mod account_actions;
 pub mod console;
 mod erasure;
 mod partitions;
 mod privacy;
+pub use account_actions::{count_account_actions, export_account_actions};
 pub use partitions::{partition_preview, remove_partition, AuditLedger, PartitionRemoval};
 mod read;
 mod verification;
@@ -613,7 +615,8 @@ inventory::submit! {
             ("base-audit-010-actor-tenant", include_str!("../migrations/010-actor-tenant.sql")),
             ("base-audit-011-bounded-evidence", include_str!("../migrations/011-bounded-evidence.sql")),
             ("base-audit-012-partitions", include_str!("../migrations/012-partitions.sql")),
-            ("base-audit-013-partition-removal", include_str!("../migrations/013-partition-removal.sql"))],
+            ("base-audit-013-partition-removal", include_str!("../migrations/013-partition-removal.sql")),
+            ("base-audit-014-account-actions", include_str!("../migrations/014-account-actions.sql"))],
         services: &[bilibi_module_registry::Service { id: "base/audit.capture", factory: |services| {
             let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
             let capture = Arc::new(AuditCapture::new(RedactionPolicy::from_inventory(), db));

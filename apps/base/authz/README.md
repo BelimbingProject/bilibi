@@ -1,6 +1,6 @@
 # Authorization owner contract
 
-**Use it for:** declaring capabilities, checking them, roles and grants (including roles a group you own, such as a team, gives its members), and masking fields some readers must not see.
+**Use it for:** declaring capabilities, checking them, roles and grants (including roles a group you own, such as a team, gives its members), how far a grant reaches into its records (mine, my team's or all), and masking fields some readers must not see.
 
 **Not for:** role tables, permission flags in code or `is admin` checks of your own.
 
@@ -91,6 +91,8 @@ Named system principals require an installed declaration and a durable grant in 
 **Standing grants** (ADR 12) are for Platform work no tenant should have to switch on, such as Media's malware scans. The module that declares a principal may contribute `StandingGrant { principal, capabilities }` to `STANDING_GRANTS` under the principal's name; the principal then holds those tenant capabilities in every live tenant with no `authz_system_grants` row (decision reason `system_principal_standing`). A tenant's denying grant (`Grants::set_system(.., Some(false))`) still wins. Boot refuses a grant from another module, for a capability outside the declaration, for a platform capability, or a second grant for one principal. `effective_system` includes standing capabilities.
 
 **Optional capabilities** (#428) let a principal hold a key of a module its owner calls only while that module is mounted, such as a connector behind a port: the connector depends on the core module, so the core module's declaration cannot name the connector's key. The module that declares the principal contributes `OptionalCapabilities { principal, module, capabilities, standing }` to `OPTIONAL_CAPABILITIES` (one entry per principal and module). While `module` is installed, the keys join the principal's declared bounds, so Automation access, `Grants::set_system` and every decision treat them like declared keys; with `standing` they are also standing grants. While it is absent, the entry grants nothing and its keys are not checked. Boot refuses an entry from a module that does not declare the principal, a `module` that is the declaring module or one of its dependencies (declare those keys on the principal), and, with the module installed, a key that module does not contribute, a portal key, or a non-tenant key with `standing`. The keys never enter a role. Do not have the connector accept the core module's capability instead. Executable proof: `cargo run -p bilibi-web --example optional-capabilities -- --catalogs`.
+
+**Offered capabilities** (ADR 31) let the owner of a capability add it to another module's principal, so a Base principal can act on a Domain's records without Base naming the Domain: Base Rules' `rules` reads and routes a Domain's cases because that Domain offers it the keys. The owner contributes `OfferedCapabilities { principal, capabilities }` to `OFFERED_CAPABILITIES` (one entry per principal and module). The keys join the principal's bounds; they are never standing, so a tenant administrator still grants each one on Automation access, and they never enter a role. Boot refuses a key the contributor does not own, a platform or portal key, a principal its own module declares or one of a module it does not depend on, a key already in the bounds, and a second entry for one principal and module.
 
 `holders(client, tenant, key, limit)` lists the accounts of a tenant that hold a tenant capability (direct allow, grant-all or role grant, no direct deny), in id order, for an owner that must tell them about work only they may do (Media's quarantine notices). It logs nothing; prove each account live before writing to it.
 
@@ -227,6 +229,30 @@ A group another module owns (a Core team) can carry roles; its members hold them
 - **Live.** Decisions read the rows; there is no cache, job or sign-in step.
 - **Explainable.** `effective_principal_roles` and `authz_roles_for` carry `via` ("team:12", the group's source and id, never its name; null for manual and provider memberships). A decision only a group's role allowed logs reason `group_role_capability` with `via`. The decision log resolves it when shown: the group's name when the reader works in its company, otherwise "a team in a company you do not work in".
 - Direct denies win over group roles, as over every other grant.
+
+## Record reach
+
+A role gives a capability with a reach: **mine** (`own`), **my team's** (`team`) or **all** (`all`, the default) ([ADR 30](../../../docs/architecture/decisions/30-record-reach-on-grants.md), #683). It is the `reach` of the role's grant (`role_capabilities`, migration `base-authz-017-grant-reach`), or of a direct allow (`principal_capabilities`).
+
+| Reach | Records it admits |
+| --- | --- |
+| Mine | Owned by the account |
+| My team's | Mine, owned by someone who shares a Core team with the account, or filed under one of its teams |
+| All | Every record the capability opens |
+
+- **Opt in.** Only a key declared `CapabilityDefinition::tenant(KEY).with_reach()` may carry less than all; `Grants` refuses the rest ("always reaches all records"). Opt in only after every read of the records applies the reach and every write rechecks it.
+- **Widest wins.** An account's reach is the widest grant that gives it the key, in the same company context as the decision. Grant-all reaches all; a team role carries its role's reach.
+- **A restriction on the user wins over the team.** A direct deny removes the key. A direct allow's reach is the account's reach for the key: it caps what roles and team roles give, and gives the key at that reach.
+- **Reach only narrows.** It applies on top of the owner's tenant and company filters ([ADR 19](../../../docs/architecture/decisions/19-company-work-access-and-page-scope.md)), never instead of them. Read live; nothing is cached.
+- **Apply it.** A Grid table names its owner field (`TableDecl::owner`, optional `team`) and Grid filters every read (`apps/base/grid/README.md`, "Record reach"). Your own SQL uses `Reach::predicate(owner, team)` with tenant `$1` and reader `$2`, after `reach_proof(client, scope, key)`; a write rechecks `reach_admits(client, scope, key, owner, team)` in its transaction. `effective_grants` returns the held keys and `Effective::reach_of` for a catalog.
+- **A grant gives no more reach than the actor holds.** `set_role_capability_in` (`grant: Option<Reach>`), `set_direct_in` (`Direct::Allow(reach)`), `validate_assignment`, group roles, new members of a group that carries roles, and provider role bounds need the actor to hold each key at least as far as it reaches (`Effective::reaches`). A system principal's grant needs all.
+- **Joining a team gives the member the team's reach.** Team management defines who shares "my team's" records; a membership change is not a grant and runs no reach check. A direct deny or a narrower direct allow on the user caps what the team gives.
+- **One rule for a user's direct rule.** An allow needs the actor to hold the key as far as it reaches. Clearing a direct rule on a key that supports reach (an allow, a deny or none) needs the actor to hold the key as far as the account reaches once it is gone, on their own account too, so neither a cap nor a deny-then-clear lifts it; a clear that leaves the key unheld needs nothing more (`Grants::validate_direct`, also run by the agent review). Setting a deny only narrows and checks no reach.
+- **Taking over an account needs all.** `holds_everything_of` treats a key the actor reaches only partly as covering nobody else's grant of it.
+- **Impersonating:** a key that supports reach is held only when the operator reaches all of it (`denied_impersonation_reach`), with the viewed account's reach.
+- **System principals** reach all of what they are granted; `reach_proof` holds nothing for them, as `holds_proof`.
+- **Where it shows.** The role page lists each grant's reach beside its key. `base.authz_agent.role_capability.set` and, for an allow, `base.authz_agent.principal_capability.set` take `reach` (`own`, `team`, `all`).
+- Proof: `BILIBI_RECORD_REACH=disposable cargo run -p bilibi-web --example record-reach` (`scripts/run-walkthroughs.sh record-reach`).
 
 ## Restrictions on a caller's read connection
 

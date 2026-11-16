@@ -6,6 +6,7 @@
 //! result beside it. A pass works in bounded slices: when its time is up it
 //! queues its own continuation from the next unrecorded row, so it fits the
 //! Queue's attempt timeout, and a retried attempt never records a row twice.
+use crate::stats::Written;
 use crate::{
     csv, files::FILES, mapping::convert, record::Registered, store, BulkData, Field, Mapping,
     Outcome, Pass, Policy, Run, RunState, WORKER,
@@ -114,6 +115,8 @@ struct Work<'a> {
     pass: Pass,
     company: i64,
     found: HashMap<(String, String), std::result::Result<String, String>>,
+    /// Rows the real pass has written in this slice, per table.
+    written: Written,
 }
 
 /// A refusal one row can carry, in words; `None` when the cause is the
@@ -188,6 +191,10 @@ impl Work<'_> {
                 .find(|field| field.name == entry.field)
                 .cloned()
             else {
+                problems.push(format!(
+                    "{}: is no longer available for import",
+                    entry.field
+                ));
                 continue;
             };
             let text = match (&entry.column, &entry.value) {
@@ -216,10 +223,21 @@ impl Work<'_> {
             return Ok(Planned::Refused(problems.join("; ")));
         }
         let import = &self.registered.definition.import;
-        let create = |input: Map<String, Value>| Planned::Write {
-            contract: import.create,
-            input: Value::Object(input),
-            outcome: Outcome::Create,
+        let custom = self
+            .registered
+            .custom
+            .map(|_| crate::custom::take(&mut input));
+        let create = |mut input: Map<String, Value>| {
+            if let (Some(binding), Some(custom)) = (self.registered.custom, &custom) {
+                if !custom.is_empty() {
+                    input.insert(binding.create_field.into(), json!(custom));
+                }
+            }
+            Planned::Write {
+                contract: import.create,
+                input: Value::Object(input),
+                outcome: Outcome::Create,
+            }
         };
         let Some(duplicates) = &import.duplicates else {
             return Ok(create(input));
@@ -270,6 +288,9 @@ impl Work<'_> {
                 }
                 let mut fields = Map::new();
                 for name in &self.registered.update_fields {
+                    if self.registered.custom.is_some_and(|binding| binding.update_field == name) {
+                        continue;
+                    }
                     let value = input.get(name).cloned().or_else(|| {
                         candidate
                             .get(name)
@@ -287,6 +308,11 @@ impl Work<'_> {
                     update.extend(fields);
                 } else {
                     update.insert(duplicates.update_fields.into(), Value::Object(fields));
+                }
+                if let (Some(binding), Some(custom)) = (self.registered.custom, custom) {
+                    if !custom.is_empty() {
+                        update.insert(binding.update_field.into(), json!(custom));
+                    }
                 }
                 Ok(Planned::Write {
                     contract: duplicates.update,
@@ -491,6 +517,7 @@ impl BulkData {
             pass,
             company: run.company,
             found: HashMap::new(),
+            written: Written::default(),
         };
         let started = Instant::now();
         let mut next = usize::try_from(run.next_row).map_err(|_| Error::Internal)?;
@@ -521,12 +548,14 @@ impl BulkData {
                 }
                 Pass::Run => {
                     if !work.write(client, planned, row, key).await? {
+                        work.written.analyze(client).await;
                         return Ok(());
                     }
                     next += 1;
                 }
             }
         }
+        std::mem::take(&mut work.written).analyze(client).await;
         if !batch.is_empty()
             && !self
                 .flush(execution, client, &scope, &work, batch, next)
@@ -773,7 +802,7 @@ impl Work<'_> {
     /// A real row: the owner's write and its result in one transaction.
     /// False when the run was cancelled or ended meanwhile.
     async fn write(
-        &self,
+        &mut self,
         client: &mut tokio_postgres::Client,
         planned: Planned,
         row: i32,
@@ -901,6 +930,7 @@ impl Work<'_> {
             }
         };
         record(&mut tx, tenant, self.run, self.pass, vec![result], row).await?;
+        self.written.add(tx.sql()).await?;
         tx.commit().await?;
         self.bulk.wake(tenant, self.scope.user());
         Ok(true)

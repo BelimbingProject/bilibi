@@ -391,6 +391,11 @@ pub(super) async fn list(
                 .and_then(|key| extension_fields.custom_values.get(&id)?.get(key))
                 .and_then(Value::as_str);
             let shown = match (&field.kind, value) {
+                (crate::list_fields::ListKind::Boolean, Some(value)) => match value {
+                    "true" => "Yes".into(),
+                    "false" => "No".into(),
+                    _ => value.to_owned(),
+                },
                 (crate::list_fields::ListKind::Date, Some(value)) => value
                     .parse::<jiff::civil::Date>()
                     .ok()
@@ -692,6 +697,7 @@ struct DetailBody<'a> {
     id: i64,
     panels: &'a [String],
     header: Html,
+    facts: Html,
     chain: Html,
     notice: Html,
     card: Html,
@@ -716,6 +722,7 @@ fn operation_name(op: crate::lifecycle::Operation) -> (&'static str, &'static st
 /// What the detail page's live state hands its view: commit outcomes, the
 /// open dialog, the notice and the Departments table arrangement.
 pub(super) struct DetailState<'a> {
+    pub facts: &'a [bilibi_ports::RecordFactValue],
     pub statuses: &'a CommitStates,
     pub pending: Option<&'a Pending>,
     pub notice: &'a str,
@@ -736,6 +743,7 @@ pub(super) async fn detail(
     state: DetailState<'_>,
 ) -> Result<String> {
     let DetailState {
+        facts: key_facts,
         statuses,
         pending,
         notice,
@@ -1085,6 +1093,34 @@ pub(super) async fn detail(
                     }
                     render(&InlineEdit { field })?
                 }
+                (bilibi_custom_fields::Kind::LongText, _) => {
+                    render(&bilibi_ui::InlineLongText { field, rows: 5 })?
+                }
+                (bilibi_custom_fields::Kind::Boolean, _) => {
+                    let editor = Field::named(&name)
+                        .id(format!("{name}-input"))
+                        .label(&definition.label)
+                        .value(value)
+                        .kind(InputKind::Switch);
+                    render(&InlineChoice {
+                        field,
+                        display: Html::text(match value {
+                            "true" => "Yes",
+                            "false" => "No",
+                            _ => "—",
+                        }),
+                        editor: render(&editor)?,
+                    })?
+                }
+                (bilibi_custom_fields::Kind::Email, _) => render(&InlineEdit {
+                    field: field.input_type("email"),
+                })?,
+                (bilibi_custom_fields::Kind::Phone, _) => render(&InlineEdit {
+                    field: field.input_type("tel"),
+                })?,
+                (bilibi_custom_fields::Kind::Link, _) => render(&InlineEdit {
+                    field: field.input_type("url"),
+                })?,
                 (bilibi_custom_fields::Kind::Number, _) => {
                     field = field.input_type("text");
                     render(&InlineEdit { field })?
@@ -1408,6 +1444,13 @@ pub(super) async fn detail(
             id,
             panels,
             header,
+            facts: render(&bilibi_ui::RecordFacts {
+                id: "company-key-facts",
+                items: key_facts
+                    .iter()
+                    .map(|fact| bilibi_ui::StatItem::text(&fact.label, &fact.value))
+                    .collect(),
+            })?,
             chain,
             notice: notices,
             card: content,
@@ -1738,7 +1781,14 @@ pub(super) async fn create(
                 bilibi_custom_fields::Kind::Number => {
                     field.kind(InputKind::Text).attr("inputmode", "decimal")
                 }
-                _ => field.kind(InputKind::Text).attr("maxlength", "1000"),
+                bilibi_custom_fields::Kind::LongText => {
+                    field.kind(InputKind::Textarea).attr("rows", "5")
+                }
+                bilibi_custom_fields::Kind::Boolean => field.kind(InputKind::Switch),
+                bilibi_custom_fields::Kind::Email => field.kind(InputKind::Email),
+                bilibi_custom_fields::Kind::Phone => field.kind(InputKind::Tel),
+                bilibi_custom_fields::Kind::Link => field.kind(InputKind::Url),
+                _ => field.kind(InputKind::Text),
             };
             additional_fields.push(&render(&field)?);
         }
@@ -2249,7 +2299,8 @@ fn field_filter_controls(state: &ExtensionListFields<'_>, page: &crate::Page) ->
                         value.kind(InputKind::Text)
                     }
                 }
-                crate::list_fields::ListKind::Choice { .. } => {
+                crate::list_fields::ListKind::Boolean
+                | crate::list_fields::ListKind::Choice { .. } => {
                     let mut choices = vec![Choice::new("Choose a value", "")];
                     choices.extend(field.choices.clone());
                     if !filter.value.is_empty() && !choices.iter().any(|c| c.value == filter.value)

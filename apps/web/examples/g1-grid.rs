@@ -159,7 +159,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &for_viewer,
     );
     grants
-        .set_direct(&admin, viewer.user(), "grid.reference.view", Some(false))
+        .set_direct(
+            &admin,
+            viewer.user(),
+            "grid.reference.view",
+            Some(bilibi_authz::grants::Direct::Deny),
+        )
         .await?;
     show(
         "viewer after a direct deny",
@@ -196,7 +201,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // A platform capability needs the operator identity as well as a grant, so
     // grant-all administrators never see this table in the other steps.
     grants
-        .set_direct(&admin, staff.user(), "reference.broken.view", Some(true))
+        .set_direct(
+            &admin,
+            staff.user(),
+            "reference.broken.view",
+            Some(bilibi_authz::grants::Direct::Allow(
+                bilibi_authz::Reach::All,
+            )),
+        )
         .await?;
     println!(
         "granted but not operator: sees it = {:?}",

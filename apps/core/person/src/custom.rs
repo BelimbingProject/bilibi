@@ -132,10 +132,20 @@ pub(crate) fn condition(
     use bilibi_custom_fields::Kind;
     let value = filter.value.trim();
     match (definition.kind, filter.op.as_str()) {
-        (Kind::Text, "contains") if !value.is_empty() && value.chars().count() <= 256 => Some(
-            format!("position(lower(${index}::text) in lower({expression}))>0"),
-        ),
-        (Kind::Text | Kind::Choice, "eq") if !value.is_empty() && value.chars().count() <= 256 => {
+        (Kind::Text | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email, "contains")
+            if !value.is_empty() && value.chars().count() <= 256 =>
+        {
+            Some(format!(
+                "position(lower(${index}::text) in lower({expression}))>0"
+            ))
+        }
+        (Kind::Boolean, "eq") if matches!(value, "true" | "false") => {
+            Some(format!("{expression}=${index}::text"))
+        }
+        (
+            Kind::Text | Kind::Choice | Kind::LongText | Kind::Link | Kind::Phone | Kind::Email,
+            "eq",
+        ) if !value.is_empty() && value.chars().count() <= 256 => {
             Some(format!("{expression}=${index}::text"))
         }
         (Kind::Number, "gte" | "lte") if bilibi_custom_fields::valid_number(value) => {
@@ -179,7 +189,7 @@ pub(crate) fn patch(input: &Value) -> Result<Custom> {
 
 /// The agent input schema for `custom`.
 pub(crate) fn schema() -> Value {
-    json!({"type":"array","description":"Custom field values as {key, value} pairs; value is text (a number as a decimal string, a date as YYYY-MM-DD, a choice as its code) or null to clear. Find keys with base.custom_fields.list (record type person).","items":{"type":"object","required":["key"],"properties":{"key":{"type":"string","maxLength":40},"value":{"type":"string","maxLength":10000,"nullable":true}}}})
+    json!({"type":"array","description":"Custom field values as {key, value} pairs; value is text (a number as a decimal string, a date as YYYY-MM-DD, a choice as its code, yes/no as \"true\" or \"false\") or null to clear. Find keys with base.custom_fields.list (record type person).","items":{"type":"object","required":["key"],"properties":{"key":{"type":"string","maxLength":40},"value":{"type":"string","maxLength":10000,"nullable":true}}}})
 }
 
 // People take tenant-defined custom fields: the values live in

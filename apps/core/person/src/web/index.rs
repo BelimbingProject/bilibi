@@ -170,6 +170,7 @@ impl Index {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        self.columns.refresh_views(scope).await?;
         // Each read below takes its own pooled connection; none is held
         // across another, so many open lists cannot exhaust the pool.
         let masked = {
@@ -673,7 +674,7 @@ impl Index {
             bilibi_bulk_data::Kind::Integer | bilibi_bulk_data::Kind::Number => {
                 control.kind(InputKind::Number)
             }
-            bilibi_bulk_data::Kind::Text => control,
+            bilibi_bulk_data::Kind::Text | bilibi_bulk_data::Kind::Custom(_) => control,
         };
         let which = if self.selection.all_matching && !self.selection.excluded.is_empty() {
             format!("{count} of the {matching} contacts the filters match")
@@ -828,8 +829,21 @@ impl LiveState<Scope, Error> for Index {
                         self.list.next_sort(value["sort"].as_str().unwrap_or(""));
                     }
                     "grid" => {
-                        if let Outcome::Sort(key) =
-                            self.columns.handle(request.scope, &values(value)).await?
+                        let query = self.list.to_params();
+                        if let Outcome::Sort(key) = self
+                            .columns
+                            .handle(
+                                request.scope,
+                                &PageColumns::event_values(value)?,
+                                bilibi_grid::ViewCaller {
+                                    contracts: &self.pages.contracts,
+                                    credential: request.credential,
+                                    service: super::SERVICE,
+                                    event: "grid",
+                                    query,
+                                },
+                            )
+                            .await?
                         {
                             self.list.next_sort(&key);
                         }

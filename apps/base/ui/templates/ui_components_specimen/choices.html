@@ -3,5 +3,6 @@
 {% call ui::card(id="specimen-choice-controls", title="Choice controls", inner_class="p-4") %}
 {% call form::input(field=controls.select) %}{% endcall %}
 {% call form::input(field=controls.checkbox) %}{% endcall %}
+{% for field in controls.switches %}{% call form::input(field=field) %}{% endcall %}{% endfor %}
 {% call form::radio_group(group=controls.radio) %}{% endcall %}
 {% endcall %}

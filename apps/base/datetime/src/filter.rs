@@ -10,7 +10,7 @@
 //! hand every live event to [`PeriodFilter::event_checked`] (a filter ignores another
 //! filter's events); an [`Outcome::Applied`] replaces the URL period and
 //! resets the page, an [`Outcome::Update`] only re-renders.
-use crate::{Clock, Period, Preset};
+use crate::{Clock, FinancialYears, Period, Preset};
 use askama::Template;
 use bilibi_ui::{params, Choice, Field, InputKind};
 use serde_json::Value;
@@ -42,6 +42,8 @@ pub struct PeriodFilter {
     pub period: Period,
     /// The calendar zone the dates are read in (named in the select's title).
     pub timezone: String,
+    financial_years: Option<FinancialYears>,
+    today: jiff::civil::Date,
     open: bool,
     draft_from: String,
     draft_to: String,
@@ -55,11 +57,20 @@ impl PeriodFilter {
             label: "Period".into(),
             period,
             timezone: clock.timezone.clone(),
+            financial_years: None,
+            today: clock.today,
             open: false,
             draft_from: String::new(),
             draft_to: String::new(),
             error: None,
         }
+    }
+
+    /// Enable financial-year presets from the caller's calendar. Refresh this
+    /// when the selected company or its calendar changes, including clearing it.
+    pub fn financial_years(mut self, years: Option<FinancialYears>) -> Self {
+        self.financial_years = years;
+        self
     }
 
     pub fn label(mut self, label: impl Into<String>) -> Self {
@@ -71,6 +82,7 @@ impl PeriodFilter {
     /// and draft, if open, are kept.
     pub fn set(&mut self, period: Period, clock: &Clock) {
         self.period = period;
+        self.today = clock.today;
         self.timezone = clock.timezone.clone();
     }
 
@@ -143,8 +155,11 @@ impl PeriodFilter {
                     return Ok(Some(Outcome::Update));
                 }
                 let period = period.to_owned();
-                let applied =
-                    Period::parse(|key| (key == "period").then(|| period.clone()), clock.today);
+                let applied = Period::parse_with_financial_years(
+                    |key| (key == "period").then(|| period.clone()),
+                    clock.today,
+                    self.financial_years,
+                );
                 self.close();
                 Some(Outcome::Applied(applied))
             }
@@ -198,6 +213,12 @@ impl PeriodFilter {
     pub fn selection(&self) -> Field {
         let mut options: Vec<Choice> = Preset::ALL
             .iter()
+            .filter(|(_, preset)| {
+                !preset.needs_financial_year()
+                    || self
+                        .financial_years
+                        .is_some_and(|years| years.supports(*preset, self.today))
+            })
             .map(|(label, preset)| Choice::new(*label, preset.as_str()))
             .collect();
         if self.period.preset == Preset::Custom {

@@ -207,7 +207,16 @@ async fn context<'a>(
         }
     });
     let active = active_item(&tree, path);
-    let nodes: Vec<_> = tree.iter().map(|node| nav_node(node, active)).collect();
+    // The tenant's own words for menu items (ADR 28); keys and routes stay.
+    let labels = app
+        .services
+        .get::<bilibi_base::labels::Labels>(bilibi_base::labels::SERVICE)?
+        .labels(&**client, scope)
+        .await?;
+    let nodes: Vec<_> = tree
+        .iter()
+        .map(|node| nav_node(node, active, &labels))
+        .collect();
     // The tenant's standing, from the explicit operator proof only.
     let platform_operator = match tenancy::prove_operator(&**client, scope).await {
         Ok(_) => true,
@@ -645,20 +654,24 @@ fn active_item(tree: &[menu::Node], path: &str) -> Option<&'static str> {
     best.map(|(id, _)| id)
 }
 
-fn nav_node(node: &menu::Node, active: Option<&str>) -> NavNode {
+fn nav_node(
+    node: &menu::Node,
+    active: Option<&str>,
+    labels: &bilibi_base::labels::LabelSet,
+) -> NavNode {
     let item = node.item.item;
     // The contributed icon name is used unchanged.
     let icon = item.icon.unwrap_or("square-3-stack-3d").to_owned();
     NavNode {
         id: item.id.to_owned(),
-        label: item.label.to_owned(),
+        label: labels.menu(item.id, item.label),
         icon,
         route: item.route.map(str::to_owned),
         active: active == Some(item.id),
         children: node
             .children
             .iter()
-            .map(|child| nav_node(child, active))
+            .map(|child| nav_node(child, active, labels))
             .collect(),
     }
 }

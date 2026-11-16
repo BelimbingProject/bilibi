@@ -43,6 +43,9 @@ futures-core.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
+# Core modules record-reach uses; a mounted composition may not compose them.
+bilibi-activity.workspace = true
+bilibi-team.workspace = true
 mmdb-writer.workspace = true
 tokio-tungstenite.workspace = true
 bilibi-mail.workspace = true

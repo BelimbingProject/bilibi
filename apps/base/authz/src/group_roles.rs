@@ -147,11 +147,12 @@ impl Grants {
             }
             for key in client
                 .query(
-                    "SELECT capability FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2",
+                    "SELECT capability,reach FROM role_capabilities WHERE tenant_id=$1 AND role_id=$2",
                     &[&scope.tenant(), role],
                 )
                 .await?
             {
+                let reach = crate::Reach::parse(key.get(1)).unwrap_or(crate::Reach::All);
                 let key: &str = key.get(0);
                 self.staff_key(key)?;
                 if company.is_some()
@@ -165,7 +166,9 @@ impl Grants {
                         "{name} has permissions that apply across the organisation, so a {source} with a company cannot carry it."
                     )));
                 }
-                if !actor.allowed.contains(key) {
+                // A team role carries its reach (#683): the actor holds the
+                // key at least that far.
+                if !actor.reaches(key, reach) {
                     return Err(Error::Forbidden);
                 }
             }
@@ -198,24 +201,22 @@ impl Grants {
             crate::effective_capabilities_in_company(client, scope, scope.user(), company).await?;
         let rows = client
             .query(
-                &format!("SELECT {}, COALESCE((SELECT array_agg(c.capability) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),'{{}}') FROM roles r WHERE r.tenant_id=$1 AND (r.company_id IS NULL OR r.company_id=ANY($2)) AND NOT r.grant_all AND NOT r.requires_engagement ORDER BY lower(r.name),r.id", crate::roles::SUMMARY),
+                &format!("SELECT {}, COALESCE((SELECT array_agg(c.reach || ':' || c.capability) FROM role_capabilities c WHERE c.tenant_id=r.tenant_id AND c.role_id=r.id),'{{}}') FROM roles r WHERE r.tenant_id=$1 AND (r.company_id IS NULL OR r.company_id=ANY($2)) AND NOT r.grant_all AND NOT r.requires_engagement ORDER BY lower(r.name),r.id", crate::roles::SUMMARY),
                 &[&scope.tenant(), &companies],
             )
             .await?;
         Ok(rows
             .iter()
             .filter(|row| {
-                let keys: Vec<String> = row.get(9);
-                !keys.is_empty()
-                    && keys.iter().all(|key| {
-                        self.vocabulary
-                            .capabilities
-                            .get(key.as_str())
-                            .is_some_and(|c| {
-                                c.definition.audience != crate::Audience::Portal
-                                    && (company.is_none() || c.definition.company_scoped)
-                            })
-                            && actor.allowed.contains(key.as_str())
+                let grants: Vec<String> = row.get(9);
+                !grants.is_empty()
+                    && grants.iter().all(|grant| {
+                        let (reach, key) = grant.split_once(':').unwrap_or(("all", grant));
+                        self.vocabulary.capabilities.get(key).is_some_and(|c| {
+                            c.definition.audience != crate::Audience::Portal
+                                && (company.is_none() || c.definition.company_scoped)
+                        }) && actor
+                            .reaches(key, crate::Reach::parse(reach).unwrap_or(crate::Reach::All))
                     })
             })
             .map(crate::roles::summary)

@@ -910,7 +910,7 @@ async fn visible_tenant(
 
 inventory::submit! {
     Module { id: "base/integration", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/schedule", "base/settings", "base/ui", "base/datetime", "base/locale", "base/menu", "base/grid", "base/personal_data"],
+        dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/schedule", "base/settings", "base/ui", "base/datetime", "base/locale", "base/menu", "base/grid", "base/personal_data", "base/agent_api"],
         migrations: &[("base-integration-001", include_str!("../migrations/001-exchanges.sql")),
             ("base-integration-002", include_str!("../migrations/002-reference-webhook.sql")),
             ("base-integration-003-agent-self-report", include_str!("../migrations/003-agent-self-report.sql")),
@@ -931,6 +931,7 @@ inventory::submit! {
                 display: services.get("base/datetime.display")?,
                 locales: services.get("base/locale.locales")?,
                 views: services.get::<bilibi_grid::PageViews>(bilibi_grid::PAGE_VIEWS)?,
+                contracts: services.get(bilibi_agent_api::page::SERVICE)?,
             }))))
         } }, Service { id: reference_webhook::SERVICE, factory: |services| {
             Ok(reference_webhook::service(services.get::<Db>("base/database.pool")?.as_ref().clone()))
@@ -978,6 +979,6 @@ bilibi_menu::contribute!(
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "base/integration.pages", bilibi_module_registry::Provenance { module: "base/integration", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "base/integration.pages",
-    contracts: &[],
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ],
     pending: bilibi_module_registry::contributions::Pending::Every { reason: "Exchange actions write through the Integration facade; no contract yet." },
 }) }

@@ -17,6 +17,7 @@ bilibi-picklists.workspace = true
 bilibi-settings.workspace = true
 bilibi-tenancy.workspace = true
 bilibi-ui.workspace = true
+url.workspace = true
 inventory.workspace = true
 jiff.workspace = true
 serde.workspace = true

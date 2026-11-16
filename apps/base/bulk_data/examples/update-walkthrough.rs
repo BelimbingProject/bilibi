@@ -9,6 +9,7 @@ use bilibi_database::{pool, Db, Error};
 use bilibi_queue::{Config, Executor};
 use bilibi_tenancy::{ProofFuture, Scope};
 use serde_json::{json, Value};
+use std::os::unix::fs::DirBuilderExt;
 use std::time::Duration;
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_postgres::Transaction;
@@ -193,13 +194,6 @@ async fn main() -> Result<(), Failure> {
     };
     let (manager, viewer, other) = (person(0), person(1), person(2));
     let sql = db.get().await?;
-    // 500 contacts to change, and another tenant's contact named alike.
-    sql.batch_execute(
-        "INSERT INTO persons(tenant_id,code,name,kind,email)
-           SELECT 1, 'bulk_' || n, 'Bulk ' || lpad(n::text, 3, '0'), 'human', 'bulk' || n || '@bulk.test' FROM generate_series(1,500) n;
-         INSERT INTO persons(tenant_id,code,name,kind) VALUES (2,'bulk_other_tenant','Bulk Other Tenant','human');",
-    )
-    .await?;
     let ids = |names: &[&str]| {
         let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
         let sql = &sql;
@@ -216,6 +210,70 @@ async fn main() -> Result<(), Failure> {
         }
     };
     let (stop, worker) = start(&app)?;
+
+    // 500 contacts to change, imported as a person imports them: no ANALYZE
+    // here, as the import refreshes the planner's statistics itself (#719).
+    // Without that the planner takes `persons` for one row until autovacuum
+    // gets there, and the searches below run for minutes (#717).
+    let root = std::env::current_dir()?.join("data/artifacts");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)?;
+    sql.execute("INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted) VALUES('artifacts.storage_root',0,'global',0,$1,false) ON CONFLICT (key,tenant_id,scope_type,scope_id) DO NOTHING", &[&json!(root)]).await?;
+    let mut contacts = String::from("Name,Kind,E-mail\n");
+    for n in 1..=500 {
+        contacts.push_str(&format!("Bulk {n:03},human,bulk{n}@bulk.test\n"));
+    }
+    let import = bulk
+        .upload(
+            &manager.scope,
+            "core/person.contacts",
+            "contacts.csv",
+            contacts.as_bytes(),
+        )
+        .await??;
+    let mapping = json!({"fields": [
+        {"field": "name", "column": "Name"}, {"field": "kind", "column": "Kind"},
+        {"field": "email", "column": "E-mail"}
+    ]});
+    for key in [
+        "base.bulk_data.import.preview",
+        "base.bulk_data.import.start",
+    ] {
+        let version = bulk.run(&**sql, &manager.scope, import).await?.version;
+        manager
+            .write(
+                key,
+                json!({"run_id": import, "version": version, "mapping": mapping}),
+            )
+            .await?;
+        while bulk
+            .run(&**sql, &manager.scope, import)
+            .await?
+            .state
+            .working()
+        {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    let imported: i64 = sql
+        .query_one(
+            "SELECT count(*) FROM persons WHERE tenant_id=1 AND email LIKE 'bulk%@bulk.test'",
+            &[],
+        )
+        .await?
+        .get(0);
+    if imported != 500 {
+        return Err(format!("the import created {imported} of the 500 contacts").into());
+    }
+    println!("imported the 500 contacts to change");
+    // Another tenant's contact named alike.
+    sql.execute(
+        "INSERT INTO persons(tenant_id,code,name,kind) VALUES (2,'bulk_other_tenant','Bulk Other Tenant','human')",
+        &[],
+    )
+    .await?;
 
     println!("== refused before it starts");
     viewer

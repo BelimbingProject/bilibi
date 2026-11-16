@@ -14,18 +14,21 @@ pub mod page_columns;
 pub mod page_views;
 pub mod query;
 pub mod reference;
+mod shared_views;
 mod summary;
 pub mod view;
+mod view_operations;
 pub use lens::{Lens, Range};
 pub use oversight::{
     ChildResult, OversightData, OversightQueries, OversightResult, OversightSpec, OVERSIGHT_QUERIES,
 };
-pub use page_columns::{Outcome, PageColumns};
+pub use page_columns::{Outcome, PageColumns, ViewCaller};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
-    project, project_lenses, project_within, scalar_expression, scalar_join, stats, Lenses,
-    Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS, MAX_ESTIMATED_COST,
+    project, project_lenses, project_within, scalar_access, scalar_expression, scalar_join, stats,
+    Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS, MAX_ESTIMATED_COST,
 };
+pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
 pub use summary::{
     page_keys, summarize, Bounds, Bucket, Filter, Grouping, KeyPage, Line, Measure, PageSpec,
     Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES, MAX_COST_BOUND, MAX_FILTERS,
@@ -96,7 +99,7 @@ pub fn validate_capabilities(
     vocabulary: &bilibi_authz::Vocabulary,
 ) -> Result<()> {
     for table in installed.tables() {
-        if !vocabulary.capabilities.contains_key(table.capability()) {
+        let Some(capability) = vocabulary.capabilities.get(table.capability()) else {
             return Err(RegistryError::Contribution(format!(
                 "grid table {} from {} ({}:{}) names undeclared capability {}",
                 table.id(),
@@ -104,6 +107,28 @@ pub fn validate_capabilities(
                 table.provenance.source,
                 table.provenance.line,
                 table.capability()
+            )));
+        };
+        // Reach is applied through the owner field: a table read under a key
+        // that supports reach without one would show every row (#683).
+        if capability.definition.reach != table.decl.owner.is_some() {
+            return Err(RegistryError::Contribution(format!(
+                "grid table {} from {} ({}:{}): {} {}, so the table {} an owner field",
+                table.id(),
+                table.owner,
+                table.provenance.source,
+                table.provenance.line,
+                table.capability(),
+                if capability.definition.reach {
+                    "supports record reach"
+                } else {
+                    "does not support record reach"
+                },
+                if capability.definition.reach {
+                    "must declare"
+                } else {
+                    "cannot declare"
+                },
             )));
         }
     }
@@ -146,10 +171,12 @@ inventory::submit! { Consumer::new::<GridContribution>(TABLES, "base/grid", |ent
 inventory::submit! {
     Module {
         id: "base/grid", layer: Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data"],
+        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/audit", "base/ui", "base/datetime", "base/settings", "base/personal_data", "base/agent_api"],
         migrations: &[
             ("base-grid-001", include_str!("../migrations/001-reference.sql")),
             ("base-grid-002", include_str!("../migrations/002-reference-recorded-at.sql")),
+            ("base-grid-003-reference-tasks", include_str!("../migrations/003-reference-tasks.sql")),
+            ("base-grid-004-shared-views", include_str!("../migrations/004-shared-views.sql")),
         ],
         services: &[Service { id: PAGE_VIEWS, factory: page_views::service }, Service { id: OVERSIGHT_QUERIES, factory: oversight::service }],
     }

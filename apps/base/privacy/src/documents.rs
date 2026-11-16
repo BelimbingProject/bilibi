@@ -195,6 +195,20 @@ impl HtmlOwner for RequestDocuments {
     }
 }
 
+/// Why a certificate could not be printed, when the operator fixes it in
+/// Settings: carried as `Error::Refused(code)` from the render and recorded
+/// as the request's `finish_error` (`runner::finish_code`).
+pub(crate) const PDF_ENGINE_UNAVAILABLE: &str = "pdf_engine_unavailable";
+pub(crate) const PDF_RENDER_TIMED_OUT: &str = "pdf_render_timed_out";
+fn render_error(error: bilibi_artifacts::Error) -> Error {
+    match error {
+        bilibi_artifacts::Error::PdfEngineUnavailable => {
+            Error::Refused(PDF_ENGINE_UNAVAILABLE.into())
+        }
+        bilibi_artifacts::Error::PdfTimeout => Error::Refused(PDF_RENDER_TIMED_OUT.into()),
+        error => artifact_error(error),
+    }
+}
 fn artifact_error(error: bilibi_artifacts::Error) -> Error {
     match error {
         bilibi_artifacts::Error::Database(error) => error,
@@ -377,6 +391,7 @@ fn reason_text(reason: KeptReason) -> &'static str {
         KeptReason::RetainedUntil => "Retained record",
         KeptReason::LegalMinimum => "Legal minimum period",
         KeptReason::Shared => "Shared with another party",
+        KeptReason::Evidence => "Audit evidence under its retention policy",
     }
 }
 
@@ -507,7 +522,7 @@ pub(crate) async fn certificate(
             &options,
         )
         .await
-        .map_err(artifact_error)?;
+        .map_err(render_error)?;
     Ok(rendered.document.id)
 }
 

@@ -12,9 +12,9 @@ use crate::{
 };
 use bilibi_agent_api::{page::Call, Error as ContractError};
 use bilibi_authz::{
-    grants::Assignment,
+    grants::{Assignment, Direct},
     roles::{RoleSummary, UPDATE as UPDATE_ROLE},
-    Effective,
+    Effective, Reach,
 };
 use bilibi_database::Error;
 use bilibi_party_ids::PersonId;
@@ -741,16 +741,14 @@ impl Detail {
         )
         .await?;
         // The escalation guard: a role is grantable only by an actor holding
-        // everything it grants; a grant-all role only by a grant-all actor.
+        // everything it grants at least as far; a grant-all role only by a
+        // grant-all actor.
         let grantable = |id: i64| -> bool {
             match grants.get(&id) {
                 Some((true, _)) => actor.grant_all,
-                Some((false, capabilities)) => {
-                    actor.grant_all
-                        || capabilities
-                            .iter()
-                            .all(|key| actor.allowed.contains(key.as_str()))
-                }
+                Some((false, capabilities)) => capabilities
+                    .iter()
+                    .all(|(key, reach)| actor.reaches(key, *reach)),
                 None => false,
             }
         };
@@ -901,7 +899,7 @@ impl Detail {
         let available_caps: Vec<&str> = remaining
             .iter()
             .copied()
-            .filter(|key| actor.grant_all || actor.allowed.contains(key))
+            .filter(|key| actor.reaches(key, Reach::All))
             .collect();
         let cap_control = if !loaded.can_manage {
             "forbidden"
@@ -1636,7 +1634,11 @@ impl Detail {
                 )
                 .await
             }
-            AuthzRule::Deny(key) => grants.set_direct(scope, self.id, key, Some(false)).await,
+            AuthzRule::Deny(key) => {
+                grants
+                    .set_direct(scope, self.id, key, Some(Direct::Deny))
+                    .await
+            }
             AuthzRule::RemoveGrant(key) | AuthzRule::RemoveDenial(key) => {
                 grants.set_direct(scope, self.id, key, None).await
             }
@@ -1972,11 +1974,7 @@ impl Detail {
                             bilibi_authz::effective_capabilities_of(&**client, scope, scope.user())
                                 .await?;
                         drop(client);
-                        if !actor.grant_all
-                            && chosen
-                                .iter()
-                                .any(|key| !actor.allowed.contains(key.as_str()))
-                        {
+                        if chosen.iter().any(|key| !actor.reaches(key, Reach::All)) {
                             self.flash
                                 .error("You cannot grant capabilities you do not hold.");
                         } else {
@@ -1985,7 +1983,12 @@ impl Detail {
                                 match self
                                     .pages
                                     .grants
-                                    .set_direct(scope, self.id, key, Some(true))
+                                    .set_direct(
+                                        scope,
+                                        self.id,
+                                        key,
+                                        Some(Direct::Allow(Reach::All)),
+                                    )
                                     .await
                                 {
                                     Ok(()) => granted += 1,

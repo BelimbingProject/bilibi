@@ -22,6 +22,7 @@ bilibi-design-library = { path = "design_library" }
 bilibi-events = { path = "events" }
 bilibi-grid = { path = "grid" }
 bilibi-integration = { path = "integration" }
+bilibi-labels = { path = "labels" }
 bilibi-language-detection = { path = "language_detection" }
 bilibi-locale = { path = "locale" }
 bilibi-mail = { path = "mail" }
@@ -39,6 +40,7 @@ bilibi-privacy = { path = "privacy" }
 bilibi-queue = { path = "queue" }
 bilibi-records = { path = "records" }
 bilibi-reports = { path = "reports" }
+bilibi-rules = { path = "rules" }
 bilibi-schedule = { path = "schedule" }
 bilibi-search = { path = "search" }
 bilibi-security = { path = "security" }

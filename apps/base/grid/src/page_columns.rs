@@ -40,10 +40,11 @@
 //! built-ins. A spec the fresh catalog refuses (a field an operator restricted
 //! since, a table the account lost) is pruned from what is shown and from the
 //! address, and leaves the account's memory on the next arrangement.
+mod views;
 use crate::page_views::PageViews;
 use crate::view::View;
 use crate::{lens, Catalog, Column, Lens, Lenses, Stats, MAX_COLUMNS};
-use bilibi_database::Result;
+use bilibi_database::{Error, Result};
 use bilibi_datetime::DisplayContext;
 use bilibi_tenancy::Scope;
 use bilibi_ui::flex_table::{step_zoom, Cost, FlexColumn, FlexRow, FlexTable, RowMode};
@@ -97,6 +98,17 @@ pub struct PageColumns {
     pub suggestions: Vec<FlexColumn>,
     pub add_query: String,
     scalar_sorts: BTreeMap<String, String>,
+    saved: views::Saved,
+    named_views: bool,
+    explicit: bool,
+}
+
+pub struct ViewCaller<'a> {
+    pub contracts: &'a bilibi_agent_api::page::PageContracts,
+    pub credential: &'a str,
+    pub service: &'static str,
+    pub event: &'a str,
+    pub query: HashMap<String, String>,
 }
 
 impl PageColumns {
@@ -144,6 +156,9 @@ impl PageColumns {
             suggestions: Vec::new(),
             add_query: String::new(),
             scalar_sorts: BTreeMap::new(),
+            saved: views::Saved::default(),
+            named_views: false,
+            explicit: false,
         })
     }
 
@@ -236,7 +251,9 @@ impl PageColumns {
         scope: &Scope,
         params: &HashMap<String, String>,
     ) -> Result<()> {
-        self.view = if View::carried(params) {
+        self.named_views = true;
+        self.explicit = View::carried(params);
+        self.view = if self.explicit {
             View::from_params(params, &self.table)
         } else {
             self.views
@@ -245,13 +262,23 @@ impl PageColumns {
                 .unwrap_or_else(|| View::new(&self.table))
         };
         self.clear_suggestions();
+        self.refresh_views(scope).await?;
         Ok(())
     }
 
-    /// The URL params a page merges into its own: only what differs from the
-    /// defaults.
+    pub fn event_values(payload: &Value) -> Result<HashMap<String, String>> {
+        bilibi_ui::params::string_values_checked(payload, crate::shared_views::MAX_QUERY)
+            .map_err(Error::refused)
+    }
+
+    /// The URL params a page merges into its own. Explicit arrangements keep
+    /// a row-height marker so the address still wins over personal memory.
     pub fn params(&self) -> HashMap<String, String> {
-        self.view.to_params()
+        let mut params = self.view.to_params();
+        if self.explicit {
+            params.insert("z".into(), self.view.zoom.to_string());
+        }
+        params
     }
 
     fn clear_suggestions(&mut self) {
@@ -490,6 +517,9 @@ impl PageColumns {
         table.since = Some(&self.since);
         table.suggestions = self.suggestions.clone();
         table.add_query = &self.add_query;
+        if self.named_views {
+            table.views = Some(self.views_bar());
+        }
         table
     }
 
@@ -499,6 +529,7 @@ impl PageColumns {
         &mut self,
         scope: &Scope,
         params: &HashMap<String, String>,
+        caller: ViewCaller<'_>,
     ) -> Result<Outcome> {
         let get = |key: &str| params.get(key).map(String::as_str).unwrap_or("");
         let spec = get("spec");
@@ -540,6 +571,9 @@ impl PageColumns {
                 })
                 .and_then(|b| b.sort.clone())
                 .map_or(Outcome::Noop, Outcome::Sort));
+        }
+        if let Some(outcome) = self.handle_views(scope, params, caller).await? {
+            return Ok(outcome);
         }
         // An empty column list means the page default; an op that changes
         // columns starts from that default spelled out, so a built-in is

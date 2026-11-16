@@ -1,10 +1,10 @@
 # Tenant customisation is data on shared servers; customer code needs its own server
 
 **Document Type:** Architecture decision record
-**Status:** Accepted
+**Status:** Accepted; implementation in progress
 **Agents:** claude/claude-opus-5-5-medium (author)
 **Scope:** What a tenant may change without a release, and where customer-supplied code may run
-**Last Updated:** 2026-11-14
+**Last Updated:** 2026-11-16
 
 A shared Bilibi server runs one program for many tenants. A release is the right way to add a new capability, but too slow and too costly for one client's rule, label or view. Customer-supplied code inside that shared program would put every other tenant at risk. Custom fields (ADR 21, tenant-defined custom fields) already show the answer for fields: store the customisation as data. The owner agreed on 2026-11-14 to apply the same boundary to all tenant customisation.
 
@@ -44,7 +44,7 @@ A JSON document that embeds a script or an unlimited action loop is code, whatev
 - Shared-server clients get quick, tenant-local changes within the vocabulary Bilibi offers. A new trigger, action, record type or connector still needs a shared release.
 - On-prem and dedicated-server clients keep full code customisation.
 - Operators must enforce code admission and real isolation; the installation setting does not exist yet.
-- The rule engine is follow-up work: [#682](https://github.com/BelimbingProject/bilibi/issues/682) (wave 3). It holds the design, limits and runtime proof. When it lands, this record moves to **Accepted; implemented** and the owner READMEs it touches (custom fields, the internal operation caller) are updated in the same change.
+- The rule engine's first trial is built: [`base/rules`](../../../apps/base/rules/README.md), a structured rule record with approved versions, run after commit as one bounded principal ([ADR 31](./31-tenant-rules-run-after-commit-as-one-bounded-principal.md)). The internal operation caller admits a principal only where the contract's owner says so (`apps/base/agent_api/README.md`, "Queued jobs as callers"). Rules read an owner's typed fields; tenant custom fields are not rule inputs yet. Still to come under [#682](https://github.com/BelimbingProject/bilibi/issues/682): shadow runs, configuration packs, the bounded text formula (tested against the table above), AI observations, and the installation setting that admits customer code. This record moves to **Accepted; implemented** when the setting exists.
 
 ## Why not the alternatives
 

@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &admin,
             admin.user(),
             "base.agent-api.reference.update",
-            Some(false),
+            Some(bilibi_authz::grants::Direct::Deny),
         )
         .await?;
     attempt(&plans, &admin, &browser, &ops).await;

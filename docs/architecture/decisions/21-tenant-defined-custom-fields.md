@@ -2,11 +2,11 @@
 
 **Document Type:** Architecture decision record
 **Status:** Accepted; implemented
-**Agents:** claude-code/sonnet-5.5-high
+**Agents:** claude-code/sonnet-5.5-high, codex/gpt-6.1-sol-medium (implementation)
 **Scope:** Fields a tenant administrator adds to a record type without a release (issue #131)
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-16
 
-A hosted Bilibi with many customers cannot ship a release for every attribute a customer tracks. Static fields from an Extension (Company's field contribution contract) cover one customer per instance. The owner's direction on #131 (2026-10-26) is the scope here: simplicity now, open for later options. A tenant administrator defines **text, number, date and pick-list** fields, shown on the record page and as list columns. There are no reference fields and no per-field runtime permissions. Custom record types, calculated fields, dependent choices, unique fields and import are not part of it.
+A hosted Bilibi with many customers cannot ship a release for every attribute a customer tracks. Static fields from an Extension (Company's field contribution contract) cover one customer per instance. The owner's direction on #131 (2026-10-26) is the scope here: simplicity now, open for later options. A tenant administrator defines **text, number, date, pick-list, yes/no, long text, link, phone and email** fields, shown on the record page and as list columns. There are no reference fields and no per-field runtime permissions. The CSV import contract lives in [Bulk Data](../../../apps/base/bulk_data/README.md#tenant-defined-fields-in-csv-import). Custom record types, calculated fields, dependent choices and unique fields are not part of it. Several choices, record references, reports and global search remain follow-up work under issue #685.
 
 **Definitions are Base data, values are the owner's.** `base/custom_fields` owns one row per tenant, record type and key: label, help text, type, the pick-list a choice field uses, position, archived date and version. The key and the type never change and a key is never reused, so a value stored under it is always read as the type it was written as. A record's owner adds `custom_fields jsonb NOT NULL DEFAULT '{}'` to its own table (with an object check and a `gin (… jsonb_path_ops)` index) and checks every value against the tenant's definitions inside its own write. The tenant predicate, soft delete, version check and one audited `Change` then cover the values with the row. Tenants never run DDL.
 
@@ -14,7 +14,7 @@ A hosted Bilibi with many customers cannot ship a release for every attribute a 
 
 **Choice fields reuse governed pick-lists.** A choice field names a standalone tenant pick-list (`base/picklists`, ADR 07) instead of keeping options of its own, so renaming, retiring and translating values has one door. A retired value stays valid on records that hold it.
 
-**Numbers are exact strings.** A number is stored as a decimal string, never a float, so no digit is lost; dates are `YYYY-MM-DD`.
+**Values have stable text representations.** A number is stored as a decimal string, never a float, so no digit is lost; dates are `YYYY-MM-DD` and yes/no uses `"true"` or `"false"`. The additional scalar types use strings and the same owner validation and JSON storage.
 
 **One door, many keys.** Page and agent share the `base.custom_fields.*` operations (ADR 01); the page calls the same contracts as an agent. Archiving is the only removal: values stay on records and the field can be restored.
 

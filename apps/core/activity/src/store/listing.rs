@@ -80,10 +80,10 @@ impl Listing {
 
     /// Visible: oversight, taking part, or shared on the record the list is
     /// narrowed to when the reader may view that record.
-    fn conditions() -> String {
+    fn conditions(&self) -> String {
         format!(
             "a.tenant_id=$1 AND a.deleted_at IS NULL
-         AND ($3 OR {MINE} OR ($4 AND a.shared AND a.related_kind = $10 AND a.related_id = $11))
+         AND ({oversees} OR {MINE} OR ($4 AND a.shared AND a.related_kind = $10 AND a.related_id = $11))
          AND ($5 = '' OR a.subject ILIKE $6)
          AND ($7::text IS NULL OR a.kind = $7)
          AND ($8 = 'all' OR ($8 = 'open') = (a.closed_at IS NULL AND a.kind <> 'note'))
@@ -97,7 +97,8 @@ impl Listing {
          AND ($13::timestamptz IS NULL
               OR (a.kind IN ('call','meeting') AND a.starts_at < $14 AND a.ends_at > $13)
               OR (a.kind = 'task' AND a.due_at >= $13 AND a.due_at < $14))
-         AND ($15::bigint IS NULL OR a.series_id = $15)"
+         AND ($15::bigint IS NULL OR a.series_id = $15)",
+            oversees = self.reader.oversees()
         )
     }
 
@@ -139,7 +140,7 @@ pub(crate) async fn list(
     };
     let page_size = filter.page_size.clamp(1, largest);
     let offset = (filter.page.max(1) - 1).saturating_mul(page_size);
-    let conditions = Listing::conditions();
+    let conditions = listing.conditions();
     let params = listing.params();
     let total: i64 = client
         .query_opt(
@@ -208,7 +209,7 @@ pub(crate) async fn day_counts(
     };
     let listing = Listing::new(client, scope, &filter, related_readable).await?;
     let starts: Vec<SystemTime> = days.iter().copied().map(SystemTime::from).collect();
-    let conditions = Listing::conditions();
+    let conditions = listing.conditions();
     // `width_bucket` finds the day an instant falls in by binary search over
     // the day starts, so a busy year costs one pass over its activities.
     let sql = format!(

@@ -38,3 +38,5 @@ search/paging, FlexTable notch and Graphic's icon filter/copy tiles.
 Graphic lists every embedded SVG variant and semantic action from `bilibi_ui::Icons`; copied names use the same bare format as menus and components.
 Theme and Design Spec preserve the source's foundations and accepted decisions.
 No unit tests or test-only infrastructure belong to this module.
+
+The period-filter specimen enables financial-year presets with a 1 April year start and no preceding year, using the same caller-owned calendar API as reports.

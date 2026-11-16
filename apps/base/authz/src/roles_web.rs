@@ -16,6 +16,7 @@ use crate::{
     grants::CreatedRole,
     roles::{self, NewRole, Query, RoleDetails, RoleErrors, RoleSummary, Sort},
     web::{render, Pages, TextCell},
+    Reach,
 };
 use askama::Template;
 use bilibi_database::{Error, Result};
@@ -370,12 +371,12 @@ impl Pages {
 
 #[derive(Template)]
 #[template(
-    source = r#"{% if grant_all %}<p id="role-grant-all" class="mt-1 text-xs text-ink-subtle">This role can do everything, including anything added later.</p>{% endif %}{% if !capabilities.is_empty() %}<ul id="role-capabilities" class="mt-2 flex flex-wrap gap-1.5">{% for capability in capabilities %}<li class="rounded-md bg-surface-sunken px-2 py-1 font-mono text-xs text-ink-muted">{{ capability }}</li>{% endfor %}</ul>{% elif !grant_all %}<p class="mt-2 rounded-xl border border-line bg-surface px-4 py-6 text-center text-sm text-ink-muted">This role grants no permissions.</p>{% endif %}"#,
+    source = r#"{% if grant_all %}<p id="role-grant-all" class="mt-1 text-xs text-ink-subtle">This role can do everything, including anything added later.</p>{% endif %}{% if !capabilities.is_empty() %}<ul id="role-capabilities" class="mt-2 flex flex-wrap gap-1.5">{% for capability in capabilities %}<li class="rounded-md bg-surface-sunken px-2 py-1 font-mono text-xs text-ink-muted">{{ capability.key }}{% if capability.reach != Reach::All %}<span class="ml-1.5 font-sans text-ink-subtle">· {{ capability.reach.label() }}</span>{% endif %}</li>{% endfor %}</ul>{% elif !grant_all %}<p class="mt-2 rounded-xl border border-line bg-surface px-4 py-6 text-center text-sm text-ink-muted">This role grants no permissions.</p>{% endif %}"#,
     ext = "html"
 )]
 struct CapabilityList<'a> {
     grant_all: bool,
-    capabilities: &'a [String],
+    capabilities: &'a [crate::roles::Granted],
 }
 
 fn section(id: &str, card: &str, title: &str, body: Html) -> Result<Html> {
