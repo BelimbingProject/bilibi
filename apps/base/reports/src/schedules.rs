@@ -463,7 +463,7 @@ impl Reports {
         let Ok(client) = self.db.get().await else {
             return JobOutcome::Retry("database_unavailable");
         };
-        let Ok(tenants) = client.query("SELECT DISTINCT tenant_id FROM base_report_subscriptions WHERE NOT paused AND next_run_at <= now()  UNION SELECT DISTINCT tenant_id FROM base_report_deliveries WHERE state IN ('pending','queued')", &[]).await else {
+        let Ok(tenants) = client.query("SELECT DISTINCT tenant_id FROM base_report_subscriptions WHERE NOT paused AND next_run_at <= now()  UNION SELECT DISTINCT tenant_id FROM base_report_deliveries WHERE state IN ('pending','queued') UNION SELECT DISTINCT tenant_id FROM base_report_deliveries WHERE state IN ('sent','skipped','cancelled') AND finished_at < now() - make_interval(days => $1)", &[&KEEP_DELIVERY_DAYS]).await else {
             return JobOutcome::Retry("database_unavailable");
         };
         drop(client);
@@ -498,7 +498,7 @@ impl Reports {
             Box::pin(async move {
                 let gone = sql
                     .query(
-                        "DELETE FROM base_report_deliveries WHERE tenant_id=$1 AND id IN (SELECT id FROM base_report_deliveries WHERE tenant_id=$1 AND state IN ('sent','skipped','cancelled') AND finished_at < now() - make_interval(days => $2) ORDER BY id LIMIT $3) RETURNING id, state",
+                        "DELETE FROM base_report_deliveries WHERE tenant_id=$1 AND id IN (SELECT id FROM base_report_deliveries WHERE tenant_id=$1 AND state IN ('sent','skipped','cancelled') AND finished_at < now() - make_interval(days => $2) ORDER BY finished_at, id LIMIT $3) RETURNING id, state",
                         &[&tenant, &KEEP_DELIVERY_DAYS, &(BATCH * 5)],
                     )
                     .await?;
@@ -587,7 +587,10 @@ impl Reports {
         for row in due {
             let id: i64 = row.get(0);
             let owner: i64 = row.get(1);
-            if !self.owner_may_schedule(tenant, owner, row.get(11)).await? {
+            if !self
+                .owner_may_schedule(tx.sql(), tenant, owner, row.get(11))
+                .await?
+            {
                 // The owner lost the account, the desk or `reports.schedule`,
                 // so cannot pause it themselves: pause it here.
                 tx.mutate(move |sql| {
@@ -672,21 +675,21 @@ impl Reports {
     /// subscription's workplace and `reports.schedule`.
     async fn owner_may_schedule(
         &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
         tenant: i64,
         owner: i64,
         company: i64,
     ) -> Result<bool, Error> {
-        let client = self.db.get().await?;
         let scope = match self
             .authentication
-            .authenticate_job(&**client, tenant, owner, Some(company))
+            .authenticate_job(client, tenant, owner, Some(company))
             .await
         {
             Ok(scope) => scope,
             Err(Error::Unauthorized | Error::Forbidden | Error::NotFound) => return Ok(false),
             Err(error) => return Err(error),
         };
-        match bilibi_authz::authorize_key(&**client, &scope, SCHEDULE).await {
+        match bilibi_authz::authorize_key(client, &scope, SCHEDULE).await {
             Ok(()) => Ok(true),
             Err(Error::Forbidden) => Ok(false),
             Err(error) => Err(error),
@@ -734,6 +737,7 @@ impl Reports {
         {
             Ok(scope) => scope,
             Err(Error::Unauthorized | Error::Forbidden | Error::NotFound) => {
+                drop(client);
                 return self
                     .skip_unqueued(
                         tenant,
@@ -750,7 +754,10 @@ impl Reports {
         ] {
             match bilibi_authz::authorize_key(&**client, &scope, capability).await {
                 Ok(()) => {}
-                Err(Error::Forbidden) => return self.skip_unqueued(tenant, delivery, reason).await,
+                Err(Error::Forbidden) => {
+                    drop(client);
+                    return self.skip_unqueued(tenant, delivery, reason).await;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -844,7 +851,7 @@ impl Reports {
         };
         let row = client
             .query_opt(
-                "SELECT d.state, d.export_id, s.report_id, s.format, s.skip_empty, s.paused FROM base_report_deliveries d JOIN base_report_subscriptions s ON s.tenant_id=d.tenant_id AND s.id=d.subscription_id WHERE d.tenant_id=$1 AND d.id=$2 AND d.recipient_id=$3",
+                "SELECT d.state, d.export_id, s.report_id, s.format, s.skip_empty, s.paused, d.mailed_at IS NOT NULL FROM base_report_deliveries d JOIN base_report_subscriptions s ON s.tenant_id=d.tenant_id AND s.id=d.subscription_id WHERE d.tenant_id=$1 AND d.id=$2 AND d.recipient_id=$3",
                 &[&scope.tenant(), &delivery, &scope.user()],
             )
             .await;
@@ -861,6 +868,9 @@ impl Reports {
         }
         let (export, report, format, skip_empty, paused): (Option<i64>, i64, String, bool, bool) =
             (row.get(1), row.get(2), row.get(3), row.get(4), row.get(5));
+        if row.get::<_, bool>(6) {
+            return self.close(execution, scope, delivery, "sent", None).await;
+        }
         if paused {
             return self
                 .close(
@@ -970,7 +980,19 @@ impl Reports {
                 exports::path(export)
             ),
         );
+        match self.mail_attempt(execution, scope, delivery, true).await {
+            Ok(true) => {}
+            Ok(false) => return self.close(execution, scope, delivery, "sent", None).await,
+            Err(_) => return JobOutcome::Retry("mail_not_recorded"),
+        }
         if self.mailer.deliver(&message).await.is_err() {
+            if self
+                .mail_attempt(execution, scope, delivery, false)
+                .await
+                .is_err()
+            {
+                return JobOutcome::Retry("mail_reset_failed");
+            }
             return self
                 .retry_or_close(
                     execution,
@@ -983,6 +1005,40 @@ impl Reports {
                 .await;
         }
         self.close(execution, scope, delivery, "sent", None).await
+    }
+
+    async fn mail_attempt(
+        &self,
+        execution: &Execution,
+        scope: &Scope,
+        delivery: i64,
+        sending: bool,
+    ) -> Result<bool, Error> {
+        let mut client = self.db.get().await?;
+        let mut tx = execution
+            .begin(&mut client, "reports.delivery.mail")
+            .await?;
+        let (tenant, user) = (scope.tenant(), scope.user());
+        let changed = tx.mutate(move |sql| {
+            Box::pin(async move {
+                let row = sql.query_opt(
+                    "SELECT mailed_at::text FROM base_report_deliveries WHERE tenant_id=$1 AND id=$2 AND recipient_id=$3 AND state='queued' FOR UPDATE",
+                    &[&tenant, &delivery, &user],
+                ).await?;
+                let Some(row) = row else { return Ok((false, Vec::new())); };
+                let old: Option<String> = row.get(0);
+                if old.is_some() == sending {
+                    return Ok((false, Vec::new()));
+                }
+                let new: Option<String> = sql.query_one(
+                    "UPDATE base_report_deliveries SET mailed_at=CASE WHEN $3 THEN now() ELSE NULL END WHERE tenant_id=$1 AND id=$2 RETURNING mailed_at::text",
+                    &[&tenant, &delivery, &sending],
+                ).await?.get(0);
+                Ok((true, vec![Change { kind: DELIVERY.into(), id: delivery, old: json!({"mailed_at": old}), new: json!({"mailed_at": new}) }]))
+            })
+        }).await?;
+        tx.commit().await?;
+        Ok(changed)
     }
 
     /// The prepared export a delivery fills, recorded on the delivery in
