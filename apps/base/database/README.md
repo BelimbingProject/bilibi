@@ -88,6 +88,7 @@ Why: once more callers than connections each hold one and ask for a second, ever
 | To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
 | To call a service that takes its own | Drop your connection first |
 | A real exception: a single, named connection that must be separate, never a whole job | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
+| That exception, but refused at once when the pool has none free instead of waiting behind the connection you hold | `db.try_get_detached("why")` |
 | A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
 
 - **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.

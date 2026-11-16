@@ -142,6 +142,18 @@ impl Db {
         let object = self.pool.get().await?;
         Ok(Connection { object, mark: None })
     }
+    /// A detached connection that never waits: served only when the pool has
+    /// one free now, refused at once otherwise. For a second connection taken
+    /// on purpose while the caller holds another, which must not wait out a
+    /// full pool behind its own first connection. `why` as in
+    /// [`Db::get_detached`].
+    pub async fn try_get_detached(&self, why: &'static str) -> Result<Connection, PoolError> {
+        debug_assert!(!why.trim().is_empty(), "try_get_detached needs its reason");
+        let mut timeouts = self.pool.timeouts();
+        timeouts.wait = Some(std::time::Duration::ZERO);
+        let object = self.pool.timeout_get(&timeouts).await?;
+        Ok(Connection { object, mark: None })
+    }
     pub fn status(&self) -> Status {
         self.pool.status()
     }

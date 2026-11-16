@@ -121,6 +121,11 @@ async fn main() -> Result<()> {
     assert!(matches!(&refused, Err(error) if error.is_pool_exhausted()));
     assert!(waited >= WAIT && waited < WAIT * 3);
     println!("PASS empty pool: the third caller is refused after {waited:.1?}, not left waiting");
+    let started = Instant::now();
+    let refused = db.try_get_detached(BY_HAND).await.map_err(Error::from);
+    assert!(matches!(&refused, Err(error) if error.is_pool_exhausted()));
+    assert!(started.elapsed() < WAIT / 2);
+    println!("PASS empty pool: a caller that will not wait is refused at once");
 
     first.query_one("SELECT 1", &[]).await?;
     drop(second);
