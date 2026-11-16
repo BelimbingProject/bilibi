@@ -24,7 +24,8 @@
 //! would start itself is refused at approval, and a two-rule loop is refused and a noncyclic chain stops at
 //! the chain budget; a threshold change is a new approved version, no
 //! release; and a burst in one tenant waits its turn while the other tenant's
-//! rule runs at once. Every check prints `ok` or `FAIL`; one failure ends the
+//! rule runs at once. A person drafts and previews the input the Rules page
+//! builds (an `in` list, then the rule's next version) with the same contract. Every check prints `ok` or `FAIL`; one failure ends the
 //! run with an error.
 use bilibi_agent_api::plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans};
 use bilibi_authz::grants::Grants;
@@ -721,6 +722,66 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     );
     proof
         .switch(&one, exact_rule, false)
+        .await
+        .map_err(|_| Error::Internal)?;
+
+    println!("\n== The Rules page drafts with the same contract");
+    // The page builds this input from its comboboxes and typed fields: an
+    // `in` list as `values`, action parameters and example facts as JSON
+    // text. A person drafts it, previews its review, and a version of the
+    // same rule follows with `rule_id`; nothing else writes a rule.
+    let from_page = json!({
+        "name": "Route by priority", "trigger": OPENED, "match": "any",
+        "conditions": [{"field": "priority", "op": "in", "values": ["urgent", "normal"]}],
+        "actions": [{"operation": "rule_cases.cases.route", "input": json!({"queue": "page"}).to_string()}],
+        "examples": [
+            {"facts": json!({"priority": "urgent"}).to_string(), "expect": "match"},
+            {"facts": json!({"priority": "low"}).to_string(), "expect": "no_match"}
+        ],
+        "explanation": "Send urgent and normal cases to the page queue."
+    });
+    let page_review = proof
+        .review(&one, "base.rules.draft", from_page.clone())
+        .await;
+    check(
+        page_review["valid"] != json!(false)
+            && page_review["preview"]["result"]["conditions"]
+                .as_array()
+                .is_some_and(|c| c.len() == 1)
+            && page_review["preview"]["result"]["examples"]
+                .as_array()
+                .is_some_and(|e| e.len() == 2 && e.iter().all(|x| x["passes"] == json!(true))),
+        "the page's review shows the conditions in words and each example passing",
+    );
+    let (page_rule, page_v1) = proof.draft(&one, from_page.clone()).await?;
+    let mut next = from_page;
+    next["rule_id"] = json!(page_rule);
+    next["conditions"] = json!([{"field": "priority", "op": "eq", "value": "urgent"}]);
+    next["examples"] = json!([
+        {"facts": json!({"priority": "urgent"}).to_string(), "expect": "match"},
+        {"facts": json!({"priority": "normal"}).to_string(), "expect": "no_match"}
+    ]);
+    let (same_rule, page_v2) = proof.draft(&one, next).await?;
+    let via: String = proof
+        .db
+        .get()
+        .await?
+        .query_one(
+            "SELECT drafted_via FROM base_rule_versions WHERE rule_id=$1 AND number=$2",
+            &[&page_rule, &(page_v2 as i32)],
+        )
+        .await?
+        .get(0);
+    check(
+        same_rule == page_rule && page_v2 == page_v1 + 1 && via == "person",
+        "the next version belongs to the same rule and records that a person drafted it",
+    );
+    check(
+        proof.approve(&one, page_rule, page_v2).await.is_ok(),
+        "a person approves the version the page drafted",
+    );
+    proof
+        .switch(&one, page_rule, false)
         .await
         .map_err(|_| Error::Internal)?;
 
