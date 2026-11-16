@@ -134,12 +134,12 @@ the checks and which fields are withheld.
 
 **One narrow exception to append-only evidence, opened only by a sealed `base/personal_data` grant** ([ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md), migration `base-audit-009-erasure`).
 
-- `erase_record(tx, &Erasure, kind, id, person, &Minimums)` clears the personal fields that the kind's owner declared (`RECORD_KINDS`) in every mutation row of that record, and the subject identifier only when declared. An undeclared kind is `Invalid`; the caller never names fields.
+- `erase_record(tx, &Erasure, kind, id, person, &Minimum)` clears the personal fields that the kind's owner declared (`RECORD_KINDS`) in every mutation row of that record, and the subject identifier only when declared. An undeclared kind is `Invalid`; the caller never names fields.
 - **The database holds the same authority:** the fields must be declared in `base_personal_data_kinds` (written by the kind's owning module's migration; `Internal` when code and row disagree). The cause must be confirmed, for the person named, by the checker its owner registered in `base_audit_erasure_causes` (`base/privacy`: the request's own person while it runs or still owes cleanup, or a sweep still running). The target must be a record the calling transaction itself changed, or a due deferral the sweep is finishing. Anything else is refused, even when called directly as the owner role, so a request never authorises erasure of another person's or an untouched record.
 - A store whose live record has nothing left to clear calls `holds_values(tx, kind, id)` first: it writes its erasure change (which lets the history be cleared) only while that history still holds a declared value, so a repeat erasure of a clean record writes nothing. A declared field `*` matches every top-level key.
 - Declarations and checkers change only in a transaction that also records a migration in the ledger (checked at commit). This guards against mistakes, such as an ad hoc `UPDATE`; it is not a boundary against code running as the application's database role, which can also write the ledger.
-- `Minimums` are legal minimums per company: a row of a listed company stays while newer than that company's days; a row of no company follows the strictest. Kept rows get one open `base_audit_erasure_deferrals` row naming the person; the erasure's own rows (its trace) are always cleared.
-- `due_evidence(client, tenant, after, limit)` lists due deferrals; the caller leaves out held records and persons under the hold guard and passes the rest to `erase_deferred(tx, &Erasure, ids, &Minimums)` (sweep grants only), which erases them with today's minimums.
+- `Minimum` is the tenant's one legal minimum (`None`, or 1–36,500 days): a row stays while newer than it. Evidence names no company, since the owning company belongs to the record and the mutation boundary does not know it, so the caller passes the strictest company's minimum. Kept rows get one open `base_audit_erasure_deferrals` row naming the person; the erasure's own rows (its trace) are always cleared.
+- `due_evidence(client, tenant, after, limit)` lists due deferrals; the caller leaves out held records and persons under the hold guard and passes the rest to `erase_deferred(tx, &Erasure, ids, &Minimum)` (sweep grants only), which erases them with today's minimum.
 - Each call writes one append-only `base_audit_erasures` row in the same statement: request or sweep, kind, ID, fields, rows erased and kept, actor.
 - No session setting opens the path: the guard admits a change only while `base_audit_erase_values` runs as the evidence's owner (call stack and `current_user`), and `EXECUTE` is revoked from `PUBLIC`. Every other update, delete and truncate is refused.
 - Audit's own store, `base/audit.history`, exports the evidence history of the subject's person record.
@@ -152,11 +152,11 @@ the checks and which fields are withheld.
 
 | Part | Rule |
 | --- | --- |
-| Period | No default: a company turns the record class `base/privacy.audit_actions` on and sets its days (`apps/base/privacy/README.md`, Retention). Action rows name no company, so they follow the tenant's primary company |
+| Period | No default: a company turns the record class `base/privacy.audit_actions` on and sets its days (`apps/base/privacy/README.md`, Retention). Action rows name no company, so only the tenant's primary company's run sweeps them |
 | Exemption | A retained action (its bookmark on the Actions screen, else the `is_retained` bit recorded with it) is passed over and counted as kept |
 | What goes | `ip_address`, `url`, `user_agent` become NULL and each top-level payload value becomes `[erased]`. `erased_at` says when |
 | What stays | ID, tenant, actor, impersonator, event, time, trace and the payload's keys: the hash chain's facts, so the chain holds |
-| Facade | `erase_actions(tx, &Erasure, cutoff, companies, after, limit)`, sweep grants only, one batch of at most 1,000 rows in ID order |
+| Facade | `erase_actions(tx, &Erasure, cutoff, after, limit)`, sweep grants only, one batch of at most 1,000 rows in ID order |
 | Database | `base_audit_erase_actions` is refused unless the sweep is open in the tenant (`base_audit_erasure_causes`). The guard itself clears the row, so the function can change nothing else; every other update is refused |
 | Ledger | One append-only `base_audit_action_erasures` row per batch: sweep, cutoff, first and last ID, rows erased and kept, actor |
 

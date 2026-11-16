@@ -57,7 +57,7 @@ pub async fn export_account_actions(
                 to_char(a.erased_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),\
                 coalesce((SELECT m.is_retained FROM base_audit_action_metadata m \
                     WHERE m.partition_month=a.partition_month AND m.action_id=a.id),a.is_retained),\
-                a.actor_role,a.agent_self_report,a.client_identity,a.trace_id,a.company_id,\
+                a.actor_role,a.agent_self_report,a.client_identity,a.trace_id,\
                 to_char(a.recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
                 {MATCH} AND a.id>$3 ORDER BY a.id LIMIT $4"
                 ),
@@ -83,7 +83,7 @@ pub async fn export_account_actions(
                 "actor_role": row.get::<_, Option<String>>(12),
                 "agent_self_report": row.get::<_, Option<String>>(13),
                 "client_identity": row.get::<_, Option<String>>(14), "trace_id": row.get::<_, Option<String>>(15),
-                "company_id": row.get::<_, Option<i64>>(16), "recorded_at": row.get::<_, Option<String>>(17),
+                "recorded_at": row.get::<_, Option<String>>(16),
             }));
         }
         if records.len() > MAX_ROWS {

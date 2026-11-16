@@ -1,7 +1,7 @@
 //! Retention of the action ledger (`base_audit_actions`): the record class
 //! `base/privacy.audit_actions`. Like every class it is off until a company
-//! turns it on and sets a period. Action rows name no company, so they follow
-//! the tenant's primary company. Once the period has passed, a row loses its
+//! turns it on and sets a period. Action rows name no company, so only the
+//! tenant's primary company's run sweeps them; another company's examines none. Once the period has passed, a row loses its
 //! address, URL, browser and payload values; who acted, when and the event
 //! stay, so the row still answers "what happened" and the hash chain holds
 //! (`bilibi_audit::erase_actions`). A retained action (its bookmark on the
@@ -29,15 +29,11 @@ impl Sweeper for AuditActions {
     ) -> HandlerFuture<'a, Swept> {
         Box::pin(async move {
             grant.check(scope)?;
-            let batch = bilibi_audit::erase_actions(
-                tx,
-                grant,
-                cutoff,
-                companies.parameters(),
-                after,
-                limit,
-            )
-            .await?;
+            let (_, primary, _) = companies.parameters();
+            if !primary {
+                return Ok(Swept::default());
+            }
+            let batch = bilibi_audit::erase_actions(tx, grant, cutoff, after, limit).await?;
             Ok(Swept {
                 acted: batch.erased,
                 kept: batch.kept,
