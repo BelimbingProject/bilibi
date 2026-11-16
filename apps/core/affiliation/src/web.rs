@@ -830,6 +830,7 @@ impl Panel {
             })?
         } else if let Some(pending) = &self.pending_end {
             let mut date = Field::in_form("end", "effective_to")
+                .grid_field("person_affiliations.effective_to")
                 .id(self.dom("end-date"))
                 .label("Last day")
                 .kind(InputKind::Date)

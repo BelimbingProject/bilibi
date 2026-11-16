@@ -233,6 +233,13 @@ fn builtins(spec: &Spec) -> Vec<BuiltinColumn> {
     }
     columns.push(BuiltinColumn::new("description", "Description"));
     columns.push(BuiltinColumn::new("is_active", "Status"));
+    if spec.kind == Kind::LegalEntityType {
+        for column in &mut columns {
+            if matches!(column.id.as_str(), "code" | "name" | "is_active") {
+                column.field = format!("legal_entity_types.{}", column.id);
+            }
+        }
+    }
     columns
 }
 pub(super) fn capitalize(text: &str) -> String {
@@ -577,7 +584,13 @@ impl ReferenceTypes {
     fn form(&self, draft: &Draft) -> Result<Html> {
         let spec = self.spec;
         let field = |key: &str| {
+            let identity = if spec.kind == Kind::LegalEntityType && matches!(key, "code" | "name") {
+                format!("legal_entity_types.{key}")
+            } else {
+                String::new()
+            };
             Field::in_form(spec.form_as, key)
+                .grid_field(identity)
                 .id(format!("{}-{}", spec.dom_field, key.replace('_', "-")))
                 .value(draft.values.get(key).cloned().unwrap_or_default())
                 .errors(
@@ -614,6 +627,11 @@ impl ReferenceTypes {
             .label("Description");
         let active = (!editing).then(|| {
             Field::in_form(spec.form_as, "is_active")
+                .grid_field(if spec.kind == Kind::LegalEntityType {
+                    "legal_entity_types.is_active"
+                } else {
+                    ""
+                })
                 .id(format!("{}-active", spec.dom_field))
                 .kind(InputKind::Checkbox)
                 .label("Active")

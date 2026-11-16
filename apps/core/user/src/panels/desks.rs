@@ -73,7 +73,13 @@ impl Desks {
             columns: ListColumns::mount(
                 &table_id,
                 vec![
-                    BuiltinColumn::new("name", "Name"),
+                    BuiltinColumn::new("name", "Name").grid_field(
+                        if request.operation == "company_desks" {
+                            "persons.name"
+                        } else {
+                            "companies.name"
+                        },
+                    ),
                     BuiltinColumn::new("kind", "Desk"),
                 ],
             )

@@ -1793,7 +1793,13 @@ pub(super) fn duplicate_builtins() -> Vec<BuiltinColumn> {
         ("facts", "Matched facts"),
     ]
     .into_iter()
-    .map(|(id, label)| BuiltinColumn::new(id, label))
+    .map(|(id, label)| {
+        let column = BuiltinColumn::new(id, label);
+        match id {
+            "name" | "status" => column.grid_field(format!("companies.{id}")),
+            _ => column,
+        }
+    })
     .collect()
 }
 pub(super) async fn create(
@@ -2419,20 +2425,21 @@ struct MutedValue<'a> {
 // Children columns are independent of Departments.
 pub(super) fn children_builtins() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("name", "Name"),
-        BuiltinColumn::new("status", "Status"),
-        BuiltinColumn::new("legal_entity_type", "Legal Entity Type"),
-        BuiltinColumn::new("jurisdiction", "Jurisdiction"),
+        BuiltinColumn::new("name", "Name").grid_field("companies.name"),
+        BuiltinColumn::new("status", "Status").grid_field("companies.status"),
+        BuiltinColumn::new("legal_entity_type", "Legal Entity Type")
+            .grid_field("legal_entity_types.name"),
+        BuiltinColumn::new("jurisdiction", "Jurisdiction").grid_field("companies.jurisdiction"),
     ]
 }
 /// The detail page's Departments table:
 /// built-in columns only, with Manage leading to the departments page.
 pub(super) fn department_builtins() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("type", "Department Type"),
+        BuiltinColumn::new("type", "Department Type").grid_field("departments.type_name"),
         BuiltinColumn::new("category", "Category"),
         BuiltinColumn::new("head", "Head"),
-        BuiltinColumn::new("status", "Status"),
+        BuiltinColumn::new("status", "Status").grid_field("departments.status"),
     ]
 }
 #[derive(Template)]
