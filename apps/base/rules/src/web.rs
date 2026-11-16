@@ -24,8 +24,8 @@ use bilibi_ui::{
         PageFuture, PageRequest,
     },
     params, Alert, Badge, BadgeKind, BuiltinColumn, Button, ButtonVariant, Card, ColumnType,
-    ColumnsOutcome, ConfirmDialog, Fact, Facts, FilterToolbar, FlashMap, FlexRow, FlexTable,
-    Header, Html, Instant, ListColumns, ListSpec, ListState, Pagination, RecordLink,
+    ColumnsOutcome, ConfirmDialog, CreateButton, Fact, Facts, FilterToolbar, FlashMap, FlexRow,
+    FlexTable, Header, Html, Instant, ListColumns, ListSpec, ListState, Pagination, RecordLink,
     SectionHeading, StatusKind, TableEmpty, Toggle, ToolbarControl, NO_FLASH,
 };
 use jiff::Timestamp;
@@ -35,12 +35,14 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+mod editor;
 mod show;
 
 pub const INDEX: &str = "/rules";
 pub const SHOW: &str = "/rules/{id}";
 const PAGE_SIZES: [u64; 3] = [25, 50, 100];
 const DENIED: &str = "You do not have permission to approve or switch rules.";
+const DENIED_DRAFT: &str = "You do not have permission to draft rules.";
 
 static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     ListSpec {
@@ -143,6 +145,7 @@ struct IndexView<'a> {
     header: Html,
     toolbar: Html,
     card: Html,
+    dialog: Html,
 }
 
 fn builtins() -> Vec<BuiltinColumn> {
@@ -164,6 +167,7 @@ struct Index {
     rows_changed: bool,
     workspace: bool,
     flash: Option<(StatusKind, String)>,
+    editor: Option<editor::Editor>,
 }
 impl Index {
     fn new(pages: Pages, query: &HashMap<String, String>, workspace: bool) -> Result<Self> {
@@ -174,11 +178,37 @@ impl Index {
             rows_changed: true,
             workspace,
             flash: None,
+            editor: None,
         })
     }
-    fn event(&mut self, value: &Value) -> Result<()> {
+    /// Answers `Some((rule, version))` when the editor saved a draft.
+    async fn event(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        value: &Value,
+    ) -> Result<Option<(i64, i64)>> {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
-        match get("type").ok_or(Error::Invalid)? {
+        let kind = get("type").ok_or(Error::Invalid)?;
+        match kind {
+            "draft_new" => {
+                self.flash = None;
+                self.editor = Some(editor::Editor::new());
+            }
+            kind if kind.starts_with("draft_") => {
+                let call = Call {
+                    scope,
+                    credential,
+                    service: crate::PAGES,
+                    event: "draft",
+                    contract: "base.rules.draft",
+                };
+                if let editor::Outcome::Saved { rule_id, version } =
+                    editor::Editor::event(&mut self.editor, &self.pages, call, kind, value).await?
+                {
+                    return Ok(Some((rule_id, version)));
+                }
+            }
             "filters" => self.state.apply_filters(
                 &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
                     .map_err(Error::refused)?,
@@ -194,7 +224,7 @@ impl Index {
             "clear-flash" => self.flash = None,
             _ => return Err(Error::Invalid),
         }
-        Ok(())
+        Ok(None)
     }
     async fn render(&mut self, scope: &Scope) -> Result<String> {
         let pages = self.pages.clone();
@@ -216,6 +246,17 @@ impl Index {
         let header = render(Header {
             title: Html::text("Rules"),
             subtitle: "Actions that run on their own when something happens to a record.",
+            actions: if can_draft {
+                render(CreateButton {
+                    noun: "Rule",
+                    id: "rule-new",
+                    event: "draft_new",
+                    button_type: "button",
+                    ..CreateButton::default()
+                })?
+            } else {
+                Html::EMPTY
+            },
             ..Header::default()
         })?;
         let form = self.state.filters_form();
@@ -275,9 +316,9 @@ impl Index {
                 if !self.state.search.is_empty() {
                     "No rules match this search."
                 } else if can_draft {
-                    "No rules yet. Ask your AI agent to draft one from plain words (\u{201c}send new urgent cases to the priority queue\u{201d}); its draft appears here for approval."
+                    "No rules yet. Choose New rule to draft one, or ask your AI agent to draft one from plain words (\u{201c}send new urgent cases to the priority queue\u{201d}); a draft waits here for approval."
                 } else {
-                    "No rules yet. An administrator who may draft rules can ask an AI agent to draft one."
+                    "No rules yet. An administrator who may draft rules can draft one, or ask an AI agent to."
                 },
             )));
         }
@@ -293,11 +334,16 @@ impl Index {
             body,
             ..Card::default()
         })?;
+        let dialog = match &self.editor {
+            Some(editor) => editor.dialog(&pages, scope).await?,
+            None => Html::EMPTY,
+        };
         IndexView {
             flash: flash_map(&self.flash),
             header,
             toolbar,
             card,
+            dialog,
         }
         .render()
         .map_err(|_| Error::Internal)
@@ -313,7 +359,20 @@ impl LiveState<Scope, Error> for Index {
                     self.state =
                         ListState::parse(values, SPEC.clone()).map_err(|_| Error::Internal)?
                 }
-                LiveInput::Event(value) => self.event(value)?,
+                LiveInput::Event(value) => {
+                    let saved = self.event(request.scope, request.credential, value).await?;
+                    if let Some((rule_id, version)) = saved {
+                        // A finished draft lands on the rule, where an approver acts.
+                        return Ok(LiveBody {
+                            redirect: Some(format!("{INDEX}/{rule_id}")),
+                            flash: Some((
+                                StatusKind::Success,
+                                format!("Version {version} is saved. It runs once an administrator approves it."),
+                            )),
+                            ..LiveBody::default()
+                        });
+                    }
+                }
             }
             let html = self.render(request.scope).await?;
             Ok(LiveBody {

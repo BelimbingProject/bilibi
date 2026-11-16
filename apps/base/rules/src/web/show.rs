@@ -165,6 +165,7 @@ pub(super) struct Show {
     columns: ListColumns,
     request: Option<Request>,
     flash: Option<(StatusKind, String)>,
+    editor: Option<super::editor::Editor>,
 }
 impl Show {
     pub(super) fn new(pages: Pages, id: i64) -> Result<Self> {
@@ -174,6 +175,7 @@ impl Show {
             columns: ListColumns::mount("rule-runs", run_columns()).map_err(|_| Error::Internal)?,
             request: None,
             flash: None,
+            editor: None,
         })
     }
 
@@ -181,6 +183,33 @@ impl Show {
         let get = |key: &str| value.get(key).and_then(Value::as_str);
         match get("type").ok_or(Error::Invalid)? {
             "clear-flash" => self.flash = None,
+            "draft_next" => {
+                let client = self.pages.db.get().await?;
+                let view = self.pages.rules.get(&**client, scope, self.id).await?;
+                drop(client);
+                self.flash = None;
+                self.editor = Some(super::editor::Editor::next_version(&view));
+            }
+            kind if kind.starts_with("draft_") => {
+                let call = Call {
+                    scope,
+                    credential,
+                    service: crate::PAGES,
+                    event: "draft",
+                    contract: "base.rules.draft",
+                };
+                if let super::editor::Outcome::Saved { version, .. } =
+                    super::editor::Editor::event(&mut self.editor, &self.pages, call, kind, value)
+                        .await?
+                {
+                    self.flash = Some((
+                        StatusKind::Success,
+                        format!(
+                            "Version {version} is saved. It runs once an administrator approves it."
+                        ),
+                    ));
+                }
+            }
             "grid" => {
                 self.columns.handle(
                     &params::string_values_checked(value, params::FIELD_LIMIT)
@@ -450,6 +479,9 @@ impl Show {
         let can_approve = bilibi_authz::decide(&**client, scope, APPROVE)
             .await?
             .allowed;
+        let can_draft = bilibi_authz::decide(&**client, scope, MANAGE)
+            .await?
+            .allowed;
         let latest = view.versions.first();
         let review = match latest {
             Some(version) if can_approve && version.approved_at.is_none() => Some(
@@ -464,13 +496,26 @@ impl Show {
         let header = render(Header {
             title: Html::text(&view.summary.name),
             subtitle: &format!("When {}", view.summary.trigger_title.to_lowercase()),
-            actions: render(Button {
-                variant: ButtonVariant::Secondary,
-                id: "rule-all",
-                href: INDEX,
-                body: Html::text("All rules"),
-                ..Button::default()
-            })?,
+            actions: {
+                let mut actions = render(Button {
+                    variant: ButtonVariant::Secondary,
+                    id: "rule-all",
+                    href: INDEX,
+                    body: Html::text("All rules"),
+                    ..Button::default()
+                })?;
+                if can_draft {
+                    actions.push(&render(Button {
+                        variant: ButtonVariant::Primary,
+                        id: "rule-draft",
+                        button_type: "button",
+                        event: "draft_next",
+                        body: Html::text("Draft next version"),
+                        ..Button::default()
+                    })?);
+                }
+                actions
+            },
             ..Header::default()
         })?;
         let runs_now = match view.summary.state {
@@ -599,7 +644,7 @@ impl Show {
             body: render(table)?,
             ..Card::default()
         })?;
-        let dialog = match &self.request {
+        let mut dialog = match &self.request {
             Some(request) => {
                 let consequence = format!(
                     "Approve version {} of \u{201c}{}\u{201d}?",
@@ -621,6 +666,9 @@ impl Show {
             }
             None => Html::EMPTY,
         };
+        if let Some(editor) = &self.editor {
+            dialog.push(&editor.dialog(&pages, scope).await?);
+        }
         ShowView {
             flash: flash_map(&self.flash),
             rule_id: self.id.to_string(),

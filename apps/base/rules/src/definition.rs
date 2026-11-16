@@ -56,7 +56,7 @@ impl Op {
         "empty",
         "not_empty",
     ];
-    fn parse(key: &str) -> Option<Self> {
+    pub(crate) fn parse(key: &str) -> Option<Self> {
         Some(match key {
             "eq" => Self::Eq,
             "ne" => Self::Ne,
@@ -89,7 +89,7 @@ impl Op {
             Self::NotEmpty => "is not empty",
         }
     }
-    fn ordered(self) -> bool {
+    pub(crate) fn ordered(self) -> bool {
         matches!(self, Self::Lt | Self::Le | Self::Gt | Self::Ge)
     }
 }
