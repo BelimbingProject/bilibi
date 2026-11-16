@@ -124,44 +124,63 @@ fn refusal(error: Error) -> AgentError {
 }
 
 struct Replay;
+impl Replay {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let (subscriber, from, limit) = replay_input(input)?;
+        let events = events()?;
+        let review = events
+            .replay_review(client, scope, subscriber, from, limit)
+            .await
+            .map_err(refusal)?;
+        let mut facts = review.to_json();
+        facts["subscriber"] = json!(subscriber);
+        let erased = if review.erased > 0 {
+            format!(
+                "; {} events a personal-data erasure changed are left out",
+                review.erased
+            )
+        } else {
+            String::new()
+        };
+        facts["summary"] = json!(if review.pending == 0 {
+            format!(
+                "Nothing to replay to {subscriber}: every event in the batch is delivered{erased}"
+            )
+        } else {
+            format!(
+                "Hand {} events to {subscriber} ({} new deliveries); delivered events are skipped{erased}",
+                review.pending, review.created
+            )
+        });
+        facts["step_up"] = json!([STEP_UP_REPLAY]);
+        Ok(facts.into())
+    }
+}
 impl WriteHandler for Replay {
     fn owner(&self) -> &'static str {
         "base/events"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let (subscriber, from, limit) = replay_input(input)?;
-            let events = events()?;
-            let client = events.db.get().await.map_err(Error::from)?;
-            let review = events
-                .replay_review(&**client, scope, subscriber, from, limit)
-                .await
-                .map_err(refusal)?;
-            let mut facts = review.to_json();
-            facts["subscriber"] = json!(subscriber);
-            let erased = if review.erased > 0 {
-                format!(
-                    "; {} events a personal-data erasure changed are left out",
-                    review.erased
-                )
-            } else {
-                String::new()
-            };
-            facts["summary"] = json!(if review.pending == 0 {
-                format!("Nothing to replay to {subscriber}: every event in the batch is delivered{erased}")
-            } else {
-                format!(
-                    "Hand {} events to {subscriber} ({} new deliveries); delivered events are skipped{erased}",
-                    review.pending, review.created
-                )
-            });
-            facts["step_up"] = json!([STEP_UP_REPLAY]);
-            Ok(facts.into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = events()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(

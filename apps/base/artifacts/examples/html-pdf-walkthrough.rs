@@ -299,7 +299,9 @@ async fn main() -> Result<()> {
     let authentication = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let actor = authentication
         .authenticate(&**client, 1, 1, "walkthrough".into())
         .await?;

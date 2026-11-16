@@ -53,7 +53,9 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let queries = services.get::<QueryService>("core/user.database_queries")?;
     let users = services.get::<UserService>("core/user.accounts")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Explicit disposable fixture setup, never a production operator shortcut.
     client.execute("INSERT INTO platform_operator(singleton,tenant_id) VALUES(true,1) ON CONFLICT(singleton) DO UPDATE SET tenant_id=1", &[]).await?;
     for (tenant, email) in [

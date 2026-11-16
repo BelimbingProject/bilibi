@@ -32,7 +32,9 @@ async fn main() -> Result<()> {
     )?;
     services.install(&modules)?;
     let geo = services.get::<Geonames>(SERVICE)?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     println!("== installed reference data (before resetting the walkthrough)");
     show("presence", geo.presence().await?);
     show("get_country(MY)", geo.get_country("MY").await?);

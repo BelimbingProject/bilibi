@@ -193,7 +193,9 @@ async fn main() -> Result<(), Failure> {
             "thursday":{"type":"off"},"friday":{"type":"off"},"saturday":{"type":"off"},"sunday":{"type":"rest"}}})).await?;
 
     // Load through the caller's transaction, just as a consuming mutation does.
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = client.transaction().await?;
     calendars.check(&*tx, &scope, "arithmetic-office").await?;
     let office = Timetable::load(

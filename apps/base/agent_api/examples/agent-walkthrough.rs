@@ -39,7 +39,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let admin = app.security.guard(&admin_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let key = "base.agent_api.reference.read";
     let cap = "base.agent-api.reference.view";

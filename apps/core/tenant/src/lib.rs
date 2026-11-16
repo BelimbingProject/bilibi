@@ -109,6 +109,8 @@ impl TenantService {
         let change = move_of(key);
         let client = self.db.get().await.map_err(Error::from)?;
         let proof = bilibi_authz::authorize_operator(&**client, scope, change.capability()).await?;
+        // `preview_move` reads on a connection of its own.
+        drop(client);
         let (id, reason) = move_input(input)?;
         let plan = self
             .tenants

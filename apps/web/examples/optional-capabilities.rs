@@ -209,7 +209,9 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .get::<Authentication>("base/tenancy.authentication")?;
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     let worker = SystemScope::rehydrate(client, 1, Some(PRINCIPAL)).await?;
     for key in [RUN, USE, ABSENT_USE] {

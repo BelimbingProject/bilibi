@@ -116,7 +116,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?)
     );
     // Inactive exclusion, one reason at a time, on the disposable database.
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let still = |label: &'static str, id: i64| {
         let users = users.clone();
         let manager = manager.clone();

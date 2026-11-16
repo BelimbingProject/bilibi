@@ -359,25 +359,42 @@ impl Write {
         })
     }
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let action = self.action(input)?;
+        let bulk = bulk()?;
+        Ok(bulk
+            .review(client, scope, &action)
+            .await
+            .map_err(error)?
+            .into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "base/bulk_data"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let action = self.action(input)?;
-            let bulk = bulk()?;
-            let client = bulk.db.get().await.map_err(Error::from)?;
-            Ok(bulk
-                .review(&**client, scope, &action)
-                .await
-                .map_err(error)?
-                .into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bulk()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(

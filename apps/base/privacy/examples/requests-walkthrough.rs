@@ -277,7 +277,9 @@ async fn main() -> Result<()> {
     let settings = app.services.get::<Settings>("base/settings.store")?;
     let media = app.services.get::<Media>("base/media.store")?;
     let artifacts = app.services.get::<Artifacts>("base/artifacts.store")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // The tenant 2 manager may read requests, so isolation shows as an empty
     // list and a missing request rather than a refusal.
     client

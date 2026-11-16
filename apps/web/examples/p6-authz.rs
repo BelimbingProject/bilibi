@@ -57,7 +57,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &Client = &client;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;
     let admin = auth.authenticate(client, 1, 4, String::new()).await?;

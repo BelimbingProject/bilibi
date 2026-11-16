@@ -115,7 +115,10 @@ async fn customer(
         None => None,
     };
     drop(client);
-    let mut client = app.db.get().await?;
+    let mut client = app
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = app
         .mutations
         .begin(

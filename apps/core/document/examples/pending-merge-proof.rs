@@ -155,10 +155,15 @@ async fn main() -> Result<()> {
         id: survivor.id,
         version: survivor.version,
     };
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let preview = docs.preview_merge(&**client, &scope, dst, &[src]).await;
     let preview_refused = matches!(preview, Err(WriteError::ScanPending));
-    let mut client = app.db.get().await?;
+    let mut client = app
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = app
         .mutations
         .begin(&mut client, scope.mutation_context("core.document.merge"))
@@ -174,12 +179,17 @@ async fn main() -> Result<()> {
         id: source.id,
         version: source.version,
     };
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let reverse_preview = docs
         .preview_merge(&**client, &scope, reverse_dst, &[reverse_src])
         .await;
     let reverse_preview_refused = matches!(reverse_preview, Err(WriteError::ScanPending));
-    let mut other_client = app.db.get().await?;
+    let mut other_client = app
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut other_tx = app
         .mutations
         .begin(

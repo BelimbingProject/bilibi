@@ -129,31 +129,48 @@ async fn validate(
 }
 
 struct Update;
+impl Update {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let f = facade()?;
+        let current = f.oversight.given(client, scope).await?;
+        if current["parent_id"].is_null() {
+            return Err(bilibi_agent_api::invalid(
+                "tables",
+                "This tenant has no recorded parent.",
+            ));
+        }
+        if current["version"] != input["version"] {
+            return Err(Error::Conflict.into());
+        }
+        validate(client, scope, input).await?;
+        Ok(json!({"summary":if input["active"]==true {"Allow parent oversight"} else {"Revoke parent oversight"},"parent":current["parent_name"],"before":current,"after":input}).into())
+    }
+}
 impl WriteHandler for Update {
     fn owner(&self) -> &'static str {
         "core/tenant"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let f = facade()?;
-            let client = f.db.get().await.map_err(Error::from)?;
-            let current = f.oversight.given(&**client, scope).await?;
-            if current["parent_id"].is_null() {
-                return Err(bilibi_agent_api::invalid(
-                    "tables",
-                    "This tenant has no recorded parent.",
-                ));
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = facade()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
             }
-            if current["version"] != input["version"] {
-                return Err(Error::Conflict.into());
-            }
-            validate(&**client, scope, input).await?;
-            Ok(json!({"summary":if input["active"]==true {"Allow parent oversight"} else {"Revoke parent oversight"},"parent":current["parent_name"],"before":current,"after":input}).into())
         })
     }
     fn commit<'a>(

@@ -64,7 +64,7 @@ than opening or committing an inner transaction.
 - These are environment values, not settings, because the pool exists before a setting can be read. A value outside its range refuses the start and names the variable.
 - System Info shows the size in use as Pool Size.
 - `pool_with(url, PoolLimits { size, wait })` is for a private host or a walkthrough that needs its own limits.
-- The timeout turns a lock-up into refusals; it does not make nested asks right. Code that holds a connection still must not ask for another (`apps/AGENTS.md`).
+- The timeout turns a lock-up into refusals; it does not make nested asks right. `Db::get` checks them: see the next section.
 
 Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 
@@ -72,7 +72,30 @@ Proof, on any reachable PostgreSQL database (it runs only `SELECT 1`):
 cargo run -p bilibi-database --example pool-walkthrough
 ```
 
-It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals.
+It prints the refusal of a third caller on a two-connection pool after the wait, a returned connection serving the next caller, six callers each holding one connection and asking for a second all answered (the shape that used to lock a process), and the environment limits with their refusals. It also prints the second-connection check: the one log line with both call sites and the cases that are not logged.
+
+## One connection per task
+
+**A task that holds a pooled connection must not ask the pool for another; `Db::get` checks it ([src/pool.rs](src/pool.rs)).**
+
+`bilibi_database::Db` wraps the pool; it is no longer an alias for `deadpool_postgres::Pool`. Checkouts return `bilibi_database::Connection`, which dereferences to the client. `get`, `status`, `timeouts` and `resize` retain their calling forms; replace `deadpool_postgres::Object::take(connection)` with `bilibi_database::Connection::take(connection)`.
+
+Why: once more callers than connections each hold one and ask for a second, every one of them waits out the pool and is refused (#406, #539).
+
+| You need | Use |
+| --- | --- |
+| A connection | `db.get().await?` |
+| To read while you already hold one | Pass the one you hold: `&(impl ProofClient + ?Sized)`, a `&Transaction`, or the `OperationClient` you were given |
+| To call a service that takes its own | Drop your connection first |
+| A real exception: a single, named connection that must be separate, never a whole job | `db.get_detached("why")`, with the reason the pool cannot be starved by it |
+| That exception, but refused at once when the pool has none free instead of waiting behind the connection you hold | `db.try_get_detached("why")` |
+| A connection that carries session state (a session lock, a session setting) | `Connection::take(db.get().await?)`: closed when dropped, never returned to the pool, and no longer counted |
+
+- **What counts as a task:** the Tokio task, or the thread for the future a `block_on` drives (a walkthrough's `main`). `tokio::join!` branches are one task. A spawned task starts with none.
+- **A second ask warns, then attempts the checkout** under the normal pool limits; it can still time out. Each pool logs once per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …`
+- Set `RUST_BACKTRACE=1` to print the stack at the warning site under the line; it does not reconstruct the async await chain or the first checkout's stack.
+- `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run during this warning-only pilot.
+- Warnings become refusals in a later change after two weeks of CI walkthrough runs on `main` with no hit that was not a real nested take. Unresolved real nesting stays warned; only genuine single-purpose exceptions use `get_detached`.
 
 # Schema ownership
 

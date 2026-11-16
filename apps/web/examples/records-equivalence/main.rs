@@ -207,7 +207,9 @@ async fn snapshots(
     records: &Records,
     admin: &Scope,
 ) -> Outcome {
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -287,7 +289,10 @@ async fn snapshots(
 async fn connections(db: &Db, records: &Records, admin: &Scope) -> Outcome {
     let mut held = Vec::new();
     for _ in 0..db.status().max_size {
-        held.push(db.get().await?);
+        held.push(
+            db.get_detached("the walkthrough's own checking connection")
+                .await?,
+        );
     }
     let client = held.first_mut().ok_or(Error::Internal)?;
     let tx = client

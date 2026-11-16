@@ -65,7 +65,11 @@ impl Person<'_> {
             .map_err(|error| error.to_string())
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self.db.get().await.map_err(|error| error.to_string())?;
+        let client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await
+            .map_err(|error| error.to_string())?;
         self.registry
             .call(&**client, &self.scope, key, &input)
             .await
@@ -202,7 +206,9 @@ async fn main() -> Result<(), Failure> {
         db: &db,
     };
     let (manager, viewer, other) = (person(0), person(1), person(2));
-    let sql = db.get().await?;
+    let sql = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let root = std::env::current_dir()?.join("data/artifacts");
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -494,7 +500,9 @@ async fn main() -> Result<(), Failure> {
         path.exists()
     );
     check("export of the expired file").await;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let listed = bulk
         .exports(&**client, &manager.scope, 50)
         .await?
@@ -544,7 +552,9 @@ async fn main() -> Result<(), Failure> {
     let artifacts = app
         .services
         .get::<bilibi_artifacts::Artifacts>("base/artifacts.store")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     for run in 1..=2 {
         let report = artifacts
             .sweep_expired(&mut client, &bilibi_bulk_data::FILES)
@@ -608,7 +618,9 @@ async fn main() -> Result<(), Failure> {
     let artifacts = app
         .services
         .get::<bilibi_artifacts::Artifacts>("base/artifacts.store")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let report = artifacts
         .sweep_expired(&mut client, &bilibi_bulk_data::FILES)
         .await?;

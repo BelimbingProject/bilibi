@@ -96,7 +96,9 @@ async fn main() -> Result<()> {
     services.install(&modules)?;
     let importer = services.get::<ReferenceImport>(IMPORT_SERVICE)?;
     let geo = services.get::<Geonames>(SERVICE)?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client
         .batch_execute("TRUNCATE address_person_subjects, address_attachments, addresses, geonames_postcode_overrides, geonames_cities, geonames_postcodes, geonames_admin1, geonames_countries RESTART IDENTITY")
         .await?;

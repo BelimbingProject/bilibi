@@ -1,5 +1,6 @@
 //! Shared PostgreSQL pool, errors, migration runner, and transactional mutation capture.
 pub mod page_write;
+mod pool;
 pub mod seeds;
 pub mod timing;
 mod transaction;
@@ -14,7 +15,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
-pub use deadpool_postgres::Pool as Db;
+pub use pool::{Connection, Db};
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +206,7 @@ pub fn pool_with(url: &str, limits: PoolLimits) -> Result<Db> {
         .wait_timeout(Some(limits.wait))
         .runtime(Runtime::Tokio1)
         .build()
+        .map(Db::new)
         .map_err(|_| Error::Internal)
 }
 

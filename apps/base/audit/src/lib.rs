@@ -380,7 +380,13 @@ impl AuditCapture {
             _ => "other",
         };
         let write = async {
-            let client = self.diagnostics.get().await?;
+            let client = self
+                .diagnostics
+                .get_detached(
+                    "a capture failure is recorded beside the write that failed, which rolls \
+                     back and so cannot carry it; the write gives up after DIAGNOSTICS_TIMEOUT",
+                )
+                .await?;
             client.execute("INSERT INTO base_audit_capture_failures(stage,auditable_type,error_type,actor_type,actor_id,impersonator_id,system_principal,tenant_id,trace_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", &[&stage,&kind,&error_type,&who.actor_type,&who.actor_id,&who.impersonator_id,&who.system_principal,&who.tenant,&who.trace_id]).await?;
             Ok::<(), Error>(())
         };

@@ -737,7 +737,9 @@ async fn agent(
         Ok::<_, Error>(count)
     };
     println!("-- reviewed writes (agent operations)");
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let lists = registry
         .call(&**client, &admin, "base.picklists.lists", &json!({}))
         .await?;

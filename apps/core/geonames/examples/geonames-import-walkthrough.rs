@@ -317,7 +317,9 @@ async fn main() -> Result<()> {
 
     println!("== the screen entry point checks admin.geonames.update (platform) on every call");
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.execute("INSERT INTO platform_operator(singleton,tenant_id) VALUES(true,1) ON CONFLICT DO NOTHING", &[]).await?;
     let admin = authentication
         .authenticate(&**client, 1, 4, "walkthrough".into())

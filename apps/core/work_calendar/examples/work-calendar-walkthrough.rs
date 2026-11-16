@@ -98,7 +98,11 @@ impl Agent<'_> {
         Ok(self.commit(&ops).await?.remove(0))
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self.db.get().await.map_err(|error| error.to_string())?;
+        let client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await
+            .map_err(|error| error.to_string())?;
         self.registry
             .call(&**client, &self.scope, key, &input)
             .await
@@ -279,7 +283,9 @@ async fn main() -> Result<(), Failure> {
             )
             .await,
     );
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     show(
         "national set",
         admin
@@ -580,7 +586,9 @@ async fn main() -> Result<(), Failure> {
         "default for company 1 before: {:?}",
         calendars.default_for(&admin.scope, company).await?
     );
-    let mut connection = db.get().await?;
+    let mut connection = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = boundary
         .begin(
             &mut connection,
@@ -920,7 +928,9 @@ async fn main() -> Result<(), Failure> {
     // Demonstration only: a gate holds each write at its insert, after it has
     // read what it needs, as two busy requests overlapping would.
     client.batch_execute("CREATE OR REPLACE FUNCTION walkthrough_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(4242); RETURN NEW; END $$; CREATE TRIGGER walkthrough_gate BEFORE INSERT ON core_work_calendar_holidays FOR EACH ROW EXECUTE FUNCTION walkthrough_gate(); CREATE TRIGGER walkthrough_gate BEFORE INSERT ON core_work_calendar_includes FOR EACH ROW EXECUTE FUNCTION walkthrough_gate()").await?;
-    let gate = db.get().await?;
+    let gate = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     gate.execute("SELECT pg_advisory_lock(4242)", &[]).await?;
     let (holiday, include, opened) =
         tokio::join!(admin.commit(&first), second.commit(&second_ops), async {

@@ -129,7 +129,9 @@ async fn main() -> Result<(), Error> {
         .await?;
     let manager = app.security.guard(&login.token).await?;
     let tenant = manager.tenant();
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     // Re-runs start from the seeded state.
     client.batch_execute("DELETE FROM company_relationships WHERE source_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'search\\_%') OR target_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'search\\_%'); DELETE FROM companies WHERE code LIKE 'search\\_%'; DELETE FROM persons WHERE code LIKE 'search-person-%' OR code LIKE 'crowd-person-%' OR code='search-rare'").await?;
