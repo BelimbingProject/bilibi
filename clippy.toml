@@ -3,12 +3,8 @@
 # kept breaking: the message says what to use instead and why. Cargo.toml
 # `[workspace.lints.clippy]` sets the levels.
 #
-# Warning-first CI policy and removal of its override: CONTRIBUTING.md,
+# `Html::raw` is held by `scripts/ratchets.py`, not Clippy: CONTRIBUTING.md,
 # "Guard rails".
 
 # A facade with more arguments than this takes a request or options type.
 too-many-arguments-threshold = 12
-
-disallowed-methods = [
-    { path = "bilibi_ui::html::Html::raw", reason = "`Html::raw` skips escaping and is for shared components in `base/ui`. Render a component (`apps/base/ui/README.md`) or use `Html::text`; hand-built markup has already shipped unbalanced tags (#331)." },
-]

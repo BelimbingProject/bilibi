@@ -40,7 +40,7 @@ cat .local/composition/manifest.txt
 
 step "Format and lint every workspace member (profile: ${build})"
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::disallowed_methods
+cargo clippy --workspace --all-targets --locked -- -D warnings
 
 if [[ "$build" == release ]]; then
   step 'Locked release build of every workspace member'

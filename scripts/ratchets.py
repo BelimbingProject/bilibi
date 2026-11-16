@@ -7,7 +7,7 @@ hatches prints the new, lower count. Each rule is a lint that cannot block yet
 because old sites remain; the count only falls until it reaches 0, and then the
 rule becomes a blocking lint or type (see clippy.toml).
 
-- `Html::raw(` outside apps/base/ui (also `clippy::disallowed_methods`).
+- `Html::raw(` outside apps/base/ui.
 - `|safe` outside apps/base/ui.
 - `Pending::Every` and `Pending::Events` page-write allowances.
 
