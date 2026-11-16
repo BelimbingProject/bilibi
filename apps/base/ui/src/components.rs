@@ -527,7 +527,7 @@ pub struct DayMonth<'a> {
 /// shows while the click's round trip is in flight.
 #[derive(Template, Debug, Default)]
 #[template(
-    source = r#"{% import "components.html" as ui %}{% call ui::button(variant=variant, class=class, href=href, id=id, button_type=button_type, name=name, value=value, disabled=disabled, busy=busy, aria_busy=aria_busy, event=event, working=working, download=download) %}{{ body|safe }}{% endcall %}"#,
+    source = r#"{% import "components.html" as ui %}{% call ui::button(variant=variant, class=class, href=href, id=id, button_type=button_type, name=name, value=value, disabled=disabled, busy=busy, aria_busy=aria_busy, event=event, working=working, download=download, data_key=data_key) %}{{ body|safe }}{% endcall %}"#,
     ext = "html"
 )]
 pub struct Button<'a> {
@@ -548,6 +548,9 @@ pub struct Button<'a> {
     /// With `href`, the link saves its target under this file name instead
     /// of opening it (a `data:` text file the page itself built).
     pub download: &'a str,
+    /// Sent with the event as `key` (`data-value-key`): which of several
+    /// like controls raised it, such as the field a record picker serves.
+    pub data_key: &'a str,
     pub body: Html,
 }
 

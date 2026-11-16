@@ -792,6 +792,16 @@ impl Detail {
                     Kind::Date | Kind::Custom(bilibi_custom_fields::Kind::Date)
                 ) {
                     input.kind(InputKind::Date)
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Choices)
+                ) {
+                    input.hint("Pick-list codes, separated by ;")
+                } else if matches!(
+                    field.kind,
+                    Kind::Custom(bilibi_custom_fields::Kind::Reference)
+                ) {
+                    input.hint("The record's number, as on its page address.")
                 } else {
                     input
                 };

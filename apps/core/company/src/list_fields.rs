@@ -32,8 +32,24 @@ pub(crate) enum ListKind {
     Choice {
         picklist: String,
     },
+    /// A tenant-defined several-choices field: a JSON array of codes. It
+    /// filters by one code it holds and does not sort.
+    Choices,
+    /// A tenant-defined record field: a record's id, named with the reader's
+    /// access. It neither filters nor sorts.
+    Reference,
 }
 impl ListKind {
+    /// Whether the list may sort by it: an array of codes or a record's id has
+    /// no order a person would recognise.
+    pub(crate) fn sortable(&self) -> bool {
+        !matches!(self, Self::Choices | Self::Reference)
+    }
+    /// Whether the list offers a filter on it. A record's id is not a value a
+    /// person could choose from a list.
+    pub(crate) fn filterable(&self) -> bool {
+        !matches!(self, Self::Reference)
+    }
     fn of(kind: CompanyFieldKind) -> Self {
         match kind {
             CompanyFieldKind::Text { .. } => Self::Text,
@@ -45,16 +61,31 @@ impl ListKind {
     }
 }
 
-/// One field the list can filter and sort by: a contributed Extension field
-/// (`definition`, read through a Grid path) or a tenant's custom field
-/// (`custom_key`, read from `companies.custom_fields`).
+/// One field the list can show, filter and sort by (as its kind allows): a
+/// contributed Extension field (`definition`, read through a Grid path) or a
+/// tenant's custom field (`custom`, read from `companies.custom_fields`).
 pub(crate) struct AvailableField {
     pub id: String,
     pub label: String,
     pub kind: ListKind,
     pub definition: Option<CompanyField>,
-    pub custom_key: Option<String>,
+    pub custom: Option<bilibi_custom_fields::Definition>,
     pub choices: Vec<bilibi_ui::Choice>,
+}
+impl AvailableField {
+    /// The key of a tenant's custom field in `companies.custom_fields`.
+    pub(crate) fn custom_key(&self) -> Option<&str> {
+        self.custom.as_ref().map(|custom| custom.key.as_str())
+    }
+}
+
+/// Whether the list sorts by a tenant's custom field of this kind (the
+/// column picker and the sort state ask before the list is read).
+pub(crate) fn custom_sortable(kind: bilibi_custom_fields::Kind) -> bool {
+    !matches!(
+        kind,
+        bilibi_custom_fields::Kind::Choices | bilibi_custom_fields::Kind::Reference
+    )
 }
 
 /// The id a custom field has in the list's sort, filter and column state.
@@ -88,7 +119,7 @@ pub(crate) async fn available(
             label: definition.label.into(),
             kind: ListKind::of(definition.kind),
             definition: Some(definition),
-            custom_key: None,
+            custom: None,
             choices,
         });
     }
@@ -114,14 +145,33 @@ pub(crate) async fn available(
                     .choices(client, scope, list, None)
                     .await?,
             ),
-            _ => (ListKind::Text, Vec::new()),
+            (bilibi_custom_fields::Kind::Choices, Some(list)) => (
+                ListKind::Choices,
+                field_contributions::picklists()?
+                    .choices(client, scope, list, None)
+                    .await?,
+            ),
+            (bilibi_custom_fields::Kind::Reference, _) => (ListKind::Reference, Vec::new()),
+            (
+                bilibi_custom_fields::Kind::Text
+                | bilibi_custom_fields::Kind::LongText
+                | bilibi_custom_fields::Kind::Link
+                | bilibi_custom_fields::Kind::Phone
+                | bilibi_custom_fields::Kind::Email,
+                _,
+            ) => (ListKind::Text, Vec::new()),
+            // A pick-list field always names its list; one that does not
+            // cannot be read as a choice.
+            (bilibi_custom_fields::Kind::Choice | bilibi_custom_fields::Kind::Choices, None) => {
+                return Err(Error::Internal)
+            }
         };
         result.push(AvailableField {
             id: custom_id(&definition.key),
-            label: definition.label,
+            label: definition.label.clone(),
             kind,
             definition: None,
-            custom_key: Some(definition.key),
+            custom: Some(definition),
             choices,
         });
     }
@@ -150,7 +200,14 @@ pub(crate) fn operators(kind: &ListKind) -> &'static [(&'static str, &'static st
             ("gte", "On or after"),
         ],
         ListKind::Boolean | ListKind::Choice { .. } => &[("eq", "Equals")],
+        ListKind::Choices => &[("holds", "Holds")],
+        ListKind::Reference => &[],
     }
+}
+
+/// A several-choices filter with no code chosen ("Any …") applies nothing.
+fn idle(filter: &FieldFilter, field: &AvailableField) -> bool {
+    field.kind == ListKind::Choices && filter.value.is_empty()
 }
 
 fn filter_error(filter: &FieldFilter, field: &AvailableField) -> Option<String> {
@@ -164,17 +221,21 @@ fn filter_error(filter: &FieldFilter, field: &AvailableField) -> Option<String> 
         ListKind::Text => !filter.value.is_empty() && filter.value.chars().count() <= 256,
         ListKind::Number => bilibi_custom_fields::valid_number(&filter.value),
         ListKind::Date => field_contributions::valid_date(&filter.value),
-        ListKind::Boolean | ListKind::Choice { .. } => field
+        ListKind::Boolean | ListKind::Choice { .. } | ListKind::Choices => field
             .choices
             .iter()
             .any(|choice| choice.value == filter.value),
+        ListKind::Reference => false,
     };
     (!valid).then(|| {
         match &field.kind {
             ListKind::Text => "Enter text up to 256 characters.",
             ListKind::Number => "Enter a number such as 12 or -3.5.",
             ListKind::Date => "Enter a valid date from 0001-01-01 to 9999-12-31.",
-            ListKind::Boolean | ListKind::Choice { .. } => "Choose a value from this list.",
+            ListKind::Boolean | ListKind::Choice { .. } | ListKind::Choices => {
+                "Choose a value from this list."
+            }
+            ListKind::Reference => "This field cannot be filtered.",
         }
         .into()
     })
@@ -225,13 +286,20 @@ async fn read(
             errors.push(None);
             continue;
         }
-        let Some(field) = fields.iter().find(|field| field.id == filter.field) else {
+        let Some(field) = fields
+            .iter()
+            .find(|field| field.id == filter.field && field.kind.filterable())
+        else {
             errors.push(Some(
                 "This filter is unavailable and was not applied.".into(),
             ));
             notice = "An unavailable field was removed from the query.".into();
             continue;
         };
+        if idle(filter, field) {
+            errors.push(None);
+            continue;
+        }
         let error = filter_error(filter, field);
         if error.is_none() && field.definition.is_some() {
             used_fields.insert(field.id.clone());
@@ -240,7 +308,9 @@ async fn read(
     }
 
     let mut sort = params.sort.clone();
-    let sort_field = fields.iter().find(|field| field.id == sort);
+    let sort_field = fields
+        .iter()
+        .find(|field| field.id == sort && field.kind.sortable());
     if let Some(field) = sort_field {
         if field.definition.is_some() {
             used_fields.insert(field.id.clone());
@@ -297,17 +367,33 @@ async fn read(
         if filter.field.is_empty() {
             continue;
         }
-        let Some(field) = fields.iter().find(|field| field.id == filter.field) else {
+        let Some(field) = fields
+            .iter()
+            .find(|field| field.id == filter.field && field.kind.filterable())
+        else {
             notice = "An unavailable field was removed from the query.".into();
             continue;
         };
-        if filter_error(filter, field).is_some() {
+        if idle(filter, field) || filter_error(filter, field).is_some() {
             continue;
         }
-        let expression = match &field.custom_key {
+        if field.kind == ListKind::Choices {
+            // Holds this code: containment on the owner's
+            // `gin (custom_fields jsonb_path_ops)` index, key and code bound.
+            let key = field.custom_key().ok_or(Error::Internal)?;
+            args.push(Box::new(key.to_owned()));
+            args.push(Box::new(filter.value.clone()));
+            predicates.push(format!(
+                "r.custom_fields @> jsonb_build_object(${}::text, jsonb_build_array(${}::text))",
+                args.len() - 1,
+                args.len()
+            ));
+            continue;
+        }
+        let expression = match field.custom_key() {
             // The key is a bound value, never part of the statement text.
             Some(key) => {
-                args.push(Box::new(key.clone()));
+                args.push(Box::new(key.to_owned()));
                 custom_expression(args.len(), &field.kind)
             }
             None => expressions.get(&field.id).ok_or(Error::Internal)?.clone(),
@@ -334,7 +420,9 @@ async fn read(
         };
         predicates.push(format!("{expression} {operator} ${}{cast}", args.len()));
     }
-    let sort_field = fields.iter().find(|field| field.id == sort);
+    let sort_field = fields
+        .iter()
+        .find(|field| field.id == sort && field.kind.sortable());
     let dir = if sort != params.sort {
         "asc"
     } else {
@@ -356,9 +444,9 @@ async fn read(
     // A custom sort key is a bound value of the page statement only, so the
     // count statement above has no unused parameter.
     let expression = if let Some(field) = sort_field {
-        match &field.custom_key {
+        match field.custom_key() {
             Some(key) => {
-                args.push(Box::new(key.clone()));
+                args.push(Box::new(key.to_owned()));
                 custom_expression(args.len(), &field.kind)
             }
             None => expressions.get(&field.id).ok_or(Error::Internal)?.clone(),

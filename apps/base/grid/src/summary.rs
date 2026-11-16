@@ -357,6 +357,9 @@ pub(crate) async fn summarize_catalog(
             Agg::Count => resolve_any(catalog, root, &measure.column, &mut hops)?,
             _ => resolve(catalog, root, &measure.column, &mut hops)?,
         };
+        if column.reference.is_some() && measure.agg != Agg::Count {
+            return Err(unsupported(&column, "record fields support count only"));
+        }
         let fits = match measure.agg {
             Agg::Count => true,
             Agg::Sum | Agg::Avg => column.ty.number(),
@@ -797,6 +800,14 @@ fn test(
     today: Date,
     binds: &mut Binds,
 ) -> Result<String, QueryError> {
+    if column.reference.is_some()
+        && !matches!(
+            test,
+            Test::Equals(_) | Test::OneOf(_) | Test::Empty | Test::NotEmpty
+        )
+    {
+        return Err(unsupported(column, "record fields compare stored ids only"));
+    }
     let ty = column.ty;
     let dated = matches!(ty, FieldType::Date | FieldType::DateTime);
     Ok(match test {

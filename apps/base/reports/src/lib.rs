@@ -35,7 +35,7 @@ use bilibi_datetime::DisplayPolicy;
 use bilibi_grid::{Catalog, Column, FieldType, Filter, PageSpec, QueryError, SummarySpec, Test};
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::Scope;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -46,7 +46,7 @@ const PREPARER: &str = "base/reports.preparer";
 const EXPORT_ENDED: &str = "base/reports.export_ended";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 7] = [
+const MIGRATIONS: [(&str, &str); 8] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -74,6 +74,10 @@ const MIGRATIONS: [(&str, &str); 7] = [
     (
         "base-reports-007-subscription-people",
         include_str!("../migrations/007-subscription-people.sql"),
+    ),
+    (
+        "base-reports-008-reference-names",
+        include_str!("../migrations/008-reference-names.sql"),
     ),
 ];
 const KIND: &str = "base_report";
@@ -110,7 +114,9 @@ pub enum ReportError {
     Refused(String),
     /// Over the read's cost or time bound: a prepared export, which runs in
     /// the background under the larger bounds, may still produce it.
-    #[error("This report is too heavy to show here ({0}). Prepare it as an export instead; it runs in the background and the bell says when it is ready.")]
+    #[error(
+        "This report is too heavy to show here ({0}). Prepare it as an export instead; it runs in the background and the bell says when it is ready."
+    )]
     TooHeavy(&'static str),
     #[error(transparent)]
     Database(#[from] Error),
@@ -187,8 +193,17 @@ pub struct ColumnInfo {
     pub ty: &'static str,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) struct ReferenceName {
+    kind: String,
+    id: String,
+    label: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Run {
+    #[serde(skip)]
+    pub(crate) reference_names: Vec<ReferenceName>,
     pub report: Report,
     /// Live child outcomes, empty for an ordinary tenant report.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -359,11 +374,12 @@ fn grid(error: QueryError) -> ReportError {
     }
 }
 
-fn access_key(catalog: &Catalog, report: &Report) -> String {
+fn access_key(catalog: &Catalog, report: &Report, records: &bilibi_records::Records) -> String {
     let Some(root) = catalog.table(&report.record_type) else {
         return format!("{}:unreadable", report.version);
     };
     let d = &report.definition;
+    let mut references = std::collections::BTreeSet::new();
     let seen: String = d
         .columns
         .iter()
@@ -374,12 +390,25 @@ fn access_key(catalog: &Catalog, report: &Report) -> String {
         // A masked column still resolves; its values are read partial, so
         // masking it changes what the reader sees (ADR 05).
         .map(|spec| match catalog.resolve(root, spec) {
-            Ok(column) if catalog.mask(&column).is_some() => 'm',
-            Ok(_) => '1',
+            Ok(column) => match column.reference {
+                Some(kind) => {
+                    let readable = records
+                        .kind(kind)
+                        .is_some_and(|kind| catalog.table(kind.table).is_some());
+                    references.insert(format!("ref:{}:{kind}:{}", column.spec, u8::from(readable)));
+                    'r'
+                }
+                None if catalog.mask(&column).is_some() => 'm',
+                None => '1',
+            },
             Err(_) => '0',
         })
         .collect();
-    format!("{}:{seen}", report.version)
+    format!(
+        "{}:{seen}:{}",
+        report.version,
+        references.into_iter().collect::<Vec<_>>().join(":")
+    )
 }
 
 impl Reports {
@@ -807,7 +836,7 @@ impl Reports {
         let catalog = Catalog::for_scope(&**client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
-        Ok(access_key(&catalog, &report))
+        Ok(access_key(&catalog, &report, &self.records))
     }
 
     /// One dashboard update shares a fresh catalog across all placed reports.
@@ -831,11 +860,89 @@ impl Reports {
                 let access = if report.definition.oversight {
                     format!("{}:oversight:{}", report.version, jiff::Timestamp::now())
                 } else {
-                    access_key(&catalog, &report)
+                    access_key(&catalog, &report, &self.records)
                 };
                 (report, access)
             })
             .collect())
+    }
+
+    async fn name_references<'a>(
+        &self,
+        scope: &Scope,
+        columns: &[Column],
+        rows: impl Iterator<Item = &'a mut Vec<Value>>,
+        group_keys: bool,
+    ) -> Outcome<Vec<ReferenceName>> {
+        let mut names = Vec::new();
+        let mut cells: std::collections::BTreeMap<&str, Vec<&mut Value>> = Default::default();
+        for row in rows {
+            for (column, value) in columns.iter().zip(row) {
+                if let Some(kind) = column.reference.filter(|_| !value.is_null()) {
+                    cells.entry(kind).or_default().push(value);
+                }
+            }
+        }
+        for (kind, values) in cells {
+            let ids: std::collections::BTreeSet<String> = values.iter().map(|v| cell(v)).collect();
+            let references: Vec<_> = ids
+                .into_iter()
+                .map(|id| bilibi_records::Reference::new(kind, id))
+                .collect();
+            let mut labels = std::collections::BTreeMap::new();
+            for chunk in references.chunks(100) {
+                for resolved in self.records.resolve(scope, chunk).await? {
+                    names.push(ReferenceName {
+                        kind: kind.to_owned(),
+                        id: resolved.reference.id.clone(),
+                        label: resolved.label.clone(),
+                    });
+                    labels.insert(
+                        resolved.reference.id,
+                        resolved.label.unwrap_or_else(|| "Restricted".into()),
+                    );
+                }
+            }
+            for value in values {
+                let id = cell(value);
+                let label = labels.get(&id).map(String::as_str).unwrap_or("Restricted");
+                *value = if group_keys {
+                    serde_json::json!({"stored_id": id, "label": label})
+                } else {
+                    Value::String(label.to_owned())
+                };
+            }
+        }
+        Ok(names)
+    }
+
+    async fn reference_names_current(
+        &self,
+        scope: &Scope,
+        names: &[ReferenceName],
+    ) -> Outcome<bool> {
+        let mut kinds: BTreeMap<&str, Vec<&ReferenceName>> = BTreeMap::new();
+        for name in names {
+            kinds.entry(&name.kind).or_default().push(name);
+        }
+        for (kind, names) in kinds {
+            for chunk in names.chunks(100) {
+                let references: Vec<_> = chunk
+                    .iter()
+                    .map(|name| bilibi_records::Reference::new(kind, &name.id))
+                    .collect();
+                let current = self.records.resolve(scope, &references).await?;
+                if current.len() != chunk.len()
+                    || current
+                        .iter()
+                        .zip(chunk)
+                        .any(|(now, before)| now.label != before.label)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Each row's own page, through Base Records: a kind its owner registers
@@ -853,7 +960,11 @@ impl Reports {
             .iter()
             .map(|(key, _)| bilibi_records::Reference::new(kind.key, cell(key)))
             .collect();
-        Ok(self.records.resolve(scope, &references).await?)
+        let mut pages = Vec::new();
+        for chunk in references.chunks(100) {
+            pages.extend(self.records.resolve(scope, chunk).await?);
+        }
+        Ok(pages)
     }
 
     /// Runs a report as the reader: their catalog, grants and time zone.
@@ -974,6 +1085,7 @@ impl Reports {
         }
         let as_rows = report.kind == Kind::Rows || input.as_rows;
         let mut kept = None;
+        let reference_names;
         let result = match report.kind {
             _ if as_rows => {
                 let specs: Vec<String> = if report.kind == Kind::Rows {
@@ -1030,13 +1142,9 @@ impl Reports {
                     timezone: timezone.clone(),
                 };
                 let page = listing
-                    .page(
-                        &self.db,
-                        scope,
-                        input.page.saturating_mul(page_size),
-                        page_size,
-                    )
+                    .page(self, scope, input.page.saturating_mul(page_size), page_size)
                     .await?;
+                reference_names = page.reference_names;
                 let rows = page.rows;
                 // A file holds no links: the reader opens records from the page.
                 let pages = if file {
@@ -1109,7 +1217,7 @@ impl Reports {
                     .setting(&**client, scope, contributions::MAX_GROUPS_KEY)
                     .await?;
                 drop(client);
-                let summary = bilibi_grid::summarize(
+                let mut summary = bilibi_grid::summarize(
                     &self.db,
                     scope,
                     &report.record_type,
@@ -1124,6 +1232,16 @@ impl Reports {
                 )
                 .await
                 .map_err(grid)?;
+                let group_columns: Vec<_> =
+                    summary.groupings.iter().map(|(c, _)| c.clone()).collect();
+                reference_names = self
+                    .name_references(
+                        scope,
+                        &group_columns,
+                        summary.lines.iter_mut().map(|l| &mut l.keys),
+                        true,
+                    )
+                    .await?;
                 RunResult::Summary {
                     groupings: summary
                         .groupings
@@ -1146,6 +1264,7 @@ impl Reports {
             }
         };
         let run = Run {
+            reference_names,
             report,
             oversight: Vec::new(),
             left_out,

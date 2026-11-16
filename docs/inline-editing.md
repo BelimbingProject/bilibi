@@ -58,7 +58,13 @@ never treated as stored.
    of its own reports `CommitStatus::failure()` on its fact.
 4. For a choice, render the editor with the shared `Field` select or
    `Combobox` (no `data-event` of its own) and pass its committed label as
-   `display`. The choice vocabulary and its validation stay with the owner.
+   `display`. For several choices, render a `MultiSelect` named exactly as the
+   field (it appends `[]`), with `in_fact()` so the fact's label takes the
+   heading's place, with the held codes as `values`, the field's value
+   being those codes joined by `,`, and `allow_empty()` so all can be
+   unticked: ticks keep the editor open, and leaving it or Enter commits the
+   ticked codes joined by `,` (`bilibi_custom_fields::codes_value` reads
+   them). The choice vocabulary and its validation stay with the owner.
    Give the editor no width of its own: inside a fact it fills the fact's
    floating-field box (`[data-fact]` in `assets/css/app.css`). The owner may change the available choices on every render; no client-side vocabulary or separate refresh event is needed.
 

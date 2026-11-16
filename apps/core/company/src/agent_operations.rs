@@ -74,14 +74,17 @@ fn parse(input: &Value) -> bilibi_agent_api::Result<(NewCompany, crate::CompanyF
     Ok((new, fields))
 }
 
-/// The agent's `custom` input: a list of `{key, value}` pairs (the input
-/// dialect has no free-form object, and each tenant's keys differ), folded into
-/// the key-to-value object the rest of Company works with.
+/// The agent's `custom` input: a list of `{key, value, values}` pairs (the
+/// input dialect has no free-form object, gives each property one type, and
+/// each tenant's keys differ), folded into the key-to-value object the rest of
+/// Company works with. A pair carries exactly one of `value` (a string, or
+/// null to clear) and `values` (a several-choices field's codes, empty to
+/// clear); the definitions' check decides whether that shape suits the field.
 fn custom_object(value: &Value) -> bilibi_agent_api::Result<Value> {
     let pairs = value.as_array().ok_or_else(|| {
         invalid(vec![FieldError::new(
             "custom",
-            "must be a list of {key, value} pairs",
+            "must be a list of {key, value} or {key, values} pairs",
         )])
     })?;
     let mut object = serde_json::Map::new();
@@ -90,10 +93,22 @@ fn custom_object(value: &Value) -> bilibi_agent_api::Result<Value> {
             .as_str()
             .filter(|key| !key.is_empty())
             .ok_or_else(|| invalid(vec![FieldError::new("custom", "each pair needs a key")]))?;
-        if object
-            .insert(key.to_owned(), pair["value"].clone())
-            .is_some()
-        {
+        let refuse = |message: &'static str| {
+            invalid(vec![FieldError::new_owned(
+                crate::field_contributions::custom_name(key),
+                message,
+            )])
+        };
+        let held = match (pair.get("value"), pair.get("values")) {
+            (Some(value), None) => value.clone(),
+            (None, Some(Value::Array(codes))) if codes.iter().all(Value::is_string) => {
+                Value::Array(codes.clone())
+            }
+            (None, Some(_)) => return Err(refuse("takes its values as a list of codes")),
+            (Some(_), Some(_)) => return Err(refuse("takes value or values, not both")),
+            (None, None) => return Err(refuse("needs value or values")),
+        };
+        if object.insert(key.to_owned(), held).is_some() {
             return Err(invalid(vec![FieldError::new_owned(
                 crate::field_contributions::custom_name(key),
                 "is given twice",
@@ -255,12 +270,19 @@ impl ReadHandler for Get {
                     .await?
                     .into_iter()
                     .map(|field| {
-                        json!({
+                        // The stored JSON as it is (a several-choices field's
+                        // codes as an array, a record field's id); agents name
+                        // a record with base.records.resolve.
+                        let mut listed = json!({
                             "key": field.key,
                             "label": field.label,
                             "type": field.kind.as_str(),
                             "value": held.and_then(|held| held.get(&field.key)).cloned().unwrap_or(Value::Null),
-                        })
+                        });
+                        if let Some(target) = &field.target {
+                            listed["target"] = json!(target);
+                        }
+                        listed
                     })
                     .collect(),
             );
@@ -400,7 +422,11 @@ impl WriteHandler for Create {
             changes.extend(
                 crate::field_contributions::custom_patch(&custom_values)
                     .iter()
-                    .filter(|(_, value)| !value.is_null() && value.as_str() != Some(""))
+                    .filter(|(_, value)| {
+                        !value.is_null()
+                            && value.as_str() != Some("")
+                            && value.as_array().is_none_or(|codes| !codes.is_empty())
+                    })
                     .map(|(key, value)| json!({"field":crate::field_contributions::custom_name(key),"from":null,"to":value})),
             );
             Ok(json!({"summary":"Create company","changes":changes,"duplicate_candidates":matches.candidates,"duplicates_likely":matches.likely,"create_anyway":new.create_anyway}).into())
@@ -681,10 +707,11 @@ fn create_schema() -> Value {
 /// value is checked against the tenant's active definitions at preview and
 /// commit.
 fn custom_schema() -> Value {
-    json!({"type":"array","description":"The organisation's own custom fields as {key, value} pairs: text, a number as written (12.5), a date as YYYY-MM-DD, or a pick-list code. Find the keys with base.custom_fields.list (record_type company). An empty value clears it.",
+    json!({"type":"array","description":"The organisation's own custom fields as {key, value} or {key, values} pairs: value is text, a number as written (12.5), a date as YYYY-MM-DD, true or false, a pick-list code, or a record field's record ID; values holds a several-choices field's pick-list codes. Find the keys, types, pick-lists and record kinds with base.custom_fields.list (record_type company). An empty or null value, or an empty values list, clears it.",
     "items":{"type":"object","required":["key"],"properties":{
         "key":{"type":"string","maxLength":40},
-        "value":{"type":"string","maxLength":10000,"nullable":true}
+        "value":{"type":"string","maxLength":10000,"nullable":true,"description":"Every field but several choices: the text, number, date, true or false, pick-list code, or record ID. Null clears it."},
+        "values":{"type":"array","items":{"type":"string","maxLength":64},"description":"For a several-choices field, the pick-list codes; an empty list clears it."}
     }}})
 }
 

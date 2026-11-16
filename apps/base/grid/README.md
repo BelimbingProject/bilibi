@@ -63,6 +63,16 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 - A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
 - A parent's oversight read skips a table it reaches only partly.
 
+## Tenant custom fields
+
+A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declarations, so Grid adds them to each fresh scoped catalog through one hook (`bind_custom_columns`, a `CustomColumns` that `base/custom_fields` binds at boot). Grid does not depend on that module.
+
+- The owner selects its `custom_fields` JSON column in the table's source, declares it as a hidden text field and contributes a `bilibi_custom_fields::GridSource` naming the table and that field ([Custom Fields](../custom_fields/README.md#offer-custom-fields-on-a-record-type)).
+- Each active field becomes `cf_<key>` on that table, with the tenant's current label (`Table::field_label`; the `Field` itself carries the id as its label, so read labels through the table or the resolved `Column`). It resolves, projects, filters, groups and sorts like any field of the table, also through links (`work.company.cf_segment:list`), under the table's capability, reach and tenant predicate. It is never restrictable or masked: it is as visible as its record.
+- Its value is SQL over the hidden field that `base/custom_fields` builds from the validated key and no request text. A record field projects only its stored id; `Table::custom_reference` and `Column::reference` carry its Base Records kind. [Reports](../reports/README.md#the-rule) owns permission-aware naming of cells and groups. The column remains available to readers of its root table. Only equals, one_of, empty and not_empty filters are accepted, comparing stored ids. List column pickers, saved list paths and related list paths exclude record fields; owners show their record fields as pills.
+- `Table::custom_search_values` gives Base Search the tenant's searchable text fields. `Table::is_custom` tells a page that draws its own `cf_` columns which fields are tenant fields.
+- Keys never change and are never reused, so each distinct `cf_<key>` id is kept once for the process; labels are not.
+
 ## Detail fields become columns
 
 A scalar field shown on a record can also be added to its list, under the same label.
@@ -214,7 +224,7 @@ The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh
 - **Columns** are specs, resolved against the reader's catalog: a field, a linked field or a rollup. A restricted or unreadable column is refused (`QueryError::Column`), so it can neither be shown nor filtered on.
 - **Filters** (`Test`): `Equals`, `OneOf` (up to 100 values), `Contains` (text and choices), `Range` (numbers, or `YYYY-MM-DD` days for dates and date-times), `Within(Period)` (today, this week, last 7 or 30 days, this month, quarter or year), `Empty`, `NotEmpty`. At most 16. A type mismatch is `QueryError::Unsupported`.
 - **Groupings**: at most 2. A date or date-time groups only by a `Bucket` (day, week from Monday, month, quarter, year) and returns the bucket's first day; anything else groups by value.
-- **Measures**: at most 8. `count` (rows with a value), `sum` and `avg` (numbers), `min` and `max` (ordered values and text).
+- **Measures**: at most 8. `count` (rows with a value), `sum` and `avg` (numbers), `min` and `max` (ordered values and text). A record-reference field supports only `count`; value aggregates are refused with `QueryError::Unsupported`, so stored ids never become summary values. Reference-field rollups through many-links are refused during column resolution.
 - **Time zone**: the reader's IANA zone (`bilibi_datetime::valid_timezone`). Date-time buckets and day filters use the reader's local days; a day range on an instant compares against the instants those days start and end at, so the owner's index still applies.
 - **Bounds**: `max_groups` 1 to 1,000; above it the read is refused, never truncated. Pages hold 1 to 100 rows and start within the first 10,000; up to 3 sorts, the root key breaking ties.
 

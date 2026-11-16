@@ -172,8 +172,10 @@ impl Pages {
         let custom_sorts: Vec<String> = custom
             .iter()
             .take(crate::list_fields::MAX_CUSTOM_COLUMNS)
+            .filter(|field| crate::list_fields::custom_sortable(field.kind))
             .map(|field| crate::list_fields::custom_id(&field.key))
             .collect();
+        drop(client);
         let mut columns = views::columns(self.views.clone(), &masked, &custom)?;
         columns.from_params(scope, request.query).await?;
         Ok(CompanyPage {
@@ -229,6 +231,7 @@ impl Pages {
             parent_hits: Vec::new(),
             parent_chosen: None,
             parent_changing: false,
+            custom_pickers: views::CustomPickers::default(),
         })
     }
 }
@@ -348,6 +351,40 @@ fn list_state(values: &HashMap<String, String>, custom_sorts: &[String]) -> Resu
     };
     ListState::parse(&values, spec).map_err(|_| Error::Internal)
 }
+/// The several-choices fields a form posted (`cf_<key>[]`, one value per
+/// tick), each kept as its codes joined by commas (a code never holds one).
+fn ticked(payload: &Value, previous: &HashMap<String, String>) -> Vec<(String, String)> {
+    payload
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| key.starts_with("cf_") && key.ends_with("[]"))
+        .filter_map(|(key, value)| {
+            let codes: Vec<&str> = value
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|code| !code.is_empty())
+                .collect();
+            let held: Vec<&str> = previous
+                .get(key)
+                .map_or("", String::as_str)
+                .split(',')
+                .filter(|code| !code.is_empty())
+                .collect();
+            let ordered = if codes.len() > bilibi_picklists::VALUES_MAX {
+                codes
+            } else {
+                held.iter()
+                    .filter(|code| codes.contains(code))
+                    .chain(codes.iter().filter(|code| !held.contains(code)))
+                    .copied()
+                    .collect()
+            };
+            Some((key.clone(), ordered.join(",")))
+        })
+        .collect()
+}
 fn bounded_filter(value: &str, max: usize) -> String {
     let mut end = value.len().min(max);
     while !value.is_char_boundary(end) {
@@ -448,15 +485,39 @@ struct CompanyPage {
     parent_hits: Vec<bilibi_records::Hit>,
     parent_chosen: Option<(i64, String)>,
     parent_changing: bool,
+    /// The record fields' pickers, keyed by `cf_<key>`.
+    custom_pickers: views::CustomPickers,
 }
 impl CompanyPage {
+    fn reconcile_custom(&mut self, definitions: &[bilibi_custom_fields::Definition]) {
+        let active: std::collections::BTreeSet<String> = definitions
+            .iter()
+            .map(|d| format!("cf_{}", d.key))
+            .collect();
+        self.form.retain(|name, _| {
+            let field = name
+                .strip_prefix("custom_reference[")
+                .or_else(|| name.strip_prefix("custom_reference_search["))
+                .and_then(|field| field.strip_suffix(']'))
+                .unwrap_or(name);
+            !field.starts_with("cf_") || active.contains(field.strip_suffix("[]").unwrap_or(field))
+        });
+        self.custom_pickers
+            .chosen
+            .retain(|name, _| active.contains(name));
+        self.custom_pickers
+            .queries
+            .retain(|name, _| active.contains(name));
+        self.custom_pickers
+            .hits
+            .retain(|name, _| active.contains(name));
+        self.errors.retain(|error| {
+            !error.field.starts_with("cf_") || active.contains(error.field.as_ref())
+        });
+    }
+
     /// Companies whose name contains `query`, without this company itself.
-    async fn search_parents(&mut self, scope: &Scope, query: &str) -> Result<()> {
-        let query: String = query.chars().take(100).collect();
-        if query == self.parent_query {
-            return Ok(());
-        }
-        self.parent_query = query;
+    async fn search_parents(&mut self, scope: &Scope) -> Result<()> {
         self.parent_hits = if self.parent_query.trim().is_empty() {
             Vec::new()
         } else {
@@ -490,16 +551,7 @@ impl CompanyPage {
         parent: Option<i64>,
     ) -> Result<()> {
         let id = self.id.ok_or(Error::Invalid)?;
-        let version: i64 = {
-            let client = self.db.get().await?;
-            client
-                .query_one(
-                    "SELECT version FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL",
-                    &[&scope.tenant(), &id],
-                )
-                .await?
-                .get(0)
-        };
+        let version = self.current_version(scope).await?;
         let edit = Edit {
             id,
             field: "parent_id".into(),
@@ -533,6 +585,164 @@ impl CompanyPage {
             Err(_) => CommitStatus::failure(),
         };
         self.statuses.put("parent_id", status);
+        Ok(())
+    }
+    /// The record page's company at its current version: a picker's pick or
+    /// clear saves at once, so it starts from what is stored now.
+    async fn current_version(&self, scope: &Scope) -> Result<i64> {
+        let id = self.id.ok_or(Error::Invalid)?;
+        let client = self.db.get().await?;
+        Ok(client
+            .query_one(
+                "SELECT version FROM companies WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL",
+                &[&scope.tenant(), &id],
+            )
+            .await?
+            .get(0))
+    }
+    /// The tenant's active custom field `key`, if it is one.
+    async fn custom_definition(
+        &self,
+        scope: &Scope,
+        key: &str,
+    ) -> Result<Option<bilibi_custom_fields::Definition>> {
+        let client = self.db.get().await?;
+        Ok(crate::field_contributions::custom_fields()?
+            .active(
+                &**client,
+                scope,
+                crate::field_contributions::CUSTOM_RECORD_TYPE,
+            )
+            .await?
+            .into_iter()
+            .find(|definition| definition.key == key))
+    }
+    async fn read_reference_queries(&mut self, scope: &Scope, value: &Value) -> Result<()> {
+        let definitions = {
+            let client = self.db.get().await?;
+            crate::field_contributions::custom_fields()?
+                .active(
+                    &**client,
+                    scope,
+                    crate::field_contributions::CUSTOM_RECORD_TYPE,
+                )
+                .await?
+        };
+        for definition in definitions
+            .iter()
+            .filter(|definition| definition.kind == bilibi_custom_fields::Kind::Reference)
+        {
+            let name = format!("cf_{}", definition.key);
+            let Some(query) = value
+                .get(format!("custom_reference_search[{name}]"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let query: String = query.chars().take(100).collect();
+            self.custom_pickers.queries.insert(name.to_owned(), query);
+        }
+        Ok(())
+    }
+    /// A record field's hit was chosen: the record page saves it at once
+    /// through the update contract; the create form keeps it for the write.
+    async fn pick_reference(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        name: &str,
+        raised: &str,
+    ) -> Result<()> {
+        let key = name.strip_prefix("cf_").ok_or(Error::Invalid)?;
+        let definition = self
+            .custom_definition(scope, key)
+            .await?
+            .filter(|definition| definition.kind == bilibi_custom_fields::Kind::Reference)
+            .ok_or(Error::Invalid)?;
+        let id = bilibi_custom_fields::picked(&definition, raised).ok_or(Error::Invalid)?;
+        self.custom_pickers.queries.remove(name);
+        self.custom_pickers.hits.remove(name);
+        if self.operation == "detail" {
+            let version = self.current_version(scope).await?;
+            return self
+                .save_custom(
+                    scope,
+                    credential,
+                    name,
+                    serde_json::json!({"key": key, "value": id}),
+                    version,
+                )
+                .await;
+        }
+        let target = definition.target.as_deref().ok_or(Error::Internal)?;
+        match self
+            .records
+            .resolve(scope, &[bilibi_records::Reference::new(target, id)])
+            .await?
+            .into_iter()
+            .next()
+        {
+            Some(chosen) => {
+                self.custom_pickers.chosen.insert(name.to_owned(), chosen);
+            }
+            None => {
+                self.custom_pickers.chosen.remove(name);
+            }
+        }
+        self.errors.retain(|error| error.field != name);
+        Ok(())
+    }
+    /// Saves one custom field pair through `core.company.update`, the same
+    /// contract, capability, version check and audit as every custom fact.
+    /// A refusal stays on the fact (`name`), never as a fatal error.
+    async fn save_custom(
+        &mut self,
+        scope: &Scope,
+        credential: &str,
+        name: &str,
+        pair: Value,
+        version: i64,
+    ) -> Result<()> {
+        let id = self.id.ok_or(Error::Invalid)?;
+        let input = serde_json::json!({
+            "company_id": id,
+            "version": version,
+            "fields": {"custom": [pair]},
+        });
+        let result = self
+            .contracts
+            .submit(
+                &Call {
+                    scope,
+                    credential,
+                    service: "core/company.pages",
+                    event: "save_custom_field",
+                    contract: "core.company.update",
+                },
+                input,
+            )
+            .await;
+        let status = match result {
+            Ok(_) => CommitStatus::Saved,
+            Err(bilibi_agent_api::Error::Backend(Error::Unauthorized)) => {
+                return Err(Error::Unauthorized);
+            }
+            Err(bilibi_agent_api::Error::Backend(Error::Forbidden | Error::NotFound)) => {
+                self.notice = "You no longer have permission to change this company, or the company is archived.".into();
+                CommitStatus::Error(self.notice.clone())
+            }
+            Err(bilibi_agent_api::Error::Backend(Error::Conflict)) => CommitStatus::Error(
+                "The record changed. Your draft is kept; reload before saving.".into(),
+            ),
+            Err(bilibi_agent_api::Error::InvalidInput(errors)) => {
+                CommitStatus::Error(errors.into_values().flatten().collect::<Vec<_>>().join(" "))
+            }
+            Err(bilibi_agent_api::Error::Backend(Error::Invalid)) => {
+                CommitStatus::Error("The value was not saved. Check its format and length.".into())
+            }
+            Err(_) => CommitStatus::failure(),
+        };
+        self.statuses.put(name, status);
         Ok(())
     }
     /// The contributed record panels this reader may mount.
@@ -586,6 +796,62 @@ impl CompanyPage {
     }
     async fn draw(&mut self, scope: &Scope) -> Result<LiveBody> {
         self.columns.refresh_views(scope).await?;
+        if self.operation != "list" {
+            let definitions = {
+                let client = self.db.get().await?;
+                crate::field_contributions::custom_fields()?
+                    .active(
+                        &**client,
+                        scope,
+                        crate::field_contributions::CUSTOM_RECORD_TYPE,
+                    )
+                    .await?
+            };
+            if self.operation == "create" {
+                self.reconcile_custom(&definitions);
+            }
+            self.custom_pickers.hits.clear();
+            for definition in definitions
+                .iter()
+                .filter(|d| d.kind == bilibi_custom_fields::Kind::Reference)
+            {
+                let name = format!("cf_{}", definition.key);
+                if let Some(query) = self
+                    .custom_pickers
+                    .queries
+                    .get(&name)
+                    .filter(|q| !q.trim().is_empty())
+                {
+                    let hits = crate::field_contributions::custom_fields()?
+                        .reference_hits(scope, definition, query)
+                        .await?;
+                    self.custom_pickers.hits.insert(name, hits);
+                }
+            }
+            self.search_parents(scope).await?;
+        }
+        let mut chosen: Vec<_> = self.custom_pickers.chosen.values_mut().collect();
+        for chunk in chosen.chunks_mut(100) {
+            let references: Vec<_> = chunk.iter().map(|held| held.reference.clone()).collect();
+            let current = self.records.resolve(scope, &references).await?;
+            for (held, resolved) in chunk.iter_mut().zip(current) {
+                **held = resolved;
+            }
+        }
+        if let Some((id, label)) = &mut self.parent_chosen {
+            let current = self
+                .records
+                .resolve(
+                    scope,
+                    &[bilibi_records::Reference::new("company", id.to_string())],
+                )
+                .await?;
+            *label = current
+                .into_iter()
+                .next()
+                .and_then(|r| r.label)
+                .unwrap_or_else(|| "Restricted".into());
+        }
         let mut client = self.db.get().await?;
         let masked = crate::field_contributions::effective_restrictions(&**client, scope).await?;
         let html = match self.operation {
@@ -604,7 +870,7 @@ impl CompanyPage {
                     crate::list_fields::available(&**client, scope, &catalog, &masked).await?;
                 self.custom_sorts = available
                     .iter()
-                    .filter(|field| field.custom_key.is_some())
+                    .filter(|field| field.custom.is_some() && field.kind.sortable())
                     .map(|field| field.id.clone())
                     .collect();
                 let last = ((page.total + self.params.page_size as i64 - 1)
@@ -613,26 +879,40 @@ impl CompanyPage {
                     query.page = self.params.page as i64;
                     page = crate::list(&mut client, scope, &query).await?;
                 }
-                // Rebuild built-ins under the fresh restrictions too: a retained
-                // built-in must never outlive its reader's field access.
-                if masked != self.masked {
-                    let query = self.columns.params();
-                    let custom = crate::field_contributions::custom_fields()?
-                        .active(
-                            &**client,
-                            scope,
-                            crate::field_contributions::CUSTOM_RECORD_TYPE,
-                        )
-                        .await?;
-                    self.columns = views::columns(self.views.clone(), &masked, &custom)?;
-                    self.columns.from_params(scope, &query).await?;
-                    self.masked = masked.clone();
-                }
+                let custom = if masked != self.masked {
+                    Some(
+                        crate::field_contributions::custom_fields()?
+                            .active(
+                                &**client,
+                                scope,
+                                crate::field_contributions::CUSTOM_RECORD_TYPE,
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 let locale = self.locales.resolve(&**client, scope, None).await?;
                 let display = self
                     .datetime
                     .display(&**client, scope, None, locale.locale)
                     .await?;
+                let company_ids = page
+                    .rows
+                    .iter()
+                    .map(|company| company.id)
+                    .collect::<Vec<_>>();
+                let extension_values =
+                    crate::field_contributions::read(&**client, scope, &company_ids).await?;
+                let custom_values =
+                    crate::field_contributions::custom_read(&**client, scope, &company_ids).await?;
+                drop(client);
+                if let Some(custom) = custom {
+                    let query = self.columns.params();
+                    self.columns = views::columns(self.views.clone(), &masked, &custom)?;
+                    self.columns.from_params(scope, &query).await?;
+                    self.masked = masked.clone();
+                }
                 self.columns
                     .load(
                         scope,
@@ -651,18 +931,9 @@ impl CompanyPage {
                 self.columns = loaded_columns
                     .with_record_slots(&views::record_slots(&masked)?)
                     .map_err(|_| Error::Internal)?;
-                let company_ids = page
-                    .rows
-                    .iter()
-                    .map(|company| company.id)
-                    .collect::<Vec<_>>();
-                let extension_values =
-                    crate::field_contributions::read(&**client, scope, &company_ids).await?;
-                let custom_values =
-                    crate::field_contributions::custom_read(&**client, scope, &company_ids).await?;
                 let add_to = self.records.add_to(scope, "company").await?;
                 views::list(
-                    &**client,
+                    &self.db,
                     scope,
                     &page,
                     &query,
@@ -700,12 +971,13 @@ impl CompanyPage {
                 self.active_panels = self.allowed_panels(&**client, scope, id).await?;
                 let anchors: Vec<String> =
                     self.active_panels.iter().map(|p| p.id.clone()).collect();
+                drop(client);
                 let facts = self
                     .facts
                     .record_facts(&self.db, scope, "core/company", &id.to_string())
                     .await;
                 views::detail(
-                    &client,
+                    &self.db,
                     scope,
                     id,
                     &self.picklists,
@@ -726,6 +998,7 @@ impl CompanyPage {
                             chosen: None,
                             changing: self.parent_changing,
                         },
+                        custom: &self.custom_pickers,
                     },
                 )
                 .await?
@@ -744,6 +1017,7 @@ impl CompanyPage {
                         likely: self.duplicate_likely,
                         reason: &self.duplicate_reason,
                         parent: self.parent_picker(),
+                        custom: &self.custom_pickers,
                     },
                 )
                 .await?
@@ -927,7 +1201,7 @@ impl CompanyPage {
                 let status = match result {
                     Ok(_) => CommitStatus::Saved,
                     Err(bilibi_agent_api::Error::Backend(Error::Unauthorized)) => {
-                        return Err(Error::Unauthorized)
+                        return Err(Error::Unauthorized);
                     }
                     Err(bilibi_agent_api::Error::Backend(Error::Forbidden | Error::NotFound)) => {
                         self.notice = "You no longer have permission to change this company, or the company is archived.".into();
@@ -957,45 +1231,55 @@ impl CompanyPage {
                     return Err(Error::Invalid);
                 }
                 let submitted = get("value");
-                let input = serde_json::json!({
-                    "company_id": id,
-                    "version": version,
-                    "fields": {"custom": [{"key": key, "value": submitted}]},
-                });
-                let result = self
-                    .contracts
-                    .submit(
-                        &Call {
-                            scope,
-                            credential,
-                            service: "core/company.pages",
-                            event: "save_custom_field",
-                            contract: "core.company.update",
-                        },
-                        input,
-                    )
-                    .await;
-                let status = match result {
-                    Ok(_) => CommitStatus::Saved,
-                    Err(bilibi_agent_api::Error::Backend(Error::Unauthorized)) => {
-                        return Err(Error::Unauthorized)
-                    }
-                    Err(bilibi_agent_api::Error::Backend(Error::Forbidden | Error::NotFound)) => {
-                        self.notice = "You no longer have permission to change this company, or the company is archived.".into();
-                        CommitStatus::Error(self.notice.clone())
-                    }
-                    Err(bilibi_agent_api::Error::Backend(Error::Conflict)) => CommitStatus::Error(
-                        "The record changed. Your draft is kept; reload before saving.".into(),
-                    ),
-                    Err(bilibi_agent_api::Error::InvalidInput(errors)) => CommitStatus::Error(
-                        errors.into_values().flatten().collect::<Vec<_>>().join(" "),
-                    ),
-                    Err(bilibi_agent_api::Error::Backend(Error::Invalid)) => CommitStatus::Error(
-                        "The value was not saved. Check its format and length.".into(),
-                    ),
-                    Err(_) => CommitStatus::failure(),
+                // Several choices travel as `values` (the shared editor joins
+                // its ticks with commas), every other kind as `value`.
+                let several =
+                    self.custom_definition(scope, &key)
+                        .await?
+                        .is_some_and(|definition| {
+                            definition.kind == bilibi_custom_fields::Kind::Choices
+                        });
+                let pair = if several {
+                    let codes = bilibi_custom_fields::codes_value([submitted]);
+                    serde_json::json!({"key": key, "values": if codes.is_null() { serde_json::json!([]) } else { codes }})
+                } else {
+                    serde_json::json!({"key": key, "value": submitted})
                 };
-                self.statuses.put(field, status);
+                self.save_custom(scope, credential, &field, pair, version)
+                    .await?;
+            }
+            "custom_reference_search" if self.operation == "detail" => {
+                self.read_reference_queries(scope, value).await?;
+            }
+            views::CUSTOM_PICK if matches!(self.operation, "detail" | "create") => {
+                let name = get("key").to_owned();
+                if !name.starts_with("cf_") {
+                    return Err(Error::Invalid);
+                }
+                self.pick_reference(scope, credential, &name, get("record"))
+                    .await?;
+            }
+            views::CUSTOM_CLEAR if matches!(self.operation, "detail" | "create") => {
+                let name = get("key").to_owned();
+                if !name.starts_with("cf_") {
+                    return Err(Error::Invalid);
+                }
+                self.custom_pickers.queries.remove(&name);
+                self.custom_pickers.hits.remove(&name);
+                if self.operation == "detail" {
+                    let key = name.strip_prefix("cf_").ok_or(Error::Invalid)?;
+                    let version = self.current_version(scope).await?;
+                    self.save_custom(
+                        scope,
+                        credential,
+                        &name,
+                        serde_json::json!({"key": key, "value": null}),
+                        version,
+                    )
+                    .await?;
+                } else {
+                    self.custom_pickers.chosen.remove(&name);
+                }
             }
             "save_field" if self.operation == "detail" => {
                 let id = get("id").parse().map_err(|_| Error::Invalid)?;
@@ -1012,7 +1296,7 @@ impl CompanyPage {
                 let status = match result {
                     Ok(()) => CommitStatus::Saved,
                     Err(crate::WriteError::Access(Error::Unauthorized)) => {
-                        return Err(Error::Unauthorized)
+                        return Err(Error::Unauthorized);
                     }
                     Err(crate::WriteError::Access(Error::Forbidden)) => {
                         self.notice="You no longer have permission to change this company, or the company is archived.".into();
@@ -1087,7 +1371,7 @@ impl CompanyPage {
                     let status = match self.company.save_fact(scope, credential, &edit).await {
                         Ok(()) => CommitStatus::Saved,
                         Err(crate::WriteError::Access(Error::Unauthorized)) => {
-                            return Err(Error::Unauthorized)
+                            return Err(Error::Unauthorized);
                         }
                         Err(crate::WriteError::Access(Error::Conflict)) => CommitStatus::Error(
                             "The record changed. Reload before changing its activities.".into(),
@@ -1151,7 +1435,7 @@ impl CompanyPage {
                 )
                 .map_err(Error::refused)?;
                 let query = fields.get("parent_search").cloned().unwrap_or_default();
-                self.search_parents(scope, &query).await?;
+                self.parent_query = query.chars().take(100).collect();
             }
             "pick_parent" if matches!(self.operation, "detail" | "create") => {
                 let id: i64 = get("record")
@@ -1193,7 +1477,7 @@ impl CompanyPage {
                     .get("code_edited")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let values: HashMap<String, String> = value
+                let mut values: HashMap<String, String> = value
                     .as_object()
                     .ok_or(Error::Invalid)?
                     .iter()
@@ -1202,13 +1486,16 @@ impl CompanyPage {
                     })
                     .filter(|(key, _)| key != "type")
                     .collect();
+                values.extend(ticked(value, &self.form));
                 let name = values.get("name").cloned().unwrap_or_default();
                 let query = values
                     .get("parent[parent_search]")
                     .cloned()
                     .unwrap_or_default();
                 self.form = values;
-                self.search_parents(scope, &query).await?;
+                self.errors = views::new_company(&self.form).4;
+                self.parent_query = query.chars().take(100).collect();
+                self.read_reference_queries(scope, value).await?;
                 if name != old_name && !self.code_edited {
                     let client = self.db.get().await?;
                     bilibi_authz::authorize_key(&**client, scope, crate::CREATE).await?;
@@ -1243,23 +1530,36 @@ impl CompanyPage {
                         .get("code_edited")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let values: HashMap<String, String> = value
+                    let mut values: HashMap<String, String> = value
                         .as_object()
                         .ok_or(Error::Invalid)?
                         .iter()
                         .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.into())))
                         .filter(|(k, _)| k != "type" && k != "intent")
                         .collect();
+                    values.extend(ticked(value, &self.form));
                     self.form = values;
                     self.duplicate_reason.clear();
                     self.confirming_duplicate = false;
                     self.duplicate_candidates.clear();
                     self.duplicate_likely = false;
                 }
+                let definitions = crate::field_contributions::custom_fields()?
+                    .active(
+                        &**client,
+                        scope,
+                        crate::field_contributions::CUSTOM_RECORD_TYPE,
+                    )
+                    .await?;
+                self.reconcile_custom(&definitions);
                 match &self.parent_chosen {
                     Some((id, _)) => self.form.insert("parent_id".into(), id.to_string()),
                     None => self.form.remove("parent_id"),
                 };
+                // A record field posts the record its picker holds, as its id.
+                for (name, chosen) in &self.custom_pickers.chosen {
+                    self.form.insert(name.clone(), chosen.id.clone());
+                }
                 let (mut new, company_fields, activities, metadata, errors) =
                     views::new_company(&self.form);
                 if !self.code_edited {

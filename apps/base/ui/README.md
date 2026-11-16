@@ -233,7 +233,7 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 ## Record references
 
-`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md).
+`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`.
 
 ## File preview
 
@@ -260,3 +260,5 @@ See [`base/system`](../system/README.md) for Banner colour on Instance settings.
 `Softphone` renders a Domain-owned call projection: its last confirmed `CallPhase`, separate `PhoneHealth`, caller, action availability and an escaped `Html` screen-pop. Omit actions the actor cannot use; supply an unavailable reason for a temporarily disabled supported action. The shared control sends the enclosing page or panel its event with `action` and an opaque `version`. The owner binds the call in mounted state, checks the actor, current version and action again, and renders only an authoritative response. It owns transfer and conference inputs, provider I/O and the refusal text. Phone unavailability disables controls while preserving the last call phase and the rest of the page. On reconnect the owner reloads a scoped projection; event wakes are hints and must not be treated as ordered state.
 
 The disposable `softphone-walkthrough` web example is a fake source for manual browser verification; it is not registered by the production application. Its state and action controls exercise the live transport without a phone system.
+
+Several-choice inline editors preserve held code order and append new selections in tick order; opening and leaving an untouched editor sends no write. Contact and Company create forms preserve held order across redraws; selections added within one form event follow checkbox option order.

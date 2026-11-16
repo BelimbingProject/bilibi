@@ -252,12 +252,12 @@ impl Reports {
     /// only while what they may see of the report is what it was when the
     /// file was made: a lost share, source or field refuses it.
     pub async fn exported(&self, scope: &Scope, export: i64) -> Result<crate::File, ReportError> {
-        let mut client = self.db.get().await.map_err(Error::from)?;
+        let client = self.db.get().await.map_err(Error::from)?;
         authorize(&**client, scope, EXPORT).await?;
         let current = scope.current_company().ok_or(ReportError::NotFound)?.get();
         let row = client
             .query_opt(
-                "SELECT artifact_id, filename, format, rows, company_id, report_id, access FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready'",
+                "SELECT artifact_id, filename, format, rows, company_id, report_id, access, reference_names FROM base_report_exports WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND company_id=$4 AND state='ready'",
                 &[&scope.tenant(), &export, &scope.user(), &current],
             )
             .await
@@ -267,15 +267,24 @@ impl Reports {
             (row.get(0), row.get(1), row.get(2), row.get(3));
         let company = OrganisationId::new(row.get(4)).map_err(|_| Error::Internal)?;
         let (report, made): (i64, Option<String>) = (row.get(5), row.get(6));
+        let reference_names: Vec<crate::ReferenceName> =
+            serde_json::from_value(row.get(7)).map_err(|_| Error::Internal)?;
+        drop(client);
         let now = match self.access(scope, report).await {
             Err(ReportError::Database(error)) => return Err(error.into()),
             other => other.ok(),
         };
-        if made.is_none() || now != made {
+        if made.is_none()
+            || now != made
+            || !self
+                .reference_names_current(scope, &reference_names)
+                .await?
+        {
             return Err(ReportError::Refused(
                 "What you may see of this report has changed since the file was made. Prepare it again.".into(),
             ));
         }
+        let mut client = self.db.get().await.map_err(Error::from)?;
         let document = self
             .artifacts
             .for_owner(scope, company, &ExportOwner)
@@ -283,6 +292,7 @@ impl Reports {
             .await
             .map_err(|_| ReportError::NotFound)?;
         Ok(crate::File {
+            reference_names,
             filename,
             content_type: Format::from_key(&format)
                 .unwrap_or(Format::Csv)
@@ -352,7 +362,7 @@ impl Reports {
             Err(_) => {
                 return self
                     .give_up(execution, scope, export, "settings_unavailable", quiet)
-                    .await
+                    .await;
             }
         };
         // What the requester may see is taken before the run: if it changes
@@ -385,7 +395,7 @@ impl Reports {
             Err(ReportError::Database(_)) => {
                 return self
                     .give_up(execution, scope, export, "report_unavailable", quiet)
-                    .await
+                    .await;
             }
             Err(refused) => {
                 let message = refused.to_string();
@@ -412,7 +422,7 @@ impl Reports {
                 Err(_) => {
                     return self
                         .give_up(execution, scope, export, "settings_unavailable", quiet)
-                        .await
+                        .await;
                 }
             }
         };
@@ -428,7 +438,7 @@ impl Reports {
             Err(_) => {
                 return self
                     .give_up(execution, scope, export, "store_failed", quiet)
-                    .await
+                    .await;
             }
         };
         match self
@@ -460,7 +470,9 @@ impl Reports {
             return JobOutcome::Retry(code);
         }
         let message = match code {
-            "store_failed" => "The file could not be stored. Ask an administrator to check the private document folder setting.",
+            "store_failed" => {
+                "The file could not be stored. Ask an administrator to check the private document folder setting."
+            }
             _ => "The export could not be prepared after several tries. Try again later.",
         };
         match self
@@ -507,14 +519,20 @@ impl Reports {
                 None,
             ),
         };
+        let reference_names = match &outcome {
+            Finished::Ready(_, file, _) => {
+                serde_json::to_value(&file.reference_names).map_err(|_| Error::Internal)?
+            }
+            Finished::Failed(_) => json!([]),
+        };
         let new = json!({"state": state, "rows": rows});
         let name: String = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let row = sql
                         .query_opt(
-                            "UPDATE base_report_exports SET state=$4, artifact_id=$5, filename=$6, rows=$7, message=$8, expires_at=$9::text::timestamptz, access=$10, finished_at=now() WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND state='queued' RETURNING report_name",
-                            &[&tenant, &export, &user, &state, &artifact, &filename, &rows, &message, &expires, &access],
+                            "UPDATE base_report_exports SET state=$4, artifact_id=$5, filename=$6, rows=$7, message=$8, expires_at=$9::text::timestamptz, access=$10, reference_names=$11, finished_at=now() WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND state='queued' RETURNING report_name",
+                            &[&tenant, &export, &user, &state, &artifact, &filename, &rows, &message, &expires, &access, &reference_names],
                         )
                         .await?
                         .ok_or(Error::Conflict)?;

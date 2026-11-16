@@ -22,7 +22,10 @@ impl Run {
             .filter(|c| c.outcome != "ok")
             .collect();
         Some(if excluded.is_empty() {
-            format!("Read-only parent oversight: {} consenting children included. No child record links.",self.oversight.len())
+            format!(
+                "Read-only parent oversight: {} consenting children included. No child record links.",
+                self.oversight.len()
+            )
         } else {
             format!(
                 "Partial: {} of {} consenting children not included. {}.",
@@ -394,6 +397,7 @@ impl Reports {
             )
         };
         Ok(Run {
+            reference_names: Vec::new(),
             report,
             oversight: outcomes,
             left_out,

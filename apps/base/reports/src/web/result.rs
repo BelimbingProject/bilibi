@@ -27,6 +27,11 @@ pub(crate) fn cell(value: &Value) -> String {
         Value::Bool(true) => "Yes".into(),
         Value::Bool(false) => "No".into(),
         Value::String(text) => text.clone(),
+        Value::Object(object) if object.contains_key("stored_id") => object
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("Restricted")
+            .to_owned(),
         other => other.to_string(),
     }
 }
@@ -675,12 +680,12 @@ pub(crate) fn figure(
             chart
         };
     }
-    let mut categories: Vec<String> = Vec::new();
-    let mut names: Vec<String> = Vec::new();
+    let mut categories: Vec<Value> = Vec::new();
+    let mut names: Vec<Value> = Vec::new();
     for (_, l) in &detail {
         let (a, b) = (
-            l.0.first().map(|v| key(0, v)).unwrap_or_default(),
-            l.0.get(1).map(|v| key(1, v)).unwrap_or_default(),
+            l.0.first().cloned().unwrap_or_default(),
+            l.0.get(1).cloned().unwrap_or_default(),
         );
         if !categories.contains(&a) {
             categories.push(a);
@@ -689,19 +694,21 @@ pub(crate) fn figure(
             names.push(b);
         }
     }
-    let find = |category: &String, name: &String| {
-        detail.iter().find(|(_, l)| {
-            l.0.first().map(|v| key(0, v)).as_ref() == Some(category)
-                && l.0.get(1).map(|v| key(1, v)).as_ref() == Some(name)
-        })
+    let find = |category: &Value, name: &Value| {
+        detail
+            .iter()
+            .find(|(_, l)| l.0.first() == Some(category) && l.0.get(1) == Some(name))
     };
     let series = names
         .iter()
         .map(|name| Series {
-            name: if name.is_empty() {
-                "(none)".into()
-            } else {
-                name.clone()
+            name: {
+                let label = key(1, name);
+                if label.is_empty() {
+                    "(none)".into()
+                } else {
+                    label
+                }
             },
             values: categories
                 .iter()
@@ -709,7 +716,13 @@ pub(crate) fn figure(
                 .collect(),
         })
         .collect();
-    let chart = Chart::new(id, title, kind, categories.clone(), series);
+    let chart = Chart::new(
+        id,
+        title,
+        kind,
+        categories.iter().map(|v| key(0, v)).collect(),
+        series,
+    );
     if drill {
         chart.drill("drill", |s, c| {
             let (name, category) = (names.get(s)?, categories.get(c)?);

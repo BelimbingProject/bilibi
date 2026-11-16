@@ -270,13 +270,16 @@ static GRID: GridContribution = GridContribution {
             "documents",
             "Documents",
             VIEW,
-            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on,d.sync_id,d.related_document_id,d.relation,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.search_vector FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))"),
+            Source::tenant("SELECT d.id,d.company_id,d.name,d.publish_date,d.source,d.external_url,d.category,d.sub_category,d.document_type,d.status,d.expires_on,d.sync_id,d.related_document_id,d.relation,d.revision,d.last_revision_at,d.created_by,d.created_at,d.updated_at,d.search_vector,d.custom_fields,d.custom_search_vector FROM core_documents d WHERE d.tenant_id=$1 AND d.deleting_at IS NULL AND EXISTS (SELECT 1 FROM core_document_access a WHERE a.tenant_id=d.tenant_id AND a.document_id=d.id AND a.user_id=$2 AND a.can_view AND (a.expires_at IS NULL OR a.expires_at > now()))"),
             "id",
             &[
                 Field::new("id", "ID", FieldType::Integer).protected(),
                 Field::new("company_id", "Filing company ID", FieldType::Integer).protected(),
                 Field::new("name", "Name", FieldType::String).protected(),
                 Field::new("search_vector", "Search terms", FieldType::String).hidden(),
+                // The tenant's custom values; Grid adds each active field as `cf_<key>`.
+                Field::new("custom_fields", "Custom fields", FieldType::String).hidden(),
+                Field::new("custom_search_vector", "Custom search terms", FieldType::String).hidden(),
                 Field::new("publish_date", "Publication date", FieldType::Date).protected(),
                 Field::choice("source", "Source", &["internal", "external"]).protected(),
                 Field::new("external_url", "Link", FieldType::String).protected(),
@@ -340,6 +343,7 @@ static GRID: GridContribution = GridContribution {
     ],
 };
 bilibi_grid::contribute!("core/document", "core/document.grid", &GRID);
+inventory::submit! { Contribution::new(bilibi_custom_fields::GRID_SOURCES, crate::custom::RECORD_TYPE, provenance!(), &bilibi_custom_fields::GridSource { record_type: crate::custom::RECORD_TYPE, table: "documents", column: "custom_fields" }) }
 
 // Other modules may point at a document. The owner checks explicit access.
 pub struct DocumentRecords;
@@ -384,7 +388,8 @@ bilibi_records::holder!(
 static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("documents", "name", "search_vector", "/documents/{id}")
         .subtitle(&["sync_id", "category"])
-        .updated("updated_at");
+        .updated("updated_at")
+        .custom("custom_search_vector");
 bilibi_search::contribute!("core/document", "document.search", &SEARCH);
 
 // Pages: the list and a document's record page.
@@ -464,6 +469,8 @@ inventory::submit! { Contribution::new(PAGE_WRITES, "core/document.pages", prove
         ("create", "core.document.create"),
         ("save_field", "core.document.update"),
         ("save_custom_field", "core.document.update"),
+        ("pick_custom_reference", "core.document.update"),
+        ("clear_custom_reference", "core.document.update"),
         ("add_revision", "core.document.add_revision"),
         ("link", "core.document.link"),
         ("unlink", "core.document.unlink"),

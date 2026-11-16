@@ -119,11 +119,18 @@ pub struct Catalog {
     masks: BTreeMap<&'static str, BTreeMap<String, &'static str>>,
 }
 impl Catalog {
+    pub(crate) fn without_custom_references(mut self) -> Self {
+        for table in self.tables.values_mut() {
+            table.remove_custom_references();
+        }
+        self
+    }
+
     /// The catalog this scope's actor may read, built from the installed snapshot
     /// with a fresh read of grants and field restrictions. A source is described to
     /// the server once per process to settle which of its keys each field reads.
     pub async fn for_scope(
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Self, CatalogError> {
         Self::build(client, scope, None).await
@@ -131,7 +138,7 @@ impl Catalog {
     /// [`Catalog::for_scope`] with one masked field of one table unmasked, for
     /// a reveal the caller has already authorized and recorded.
     pub(crate) async fn revealing(
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         table: &str,
         field: &str,
@@ -139,7 +146,7 @@ impl Catalog {
         Self::build(client, scope, Some((table, field))).await
     }
     async fn build(
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         reveal: Option<(&str, &str)>,
     ) -> Result<Self, CatalogError> {
@@ -238,6 +245,13 @@ impl Catalog {
         let visible: BTreeSet<&str> = tables.keys().copied().collect();
         for table in tables.values_mut() {
             table.retain_links(|link| visible.contains(link.to()));
+        }
+        // The tenant's custom fields, read fresh with the grants above, join
+        // the tables this reader may read.
+        if let Some(hook) = crate::custom::hook() {
+            for custom in hook.tables(client, scope).await? {
+                add_custom(&mut tables, custom);
+            }
         }
         let catalog = Self {
             tenant: scope.tenant(),
@@ -533,18 +547,59 @@ impl Catalog {
     }
 }
 
+fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom::CustomTable) {
+    let Some(json) = tables
+        .get(custom.table)
+        .and_then(|table| table.field(custom.column))
+        .filter(|field| field.hidden)
+        .map(Field::source_key)
+    else {
+        return;
+    };
+    let mut added = Vec::new();
+    for column in custom.columns {
+        if !crate::custom::key_shaped(&column.key) {
+            continue;
+        }
+        let id = crate::custom::field_id(&column.key);
+        let sql = column.value.replace(
+            "{json}",
+            &format!("{{alias}}.\"{}\"", json.replace('"', "\"\"")),
+        );
+        added.push((
+            Field::new(id, id, column.ty).column(json),
+            column.label,
+            sql,
+            column.searchable && column.reference.is_none(),
+            column.reference,
+        ));
+    }
+    let Some(table) = tables.get_mut(custom.table) else {
+        return;
+    };
+    for (field, label, sql, searchable, reference) in added {
+        if table.field(field.id).is_none() {
+            table.add_custom(field, label, sql, searchable, reference);
+        }
+    }
+}
+
 fn truncated(spec: &str) -> String {
     spec.chars().take(MAX_SPEC).collect()
 }
 fn field_specs(table: &Table, prefix: &str) -> Vec<String> {
     table
         .visible_fields()
+        .filter(|field| table.custom_reference(field.id).is_none())
         .map(|field| format!("{prefix}{}", field.id))
         .collect()
 }
 fn rollup_specs(target: &Table, path: &str, out: &mut Vec<String>) {
     out.push(format!("{path}:count"));
-    for field in target.visible_fields() {
+    for field in target
+        .visible_fields()
+        .filter(|field| target.custom_reference(field.id).is_none())
+    {
         let id = field.id;
         match field.ty {
             FieldType::Integer | FieldType::Float | FieldType::Decimal if id != target.key() => {

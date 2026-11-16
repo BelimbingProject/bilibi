@@ -10,6 +10,7 @@ use crate::{
 use bilibi_authz::authorize_key;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_picklists::{PickLists, Reach};
+use bilibi_records::Records;
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ pub const KEY_MAX: usize = 40;
 pub const HELP_MAX: usize = 255;
 
 const COLUMNS: &str =
-    "id,record_type,key,label,help,kind,picklist,position,archived_on::text AS archived_on,version";
+    "id,record_type,key,label,help,kind,picklist,target,position,archived_on::text AS archived_on,version";
 
 /// What a field holds. Fixed when the field is defined.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -42,9 +43,15 @@ pub enum Kind {
     Link,
     Phone,
     Email,
+    /// Several codes of one standalone tenant pick-list, kept as a JSON
+    /// array of codes in the order chosen, each at most once.
+    Choices,
+    /// One record of a Base Records kind (`Definition::target`), kept as the
+    /// record's id text; it is named with the reader's own access.
+    Reference,
 }
 impl Kind {
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 11] = [
         Kind::Text,
         Kind::Number,
         Kind::Date,
@@ -54,6 +61,8 @@ impl Kind {
         Kind::Link,
         Kind::Phone,
         Kind::Email,
+        Kind::Choices,
+        Kind::Reference,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -66,6 +75,8 @@ impl Kind {
             Self::Link => "link",
             Self::Phone => "phone",
             Self::Email => "email",
+            Self::Choices => "choices",
+            Self::Reference => "reference",
         }
     }
     pub fn label(self) -> &'static str {
@@ -79,10 +90,16 @@ impl Kind {
             Self::Link => "Link",
             Self::Phone => "Phone",
             Self::Email => "Email",
+            Self::Choices => "Several choices",
+            Self::Reference => "Record",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+    /// Whether the field names a pick-list its values come from.
+    pub fn takes_picklist(self) -> bool {
+        matches!(self, Self::Choice | Self::Choices)
     }
 }
 
@@ -96,8 +113,10 @@ pub struct Definition {
     pub label: String,
     pub help: Option<String>,
     pub kind: Kind,
-    /// For a choice field, the pick-list its values come from.
+    /// For a choice or several-choices field, the pick-list its values come from.
     pub picklist: Option<String>,
+    /// For a record field, the Base Records kind it points at (`company`).
+    pub target: Option<String>,
     pub position: i32,
     pub archived_on: Option<String>,
     pub version: i64,
@@ -112,6 +131,7 @@ impl Definition {
             help: row.get("help"),
             kind: Kind::parse(row.get::<_, &str>("kind")).ok_or(Error::Internal)?,
             picklist: row.get("picklist"),
+            target: row.get("target"),
             position: row.get("position"),
             archived_on: row.get("archived_on"),
             version: row.get("version"),
@@ -153,6 +173,8 @@ pub struct NewField {
     pub help: Option<String>,
     pub kind: String,
     pub picklist: Option<String>,
+    /// For a record field, the kind of record it points at.
+    pub target: Option<String>,
 }
 /// Everything but the key and the kind.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -172,6 +194,7 @@ enum Step {
 pub struct CustomFields {
     pub(crate) record_types: BTreeMap<&'static str, &'static RecordType>,
     pub(crate) picklists: Arc<PickLists>,
+    pub(crate) records: Arc<Records>,
     pub(crate) settings: Arc<Settings>,
 }
 
@@ -247,6 +270,24 @@ impl CustomFields {
             .collect()
     }
 
+    /// The kinds of record a record field may point at: every mounted Base
+    /// Records kind, by key, with its name for people ("Companies").
+    pub fn reference_kinds(&self) -> Vec<(&'static str, &'static str)> {
+        let mut kinds: Vec<_> = self
+            .records
+            .kinds()
+            .map(|kind| (kind.key, self.records.kind_label(kind.key)))
+            .collect();
+        kinds.sort_by_key(|(key, label)| (*label, *key));
+        kinds
+    }
+
+    /// The Base Records facade a record field's values are checked and named
+    /// through, for owners that show them.
+    pub fn records(&self) -> &Records {
+        &self.records
+    }
+
     /// The most active fields one record type may have, a tenant setting.
     async fn limit(&self, client: &dyn ReadClient, scope: &Scope) -> Result<i64> {
         self.settings
@@ -304,9 +345,9 @@ impl CustomFields {
                 &[&tenant, &record_type],
             )
             .await?;
-        // A choice field whose pick-list is no longer offered (its module is
-        // not mounted) leaves forms, lists and agents with the list; its
-        // definition and the values stay.
+        // A choice field whose pick-list is no longer offered, or a record
+        // field whose kind is no longer mounted, leaves forms, lists and
+        // agents with its module; its definition and the values stay.
         rows.iter()
             .map(Definition::from_row)
             .filter(|definition| {
@@ -315,6 +356,10 @@ impl CustomFields {
                         .picklist
                         .as_deref()
                         .is_none_or(|list| self.picklists.list(list).is_ok())
+                        && definition
+                            .target
+                            .as_deref()
+                            .is_none_or(|kind| self.records.kind(kind).is_some())
                 })
             })
             .collect()
@@ -400,10 +445,10 @@ impl CustomFields {
             .map(str::trim)
             .filter(|key| !key.is_empty());
         match (kind, picklist) {
-            (Some(Kind::Choice), None) => {
+            (Some(kind), None) if kind.takes_picklist() => {
                 errors.push(FieldError::new("picklist", "choose the pick-list to use"))
             }
-            (Some(Kind::Choice), Some(key)) => {
+            (Some(kind), Some(key)) if kind.takes_picklist() => {
                 if !self.choice_lists().iter().any(|(list, _)| *list == key) {
                     errors.push(FieldError::new(
                         "picklist",
@@ -413,7 +458,31 @@ impl CustomFields {
             }
             (Some(_), Some(_)) => errors.push(FieldError::new(
                 "picklist",
-                "only a choice field takes a pick-list",
+                "only a pick-list or several-choices field takes a pick-list",
+            )),
+            _ => {}
+        }
+        let target = input
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty());
+        match (kind, target) {
+            (Some(Kind::Reference), None) => errors.push(FieldError::new(
+                "target",
+                "choose the kind of record it points at",
+            )),
+            (Some(Kind::Reference), Some(key)) => {
+                if self.records.kind(key).is_none() {
+                    errors.push(FieldError::new(
+                        "target",
+                        "is not a kind of record that can be linked",
+                    ));
+                }
+            }
+            (Some(_), Some(_)) => errors.push(FieldError::new(
+                "target",
+                "only a record field points at a kind of record",
             )),
             _ => {}
         }
@@ -458,6 +527,7 @@ impl CustomFields {
                 .map(|kind| kind.as_str().to_owned())
                 .unwrap_or_default(),
             picklist: picklist.map(str::to_owned),
+            target: target.map(str::to_owned),
         }))
     }
     /// The field a define would add, without adding it (the agent preview).
@@ -487,8 +557,8 @@ impl CustomFields {
                 Box::pin(async move {
                     let row = sql
                         .query_one(
-                            &format!("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,help,kind,picklist,position) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT coalesce(max(position),0)+10 FROM base_custom_fields WHERE tenant_id=$1 AND record_type=$2)) RETURNING {COLUMNS}"),
-                            &[&tenant, &field.record_type, &field.key, &field.label, &field.help, &field.kind, &field.picklist],
+                            &format!("INSERT INTO base_custom_fields(tenant_id,record_type,key,label,help,kind,picklist,target,position) VALUES($1,$2,$3,$4,$5,$6,$7,$8,(SELECT coalesce(max(position),0)+10 FROM base_custom_fields WHERE tenant_id=$1 AND record_type=$2)) RETURNING {COLUMNS}"),
+                            &[&tenant, &field.record_type, &field.key, &field.label, &field.help, &field.kind, &field.picklist, &field.target],
                         )
                         .await?;
                     let created = Definition::from_row(&row)?;

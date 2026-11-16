@@ -71,11 +71,11 @@ On a migrated, fixture-holding, seeded disposable database (as for the audit cov
 
 ## Custom fields
 
-Documents is a `base/custom_fields` record type (`document`): an administrator adds the scalar field types offered by Base Custom Fields without a release (ADR 21). Values live in `core_documents.custom_fields`, checked with `CustomFields::validate_locked` in the same write as every other change.
+Documents is a `base/custom_fields` record type (`document`): an administrator adds the field types offered by Base Custom Fields without a release (ADR 21). Values live in `core_documents.custom_fields`, checked with `CustomFields::validate_locked` in the same write as every other change. A several-choices value is a JSON array of codes; a record value is the record's id as text.
 
-- **Page:** the active fields show as facts that edit in place (`save_custom_field`, through `core.document.update`).
-- **Agents:** `core.document.create` and `.update` (inside `patch`) take `custom` as `{key, value}` pairs; `core.document.get` returns `custom` as `{key, label, type, value}` for the active fields. Find keys with `base.custom_fields.list`.
-- **Copy** carries the values over; **merge** keeps the survivor's.
+- **Page:** the active fields show as facts that edit in place (`save_custom_field`, through `core.document.update`). Several choices edit as a multi-select (the ticked codes, joined by commas, become the array). A record field shows the record's pill, named with the reader's access (Restricted when they cannot see it); an editor gets a picker that saves a pick at once (`pick_custom_reference`) and clears it with Remove (`clear_custom_reference`), each naming the field as `key`, searching on `custom_reference_change`. A refusal shows under the picker.
+- **Agents:** `core.document.create` and `.update` (inside `patch`) take `custom` as `{key, value}` pairs (`value` text, or null to clear) or `{key, values}` for several choices (an empty list clears); one pair carries exactly one of them. `core.document.get` returns `custom` as `{key, label, type, value}` for the active fields, with `target` (the record kind) for a record field; `value` is the stored JSON (an array for several choices, an id for a record: name it with `base.records.resolve`). Find keys with `base.custom_fields.list`.
+- **Copy** carries the values over, checked again for the copier (a record they cannot see is refused); **merge** keeps the survivor's.
 - Not yet: a custom field as a list column or filter, and a field in the New document dialog.
 
 ## Library actions

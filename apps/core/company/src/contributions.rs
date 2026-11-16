@@ -122,7 +122,7 @@ static GRID: GridContribution = GridContribution {
         "Companies",
         LIST,
         Source::tenant(
-            "SELECT id, parent_id, code, name, legal_name, registration_number, legal_entity_type_id, jurisdiction, website, status, email, phone, tax_id, revenue, created_at, updated_at, search_vector FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL",
+            "SELECT id, parent_id, code, name, legal_name, registration_number, legal_entity_type_id, jurisdiction, website, status, email, phone, tax_id, revenue, created_at, updated_at, search_vector, custom_fields, custom_search_vector FROM companies WHERE tenant_id = $1 AND deleted_at IS NULL",
         ),
         "id",
         &[
@@ -143,6 +143,9 @@ static GRID: GridContribution = GridContribution {
             Field::new("created_at", "Created", DateTime),
             Field::new("updated_at", "Updated", DateTime),
             Field::new("search_vector", "Search terms", String).hidden(),
+            // The tenant's custom values; Grid adds each active field as `cf_<key>`.
+            Field::new("custom_fields", "Custom fields", String).hidden(),
+            Field::new("custom_search_vector", "Custom search terms", String).hidden(),
         ],
     )
     .label_field("name")
@@ -195,6 +198,8 @@ static GRID: GridContribution = GridContribution {
     ],
 };
 bilibi_grid::contribute!("core/company", "company.grid", &GRID);
+inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_custom_fields::GRID_SOURCES, "company", bilibi_module_registry::Provenance { module: "core/company", source: file!(), line: line!() },
+&bilibi_custom_fields::GridSource { record_type: "company", table: "companies", column: "custom_fields" }) }
 
 // Global search finds live companies by name, code and legal name; an archived
 // one stays findable, ranked after current ones and marked.
@@ -202,7 +207,8 @@ static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("companies", "name", "search_vector", "/companies/{id}")
         .subtitle(&["code", "legal_name"])
         .state("status", &["archived"])
-        .updated("updated_at");
+        .updated("updated_at")
+        .custom("custom_search_vector");
 bilibi_search::contribute!("core/company", "company.search", &SEARCH);
 
 inventory::submit! {

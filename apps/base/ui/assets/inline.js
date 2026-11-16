@@ -40,24 +40,64 @@
       listen(this.el, 'keyup', (event) => {
         if (this.active && event.key === 'Escape' && !event.isComposing) this.cancel(true);
       });
-      listen(this.el, 'focusout', () => {
+      listen(this.el, 'focusout', (event) => {
+        // Focus moving within the editor (a tick in its list) is not leaving
+        // it; the microtask below runs before the new element takes focus.
+        if (event.relatedTarget && this.editor()?.contains(event.relatedTarget)) return;
         queueMicrotask(() => {
           if (!this.active || this.editor()?.contains(document.activeElement)) return;
-          if (this.choice) this.cancel(false);
+          // Several choices are ticked one by one: leaving the editor commits them.
+          if (this.choice && !this.ticks()) this.cancel(false);
           else this.commit(false);
         });
       });
       listen(this.el, 'change', (event) => {
+        const ticks = this.ticks();
+        if (this.active && ticks?.includes(event.target)) {
+          this.choiceOrder = (this.choiceOrder || []).filter(code => code !== event.target.value);
+          if (event.target.checked) this.choiceOrder.push(event.target.value);
+        }
         // A date's picker has no name: the DateInput hook has already copied
         // the chosen day into the named hidden value.
-        if ((this.choice || this.date) && this.active && (event.target.name === this.el.dataset.field || (this.date && event.target.matches('[data-date-picker]')))) this.commit(true);
+        if ((this.choice || this.date) && !this.ticks() && this.active && (event.target.name === this.el.dataset.field || (this.date && event.target.matches('[data-date-picker]')))) this.commit(true);
       });
       this.updated();
       if (this.el.dataset.initialEdit === 'true') this.start(undefined, false, this.el.dataset.autofocus !== 'false');
     },
     destroyed() { this.abort.abort(); },
     editor() { return this.el.querySelector('[data-role="editor"]'); },
+    // A several-choices editor is a MultiSelect named `<field>[]`: its value
+    // is the ticked codes joined by commas (a code never holds one).
+    ticks() {
+      if (!this.choice) return null;
+      const name = `${this.el.dataset.field}[]`;
+      const boxes = [...(this.editor()?.querySelectorAll('input[type="checkbox"]') || [])].filter((box) => box.name === name);
+      return boxes.length || this.editor()?.querySelector('[data-hook="MultiSelect"]') ? boxes : null;
+    },
     control() {
+      const ticks = this.ticks();
+      if (ticks) {
+        const owner = this;
+        return {
+          get value() {
+            const checked = ticks.filter(box => box.checked).map(box => box.value);
+            const held = owner.choiceOrder || String(owner.el.dataset.value || '').split(',');
+            return [...held.filter(code => checked.includes(code)), ...checked.filter(code => !held.includes(code))].join(',');
+          },
+          set value(text) {
+            const codes = String(text || '').split(',');
+            for (const box of ticks) {
+              if (box.checked !== codes.includes(box.value)) {
+                box.checked = codes.includes(box.value);
+                box.dispatchEvent(new Event('change', {bubbles: true}));
+              }
+            }
+            owner.choiceOrder = codes.filter(code => ticks.some(box => box.checked && box.value === code));
+          },
+          setAttribute: () => {}, removeAttribute: () => {},
+          focus: () => this.editor().querySelector('[aria-expanded]')?.focus(),
+        };
+      }
       return [...(this.editor()?.querySelectorAll('[name]') || [])].find((input) => input.name === this.el.dataset.field);
     },
     trigger() { return this.el.querySelector('[data-role="trigger"]'); },
