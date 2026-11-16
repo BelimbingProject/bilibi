@@ -72,17 +72,16 @@ pub(crate) fn sources(
 /// Grid's hook: the tenant's active fields of every source, in their order.
 pub(crate) struct Columns {
     pub(crate) fields: std::sync::Arc<CustomFields>,
-    pub(crate) sources: Vec<&'static GridSource>,
 }
 
 impl CustomColumns for Columns {
     fn tables<'a>(&'a self, client: &'a dyn ReadClient, scope: &'a Scope) -> CustomFuture<'a> {
         Box::pin(async move {
-            let mut tables = Vec::with_capacity(self.sources.len());
-            for source in &self.sources {
+            let mut tables = Vec::with_capacity(self.fields.sources.len());
+            for source in &self.fields.sources {
                 let definitions = self
                     .fields
-                    .active(client, scope, source.record_type)
+                    .defined(client, scope, source.record_type)
                     .await?;
                 let columns = definitions
                     .into_iter()
@@ -108,6 +107,8 @@ impl CustomColumns for Columns {
                                     | Kind::Phone
                                     | Kind::Email
                             ),
+                            rule_condition: definition.rule_condition
+                                && definition.kind.rule_condition_kind(),
                         }
                     })
                     .collect();
@@ -118,6 +119,45 @@ impl CustomColumns for Columns {
                 });
             }
             Ok(tables)
+        })
+    }
+}
+
+/// Authz's hook: every active field of every source, restrictable as
+/// `cf_<key>` on the source's table (withheld only; none is personal).
+pub(crate) struct Restrictable {
+    pub(crate) fields: std::sync::Arc<CustomFields>,
+}
+
+impl bilibi_authz::field_catalog::TenantFields for Restrictable {
+    fn fields<'a>(
+        &'a self,
+        client: &'a dyn ReadClient,
+        scope: &'a Scope,
+    ) -> bilibi_authz::field_catalog::TenantFieldsFuture<'a> {
+        Box::pin(async move {
+            let installed =
+                bilibi_grid::installed().map_err(|_| bilibi_database::Error::Internal)?;
+            let mut out = Vec::new();
+            for source in &self.fields.sources {
+                let Some(table) = installed.table(source.table) else {
+                    continue;
+                };
+                for definition in self
+                    .fields
+                    .defined(client, scope, source.record_type)
+                    .await?
+                {
+                    out.push(bilibi_authz::field_catalog::TenantField {
+                        table: source.table,
+                        table_label: table.label(),
+                        record_types: table.decl.record_types,
+                        id: format!("cf_{}", definition.key),
+                        label: definition.label,
+                    });
+                }
+            }
+            Ok(out)
         })
     }
 }

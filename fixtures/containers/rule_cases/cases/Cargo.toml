@@ -10,6 +10,7 @@ publish = false
 bilibi-agent-api.workspace = true
 bilibi-authz.workspace = true
 bilibi-company.workspace = true
+bilibi-custom-fields.workspace = true
 bilibi-database.workspace = true
 bilibi-events.workspace = true
 bilibi-grid.workspace = true

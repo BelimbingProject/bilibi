@@ -125,7 +125,7 @@ struct RoleBadges<'a> {
 pub(crate) struct Screen {
     pages: Pages,
     columns: ListColumns,
-    catalog: &'static FieldCatalog,
+    catalog: FieldCatalog,
     roles: Vec<RoleChoice>,
     restrictions: Vec<RestrictionSummary>,
     dialog: Dialog,
@@ -140,7 +140,7 @@ impl Screen {
             pages: pages.clone(),
             columns: ListColumns::mount("field-restrictions", builtins())
                 .map_err(|_| Error::Internal)?,
-            catalog: pages.restrictions.catalog()?,
+            catalog: FieldCatalog::default(),
             roles: Vec::new(),
             restrictions: Vec::new(),
             dialog: Dialog::None,
@@ -157,6 +157,7 @@ impl Screen {
     /// for this round trip, so a refusal here is a race the host resolves.
     async fn load(&mut self, scope: &Scope) -> Result<()> {
         self.roles = self.pages.restrictions.roles(scope).await?;
+        self.catalog = self.pages.restrictions.catalog(scope).await?;
         self.restrictions = self.pages.restrictions.list(scope).await?;
         let rows = std::mem::take(&mut self.restrictions);
         self.columns.load(&rows, key);
@@ -229,7 +230,7 @@ impl Screen {
                     let label = if several {
                         format!("{} › {}", table.label, field.label)
                     } else {
-                        field.label.to_owned()
+                        field.label.to_string()
                     };
                     Choice::new(label, format!("{}{SEPARATOR}{}", table.id, field.id))
                 })

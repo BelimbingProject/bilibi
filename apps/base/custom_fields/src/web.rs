@@ -31,7 +31,7 @@ use bilibi_ui::{
     CommitStates, CommitStatus, ConfirmDialog, CreateButton, Field, FilterToolbar, FlashMap,
     FlexRow, FlexTable, Form, Header, Html, IconButton, IconKind, InlineEdit, InlineField,
     InputKind, ListColumns, ListSpec, ListState, Modal, Pagination, RowMode, StatusKind,
-    TableEmpty, ToolbarControl, NO_FLASH,
+    TableEmpty, Toggle, ToolbarControl, NO_FLASH,
 };
 use serde_json::{json, Value};
 use std::{
@@ -167,6 +167,7 @@ fn columns() -> Vec<BuiltinColumn> {
         BuiltinColumn::new("record_type", "Record"),
         BuiltinColumn::new("kind", "Type"),
         BuiltinColumn::new("help", "Help text"),
+        BuiltinColumn::new("rule_condition", "Rule condition"),
         BuiltinColumn::new("status", "Status"),
     ]
 }
@@ -265,6 +266,9 @@ impl Index {
                 if !text("target").is_empty() {
                     input["target"] = json!(text("target"));
                 }
+                if text("rule_condition") == "true" {
+                    input["rule_condition"] = json!(true);
+                }
                 let result = self
                     .pages
                     .contracts
@@ -353,6 +357,47 @@ impl Index {
                     },
                 };
                 self.statuses.put(format!("{id}-{field}"), status);
+            }
+            "switch_rule_condition" => {
+                let Some(current) = self.definition(get("key").unwrap_or_default()).cloned() else {
+                    self.notice = "This field no longer exists; reload the page.".into();
+                    return Ok(());
+                };
+                let on = !current.rule_condition;
+                let mut input = json!({
+                    "record_type": current.record_type,
+                    "key": current.key,
+                    "label": current.label,
+                    "rule_condition": on,
+                    "version": current.version,
+                });
+                if let Some(help) = &current.help {
+                    input["help"] = json!(help);
+                }
+                let result = self
+                    .pages
+                    .contracts
+                    .submit(
+                        &Self::call(
+                            scope,
+                            credential,
+                            "switch_rule_condition",
+                            "base.custom_fields.update",
+                        ),
+                        input,
+                    )
+                    .await;
+                self.flash = Some(match outcome(result)? {
+                    Ok(()) if on => (
+                        StatusKind::Success,
+                        format!("Rules can now use “{}” in their conditions.", current.label),
+                    ),
+                    Ok(()) => (
+                        StatusKind::Success,
+                        format!("Rules can no longer use “{}”. A rule that reads it stops until a new version is approved.", current.label),
+                    ),
+                    Err(message) => (StatusKind::Error, message),
+                });
             }
             "request_archive" | "request_restore" => {
                 let step = if get("type") == Some("request_archive") {
@@ -562,6 +607,28 @@ impl Index {
                             edits,
                         ),
                     })?,
+                )
+                .slot(
+                    "rule_condition",
+                    if !definition.kind.rule_condition_kind() {
+                        Html::text("Not offered for this type")
+                    } else if edits && !definition.archived() {
+                        render(Toggle {
+                            on: definition.rule_condition,
+                            label: &format!("Rule condition: {}", definition.label),
+                            id: &format!("custom-field-{}-rule-condition", definition.id),
+                            event: "switch_rule_condition",
+                            name: "key",
+                            value: &row_id(definition),
+                            disabled: false,
+                        })?
+                    } else {
+                        Html::text(if definition.rule_condition {
+                            "On"
+                        } else {
+                            "Off"
+                        })
+                    },
                 )
                 .slot(
                     "status",
@@ -774,6 +841,15 @@ impl Index {
                 .value(value("help"))
                 .attr("maxlength", &HELP_MAX.to_string())
                 .errors(errors("help")),
+        )?);
+        body.push(&render(
+            Field::in_form("field", "rule_condition")
+                .id("custom-field-new-rule-condition")
+                .label("Rule condition")
+                .kind(InputKind::Switch)
+                .value(if value("rule_condition") == "true" { "true" } else { "false" })
+                .hint("Lets rules decide on this field (text, number, date, pick-list and yes/no only). Rules never read a field you have not offered.")
+                .errors(errors("rule_condition")),
         )?);
         let mut actions = render(Button {
             event: "close_new",

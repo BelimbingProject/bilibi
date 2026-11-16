@@ -70,12 +70,14 @@ fn new_field(input: &Value) -> NewField {
         kind: bilibi_agent_api::text_field(input, "kind"),
         picklist: input["picklist"].as_str().map(str::to_owned),
         target: input["target"].as_str().map(str::to_owned),
+        rule_condition: input["rule_condition"].as_bool().unwrap_or(false),
     }
 }
 fn update(input: &Value) -> bilibi_agent_api::Result<FieldUpdate> {
     Ok(FieldUpdate {
         label: bilibi_agent_api::text_field(input, "label"),
         help: input["help"].as_str().map(str::to_owned),
+        rule_condition: input["rule_condition"].as_bool(),
         version: version(input)?,
     })
 }
@@ -269,6 +271,7 @@ fn text_properties() -> Value {
     json!({
         "label":{"type":"string","maxLength":LABEL_MAX,"description":"What people see beside the value."},
         "help":{"type":"string","maxLength":HELP_MAX,"description":"Optional help text; blank removes it."},
+        "rule_condition":{"type":"boolean","description":"Offer the field to Base Rules conditions (text, number, date, choice and boolean fields only). A rule never reads a field that is not offered; withdrawing it, or archiving the field, stops every rule that reads it until a new version is approved. Omit on update to keep it."},
     })
 }
 fn record_types_schema() -> Value {
@@ -312,7 +315,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/custom_fields.agent", 
         Operation { key: "base.custom_fields.record_types", title: "List the records that take custom fields", summary: "The kinds of record whose organisation can add its own fields, the pick-lists a choice field may use and the kinds of record a reference field may point at.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: record_types_schema, output: record_types_output, handler: Handler::Read(&Read::RecordTypes), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.list", title: "List custom fields", summary: "The organisation's own fields on a kind of record, with their key, type, label and status; archived ones on request.", keywords: &["custom", "field", "attribute", "extra"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.define", title: "Add a custom field", summary: "Add a typed custom field to a kind of record. Its key and type never change.", keywords: &["custom", "field", "attribute", "add", "create"], capability: MANAGE, input: define_schema, output: field_output, handler: Handler::SafeWrite(&Write::Define), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.custom_fields.update", title: "Change a custom field", summary: "Rename a field or rewrite its help text using its current version; its key and type never change.", keywords: &["custom", "field", "rename", "help"], capability: MANAGE, input: update_schema, output: field_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.custom_fields.update", title: "Change a custom field", summary: "Rename a field, rewrite its help text or offer it to rule conditions using its current version; its key and type never change.", keywords: &["custom", "field", "rename", "help"], capability: MANAGE, input: update_schema, output: field_output, handler: Handler::SafeWrite(&Write::Update), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.archive", title: "Archive a custom field", summary: "Hide a field from forms, columns and agents; records keep the values already stored under it.", keywords: &["custom", "field", "archive", "hide", "retire"], capability: MANAGE, input: status_schema, output: field_output, handler: Handler::SafeWrite(&Write::Archive), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.custom_fields.restore", title: "Restore a custom field", summary: "Bring an archived field back with the values its records kept.", keywords: &["custom", "field", "restore", "unarchive"], capability: MANAGE, input: status_schema, output: field_output, handler: Handler::SafeWrite(&Write::Restore), channels: Channels::Every, step_up: &[] },
     ],

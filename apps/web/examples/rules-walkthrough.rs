@@ -20,7 +20,9 @@
 //! rule's job gives one effect, and so does a retry after the effect
 //! committed; an agent drafts a second rule that a person approves; a denied
 //! capability, a restricted field, an archived company, a suspended tenant,
-//! a stale version and a switched-off rule each stop the effect; a rule that
+//! a stale version and a switched-off rule each stop the effect; a tenant
+//! custom field is a condition only once the tenant offers it to rules, routes
+//! its case, and refuses the rule when restricted or archived; a rule that
 //! would start itself is refused at approval, and a two-rule loop is refused and a noncyclic chain stops at
 //! the chain budget; a threshold change is a new approved version, no
 //! release; and a burst in one tenant waits its turn while the other tenant's
@@ -191,8 +193,21 @@ impl Proof {
         priority: &str,
         amount: &str,
     ) -> Result<i64> {
+        self.open_with(scope, company, title, priority, amount, json!([]))
+            .await
+    }
+    /// [`open`](Self::open) with tenant custom field values.
+    async fn open_with(
+        &self,
+        scope: &Scope,
+        company: i64,
+        title: &str,
+        priority: &str,
+        amount: &str,
+        custom: Value,
+    ) -> Result<i64> {
         let result = self
-            .write(scope, "rule_cases.cases.open", json!({"company_id": company, "title": title, "priority": priority, "amount": amount, "margin": "250.00"}))
+            .write(scope, "rule_cases.cases.open", json!({"company_id": company, "title": title, "priority": priority, "amount": amount, "margin": "250.00", "custom": custom}))
             .await
             .map_err(|why| {
                 println!("     open refused: {why}");
@@ -317,6 +332,236 @@ fn urgent_rule(name: &str, queue: &str, threshold: &str) -> Value {
         ],
         "explanation": format!("Send new urgent cases over {threshold} to {queue}.")
     })
+}
+
+/// #730: a tenant custom field is a condition only once the tenant offers it
+/// to rules; restricting or archiving it refuses the rule visibly, never as
+/// an empty value.
+async fn custom_field_proof(
+    proof: &Proof,
+    restrictions: &bilibi_authz::restrictions::FieldRestrictions,
+) -> Result<()> {
+    let one = proof.one.clone();
+    println!("\n== A tenant custom field as a condition");
+    let version = || async {
+        let row = proof.db.get().await?.query_one(
+            "SELECT version FROM base_custom_fields WHERE tenant_id=$1 AND record_type='rule_case' AND key='segment'",
+            &[&one.tenant()],
+        ).await?;
+        Ok::<i64, Error>(row.get(0))
+    };
+    let defined = proof
+        .write(&one, "base.custom_fields.define", json!({"record_type": "rule_case", "key": "segment", "label": "Segment", "kind": "text"}))
+        .await;
+    check(
+        defined.is_ok(),
+        "an administrator adds a Segment text field to cases",
+    );
+    let rule = json!({"name": "Enterprise cases to key accounts", "trigger": OPENED, "match": "all",
+    "conditions": [{"field": "cf_segment", "op": "eq", "value": "Enterprise"}],
+    "actions": [{"operation": "rule_cases.cases.route", "input": json!({"queue": "key-accounts"}).to_string()}],
+    "examples": [
+        {"facts": json!({"cf_segment": "Enterprise"}).to_string(), "expect": "match"},
+        {"facts": json!({"cf_segment": "SMB"}).to_string(), "expect": "no_match"}
+    ]});
+    let fields = |vocabulary: &Value| -> Vec<(String, String)> {
+        vocabulary["triggers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["trigger"] == OPENED)
+            .flat_map(|t| t["fields"].as_array().cloned().unwrap_or_default())
+            .map(|f| {
+                (
+                    f["field"].as_str().unwrap_or_default().to_owned(),
+                    f["label"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let client = proof.db.get().await?;
+    let offered = fields(&proof.rules.vocabulary(&**client, &one).await?);
+    drop(client);
+    check(
+        !offered.iter().any(|(field, _)| field == "cf_segment"),
+        "a custom field not offered to rules is not in the rules vocabulary",
+    );
+    let refused = proof.write(&one, "base.rules.draft", rule.clone()).await;
+    println!("     draft on an unoffered field: {refused:?}");
+    check(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("not offered to rules")),
+        "a draft on a custom field the tenant has not offered is refused with the reason",
+    );
+    let offer = proof
+        .write(&one, "base.custom_fields.update", json!({"record_type": "rule_case", "key": "segment", "label": "Segment", "rule_condition": true, "version": version().await?}))
+        .await;
+    check(
+        offer.is_ok(),
+        "the administrator offers Segment to rule conditions",
+    );
+    let refused_kind = proof
+        .write(&one, "base.custom_fields.define", json!({"record_type": "rule_case", "key": "notes", "label": "Notes", "kind": "long_text", "rule_condition": true}))
+        .await;
+    check(
+        refused_kind.is_err_and(|why| why.contains("rule condition")),
+        "a long text field cannot be offered to rule conditions",
+    );
+    let client = proof.db.get().await?;
+    let offered = fields(&proof.rules.vocabulary(&**client, &one).await?);
+    drop(client);
+    check(
+        offered
+            .iter()
+            .any(|(field, label)| field == "cf_segment" && label == "Segment"),
+        "the offered field is in the vocabulary under its tenant label",
+    );
+    let (rule_id, number) = proof.draft(&one, rule.clone()).await?;
+    let approved = proof.approve(&one, rule_id, number).await;
+    println!("     approval: {approved:?}");
+    check(
+        approved.is_ok(),
+        "a rule on the offered custom field is approved",
+    );
+    let enterprise = proof
+        .open_with(
+            &one,
+            1,
+            "Enterprise renewal",
+            "low",
+            "800.00",
+            json!([{"key": "segment", "value": "Enterprise"}]),
+        )
+        .await?;
+    let smb = proof
+        .open_with(
+            &one,
+            1,
+            "Small shop question",
+            "low",
+            "800.00",
+            json!([{"key": "segment", "value": "SMB"}]),
+        )
+        .await?;
+    proof.settled().await?;
+    proof.show(enterprise).await?;
+    check(
+        proof.case(enterprise).await?.0.as_deref() == Some("key-accounts"),
+        "an Enterprise case is routed to the key-account queue",
+    );
+    check(
+        proof.case(smb).await?.0.is_none()
+            && proof
+                .receipts(smb)
+                .await?
+                .iter()
+                .any(|r| r.0 == rule_id && r.1 == "no_match"),
+        "an SMB case does not match, and its receipt says so",
+    );
+    let client = proof.db.get().await?;
+    let facts: Option<Value> = client
+        .query_one(
+            "SELECT facts FROM base_rule_runs WHERE rule_id=$1 AND subject=$2",
+            &[&rule_id, &enterprise.to_string()],
+        )
+        .await?
+        .get(0);
+    let role: i64 = client.query_one(
+        "SELECT id FROM roles WHERE tenant_id=$1 AND id NOT IN (SELECT role_id FROM principal_roles WHERE tenant_id=$1 AND user_id=$2) ORDER BY id LIMIT 1",
+        &[&one.tenant(), &one.user()],
+    ).await?.get(0);
+    drop(client);
+    check(
+        facts
+            .as_ref()
+            .is_some_and(|facts| facts["cf_segment"] == "Enterprise"),
+        "the receipt keeps the custom field's value as evidence",
+    );
+
+    println!("\n== A restricted custom field is never read");
+    let restricted = restrictions
+        .put(&one, "rule_cases", "cf_segment", &[role])
+        .await;
+    check(
+        restricted.is_ok(),
+        "an operator restricts the custom field like a declared one",
+    );
+    let withheld = proof
+        .open_with(
+            &one,
+            1,
+            "Enterprise while restricted",
+            "low",
+            "800.00",
+            json!([{"key": "segment", "value": "Enterprise"}]),
+        )
+        .await?;
+    proof.settled().await?;
+    proof.show(withheld).await?;
+    check(
+        proof.receipts(withheld).await?.iter().any(|r| {
+            r.0 == rule_id && r.1 == "refused" && r.2.as_deref() == Some("restricted_field")
+        }),
+        "once it is restricted, the rule is refused before it reads it",
+    );
+    check(
+        proof.case(withheld).await?.0.is_none(),
+        "and the case stays where it was",
+    );
+    let (again, again_number) = proof
+        .draft(&one, json!({"name": "Enterprise again", "trigger": OPENED, "conditions": rule["conditions"], "actions": rule["actions"], "examples": rule["examples"]}))
+        .await?;
+    let refused = proof.approve(&one, again, again_number).await;
+    println!("     approval while restricted: {refused:?}");
+    check(
+        refused.is_err_and(|why| why.contains("hidden from automation")),
+        "a new rule on the restricted custom field cannot be approved",
+    );
+    restrictions
+        .remove(&one, "rule_cases", "cf_segment")
+        .await?;
+
+    println!("\n== An archived custom field refuses its rule");
+    let archived = proof
+        .write(
+            &one,
+            "base.custom_fields.archive",
+            json!({"record_type": "rule_case", "key": "segment", "version": version().await?}),
+        )
+        .await;
+    check(archived.is_ok(), "the administrator archives Segment");
+    let after = proof
+        .open(&one, 1, "Enterprise after archiving", "low", "800.00")
+        .await?;
+    proof.settled().await?;
+    proof.show(after).await?;
+    check(
+        proof.receipts(after).await?.iter().any(|r| {
+            r.0 == rule_id && r.1 == "refused" && r.2.as_deref() == Some("catalog_changed")
+        }),
+        "the rule is refused as changed, not read as an empty value",
+    );
+    let client = proof.db.get().await?;
+    let needs_review: bool = client
+        .query_one(
+            "SELECT needs_review FROM base_rules WHERE id=$1",
+            &[&rule_id],
+        )
+        .await?
+        .get(0);
+    drop(client);
+    check(needs_review, "and the rule is marked Needs review");
+    let refused = proof.write(&one, "base.rules.draft", json!({"rule_id": rule_id, "name": "Enterprise cases to key accounts", "trigger": OPENED, "conditions": rule["conditions"], "actions": rule["actions"], "examples": rule["examples"]})).await;
+    check(
+        refused.is_err_and(|why| why.contains("cf_segment is not a field this trigger offers")),
+        "a next version on the archived field is refused at draft",
+    );
+    proof
+        .switch(&one, rule_id, false)
+        .await
+        .map_err(|_| Error::Internal)?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -861,6 +1106,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         .switch(&one, r4, false)
         .await
         .map_err(|_| Error::Internal)?;
+    custom_field_proof(proof, &restrictions).await?;
 
     println!("\n== Cycles are refused at approval; a chain stops at the depth budget");
     let selfish = json!({"name": "Reroute forever", "trigger": ROUTED, "conditions": [],

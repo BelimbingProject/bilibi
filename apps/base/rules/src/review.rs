@@ -8,7 +8,7 @@ use crate::definition::{self, Definition, Example, Problems};
 use crate::store::Rules;
 use crate::{ACTIVE_PER_TRIGGER, APPROVE, MANAGE};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
-use bilibi_grid::{Catalog, FieldType};
+use bilibi_grid::{Catalog, CustomTable, FieldType};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -87,14 +87,38 @@ fn digest(definition: &Value, examples: &Value) -> String {
 }
 
 impl Rules {
-    pub(crate) fn catalog_digest(&self, event: &str, definition: &Definition) -> Option<String> {
+    /// The tenant's custom fields, as a fingerprint pins them (`catalog_digest`).
+    pub(crate) async fn custom_tables(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<Vec<CustomTable>> {
+        bilibi_grid::custom_tables(client, scope).await
+    }
+
+    /// The installed bindings a version runs on. A condition on a tenant
+    /// custom field of the trigger's table pins the field's type and value SQL
+    /// from `custom` (`custom_tables`); a field that is archived, gone or no
+    /// longer offered to rules has no fingerprint, so the version is refused.
+    pub(crate) fn catalog_digest(
+        &self,
+        event: &str,
+        definition: &Definition,
+        custom: &[CustomTable],
+    ) -> Option<String> {
         let trigger = self.trigger(event)?.definition;
         let grid = bilibi_grid::installed().ok()?;
         let root = grid.table(trigger.table)?;
         let mut paths = definition.fields();
         paths.push(trigger.version.to_owned());
         let fields: Option<Vec<Value>> = paths.iter().map(|path| {
-            let column = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)).ok()?;
+            let Ok(column) = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) else {
+                let (table, column) = custom.iter().filter(|table| table.table == trigger.table).find_map(|table| {
+                    table.columns.iter().find(|column| path.strip_prefix("cf_") == Some(column.key.as_str())).map(|column| (table, column))
+                })?;
+                return column.rule_condition.then(|| json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
+                    "custom": {"column": table.column, "value": column.value}}));
+            };
             let field = column.field?;
             let hops: Option<Vec<Value>> = column.hops.iter().map(|link| {
                 let from = grid.table(link.decl.from)?;
@@ -214,6 +238,29 @@ impl Rules {
         problems: &mut Problems,
     ) -> Result<()> {
         let table = catalog.table(trigger.definition.table);
+        // A tenant custom field is a condition only when the tenant offered
+        // it to rules, and only on the trigger's own record (#730).
+        for (i, condition) in definition.conditions.iter().enumerate() {
+            let Some(column) =
+                table.and_then(|table| catalog.resolve(table, &condition.field).ok())
+            else {
+                continue;
+            };
+            let Some(owner) = catalog.table(column.table) else {
+                continue;
+            };
+            let Some(field) = column.field.filter(|field| owner.is_custom(field.id)) else {
+                continue;
+            };
+            let why = if !column.hops.is_empty() {
+                format!("{} is a custom field of a linked record; a rule reads custom fields of the trigger's own record only", condition.field)
+            } else if !owner.custom_rule_condition(field.id) {
+                format!("{} is a custom field not offered to rules; an administrator turns on Rule condition for it on Custom fields", condition.field)
+            } else {
+                continue;
+            };
+            problems.push((format!("conditions.{i}.field"), why));
+        }
         let field = |path: &str| -> Option<(FieldType, &'static [&'static str], String)> {
             let table = table?;
             let column = catalog.resolve(table, path).ok()?;
@@ -427,6 +474,7 @@ impl Rules {
             problems.push(("version".into(), "this version already runs".into()));
         }
         let trigger: String = row.get(1);
+        let custom = self.custom_tables(client, scope).await?;
         if row.get::<_, bool>(4) {
             let definition = Definition::parse(&row.get::<_, Value>(2), &mut Vec::new())
                 .ok_or(Error::Invalid)?;
@@ -434,7 +482,7 @@ impl Rules {
             let fingerprint: Option<String> = saved.get(0);
             if saved.get::<_, bool>(1)
                 || fingerprint.is_none()
-                || fingerprint != self.catalog_digest(&trigger, &definition)
+                || fingerprint != self.catalog_digest(&trigger, &definition, &custom)
             {
                 problems.push((
                     "version".into(),
@@ -657,8 +705,9 @@ impl Rules {
             )
             .await?
             .get(0);
+        let custom = self.custom_tables(tx.sql(), scope).await?;
         let catalog_digest = self
-            .catalog_digest(&event, &definition)
+            .catalog_digest(&event, &definition, &custom)
             .ok_or(Error::Invalid)?;
         let user = scope.user();
         tx.mutate(move |sql| Box::pin(async move {

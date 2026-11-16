@@ -81,7 +81,7 @@ pub async fn withheld_by_record_type(
         for field in &table.fields {
             let owner_restricted = restricted
                 .get(table.id)
-                .is_some_and(|fields| fields.contains(field.id));
+                .is_some_and(|fields| fields.contains(field.id.as_ref()));
             let alias_restricted = field.restriction_aliases.iter().any(|alias| {
                 restricted
                     .get(alias.table)
@@ -98,7 +98,7 @@ pub async fn withheld_by_record_type(
                 result
                     .entry((*kind).to_owned())
                     .or_default()
-                    .insert(field.id.to_owned());
+                    .insert(field.id.to_string());
             }
             for alias in &field.restriction_aliases {
                 for kind in alias

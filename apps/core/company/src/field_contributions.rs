@@ -378,8 +378,8 @@ pub(crate) fn catalog_snapshot() -> std::result::Result<Vec<CatalogTable>, Strin
         .map(|field| {
             let (table, target, record_types) = resolved_grid_alias(field.grid_column)?;
             Ok(CatalogField {
-                id: field.id,
-                label: field.label,
+                id: field.id.into(),
+                label: field.label.into(),
                 // A company field contributed by an Extension is not marked personal.
                 personal: None,
                 restriction_aliases: vec![bilibi_authz::field_catalog::RestrictionAlias {

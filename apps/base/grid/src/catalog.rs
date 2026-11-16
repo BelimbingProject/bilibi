@@ -260,10 +260,12 @@ impl Catalog {
             table.retain_links(|link| visible.contains(link.to()));
         }
         // The tenant's custom fields, read fresh with the grants above, join
-        // the tables this reader may read.
+        // the tables this reader may read, without the ones an operator
+        // withholds from this reader (custom fields are withheld, never masked).
         if let Some(hook) = crate::custom::hook() {
             for custom in hook.tables(client, scope).await? {
-                add_custom(&mut tables, custom);
+                let withheld = restricted.get(custom.table).cloned().unwrap_or_default();
+                add_custom(&mut tables, custom, &withheld);
             }
         }
         let catalog = Self {
@@ -574,7 +576,11 @@ impl Catalog {
     }
 }
 
-fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom::CustomTable) {
+fn add_custom(
+    tables: &mut BTreeMap<&'static str, Table>,
+    custom: crate::custom::CustomTable,
+    withheld: &std::collections::HashSet<String>,
+) {
     let Some(json) = tables
         .get(custom.table)
         .and_then(|table| table.field(custom.column))
@@ -589,6 +595,9 @@ fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom:
             continue;
         }
         let id = crate::custom::field_id(&column.key);
+        if withheld.contains(id) {
+            continue;
+        }
         let sql = column.value.replace(
             "{json}",
             &format!("{{alias}}.\"{}\"", json.replace('"', "\"\"")),
@@ -599,14 +608,15 @@ fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom:
             sql,
             column.searchable && column.reference.is_none(),
             column.reference,
+            column.rule_condition,
         ));
     }
     let Some(table) = tables.get_mut(custom.table) else {
         return;
     };
-    for (field, label, sql, searchable, reference) in added {
+    for (field, label, sql, searchable, reference, rule_condition) in added {
         if table.field(field.id).is_none() {
-            table.add_custom(field, label, sql, searchable, reference);
+            table.add_custom(field, label, sql, searchable, reference, rule_condition);
         }
     }
 }
