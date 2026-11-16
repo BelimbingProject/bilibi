@@ -87,12 +87,24 @@ fn digest(definition: &Value, examples: &Value) -> String {
 }
 
 impl Rules {
-    /// The tenant's custom fields, as a fingerprint pins them (`catalog_digest`).
-    pub(crate) async fn custom_tables(
+    /// The tenant's custom fields, as a fingerprint pins them
+    /// (`catalog_digest`). Read only when one of `definitions` has a custom
+    /// condition: a rule on declared fields reads no definitions.
+    pub(crate) async fn custom_tables<'d>(
         &self,
         client: &(impl GenericClient + Sync),
         scope: &Scope,
+        definitions: impl IntoIterator<Item = &'d Definition>,
     ) -> Result<Vec<CustomTable>> {
+        let custom = definitions.into_iter().any(|definition| {
+            definition
+                .fields()
+                .iter()
+                .any(|path| bilibi_grid::custom_key(path).is_some())
+        });
+        if !custom {
+            return Ok(Vec::new());
+        }
         bilibi_grid::custom_tables(client, scope).await
     }
 
@@ -114,7 +126,7 @@ impl Rules {
         let fields: Option<Vec<Value>> = paths.iter().map(|path| {
             let Ok(column) = bilibi_grid::column::resolve(path, root, &|id| grid.table(id)) else {
                 let (table, column) = custom.iter().filter(|table| table.table == trigger.table).find_map(|table| {
-                    table.columns.iter().find(|column| path.strip_prefix("cf_") == Some(column.key.as_str())).map(|column| (table, column))
+                    table.columns.iter().find(|column| bilibi_grid::custom_key(path) == Some(column.key.as_str())).map(|column| (table, column))
                 })?;
                 return column.rule_condition.then(|| json!({"path": path, "table": table.table, "type": format!("{:?}", column.ty),
                     "custom": {"column": table.column, "value": column.value}}));
@@ -474,10 +486,10 @@ impl Rules {
             problems.push(("version".into(), "this version already runs".into()));
         }
         let trigger: String = row.get(1);
-        let custom = self.custom_tables(client, scope).await?;
         if row.get::<_, bool>(4) {
             let definition = Definition::parse(&row.get::<_, Value>(2), &mut Vec::new())
                 .ok_or(Error::Invalid)?;
+            let custom = self.custom_tables(client, scope, [&definition]).await?;
             let saved = client.query_one("SELECT v.catalog_digest,r.needs_review FROM base_rule_versions v JOIN base_rules r ON r.tenant_id=v.tenant_id AND r.id=v.rule_id WHERE v.tenant_id=$1 AND v.rule_id=$2 AND v.number=$3", &[&tenant, &rule, &number]).await?;
             let fingerprint: Option<String> = saved.get(0);
             if saved.get::<_, bool>(1)
@@ -705,7 +717,7 @@ impl Rules {
             )
             .await?
             .get(0);
-        let custom = self.custom_tables(tx.sql(), scope).await?;
+        let custom = self.custom_tables(tx.sql(), scope, [&definition]).await?;
         let catalog_digest = self
             .catalog_digest(&event, &definition, &custom)
             .ok_or(Error::Invalid)?;

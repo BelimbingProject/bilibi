@@ -366,9 +366,15 @@ impl Rules {
             "SELECT run_id,position,operation,state,reason,result FROM base_rule_effects WHERE tenant_id=$1 AND run_id=ANY($2) ORDER BY run_id,position",
             &[&tenant, &ids],
         ).await?;
-        let custom = self.custom_tables(client, scope).await?;
+        let definitions: Vec<Option<definition::Definition>> = rows
+            .iter()
+            .map(|row| definition::Definition::parse(&row.get::<_, Value>(13), &mut Vec::new()))
+            .collect();
+        let custom = self
+            .custom_tables(client, scope, definitions.iter().flatten())
+            .await?;
         let mut readable = std::collections::BTreeMap::new();
-        for row in &rows {
+        for (row, definition) in rows.iter().zip(&definitions) {
             let event: &str = row.get(4);
             let facts: Option<Value> = row.get(9);
             let fields: Vec<String> = facts
@@ -376,8 +382,6 @@ impl Rules {
                 .and_then(Value::as_object)
                 .map(|facts| facts.keys().cloned().collect())
                 .unwrap_or_default();
-            let definition =
-                definition::Definition::parse(&row.get::<_, Value>(13), &mut Vec::new());
             let compatible = definition.as_ref().is_some_and(|definition| {
                 let saved: Option<String> = row.get(14);
                 saved.is_some() && saved == self.catalog_digest(event, definition, &custom)

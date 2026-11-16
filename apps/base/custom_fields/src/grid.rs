@@ -152,7 +152,7 @@ impl bilibi_authz::field_catalog::TenantFields for Restrictable {
                         table: source.table,
                         table_label: table.label(),
                         record_types: table.decl.record_types,
-                        id: format!("cf_{}", definition.key),
+                        id: bilibi_grid::custom_field_id(&definition.key).to_owned(),
                         label: definition.label,
                     });
                 }

@@ -363,7 +363,7 @@ impl CustomFields {
         if let Some(source) = self.sources.iter().find(|s| s.record_type == record_type) {
             let restricted = bilibi_authz::fields::restricted_read(client, scope).await?;
             if let Some(withheld) = restricted.get(source.table) {
-                fields.retain(|field| !withheld.contains(&format!("cf_{}", field.key)));
+                fields.retain(|field| !withheld.contains(bilibi_grid::custom_field_id(&field.key)));
             }
         }
         Ok(fields)

@@ -137,7 +137,7 @@ fn render(fragment: impl Template) -> Result<Html> {
 /// their values out of each entry, the one place a stored mutation becomes a
 /// read model for a screen.
 pub(crate) async fn withhold(
-    client: &impl tokio_postgres::GenericClient,
+    client: &(impl tokio_postgres::GenericClient + Sync),
     scope: &Scope,
     entries: &mut [MutationEntry],
 ) -> Result<()> {
@@ -187,9 +187,57 @@ pub(crate) async fn withhold(
                 .cloned()
                 .collect();
             entry.withhold(&fields);
+            withhold_custom(entry, &fields);
         }
     }
     Ok(())
+}
+
+/// Owners audit a record's tenant custom values as one `custom_fields` object
+/// (Custom Fields README), while a restriction names the field `cf_<key>`. A
+/// withheld custom field leaves that object too; a change to it still shows as
+/// a withheld `custom_fields.<key>` row, and an object left empty goes.
+fn withhold_custom(entry: &mut MutationEntry, fields: &std::collections::HashSet<String>) {
+    const NESTED: &str = "custom_fields";
+    let mut emptied = false;
+    for key in fields
+        .iter()
+        .filter_map(|field| bilibi_grid::custom_key(field))
+    {
+        let value = |values: &Value| {
+            values
+                .get(NESTED)
+                .and_then(|custom| custom.get(key))
+                .cloned()
+        };
+        let (old, new) = (value(&entry.old_values), value(&entry.new_values));
+        if old.is_none() && new.is_none() {
+            continue;
+        }
+        for values in [&mut entry.old_values, &mut entry.new_values] {
+            if let Some(Value::Object(custom)) = values.get_mut(NESTED) {
+                custom.remove(key);
+            }
+        }
+        emptied = true;
+        if entry.event != "updated" || old != new {
+            entry.withheld.push(format!("{NESTED}.{key}"));
+        }
+    }
+    if emptied {
+        for values in [&mut entry.old_values, &mut entry.new_values] {
+            if let Value::Object(object) = values {
+                if object
+                    .get(NESTED)
+                    .and_then(Value::as_object)
+                    .is_some_and(serde_json::Map::is_empty)
+                {
+                    object.remove(NESTED);
+                }
+            }
+        }
+        entry.withheld.sort();
+    }
 }
 
 impl Mutations {

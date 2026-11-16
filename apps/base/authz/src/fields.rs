@@ -59,7 +59,7 @@ fn restriction_rows(rows: Vec<tokio_postgres::Row>) -> BTreeMap<String, HashSet<
 /// nothing withheld is absent; an identity outside the catalog reaches no
 /// audit kind.
 pub async fn withheld_by_record_type(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     types: &[&str],
 ) -> Result<BTreeMap<String, HashSet<String>>> {
@@ -68,7 +68,10 @@ pub async fn withheld_by_record_type(
     if restricted.is_empty() || types.is_empty() {
         return Ok(result);
     }
-    let catalog = crate::field_catalog::field_catalog()?;
+    // The tenant's own fields (custom fields) are restrictable too, so read
+    // the tenant catalog: a table whose only restrictable fields are custom
+    // still reaches its audit kinds.
+    let catalog = crate::field_catalog::tenant_catalog(client, scope).await?;
     for table in catalog.tables() {
         for kind in table
             .record_types

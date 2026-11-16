@@ -91,11 +91,18 @@ pub fn key_shaped(key: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// The custom key a field id `cf_<key>` names, or `None` for any other id:
+/// the one reading of the custom-field id, for callers that hold only the id
+/// (a restriction, a rule condition, an audit reader).
+pub fn custom_key(id: &str) -> Option<&str> {
+    id.strip_prefix("cf_").filter(|key| key_shaped(key))
+}
+
 /// A field id `cf_<key>` as the `&'static str` every catalog field carries.
 /// Keys never change and are never reused, so each distinct key text is kept
 /// once for the process however many catalogs name it; labels, which tenants
 /// rename, are not kept here (`Table::field_label`).
-pub(crate) fn field_id(key: &str) -> &'static str {
+pub fn custom_field_id(key: &str) -> &'static str {
     static IDS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let id = format!("cf_{key}");
     let mut ids = IDS

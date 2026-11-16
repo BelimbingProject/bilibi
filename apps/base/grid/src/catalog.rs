@@ -594,7 +594,7 @@ fn add_custom(
         if !crate::custom::key_shaped(&column.key) {
             continue;
         }
-        let id = crate::custom::field_id(&column.key);
+        let id = crate::custom::custom_field_id(&column.key);
         if withheld.contains(id) {
             continue;
         }

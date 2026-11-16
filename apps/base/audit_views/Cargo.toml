@@ -12,6 +12,7 @@ askama.workspace = true
 bilibi-audit.workspace = true
 bilibi-authz = { path = "../authz" }
 bilibi-dashboard = { path = "../dashboard" }
+bilibi-grid.workspace = true
 bilibi-database.workspace = true
 bilibi-datetime = { path = "../datetime" }
 bilibi-locale = { path = "../locale" }

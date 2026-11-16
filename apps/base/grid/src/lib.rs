@@ -46,8 +46,8 @@ pub use catalog::{
 };
 pub use column::{Agg, Column, ColumnError, ColumnKind};
 pub use custom::{
-    bind_custom_columns, custom_tables, key_shaped, CustomColumn, CustomColumns, CustomFuture,
-    CustomTable,
+    bind_custom_columns, custom_field_id, custom_key, custom_tables, key_shaped, CustomColumn,
+    CustomColumns, CustomFuture, CustomTable,
 };
 pub use model::{
     id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,

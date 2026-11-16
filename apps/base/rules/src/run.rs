@@ -287,7 +287,7 @@ impl Worker {
         let definition =
             Definition::parse(&row.get::<_, Value>(3), &mut problems).ok_or(Error::Invalid)?;
         let approved_digest: Option<String> = row.get(4);
-        let custom = rules.custom_tables(&**client, scope).await?;
+        let custom = rules.custom_tables(&**client, scope, [&definition]).await?;
         if row.get::<_, bool>(5)
             || approved_digest.is_none()
             || approved_digest != rules.catalog_digest(&trigger, &definition, &custom)
@@ -551,7 +551,7 @@ impl Worker {
         let trigger: String = version.get(0);
         let definition = Definition::parse(&version.get::<_, Value>(1), &mut Vec::new())
             .ok_or(Error::Invalid)?;
-        let custom = rules.custom_tables(tx.sql(), &scope).await?;
+        let custom = rules.custom_tables(tx.sql(), &scope, [&definition]).await?;
         if version.get::<_, Option<String>>(2)
             != rules.catalog_digest(&trigger, &definition, &custom)
         {
