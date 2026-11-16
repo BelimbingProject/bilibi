@@ -41,6 +41,25 @@ fn rules() -> Result<&'static Arc<Rules>> {
 /// The cause the worker names for events its actions record.
 const CAUSE: &str = "base/rules.run:";
 
+impl Rules {
+    pub async fn action_identity(
+        client: &(impl bilibi_tenancy::ProofClient + ?Sized),
+        scope: &Scope,
+    ) -> Result<Option<String>> {
+        if scope.actor().principal() != Some(crate::PRINCIPAL) {
+            return Ok(None);
+        }
+        Ok(client
+            .query_opt(
+                "SELECT NULLIF(current_setting('bilibi.rules.action', true), '')",
+                &[],
+            )
+            .await?
+            .ok_or(Error::Internal)?
+            .get(0))
+    }
+}
+
 pub(crate) struct Triggers;
 pub(crate) static TRIGGERS: Triggers = Triggers;
 impl Subscribe for Triggers {
@@ -555,6 +574,12 @@ impl Worker {
         rules
             .events
             .cause(&mut tx, &format!("{CAUSE}{}", run.id))
+            .await?;
+        tx.sql()
+            .execute(
+                "SELECT set_config('bilibi.rules.action', $1, true)",
+                &[&format!("{}:{position}", run.version)],
+            )
             .await?;
         let outcome = rules
             .jobs

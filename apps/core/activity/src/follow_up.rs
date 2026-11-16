@@ -123,23 +123,27 @@ impl WriteHandler for FollowUp {
             let kind = self.kind.to_owned();
             let source = input["record_id"].as_i64().ok_or(Error::Invalid)?;
             let revision = input["expected_revision"].as_i64().ok_or(Error::Invalid)?;
-            let binding = json!([kind, source, revision, assignee, task.common.title]);
-            let key: String = Sha256::digest(binding.to_string().as_bytes())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            // Owner locks serialize all parts of a source event. The binding
-            // stays on the activity after its ordinary soft deletion.
-            if let Some(row) = tx
-                .sql()
-                .query_opt(
-                    "SELECT id FROM core_activities WHERE tenant_id=$1 AND followup_key=$2",
-                    &[&tenant, &key],
-                )
-                .await
-                .map_err(Error::from)?
-            {
-                return Ok(json!({"activity_id":row.get::<_,i64>(0)}).into());
+            let key = bilibi_rules::Rules::action_identity(tx.sql(), scope)
+                .await?
+                .map(|action| {
+                    let binding = json!([action, kind, source, revision]);
+                    Sha256::digest(binding.to_string().as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                });
+            if let Some(key) = &key {
+                if let Some(row) = tx
+                    .sql()
+                    .query_opt(
+                        "SELECT id FROM core_activities WHERE tenant_id=$1 AND followup_rule_key=$2",
+                        &[&tenant, key],
+                    )
+                    .await
+                    .map_err(Error::from)?
+                {
+                    return Ok(json!({"activity_id":row.get::<_,i64>(0)}).into());
+                }
             }
             let activity = if scope.actor().principal().is_some() {
                 activities()?
@@ -158,10 +162,11 @@ impl WriteHandler for FollowUp {
             }
             .map_err(|error| crate::agent_operations::invalid(error, ""))?;
             let activity_id = activity.id;
-            tx.mutate(move |sql| {
+            if let Some(key) = key {
+                tx.mutate(move |sql| {
                 Box::pin(async move {
                     sql.execute(
-                        "UPDATE core_activities SET followup_key=$3 WHERE tenant_id=$1 AND id=$2",
+                        "UPDATE core_activities SET followup_rule_key=$3 WHERE tenant_id=$1 AND id=$2",
                         &[&tenant, &activity_id, &key],
                     )
                     .await?;
@@ -170,13 +175,14 @@ impl WriteHandler for FollowUp {
                         vec![bilibi_database::Change {
                             kind: crate::RECORD.into(),
                             id: activity_id,
-                            old: json!({"followup_key":null}),
-                            new: json!({"followup_key":key}),
+                            old: json!({"followup_rule_key":null}),
+                            new: json!({"followup_rule_key":key}),
                         }],
                     ))
                 })
             })
             .await?;
+            }
             Ok(json!({"activity_id":activity_id}).into())
         })
     }

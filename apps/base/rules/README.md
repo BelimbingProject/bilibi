@@ -109,6 +109,8 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rule
 
 Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
 
+`Rules::action_identity(client, scope)` returns the executing rule version and action position as an opaque identity, only inside a Rules action transaction under the `rules` principal. An owner may combine it with its logical source event identity to deduplicate multipart events without merging independent rules or manual requests. This identity grants no authority; owner checks still apply.
+
 ## Pages and agents
 
 - **Administration › Rules** (`/rules`, `admin.rules.view`): every rule, its trigger, whether it is on, the running version and the last run. **New rule** (`admin.rules.manage`) opens the drafting dialog; `/rules/{id}` has **Draft next version** (same dialog, filled from the latest version; a rule keeps its trigger). `/rules/{id}`: the rule, the version awaiting approval (with the approval review's problems and warnings, and Approve through a confirmation), the running version, the on/off switch and the latest 25 receipts (which conditions held, what each action did or why it was refused). Both call the contracts agents call.

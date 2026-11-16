@@ -54,6 +54,27 @@ fn check(ok: bool, message: &str) -> Result<()> {
 async fn task_count(db: &Db, kind: &str, source: i64) -> Result<i64> {
     Ok(db.get().await?.query_one("SELECT count(*) FROM core_activities WHERE tenant_id=1 AND related_kind=$1 AND related_id=$2", &[&kind, &source.to_string()]).await?.get(0))
 }
+async fn wait_for_runs(db: &Db, events: &[i64], rules: &[i64]) -> Result<()> {
+    for _ in 0..300 {
+        let client = db.get().await?;
+        let row = client.query_one(
+            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND r.state='done'), count(*) FILTER (WHERE r.state NOT IN ('queued','matched','done')) FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) rule(id) LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/rules.triggers' LEFT JOIN base_rule_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.rule_id=rule.id",
+            &[&events, &rules],
+        ).await?;
+        if row.get::<_, i64>(2) != 0 {
+            return check(false, "every expected source part must finish successfully");
+        }
+        if row.get::<_, i64>(0) == row.get::<_, i64>(1) {
+            return Ok(());
+        }
+        drop(client);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    check(
+        false,
+        "timed out waiting for every source delivery and successful rule run",
+    )
+}
 #[tokio::main]
 async fn main() -> Result<()> {
     bilibi_base::link();
@@ -156,20 +177,27 @@ async fn main() -> Result<()> {
         (row.get(0), row.get(1), row.get(2))
     };
     let recipient = 4_i64;
-    let rule = write(&plans, &admin, "base.rules.draft", json!({
+    let draft = json!({
         "name":format!("{domain} follow-up proof"),"trigger":event,"match":"all",
         "conditions":[{"field":"id","op":"eq","value":source.to_string()},{"field":"company_id","op":"eq","value":company.to_string()}],
         "actions":[{"operation":action,"input":json!({"assignee_user_id":recipient,"title":"Review the approved record"}).to_string()}],
         "examples":[{"facts":json!({"id":source,"company_id":company}).to_string(),"expect":"match"},{"facts":json!({"id":source+1,"company_id":company}).to_string(),"expect":"no_match"}],
         "explanation":"Create one private follow-up after the owner event, without changing its decision or payment facts."
-    })).await?;
-    write(
-        &plans,
-        &admin,
-        "base.rules.approve",
-        json!({"rule_id":rule["rule_id"],"version":rule["version"]}),
-    )
-    .await?;
+    });
+    let mut rule_ids = Vec::new();
+    for name in ["First follow-up rule", "Independent follow-up rule"] {
+        let mut draft = draft.clone();
+        draft["name"] = json!(name);
+        let rule = write(&plans, &admin, "base.rules.draft", draft).await?;
+        write(
+            &plans,
+            &admin,
+            "base.rules.approve",
+            json!({"rule_id":rule["rule_id"],"version":rule["version"]}),
+        )
+        .await?;
+        rule_ids.push(rule["rule_id"].as_i64().ok_or(Error::Invalid)?);
+    }
     if let Some(id) = draft_order {
         write(
             &plans,
@@ -178,6 +206,39 @@ async fn main() -> Result<()> {
             json!({"company_id":company,"id":id,"revision":1,"status":"confirmed"}),
         )
         .await?;
+    }
+    let trigger = services
+        .catalog()?
+        .entries::<bilibi_base::rules::Trigger>(bilibi_base::rules::TRIGGERS)?
+        .iter()
+        .find(|entry| entry.id == event)
+        .ok_or(Error::Invalid)?
+        .get::<bilibi_base::rules::Trigger>()?;
+    let expected_events: Vec<i64> = db
+        .get()
+        .await?
+        .query(
+            "SELECT id,payload FROM base_events WHERE tenant_id=1 AND name=$1 ORDER BY id",
+            &[&event],
+        )
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            let payload: Value = row.get(1);
+            let id = payload.pointer(trigger.subject)?;
+            (id.as_i64() == Some(source) || id.as_str() == Some(source.to_string().as_str()))
+                .then(|| row.get(0))
+        })
+        .collect();
+    check(
+        !expected_events.is_empty(),
+        "the source recorded its expected events",
+    )?;
+    if domain == "commerce" {
+        check(
+            expected_events.len() == 2,
+            "the two-line order recorded both source parts",
+        )?;
     }
     let executor = Executor::from_services(
         &services,
@@ -191,20 +252,25 @@ async fn main() -> Result<()> {
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(async move { executor.run(shutdown).await });
     let result: Result<()> = async {
-        for _ in 0..300 {
-            let row = db.get().await?.query_one("SELECT count(*) FROM base_rule_runs WHERE tenant_id=1 AND rule_id=$1 AND state IN ('queued','matched')", &[&rule["rule_id"].as_i64().ok_or(Error::Invalid)?]).await?;
-            if task_count(&db, kind, source).await? == 1 && row.get::<_,i64>(0) == 0 { break; }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        check(task_count(&db, kind, source).await? == 1, "the owner event created one task, including all line parts")?;
+        wait_for_runs(&db, &expected_events, &rule_ids).await?;
+        check(task_count(&db, kind, source).await? == 2, "each independent rule created one task across all source parts")?;
         let client = db.get().await?;
-        let row = client.query_one("SELECT shared,created_by,assignee_user_id,id FROM core_activities WHERE tenant_id=1 AND related_kind=$1 AND related_id=$2", &[&kind,&source.to_string()]).await?;
-        check(!row.get::<_,bool>(0) && row.get::<_,i64>(1)==recipient && row.get::<_,i64>(2)==recipient, "the task is private and addressed to the configured recipient")?;
-        let task: i64 = row.get(3);
+        let rows = client.query("SELECT shared,created_by,assignee_user_id,id FROM core_activities WHERE tenant_id=1 AND related_kind=$1 AND related_id=$2 ORDER BY id", &[&kind,&source.to_string()]).await?;
+        check(rows.iter().all(|row| !row.get::<_,bool>(0) && row.get::<_,i64>(1)==recipient && row.get::<_,i64>(2)==recipient), "both tasks are private and addressed to the configured recipient")?;
+        let task: i64 = rows[0].get(3);
+        for rule in &rule_ids {
+            let row = client.query_one("SELECT count(DISTINCT f.result->>'activity_id'),count(*) FROM base_rule_effects f JOIN base_rule_runs r ON r.tenant_id=f.tenant_id AND r.id=f.run_id WHERE f.tenant_id=1 AND r.rule_id=$1 AND r.event_id=ANY($2) AND f.state='done'", &[rule, &expected_events]).await?;
+            check(row.get::<_,i64>(0)==1 && row.get::<_,i64>(1)==expected_events.len() as i64, "every part of one rule returned the same task")?;
+        }
         drop(client);
+        write(&plans, &admin, "base.events.replay", json!({"subscriber":"base/rules.triggers","from_event":expected_events[0],"limit":1000})).await?;
+        wait_for_runs(&db, &expected_events, &rule_ids).await?;
+        check(task_count(&db, kind, source).await? == 2, "replaying delivered source parts creates no duplicate tasks")?;
         let valid = json!({"record_id":source,"expected_revision":revision,"assignee_user_id":recipient,"title":"Review the approved record"});
         write(&plans, &admin, action, valid.clone()).await?;
-        check(task_count(&db, kind, source).await? == 1, "the same owner request returns the existing task")?;
+        check(task_count(&db, kind, source).await? == 3, "a manual request is independent of both rules")?;
+        write(&plans, &admin, action, valid.clone()).await?;
+        check(task_count(&db, kind, source).await? == 4, "identical manual requests create independent tasks")?;
         let mut stale = valid.clone(); stale["expected_revision"] = json!(revision+1);
         check(write(&plans,&admin,action,stale).await.is_err(), "a stale source revision is refused")?;
         let mut foreign = valid.clone(); foreign["assignee_user_id"] = json!(5);
@@ -215,7 +281,11 @@ async fn main() -> Result<()> {
         grants.set_direct(&admin, 2, "core.activity.view", Some(Direct::Allow(bilibi_authz::Reach::All))).await?;
         let activities = services.get::<bilibi_activity::Activities>(bilibi_activity::SERVICE)?;
         check(activities.get(&viewer, task).await.is_err(), "an uninvolved viewer cannot read the private follow-up")?;
-        check(task_count(&db, kind, source).await? == 1, "refused writes left no extra task")?;
+        check(task_count(&db, kind, source).await? == 4, "refused writes left no extra task")?;
+        let version = activities.get(&admin, task).await.map_err(|_| Error::Invalid)?.version;
+        write(&plans, &admin, "core.activity.delete", json!({"id":task,"version":version})).await?;
+        write(&plans, &admin, action, valid).await?;
+        check(task_count(&db, kind, source).await? == 5, "deleting a rule task does not suppress a later request")?;
         Ok(())
     }.await;
     let _ = stop.send(true);
