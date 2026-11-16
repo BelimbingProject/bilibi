@@ -88,7 +88,9 @@ async fn main() -> Result<(), Error> {
     let other = login(&app, "manager@other.example.test").await?;
     // Reconciliation gives the fixture roles their declared module grants.
     grants.reconcile().await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     // Re-runs start from the seeded state.
     client.batch_execute("UPDATE companies SET status='active' WHERE tenant_id=1 AND id=4; DELETE FROM roles WHERE code LIKE 'k15_%'; DELETE FROM address_attachments WHERE tenant_id=1 AND address_id IN (SELECT id FROM addresses WHERE label='K15 walkthrough'); DELETE FROM addresses WHERE label='K15 walkthrough'; DELETE FROM base_settings WHERE key LIKE 'ui.locale%' AND scope_type='global'; DELETE FROM base_settings WHERE key='localization.timezone' AND scope_type='company'").await?;
     let four = OrganisationId::new(4)?;

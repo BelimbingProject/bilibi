@@ -935,7 +935,8 @@ impl Index {
                     ("Tasks", "task"),
                     ("Notes", "note"),
                 ]),
-            ),
+            )
+            .grid_field("activities.kind"),
             ToolbarControl::select(
                 "activities-state",
                 "state",

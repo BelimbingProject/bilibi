@@ -33,6 +33,7 @@ Cargo, so the gap shows as one plain line instead of a link or boot failure.
 """
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -69,8 +70,35 @@ def snake_id(value, what, where):
     return value
 
 
+def require_customer_admission(container):
+    hint = (f'Extension {container} requires an isolated installation; use an isolated '
+            'installation, or prepare a code-free release')
+    url = os.environ.get('DATABASE_URL')
+    if not url:
+        raise Refused(f'{hint}. Set DATABASE_URL to read its saved installation.mode')
+
+    def query(sql):
+        try:
+            result = subprocess.run(['psql', '-d', url, '-X', '-w', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', sql],
+                                    capture_output=True, text=True)
+        except FileNotFoundError:
+            raise Refused('psql is required to read installation.mode') from None
+        if result.returncode:
+            raise Refused(f'{hint}. Could not read installation.mode')
+        return result.stdout.strip()
+
+    exists = query("SELECT to_regclass('base_settings') IS NOT NULL")
+    mode = 'shared'
+    if exists == 't':
+        mode = query("SELECT COALESCE((SELECT value #>> '{}' FROM base_settings "
+                     "WHERE key='installation.mode' AND tenant_id=0 "
+                     "AND scope_type='global' AND scope_id=0), 'shared')")
+    if mode != 'isolated':
+        raise Refused(f'{hint}. Saved installation.mode is {mode!r}')
+
+
 def container_modules(root, layer):
-    """Validate each mounted container of a Domain or Extension root; yield (path, crate)."""
+    """Validate mounted containers; yield (module path, crate, extension code)."""
     role = CONTAINER_LAYERS[layer]
     for folder in sorted((root / 'apps' / layer).iterdir()):
         if folder.name.startswith('.') or folder.name == 'src' or not (folder.is_dir() or folder.is_symlink()):
@@ -88,7 +116,8 @@ def container_modules(root, layer):
             declared = tomllib.loads(descriptor.read_text())
         except tomllib.TOMLDecodeError as error:
             raise Refused(f'{where}/{CONTAINER_FILE}: {error}') from None
-        unknown = sorted(set(declared) - {'id', 'layer'})
+        allowed = {'id', 'layer', 'code'} if layer == 'extensions' else {'id', 'layer'}
+        unknown = sorted(set(declared) - allowed)
         if unknown:
             raise Refused(f'{where}/{CONTAINER_FILE}: unknown keys {unknown}; expected id and layer')
         container = snake_id(declared.get('id'), 'container id', f'{where}/{CONTAINER_FILE}')
@@ -99,6 +128,13 @@ def container_modules(root, layer):
             hint = f'; mount it under apps/{layer_folder}' if layer_folder else ''
             raise Refused(f'{where}: {CONTAINER_FILE} declares layer {declared.get("layer")!r}, '
                           f'but apps/{layer} holds layer {role!r}{hint}')
+        code = None
+        if layer == 'extensions':
+            code = declared.get('code')
+            if code not in {'reviewed', 'customer'}:
+                raise Refused(f'{where}/{CONTAINER_FILE}: code must be "reviewed" or "customer"')
+            if code == 'customer':
+                require_customer_admission(container)
         for manifest in sorted(folder.glob('*/Cargo.toml')):
             module = manifest.parent
             if module.name.startswith('.') or module.name == 'fixtures':
@@ -110,17 +146,21 @@ def container_modules(root, layer):
             expected = f'bilibi-{container}-{module.name}'.replace('_', '-')
             if name != expected:
                 raise Refused(f'{where}/{module.name}/Cargo.toml: crate {name!r} must be named {expected!r}')
-            yield f'{container}/{module.name}', name
+            yield f'{container}/{module.name}', name, code
 
 
 def discovered(root):
     """Map each layer to its [(relative path, crate)] list."""
     result = {}
     names = set()
-    containers = {}
+    layers_by_container = {}
+    extension_code = {}
     for layer in LAYERS:
         if layer in CONTAINER_LAYERS:
-            modules = list(container_modules(root, layer))
+            declared = list(container_modules(root, layer))
+            modules = [(path, name) for path, name, _ in declared]
+            if layer == 'extensions':
+                extension_code = {path.split('/')[0]: code for path, _, code in declared}
         else:
             modules = [(manifest.parent.name, package_name(manifest))
                        for manifest in sorted((root / 'apps' / layer).glob('*/Cargo.toml'))]
@@ -130,9 +170,10 @@ def discovered(root):
             names.add(name)
             if layer in CONTAINER_LAYERS:
                 container = path.split('/')[0]
-                if containers.setdefault(container, layer) != layer:
+                if layers_by_container.setdefault(container, layer) != layer:
                     raise Refused(f'Container {container!r} is mounted under both apps/domains and apps/extensions')
         result[layer] = modules
+    result['container_code'] = extension_code
     return result
 
 
@@ -274,7 +315,7 @@ def explain(root, modules):
         print(f'  +  {module_id}: {", ".join(askers)}')
 
 
-def composition(layer, modules):
+def composition(layer, modules, extension_code=None):
     text = (f'# Generated by scripts/discover-modules.py; edit deep-module manifests.\n'
             f'[package]\nname = "bilibi-{layer}"\nversion.workspace = true\n'
             'edition.workspace = true\nrust-version.workspace = true\nlicense.workspace = true\n\n[dependencies]\n')
@@ -289,6 +330,12 @@ def composition(layer, modules):
         # A mounted module's ID is its <container>/<module> path; boot refuses descriptors that differ.
         code += '/// Mounted (module ID, crate) pairs, checked against registered descriptors at boot.\n#[rustfmt::skip]\n'
         code += 'pub const MODULES: &[(&str, &str)] = &[' + ', '.join(f'("{path}", "{name}")' for path, name in modules) + '];\n'
+    if layer == 'extensions':
+        extension_code = extension_code or {}
+        code += '/// Extension container IDs and their reviewed/customer code declaration.\n'
+        code += 'pub const CODE: &[(&str, &str)] = &['
+        code += ', '.join(f'("{name}", "{extension_code[name]}")' for name in sorted(extension_code))
+        code += '];\n'
     code += 'pub fn link() {}\n'
     return {f'apps/{layer}/Cargo.toml': text, f'apps/{layer}/src/lib.rs': code}
 
@@ -298,7 +345,8 @@ def outputs(root, modules):
     result = {}
     for layer in LAYERS:
         members = composed_core(root, modules) if layer == 'core' else modules[layer]
-        result.update({root / path: text for path, text in composition(layer, members).items()})
+        code = modules['container_code'] if layer == 'extensions' else None
+        result.update({root / path: text for path, text in composition(layer, members, code).items()})
     return result
 
 
@@ -389,6 +437,9 @@ def require_resolved_lock(root):
 
 def pin(root, modules, files):
     """Record the Platform and container HEADs and the resolved Cargo.lock under .local/composition."""
+    for container, code in modules['container_code'].items():
+        if code == 'customer':
+            require_customer_admission(container)
     changed = [line[3:] for line in git(root, 'status', '--porcelain', '--untracked-files=no').splitlines()]
     composition_files = {str(path.relative_to(root)) for path in files} | {'Cargo.lock'}
     unexpected = sorted(set(changed) - composition_files)
@@ -415,6 +466,9 @@ def pin(root, modules, files):
         manifest += f'\n[containers."{name}"]\nhead = "{head}"\n'
         if versions[name]:
             manifest += f'version = "{versions[name]}"\n'
+        layer, container = name.split('/', 1)
+        if layer == 'extensions':
+            manifest += f'code = "{modules["container_code"][container]}"\n'
     target = root / PIN_DIR
     target.mkdir(parents=True, exist_ok=True)
     # Written only when changed: the executable host's build script watches

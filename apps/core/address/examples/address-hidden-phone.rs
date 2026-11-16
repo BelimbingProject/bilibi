@@ -124,7 +124,9 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         ),
     );
     let relabel = json!({"address_id": created.id, "version": created.version, "address": {"label": "Reception", "line1": "1 Jalan Ampang"}});
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = client.transaction().await?;
     let preview = update
         .preview(&Caller(&tx), &manager, &relabel)

@@ -262,6 +262,96 @@ enum Write {
     End,
     Unlink,
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let bound = bound()?;
+        let value = match self {
+            Self::CreateRole => {
+                let role = relationship_roles::preview(client, scope, &role_input(input))
+                    .await?
+                    .map_err(invalid)?;
+                json!({"summary":format!("Create relationship role “{}”", role.name),"role":role})
+            }
+            Self::UpdateRole => {
+                let update = RoleUpdate {
+                    name: bilibi_agent_api::text_field(input, "name"),
+                    inverse_name: bilibi_agent_api::text_field(input, "inverse_name"),
+                    version: positive(input, "version")?,
+                };
+                let (before, update) = outcome(
+                    relationship_roles::preview_update(client, scope, role_id(input)?, &update)
+                        .await
+                        .map_err(write_error)?,
+                )?;
+                json!({"summary":format!("Rename relationship role “{}” to “{}”", before.name, update.name),"before":before,"name":update.name,"inverse_name":update.inverse_name,"version":update.version})
+            }
+            Self::RetireRole => {
+                let role = relationship_roles::preview_retire(
+                    client,
+                    scope,
+                    role_id(input)?,
+                    positive(input, "version")?,
+                )
+                .await
+                .map_err(write_error)?;
+                json!({"summary":format!("Retire relationship role “{}”; existing links keep it", role.name),"role":role,"retired_on":date(input,"retired_on")?})
+            }
+            Self::Assign => {
+                let assignable = outcome(
+                    relationships::preview_assign(
+                        client,
+                        scope,
+                        &bound.proofs,
+                        &assignment(input)?,
+                    )
+                    .await
+                    .map_err(write_error)?,
+                )?;
+                json!({"summary":format!("Assign role “{}” from company {} to {:?}", assignable.role.name, assignable.input.source_organisation_id, assignable.input.target),"relationship":assignable.input,"role":assignable.role})
+            }
+            Self::Update => {
+                let before = relationships::preview_write(
+                    client,
+                    scope,
+                    relationship_id(input)?,
+                    positive(input, "version")?,
+                )
+                .await
+                .map_err(write_error)?;
+                json!({"summary":"Change the effective dates of a relationship","before":before,"dates":dates(input)?})
+            }
+            Self::End => {
+                let before = relationships::preview_write(
+                    client,
+                    scope,
+                    relationship_id(input)?,
+                    positive(input, "version")?,
+                )
+                .await
+                .map_err(write_error)?;
+                let to = date(input, "effective_to")?.ok_or(Error::Invalid)?;
+                json!({"summary":format!("End a relationship on {}", to.as_str()),"before":before,"effective_to":to})
+            }
+            Self::Unlink => {
+                let before = relationships::preview_write(
+                    client,
+                    scope,
+                    relationship_id(input)?,
+                    positive(input, "version")?,
+                )
+                .await
+                .map_err(write_error)?;
+                json!({"summary":"Unlink a relationship; its dated history is retained","before":before})
+            }
+        };
+        Ok(value.into())
+    }
+}
 impl WriteHandler for Write {
     fn preview_dependent<'a>(
         &'a self,
@@ -337,94 +427,20 @@ impl WriteHandler for Write {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let bound = bound()?;
-            let client = bound.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let value = match self {
-                Self::CreateRole => {
-                    let role = relationship_roles::preview(client, scope, &role_input(input))
-                        .await?
-                        .map_err(invalid)?;
-                    json!({"summary":format!("Create relationship role “{}”", role.name),"role":role})
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = bound()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::UpdateRole => {
-                    let update = RoleUpdate {
-                        name: bilibi_agent_api::text_field(input, "name"),
-                        inverse_name: bilibi_agent_api::text_field(input, "inverse_name"),
-                        version: positive(input, "version")?,
-                    };
-                    let (before, update) = outcome(
-                        relationship_roles::preview_update(client, scope, role_id(input)?, &update)
-                            .await
-                            .map_err(write_error)?,
-                    )?;
-                    json!({"summary":format!("Rename relationship role “{}” to “{}”", before.name, update.name),"before":before,"name":update.name,"inverse_name":update.inverse_name,"version":update.version})
-                }
-                Self::RetireRole => {
-                    let role = relationship_roles::preview_retire(
-                        client,
-                        scope,
-                        role_id(input)?,
-                        positive(input, "version")?,
-                    )
-                    .await
-                    .map_err(write_error)?;
-                    json!({"summary":format!("Retire relationship role “{}”; existing links keep it", role.name),"role":role,"retired_on":date(input,"retired_on")?})
-                }
-                Self::Assign => {
-                    let assignable = outcome(
-                        relationships::preview_assign(
-                            client,
-                            scope,
-                            &bound.proofs,
-                            &assignment(input)?,
-                        )
-                        .await
-                        .map_err(write_error)?,
-                    )?;
-                    json!({"summary":format!("Assign role “{}” from company {} to {:?}", assignable.role.name, assignable.input.source_organisation_id, assignable.input.target),"relationship":assignable.input,"role":assignable.role})
-                }
-                Self::Update => {
-                    let before = relationships::preview_write(
-                        client,
-                        scope,
-                        relationship_id(input)?,
-                        positive(input, "version")?,
-                    )
-                    .await
-                    .map_err(write_error)?;
-                    json!({"summary":"Change the effective dates of a relationship","before":before,"dates":dates(input)?})
-                }
-                Self::End => {
-                    let before = relationships::preview_write(
-                        client,
-                        scope,
-                        relationship_id(input)?,
-                        positive(input, "version")?,
-                    )
-                    .await
-                    .map_err(write_error)?;
-                    let to = date(input, "effective_to")?.ok_or(Error::Invalid)?;
-                    json!({"summary":format!("End a relationship on {}", to.as_str()),"before":before,"effective_to":to})
-                }
-                Self::Unlink => {
-                    let before = relationships::preview_write(
-                        client,
-                        scope,
-                        relationship_id(input)?,
-                        positive(input, "version")?,
-                    )
-                    .await
-                    .map_err(write_error)?;
-                    json!({"summary":"Unlink a relationship; its dated history is retained","before":before})
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(

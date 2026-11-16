@@ -84,7 +84,9 @@ async fn main() -> Result<()> {
     let mailer = services.get::<Mailer>("base/mail.mailer")?;
     println!("transport: {}", mailer.describe());
     let mailbox = Mailbox::new(mailbox_dir(), 100);
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     // Fixture account: Sam Staff, tenant 1. A rerun starts from the fixture password.
     let (email, seeded) = ("staff@example.test", "bilibi-dev");

@@ -186,11 +186,42 @@ pub fn modules() -> Result<Vec<&'static bilibi_module_registry::Module>> {
 /// The product binary's boot check: the linked Domain and Extension descriptors
 /// must be exactly the mounted crates discovery found. Examples that link their
 /// own reference Extensions call `modules` instead.
-pub fn verify_composition() -> Result<()> {
+pub async fn verify_composition(db: &bilibi_database::Db) -> Result<()> {
+    use bilibi_base::settings::{Definitions, Encryption, Settings};
+
+    verify_descriptors()?;
+    let modules = modules()?;
+    // Preflight reads only a non-secret global setting. Installing application
+    // services here would bind process-wide services again during dispatch.
+    let catalog = bilibi_module_registry::Catalog::discover(&modules)?;
+    let settings = Settings::new(
+        Definitions::from_catalog(&catalog)?,
+        Encryption::from_hex(None),
+        Arc::default(),
+    );
+    let mut client = db.get().await?;
+    let tx = client.transaction().await?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))",
+        &[&"base/system.installation-mode"],
+    )
+    .await?;
+    let mode = bilibi_base::system::InstallationMode::resolve(&settings, &*tx).await?;
     Ok(bilibi_module_registry::verify_composition(
+        &modules,
+        bilibi_domains::MODULES,
+        bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
+        mode.as_str(),
+    )?)
+}
+
+pub fn verify_descriptors() -> Result<()> {
+    Ok(bilibi_module_registry::verify_descriptors(
         &modules()?,
         bilibi_domains::MODULES,
         bilibi_extensions::MODULES,
+        bilibi_extensions::CODE,
     )?)
 }
 
@@ -247,8 +278,12 @@ pub fn status() -> String {
                 (None, Some(commit)) => format!("untagged, commit {commit}"),
                 (_, None) => "unpinned".to_owned(),
             };
+            let code = container
+                .extension_code
+                .map(|code| format!(", code: {}", code.as_str()))
+                .unwrap_or_default();
             text.push_str(&format!(
-                "  {} {at}, modules: {}\n",
+                "  {} {at}{code}, modules: {}\n",
                 container.id,
                 container.modules.join(", ")
             ));

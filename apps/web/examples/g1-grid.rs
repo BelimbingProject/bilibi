@@ -142,7 +142,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .get::<Authentication>("base/tenancy.authentication")?;
     let grants = app.services.get::<Grants>("base/authz.grants")?;
     grants.reconcile().await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &Client = &client;
     seed(client).await?;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;

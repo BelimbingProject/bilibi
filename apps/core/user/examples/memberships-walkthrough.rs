@@ -214,7 +214,9 @@ async fn main() -> Result<()> {
     grants.reconcile().await?;
     let users = app.services.get::<UserService>("core/user.accounts")?;
     let mailbox = Mailbox::new(mailbox_dir(), 100);
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     for capability in [
         "admin.user.invite",
         "admin.user.update",

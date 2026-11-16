@@ -56,7 +56,9 @@ async fn main() -> Result<(), Failure> {
     let viewer_login = app.user.login("viewer@example.test", password).await?;
     let manager = app.security.guard(&manager_login.token).await?;
     let viewer = app.security.guard(&viewer_login.token).await?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
 
     // Discovery: ranked search, describe and the guide, as an agent sees them.

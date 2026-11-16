@@ -103,7 +103,9 @@ async fn main() -> Result<(), Error> {
     let token = login.token.as_str();
     let admin = app.security.guard(token).await?;
     let tenant = admin.tenant();
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     client
         .execute(

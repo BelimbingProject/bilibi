@@ -322,29 +322,46 @@ async fn business_time(
 }
 
 struct Write(Action);
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let calendars = calendars()?;
+        let scope = calendars.authentication.reprove(client, scope).await?;
+        let prepared = calendars
+            .prepare(client, &scope, self.0, input)
+            .await
+            .map_err(refusal)?;
+        Ok(calendars
+            .review(client, &scope, &prepared, None)
+            .await
+            .map_err(refusal)?
+            .into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "core/work_calendar"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let calendars = calendars()?;
-            let client = calendars.db.get().await.map_err(Error::from)?;
-            let scope = calendars.authentication.reprove(&**client, scope).await?;
-            let prepared = calendars
-                .prepare(&**client, &scope, self.0, input)
-                .await
-                .map_err(refusal)?;
-            Ok(calendars
-                .review(&**client, &scope, &prepared, None)
-                .await
-                .map_err(refusal)?
-                .into())
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = calendars()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
+                }
+            }
         })
     }
     fn commit<'a>(

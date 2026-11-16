@@ -716,6 +716,61 @@ with_env() { # <instance> <user> <command...>
     # shellcheck disable=SC2016 # the inner shell expands $1 and $2
     runuser -u "$user" -- bash -c 'set -a; . "$1"; set +a; shift; export HOME="$2"; shift; exec "$@"' -- "$dir/env" "$dir/data" "$@"
 }
+lock_installation() {
+    local instance=$1 reply
+    coproc POLICY { runuser -u postgres -- "$pg_bin/psql" -p "$(postgres_port)" -d "$(database_name "$instance")" -X -qAt -v ON_ERROR_STOP=1; }
+    policy_pid=$POLICY_PID
+    policy_in=${POLICY[1]}
+    policy_out=${POLICY[0]}
+    trap 'exec {policy_in}>&-; wait "$policy_pid"' EXIT
+    printf '%s\n' "SELECT 'locked' FROM pg_advisory_lock_shared(hashtextextended('base/system.installation-mode',0));" >&"$policy_in"
+    read -r reply <&"$policy_out" || fail 'could not read installation policy'
+    [[ $reply == locked ]] || fail 'could not lock installation policy'
+}
+read_installation_mode() {
+    local reply
+    printf '%s\n' "SELECT to_regclass('base_settings') IS NOT NULL;" >&"$policy_in"
+    read -r reply <&"$policy_out" || fail 'could not read installation policy'
+    installation_mode=shared
+    if [[ $reply == t ]]; then
+        printf '%s\n' "SELECT COALESCE((SELECT value #>> '{}' FROM base_settings WHERE key='installation.mode' AND tenant_id=0 AND scope_type='global' AND scope_id=0),'shared');" >&"$policy_in"
+        read -r installation_mode <&"$policy_out" || fail 'could not read installation policy'
+    elif [[ $reply != f ]]; then
+        fail 'could not read installation policy'
+    fi
+    [[ $installation_mode == shared || $installation_mode == isolated ]] || fail 'invalid installation.mode'
+}
+admit_release() {
+    local instance=$1 n=$2 dir
+    dir=$(instance_dir "$instance")
+    read_installation_mode || return 1
+    with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" status | python3 -c '
+import sys
+mode = sys.argv[1]
+status = sys.stdin.read()
+if mode not in {"shared", "isolated"} or not status.startswith("Bilibi "):
+    sys.exit("Invalid installation policy or release composition")
+_, found, extensions = status.partition("\nExtensions:")
+if not found:
+    sys.exit("The release does not report its Extension composition")
+if extensions.strip() == "none mounted":
+    sys.exit(0)
+if not extensions.startswith("\n") or not extensions.strip():
+    sys.exit("Invalid Extension composition")
+for line in extensions.splitlines():
+    if not line:
+        continue
+    declaration, modules, _ = line.partition(", modules:")
+    identity, code_marker, code = declaration.rpartition(", code: ")
+    if not line.startswith("  ") or not modules or not code_marker or " " not in identity.strip():
+        sys.exit("Invalid or missing Extension code declaration")
+    name = identity.strip().split(" ", 1)[0]
+    if code not in {"reviewed", "customer"}:
+        sys.exit(f"Extension {name} must declare reviewed or customer code")
+    if code == "customer" and mode == "shared":
+        sys.exit(f"Extension {name} requires an isolated installation; use an isolated installation, or prepare a code-free release")
+' "$installation_mode"
+}
 # wait_healthy <instance>: the backend answers on its own port within 60 s.
 wait_healthy() {
     local port; port=$(env_value "$1" BIND_ADDR | sed 's/.*://')
@@ -736,6 +791,13 @@ put_in_service() {
     dir=$(instance_dir "$instance")
     ensure_current_link "$instance"
     systemctl stop "$unit_name$instance"
+    if ! admit_release "$instance" "$n"; then
+        if [[ -n $previous ]]; then
+            admit_release "$instance" "$previous" || return 1
+            systemctl start "$unit_name$instance"
+        fi
+        return 1
+    fi
     point_current "$instance" "$n"
     systemctl start "$unit_name$instance"
     if wait_healthy "$instance"; then
@@ -745,6 +807,7 @@ put_in_service() {
     say "$instance: release $n did not answer within 60 s; see: journalctl -u $unit_name$instance" >&2
     if [[ -n $previous ]]; then
         systemctl stop "$unit_name$instance"
+        admit_release "$instance" "$previous" || return 1
         point_current "$instance" "$previous"
         systemctl start "$unit_name$instance"
         if wait_healthy "$instance"; then
@@ -796,15 +859,26 @@ release() {
     fi
     rm -rf -- "$unpacked"
     say "$instance: release $n copied to $dir/releases/$n"
-    # The database must be up to date before the new program serves; nothing
-    # migrates on boot. The service pauses from here: Caddy shows the waiting page.
-    [[ -n $previous ]] && systemctl stop "$unit_name$instance"
-    if ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" migrate ||
-        ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" seed-production; then
-        [[ -n $previous ]] && systemctl start "$unit_name$instance"
-        fail "release $n could not update the database" "see the output above; the previous release is back in service"
-    fi
-    put_in_service "$instance" "$n" "$previous"
+    (
+        lock_installation "$instance"
+        [[ -n $previous ]] && systemctl stop "$unit_name$instance"
+        if ! admit_release "$instance" "$n"; then
+            if [[ -n $previous ]]; then
+                admit_release "$instance" "$previous" || exit 1
+                systemctl start "$unit_name$instance"
+            fi
+            fail "release $n does not satisfy this instance's installation policy" "use an isolated installation, or prepare a code-free release; a first release must be code-free"
+        fi
+        if ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" migrate ||
+            ! with_env "$instance" bilibi-build "$dir/releases/$n/bilibi-web" seed-production; then
+            if [[ -n $previous ]]; then
+                admit_release "$instance" "$previous" || exit 1
+                systemctl start "$unit_name$instance"
+            fi
+            fail "release $n could not update the database" "see the output above; the previous release is back in service"
+        fi
+        put_in_service "$instance" "$n" "$previous"
+    )
     if [[ -z $previous ]]; then
         say "Next: create the first account with: $0 create-owner $instance"
     fi
@@ -848,7 +922,10 @@ switch() {
     # An older release may lack migrations the newer one applied; the database
     # keeps them (migrations are forward-only). Going back is the Software page's
     # Undo, which also restores a backup when tables changed.
-    put_in_service "$instance" "$n" "$(current_release "$instance")"
+    (
+        lock_installation "$instance"
+        put_in_service "$instance" "$n" "$(current_release "$instance")"
+    )
 }
 status() {
     local instance list

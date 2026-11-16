@@ -222,7 +222,7 @@ impl<'a> Run<'a> {
     async fn settle_clean_failure(&mut self) -> Db<()> {
         let mut message = format!("Nothing changed. {}.", self.failure_reason());
         if self.job.paused && self.service.state() != "active" {
-            let started = match self.service.start() {
+            let started = match self.start_current().await {
                 Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                 Err(why) => Err(why),
             };
@@ -274,10 +274,12 @@ impl<'a> Run<'a> {
     pub async fn resume(&mut self) -> Db<bool> {
         let paused = self.job.paused;
         if paused {
+            jobs::lock_installation(&*self.client).await?;
             // From the first moment: nothing may be entered while the
             // database is being decided on.
             if let Err(reason) = self.service.stop() {
-                self.log(&reason);
+                self.interrupted(&reason).await?;
+                return Ok(true);
             }
         }
         if self.failed_step().is_some() || self.step("switch_back").is_some() {
@@ -301,7 +303,7 @@ impl<'a> Run<'a> {
         }
         if self.update_committed().await? {
             if self.is_done("switch") {
-                let answered = match self.service.start() {
+                let answered = match self.start_current().await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -313,7 +315,7 @@ impl<'a> Run<'a> {
             }
             return Ok(false);
         }
-        let back = match self.service.start() {
+        let back = match self.start_current().await {
             Ok(()) => match self.service.wait_healthy(HEALTH_LIMIT).await {
                 Ok(_) => "The release that was in service is back and answers.".to_owned(),
                 Err(why) => format!("The release that was in service was started again but does not answer: {why}. Check the service."),
@@ -432,9 +434,6 @@ impl<'a> Run<'a> {
                 json!({"message": "Updating the database", "ledger_before": before}),
             )
             .await?;
-            if let Err(reason) = self.service.stop() {
-                self.log(&reason);
-            }
             match self.migrate(release, before).await {
                 Ok(detail) => self.done("migrate", detail).await?,
                 Err(reason) => {
@@ -461,7 +460,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching to release {release}"))
                 .await?;
-            if let Err(reason) = self.switch_to(release) {
+            if let Err(reason) = self.switch_to(release).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -736,7 +735,13 @@ impl<'a> Run<'a> {
                 dst.display()
             ));
         }
-        let status = program_status(&dst).inspect_err(|_| {
+        let status = composition::status(&dst).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&dst);
+        })?;
+        let mode = jobs::installation_mode(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
+        let candidate = composition::admit(&status, &mode).inspect_err(|_| {
             let _ = fs::remove_dir_all(&dst);
         })?;
         let plugins = layout::read_plugins(&dst).inspect_err(|_| {
@@ -749,7 +754,7 @@ impl<'a> Run<'a> {
             .chars()
             .take(200)
             .collect();
-        let now = composition::parse(&status);
+        let now = candidate;
         let changes = composition::diff(&composition_of(&self.layout.release(current)), &now);
         Ok(json!({
             "message": format!("Copied {} as release {n}. Bilibi version: {}.", source.text, now["platform"]["version"].as_str().unwrap_or("not recorded")),
@@ -787,6 +792,9 @@ impl<'a> Run<'a> {
     }
     /// The pause begins: stop the service, then dump the database.
     async fn backup(&mut self) -> Result<Value, String> {
+        jobs::lock_installation(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
         self.service.stop()?;
         let paused_epoch = jobs::epoch(&*self.client)
             .await
@@ -811,6 +819,8 @@ impl<'a> Run<'a> {
     /// production seeds. `migrated` says whether the shape changed.
     async fn migrate(&self, release: u64, before: i64) -> Result<Value, String> {
         let program = self.layout.release(release).join("bilibi-web");
+        self.service.stop()?;
+        self.admit_release(release).await?;
         run_program(&program, "migrate", MIGRATE_LIMIT_SECONDS)?;
         run_program(&program, "seed-production", "600")?;
         let after = jobs::ledger_count(&*self.client)
@@ -823,16 +833,31 @@ impl<'a> Run<'a> {
             "ledger_before": before, "applied": applied, "migrated": applied > 0,
         }))
     }
-    fn switch_to(&self, release: u64) -> Result<(), String> {
+    async fn admit_release(&self, release: u64) -> Result<(), String> {
+        let status = composition::status(&self.layout.release(release))?;
+        let mode = jobs::installation_mode(&*self.client)
+            .await
+            .map_err(|error| jobs::short(&error))?;
+        composition::admit(&status, &mode)?;
+        Ok(())
+    }
+    async fn start_current(&self) -> Result<(), String> {
+        let release = self
+            .layout
+            .current()
+            .ok_or("There is no current release to start.")?;
+        self.admit_release(release).await?;
+        self.service.start()
+    }
+    async fn switch_to(&self, release: u64) -> Result<(), String> {
         if !self.layout.release(release).join("bilibi-web").is_file() {
             return Err(format!(
                 "release {release} is missing from {}",
                 self.layout.releases().display()
             ));
         }
-        if let Err(reason) = self.service.stop() {
-            self.log(&reason);
-        }
+        self.service.stop()?;
+        self.admit_release(release).await?;
         self.layout
             .point_current(release)
             .map_err(|error| format!("could not point current at release {release}: {error}"))?;
@@ -845,7 +870,7 @@ impl<'a> Run<'a> {
         if matches!(self.state("switch_back"), "done" | "failed") {
             let mut result = self.detail("switch_back");
             if self.is_done("switch_back") {
-                let answered = match self.service.start() {
+                let answered = match self.start_current().await {
                     Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
                     Err(why) => Err(why),
                 };
@@ -878,7 +903,8 @@ impl<'a> Run<'a> {
         }
         self.log(&label);
         if let Err(why) = self.service.stop() {
-            self.log(&why);
+            self.fail("switch_back", &why).await?;
+            return self.finish("failed", json!({"message": why})).await;
         }
         let mut restored = self.detail("switch_back")["restored"]
             .as_bool()
@@ -891,6 +917,7 @@ impl<'a> Run<'a> {
                 file,
                 back.base["backup_at"].as_str().unwrap_or(""),
                 &self.history_file("switch_back"),
+                Some(&self.layout.release(back.to)),
             )
             .await
             {
@@ -917,7 +944,7 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        let answered = match self.switch_to(back.to) {
+        let answered = match self.switch_to(back.to).await {
             Ok(()) => self.service.wait_healthy(HEALTH_LIMIT).await.map(|_| ()),
             Err(why) => Err(why),
         };
@@ -1039,6 +1066,10 @@ impl<'a> Run<'a> {
                 return self.nothing_changed("backup", "the backup taken before the change is missing, so the database cannot be put back").await;
             }
         }
+        jobs::lock_installation(&*self.client).await?;
+        if let Err(reason) = self.admit_release(undone.previous).await {
+            return self.nothing_changed("backup", &reason).await;
+        }
         if !self.is_done("backup") {
             let detail = json!({"message": format!(
                 "{} pauses from here: the service stops and the database as it is now is backed up first.",
@@ -1068,7 +1099,10 @@ impl<'a> Run<'a> {
                 json!({"message": format!("Restoring the backup taken at {}", undone.since), "lost": lost}),
             )
             .await?;
-            let _ = self.service.stop();
+            if let Err(why) = self.service.stop() {
+                self.fail("restore", &why).await?;
+                return self.finish("failed", json!({"message": why})).await;
+            }
             let file = undone.original.clone().unwrap_or_default();
             match backup::restore(
                 &*self.client,
@@ -1076,6 +1110,7 @@ impl<'a> Run<'a> {
                 &file,
                 &undone.since,
                 &self.history_file("restore"),
+                Some(&self.layout.release(undone.previous)),
             )
             .await
             {
@@ -1098,7 +1133,7 @@ impl<'a> Run<'a> {
         if !self.is_done("switch") {
             self.start("switch", &format!("Switching back to release {previous}"))
                 .await?;
-            if let Err(reason) = self.switch_to(previous) {
+            if let Err(reason) = self.switch_to(previous).await {
                 self.fail("switch", &reason).await?;
                 return self.switch_back().await;
             }
@@ -1226,27 +1261,10 @@ impl<'a> Run<'a> {
     }
 }
 
-/// `bilibi-web status` on a release folder: it proves the program runs on
-/// this machine, and its text names what the release holds.
-fn program_status(dir: &std::path::Path) -> Result<String, String> {
-    let out = Command::new("timeout")
-        .arg("30")
-        .arg(dir.join("bilibi-web"))
-        .arg("status")
-        .output()
-        .map_err(|error| format!("could not run the copied program: {error}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "the copied program does not run on this server: {}",
-            backup::tail(&out.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
 /// What a release folder's program says it is made of; null when it does not
 /// run.
 fn composition_of(dir: &std::path::Path) -> Value {
-    program_status(dir).map_or(Value::Null, |status| composition::parse(&status))
+    composition::status(dir).map_or(Value::Null, |status| composition::parse(&status))
 }
 /// What changes in the add-ons switched on, in words, or nothing when the
 /// release does not say or the list stays the same.

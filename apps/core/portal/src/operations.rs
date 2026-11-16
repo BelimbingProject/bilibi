@@ -206,91 +206,107 @@ enum Write {
     Approve,
     Reject,
 }
+impl Write {
+    async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        input: &Value,
+    ) -> bilibi_agent_api::Result<bilibi_agent_api::json::Output> {
+        let access = access()?;
+        let value = match self {
+            Self::Site => {
+                let (before, after) = checked(
+                    access
+                        .preview_site(client, scope, &site_input(input))
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({
+                    "summary": format!("Set the customer portal to {} at /portal/sign-in/{}", after.title, after.address),
+                    "before": before.map(|site| site.to_json()),
+                    "after": after.to_json(),
+                })
+            }
+            Self::Invite => checked(
+                access
+                    .preview_invitation(client, scope, &invitation_input(input)?)
+                    .await
+                    .map_err(found)?,
+            )?,
+            Self::Approve => {
+                let (person, affiliation) = chosen(input)?;
+                checked(
+                    access
+                        .preview_approve(client, scope, id(input)?, person, affiliation)
+                        .await
+                        .map_err(found)?,
+                )?
+            }
+            Self::Reject => {
+                let registration = checked(
+                    access
+                        .preview_reject(client, scope, id(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({
+                    "summary": format!("Reject the request from {} <{}>", registration.name, registration.email),
+                    "before": registration.to_json(),
+                })
+            }
+            Self::Access(active) => {
+                let account = checked(
+                    access
+                        .preview_access(client, scope, id(input)?, *active)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({
+                    "summary": if *active {
+                        format!("Restore portal access for {} <{}>", account.name, account.email)
+                    } else {
+                        format!("Revoke portal access for {} <{}>; their portal sessions end now", account.name, account.email)
+                    },
+                    "before": account_json(&account),
+                })
+            }
+            Self::Revoke => {
+                let invitation = checked(
+                    access
+                        .preview_revoke(client, scope, id(input)?)
+                        .await
+                        .map_err(found)?,
+                )?;
+                json!({
+                    "summary": format!("Revoke the invitation to {} <{}>; its link stops working", invitation.name, invitation.email),
+                    "before": invitation.to_json(),
+                })
+            }
+        };
+        Ok(value.into())
+    }
+}
 impl WriteHandler for Write {
     fn owner(&self) -> &'static str {
         "core/portal"
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let access = access()?;
-            let client = access.db.get().await.map_err(Error::from)?;
-            let client = &**client;
-            let value = match self {
-                Self::Site => {
-                    let (before, after) = checked(
-                        access
-                            .preview_site(client, scope, &site_input(input))
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({
-                        "summary": format!("Set the customer portal to {} at /portal/sign-in/{}", after.title, after.address),
-                        "before": before.map(|site| site.to_json()),
-                        "after": after.to_json(),
-                    })
+            // The door's own transaction when it gives one: a preview never
+            // asks the pool for a second connection.
+            match client.transaction() {
+                Some(tx) => self.preview_on(tx, scope, input).await,
+                None => {
+                    let pooled = access()?.db.get().await.map_err(Error::from)?;
+                    self.preview_on(&**pooled, scope, input).await
                 }
-                Self::Invite => checked(
-                    access
-                        .preview_invitation(client, scope, &invitation_input(input)?)
-                        .await
-                        .map_err(found)?,
-                )?,
-                Self::Approve => {
-                    let (person, affiliation) = chosen(input)?;
-                    checked(
-                        access
-                            .preview_approve(client, scope, id(input)?, person, affiliation)
-                            .await
-                            .map_err(found)?,
-                    )?
-                }
-                Self::Reject => {
-                    let registration = checked(
-                        access
-                            .preview_reject(client, scope, id(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({
-                        "summary": format!("Reject the request from {} <{}>", registration.name, registration.email),
-                        "before": registration.to_json(),
-                    })
-                }
-                Self::Access(active) => {
-                    let account = checked(
-                        access
-                            .preview_access(client, scope, id(input)?, *active)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({
-                        "summary": if *active {
-                            format!("Restore portal access for {} <{}>", account.name, account.email)
-                        } else {
-                            format!("Revoke portal access for {} <{}>; their portal sessions end now", account.name, account.email)
-                        },
-                        "before": account_json(&account),
-                    })
-                }
-                Self::Revoke => {
-                    let invitation = checked(
-                        access
-                            .preview_revoke(client, scope, id(input)?)
-                            .await
-                            .map_err(found)?,
-                    )?;
-                    json!({
-                        "summary": format!("Revoke the invitation to {} <{}>; its link stops working", invitation.name, invitation.email),
-                        "before": invitation.to_json(),
-                    })
-                }
-            };
-            Ok(value.into())
+            }
         })
     }
     fn commit<'a>(

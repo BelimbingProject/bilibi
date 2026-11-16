@@ -71,7 +71,9 @@ async fn main() -> Result<(), Error> {
     let admin = login(&app, "admin@example.test").await?;
     let manager = login(&app, "manager@example.test").await?;
     let tenant = admin.tenant();
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let client: &tokio_postgres::Client = &client;
     // Re-runs start from the seeded state.
     client.batch_execute("DELETE FROM roles WHERE code LIKE 'bound\\_%'; DELETE FROM companies WHERE code LIKE 'bound\\_%'").await?;

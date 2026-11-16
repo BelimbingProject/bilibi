@@ -164,9 +164,15 @@ async fn main() -> Result<()> {
         boundary: &boundary,
         scope: &admin,
     };
-    let mut one = db.get().await?;
-    let mut two = db.get().await?;
-    let mut three = db.get().await?;
+    let mut one = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let mut two = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
+    let mut three = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     println!("== #587: a held check does not hold the company exclusively");
     let mut held = boundary

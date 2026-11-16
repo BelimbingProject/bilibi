@@ -30,7 +30,7 @@ use bilibi_base::queue::{Config, Executor};
 use bilibi_base::schedule::Schedule;
 use bilibi_base::settings::{Settings, Target};
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
-use bilibi_module_registry::{verify_composition, Contribution, Provenance, Services};
+use bilibi_module_registry::{Contribution, Provenance, Services};
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::json;
 use std::{
@@ -209,7 +209,10 @@ impl Proof {
         ))
     }
     async fn prune(&self, now: SystemTime) -> Result<u64> {
-        let mut client = self.db.get().await?;
+        let mut client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         self.events.prune(&mut client, now).await
     }
     /// Sets the tenant's own keep time, as the settings page would.
@@ -254,11 +257,7 @@ async fn main() -> Result<()> {
     bilibi_extensions::link();
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let modules = bilibi_module_registry::discover()?;
-    verify_composition(
-        &modules,
-        bilibi_domains::MODULES,
-        bilibi_extensions::MODULES,
-    )?;
+    bilibi_web::verify_composition(&db).await?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let mut services = Services::default();

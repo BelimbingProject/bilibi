@@ -287,7 +287,8 @@ impl Index {
                         ("Human only", "human"),
                         ("Agent only", "agent"),
                     ]),
-                ),
+                )
+                .grid_field("persons.kind"),
                 ToolbarControl::select(
                     "persons-retired",
                     "retired",

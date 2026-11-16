@@ -54,7 +54,10 @@ pub async fn run(app: &bilibi_web::App, proof: &Proof, admin: &Scope, staff: &Sc
 }
 
 async fn default_race(proof: &Proof, admin: &Scope) -> Outcome {
-    let mut first = proof.db.get().await?;
+    let mut first = proof
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut a = proof
         .boundary
         .begin(&mut first, admin.mutation_context("picklists.reference"))
@@ -155,7 +158,10 @@ async fn audited_tenant(app: &bilibi_web::App, proof: &Proof, admin: &Scope) -> 
     let companies = app
         .services
         .get::<CompanyService>(bilibi_company::SERVICE)?;
-    let mut client = proof.db.get().await?;
+    let mut client = proof
+        .db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = proof
         .boundary
         .begin(&mut client, admin.mutation_context("tenant.create"))

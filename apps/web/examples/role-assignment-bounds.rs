@@ -116,7 +116,10 @@ impl Proof {
         assigned: bool,
         bounds: &Assignment,
     ) -> Result<()> {
-        let mut client = self.db.get().await?;
+        let mut client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         let mut tx = self
             .boundary
             .begin(
@@ -180,7 +183,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .services
         .get::<bilibi_user::UserService>("core/user.accounts")?;
     println!("Fixture installed and role vocabulary reconciled.");
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let admin = auth.authenticate(&**client, 1, 4, String::new()).await?;
     let first = auth.authenticate(&**client, 1, 1, String::new()).await?;
     let second = auth.authenticate(&**client, 1, 7, String::new()).await?;
@@ -466,7 +471,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .await,
         Err(Error::Forbidden)
     ));
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = proof
         .boundary
         .begin(
@@ -549,7 +556,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     assert!(matches!(last, Err(Error::Refused(_))), "{last:?}");
     println!("A narrower role administrator cannot remove a full-access role or deny a full-access account; the last full-access assignment stays.");
 
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut tx = proof
         .boundary
         .begin(
@@ -621,7 +630,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "base.authz.role_capability.set",
         "base.authz.system_principal.set",
     );
-    let mut first_client = db.get().await?;
+    let mut first_client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut first_tx = proof
         .boundary
         .begin(

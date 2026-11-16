@@ -124,7 +124,9 @@ async fn main() -> DbResult<()> {
         std::env::var("BILIBI_MEDIA_DEMO_ROOT").map_err(|_| bilibi_database::Error::Invalid)?;
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| bilibi_database::Error::Invalid)?)?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     client.batch_execute("CREATE TABLE IF NOT EXISTS walkthrough_tickets(id text NOT NULL, tenant_id bigint NOT NULL, open boolean NOT NULL, denied text[] NOT NULL DEFAULT '{}', PRIMARY KEY(id, tenant_id))").await?;
     client.batch_execute("INSERT INTO walkthrough_tickets(id,tenant_id,open) VALUES('1',1,true),('2',1,false),('3',1,true),('9',2,true) ON CONFLICT (id,tenant_id) DO UPDATE SET open=excluded.open, denied='{}'").await?;
     if std::env::args().nth(1).as_deref() == Some("serve") {

@@ -4,6 +4,14 @@
 
 **Not for:** reading `BILIBI_ENV` or the origin to decide which instance this is.
 
+## Installation policy (`src/installation_editor.rs`)
+
+`installation.mode` is the installation owner's choice: `shared` (**Shared service**) admits only reviewed Extensions, while `isolated` (**Isolated installation**) also admits customer code Extensions. It defaults to the safe shared policy. System › Installation policy (`/system/installation`) is an owner-only, step-up-protected page; no capability, Core Administrator role or tenant administrator can see or change it, and every change asks for fresh 2FA through `base.system.installation.mode.change`.
+
+`bilibi-web run` validates the saved policy against its composition at startup. Switching to Shared service refuses while any customer code Extension remains compiled into the composition; the owner first installs a code-free release. A first installation starts with a code-free release, then the owner can select Isolated installation. The mode never changes rules, settings, custom fields, labels or shared views. The protected mutation takes the exclusive `base/system.installation-mode` advisory lock; admission readers take its shared form.
+
+Extension declarations belong to the [composition contract](../module_registry/README.md); build-time admission is documented in [Versions inside the program](../../../docs/versions.md#versions-inside-the-program). The [installer contract](../../installer/README.md) covers admission after approval, policy locking and preservation across restores.
+
 `base/system` owns `/system/info`, `/system/localization` and
 `/system/menu-inspector`. Each requires its contributed platform capability
 **and** the persisted operator identity. It also owns the owner-only

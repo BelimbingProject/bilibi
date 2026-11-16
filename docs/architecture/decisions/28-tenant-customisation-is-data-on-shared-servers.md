@@ -1,7 +1,7 @@
 # Tenant customisation is data on shared servers; customer code needs its own server
 
 **Document Type:** Architecture decision record
-**Status:** Accepted; implementation in progress
+**Status:** Accepted; implemented
 **Agents:** claude/claude-opus-5-5-medium (author), amp/claude-opus-5.5 (custom-field rule inputs, #730)
 **Scope:** What a tenant may change without a release, and where customer-supplied code may run
 **Last Updated:** 2026-11-16
@@ -43,8 +43,8 @@ A JSON document that embeds a script or an unlimited action loop is code, whatev
 
 - Shared-server clients get quick, tenant-local changes within the vocabulary Bilibi offers. A new trigger, action, record type or connector still needs a shared release.
 - On-prem and dedicated-server clients keep full code customisation.
-- Operators must enforce code admission and real isolation; the installation setting does not exist yet.
-- The rule engine's first trial is built: [`base/rules`](../../../apps/base/rules/README.md), a structured rule record with approved versions, run after commit as one bounded principal ([ADR 31](./31-tenant-rules-run-after-commit-as-one-bounded-principal.md)). The internal operation caller admits a principal only where the contract's owner says so (`apps/base/agent_api/README.md`, "Queued jobs as callers"). Rules read an owner's typed fields, and a tenant custom field of the trigger's own record once the tenant offers it to rule conditions ([#730](https://github.com/BelimbingProject/bilibi/issues/730)). Still to come under [#682](https://github.com/BelimbingProject/bilibi/issues/682): shadow runs, configuration packs, the bounded text formula (tested against the table above), AI observations, and the installation setting that admits customer code. This record moves to **Accepted; implemented** when the setting exists.
+- Code admission is implemented through the [installation policy](../../../apps/base/system/README.md#installation-policy-srcinstallation_editorrs). Operators remain responsible for real process, credential and secret isolation; the setting does not create it.
+- The rule engine's first trial is built: [`base/rules`](../../../apps/base/rules/README.md), a structured rule record with approved versions, run after commit as one bounded principal ([ADR 31](./31-tenant-rules-run-after-commit-as-one-bounded-principal.md)). The internal operation caller admits a principal only where the contract's owner says so (`apps/base/agent_api/README.md`, "Queued jobs as callers"). Rules read an owner's typed fields, and a tenant custom field of the trigger's own record once the tenant offers it to rule conditions ([#730](https://github.com/BelimbingProject/bilibi/issues/730)). Still to come under [#682](https://github.com/BelimbingProject/bilibi/issues/682): shadow runs, configuration packs, the bounded text formula (tested against the table above) and AI observations.
 
 ## Why not the alternatives
 

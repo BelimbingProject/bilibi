@@ -152,7 +152,9 @@ async fn main() -> Result<()> {
     let boundary = app
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let mut checks = Checks::default();
 
     println!("== the dispatch log keeps its checks and drops their addresses after the period");

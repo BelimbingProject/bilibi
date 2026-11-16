@@ -49,6 +49,8 @@ pub(crate) const RESET_KEY: &str = "core.user.two_factor.reset";
 pub(crate) const RESET_EVENT: &str = "reset-two-factor";
 /// The page service that owns [`RESET_EVENT`].
 pub(crate) const PAGES: &str = "core/user.pages";
+/// Why checking a code takes its connection detached (`Db::get_detached`).
+const STEP_UP_CONNECTION: &str = "a code is checked from inside the caller's write (step-up), and the spent code and failure count must stay when that write rolls back";
 /// The owner the sealed secret is bound to (`Settings::seal_owned`), with
 /// the sign-in's home tenant and identity id ([`SignIn`]).
 const OWNER: &str = "core/user.two_factor";
@@ -486,7 +488,11 @@ impl UserService {
         refuse_impersonation(scope)?;
         self.unlocked(scope).await?;
         let (tenant, user) = (scope.tenant(), scope.user());
-        let client = self.db.get().await.map_err(Error::from)?;
+        let client = self
+            .db
+            .get_detached(STEP_UP_CONNECTION)
+            .await
+            .map_err(Error::from)?;
         let row = client
             .query_opt(
                 "SELECT f.secret,f.last_step,i.home_tenant_id,i.id FROM user_two_factor f JOIN user_identities i ON i.id=f.identity_id WHERE f.identity_id=(SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2) AND f.confirmed_at IS NOT NULL",
@@ -519,7 +525,11 @@ impl UserService {
         };
         let sessions = self.sessions.clone();
         let session = scope.clone();
-        let mut client = self.db.get().await.map_err(Error::from)?;
+        let mut client = self
+            .db
+            .get_detached(STEP_UP_CONNECTION)
+            .await
+            .map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context(event))
@@ -559,7 +569,11 @@ impl UserService {
 
     /// Refuses while the account's checks are locked, recording the refusal.
     async fn unlocked(&self, scope: &Scope) -> Outcome<()> {
-        let client = self.db.get().await.map_err(Error::from)?;
+        let client = self
+            .db
+            .get_detached(STEP_UP_CONNECTION)
+            .await
+            .map_err(Error::from)?;
         let remaining = credential_attempts::locked(
             &**client,
             scope.tenant(),

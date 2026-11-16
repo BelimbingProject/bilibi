@@ -50,7 +50,9 @@ async fn main() -> Result<(), Failure> {
         .await?;
     let manager = login(&app, "manager@example.test").await?;
     let registry = app.services.get::<Registry>("base/agent_api.registry")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     // A large tenant: explicit ids far above the fixture's, so the identity
     // sequence and the fixture rows never collide.
@@ -75,7 +77,9 @@ async fn main() -> Result<(), Failure> {
         let manager = manager.clone();
         let db = db.clone();
         async move {
-            let client = db.get().await?;
+            let client = db
+                .get_detached("the walkthrough's own checking connection")
+                .await?;
             let started = Instant::now();
             let result = registry
                 .call(
@@ -153,7 +157,9 @@ async fn main() -> Result<(), Failure> {
     // this transaction, from PostgreSQL's own per-transaction counters. An
     // index scan counts its heap fetches on the index, so every index of
     // `companies` is summed in.
-    let mut reader = db.get().await?;
+    let mut reader = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let tx = reader.transaction().await?;
     let read = "SELECT sum(pg_stat_get_xact_tuples_returned(oid)+pg_stat_get_xact_tuples_fetched(oid))::bigint FROM (SELECT 'companies'::regclass::oid AS oid UNION ALL SELECT indexrelid FROM pg_index WHERE indrelid='companies'::regclass) relations";
     let before: i64 = tx.query_one(read, &[]).await?.get(0);
@@ -180,7 +186,9 @@ async fn main() -> Result<(), Failure> {
 
     // Bounds: another transaction holds `companies` exclusively. A bounded
     // read gives up at Grid's lock timeout; an unbounded one waits for ever.
-    let mut holder = db.get().await?;
+    let mut holder = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let lock = holder.transaction().await?;
     lock.batch_execute("LOCK TABLE companies IN ACCESS EXCLUSIVE MODE")
         .await?;

@@ -24,7 +24,7 @@ use bilibi_base::events::{DELIVER, PRINCIPAL};
 use bilibi_base::queue::{Config, Executor};
 use bilibi_base::session::{session_id, Sessions};
 use bilibi_database::{pool, Db, Error, MutationBoundary, Result};
-use bilibi_module_registry::{verify_composition, Services};
+use bilibi_module_registry::Services;
 use bilibi_tenancy::{Authentication, Scope};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -136,11 +136,7 @@ async fn main() -> Result<()> {
     let phase = std::env::args().nth(1).unwrap_or_default();
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     let modules = bilibi_module_registry::discover()?;
-    verify_composition(
-        &modules,
-        bilibi_domains::MODULES,
-        bilibi_extensions::MODULES,
-    )?;
+    bilibi_web::verify_composition(&db).await?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     let mut services = Services::default();

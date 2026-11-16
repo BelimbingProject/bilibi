@@ -73,7 +73,9 @@ async fn main() -> Result<()> {
     )?;
     services.install(&modules)?;
     let settings = services.get::<Settings>("base/settings.store")?;
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let config = Config {
         policy_refresh: Duration::from_secs(1),
         ..Config::default()

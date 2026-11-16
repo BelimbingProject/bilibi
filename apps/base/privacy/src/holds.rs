@@ -72,7 +72,13 @@ impl HoldSource for Source {
     fn open<'a>(&'a self, tenant: i64) -> HandlerFuture<'a, Box<dyn HoldSession>> {
         Box::pin(async move {
             let key = tenant_key(tenant)?;
-            let client = self.db.get().await?;
+            let client = self
+                .db
+                .get_detached(
+                    "holds the shared hold guard in an open transaction while the erasure it \
+                     protects runs on other connections; one per running erasure",
+                )
+                .await?;
             client.batch_execute("BEGIN").await?;
             let session = Session {
                 client: Some(client),
@@ -91,11 +97,11 @@ impl HoldSource for Source {
 }
 /// A read-only transaction holding the shared guard.
 struct Session {
-    client: Option<deadpool_postgres::Object>,
+    client: Option<bilibi_database::Connection>,
     tenant: i64,
 }
 impl Session {
-    fn client(&self) -> Result<&deadpool_postgres::Object> {
+    fn client(&self) -> Result<&bilibi_database::Connection> {
         self.client.as_ref().ok_or(Error::Internal)
     }
 }
@@ -147,7 +153,7 @@ impl Drop for Session {
     /// back to the pool mid-transaction: closing it ends the guard.
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
-            drop(deadpool_postgres::Object::take(client));
+            drop(bilibi_database::Connection::take(client));
         }
     }
 }

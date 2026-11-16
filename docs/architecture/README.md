@@ -87,7 +87,7 @@ When the program starts, every module hands in a description of itself and the t
 | `Contribution` | same | Typed, validated entries for a consumer: routes, embeds, downloads, seeds, menu, settings, vocabulary, grid tables, ports, agent operations |
 | Boot validation | `Services::install` | Rejects missing, duplicate, upward and cyclic dependencies, duplicate migrations, unknown consumers and wrong payload types |
 | Discovery script | `scripts/discover-modules.py` | Generates the four composition manifests before Cargo resolves. `--check` runs in CI |
-| Mount check | `bilibi.container.toml` | A mounted Domain or Extension declares `id` and `layer`. `bilibi-web` refuses a descriptor that differs from the mounted crates |
+| Mount check | `bilibi.container.toml` | Declares the mounted container; the [composition contract](../../apps/base/module_registry/README.md) defines required declarations and validation |
 
 Two more things keep this safe:
 

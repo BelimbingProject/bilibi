@@ -104,7 +104,9 @@ async fn main() -> DbResult<()> {
     let integration = services.get::<Integration>(SERVICE)?;
     let schedule = services.get::<Schedule>("base/schedule.store")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
 
     // Fixture: tenant 1 is the operator; user 4 is its grant_all admin. Tenant
     // 2's manager (user 5) may list only; tenant 1's viewer (user 2) nothing.

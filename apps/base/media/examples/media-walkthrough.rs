@@ -78,7 +78,9 @@ async fn main() -> DbResult<()> {
     let settings = services.get::<Settings>("base/settings.store")?;
     let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
     let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let actor = authentication
         .authenticate(&**client, 1, 1, "walkthrough".into())
         .await?;

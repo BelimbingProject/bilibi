@@ -102,7 +102,10 @@ impl Person<'_> {
             .app
             .services
             .get::<Registry>("base/agent_api.registry")?;
-        let client = self.db.get().await?;
+        let client = self
+            .db
+            .get_detached("the walkthrough's own checking connection")
+            .await?;
         Ok(registry.call(&**client, &self.scope, key, &input).await?["result"].clone())
     }
     async fn run(&self, id: i64) -> Result<Run, Failure> {

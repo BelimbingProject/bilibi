@@ -70,7 +70,9 @@ async fn main() -> Result<(), Failure> {
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
     let proofs = app.services.get::<PartyProofs>("base/tenancy.parties")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let role = relationship_role_by_code(&**client, &manager, "customer")
         .await?
         .ok_or("customer role missing")?;
@@ -511,7 +513,9 @@ async fn main() -> Result<(), Failure> {
         code: Some(format!("match-{stamp}")),
         ..new.clone()
     };
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let preview = preview_create(&**client, &manager, &matching)
         .await?
         .map_err(|errors| format!("persistent preview: {errors:?}"))?;

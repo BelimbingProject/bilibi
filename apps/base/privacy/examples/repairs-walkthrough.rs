@@ -479,7 +479,9 @@ async fn main() -> Result<()> {
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
     let settings = app.services.get::<Settings>("base/settings.store")?;
-    let mut client = db.get().await?;
+    let mut client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     erasure_approval::publish_rules(&app, &mut client, &admin.scope, 1).await?;
     {
         let mut tx = boundary
@@ -877,7 +879,9 @@ async fn main() -> Result<()> {
     )?;
 
     println!("== #598: a hold placed while an erasure holds the guard gives up with try again");
-    let guard = db.get().await?;
+    let guard = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     guard
         .batch_execute("BEGIN; SELECT pg_advisory_xact_lock_shared(841330, 1)")
         .await?;

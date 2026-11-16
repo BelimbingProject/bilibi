@@ -332,7 +332,9 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     );
     println!("ok: rollback removes Person and audit effects, publishes nothing, restores policy; pooled convenience retained");
     db.resize(2);
-    let client = db.get().await?;
+    let client = db
+        .get_detached("the walkthrough's own checking connection")
+        .await?;
     let value = registry
         .call(
             &**client,

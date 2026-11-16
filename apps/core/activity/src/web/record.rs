@@ -1184,7 +1184,14 @@ impl Detail {
         })
     }
 
-    async fn related(&self, scope: &Scope, a: &Activity, editable: bool) -> Result<Html> {
+    async fn related(
+        &self,
+        scope: &Scope,
+        words: &bilibi_grid::RecordWords,
+        a: &Activity,
+        editable: bool,
+    ) -> Result<Html> {
+        let label = words.field("related_id", "Related to");
         let resolved: Option<Resolved> = match &a.related {
             Some(r) => self
                 .pages
@@ -1197,7 +1204,7 @@ impl Detail {
         };
         let mut body = render(SectionHeading {
             id: "activity-related-heading",
-            title: "Related to",
+            title: label,
             description: if a.related.is_none() {
                 "This activity is not about a record."
             } else {
@@ -1220,7 +1227,7 @@ impl Detail {
                 "activity-related",
                 "related",
                 "record",
-                "Related to",
+                label,
                 &self.query,
                 &self.pages.records.picker_hits(&self.hits),
                 selected
@@ -1726,7 +1733,7 @@ impl Detail {
         })?);
         let guests = self.pages.activities.guests(scope, self.id).await?;
         body.push(&self.overlaps(scope, &clock, &a, &guests).await?);
-        body.push(&self.related(scope, &a, editable).await?);
+        body.push(&self.related(scope, &words, &a, editable).await?);
         let emails = self.pages.activities.guest_emails(scope, &guests).await?;
         // An address guest nobody in People has: the panel offers to create them.
         let mut creatable = std::collections::HashSet::new();

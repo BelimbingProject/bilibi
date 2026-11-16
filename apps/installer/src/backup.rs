@@ -3,7 +3,7 @@
 //! for a release that fails its check after the database changed shape.
 //! The connection details go to the tools through the `PG*` environment,
 //! never as an argument another user could read in the process list.
-use crate::jobs;
+use crate::{composition, jobs};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -99,8 +99,9 @@ pub async fn restore(
     dump: &Path,
     since: &str,
     history_file: &Path,
+    target: Option<&Path>,
 ) -> Result<Restored, String> {
-    let outcome = replace(client, pg, dump, since, history_file).await;
+    let outcome = replace(client, pg, dump, since, history_file, target).await;
     let Err(why) = &outcome else {
         return outcome;
     };
@@ -121,6 +122,7 @@ async fn replace(
     dump: &Path,
     since: &str,
     history_file: &Path,
+    target: Option<&Path>,
 ) -> Result<Restored, String> {
     if restored(history_file) {
         return Ok(Restored {
@@ -134,16 +136,20 @@ async fn replace(
     let saved = match read_saved(history_file) {
         Some((_, saved)) => saved,
         None => {
-            let saved = jobs::history(client, since).await.map_err(|error| {
+            let mut saved = jobs::history(client, since).await.map_err(|error| {
                 format!(
                     "could not read the software history: {}",
                     jobs::short(&error)
                 )
             })?;
+            let target = target.ok_or("The restore has no target release composition.")?;
+            saved["target_composition"] = json!(composition::status(target)?);
+            validate_restore(&saved)?;
             write_saved(history_file, dump, &saved)?;
             saved
         }
     };
+    validate_restore(&saved)?;
     clear(client).await?;
     let out = pg
         .command("pg_restore")
@@ -179,6 +185,24 @@ async fn replace(
     jobs::unsettle_unrecorded(client).await;
     let _ = fs::rename(history_file, restored_name(history_file));
     Ok(Restored { carried, problems })
+}
+fn validate_restore(saved: &Value) -> Result<(), String> {
+    let rows = saved["base_settings"]["rows"]
+        .as_array()
+        .ok_or("The restore record has no saved installation policy; restore refused.")?;
+    let mode = match rows.as_slice() {
+        [] => "shared",
+        [row] => row["value"]
+            .as_str()
+            .ok_or("The saved installation policy is invalid.")?,
+        _ => return Err("The saved installation policy is ambiguous.".into()),
+    };
+    let status = saved["target_composition"]
+        .as_str()
+        .ok_or("The restore record has no target composition; restore refused.")?;
+    composition::admit(status, mode)
+        .map(|_| ())
+        .map_err(|why| format!("Restore refused: {why}"))
 }
 async fn clear(client: &impl GenericClient) -> Result<(), String> {
     client

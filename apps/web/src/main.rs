@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<()> {
-    bilibi_web::verify_composition()?;
+    bilibi_web::verify_descriptors()?;
     // What this program is made of needs no database (docs/versions.md).
     if std::env::args().nth(1).as_deref() == Some("status") {
         print!("{}", bilibi_web::status());
@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
     }
     let url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
     let db = pool(&url)?;
+    bilibi_web::verify_composition(&db).await?;
     match std::env::args().nth(1).as_deref() {
         Some("migrate") => {
             let migrated = bilibi_web::migrate(&db).await?;
@@ -142,6 +143,19 @@ async fn main() -> Result<()> {
                 std::env::var("APP_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
             let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
             let mut app = bilibi_web::App::new(db, &origin)?;
+            match app
+                .services
+                .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
+                .validate_composition()
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::Invalid) => {
+                    eprintln!("Startup refused: this Shared service release contains a customer code Extension. Install a code-free release, or have the installation owner switch an isolated installation before composing customer code.");
+                    return Err(Error::Invalid);
+                }
+                Err(error) => return Err(error),
+            }
             match app.secure_origin().await {
                 Ok(true) => {}
                 Ok(false) => {

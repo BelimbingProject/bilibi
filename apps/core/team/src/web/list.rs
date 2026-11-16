@@ -110,7 +110,8 @@ pub(super) fn view(state: &State) -> Result<(Html, Vec<Html>, PageVariant)> {
                 &filters["search"],
                 "Search by name…",
             ),
-            ToolbarControl::select("team-kind", "kind", "Kind", &filters["kind"], kinds),
+            ToolbarControl::select("team-kind", "kind", "Kind", &filters["kind"], kinds)
+                .grid_field("teams.kind"),
             ToolbarControl::select(
                 "team-parent",
                 "parent",

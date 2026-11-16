@@ -3,6 +3,7 @@
 mod database_tables;
 mod info;
 mod inspector;
+mod installation_editor;
 mod instance;
 mod instance_editor;
 pub use instance_editor::{InstanceSettings, Instances, SERVICE};
@@ -24,8 +25,8 @@ use bilibi_ui::{
 use std::sync::Arc;
 
 pub use instance::{
-    valid_instance_name, Colour, Instance, Role, INSTANCE_COLOUR_KEY, INSTANCE_LABEL_KEY,
-    INSTANCE_MANAGE, INSTANCE_ROLE_KEY,
+    valid_instance_name, Colour, InstallationMode, Instance, Role, INSTALLATION_MODE_KEY,
+    INSTANCE_COLOUR_KEY, INSTANCE_LABEL_KEY, INSTANCE_MANAGE, INSTANCE_ROLE_KEY,
 };
 
 pub const INFO_VIEW: &str = "admin.system.info.view";
@@ -59,6 +60,7 @@ impl Page<Scope, Error> for Pages {
     fn title(&self, operation: &str) -> Option<&'static str> {
         Some(match operation {
             "instance" => "Instance settings",
+            "installation" => "Installation policy",
             "info" => "System Info",
             "localization" => "Language & Region",
             "inspector" => "Menu Inspector",
@@ -81,6 +83,12 @@ impl Page<Scope, Error> for Pages {
             let html = match request.operation {
                 "instance" => {
                     instance_editor::Editor::new(self.clone())
+                        .await?
+                        .body(scope)
+                        .await?
+                }
+                "installation" => {
+                    installation_editor::Editor::new(self.clone())
                         .await?
                         .body(scope)
                         .await?
@@ -116,6 +124,7 @@ impl Page<Scope, Error> for Pages {
             let scope = request.scope.ok_or(Error::Unauthorized)?;
             let state: Box<dyn LiveState<Scope, Error>> = match request.operation {
                 "instance" => Box::new(instance_editor::Editor::new(self.clone()).await?),
+                "installation" => Box::new(installation_editor::Editor::new(self.clone()).await?),
                 "localization" => {
                     self.authorize(scope, LOCALIZATION_MANAGE).await?;
                     Box::new(localization::Editor::new(self.clone()))
@@ -158,6 +167,7 @@ macro_rules! page {
     };
 }
 inventory::submit! { Contribution::new(ROUTES, "base/system.instance", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant, method: Method::Get, path: "/system/instance", service: "base/system.pages", operation: "instance", access: Access::OperatorCapability(INSTANCE_MANAGE), framed: true }) }
+inventory::submit! { Contribution::new(ROUTES, "base/system.installation", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant, method: Method::Get, path: "/system/installation", service: "base/system.pages", operation: "installation", access: Access::StepUp { operation: installation_editor::VIEW, inner: &Access::Owner }, framed: true }) }
 page!("info", "/system/info", INFO_VIEW);
 page!("localization", "/system/localization", LOCALIZATION_MANAGE);
 page!("inspector", "/system/menu-inspector", MENU_VIEW);
@@ -191,6 +201,18 @@ bilibi_menu::contribute!(
     .icon("database")
     .requires(bilibi_menu::Requirement::Owner)
     .order(10)
+);
+bilibi_menu::contribute!(
+    "base/system",
+    bilibi_menu::MenuItem::page(
+        "admin.system.installation",
+        "Installation policy",
+        "/system/installation"
+    )
+    .under("admin.system")
+    .icon("shield-check")
+    .requires(bilibi_menu::Requirement::Owner)
+    .order(4)
 );
 bilibi_menu::contribute!(
     "base/system",
@@ -235,6 +257,7 @@ inventory::submit! {
                 settings: services.get("base/settings.store")?,
                 boundary: services.get("base/database.mutations")?,
                 step_up: services.get(bilibi_step_up::SERVICE)?,
+                composition: services.get("bootstrap.composition")?,
             });
             instances.step_up.bind_enforcement(Arc::new(instance_editor::EnforcementPolicy { db: instances.db.clone(), settings: instances.settings.clone() }))?;
             Ok(instances)
