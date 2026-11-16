@@ -279,6 +279,14 @@ impl Reports {
         if saved.definition.oversight {
             return Err(ReportError::Refused("Oversight results cannot be scheduled or retained in the parent. Use a live download.".into()));
         }
+        // Hold the owner's last slot until the surrounding mutation commits.
+        tx.sql()
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('base-report-subscriptions-' || $1::text || ':' || $2::text, 0))",
+                &[&scope.tenant().to_string(), &scope.user().to_string()],
+            )
+            .await
+            .map_err(Error::from)?;
         let limit = self
             .setting(tx.sql(), scope, contributions::MAX_SUBSCRIPTIONS_KEY)
             .await? as i64;

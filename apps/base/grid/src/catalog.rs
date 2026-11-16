@@ -62,26 +62,31 @@ impl From<CatalogError> for Error {
     }
 }
 
-/// The statement shape a source was found to have: selected keys, never scope data.
-type Keys = Arc<Vec<String>>;
-fn keys_cache() -> &'static Mutex<HashMap<&'static str, Keys>> {
-    static CACHE: OnceLock<Mutex<HashMap<&'static str, Keys>>> = OnceLock::new();
+/// Static source descriptions contain selected keys and arity, never scope data.
+#[derive(Debug)]
+struct SourceDescription {
+    keys: Vec<String>,
+    parameters: usize,
+}
+type Description = Arc<SourceDescription>;
+type Descriptions = HashMap<(&'static str, bool), Description>;
+fn descriptions() -> &'static Mutex<Descriptions> {
+    static CACHE: OnceLock<Mutex<Descriptions>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
-/// The keys a static statement selects, read from the server's description of it
-/// (nothing runs) and kept for the process: the SQL text is static, so they
-/// cannot change. Every placeholder must be a bigint the grid can bind.
-async fn selected_keys(
+/// A static statement's shape, read from the server's description of it
+/// (nothing runs) and kept for the process: static SQL has a fixed shape. Every placeholder must be a bigint the grid can bind.
+async fn describe_source(
     client: &impl GenericClient,
     what: &str,
     source: &Source,
-) -> Result<Keys, CatalogError> {
-    let cache_key = source.sql;
-    if let Some(keys) = keys_cache()
+) -> Result<Description, CatalogError> {
+    let cache_key = (source.sql, source.tenant_scoped);
+    if let Some(keys) = descriptions()
         .lock()
         .ok()
-        .and_then(|c| c.get(cache_key).cloned())
+        .and_then(|c| c.get(&cache_key).cloned())
     {
         return Ok(keys);
     }
@@ -96,14 +101,15 @@ async fn selected_keys(
             "{what}: a tenant-scoped source takes bigint $1 (tenant) and optionally $2 (user); a global one none"
         )));
     }
-    let keys: Keys = Arc::new(
-        statement
+    let keys = Arc::new(SourceDescription {
+        keys: statement
             .columns()
             .iter()
             .map(|column| column.name().to_string())
             .collect(),
-    );
-    if let Ok(mut cache) = keys_cache().lock() {
+        parameters: statement.params().len(),
+    });
+    if let Ok(mut cache) = descriptions().lock() {
         cache.insert(cache_key, keys.clone());
     }
     Ok(keys)
@@ -272,8 +278,12 @@ impl Catalog {
             if !matches!(level, Some("rows" | "aggregates")) || (rows && level != Some("rows")) {
                 continue;
             }
-            let statement = client.prepare(table.source().sql).await?;
-            if !table.source().tenant_scoped || statement.params().len() != 1 {
+            if !table.source().tenant_scoped
+                || describe_source(client, table.id(), &table.source())
+                    .await?
+                    .parameters
+                    != 1
+            {
                 continue;
             }
             let withheld: BTreeSet<&str> = rule["withheld"]
@@ -316,7 +326,7 @@ impl Catalog {
                     } => table.field(from_field).is_some() && target.field(to_field).is_some(),
                     Join::Edge(source) => {
                         source.tenant_scoped
-                            && client.prepare(source.sql).await?.params().len() == 1
+                            && describe_source(client, link.id(), &source).await?.parameters == 1
                     }
                 };
                 if safe {
@@ -373,9 +383,9 @@ impl Catalog {
     async fn verify_sources(&self, client: &impl GenericClient) -> Result<(), CatalogError> {
         for table in self.tables.values() {
             let what = format!("table {} from {}", table.id(), table.owner);
-            let keys = selected_keys(client, &what, &table.source()).await?;
+            let keys = describe_source(client, &what, &table.source()).await?;
             for field in table.fields() {
-                if !keys.iter().any(|key| key == field.source_key()) {
+                if !keys.keys.iter().any(|key| key == field.source_key()) {
                     return Err(CatalogError::Misdeclared(format!(
                         "{what}: field {} names no key its source selects; it selects {keys:?}",
                         field.id
@@ -386,10 +396,10 @@ impl Catalog {
                 if let Join::Edge(source) = link.decl.join {
                     {
                         let what = format!("link {}.{} from {}", table.id(), link.id(), link.owner);
-                        let keys = selected_keys(client, &what, &source).await?;
+                        let keys = describe_source(client, &what, &source).await?;
                         if !["from_key", "to_key"]
                             .iter()
-                            .all(|name| keys.iter().any(|key| key == name))
+                            .all(|name| keys.keys.iter().any(|key| key == name))
                         {
                             return Err(CatalogError::Misdeclared(format!(
                                 "{what}: an edge selects from_key and to_key; it selects {keys:?}"

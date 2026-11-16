@@ -530,7 +530,11 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    offsets: BTreeMap::new(),
+                    pages: proof
+                        .children()
+                        .iter()
+                        .map(|child| (child.tenant(), (0, 1)))
+                        .collect(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {
