@@ -33,6 +33,8 @@ const DELIVERY: &str = "base_report_delivery";
 const MAX_RECIPIENTS: usize = 500;
 /// Due subscriptions and pending deliveries one sweep takes per tenant.
 const BATCH: i64 = 100;
+/// Days a finished delivery is kept before the sweep deletes it.
+const KEEP_DELIVERY_DAYS: i32 = 90;
 
 type Outcome<T> = Result<T, ReportError>;
 
@@ -258,11 +260,11 @@ impl Reports {
                 )])));
             }
         }
-        if !plan.roles.is_empty() {
+        let mut roles = plan.roles.clone();
+        roles.sort_unstable();
+        roles.dedup();
+        if !roles.is_empty() {
             authorize(tx.sql(), scope, crate::SHARE).await?;
-            let mut roles = plan.roles.clone();
-            roles.sort_unstable();
-            roles.dedup();
             if store::known_roles(tx.sql(), scope.tenant(), &roles).await? != roles {
                 return Err(ReportError::Invalid(std::collections::BTreeMap::from([(
                     "roles".to_owned(),
@@ -321,7 +323,7 @@ impl Reports {
                         .get(0);
                     sql.execute(
                         "INSERT INTO base_report_subscription_roles(tenant_id,subscription_id,role_id) SELECT $1,$2,role FROM unnest($3::bigint[]) role",
-                        &[&tenant, &id, &plan.roles],
+                        &[&tenant, &id, &roles],
                     )
                     .await?;
                     sql.execute(
@@ -471,11 +473,44 @@ impl Reports {
                 return JobOutcome::Retry("sweep_failed");
             }
             self.queue_pending(tenant).await;
+            if let Err(error) = self.prune(tenant).await {
+                eprintln!(
+                    "reports: pruning finished deliveries of tenant {tenant} stopped: {error}"
+                );
+            }
             if let Err(error) = self.reconcile(tenant).await {
                 eprintln!("reports: delivery reconciliation of tenant {tenant} stopped: {error}");
             }
         }
         JobOutcome::Completed
+    }
+
+    /// Deletes finished deliveries older than `KEEP_DELIVERY_DAYS`, a batch
+    /// per sweep (the audit trail keeps their history), so the table does not
+    /// grow with every run.
+    async fn prune(&self, tenant: i64) -> Result<(), Error> {
+        let mut client = self.db.get().await?;
+        let mut tx = self
+            .mutations
+            .begin(&mut client, sweep_context(tenant, "reports.delivery.prune"))
+            .await?;
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let gone = sql
+                    .query(
+                        "DELETE FROM base_report_deliveries WHERE tenant_id=$1 AND id IN (SELECT id FROM base_report_deliveries WHERE tenant_id=$1 AND state IN ('sent','skipped','cancelled') AND finished_at < now() - make_interval(days => $2) ORDER BY id LIMIT $3) RETURNING id, state",
+                        &[&tenant, &KEEP_DELIVERY_DAYS, &(BATCH * 5)],
+                    )
+                    .await?;
+                let changes = gone
+                    .iter()
+                    .map(|row| Change { kind: DELIVERY.into(), id: row.get(0), old: json!({"state": row.get::<_, String>(1)}), new: Value::Null })
+                    .collect();
+                Ok(((), changes))
+            })
+        })
+        .await?;
+        tx.commit().await
     }
 
     /// Closes each queued delivery whose job Queue has ended without the
@@ -545,13 +580,29 @@ impl Reports {
         let due = tx
             .sql()
             .query(
-                "SELECT id, owner_id, include_owner, frequency, at_minute, weekday, monthday, timezone, format, skip_empty, next_run_at::text FROM base_report_subscriptions WHERE tenant_id=$1 AND NOT paused AND next_run_at <= now() ORDER BY next_run_at LIMIT $2 FOR UPDATE SKIP LOCKED",
+                "SELECT id, owner_id, include_owner, frequency, at_minute, weekday, monthday, timezone, format, skip_empty, next_run_at::text, company_id FROM base_report_subscriptions WHERE tenant_id=$1 AND NOT paused AND next_run_at <= now() ORDER BY next_run_at LIMIT $2 FOR UPDATE SKIP LOCKED",
                 &[&tenant, &BATCH],
             )
             .await?;
         for row in due {
             let id: i64 = row.get(0);
             let owner: i64 = row.get(1);
+            if !self.owner_may_schedule(tenant, owner, row.get(11)).await? {
+                // The owner lost the account, the desk or `reports.schedule`,
+                // so cannot pause it themselves: pause it here.
+                tx.mutate(move |sql| {
+                    Box::pin(async move {
+                        sql.execute(
+                            "UPDATE base_report_subscriptions SET paused=true, version=version+1 WHERE tenant_id=$1 AND id=$2",
+                            &[&tenant, &id],
+                        )
+                        .await?;
+                        Ok(((), vec![Change { kind: KIND.into(), id, old: json!({"paused": false}), new: json!({"paused": true, "reason": "owner_lost_access"}) }]))
+                    })
+                })
+                .await?;
+                continue;
+            }
             let plan = Plan {
                 frequency: Frequency::from_key(row.get(3)).unwrap_or(Frequency::Daily),
                 at_minute: row.get(4),
@@ -575,7 +626,11 @@ impl Reports {
             let include_owner = plan.include_owner;
             tx.mutate(move |sql| {
                 Box::pin(async move {
-                    let mut recipients: Vec<i64> = sql
+                    let mut recipients: Vec<i64> = Vec::new();
+                    if include_owner {
+                        recipients.push(owner);
+                    }
+                    let others: Vec<i64> = sql
                         .query(
                             "SELECT user_id FROM (SELECT p.user_id FROM base_report_subscription_roles r JOIN effective_principal_roles p ON p.company_id IS NULL AND p.tenant_id=r.tenant_id AND p.role_id=r.role_id WHERE r.tenant_id=$1 AND r.subscription_id=$2 UNION SELECT q.user_id FROM base_report_subscription_people q WHERE q.tenant_id=$1 AND q.subscription_id=$2) x ORDER BY 1 LIMIT $3",
                             &[&tenant, &id, &(MAX_RECIPIENTS as i64)],
@@ -584,9 +639,7 @@ impl Reports {
                         .iter()
                         .map(|r| r.get(0))
                         .collect();
-                    if include_owner && !recipients.contains(&owner) {
-                        recipients.push(owner);
-                    }
+                    recipients.extend(others.into_iter().filter(|r| !(include_owner && *r == owner)));
                     recipients.truncate(MAX_RECIPIENTS);
                     let created = sql
                         .query(
@@ -613,6 +666,31 @@ impl Reports {
             .await?;
         }
         tx.commit().await
+    }
+
+    /// Whether the owner still has an active account, a desk in the
+    /// subscription's workplace and `reports.schedule`.
+    async fn owner_may_schedule(
+        &self,
+        tenant: i64,
+        owner: i64,
+        company: i64,
+    ) -> Result<bool, Error> {
+        let client = self.db.get().await?;
+        let scope = match self
+            .authentication
+            .authenticate_job(&**client, tenant, owner, Some(company))
+            .await
+        {
+            Ok(scope) => scope,
+            Err(Error::Unauthorized | Error::Forbidden | Error::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match bilibi_authz::authorize_key(&**client, &scope, SCHEDULE).await {
+            Ok(()) => Ok(true),
+            Err(Error::Forbidden) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Queues each pending delivery as its recipient. A recipient whose

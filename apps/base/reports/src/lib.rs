@@ -46,7 +46,7 @@ const PREPARER: &str = "base/reports.preparer";
 const EXPORT_ENDED: &str = "base/reports.export_ended";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 7] = [
+const MIGRATIONS: [(&str, &str); 8] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -74,6 +74,10 @@ const MIGRATIONS: [(&str, &str); 7] = [
     (
         "base-reports-007-subscription-people",
         include_str!("../migrations/007-subscription-people.sql"),
+    ),
+    (
+        "base-reports-008-delivery-sweep",
+        include_str!("../migrations/008-delivery-sweep.sql"),
     ),
 ];
 const KIND: &str = "base_report";
