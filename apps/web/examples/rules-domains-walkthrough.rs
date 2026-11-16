@@ -278,6 +278,63 @@ async fn main() -> Result<()> {
         let mut draft = draft.clone();
         draft["name"] = json!(name);
         let rule = write(&plans, &admin, "base.rules.draft", draft).await?;
+        if rule_ids.is_empty() {
+            let client = db.get().await?;
+            check(
+                bilibi_authz::decide(&**client, &admin, bilibi_activity::MANAGE)
+                    .await?
+                    .allowed,
+                "the normal approver may manage activities",
+            )?;
+            drop(client);
+            grants
+                .set_direct(
+                    &admin,
+                    admin.user(),
+                    bilibi_activity::MANAGE,
+                    Some(Direct::Deny),
+                )
+                .await?;
+            let client = db.get().await?;
+            for key in [read, manage, "admin.rules.approve"] {
+                check(
+                    bilibi_authz::decide(&**client, &admin, key).await?.allowed,
+                    "the restricted approver retains Domain and Rules permissions",
+                )?;
+            }
+            check(
+                !bilibi_authz::decide(&**client, &admin, bilibi_activity::MANAGE)
+                    .await?
+                    .allowed,
+                "the direct deny removes human activity management",
+            )?;
+            drop(client);
+            check(
+                write(
+                    &plans,
+                    &admin,
+                    "base.rules.approve",
+                    json!({"rule_id":rule["rule_id"],"version":rule["version"]}),
+                )
+                .await
+                .is_err(),
+                "approval refuses a human denied the nested activity permission",
+            )?;
+            let inactive: bool = db
+                .get()
+                .await?
+                .query_one(
+                    "SELECT active_version_id IS NULL FROM base_rules WHERE tenant_id=1 AND id=$1",
+                    &[&rule["rule_id"].as_i64().ok_or(Error::Invalid)?],
+                )
+                .await?
+                .get(0);
+            check(inactive, "refused approval leaves the draft inactive")?;
+            grants
+                .set_direct(&admin, admin.user(), bilibi_activity::MANAGE, None)
+                .await?;
+        }
+
         write(
             &plans,
             &admin,
@@ -285,6 +342,62 @@ async fn main() -> Result<()> {
             json!({"rule_id":rule["rule_id"],"version":rule["version"]}),
         )
         .await?;
+        if rule_ids.is_empty() {
+            write(
+                &plans,
+                &admin,
+                "base.rules.switch",
+                json!({"rule_id":rule["rule_id"],"enabled":false}),
+            )
+            .await?;
+            grants
+                .set_direct(
+                    &admin,
+                    admin.user(),
+                    bilibi_activity::MANAGE,
+                    Some(Direct::Deny),
+                )
+                .await?;
+            check(
+                write(
+                    &plans,
+                    &admin,
+                    "base.rules.switch",
+                    json!({"rule_id":rule["rule_id"],"enabled":true}),
+                )
+                .await
+                .is_err(),
+                "re-enabling refuses a human denied the nested activity permission",
+            )?;
+            let disabled: bool = db
+                .get()
+                .await?
+                .query_one(
+                    "SELECT disabled_at IS NOT NULL FROM base_rules WHERE tenant_id=1 AND id=$1",
+                    &[&rule["rule_id"].as_i64().ok_or(Error::Invalid)?],
+                )
+                .await?
+                .get(0);
+            check(disabled, "refused re-enabling leaves the rule off")?;
+            grants
+                .set_direct(&admin, admin.user(), bilibi_activity::MANAGE, None)
+                .await?;
+            write(
+                &plans,
+                &admin,
+                "base.rules.switch",
+                json!({"rule_id":rule["rule_id"],"enabled":true}),
+            )
+            .await?;
+            let enabled: bool = db.get().await?.query_one(
+                "SELECT active_version_id IS NOT NULL AND disabled_at IS NULL FROM base_rules WHERE tenant_id=1 AND id=$1",
+                &[&rule["rule_id"].as_i64().ok_or(Error::Invalid)?],
+            ).await?.get(0);
+            check(
+                enabled,
+                "the normally authorized human approves and re-enables the rule",
+            )?;
+        }
         rule_ids.push(rule["rule_id"].as_i64().ok_or(Error::Invalid)?);
     }
     if let Some(id) = draft_order {

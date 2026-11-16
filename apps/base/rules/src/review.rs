@@ -115,7 +115,7 @@ impl Rules {
         let actions: Option<Vec<Value>> = definition.actions.iter().map(|call| {
             let action = self.action(&call.operation)?;
             Some(json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
-                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability}))
+                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities}))
         }).collect();
         Some(digest(
             &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
@@ -511,7 +511,10 @@ impl Rules {
                 .actions
                 .iter()
                 .filter_map(|a| self.action(&a.operation))
-                .map(|a| a.capability),
+                .flat_map(|a| {
+                    std::iter::once(a.capability)
+                        .chain(a.definition.approval_capabilities.iter().copied())
+                }),
         );
         for key in needed {
             if !bilibi_authz::decide(client, scope, key).await?.allowed {

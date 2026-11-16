@@ -27,7 +27,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | Step | Contract | Capability | What it checks |
 | --- | --- | --- | --- |
 | Draft | `base.rules.draft` | `admin.rules.manage` | Installed trigger; fields the drafter may read, values of their type; installed actions on the trigger's record with inputs their contract accepts; examples come out as stated |
-| Approve | `base.rules.approve` | `admin.rules.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds All reach for the trigger table, every table its conditions walk and every action's capability; no condition field is restricted or masked for the `rules` principal; its actions close no cycle in the active rules' declared events; the tenant's limits hold |
+| Approve | `base.rules.approve` | `admin.rules.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds All reach for the trigger table, every table its conditions walk and every action's capability and declared human prerequisites; no condition field is restricted or masked for the `rules` principal; its actions close no cycle in the active rules' declared events; the tenant's limits hold |
 | Switch | `base.rules.switch` | `admin.rules.approve` | On again re-runs the approval checks on the running version |
 
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
@@ -99,7 +99,7 @@ inventory::submit! { Contribution::new(bilibi_rules::TRIGGERS, CASE_OPENED, prov
     on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case", logical_event: None, version: "version",
 }) }
 inventory::submit! { Contribution::new(bilibi_rules::ACTIONS, "cx.cases.route", provenance!(), &bilibi_rules::Action {
-    title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED],
+    title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED], approval_capabilities: &[],
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::job::PRINCIPAL_WRITES, "cx.cases.route", provenance!(), &PrincipalWrite { principals: &["rules"] }) }
 inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rules:cx/cases", provenance!(), &OfferedCapabilities {
@@ -108,6 +108,8 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rule
 ```
 
 Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
+
+`Action::approval_capabilities` declares additional capabilities a human needs to perform the action, including nested writes that use a different permission for the principal. Approval and re-enabling require the operation's own capability and every prerequisite with All reach; direct denies win. Boot checks the keys against the Authz vocabulary, and the approval fingerprint includes the declaration. This adds no principal bounds or consent: the executor and owner still check the principal's own permissions live. Use `&[]` when the operation capability suffices. Shared `core/activity::FollowUp` actions declare `approval_capabilities: &[bilibi_activity::MANAGE]` because a person needs activity management while the principal needs system task creation.
 
 `Rules::action_identity(client, scope)` returns the executing rule version, action position and captured logical event key as an opaque identity, only inside a Rules action transaction under the `rules` principal. An owner may combine it with its source kind and ID to deduplicate multipart events without merging independent rules or manual requests. This identity grants no authority; owner checks still apply.
 

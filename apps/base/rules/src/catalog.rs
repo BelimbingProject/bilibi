@@ -53,6 +53,7 @@ pub struct Action {
     /// The events its commit may record, so an approval can refuse a rule
     /// that would close a cycle through active rules.
     pub records: &'static [&'static str],
+    pub approval_capabilities: &'static [&'static str],
 }
 
 /// Contract owners never offered: an action that grants access, changes
@@ -190,6 +191,14 @@ impl Offers {
                         "the contract does not admit the rules principal's jobs (PRINCIPAL_WRITES)",
                     )
                 })?;
+            for key in action.approval_capabilities {
+                if !vocabulary.capabilities.contains_key(key) {
+                    return Err(refuse(
+                        entry,
+                        format!("undeclared approval capability {key}"),
+                    ));
+                }
+            }
             let op = registered.definition;
             if !bounds.contains(&op.capability) {
                 return Err(refuse(

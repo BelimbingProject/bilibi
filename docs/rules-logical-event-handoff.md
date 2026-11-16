@@ -26,6 +26,12 @@ Every processing stage waits for all expected deliveries, successful terminal ru
 
 These checks are implemented; this review does not claim they have run. The Test phase executes the mounted walkthroughs and records their results.
 
+## Required action adaptation
+
+All three companion follow-up `Action` initializers must add `approval_capabilities: &[bilibi_activity::MANAGE]`: Commerce `sales/src/follow_up.rs`, Supply Chain `purchasing/src/follow_up.rs`, and People `claims/src/follow_up.rs`. The executor owns these companion edits. This declaration is independent of `OfferedCapabilities` for the rules principal; keep its system-create permission and tenant consent checks. Other Actions use `&[]` only when their operation capability covers every human permission. The Platform reference actions have been updated.
+
+The mounted walkthrough denies `core.activity.manage` directly on its otherwise authorized human approver. It requires approval to fail without activating the draft, then removes the deny and approves normally. It switches the rule off, reinstates the deny, requires re-enabling to fail without changing the switch, removes the deny, and re-enables normally. It changes no role permissions. Test must execute this proof after adapting the companions; review compilation alone is not runtime evidence.
+
 ## Upgrade notes for agents
 
-Add `Trigger::logical_event` as above. `Rules::action_identity` retains its signature but now includes the captured event identity as well as rule version and action position. Do not parse the opaque identity or combine it with a live revision. `FollowUp` and its operation input schema retain their signatures. Approval fingerprints include the new trigger binding, so existing approved definitions require review. New migrations remove obsolete activity deduplication bindings without converting them; runs without a captured event identity refuse. Development databases remain disposable.
+Add `Trigger::logical_event` and `Action::approval_capabilities` as above. `Rules::action_identity` retains its signature but now includes the captured event identity as well as rule version and action position. Do not parse the opaque identity or combine it with a live revision. `FollowUp` and its operation input schema retain their signatures. Approval fingerprints include the new trigger binding, so existing approved definitions require review. New migrations remove obsolete activity deduplication bindings without converting them; runs without a captured event identity refuse. Development databases remain disposable.
