@@ -11,7 +11,7 @@ use crate::{
     requests::{self, RequestKind, RequestView, EXPORT_KIND, STORE_KIND, SUBJECT},
     Privacy, AUDIT_MINIMUM,
 };
-use bilibi_audit::Minimums;
+use bilibi_audit::Minimum;
 use bilibi_database::{Change, Db, Error, MutationTransaction, Result};
 use bilibi_party_ids::PersonId;
 use bilibi_personal_data::{
@@ -214,17 +214,16 @@ async fn failed(
 }
 
 impl Privacy {
-    /// Every company's legal minimum for audit evidence in the tenant
-    /// (`privacy.audit.legal_minimum_days`): evidence of a company stays while
-    /// newer than its own minimum, whatever company filed the request, and
-    /// evidence of no company follows the strictest.
-    pub(crate) async fn evidence_minimums(
+    /// The tenant's legal minimum for audit evidence: the strictest company's
+    /// `privacy.audit.legal_minimum_days`. Audit evidence names no company,
+    /// so every row keeps the longest minimum any company of the tenant set.
+    pub(crate) async fn evidence_minimum(
         &self,
         client: &tokio_postgres::Client,
         scope: &Scope,
-    ) -> Result<Minimums> {
-        let mut entries = Vec::new();
-        for (company, value) in self
+    ) -> Result<Minimum> {
+        let mut strictest = None;
+        for (_, value) in self
             .settings
             .company_values(client, scope, AUDIT_MINIMUM)
             .await?
@@ -236,9 +235,9 @@ impl Privacy {
                 .as_i64()
                 .and_then(|days| i32::try_from(days).ok())
                 .ok_or(Error::Invalid)?;
-            entries.push((company, days));
+            strictest = strictest.max(Some(days));
         }
-        Minimums::new(entries)
+        Minimum::new(strictest)
     }
 }
 
@@ -248,11 +247,11 @@ pub(crate) async fn clear_evidence(
     tx: &MutationTransaction<'_>,
     grant: &Erasure,
     step: &mut Erased,
-    minimums: &Minimums,
+    minimum: &Minimum,
 ) -> Result<()> {
     for record in &step.records {
         let cleared =
-            bilibi_audit::erase_record(tx, grant, &record.kind, record.id, record.person, minimums)
+            bilibi_audit::erase_record(tx, grant, &record.kind, record.id, record.person, minimum)
                 .await?;
         if cleared.kept > 0 {
             step.kept.push(Kept {
@@ -377,7 +376,7 @@ async fn answer(
                 privacy
                     .issuer
                     .erasure(scope.tenant(), Cause::Request(id), Some(request.person));
-            let minimums = privacy.evidence_minimums(&client, scope).await?;
+            let minimum = privacy.evidence_minimum(&client, scope).await?;
             if state == "pending" {
                 let holds = Holds::acquire(scope, &grant).await?;
                 let mut tx = execution
@@ -397,7 +396,7 @@ async fn answer(
                         .handler
                         .erase(&mut tx, scope, &subject, &grant, &holds)
                         .await?;
-                    clear_evidence(&tx, &grant, &mut erased, &minimums).await?;
+                    clear_evidence(&tx, &grant, &mut erased, &minimum).await?;
                     let mut answer = Answer {
                         unconfirmed: left,
                         ..Answer::default()
@@ -421,7 +420,7 @@ async fn answer(
                 id,
                 key,
                 grant: &grant,
-                minimums: &minimums,
+                minimum: &minimum,
             };
             data.handler
                 .after_erase(&mut client, scope, &subject, &grant, &holds, &progress)
@@ -532,7 +531,7 @@ struct Steps<'a> {
     id: i64,
     key: &'static str,
     grant: &'a Erasure,
-    minimums: &'a Minimums,
+    minimum: &'a Minimum,
 }
 impl Progress for Steps<'_> {
     fn record<'a>(&'a self, mut step: Erased) -> HandlerFuture<'a, ()> {
@@ -542,7 +541,7 @@ impl Progress for Steps<'_> {
                 .execution
                 .begin(&mut client, "privacy.request.erase_step")
                 .await?;
-            clear_evidence(&tx, self.grant, &mut step, self.minimums).await?;
+            clear_evidence(&tx, self.grant, &mut step, self.minimum).await?;
             let mut answer = stored_answer(&tx, self.scope, self.id, self.key).await?;
             answer.add(&step);
             record_answer(&mut tx, self.scope, self.id, self.key, &answer, false).await?;
@@ -1126,7 +1125,7 @@ impl Privacy {
         &self,
         client: &mut tokio_postgres::Client,
         scope: &Scope,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<()> {
         let open: Vec<(i64, i64)> = client
             .query(
@@ -1140,7 +1139,7 @@ impl Privacy {
             .collect();
         let mut failed = false;
         for (resumption, request) in open {
-            let outcome = Box::pin(self.resume(client, scope, request, minimums)).await;
+            let outcome = Box::pin(self.resume(client, scope, request, minimum)).await;
             let (result, owed) = match &outcome {
                 Ok(answer) => (
                     serde_json::to_value(answer).map_err(|_| Error::Internal)?,
@@ -1191,7 +1190,7 @@ impl Privacy {
         client: &mut tokio_postgres::Client,
         scope: &Scope,
         id: i64,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<Answer> {
         let tenant = scope.tenant();
         let mut request = requests::load(&*client, tenant, id, false).await?;
@@ -1229,7 +1228,7 @@ impl Privacy {
                 .handler
                 .erase(&mut tx, scope, &subject, &grant, &holds)
                 .await?;
-            clear_evidence(&tx, &grant, &mut erased, minimums).await?;
+            clear_evidence(&tx, &grant, &mut erased, minimum).await?;
             count_erasure(&mut tx, tenant, id).await?;
             tx.commit().await?;
             holds.release().await?;
@@ -1239,7 +1238,7 @@ impl Privacy {
                 privacy: self,
                 scope,
                 grant: &grant,
-                minimums,
+                minimum,
                 answer: &answer,
             };
             data.handler
@@ -1312,7 +1311,7 @@ struct Resumed<'a> {
     privacy: &'a Privacy,
     scope: &'a Scope,
     grant: &'a Erasure,
-    minimums: &'a Minimums,
+    minimum: &'a Minimum,
     answer: &'a std::sync::Mutex<Answer>,
 }
 impl Progress for Resumed<'_> {
@@ -1327,7 +1326,7 @@ impl Progress for Resumed<'_> {
                     self.scope.mutation_context("privacy.request.resume"),
                 )
                 .await?;
-            clear_evidence(&tx, self.grant, &mut step, self.minimums).await?;
+            clear_evidence(&tx, self.grant, &mut step, self.minimum).await?;
             tx.commit().await?;
             self.answer.lock().map_err(|_| Error::Internal)?.add(&step);
             Ok(())

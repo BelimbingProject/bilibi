@@ -695,7 +695,7 @@ async fn main() -> Result<()> {
         "UPDATE base_audit_actions SET erased_at=now() WHERE event='walkthrough.retention.recent'",
     )
     .await?;
-    sql_refused(&client, "erase actions without an open sweep", "SELECT base_audit_erase_actions(1,999999,now()-interval '30 days',0,10,1,true,'{1}','user',4,'walkthrough')").await?;
+    sql_refused(&client, "erase actions without an open sweep", "SELECT base_audit_erase_actions(1,999999,now()-interval '30 days',0,10,'user',4,'walkthrough')").await?;
     let portal_result: bool = client.query_one("SELECT \
         (SELECT count(*)=208 FROM customer_invitations WHERE tenant_id=1 AND name='[erased]' AND email='[erased]' AND (accepted_at IS NOT NULL OR revoked_at IS NOT NULL)) \
         AND NOT EXISTS(SELECT 1 FROM customer_invitations WHERE id BETWEEN 45204 AND 45209 AND name='[erased]') \

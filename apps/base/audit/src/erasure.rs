@@ -22,32 +22,20 @@ pub struct Cleared {
     pub kept_until: Option<String>,
 }
 
-/// Legal minimums for audit evidence, in days, by owning company. A row of a
-/// listed company stays while newer than that company's minimum; a row of no
-/// company follows the strictest; a row of any other company has none.
-#[derive(Clone, Debug, Default)]
-pub struct Minimums {
-    companies: Vec<i64>,
-    days: Vec<i32>,
-}
-impl Minimums {
-    /// One entry per company that set a minimum (1–36,500 days).
-    pub fn new(entries: impl IntoIterator<Item = (i64, i32)>) -> Result<Self> {
-        let mut minimums = Self::default();
-        for (company, days) in entries {
-            if company <= 0
-                || !(1..=36_500).contains(&days)
-                || minimums.companies.contains(&company)
-            {
-                return Err(Error::Invalid);
-            }
-            minimums.companies.push(company);
-            minimums.days.push(days);
+/// The tenant's legal minimum for audit evidence, in days: evidence newer
+/// than it keeps its values after an erasure, and the sweep erases them once
+/// it has passed. No ledger row names a company (the owning company belongs
+/// to the record, which the mutation boundary does not know), so one minimum
+/// covers the tenant; the caller passes the strictest it holds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Minimum(Option<i32>);
+impl Minimum {
+    /// `None` keeps nothing; a minimum is 1–36,500 days.
+    pub fn new(days: Option<i32>) -> Result<Self> {
+        if days.is_some_and(|days| !(1..=36_500).contains(&days)) {
+            return Err(Error::Invalid);
         }
-        Ok(minimums)
-    }
-    fn strictest(&self) -> Option<i32> {
-        self.days.iter().copied().max()
+        Ok(Self(days))
     }
 }
 
@@ -82,7 +70,7 @@ pub async fn holds_values(tx: &MutationTransaction<'_>, kind: &str, id: i64) -> 
 
 /// Erases the declared personal fields of one record's evidence in the
 /// grant's tenant, in the caller's erasure transaction. Rows still within
-/// their company's legal minimum stay, and the sweep erases them once it has
+/// the legal minimum stay, and the sweep erases them once it has
 /// passed, unless the record or `person` is then held. A kind no store owner
 /// declared is `Invalid`; a kind whose database row (`base_personal_data_kinds`)
 /// disagrees with its code is `Internal`, and the database refuses the fields
@@ -93,7 +81,7 @@ pub async fn erase_record(
     kind: &str,
     id: i64,
     person: Option<i64>,
-    minimums: &Minimums,
+    minimum: &Minimum,
 ) -> Result<Cleared> {
     if id <= 0 || person.is_some_and(|p| p <= 0) {
         return Err(Error::Invalid);
@@ -133,7 +121,7 @@ pub async fn erase_record(
         .sql()
         .query_one(
             "SELECT erased,kept,to_char(kept_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
-             FROM base_audit_erase_values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+             FROM base_audit_erase_values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
             &[
                 &grant.tenant(),
                 &request,
@@ -143,9 +131,7 @@ pub async fn erase_record(
                 &id.to_string(),
                 &fields,
                 &declared.subject_identifier,
-                &minimums.companies,
-                &minimums.days,
-                &minimums.strictest(),
+                &minimum.0,
                 &attribution.actor_type,
                 &attribution.actor_id,
                 &attribution.trace_id,
@@ -200,13 +186,13 @@ pub async fn due_evidence(
 }
 
 /// The retention sweep's half: erases the named due deferrals for a sweep
-/// grant, with the current legal minimums (rows written since stay and open a
+/// grant, with the current legal minimum (rows written since stay and open a
 /// new deferral). Returns how many it closed.
 pub async fn erase_deferred(
     tx: &MutationTransaction<'_>,
     grant: &Erasure,
     deferrals: &[i64],
-    minimums: &Minimums,
+    minimum: &Minimum,
 ) -> Result<i32> {
     let Cause::Sweep(sweep) = grant.cause() else {
         return Err(Error::Forbidden);
@@ -218,14 +204,12 @@ pub async fn erase_deferred(
     Ok(tx
         .sql()
         .query_one(
-            "SELECT base_audit_erase_deferred($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            "SELECT base_audit_erase_deferred($1,$2,$3,$4,$5,$6,$7)",
             &[
                 &grant.tenant(),
                 &sweep,
                 &deferrals,
-                &minimums.companies,
-                &minimums.days,
-                &minimums.strictest(),
+                &minimum.0,
                 &attribution.actor_type,
                 &attribution.actor_id,
                 &attribution.trace_id,
@@ -249,9 +233,7 @@ pub struct ActionsErased {
 
 /// The action ledger's retention (sweep grants only): erases one batch of the
 /// grant's tenant's action rows older than `cutoff` (RFC 3339), above ID
-/// `after`, in ID order, at most `limit` (1-1000). `companies` is the company
-/// run that covers the rows: the company, whether it is the tenant's primary
-/// one (which also takes rows of no listed company) and every listed company.
+/// `after`, in ID order, at most `limit` (1-1000).
 /// A row loses its address, URL, browser and payload values; who acted, when,
 /// the event and the payload's keys stay, so the hash chain holds. A retained
 /// row (its bookmark, else the bit recorded with it) is passed over and
@@ -260,7 +242,6 @@ pub async fn erase_actions(
     tx: &MutationTransaction<'_>,
     grant: &Erasure,
     cutoff: &str,
-    companies: (i64, bool, &[i64]),
     after: i64,
     limit: i64,
 ) -> Result<ActionsErased> {
@@ -272,20 +253,16 @@ pub async fn erase_actions(
         return Err(Error::Invalid);
     }
     let attribution = Attribution::from_context(tx.context())?;
-    let (company, primary, listed) = companies;
     let row = tx
         .sql()
         .query_one(
-            "SELECT erased,kept,last_id FROM base_audit_erase_actions($1,$2,$3::text::timestamptz,$4,$5,$6,$7,$8,$9,$10,$11)",
+            "SELECT erased,kept,last_id FROM base_audit_erase_actions($1,$2,$3::text::timestamptz,$4,$5,$6,$7,$8)",
             &[
                 &grant.tenant(),
                 &sweep,
                 &cutoff,
                 &after,
                 &limit,
-                &company,
-                &primary,
-                &listed,
                 &attribution.actor_type,
                 &attribution.actor_id,
                 &attribution.trace_id,
