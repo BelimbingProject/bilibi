@@ -115,11 +115,11 @@ impl Rules {
         let actions: Option<Vec<Value>> = definition.actions.iter().map(|call| {
             let action = self.action(&call.operation)?;
             Some(json!({"key": action.key, "table": action.definition.table, "subject": action.definition.subject,
-                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability}))
+                "version": action.definition.version, "input": action.input, "records": action.definition.records, "capability": action.capability, "approval_capabilities": action.definition.approval_capabilities}))
         }).collect();
         Some(digest(
             &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
-            "subject": trigger.subject, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
+            "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
             "capability": root.capability(), "fields": fields?, "actions": actions?}),
             &Value::Null,
         ))
@@ -511,7 +511,10 @@ impl Rules {
                 .actions
                 .iter()
                 .filter_map(|a| self.action(&a.operation))
-                .map(|a| a.capability),
+                .flat_map(|a| {
+                    std::iter::once(a.capability)
+                        .chain(a.definition.approval_capabilities.iter().copied())
+                }),
         );
         for key in needed {
             if !bilibi_authz::decide(client, scope, key).await?.allowed {
