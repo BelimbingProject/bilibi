@@ -234,7 +234,7 @@ pub(crate) fn record_word(
         .unwrap_or_else(|| field.label.to_owned())
 }
 
-/// The words a record page shows for its table's record fields under one
+/// The words a record page shows for its table's Grid and record fields under one
 /// tenant's field labels (`base/labels`). A detail page, form or inline
 /// editor draws its labels with [`RecordWords::get`] instead of
 /// `field.label`, so a rename shows there as it does in lists and exports.
@@ -242,8 +242,8 @@ pub(crate) fn record_word(
 #[derive(Clone, Debug, Default)]
 pub struct RecordWords(std::collections::BTreeMap<&'static str, String>);
 impl RecordWords {
-    /// One read of the tenant's field labels, applied to the record fields of
-    /// `table`. A table that is not installed has no words of its own.
+    /// One read of the tenant's field labels, applied to visible Grid fields
+    /// and registered record-field paths of `table`. An uninstalled table has no words.
     pub async fn load(
         client: &impl tokio_postgres::GenericClient,
         scope: &bilibi_tenancy::Scope,
