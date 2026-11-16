@@ -8,7 +8,8 @@ pub const CUSTOM_IMPORTS: &str = "base/bulk_data.custom_imports";
 
 /// Opt an import type into the tenant's custom fields. Contribute under the
 /// same id as its `RecordType`, from the same owner. Both operations take a
-/// top-level array of `{key, value}` pairs; updates receive only mapped keys.
+/// top-level array of `{key, value, values}` pairs (`values` for several
+/// choices); updates receive only mapped keys.
 #[derive(Debug)]
 pub struct CustomImport {
     pub record_type: &'static str,
@@ -59,6 +60,8 @@ pub(crate) fn register(
                     && schema["items"]["type"] == "object"
                     && schema["items"]["properties"]["key"]["type"] == "string"
                     && schema["items"]["properties"]["value"]["type"] == "string"
+                    && schema["items"]["properties"]["values"]["type"] == "array"
+                    && schema["items"]["properties"]["values"]["items"]["type"] == "string"
             })
         };
         if !accepts(registered.definition.import.create, binding.create_field)
@@ -94,10 +97,13 @@ pub(crate) fn take(input: &mut Map<String, Value>) -> Vec<Value> {
         .filter(|name| name.starts_with("cf_"))
         .cloned()
         .collect();
+    // Several choices travel as `values`, every other kind as `value`: the
+    // agent dialect gives each property one type.
     names
         .into_iter()
-        .map(
-            |name| json!({"key": &name[3..], "value": input.remove(&name).expect("collected key")}),
-        )
+        .map(|name| match input.remove(&name).expect("collected key") {
+            Value::Array(values) => json!({"key": &name[3..], "values": values}),
+            value => json!({"key": &name[3..], "value": value}),
+        })
         .collect()
 }

@@ -512,6 +512,7 @@ pub struct Field {
     pub id: String,
     pub name: String,
     pub label: String,
+    pub field: String,
     pub value: String,
     /// The selected values of a `multiple` select.
     pub values: Vec<String>,
@@ -533,6 +534,14 @@ pub struct Field {
 }
 
 impl Field {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     /// A field whose id is its name, as a field outside a form namespace.
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
@@ -1254,6 +1263,7 @@ pub struct Combobox {
     pub id: String,
     pub name: String,
     pub label: String,
+    pub field: String,
     pub value: String,
     pub options: Vec<Choice>,
     pub placeholder: String,
@@ -1266,6 +1276,14 @@ pub struct Combobox {
 }
 
 impl Combobox {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1443,6 +1461,10 @@ pub struct MultiSelect {
     /// Allow chips to wrap; false keeps complete chips on one line with an ellipsis.
     pub wrap_chips: bool,
     pub remove_event: String,
+    /// Inside a record page's fact, which draws its label in the heading's
+    /// place: the heading keeps its space, unseen, and still names the
+    /// trigger through `aria-labelledby`.
+    pub in_fact: bool,
     pub attrs: Attrs,
 }
 
@@ -1470,12 +1492,21 @@ impl MultiSelect {
             chips: false,
             wrap_chips: false,
             remove_event: String::new(),
+            in_fact: false,
             attrs: Attrs::default(),
         }
     }
 
     pub fn in_form(form: &str, key: &str) -> Self {
         Self::new(format!("{form}_{key}"), format!("{form}[{key}]"))
+    }
+
+    /// The editor of a record page's fact (inside `InlineChoice`): the fact
+    /// shows the label where the heading sits, so the heading is read, not
+    /// drawn, and the chips show the choices.
+    pub fn in_fact(mut self) -> Self {
+        self.in_fact = true;
+        self
     }
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
@@ -1786,11 +1817,20 @@ impl Restricted {
 pub struct RestrictedField {
     pub id: String,
     pub label: String,
+    pub field: String,
     pub reason: String,
     pub wrapper_class: String,
 }
 
 impl RestrictedField {
+    pub fn grid_field(mut self, identity: impl Into<String>) -> Self {
+        self.field = identity.into();
+        self
+    }
+    pub fn label_text(&self) -> String {
+        crate::field_labels::field_label(&self.field, &self.label)
+    }
+
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),

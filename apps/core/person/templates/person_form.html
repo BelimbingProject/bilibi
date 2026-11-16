@@ -5,7 +5,7 @@
 <form id="person-form" data-event="validate" data-change data-submit-event="create" class="mt-4 space-y-4" novalidate>
   {{ summary }}
   {{ notice }}
-  {% for field in fields %}{% call forms::input(field=field) %}{% endcall %}{% endfor %}
+  {% for field in fields %}{{ field }}{% endfor %}
   {% for field in restricted %}{% call forms::restricted_field(field=field) %}{% endcall %}{% endfor %}
   {% if !duplicates.is_empty() %}<div id="person-duplicates" class="text-sm text-ink-muted"><p>Possible existing contacts. Open a record to check before creating another.</p><ul>{% for person in duplicates %}<li><a href="/contacts/{{ person.id.get() }}" class="text-link hover:underline">{{ person.name }}</a>{% if person.retired_at.is_some() %} (retired){% endif %}</li>{% endfor %}</ul></div>{% endif %}
   <div class="mt-6 flex justify-end gap-2">{{ cancel }}{{ submit }}</div>

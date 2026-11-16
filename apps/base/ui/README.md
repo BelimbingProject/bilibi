@@ -41,7 +41,7 @@ bilibi_ui::record_fields! { "core/person", pub(crate) mod fields {
 } }
 ```
 
-- Use `fields::EMAIL.fact(value)` on the record and `bilibi_grid::Field::record(fields::EMAIL)` in the Grid table. SQL source keys, protection and links stay in Grid.
+- `fields::EMAIL.fact(value)` supplies the module's default title; for tenant-aware record titles, follow [Grid's label rendering](../grid/README.md#shared-label-rendering). Use `bilibi_grid::Field::record(fields::EMAIL)` in the Grid table. SQL source keys, protection and links stay in Grid.
 - Use `fields::EMAIL.input(json!({"maxLength":254}))` for the corresponding operation property. Required fields, limits, null handling and record references stay with that operation.
 - Declare closed choices with `RecordFieldType::Enum` and `.choices(...)`, or an operator list with `RecordFieldType::String` and `.picklist("owner.list")`. An operation may narrow closed choices, but cannot introduce another choice.
 - Classify personal values with `PersonalDataClass`; `NonPersonal` means the owner reviewed the field. An absent class remains unknown, so adopting this vocabulary cannot enable oversight accidentally.
@@ -127,7 +127,7 @@ Theme and time-display saves use the shared flash UI through `feedback::local_fl
 - Match each field's `maxlength` to its owner's validation. Character limits are not byte limits: CJK commonly needs three UTF-8 bytes per character, and JSON escaping can need six bytes per UTF-16 code unit.
 - Budget the whole form: all field names, values, selected arrays, hidden values and transport metadata. Leave headroom below `bilibi_ui::LIVE_EVENT_LIMIT`; two 10,000-character fields fit even when every code unit needs escaping.
 - Existing Platform declarations, including Address's 10,000-character raw input, fit this budget. New repeating forms must bound their total content as well as each field. Use the shared file uploader for larger documents; never put file bytes into JSON.
-- **A field's text limit belongs to its owner; read posted text with the checked extractors.** `params::form_values_checked(payload, form, limit)` and `params::string_values_checked(payload, limit)` return `Result<_, params::TooLong>`: a string over `limit` characters is an error, not an empty field. Pass `params::FIELD_LIMIT` (1,024) unless the owner allows more (Address 10,000, a saved query 100,000). Refuse the event with `.map_err(Error::refused)?` (`bilibi_database::Error::Refused`, shown as its message, nothing cleared) and the browser keeps the draft; the owner's validation still reports each field's own, shorter limit on the field. `params::form_values` and `params::string_values` keep their old signatures and silently drop a string over 1 KiB; they are deprecated, so move to the checked ones. `PeriodFilter::event` is deprecated the same way; use `event_checked`. Code that reads `payload` keys directly keeps its own limits.
+- **A field's text limit belongs to its owner; read posted text with the checked extractors.** `params::form_values_checked(payload, form, limit)` and `params::string_values_checked(payload, limit)` return `Result<_, params::TooLong>`: a string over `limit` characters is an error, not an empty field. Pass `params::FIELD_LIMIT` (1,024) unless the owner allows more (Address 10,000, a saved query 100,000). Refuse the event with `.map_err(Error::refused)?` (`bilibi_database::Error::Refused`, shown as its message, nothing cleared) and the browser keeps the draft; the owner's validation still reports each field's own, shorter limit on the field. The unchecked `params::form_values` and `params::string_values` have been removed. For period controls, follow the [DateTime event contract](../datetime/README.md). Code that reads `payload` keys directly keeps its own limits.
 - Keep using `Form`, `Field` and the shared adapter. Forms, change events, hooks and mounted panels receive the same protection without a module-owned size check or script.
 
 The constants and refusal copy live in [`src/live_transport.rs`](src/live_transport.rs). [Live pages](../../../docs/live-pages.md#transport) defines the server's additional socket cap and reconnect behaviour.
@@ -233,7 +233,7 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 ## Record references
 
-`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md).
+`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`.
 
 ## File preview
 
@@ -260,3 +260,11 @@ See [`base/system`](../system/README.md) for Banner colour on Instance settings.
 `Softphone` renders a Domain-owned call projection: its last confirmed `CallPhase`, separate `PhoneHealth`, caller, action availability and an escaped `Html` screen-pop. Omit actions the actor cannot use; supply an unavailable reason for a temporarily disabled supported action. The shared control sends the enclosing page or panel its event with `action` and an opaque `version`. The owner binds the call in mounted state, checks the actor, current version and action again, and renders only an authoritative response. It owns transfer and conference inputs, provider I/O and the refusal text. Phone unavailability disables controls while preserving the last call phase and the rest of the page. On reconnect the owner reloads a scoped projection; event wakes are hints and must not be treated as ordered state.
 
 The disposable `softphone-walkthrough` web example is a fake source for manual browser verification; it is not registered by the production application. Its state and action controls exercise the live transport without a phone system.
+
+Several-choice inline editors preserve held code order and append new selections in tick order; opening and leaving an untouched editor sends no write. Contact and Company create forms preserve held order across redraws; selections added within one form event follow checkbox option order.
+
+## Tenant field labels
+
+The host scopes `FieldLabels` to each render; shared form controls and `ListColumns` apply the tenant word at that boundary. The context never survives a render or crosses tenants. UI has no dependency on Grid or the database, and a render without a tenant context uses the owner's default word.
+
+`BuiltinColumn`, `Field`, `Combobox` and `RestrictedField` accept `grid_field("table.field")`, keeping the field identity separate from the column slot, input name or DOM ID. `ListColumns::mount` and `projection` default to `list_id.column_id`; declare an explicit identity when those names differ from Grid. `RecordField::builtin` supplies its registered vocabulary identity, which [Grid resolves through the declared column path](../grid/README.md#shared-label-rendering). Composite display columns without a single Grid field keep their owner's label.

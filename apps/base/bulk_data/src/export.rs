@@ -188,7 +188,7 @@ impl ExportRun {
 
 /// The person's own export.
 pub(crate) async fn load(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: i64,
     lock: bool,
@@ -269,7 +269,7 @@ impl BulkData {
     /// capability and the Imports pages. Pages ask before showing Export.
     pub async fn may_export(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
     ) -> Result<bool> {
@@ -528,7 +528,7 @@ impl BulkData {
     /// The person's own export, marked as [`BulkData::mark`] says.
     pub async fn export(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         id: i64,
     ) -> Result<ExportRun> {
@@ -546,7 +546,7 @@ impl BulkData {
     /// every export given.
     async fn mark(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         runs: &mut [ExportRun],
     ) -> Result<()> {
@@ -591,7 +591,7 @@ impl BulkData {
     /// each export's table.
     async fn seeing(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         runs: &[ExportRun],
     ) -> Result<Seeing> {
@@ -932,7 +932,6 @@ impl BulkData {
     /// a gap. Edits that leave a record in the list do not count: the last
     /// read's versions are the snapshot, and a bulk update's version fence
     /// reports a record edited after it.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn read_list(
         &self,
         execution: &Execution,
@@ -1072,7 +1071,7 @@ impl BulkData {
     /// The person's newest exports, marked as their pages show them.
     pub async fn exports(
         &self,
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         limit: i64,
     ) -> Result<Vec<ExportRun>> {
@@ -1106,8 +1105,14 @@ fn shown(
     specs
         .iter()
         .map(|spec| {
-            let column = bilibi_grid::column::resolve(spec, all, &|id| installed.table(id))
+            let mut column = bilibi_grid::column::resolve(spec, all, &|id| installed.table(id))
                 .map_err(|_| spec.clone())?;
+            if let Some(word) = column
+                .field
+                .and_then(|field| catalog.field_name(column.table, field.id))
+            {
+                column.set_labels(Some(&word));
+            }
             let visible = seen.is_some_and(|root| catalog.resolve(root, spec).is_ok());
             Ok((column.label, visible))
         })

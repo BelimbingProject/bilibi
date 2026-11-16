@@ -110,18 +110,7 @@ impl PeriodFilter {
     }
 
     /// Handles one of this component's events; `None` is someone else's event.
-    ///
-    /// Deprecated: a posted value over 1 KiB is silently read as blank. Use
-    /// [`PeriodFilter::event_checked`], which refuses it.
-    pub fn event(&mut self, kind: &str, payload: &Value, clock: &Clock) -> Option<Outcome> {
-        self.handle(kind, payload, clock, |payload, form| {
-            Ok(params::form_values(payload, form))
-        })
-        .unwrap_or(None)
-    }
-
-    /// Like [`PeriodFilter::event`], but a posted value over the form limit is
-    /// refused, not read as blank.
+    /// A posted value over the form limit is refused, not read as blank.
     pub fn event_checked(
         &mut self,
         kind: &str,

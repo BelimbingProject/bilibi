@@ -62,26 +62,31 @@ impl From<CatalogError> for Error {
     }
 }
 
-/// The statement shape a source was found to have: selected keys, never scope data.
-type Keys = Arc<Vec<String>>;
-fn keys_cache() -> &'static Mutex<HashMap<&'static str, Keys>> {
-    static CACHE: OnceLock<Mutex<HashMap<&'static str, Keys>>> = OnceLock::new();
+/// Static source descriptions contain selected keys and arity, never scope data.
+#[derive(Debug)]
+struct SourceDescription {
+    keys: Vec<String>,
+    parameters: usize,
+}
+type Description = Arc<SourceDescription>;
+type Descriptions = HashMap<(&'static str, bool), Description>;
+fn descriptions() -> &'static Mutex<Descriptions> {
+    static CACHE: OnceLock<Mutex<Descriptions>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
-/// The keys a static statement selects, read from the server's description of it
-/// (nothing runs) and kept for the process: the SQL text is static, so they
-/// cannot change. Every placeholder must be a bigint the grid can bind.
-async fn selected_keys(
+/// A static statement's shape, read from the server's description of it
+/// (nothing runs) and kept for the process: static SQL has a fixed shape. Every placeholder must be a bigint the grid can bind.
+async fn describe_source(
     client: &impl GenericClient,
     what: &str,
     source: &Source,
-) -> Result<Keys, CatalogError> {
-    let cache_key = source.sql;
-    if let Some(keys) = keys_cache()
+) -> Result<Description, CatalogError> {
+    let cache_key = (source.sql, source.tenant_scoped);
+    if let Some(keys) = descriptions()
         .lock()
         .ok()
-        .and_then(|c| c.get(cache_key).cloned())
+        .and_then(|c| c.get(&cache_key).cloned())
     {
         return Ok(keys);
     }
@@ -96,14 +101,15 @@ async fn selected_keys(
             "{what}: a tenant-scoped source takes bigint $1 (tenant) and optionally $2 (user); a global one none"
         )));
     }
-    let keys: Keys = Arc::new(
-        statement
+    let keys = Arc::new(SourceDescription {
+        keys: statement
             .columns()
             .iter()
             .map(|column| column.name().to_string())
             .collect(),
-    );
-    if let Ok(mut cache) = keys_cache().lock() {
+        parameters: statement.params().len(),
+    });
+    if let Ok(mut cache) = descriptions().lock() {
         cache.insert(cache_key, keys.clone());
     }
     Ok(keys)
@@ -117,13 +123,27 @@ pub struct Catalog {
     tables: BTreeMap<&'static str, Table>,
     /// Fields this account sees masked (ADR 05), by table, with their kinds.
     masks: BTreeMap<&'static str, BTreeMap<String, &'static str>>,
+    /// The tenant's own words for fields (`base/labels`), by table and field ID.
+    names: Arc<bilibi_labels::FieldLabels>,
 }
 impl Catalog {
+    pub(crate) fn without_custom_references(mut self) -> Self {
+        for table in self.tables.values_mut() {
+            table.remove_custom_references();
+        }
+        self
+    }
+
+    /// The tenant's word for a field, when it renamed it; every column,
+    /// filter and picker this catalog resolves already carries it.
+    pub fn field_name(&self, table: &str, field: &str) -> Option<String> {
+        self.names.get(table, field).map(str::to_owned)
+    }
     /// The catalog this scope's actor may read, built from the installed snapshot
     /// with a fresh read of grants and field restrictions. A source is described to
     /// the server once per process to settle which of its keys each field reads.
     pub async fn for_scope(
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Self, CatalogError> {
         Self::build(client, scope, None).await
@@ -131,7 +151,7 @@ impl Catalog {
     /// [`Catalog::for_scope`] with one masked field of one table unmasked, for
     /// a reveal the caller has already authorized and recorded.
     pub(crate) async fn revealing(
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         table: &str,
         field: &str,
@@ -139,7 +159,7 @@ impl Catalog {
         Self::build(client, scope, Some((table, field))).await
     }
     async fn build(
-        client: &impl GenericClient,
+        client: &(impl GenericClient + Sync),
         scope: &Scope,
         reveal: Option<(&str, &str)>,
     ) -> Result<Self, CatalogError> {
@@ -239,11 +259,19 @@ impl Catalog {
         for table in tables.values_mut() {
             table.retain_links(|link| visible.contains(link.to()));
         }
+        // The tenant's custom fields, read fresh with the grants above, join
+        // the tables this reader may read.
+        if let Some(hook) = crate::custom::hook() {
+            for custom in hook.tables(client, scope).await? {
+                add_custom(&mut tables, custom);
+            }
+        }
         let catalog = Self {
             tenant: scope.tenant(),
             user: scope.user(),
             tables,
             masks,
+            names: Arc::new(bilibi_labels::field_labels(client, scope).await?),
         };
         catalog.verify_sources(client).await?;
         Ok(catalog)
@@ -272,8 +300,12 @@ impl Catalog {
             if !matches!(level, Some("rows" | "aggregates")) || (rows && level != Some("rows")) {
                 continue;
             }
-            let statement = client.prepare(table.source().sql).await?;
-            if !table.source().tenant_scoped || statement.params().len() != 1 {
+            if !table.source().tenant_scoped
+                || describe_source(client, table.id(), &table.source())
+                    .await?
+                    .parameters
+                    != 1
+            {
                 continue;
             }
             let withheld: BTreeSet<&str> = rule["withheld"]
@@ -316,7 +348,10 @@ impl Catalog {
                     } => table.field(from_field).is_some() && target.field(to_field).is_some(),
                     Join::Edge(source) => {
                         source.tenant_scoped
-                            && client.prepare(source.sql).await?.params().len() == 1
+                            && describe_source(client, link.id(), &source)
+                                .await?
+                                .parameters
+                                == 1
                     }
                 };
                 if safe {
@@ -373,9 +408,9 @@ impl Catalog {
     async fn verify_sources(&self, client: &impl GenericClient) -> Result<(), CatalogError> {
         for table in self.tables.values() {
             let what = format!("table {} from {}", table.id(), table.owner);
-            let keys = selected_keys(client, &what, &table.source()).await?;
+            let keys = describe_source(client, &what, &table.source()).await?;
             for field in table.fields() {
-                if !keys.iter().any(|key| key == field.source_key()) {
+                if !keys.keys.iter().any(|key| key == field.source_key()) {
                     return Err(CatalogError::Misdeclared(format!(
                         "{what}: field {} names no key its source selects; it selects {keys:?}",
                         field.id
@@ -386,10 +421,10 @@ impl Catalog {
                 if let Join::Edge(source) = link.decl.join {
                     {
                         let what = format!("link {}.{} from {}", table.id(), link.id(), link.owner);
-                        let keys = selected_keys(client, &what, &source).await?;
+                        let keys = describe_source(client, &what, &source).await?;
                         if !["from_key", "to_key"]
                             .iter()
-                            .all(|name| keys.iter().any(|key| key == name))
+                            .all(|name| keys.keys.iter().any(|key| key == name))
                         {
                             return Err(CatalogError::Misdeclared(format!(
                                 "{what}: an edge selects from_key and to_key; it selects {keys:?}"
@@ -439,7 +474,13 @@ impl Catalog {
     /// or average of a field this account sees masked is refused: over one
     /// linked row it is the hidden value, and narrow rollups give it away.
     pub fn resolve(&self, root: &Table, spec: &str) -> Result<Column, ColumnError> {
-        let column = column::resolve(spec, root, &|id| self.table(id))?;
+        let mut column = column::resolve(spec, root, &|id| self.table(id))?;
+        if let Some(word) = column
+            .field
+            .and_then(|field| self.field_name(column.table, field.id))
+        {
+            column.set_labels(Some(&word));
+        }
         if matches!(column.agg, Some(Agg::Sum | Agg::Avg)) && self.mask(&column).is_some() {
             return Err(ColumnError::MaskedAggregate);
         }
@@ -533,18 +574,59 @@ impl Catalog {
     }
 }
 
+fn add_custom(tables: &mut BTreeMap<&'static str, Table>, custom: crate::custom::CustomTable) {
+    let Some(json) = tables
+        .get(custom.table)
+        .and_then(|table| table.field(custom.column))
+        .filter(|field| field.hidden)
+        .map(Field::source_key)
+    else {
+        return;
+    };
+    let mut added = Vec::new();
+    for column in custom.columns {
+        if !crate::custom::key_shaped(&column.key) {
+            continue;
+        }
+        let id = crate::custom::field_id(&column.key);
+        let sql = column.value.replace(
+            "{json}",
+            &format!("{{alias}}.\"{}\"", json.replace('"', "\"\"")),
+        );
+        added.push((
+            Field::new(id, id, column.ty).column(json),
+            column.label,
+            sql,
+            column.searchable && column.reference.is_none(),
+            column.reference,
+        ));
+    }
+    let Some(table) = tables.get_mut(custom.table) else {
+        return;
+    };
+    for (field, label, sql, searchable, reference) in added {
+        if table.field(field.id).is_none() {
+            table.add_custom(field, label, sql, searchable, reference);
+        }
+    }
+}
+
 fn truncated(spec: &str) -> String {
     spec.chars().take(MAX_SPEC).collect()
 }
 fn field_specs(table: &Table, prefix: &str) -> Vec<String> {
     table
         .visible_fields()
+        .filter(|field| table.custom_reference(field.id).is_none())
         .map(|field| format!("{prefix}{}", field.id))
         .collect()
 }
 fn rollup_specs(target: &Table, path: &str, out: &mut Vec<String>) {
     out.push(format!("{path}:count"));
-    for field in target.visible_fields() {
+    for field in target
+        .visible_fields()
+        .filter(|field| target.custom_reference(field.id).is_none())
+    {
         let id = field.id;
         match field.ty {
             FieldType::Integer | FieldType::Float | FieldType::Decimal if id != target.key() => {

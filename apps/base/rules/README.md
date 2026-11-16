@@ -27,7 +27,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | Step | Contract | Capability | What it checks |
 | --- | --- | --- | --- |
 | Draft | `base.rules.draft` | `admin.rules.manage` | Installed trigger; fields the drafter may read, values of their type; installed actions on the trigger's record with inputs their contract accepts; examples come out as stated |
-| Approve | `base.rules.approve` | `admin.rules.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds All reach for the trigger table, every table its conditions walk and every action's capability; no condition field is restricted or masked for the `rules` principal; its actions close no cycle in the active rules' declared events; the tenant's limits hold |
+| Approve | `base.rules.approve` | `admin.rules.approve` | The draft checks again as the approver, plus: it is the latest version; the approver holds All reach for the trigger table, every table its conditions walk and every action's capability and declared human prerequisites; no condition field is restricted or masked for the `rules` principal; its actions close no cycle in the active rules' declared events; the tenant's limits hold |
 | Switch | `base.rules.switch` | `admin.rules.approve` | On again re-runs the approval checks on the running version |
 
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
@@ -96,10 +96,10 @@ The chain follows causes, not traces: the worker names its run as the cause of t
 
 ```rust,ignore
 inventory::submit! { Contribution::new(bilibi_rules::TRIGGERS, CASE_OPENED, provenance!(), &bilibi_rules::Trigger {
-    on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case", version: "version",
+    on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case", logical_event: None, version: "version",
 }) }
 inventory::submit! { Contribution::new(bilibi_rules::ACTIONS, "cx.cases.route", provenance!(), &bilibi_rules::Action {
-    title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED],
+    title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED], approval_capabilities: &[],
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::job::PRINCIPAL_WRITES, "cx.cases.route", provenance!(), &PrincipalWrite { principals: &["rules"] }) }
 inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rules:cx/cases", provenance!(), &OfferedCapabilities {
@@ -108,6 +108,12 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rule
 ```
 
 Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
+
+`Action::approval_capabilities` declares additional capabilities a human needs to perform the action, including nested writes that use a different permission for the principal. Approval and re-enabling require the operation's own capability and every prerequisite with All reach; direct denies win. Boot checks the keys against the Authz vocabulary, and the approval fingerprint includes the declaration. This adds no principal bounds or consent: the executor and owner still check the principal's own permissions live. Use `&[]` when the operation capability suffices. Shared follow-up registration requirements belong to [Activities](../../core/activity/README.md#follow-up-operations-offered-by-record-owners).
+
+`Rules::action_identity(client, scope)` returns the executing rule version, action position and captured logical event key as an opaque identity, only inside a Rules action transaction under the `rules` principal. An owner may combine it with its source kind and ID to deduplicate multipart events without merging independent rules or manual requests. This identity grants no authority; owner checks still apply.
+
+`Trigger::logical_event` is an optional JSON pointer to the owner's immutable snapshot key in the event payload. Set it for multipart events: every part of one occurrence carries the same nonempty string (at most 200 bytes) or integer, and separate occurrences carry different keys. `None` means each recorded event ID is a separate occurrence. A declared key that is absent or invalid refuses delivery; it never falls back to the live record revision. Rules captures the key, namespaced by event name, on each run during delivery, so later source edits and event retention cannot change it. The pointer is part of the approval fingerprint. `expected_revision` remains solely the current write fence. Runs predating capture refuse with `event_identity_missing`; development databases are disposable.
 
 ## Pages and agents
 
@@ -118,14 +124,15 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Tables
 
-`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules` and `base-rules-002-approval-bindings`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings` and `base-rules-003-logical-events`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 
 `apps/web/examples/rules-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). It calls startup validation with a customer Extension in the supplied composition, proves refusal in Shared service and admission in Isolated installation, and calls the protected owner mutation to prove that switching to shared refuses and preserves the saved mode. A tenant administrator is refused by the same mutation. Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/rule_cases` mounted (never a Platform member), it runs the same approved rule in both installation modes: an urgent 1500.00 case goes to the priority desk exactly once, and a normal case remains unchanged. It also proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off rule, self-triggering and multi-rule cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst held to its tenant's bound while the other tenant runs at once.
 
+The official Domain companion walkthrough is `apps/web/examples/rules-domains-walkthrough.rs`. See the [companion handoff](../../../docs/rules-logical-event-handoff.md) for mounts, source prerequisites and execution instructions.
+
 ## Not yet
 
-- Triggers and actions offered by the official Domains: [#729](https://github.com/BelimbingProject/bilibi/issues/729).
 - Tenant custom fields as conditions: [#730](https://github.com/BelimbingProject/bilibi/issues/730).
 - Shadow runs against past records, configuration packs, a bounded text formula, AI observations as inputs and script or Wasm tooling for isolated installations: later items of [#682](https://github.com/BelimbingProject/bilibi/issues/682).

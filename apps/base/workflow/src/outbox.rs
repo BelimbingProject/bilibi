@@ -50,12 +50,14 @@ pub struct TransitionEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeliveryOutcome {
     Delivered,
+    Failed,
     Deferred,
     Skipped,
 }
 #[derive(Default, Debug)]
 pub struct DeliverySummary {
     pub delivered: usize,
+    pub failed: usize,
     pub deferred: usize,
     pub skipped: usize,
 }
@@ -85,7 +87,11 @@ impl Engine {
         }
         let token = uuid::Uuid::new_v4().to_string();
         let client = self.db.get().await?;
-        let row = client.query_opt("UPDATE base_workflow_transition_outbox SET attempts=attempts+1,lease_token=$2,lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE history_id=$1 AND delivered_at IS NULL AND available_at<=clock_timestamp() AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp()) RETURNING id,attempts", &[&history_id,&token]).await?;
+        let exhausted = client.execute("UPDATE base_workflow_transition_outbox SET failed_at=clock_timestamp(),last_error=COALESCE(last_error,'delivery_lease_expired'),lease_token=NULL,lease_expires_at=NULL WHERE history_id=$1 AND delivered_at IS NULL AND failed_at IS NULL AND attempts>=$2 AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp())", &[&history_id,&DELIVERY_ATTEMPTS]).await?;
+        if exhausted > 0 {
+            return Ok(DeliveryOutcome::Failed);
+        }
+        let row = client.query_opt("UPDATE base_workflow_transition_outbox SET attempts=attempts+1,lease_token=$2,lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE history_id=$1 AND delivered_at IS NULL AND failed_at IS NULL AND attempts<$3 AND available_at<=clock_timestamp() AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp()) RETURNING id,attempts", &[&history_id,&token,&DELIVERY_ATTEMPTS]).await?;
         let Some(row) = row else {
             return Ok(DeliveryOutcome::Skipped);
         };
@@ -109,39 +115,41 @@ impl Engine {
             Some(Ok(Ok(()))) => (true, None),
             _ => (false, Some("listener_or_binding_unavailable")),
         };
+        let failed = !delivered && attempt >= DELIVERY_ATTEMPTS;
         let delay = 2_i32.pow(attempt.clamp(0, 10) as u32).min(3600);
-        let changed = client.execute("UPDATE base_workflow_transition_outbox SET delivered_at=CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,available_at=CASE WHEN $3 THEN available_at ELSE clock_timestamp()+make_interval(secs=>$4::integer) END,last_error=$5,lease_token=NULL,lease_expires_at=NULL WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp()", &[&id,&token,&delivered,&delay,&error]).await?;
+        let changed = client.execute("UPDATE base_workflow_transition_outbox SET failed_at=CASE WHEN $6 THEN clock_timestamp() ELSE NULL END,delivered_at=CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,available_at=CASE WHEN $3 THEN available_at ELSE clock_timestamp()+make_interval(secs=>$4::integer) END,last_error=$5,lease_token=NULL,lease_expires_at=NULL WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp()", &[&id,&token,&delivered,&delay,&error,&failed]).await?;
         Ok(if changed == 0 {
             DeliveryOutcome::Skipped
         } else if delivered {
             DeliveryOutcome::Delivered
+        } else if failed {
+            DeliveryOutcome::Failed
         } else {
             DeliveryOutcome::Deferred
         })
     }
-    /// Whether the event of `history_id` needs no further delivery: its row
-    /// is delivered, or delivered and already pruned (only delivered rows are).
-    async fn transition_delivered(&self, history_id: i64) -> Result<bool> {
+    async fn transition_terminal(&self, history_id: i64) -> Result<Option<bool>> {
         let client = self.db.get().await?;
-        let row = client
-            .query_opt(
-                "SELECT delivered_at IS NOT NULL FROM base_workflow_transition_outbox WHERE history_id=$1",
-                &[&history_id],
-            )
-            .await?;
-        Ok(row.is_none_or(|row| row.get(0)))
+        let row = client.query_opt("SELECT delivered_at IS NOT NULL,failed_at IS NOT NULL FROM base_workflow_transition_outbox WHERE history_id=$1", &[&history_id]).await?;
+        Ok(match row {
+            None => Some(true),
+            Some(row) if row.get::<_, bool>(0) => Some(true),
+            Some(row) if row.get::<_, bool>(1) => Some(false),
+            Some(_) => None,
+        })
     }
     pub async fn deliver_due_transitions(&self, limit: i64) -> Result<DeliverySummary> {
         if !(1..=1000).contains(&limit) {
             return Err(Error::Invalid);
         }
         let client = self.db.get().await?;
-        let rows = client.query("SELECT history_id FROM base_workflow_transition_outbox WHERE delivered_at IS NULL AND available_at<=clock_timestamp() AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp()) ORDER BY available_at,id LIMIT $1", &[&limit]).await?;
+        let rows = client.query("SELECT history_id FROM base_workflow_transition_outbox WHERE delivered_at IS NULL AND failed_at IS NULL AND available_at<=clock_timestamp() AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp()) ORDER BY available_at,id LIMIT $1", &[&limit]).await?;
         drop(client);
         let mut summary = DeliverySummary::default();
         for row in rows {
             match self.deliver_transition(row.get(0)).await? {
                 DeliveryOutcome::Delivered => summary.delivered += 1,
+                DeliveryOutcome::Failed => summary.failed += 1,
                 DeliveryOutcome::Deferred => summary.deferred += 1,
                 DeliveryOutcome::Skipped => summary.skipped += 1,
             }
@@ -207,7 +215,7 @@ impl Engine {
                 .await?;
             // The row lock fences overlapping attempts, including a slow old
             // worker. Do not hold it over network/file IO (forbidden above).
-            let alive = tx.sql().query_opt("SELECT id FROM base_workflow_transition_outbox WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() AND delivered_at IS NULL FOR UPDATE", &[&id,&token]).await?.is_some();
+            let alive = tx.sql().query_opt("SELECT id FROM base_workflow_transition_outbox WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() AND delivered_at IS NULL AND failed_at IS NULL FOR UPDATE", &[&id,&token]).await?.is_some();
             if !alive {
                 return Err(Error::Conflict);
             }
@@ -260,13 +268,10 @@ impl Handler for Delivery {
             }
             match self.engine.deliver_transition(id).await {
                 Ok(DeliveryOutcome::Delivered) => Outcome::Completed,
-                // Skipped means "not mine to deliver now": done only when the
-                // event was delivered. A row another attempt still leases (a
-                // process that died holds it for up to five minutes) or that
-                // is not due yet is retried, so this job never completes
-                // over an undelivered event.
-                Ok(DeliveryOutcome::Skipped) => match self.engine.transition_delivered(id).await {
-                    Ok(true) => Outcome::Completed,
+                Ok(DeliveryOutcome::Failed) => Outcome::Cancel("transition_delivery_failed"),
+                Ok(DeliveryOutcome::Skipped) => match self.engine.transition_terminal(id).await {
+                    Ok(Some(true)) => Outcome::Completed,
+                    Ok(Some(false)) => Outcome::Cancel("transition_delivery_failed"),
                     _ => Outcome::Retry("transition_delivery_deferred"),
                 },
                 Ok(DeliveryOutcome::Deferred) | Err(_) => {

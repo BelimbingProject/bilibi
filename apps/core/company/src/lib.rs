@@ -827,7 +827,7 @@ inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/company",layer:bilibi_module_registry::Layer::Core,
         dependencies:&["base/database","base/security","base/ui","base/notifications","base/party_ids","base/session","base/menu","base/grid","base/search","base/dashboard","base/reports","base/authz","base/tenancy","base/audit","base/agent_api","base/datetime","base/locale","base/principal_directory","base/media","base/artifacts","base/picklists","base/custom_fields","base/settings","base/settings_editor","base/records","base/ports","base/personal_data","core/party","core/geonames","core/person"],
-        migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql")), ("core-company-013-search-trigram",include_str!("../migrations/013-search-trigram.sql"))],
+        migrations:&[MIGRATION, MIGRATION_ORGANISATION, MIGRATION_RELATIONSHIPS, MIGRATION_ROLE_OWNER, MIGRATION_SEARCH, ("core-company-008-match-keys", include_str!("../migrations/008-match-keys.sql")), MIGRATION_SESSION_COMPANY, ("core-company-010-assignment-scope",include_str!("../migrations/010-assignment-scope.sql")), ("core-company-011-custom-fields",include_str!("../migrations/011-custom-fields.sql")), ("core-company-012-personal-data",include_str!("../migrations/012-personal-data.sql")), ("core-company-013-search-trigram",include_str!("../migrations/013-search-trigram.sql")), ("core-company-014-custom-search",include_str!("../migrations/014-custom-search.sql"))],
         services: &[
             bilibi_module_registry::Service { id: SERVICE, factory: |services| {
                 let db = services.get::<Db>("base/database.pool")?.as_ref().clone();
@@ -1076,7 +1076,7 @@ impl CompanyService {
 // the facade rather than an operation contract (`base/agent_api` page).
 inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_module_registry::contributions::PAGE_WRITES, "core/company.pages", bilibi_module_registry::Provenance { module: "core/company", source: file!(), line: line!() }, &bilibi_module_registry::contributions::PageWrites {
     service: "core/company.pages",
-    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update")],
+    contracts: &[("grid", "base.grid.view.save"), ("grid", "base.grid.view.delete"), ("save_contributed_field", "core.company.update"), ("save_custom_field", "core.company.update"), ("pick_custom_reference", "core.company.update"), ("clear_custom_reference", "core.company.update")],
     pending: bilibi_module_registry::contributions::Pending::Events {
         events: &["save_field", "pick_parent", "remove_parent", "add_activity", "remove_activity", "apply_lifecycle", "create_company", "confirm_create_anyway"],
         reason: "Built-in facts (the parent picker included), activities, lifecycle and Company create still write through their owner facade.",

@@ -9,6 +9,7 @@ license.workspace = true
 bilibi-agent-api.workspace = true
 bilibi-audit.workspace = true
 bilibi-database.workspace = true
+bilibi-labels.workspace = true
 bilibi-module-registry.workspace = true
 bilibi-personal-data.workspace = true
 bilibi-tenancy = { path = "../tenancy" }

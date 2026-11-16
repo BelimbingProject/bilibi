@@ -119,7 +119,7 @@ ordered by run priority, work priority, availability and ID; the chosen run is
 then locked in the kernel order and both adapters authorize `ClaimWork`. The
 locked run is settled first, so due pending work and expired leases are
 candidates too. A candidate refused under its lock is skipped and the claim
-gives up after eight, so retained unsupported runs never starve supported work.
+examines at most eight candidates in total per call. `approval.wait` items are excluded from candidate selection, including unfiltered claims.
 An empty `executor_keys` or `run_ids` claims nothing. Each claim increments
 `attempts` and appends `work.claimed` with the worker and attempt.
 
@@ -130,8 +130,7 @@ and `Claim`'s `Debug` hides it. `Engine::update_work(scope, &claim, command)`
 and `update_work_in(&mut MutationTransaction, ...)` apply one `WorkCommand`;
 use the `_in` form to commit the owner's business writes with the completion.
 
-- `Heartbeat { lease_seconds }` (`HeartbeatWork`) extends a live lease to now
-  plus `lease_seconds`.
+- `Heartbeat { lease_seconds }` (`HeartbeatWork`) extends a live lease to now plus `lease_seconds`. It updates the work row and Audit without appending a process event.
 - `Complete { outcome, output, result_ref }` (`CompleteWork`) finishes the item
   as `completed`; it is allowed on a paused run, which then stays paused.
 - `Fail { error, retryable, category, retry_at }` (`FailWork`) returns
@@ -521,14 +520,9 @@ history, including status, version, attribution, comments and time. Delivery
 resolves tenant, subject, flow and owner through history's proven binding;
 queue arguments carry only a history ID. No actor is re-created from history.
 
-Each delivery claims a five-minute database lease with a fresh token. Successful
-listener effects are fenced by that token and a row lock; an expired worker
-cannot overwrite a newer attempt. Failures retain a bounded error code and
-retry after `2^min(attempt,10)` seconds (maximum 1,024 seconds). Pending rows
-have no terminal retry limit: maintenance recovers them even if their immediate
-queue job exhausts retries or its original user is no longer eligible.
+Each delivery claims a five-minute database lease with a fresh token. Successful listener effects are fenced by that token and a row lock; an expired worker cannot overwrite a newer attempt. Failures retain a bounded error code and retry after `2^min(attempt,10)` seconds (maximum 1,024 seconds). An unsuccessful tenth delivery attempt makes the row terminal: `failed_at` records failure, `last_error` retains the bounded error code, and neither maintenance nor direct delivery retries them. An expired final lease also becomes failed. Failed rows and their receipts are retained. Inspect `failed_at` and `last_error` in `base_workflow_transition_outbox`; there is no operator outbox page. Maintenance recovers earlier attempts even if their immediate queue job exhausts retries or its original user is no longer eligible.
 
-The immediate job completes only when the event is delivered. When another
+The immediate job completes when the event is delivered and cancels when delivery fails terminally. When another
 attempt still holds the lease (a process that stopped mid-delivery leaves it
 for up to five minutes) or the event is not due yet, the job retries with
 `transition_delivery_deferred` instead of completing. It has ten attempts,
@@ -567,7 +561,7 @@ Before the sweeps, each pass delivers up to 100 due events and removes
 up to 100 delivered rows older than `workflow.outbox.keep_days` (global integer,
 1–3,650, default 30), so delivery does not wait for the sweeps or depend on
 them finishing. Receipts are removed only with their delivered event.
-Pending/leased events, status history, process events and human-action replay
+Pending/leased/failed events, status history, process events and human-action replay
 records are retained. Retention never reconstructs or replays old events.
 
 The disposable `owner` example adds these commands (the final ID is a history
@@ -645,7 +639,7 @@ Policies contain ordered All/Any steps. All needs every seat, each filled by a d
 
 Money comparisons are exact and name the currency. A policy using amount thresholds must cover the submitted currency. A different currency never falls through by numerical comparison or an implicit exchange rate. Missing facts and unavailable routing refuse execution.
 
-New policy versions affect new requests. Pending requests keep their routing snapshot and original owner safety floors, while current stronger floors also apply immediately. An incompatible owner declaration refuses the round until recall and fresh submission. A change to the owner's revision needs a fresh, linked request and fresh decisions.
+New policy versions affect new requests. Pending requests keep their routing snapshot and original owner safety floors, while current stronger floors also apply immediately. An incompatible owner declaration refuses the round until recall and fresh submission. A change to the owner's revision needs a fresh, linked request and fresh decisions. Submitting it supersedes older waiting revisions and completes their wait runs without invoking the owner effect; recall refuses a request whose revision or company no longer matches the locked owner.
 
 ### Submission and decisions
 
@@ -669,7 +663,7 @@ Recall is available only while waiting, to the initiating person when the owner 
 
 ### Waiting list and exceptions
 
-**Waiting for my approval** (`/workflow/approvals`) is reached from See all in the bell's **To do** tab, not a sidebar menu item. Workflow supplies the bell through the [to-do source boundary](../notifications/README.md); read state never completes an approval. The bell makes one such read for at most ten requests, lists five and shows `10+` when more may wait. The page scans bounded aggregate work candidates and applies live owner visibility, capability, selector and independence checks. Filters and cursors stay in `ListState`. Returned counts describe eligible rows on the page; hidden candidates do not contribute a total. Capability removal hides the request on the next read and refuses an already-open decision.
+**Waiting for my approval** (`/workflow/approvals`) is reached from See all in the bell's **To do** tab, not a sidebar menu item. Workflow supplies the bell through the [to-do source boundary](../notifications/README.md); read state never completes an approval. The bell makes one such read for at most ten requests, lists five and shows `10+` when more may wait. The page scans bounded aggregate work candidates and applies live owner visibility, capability, selector and independence checks. Filters and cursors stay in `ListState`. Returned counts describe eligible rows on the page; hidden candidates do not contribute a total. Capability removal hides the request on the next read and refuses an already-open decision. `approval_detail` and `approval_detail_on` return `Conflict` for a request that is no longer `awaiting`, so closed requests offer no decision controls.
 
 The shared read contracts are `base.workflow.approvals.list`, `.history`, `.delegations` and `.exceptions`. Their read permission admits the projection only, and the five approval pages require the same `workflow.approvals.view` in addition to the owner's checks. Decision and management writes use static per-case contracts; there is no permission to approve everything. The shared page opts into owner-contributed bindings through Agent API's page-family contract, without a host list or module endpoint.
 
@@ -679,7 +673,7 @@ Approval reasons and cover notes can contain personal data. Keep labels and noti
 
 ### Reminders
 
-The existing Workflow maintenance schedule sweeps saved UTC stage deadlines through Queue. Its durable execution lease and per-tenant keyset cursor bound recovery passes and keep unavailable owners from starving later requests. It can remind or reassign, and **never approves because time elapsed**. Notice receipts and notification intents share one transaction; retries do not repeat a saved notice. Escalation changes responsibility and routing versions while preserving the original activation time and history. A seat that has already decided leaving the routed set is not a reassignment.
+The existing Workflow maintenance schedule sweeps saved UTC stage deadlines through Queue. Its durable execution lease and per-tenant keyset cursor bound recovery passes and keep unavailable owners from starving later requests. It can remind or reassign, and **never approves because time elapsed**. Notice receipts and notification intents share one transaction; retries do not repeat a saved notice. Escalation changes responsibility and routing versions while preserving the original activation time and history. A seat that has already decided leaving the routed set is not a reassignment. Maintenance resolves recipients only when a reminder or escalation is due and unrecorded; submission and voting still route immediate stage notices. Named-person routing retains the capability-holder walk, including live capability, independence and eligible-cover checks. An unchanged maintenance cursor produces no mutation or audit change after its initial creation.
 
 Before relying on reminders, explicitly review and enable `base/workflow-maintenance` in Schedule and grant `workflow.approvals.maintain` to the named principal `workflow-approval-maintenance` in each tenant. No grant is installed at boot. Missing owners, routing or grants defer that request while later rows remain reachable. Review maintenance logs when work is late.
 
@@ -693,6 +687,8 @@ cargo run -p bilibi-workflow --example owner -- approval-submit 1 1
 cargo run -p bilibi-workflow --example owner -- approval-inbox 4
 ```
 
+To check revision fencing, submit a request, change its reference fact `revision` in the disposable database, then attempt `approval-recall` with the old request ID and version. It must return `Conflict` without changing the owner. Submit the new revision with a fresh idempotency suffix and the old request ID as `prior`; the old request must be `superseded` with a completed run, and the new request must be `awaiting`.
+
 The reference adds no real owner. Its facts and failure controls live in `workflow_reference_approval_facts`; use them only in the disposable database. Run `apps/web/examples/w7-workflow-reference.rs` at a private `BIND_ADDR` and matching `APP_ORIGIN` to exercise the shared pages in a browser.
 
 ### Upgrade notes for agents
@@ -704,3 +700,5 @@ Use `ApprovalPolicyChange` for a reviewed publication and `ApprovalCover` for a 
 Owners whose business contracts already hold a transaction use `approval_detail_on` for live eligibility and version fences, and `approval_history_on` for an authorized read before recall. Before a new subject exists, `approval_submission_policy_on` reads and locks the published policy under the owner’s submission permission so a reviewed submission includes its rule version. These methods borrow the existing `Transaction`; they make the same checks as the pool-owning reads. Do not take another pool connection while holding an owner lock.
 
 Exception lists use the owner's read authorization. The separate review permission and independence checks determine whether a row can be reviewed; reading a row never grants that action.
+
+`DeliveryOutcome` adds `Failed`, and `DeliverySummary` adds `failed`; exhaustive matches and struct literals must include them.

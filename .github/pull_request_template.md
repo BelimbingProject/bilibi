@@ -32,3 +32,12 @@ Otherwise delete this section.
 Only when CI warns that a new function has a shared helper's name (apps/base/HELPERS.md):
 one line per function, `<path>: keep: <reason>`. Otherwise delete this section.
 -->
+
+## Exceptions
+
+<!--
+Only when the Guard rails check lists a new escape hatch (`#[allow]`, `#[expect]`, `Pending::Every`, `Pending::Events`,
+`begin_view_state(`, `get_detached(`, `Html::raw(`, `|safe`): one line per file and hatch,
+`<path>: <hatch>: <why no other way works>`, with `<hatch>` as `allow`, `expect`, `Pending::Every`, `Pending::Events`,
+`begin_view_state`, `get_detached`, `Html::raw` or `safe`. Otherwise delete this section.
+-->

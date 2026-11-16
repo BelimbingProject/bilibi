@@ -2,6 +2,10 @@
 //! `templates/components.html` with their typed models, the feedback, dialog
 //! and tab components (`feedback.rs`), the icon registry and
 //! the vendored asset allowlist. Only shared fragments may use `safe`.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "shared components here wrap markup they rendered, which is what `Html::raw` is for; pages outside base/ui may not"
+)]
 use askama::Template;
 pub mod download;
 pub mod endpoint;
@@ -46,8 +50,10 @@ mod mail_frame;
 pub use file_preview::FilePreview;
 pub use live_transport::{LIVE_EVENT_LIMIT, LIVE_EVENT_TOO_LARGE};
 pub use mail_frame::MailFrame;
+mod field_labels;
 mod page_search;
 pub mod params;
+pub use field_labels::FieldLabels;
 mod record_fields;
 mod record_reference;
 pub use record_fields::{

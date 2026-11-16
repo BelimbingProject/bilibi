@@ -106,23 +106,47 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Custom values from the contract's list of `{key, value}` pairs (the input
-/// dialect has no free-form object, and each tenant's keys differ).
-fn custom_input(value: &Value) -> crate::Custom {
-    value
-        .as_array()
-        .map(|pairs| {
-            pairs
-                .iter()
-                .filter_map(|pair| {
-                    Some((
-                        pair["key"].as_str()?.to_owned(),
-                        Value::String(pair["value"].as_str().unwrap_or_default().to_owned()),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Custom values from the contract's list of `{key, value, values}` pairs
+/// (the input dialect has no free-form object, and each tenant's keys
+/// differ). A pair carries exactly one of `value` (a string, or null to
+/// clear) and `values` (a several-choices field's codes, empty to clear);
+/// validation decides whether that shape suits the field.
+fn custom_input(reader: &mut Reader<'_>, key: &str) -> crate::Custom {
+    let mut custom = crate::Custom::new();
+    let Some(pairs) = reader.at()[key].as_array() else {
+        return custom;
+    };
+    for (index, pair) in pairs.iter().enumerate() {
+        let Some(name) = pair["key"].as_str() else {
+            continue;
+        };
+        let value = match (pair.get("value"), pair.get("values")) {
+            (Some(value), None) => match value {
+                Value::String(_) | Value::Null => value.clone(),
+                _ => {
+                    reader.refuse(&format!("{key}.{index}.value"), "must be text or null");
+                    continue;
+                }
+            },
+            (None, Some(Value::Array(codes))) if codes.iter().all(Value::is_string) => {
+                Value::Array(codes.clone())
+            }
+            (None, Some(_)) => {
+                reader.refuse(&format!("{key}.{index}.values"), "must be a list of codes");
+                continue;
+            }
+            (Some(_), Some(_)) => {
+                reader.refuse(&format!("{key}.{index}"), "takes value or values, not both");
+                continue;
+            }
+            (None, None) => {
+                reader.refuse(&format!("{key}.{index}"), "needs value or values");
+                continue;
+            }
+        };
+        custom.insert(name.to_owned(), value);
+    }
+    custom
 }
 
 fn draft(input: &Value) -> bilibi_agent_api::Result<Draft> {
@@ -146,7 +170,7 @@ fn draft(input: &Value) -> bilibi_agent_api::Result<Draft> {
         document_type: reader.text("document_type"),
         status: reader.text("status"),
         expires_on: reader.date("expires_on").flatten(),
-        custom: custom_input(&input["custom"]),
+        custom: custom_input(&mut reader, "custom"),
         sync_id: reader.text("sync_id"),
         related_document_id: input["related_document_id"].as_i64(),
         relation: reader.text("relation"),
@@ -167,7 +191,7 @@ fn patch(input: &Value) -> bilibi_agent_api::Result<Patch> {
         document_type: reader.clearable_text("document_type"),
         status: reader.text("status"),
         expires_on: reader.date("expires_on"),
-        custom: custom_input(&input["patch"]["custom"]),
+        custom: custom_input(&mut reader, "custom"),
         sync_id: reader.clearable_text("sync_id"),
         related_document_id: reader.at().get("related_document_id").map(Value::as_i64),
         relation: reader.clearable_text("relation"),
@@ -459,12 +483,18 @@ impl ReadHandler for Get {
             );
             value["custom"] = json!(definitions
                 .iter()
-                .map(|d| json!({
-                    "key": d.key,
-                    "label": d.label,
-                    "type": d.kind.as_str(),
-                    "value": document.custom.get(&d.key),
-                }))
+                .map(|d| {
+                    let mut field = json!({
+                        "key": d.key,
+                        "label": d.label,
+                        "type": d.kind.as_str(),
+                        "value": document.custom.get(&d.key),
+                    });
+                    if let Some(target) = &d.target {
+                        field["target"] = json!(target);
+                    }
+                    field
+                })
                 .collect::<Vec<_>>());
             value["revisions"] = json!(revisions
                 .iter()
@@ -1067,9 +1097,10 @@ fn update_schema() -> Value {
     }})
 }
 fn custom_schema() -> Value {
-    json!({"type":"array","description":"The tenant's custom fields as {key, value} pairs; find the keys with base.custom_fields.list. An empty value clears a field.","items":{"type":"object","required":["key"],"properties":{
+    json!({"type":"array","description":"The tenant's custom fields as {key, value} or {key, values} pairs; find the keys, types, pick-lists and record kinds with base.custom_fields.list. A record field's value is the record's ID. An empty or null value clears a field.","items":{"type":"object","required":["key"],"properties":{
         "key":{"type":"string","maxLength":40},
-        "value":{"type":"string","maxLength":2000}
+        "value":{"type":"string","maxLength":2000,"nullable":true,"description":"Every field but several choices: the text, number, date, true or false, pick-list code, or record ID. Null clears it."},
+        "values":{"type":"array","items":{"type":"string","maxLength":64},"description":"For a several-choices field, the pick-list codes; an empty list clears it."}
     }}})
 }
 fn revision_schema() -> Value {

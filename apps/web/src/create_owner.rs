@@ -376,7 +376,7 @@ fn hidden(prompt: &str) -> Result<String> {
 /// password is typed cannot leave the operator's terminal without echo.
 struct EchoOff(libc::termios);
 
-#[allow(
+#[expect(
     unsafe_code,
     reason = "the standard library has no terminal settings call; these are the only unsafe lines of the host"
 )]
@@ -401,7 +401,7 @@ impl EchoOff {
     }
 }
 
-#[allow(
+#[expect(
     unsafe_code,
     reason = "the standard library has no terminal settings call; these are the only unsafe lines of the host"
 )]

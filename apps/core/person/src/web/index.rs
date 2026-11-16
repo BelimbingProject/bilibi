@@ -119,7 +119,12 @@ fn columns(
         .filter(|column| !masked.contains(&column.id))
         .chain(definitions.iter().map(|definition| {
             let name = crate::custom::name(&definition.key);
-            BuiltinColumn::new(&name, &definition.label).sortable(&name)
+            let column = BuiltinColumn::new(&name, &definition.label);
+            if crate::custom::sortable(definition.kind) {
+                column.sortable(&name)
+            } else {
+                column
+            }
         }))
         .collect(),
     )
@@ -308,8 +313,21 @@ impl Index {
                 self.columns.columns.iter().any(|column| column.id == name)
             })
             .collect();
-        let cells =
-            super::custom::cells(&self.pages, scope, &display, &on_screen, &page.entries).await?;
+        // Every record the on-screen record columns hold is named in one call.
+        let names = super::custom::Names::read(
+            scope,
+            &on_screen,
+            page.entries.iter().map(|person| &person.custom),
+        )
+        .await?;
+        let shown = super::custom::Shown {
+            pages: &self.pages,
+            scope,
+            display: &display,
+            names: &names,
+            framed: self.framed,
+        };
+        let cells = super::custom::cells(&shown, &on_screen, &page.entries).await?;
         let mut rows = self.columns.rows.clone();
         for row in &mut rows {
             let Some(person) = page
@@ -357,10 +375,11 @@ impl Index {
             }
             for definition in &on_screen {
                 let name = crate::custom::name(&definition.key);
-                let shown = cells
+                let cell = cells
                     .get(&(person.id.get(), name.clone()))
-                    .map_or("—", String::as_str);
-                row.slots.insert(name, Html::text(shown));
+                    .cloned()
+                    .unwrap_or_else(|| Html::text("—"));
+                row.slots.insert(name, cell);
             }
         }
         self.page_keys = rows.iter().map(|row| row.key.clone()).collect();
@@ -567,7 +586,7 @@ impl Index {
     }
 
     /// Starts a CSV export of the list as filtered (or of the ticked
-    /// contacts), with the columns shown, through
+    /// contacts), with the shown non-custom columns, through
     /// `base.bulk_data.export.start`, and opens it.
     async fn export(&mut self, scope: &Scope, credential: &str, event: &str) -> Result<LiveBody> {
         let custom_shown = self
@@ -578,8 +597,8 @@ impl Index {
         let mut input = json!({
             "record_type": EXPORT_TYPE,
             // The columns on screen: the person's arrangement or the defaults.
-            // A custom field is not a Grid column, so the file leaves it out;
-            // its filters still choose the contacts.
+            // This page omits custom columns from list exports; custom filters
+            // still choose the contacts. Reports offer the custom columns.
             "columns": self
                 .columns
                 .columns
@@ -734,10 +753,12 @@ impl Index {
         let Some((field, _)) = &self.bulk else {
             return self.view(scope).await;
         };
-        let text = bilibi_ui::params::form_values(value, "bulk")
-            .get("value")
-            .cloned()
-            .unwrap_or_default();
+        let text =
+            bilibi_ui::params::form_values_checked(value, "bulk", bilibi_ui::params::FIELD_LIMIT)
+                .map_err(Error::refused)?
+                .get("value")
+                .cloned()
+                .unwrap_or_default();
         let mut input = json!({"record_type": EXPORT_TYPE, "field": field.name, "value": text});
         if !self.chosen(&mut input) {
             self.bulk = None;
@@ -881,7 +902,7 @@ impl LiveState<Scope, Error> for Index {
                     "bulk_update" => {
                         return self
                             .bulk_update(request.scope, request.credential, value)
-                            .await
+                            .await;
                     }
                     "close_modal" => self.draft = None,
                     "validate" | "create" => {
@@ -911,6 +932,13 @@ impl LiveState<Scope, Error> for Index {
                         }
                     }
                     "clear-flash" => {}
+                    // A record field's picker in the new-contact dialog.
+                    other @ (super::custom::PICK_EVENT | super::custom::CLEAR_EVENT) => {
+                        let pages = self.pages.clone();
+                        if let Some(draft) = &mut self.draft {
+                            draft.pick(&pages, request.scope, other, value).await?;
+                        }
+                    }
                     _ => return Err(Error::Invalid),
                 },
             }

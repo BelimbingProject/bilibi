@@ -41,6 +41,25 @@ fn rules() -> Result<&'static Arc<Rules>> {
 /// The cause the worker names for events its actions record.
 const CAUSE: &str = "base/rules.run:";
 
+impl Rules {
+    pub async fn action_identity(
+        client: &(impl bilibi_tenancy::ProofClient + ?Sized),
+        scope: &Scope,
+    ) -> Result<Option<String>> {
+        if scope.actor().principal() != Some(crate::PRINCIPAL) {
+            return Ok(None);
+        }
+        Ok(client
+            .query_opt(
+                "SELECT NULLIF(current_setting('bilibi.rules.action', true), '')",
+                &[],
+            )
+            .await?
+            .ok_or(Error::Internal)?
+            .get(0))
+    }
+}
+
 pub(crate) struct Triggers;
 pub(crate) static TRIGGERS: Triggers = Triggers;
 impl Subscribe for Triggers {
@@ -66,6 +85,18 @@ impl Subscribe for Triggers {
                 // events behind it for ever.
                 _ => return Ok(Vec::new()),
             };
+            let logical_event = match trigger.definition.logical_event {
+                Some(pointer) => match event.payload.pointer(pointer) {
+                    Some(Value::String(key)) if !key.is_empty() && key.len() <= 200 => {
+                        json!([event.name, key]).to_string()
+                    }
+                    Some(Value::Number(key)) if key.is_i64() || key.is_u64() => {
+                        json!([event.name, key]).to_string()
+                    }
+                    _ => return Err(Error::Invalid),
+                },
+                None => json!([event.name, event.id]).to_string(),
+            };
             // The run whose action recorded this event, when one did.
             let cause = match event
                 .cause
@@ -84,8 +115,8 @@ impl Subscribe for Triggers {
             };
             let (cause_id, depth) = (cause.map(|c| c.0), cause.map_or(1, |c| c.1 + 1));
             let rows = sql.query(
-                "INSERT INTO base_rule_runs(tenant_id,rule_id,version_id,event_id,event_name,subject,cause_run_id,depth,state) SELECT tenant_id,id,active_version_id,$3,$2::varchar,$4,$5,$6,'queued' FROM base_rules WHERE tenant_id=$1 AND trigger=$2::varchar AND active_version_id IS NOT NULL AND disabled_at IS NULL ORDER BY id ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING RETURNING id,rule_id",
-                &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth],
+                "INSERT INTO base_rule_runs(tenant_id,rule_id,version_id,event_id,event_name,subject,cause_run_id,depth,state,logical_event) SELECT tenant_id,id,active_version_id,$3,$2::varchar,$4,$5,$6,'queued',$7 FROM base_rules WHERE tenant_id=$1 AND trigger=$2::varchar AND active_version_id IS NOT NULL AND disabled_at IS NULL ORDER BY id ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING RETURNING id,rule_id",
+                &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth, &logical_event],
             ).await?;
             Ok(rows
                 .iter()
@@ -168,6 +199,7 @@ struct Run {
     version: i64,
     event: i64,
     subject: String,
+    logical_event: Option<String>,
     depth: i32,
     state: String,
 }
@@ -189,11 +221,11 @@ impl Worker {
             rules.limit(&**client, &scope, RUNS_PER_MINUTE).await?,
         );
         let runs: Vec<Run> = client.query(
-            "SELECT id,rule_id,version_id,event_id,subject,depth,state FROM base_rule_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
+            "SELECT id,rule_id,version_id,event_id,subject,depth,state,logical_event FROM base_rule_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
             &[&tenant, &event],
         ).await?.iter().map(|row| Run {
             id: row.get(0), rule: row.get(1), version: row.get(2), event: row.get(3),
-            subject: row.get(4), depth: row.get(5), state: row.get(6),
+            subject: row.get(4), depth: row.get(5), state: row.get(6), logical_event: row.get(7),
         }).collect();
         drop(client);
         for mut run in runs {
@@ -476,6 +508,9 @@ impl Worker {
     ) -> Result<Acted> {
         let rules = &self.rules;
         let tenant = execution.tenant();
+        let Some(logical_event) = &run.logical_event else {
+            return Ok(Acted::Stopped("event_identity_missing"));
+        };
         let action = rules.action(&call.operation).ok_or(Error::Invalid)?;
         let Some(mut input) = crate::review::bind(
             &action.input,
@@ -556,6 +591,12 @@ impl Worker {
             .events
             .cause(&mut tx, &format!("{CAUSE}{}", run.id))
             .await?;
+        tx.sql()
+            .execute(
+                "SELECT set_config('bilibi.rules.action', $1, true)",
+                &[&json!([run.version, position, logical_event]).to_string()],
+            )
+            .await?;
         let outcome = rules
             .jobs
             .commit(&mut tx, execution, action.key, &input)
@@ -613,7 +654,6 @@ impl Worker {
         Ok(Acted::Refused)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn receipt(
         &self,
         tx: &mut MutationTransaction<'_>,

@@ -27,11 +27,12 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 });
 fn columns() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Name"),
-        BuiltinColumn::new("status", "Status"),
-        BuiltinColumn::new("timezone", "Zone"),
-        BuiltinColumn::new("holiday_sets", "Holiday sets"),
+        BuiltinColumn::new("code", "Code").grid_field("work_calendars.code"),
+        BuiltinColumn::new("name", "Name").grid_field("work_calendars.name"),
+        BuiltinColumn::new("status", "Status").grid_field("work_calendars.status"),
+        BuiltinColumn::new("timezone", "Zone").grid_field("work_calendars.timezone"),
+        BuiltinColumn::new("holiday_sets", "Holiday sets")
+            .grid_field("work_calendars.holiday_sets"),
     ]
 }
 /// The substitution choices, as the record offers them too.
@@ -202,13 +203,13 @@ impl Calendars {
         }
     }
 
-    fn dialog(&self, draft: &Draft) -> Result<Html> {
+    fn dialog(&self, draft: &Draft, words: &bilibi_grid::RecordWords) -> Result<Html> {
         let value = |key: &str| draft.values.get(key).cloned().unwrap_or_default();
         let errors = |key: &str| draft.errors.get(key).cloned().unwrap_or_default();
         let field = |key: &str, label: &str| {
             Field::in_form("calendar", key)
                 .id(format!("work-calendar-new-{}", key.replace('_', "-")))
-                .label(label)
+                .label(words.field(key, label))
                 .value(value(key))
                 .errors(errors(key))
         };
@@ -266,6 +267,10 @@ impl Calendars {
     }
 
     async fn view(&self, scope: &Scope) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "work_calendars").await?;
+        drop(client);
+
         let (can_view, can_manage) = {
             let client = self.pages.db.get().await?;
             let held = effective_capabilities(&**client, scope).await?;
@@ -362,7 +367,7 @@ impl Calendars {
             ..Card::default()
         })?;
         let dialog = match &self.draft {
-            Some(draft) => self.dialog(draft)?,
+            Some(draft) => self.dialog(draft, &words)?,
             None => Html::EMPTY,
         };
         View {

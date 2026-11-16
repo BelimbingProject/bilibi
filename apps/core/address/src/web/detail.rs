@@ -32,10 +32,7 @@ const IDS: Ids = Ids {
     admin1: "address-location-admin1",
 };
 const LOCATION_LABELS: Labels = Labels {
-    admin1: "State or Province",
     admin1_prompt: "Choose a division",
-    postcode: "Postal Code",
-    locality: "Locality / City",
 };
 /// The facts an inline edit may write, by the name the editor posts.
 const TEXT_FACTS: [(&str, &str); 7] = [
@@ -434,7 +431,12 @@ impl Detail {
         }
         render(InlineEdit { field })
     }
-    fn details(&self, record: &Record, editable: bool) -> Result<Html> {
+    fn details(
+        &self,
+        record: &Record,
+        editable: bool,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
         let a = &record.address;
         let status = a
             .address
@@ -444,7 +446,7 @@ impl Detail {
         let mut choice = InlineField::new(
             "address-verification-status",
             "verification_status",
-            "Edit verification status",
+            words.get(&super::fields::VERIFICATION_STATUS),
             &status,
         )
         .version(a.version)
@@ -461,7 +463,7 @@ impl Detail {
             Field::named("verification_status")
                 .id("address-verification-status-select")
                 .label_class("sr-only")
-                .label("Verification status")
+                .label(words.get(&super::fields::VERIFICATION_STATUS))
                 .kind(InputKind::Select)
                 .value(&status)
                 .options(bilibi_ui::choices(&[
@@ -471,19 +473,24 @@ impl Detail {
                 ])),
         )?;
         let mut items = Vec::new();
-        for (name, label) in &TEXT_FACTS[..2] {
+        for (name, _) in &TEXT_FACTS[..2] {
             items.push(Fact {
-                title: super::fields::get(name).label,
+                title: words.get(&super::fields::get(name)),
                 id: if *name == "label" {
                     "address-view-label"
                 } else {
                     "address-view-phone"
                 },
-                value: self.text_fact(record, name, label, editable)?,
+                value: self.text_fact(
+                    record,
+                    name,
+                    words.get(&super::fields::get(name)),
+                    editable,
+                )?,
             });
         }
         items.push(Fact {
-            title: super::fields::VERIFICATION_STATUS.label,
+            title: words.get(&super::fields::VERIFICATION_STATUS),
             id: "address-view-verification-status",
             value: render(InlineChoice {
                 field: choice,
@@ -493,15 +500,20 @@ impl Detail {
         });
         // The street lines start their own row, as on Create Address.
         let mut lines = Vec::new();
-        for (name, label, id) in [
-            ("line1", "Address Line 1", "address-view-line1"),
-            ("line2", "Address Line 2", "address-view-line2"),
-            ("line3", "Address Line 3", "address-view-line3"),
+        for (name, id) in [
+            ("line1", "address-view-line1"),
+            ("line2", "address-view-line2"),
+            ("line3", "address-view-line3"),
         ] {
             lines.push(Fact {
-                title: super::fields::get(name).label,
+                title: words.get(&super::fields::get(name)),
                 id,
-                value: self.text_fact(record, name, label, editable)?,
+                value: self.text_fact(
+                    record,
+                    name,
+                    words.get(&super::fields::get(name)),
+                    editable,
+                )?,
             });
         }
         let mut body = render(SectionHeading {
@@ -526,7 +538,12 @@ impl Detail {
             ..Card::default()
         })
     }
-    fn location(&self, record: &Record, editable: bool) -> Result<Html> {
+    fn location(
+        &self,
+        record: &Record,
+        editable: bool,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
         let a = &record.address.address;
         let edit = if editable && self.editing.is_none() {
             render(IconButton {
@@ -555,6 +572,7 @@ impl Detail {
                     "location",
                     &IDS,
                     &LOCATION_LABELS,
+                    words,
                     &self.countries,
                     &editing.errors,
                 )?,
@@ -582,17 +600,17 @@ impl Detail {
                     id: "address-location-facts",
                     items: vec![
                         Fact {
-                            title: super::fields::COUNTRY_ISO.label,
+                            title: words.get(&super::fields::COUNTRY_ISO),
                             id: "address-view-country",
                             value: shown(&record.country_name, &a.country_iso),
                         },
                         Fact {
-                            title: super::fields::ADMIN1_CODE.label,
+                            title: words.get(&super::fields::ADMIN1_CODE),
                             id: "address-view-admin1",
                             value: shown(&record.admin1_name, &a.admin1_code),
                         },
                         Fact {
-                            title: super::fields::POSTCODE.label,
+                            title: words.get(&super::fields::POSTCODE),
                             id: "address-view-postcode",
                             value: Html::raw(format!(
                                 "<span class=\"tabular-nums\">{}</span>",
@@ -600,7 +618,7 @@ impl Detail {
                             )),
                         },
                         Fact {
-                            title: super::fields::LOCALITY.label,
+                            title: words.get(&super::fields::LOCALITY),
                             id: "address-view-locality",
                             value: Html::text(a.locality.as_deref().unwrap_or("—")),
                         },
@@ -617,26 +635,41 @@ impl Detail {
             ..Card::default()
         })
     }
-    fn provenance(&self, record: &Record, editable: bool) -> Result<Html> {
+    fn provenance(
+        &self,
+        record: &Record,
+        editable: bool,
+        words: &bilibi_grid::RecordWords,
+    ) -> Result<Html> {
         let a = &record.address.address;
         let mut items = vec![
             Fact {
-                title: super::fields::SOURCE.label,
+                title: words.get(&super::fields::SOURCE),
                 id: "address-view-source",
-                value: self.text_fact(record, "source", "Source", editable)?,
+                value: self.text_fact(
+                    record,
+                    "source",
+                    words.get(&super::fields::get("source")),
+                    editable,
+                )?,
             },
             Fact {
-                title: super::fields::SOURCE_REF.label,
+                title: words.get(&super::fields::SOURCE_REF),
                 id: "address-view-source-ref",
-                value: self.text_fact(record, "source_ref", "Source Reference", editable)?,
+                value: self.text_fact(
+                    record,
+                    "source_ref",
+                    words.get(&super::fields::get("source_ref")),
+                    editable,
+                )?,
             },
             Fact {
-                title: super::fields::PARSER_VERSION.label,
+                title: words.get(&super::fields::PARSER_VERSION),
                 id: "address-view-parser-version",
                 value: Html::text(a.parser_version.as_deref().unwrap_or("—")),
             },
             Fact {
-                title: super::fields::PARSE_CONFIDENCE.label,
+                title: words.get(&super::fields::PARSE_CONFIDENCE),
                 id: "address-view-parse-confidence",
                 value: Html::raw(format!(
                     "<span class=\"tabular-nums\">{}</span>",
@@ -646,7 +679,7 @@ impl Detail {
         ];
         if let Some(raw) = &a.raw_input {
             items.push(Fact {
-                title: super::fields::RAW_INPUT.label,
+                title: words.get(&super::fields::RAW_INPUT),
                 id: "address-view-raw-input",
                 value: Html::raw(format!(
                     "<pre class=\"overflow-x-auto rounded-xl border border-line bg-surface-muted p-3 font-mono text-xs text-ink\">{}</pre>",
@@ -681,8 +714,20 @@ impl Detail {
         for owner in owners {
             let a = &owner.attachment.attachment;
             let (kind, link) = match owner.attachment.owner {
-                PartyId::Organisation(id) => ("Company", format!("<a href=\"/companies/{id}\" id=\"linked-company-{id}\" class=\"text-action hover:underline\">{}</a>", Html::text(&owner.name))),
-                PartyId::Person(id) => ("Person", format!("<a href=\"/contacts/{id}\" id=\"linked-person-{id}\" class=\"text-action hover:underline\">{}</a>", Html::text(&owner.name))),
+                PartyId::Organisation(id) => (
+                    "Company",
+                    format!(
+                        "<a href=\"/companies/{id}\" id=\"linked-company-{id}\" class=\"text-action hover:underline\">{}</a>",
+                        Html::text(&owner.name)
+                    ),
+                ),
+                PartyId::Person(id) => (
+                    "Person",
+                    format!(
+                        "<a href=\"/contacts/{id}\" id=\"linked-person-{id}\" class=\"text-action hover:underline\">{}</a>",
+                        Html::text(&owner.name)
+                    ),
+                ),
             };
             let mut kinds = String::new();
             for k in &a.kinds {
@@ -749,6 +794,9 @@ impl Detail {
         })
     }
     async fn view(&mut self, scope: &Scope) -> Result<LiveBody> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "addresses").await?;
+        drop(client);
         let record = self.pages.addresses.detail(scope, self.id).await?;
         let editable = self.pages.allowed(scope, UPDATE).await?;
         if !editable {
@@ -797,9 +845,9 @@ impl Detail {
             flash: self.flash.map(),
             address_id: self.id.to_string(),
             header,
-            details: self.details(&record, editable)?,
-            location: self.location(&record, editable)?,
-            provenance: self.provenance(&record, editable)?,
+            details: self.details(&record, editable, &words)?,
+            location: self.location(&record, editable, &words)?,
+            provenance: self.provenance(&record, editable, &words)?,
             linked,
         }
         .render()

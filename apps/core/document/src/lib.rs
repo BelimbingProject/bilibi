@@ -1125,6 +1125,11 @@ impl Documents {
             .active(&**client, &scope, custom::RECORD_TYPE)
             .await
     }
+    /// Base Custom Fields, for the pages' shared reading and editing of
+    /// pick-list and record values.
+    pub(crate) fn custom_values(&self) -> &bilibi_custom_fields::CustomFields {
+        &self.custom
+    }
     /// Whether the reader may download files.
     pub async fn may_download(&self, scope: &Scope) -> Result<bool> {
         let client = self.db.get().await?;
@@ -1303,6 +1308,7 @@ inventory::submit! { Module {
         ("core-document-011-personal-data", include_str!("../migrations/011-personal-data.sql")),
         ("core-document-012-erasure", include_str!("../migrations/012-erasure.sql")),
         ("core-document-013-search", include_str!("../migrations/013-search.sql")),
+        ("core-document-014-custom-search", include_str!("../migrations/014-custom-search.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;

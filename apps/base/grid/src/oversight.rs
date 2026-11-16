@@ -28,8 +28,9 @@ pub enum OversightSpec {
         page: PageSpec,
         columns: Vec<String>,
         /// Per-child pages for a caller composing one globally bounded page.
-        /// Missing entries use `page`; IDs never widen the proven directory.
-        offsets: BTreeMap<i64, usize>,
+        /// Each entry is (offset, limit). Missing children return only their
+        /// count, without reading or projecting keys. IDs never widen consent.
+        pages: BTreeMap<i64, (usize, usize)>,
     },
 }
 impl OversightSpec {
@@ -314,28 +315,43 @@ impl OversightQueries {
                 OversightSpec::Rows {
                     page,
                     columns,
-                    offsets,
+                    pages,
                 } => {
                     let mut page = page.clone();
-                    if let Some(offset) = offsets.get(&grant.tenant()) {
+                    let (keys, total) = if let Some((offset, limit)) = pages.get(&grant.tenant()) {
                         page.offset = *offset;
-                    }
-                    let keys =
-                        crate::summary::page_keys_catalog(&tx, &catalog, root, &page).await?;
+                        page.limit = *limit;
+                        let keys =
+                            crate::summary::page_keys_catalog(&tx, &catalog, root, &page).await?;
+                        (keys.keys, keys.total)
+                    } else {
+                        let summary = crate::summary::summarize_catalog(
+                            &tx,
+                            &catalog,
+                            root,
+                            &SummarySpec {
+                                bounds: page.bounds,
+                                filters: page.filters.clone(),
+                                groupings: vec![],
+                                measures: vec![],
+                                timezone: page.timezone.clone(),
+                                max_groups: 1,
+                            },
+                        )
+                        .await?;
+                        (vec![], summary.total.rows)
+                    };
                     let projection = crate::query::project_catalog(
                         &tx,
                         &catalog,
                         root,
-                        &keys.keys,
+                        &keys,
                         columns,
                         &Lenses::default(),
                         page.bounds,
                     )
                     .await?;
-                    OversightData::Rows {
-                        projection,
-                        total: keys.total,
-                    }
+                    OversightData::Rows { projection, total }
                 }
             };
             tx.commit().await?;
@@ -351,7 +367,12 @@ impl OversightQueries {
             OversightData::Summary(s) => s.total.rows,
             OversightData::Rows { projection, .. } => projection.rows.len() as i64,
         };
-        let (columns, filters) = spec.evidence();
+        let (mut columns, filters) = spec.evidence();
+        if let OversightSpec::Rows { pages, .. } = spec {
+            if !pages.contains_key(&grant.tenant()) {
+                columns.clear();
+            }
+        }
         // The recheck happens after the read and before the durable action.
         // A failed audit or revoke discards this entire child's answer.
         record_oversight_read(

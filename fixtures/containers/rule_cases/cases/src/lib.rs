@@ -103,19 +103,19 @@ static GRID: GridContribution = GridContribution {
 bilibi_grid::contribute!("rule_cases/cases", "rule_cases/cases.grid", &GRID);
 
 inventory::submit! { Contribution::new(TRIGGERS, OPENED, provenance!(), &Trigger {
-    on: On { event: OPENED, versions: &[1] }, title: "A case is opened", table: TABLE, subject: "/case", version: "version",
+    on: On { event: OPENED, versions: &[1] }, title: "A case is opened", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
 inventory::submit! { Contribution::new(TRIGGERS, ROUTED, provenance!(), &Trigger {
-    on: On { event: ROUTED, versions: &[1] }, title: "A case is routed to a queue", table: TABLE, subject: "/case", version: "version",
+    on: On { event: ROUTED, versions: &[1] }, title: "A case is routed to a queue", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
 inventory::submit! { Contribution::new(TRIGGERS, FLAGGED, provenance!(), &Trigger {
-    on: On { event: FLAGGED, versions: &[1] }, title: "A case is flagged", table: TABLE, subject: "/case", version: "version",
+    on: On { event: FLAGGED, versions: &[1] }, title: "A case is flagged", table: TABLE, subject: "/case", logical_event: None, version: "version",
 }) }
 inventory::submit! { Contribution::new(ACTIONS, "rule_cases.cases.route", provenance!(), &Action {
-    title: "Send the case to a queue", table: TABLE, subject: "case_id", version: "expected_version", records: &[ROUTED],
+    title: "Send the case to a queue", table: TABLE, subject: "case_id", version: "expected_version", records: &[ROUTED], approval_capabilities: &[],
 }) }
 inventory::submit! { Contribution::new(ACTIONS, "rule_cases.cases.flag", provenance!(), &Action {
-    title: "Flag the case", table: TABLE, subject: "case_id", version: "expected_version", records: &[FLAGGED],
+    title: "Flag the case", table: TABLE, subject: "case_id", version: "expected_version", records: &[FLAGGED], approval_capabilities: &[],
 }) }
 inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "rule_cases.cases.route", provenance!(), &PrincipalWrite { principals: &["rules"] }) }
 inventory::submit! { Contribution::new(PRINCIPAL_WRITES, "rule_cases.cases.flag", provenance!(), &PrincipalWrite { principals: &["rules"] }) }

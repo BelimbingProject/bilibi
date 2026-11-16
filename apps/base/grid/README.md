@@ -6,11 +6,13 @@
 
 ## Parent oversight
 
-`OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.offsets` allows callers to compose globally bounded pages, without widening the proven directory. `latest` and `list` values stay per child, with null combined cells.
+`OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.pages` supplies each child’s `(offset, limit)` for a globally bounded page; children absent from the map return only counts, without reading or projecting row keys. The map never widens the proven directory. `latest` and `list` values stay per child, with null combined cells.
 
 **Unknown classification denies the whole source.** Every field in the complete original `TableDecl` must be explicitly marked `.personal(kind)` or `.non_personal()` by its owner before the table can enter either the consent or oversight catalog. Hidden/derived fields and fields removed by parent restrictions or child withholding still count. Absence of a personal mark is unknown, never evidence of non-personal data. `.personal` still requires the owning module's personal-data store contract; do not label unknown production fields non-personal to bypass it. Core Contacts, accounts, affiliations, addresses and companies remain unavailable to oversight until their owners complete classification and the required privacy/store contracts. Existing grants and explicit personal selections cannot enable an unclassified source. This does not remove ordinary same-tenant access. Only Grid's non-business reference sources are fully classified here.
 
 Global operator settings `tenancy.oversight.max_children` (50), `concurrency` (4), `child_timeout_ms` (2,000), `total_timeout_ms` (10,000) and `cache_seconds` (60; 0 disables) have settings-editor controls. Cache entries are bounded, in memory and keyed by reader, query, grant version and live catalog; every hit requires fresh authorization and audit. A revoked, withheld, masked, expired or unauditable answer cannot survive through the cache.
+
+Source description caching follows [The scoped catalog](#the-scoped-catalog); live capabilities, masks and consent are always rechecked.
 
 Grid owns flexible columns on list pages: the catalog every module declares its
 tables into, the paths a person walks through it to pick columns without writing
@@ -63,13 +65,31 @@ A table whose capability supports record reach (`CapabilityDefinition::with_reac
 - A child table guarded by the same key (lines of a deal) selects its parent's owner, or every line would show.
 - A parent's oversight read skips a table it reaches only partly.
 
+## Tenant custom fields
+
+A tenant's custom fields (`base/custom_fields`, ADR 21) are data, not declarations, so Grid adds them to each fresh scoped catalog through one hook (`bind_custom_columns`, a `CustomColumns` that `base/custom_fields` binds at boot). Grid does not depend on that module.
+
+- The owner selects its `custom_fields` JSON column in the table's source, declares it as a hidden text field and contributes a `bilibi_custom_fields::GridSource` naming the table and that field ([Custom Fields](../custom_fields/README.md#offer-custom-fields-on-a-record-type)).
+- Each active field becomes `cf_<key>` on that table, with the tenant's current label (`Table::field_label`; the `Field` itself carries the id as its label, so read labels through the table or the resolved `Column`). It resolves, projects, filters, groups and sorts like any field of the table, also through links (`work.company.cf_segment:list`), under the table's capability, reach and tenant predicate. It is never restrictable or masked: it is as visible as its record.
+- Its value is SQL over the hidden field that `base/custom_fields` builds from the validated key and no request text. A record field projects only its stored id; `Table::custom_reference` and `Column::reference` carry its Base Records kind. [Reports](../reports/README.md#the-rule) owns permission-aware naming of cells and groups. The column remains available to readers of its root table. Only equals, one_of, empty and not_empty filters are accepted, comparing stored ids. List column pickers, saved list paths and related list paths exclude record fields; owners show their record fields as pills.
+- `Table::custom_search_values` gives Base Search the tenant's searchable text fields. `Table::is_custom` tells a page that draws its own `cf_` columns which fields are tenant fields.
+- Keys never change and are never reused, so each distinct `cf_<key>` id is kept once for the process; labels are not.
+
+## Shared label rendering
+
+The Web host calls `render_labels` for initial pages, mounts and live fragments. Grid maps tenant overrides to visible Grid identities and registered record-field vocabulary through each field's declared column path. Shared controls consume the resulting map through [UI's tenant field labels](../ui/README.md#tenant-field-labels).
+
+`Catalog::resolve` applies the tenant's field overrides automatically. The lower-level `column::resolve` resolves structural paths with module defaults; use `Catalog::resolve` for tenant words. Built-in list columns whose IDs match Grid fields resolve overrides even without `RecordFields`.
+
+For fact titles, inline editors and other labels outside shared controls, load `RecordWords::load(client, scope, table)` once per render. `words.get(&field)` looks up the registered vocabulary, then the field ID, and falls back to `field.label`. `words.field(id, default)` handles a Grid field without record vocabulary. Load words for the owning table, including when a page contains another table's fields; DOM IDs and input names are not field identities.
+
 ## Detail fields become columns
 
-A scalar field shown on a record can also be added to its list, under the same label.
+A scalar field shown on a record can also be added to its list, under the same label. Tenant renaming is owned by [Labels](../labels/README.md); rendering uses the integration above.
 
 For example, Contacts calls its email **Personal email** in both places. Work email comes from the Affiliations panel and becomes a Contacts column through that panel's Grid contribution.
 
-- Declare the vocabulary once with `bilibi_ui::record_fields!`, including the owning module, key, label, type, choices or pick-list, and personal-data class; see [the vocabulary contract](../ui/README.md#record-field-vocabulary). Use its named fields or `get` for detail labels and `RecordField::fact` for a complete fact. Build corresponding Grid fields with `Field::record(fields::NAME)` and operation input properties with `fields::NAME.input(...)`, so boot can refuse disagreement. SQL source keys and read protection remain Grid declarations.
+- Declare the vocabulary once with `bilibi_ui::record_fields!`, including the owning module, key, label, type, choices or pick-list, and personal-data class; see [the vocabulary contract](../ui/README.md#record-field-vocabulary). Resolve detail titles through [shared label rendering](#shared-label-rendering). Build corresponding Grid fields with `Field::record(fields::NAME)` and operation input properties with `fields::NAME.input(...)`, so boot can refuse disagreement. SQL source keys and read protection remain Grid declarations.
 - Add `RecordFields { table, fields: fields::ALL }` to the owning `GridContribution.record_fields`. A panel may contribute fields to the table at its link's start. `PageColumns` collects them automatically.
 - An Extension that owns a scalar Company field contributes its own Grid table and a `One` link starting at `companies`, then contributes `RecordFields` on `companies` with a path through that link. Company reads the value through the Extension facade for its own page slots; Grid resolves the path for optional list columns. The Extension remains the only owner of its table and tenant predicate.
 - Use `.path("parent.name")` for a related readable value. Grid resolves the path against the reader's fresh catalog before offering or loading it.
@@ -90,12 +110,7 @@ unknown one. Platform capabilities need the operator identity. A system identity
 has no `Scope` and reads nothing. Build the catalog again wherever the page
 refreshes its own capabilities; there is no cache of grants.
 
-The first catalog for a source asks PostgreSQL to describe (not run) its
-statement and keeps the selected keys for the process, since the SQL is static.
-A declared field its source does not select, a placeholder that is not bigint, or
-an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared`
-naming the table and field (the owner must fix it; callers' `?` maps it to an
-internal error and logs the cause).
+The first catalog for a source asks PostgreSQL to describe (not run) its statement and keeps the selected keys and parameter count for the process, keyed by static SQL and tenant-scoped status. Ordinary and oversight catalogs reuse these descriptions across calls and children. A declared field its source does not select, a placeholder that is not bigint, or an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared` naming the table and field (the owner must fix it; callers' `?` maps it to an internal error and logs the cause).
 
 `restriction_catalog` and `restrictable` give the Authz screens the protected-field
 catalog as **data**: Authz does not depend on Grid. Each field carries its personal kind, so only personal fields can be masked.
@@ -214,7 +229,7 @@ The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh
 - **Columns** are specs, resolved against the reader's catalog: a field, a linked field or a rollup. A restricted or unreadable column is refused (`QueryError::Column`), so it can neither be shown nor filtered on.
 - **Filters** (`Test`): `Equals`, `OneOf` (up to 100 values), `Contains` (text and choices), `Range` (numbers, or `YYYY-MM-DD` days for dates and date-times), `Within(Period)` (today, this week, last 7 or 30 days, this month, quarter or year), `Empty`, `NotEmpty`. At most 16. A type mismatch is `QueryError::Unsupported`.
 - **Groupings**: at most 2. A date or date-time groups only by a `Bucket` (day, week from Monday, month, quarter, year) and returns the bucket's first day; anything else groups by value.
-- **Measures**: at most 8. `count` (rows with a value), `sum` and `avg` (numbers), `min` and `max` (ordered values and text).
+- **Measures**: at most 8. `count` (rows with a value), `sum` and `avg` (numbers), `min` and `max` (ordered values and text). A record-reference field supports only `count`; value aggregates are refused with `QueryError::Unsupported`, so stored ids never become summary values. Reference-field rollups through many-links are refused during column resolution.
 - **Time zone**: the reader's IANA zone (`bilibi_datetime::valid_timezone`). Date-time buckets and day filters use the reader's local days; a day range on an instant compares against the instants those days start and end at, so the owner's index still applies.
 - **Bounds**: `max_groups` 1 to 1,000; above it the read is refused, never truncated. Pages hold 1 to 100 rows and start within the first 10,000; up to 3 sorts, the root key breaking ties.
 

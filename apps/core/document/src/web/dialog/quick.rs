@@ -147,13 +147,14 @@ impl QuickDocument {
     pub fn render(
         &self,
         uploads: &Uploads,
+        words: &bilibi_grid::RecordWords,
         prefix: &str,
         cancel_event: &str,
         framed: bool,
     ) -> Result<Html> {
         let state = &self.state;
         let mut details = render(select(
-            state.field(prefix, "source", "Source"),
+            state.field(words, "documents", prefix, "source", "Source"),
             choices(&[("A file", "internal"), ("A link", "external")]),
             "",
         ))?;
@@ -184,7 +185,7 @@ impl QuickDocument {
             }
             Source::External => details.push(&render(
                 state
-                    .field(prefix, "external_url", "Link")
+                    .field(words, "documents", prefix, "external_url", "Link")
                     .kind(InputKind::Url)
                     .required()
                     .attr("maxlength", "2000")
@@ -193,19 +194,19 @@ impl QuickDocument {
         }
         for field in [
             state
-                .field(prefix, "name", "Name")
+                .field(words, "documents", prefix, "name", "Name")
                 .attr("maxlength", "255")
                 .hint(match self.source() {
                     Source::Internal => "The file's name when left blank.",
                     Source::External => "Required for a link.",
                 }),
             select(
-                state.field(prefix, "category", "Category"),
+                state.field(words, "documents", prefix, "category", "Category"),
                 self.options.categories.clone(),
                 "None",
             ),
             select(
-                state.field(prefix, "document_type", "Type"),
+                state.field(words, "documents", prefix, "document_type", "Type"),
                 self.options.types.clone(),
                 "None",
             ),
@@ -218,7 +219,7 @@ impl QuickDocument {
                 fixed.pill(format!("{prefix}-related-pill"), framed),
             )?);
         }
-        let mut body = state.feedback(prefix)?;
+        let mut body = state.feedback(words, words, prefix)?;
         body.push(&details_form(
             prefix,
             "quick_create",

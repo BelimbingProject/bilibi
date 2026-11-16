@@ -448,8 +448,12 @@ async fn both(proof: &Proof) -> Result<()> {
         .await?;
     proof.onboard("ACME").await?;
     proof.receive("GRN-0002", "GLOBEX", "3").await?;
+    // Publisher commands run concurrently; the receipt must exist before its return.
+    proof.commands_done().await?;
     proof.give_back("GRN-0002").await?;
     proof.receive("GRN-0003", "ACME", "7").await?;
+    // Exercise receiving an existing receipt, not two concurrent inserts.
+    proof.commands_done().await?;
     proof.receive("GRN-0003", "ACME", "7").await?;
     proof.commands_done().await?;
     let recorded: i64 = proof

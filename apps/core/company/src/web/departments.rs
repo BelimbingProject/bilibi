@@ -93,11 +93,11 @@ pub(super) struct Departments {
 
 pub(super) fn builtins() -> Vec<BuiltinColumn> {
     vec![
-        BuiltinColumn::new("code", "Code"),
-        BuiltinColumn::new("name", "Department Name"),
+        BuiltinColumn::new("code", "Code").grid_field("departments.type_code"),
+        BuiltinColumn::new("name", "Department Name").grid_field("departments.type_name"),
         BuiltinColumn::new("category", "Category"),
         BuiltinColumn::new("head", "Head"),
-        BuiltinColumn::new("status", "Status"),
+        BuiltinColumn::new("status", "Status").grid_field("departments.status"),
     ]
 }
 fn status_options() -> Vec<Choice> {
@@ -470,6 +470,7 @@ impl Departments {
                 .id("department-status")
                 .kind(InputKind::Select)
                 .label("Initial Status")
+                .grid_field("departments.status")
                 .options(status_options())
                 .required(),
             no_types: types.is_empty(),

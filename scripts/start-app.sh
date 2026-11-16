@@ -230,7 +230,7 @@ fi
 # only ever read it when .git is a directory, so a git worktree already ran
 # with these ignores alone.)
 # Keep the app owned by the launcher, outside cargo-watch's rebuild process
-# group. The owner stops only its own child on replacement or Ctrl-C.
+# group. See dev-process.py for child ownership and shutdown handling.
 # Ignore prose, while retaining all Rust, SQL, templates, assets and include files.
 exec cargo watch --no-vcs-ignores --watch apps --watch Cargo.toml --watch Cargo.lock --watch scripts \
     --ignore 'apps/base/ui/assets/app.css' --ignore 'apps/base/ui/assets/css/.mounted-*.css' \

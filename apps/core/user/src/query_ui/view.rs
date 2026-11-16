@@ -83,7 +83,6 @@ fn confirm(pending: bool, name: &str) -> Result<Html> {
         cancel_event: "cancel_delete",
     })
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn index(
     pages: &Pages,
     scope: &Scope,

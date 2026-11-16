@@ -7,6 +7,7 @@ mod agent_operations;
 mod agent_reminders;
 mod contributions;
 mod feed;
+mod follow_up;
 mod guest_person;
 mod guest_reminders;
 mod ics;
@@ -33,6 +34,7 @@ pub use contributions::{MANAGE, MANAGE_ALL, VIEW, VIEW_ALL};
 pub use feed::{
     FeedKey, FeedKeyPage, FeedKeyQuery, FeedKeySort, FEED_PATH, FEED_RECORD, STEP_UP_FEED_KEY,
 };
+pub use follow_up::{FollowUp, FollowUpCheck};
 pub use imminent::IMMINENT_HOURS;
 pub use invitations::{GateFuture, InvitationGate, Invitee, INVITATION_GATES};
 pub use lists::DayCount;
@@ -909,13 +911,16 @@ impl Activities {
 
 inventory::submit! { Module {
     id: MODULE, layer: Layer::Core,
-    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
+    dependencies: &["base/agent_api", "base/authz", "base/database", "base/datetime", "base/events", "base/grid", "base/locale", "base/mail", "base/menu", "base/notifications", "base/party_ids", "base/principal_directory", "base/queue", "base/records", "base/rules", "base/schedule", "base/settings", "base/step_up", "base/tenancy", "base/ui", "core/company", "core/person", "core/user", "core/work_calendar"],
     migrations: &[
         ("core-activity-001-activities", include_str!("../migrations/001-activities.sql")),
         ("core-activity-002-invitations", include_str!("../migrations/002-invitations.sql")),
         ("core-activity-003-series", include_str!("../migrations/003-series.sql")),
         ("core-activity-004-reminders", include_str!("../migrations/004-reminders.sql")),
         ("core-activity-005-calendar-feeds", include_str!("../migrations/005-calendar-feeds.sql")),
+        ("core-activity-006-followups", include_str!("../migrations/006-followups.sql")),
+        ("core-activity-007-rule-followups", include_str!("../migrations/007-rule-followups.sql")),
+        ("core-activity-008-logical-followups", include_str!("../migrations/008-logical-followups.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;
@@ -935,6 +940,7 @@ inventory::submit! { Module {
             people: s.get(bilibi_person::SERVICE)?,
         });
         agent_operations::bind(activities.clone())?;
+        follow_up::bind(activities.clone())?;
         s.get::<bilibi_notifications::NotificationBoundary>("base/notifications.sink")?
             .register_todos(Arc::new(reminders::Todos {
                 db: s.get::<Db>("base/database.pool")?.as_ref().clone(),

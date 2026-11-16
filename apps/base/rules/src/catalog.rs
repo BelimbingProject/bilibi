@@ -30,6 +30,7 @@ pub struct Trigger {
     pub table: &'static str,
     /// JSON pointer to that record's key in the event payload (`/case`).
     pub subject: &'static str,
+    pub logical_event: Option<&'static str>,
     /// The integer Grid field used to detect changes to the evaluated record.
     pub version: &'static str,
 }
@@ -52,6 +53,7 @@ pub struct Action {
     /// The events its commit may record, so an approval can refuse a rule
     /// that would close a cycle through active rules.
     pub records: &'static [&'static str],
+    pub approval_capabilities: &'static [&'static str],
 }
 
 /// Contract owners never offered: an action that grants access, changes
@@ -147,6 +149,12 @@ impl Offers {
                     ),
                 ));
             }
+            if trigger
+                .logical_event
+                .is_some_and(|pointer| !pointer.starts_with('/'))
+            {
+                return Err(refuse(entry, "logical event identity needs a JSON pointer"));
+            }
             if !trigger.subject.starts_with('/') || trigger.title.trim().is_empty() {
                 return Err(refuse(
                     entry,
@@ -183,6 +191,14 @@ impl Offers {
                         "the contract does not admit the rules principal's jobs (PRINCIPAL_WRITES)",
                     )
                 })?;
+            for key in action.approval_capabilities {
+                if !vocabulary.capabilities.contains_key(key) {
+                    return Err(refuse(
+                        entry,
+                        format!("undeclared approval capability {key}"),
+                    ));
+                }
+            }
             let op = registered.definition;
             if !bounds.contains(&op.capability) {
                 return Err(refuse(

@@ -27,6 +27,11 @@ pub(crate) fn cell(value: &Value) -> String {
         Value::Bool(true) => "Yes".into(),
         Value::Bool(false) => "No".into(),
         Value::String(text) => text.clone(),
+        Value::Object(object) if object.contains_key("stored_id") => object
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("Restricted")
+            .to_owned(),
         other => other.to_string(),
     }
 }
@@ -425,17 +430,29 @@ pub(crate) fn pivot(
     let Axes { down, across } = axes(lines);
     let mut sums: Vec<Option<f64>> = vec![None; across.len()];
     let (mut cells, mut subtotals, mut row_totals) = (Vec::new(), Vec::new(), Vec::new());
-    for d in &down {
+    // One pass over the lines: the first line of each (down, across) pair and
+    // the first subtotal of each down value, so a large matrix is not rescanned
+    // once per cell.
+    let mut cell_of: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    let mut subtotal_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (line, (keys, sub, _, _)) in lines.iter().enumerate() {
+        let Some(d) = keys.first().and_then(|k| down.iter().position(|v| v == k)) else {
+            continue;
+        };
+        if *sub {
+            subtotal_of.entry(d).or_insert(line);
+        } else if let Some(a) = keys.get(1).and_then(|k| across.iter().position(|v| v == k)) {
+            cell_of.entry((d, a)).or_insert(line);
+        }
+    }
+    for d in 0..down.len() {
         let mut row = Vec::with_capacity(across.len());
-        for (c, a) in across.iter().enumerate() {
-            let shown = lines
-                .iter()
-                .find(|(keys, sub, _, _)| {
-                    !*sub && keys.first() == Some(d) && keys.get(1) == Some(a)
-                })
-                .map(|(_, _, count, values)| value(*count, values));
+        for (c, slot) in sums.iter_mut().enumerate() {
+            let shown = cell_of
+                .get(&(d, c))
+                .map(|&line| value(lines[line].2, &lines[line].3));
             if let Some(v) = shown.as_ref().and_then(number) {
-                let slot = &mut sums[c];
                 *slot = Some(match (agg, *slot) {
                     (_, None) => v,
                     (Some("min"), Some(t)) => t.min(v),
@@ -445,9 +462,7 @@ pub(crate) fn pivot(
             }
             row.push(shown);
         }
-        let subtotal = lines
-            .iter()
-            .position(|(keys, sub, _, _)| *sub && keys.first() == Some(d));
+        let subtotal = subtotal_of.get(&d).copied();
         row_totals.push(subtotal.map(|line| value(lines[line].2, &lines[line].3)));
         subtotals.push(subtotal);
         cells.push(row);
@@ -609,7 +624,6 @@ pub(crate) fn agg_label(agg: &str) -> &'static str {
 /// measure (or the record count). Two: a category per first group and a
 /// series per second group, of the first measure. None: the total as a
 /// number. With `drill`, each bar or slice names the line it draws.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn figure(
     id: &str,
     title: &str,
@@ -675,12 +689,12 @@ pub(crate) fn figure(
             chart
         };
     }
-    let mut categories: Vec<String> = Vec::new();
-    let mut names: Vec<String> = Vec::new();
+    let mut categories: Vec<Value> = Vec::new();
+    let mut names: Vec<Value> = Vec::new();
     for (_, l) in &detail {
         let (a, b) = (
-            l.0.first().map(|v| key(0, v)).unwrap_or_default(),
-            l.0.get(1).map(|v| key(1, v)).unwrap_or_default(),
+            l.0.first().cloned().unwrap_or_default(),
+            l.0.get(1).cloned().unwrap_or_default(),
         );
         if !categories.contains(&a) {
             categories.push(a);
@@ -689,19 +703,31 @@ pub(crate) fn figure(
             names.push(b);
         }
     }
-    let find = |category: &String, name: &String| {
-        detail.iter().find(|(_, l)| {
-            l.0.first().map(|v| key(0, v)).as_ref() == Some(category)
-                && l.0.get(1).map(|v| key(1, v)).as_ref() == Some(name)
-        })
+    // One pass: the first line of each (category, name) pair.
+    let mut by_pair = std::collections::HashMap::new();
+    for entry in &detail {
+        let l = entry.1;
+        let pair = (
+            l.0.first().map(|v| v.to_string()).unwrap_or_default(),
+            l.0.get(1).map(|v| v.to_string()).unwrap_or_default(),
+        );
+        by_pair.entry(pair).or_insert(entry);
+    }
+    let find = |category: &Value, name: &Value| {
+        by_pair
+            .get(&(category.to_string(), name.to_string()))
+            .copied()
     };
     let series = names
         .iter()
         .map(|name| Series {
-            name: if name.is_empty() {
-                "(none)".into()
-            } else {
-                name.clone()
+            name: {
+                let label = key(1, name);
+                if label.is_empty() {
+                    "(none)".into()
+                } else {
+                    label
+                }
             },
             values: categories
                 .iter()
@@ -709,7 +735,13 @@ pub(crate) fn figure(
                 .collect(),
         })
         .collect();
-    let chart = Chart::new(id, title, kind, categories.clone(), series);
+    let chart = Chart::new(
+        id,
+        title,
+        kind,
+        categories.iter().map(|v| key(0, v)).collect(),
+        series,
+    );
     if drill {
         chart.drill("drill", |s, c| {
             let (name, category) = (names.get(s)?, categories.get(c)?);

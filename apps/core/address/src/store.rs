@@ -722,7 +722,7 @@ pub async fn detach(
 // Address write guards, also used by operation previews. Commit
 // still uses the locking guards above; a review is never a concurrency guard.
 pub(crate) async fn preview_address(
-    client: &impl GenericClient,
+    client: &(impl GenericClient + Sync),
     scope: &Scope,
     id: AddressId,
     version: i64,

@@ -8,7 +8,7 @@
 //! audit evidence whose legal minimum has passed. Each run writes one summary
 //! per class.
 use crate::{runner, Privacy, RETENTION_VIEW};
-use bilibi_audit::Minimums;
+use bilibi_audit::Minimum;
 use bilibi_authz::{SystemAuthentication, SystemScope};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Catalog, Entry, Module, RegistryError, Result as RegistryResult};
@@ -124,7 +124,6 @@ pub trait Sweeper: Send + Sync {
     /// acted on. Purge or anonymise those `holds` does not name, writing
     /// through `tx` and returning every change; never open a second
     /// transaction. Count the held ones as kept.
-    #[allow(clippy::too_many_arguments)]
     fn sweep<'a>(
         &'a self,
         tx: &'a mut MutationTransaction<'_>,
@@ -502,7 +501,6 @@ impl Privacy {
 
     /// One class's run: batches in ID order until the class is done, each
     /// under the hold guard, with one summary for the whole run.
-    #[allow(clippy::too_many_arguments)]
     async fn sweep_class(
         &self,
         client: &mut Client,
@@ -511,7 +509,7 @@ impl Privacy {
         class: &'static RecordClass,
         companies: &Companies,
         period_days: i64,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<()> {
         let (sweep, cutoff) = self
             .open_sweep(
@@ -547,7 +545,7 @@ impl Privacy {
                     records: std::mem::take(&mut swept.records),
                     ..Default::default()
                 };
-                runner::clear_evidence(&tx, &grant, &mut step, minimums).await?;
+                runner::clear_evidence(&tx, &grant, &mut step, minimum).await?;
                 tx.commit().await?;
                 holds.release().await?;
                 Ok::<_, Error>(swept)
@@ -580,7 +578,7 @@ impl Privacy {
         &self,
         client: &mut Client,
         scope: &Scope,
-        minimums: &Minimums,
+        minimum: &Minimum,
     ) -> Result<()> {
         if bilibi_audit::due_evidence(&*client, scope.tenant(), 0, 1)
             .await?
@@ -637,7 +635,7 @@ impl Privacy {
                             scope.mutation_context("privacy.retention.audit_evidence"),
                         )
                         .await?;
-                    done = bilibi_audit::erase_deferred(&tx, &grant, &free, minimums).await?;
+                    done = bilibi_audit::erase_deferred(&tx, &grant, &free, minimum).await?;
                     tx.commit().await?;
                 }
                 holds.release().await?;
@@ -680,7 +678,7 @@ impl Privacy {
         let system =
             SystemScope::rehydrate(&*client, tenant, Some(bilibi_schedule::PRINCIPAL)).await?;
         let scope = authentication.for_system(&*client, &system).await?;
-        let minimums = self.evidence_minimums(client, &scope).await?;
+        let minimum = self.evidence_minimum(client, &scope).await?;
         let mut failed = false;
         // A failing read of the companies or of one class's settings skips
         // only that part: owed cleanup and due evidence still run, and the
@@ -748,7 +746,7 @@ impl Privacy {
                         continue;
                     }
                     failed |= self
-                        .sweep_class(client, &scope, key, class, &companies, days, &minimums)
+                        .sweep_class(client, &scope, key, class, &companies, days, &minimum)
                         .await
                         .is_err();
                 }
@@ -756,13 +754,10 @@ impl Privacy {
         }
         // Each part runs although another failed; the run still fails, and retries.
         failed |= self
-            .resume_erasures(client, &scope, &minimums)
+            .resume_erasures(client, &scope, &minimum)
             .await
             .is_err();
-        failed |= self
-            .sweep_evidence(client, &scope, &minimums)
-            .await
-            .is_err();
+        failed |= self.sweep_evidence(client, &scope, &minimum).await.is_err();
         if failed {
             Err(Error::Internal)
         } else {

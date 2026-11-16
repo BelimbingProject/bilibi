@@ -586,11 +586,11 @@ impl State {
         };
         Ok(())
     }
-    fn create_form(&self, d: &Draft) -> Result<Html> {
+    fn create_form(&self, d: &Draft, words: &bilibi_grid::RecordWords) -> Result<Html> {
         let field = |k: &str, label: &str| {
             Field::in_form("product", k)
                 .id(format!("product-new-{k}"))
-                .label(label)
+                .label(words.field(k, label))
                 .value(d.values.get(k).cloned().unwrap_or_default())
                 .errors(d.errors.get(k).cloned().unwrap_or_default())
         };
@@ -723,9 +723,9 @@ impl State {
             ..Card::default()
         })
     }
-    fn facts(&self, p: &Product) -> Result<Html> {
+    fn facts(&self, p: &Product, words: &bilibi_grid::RecordWords) -> Result<Html> {
         let mut items = vec![Fact {
-            title: "Code",
+            title: words.field("code", "Code"),
             value: Html::text(&p.code),
             ..Fact::default()
         }];
@@ -751,6 +751,7 @@ impl State {
                 choices(&[("Active", "active"), ("Retired", "retired")]),
             ),
         ] {
+            let label = words.field(name, label);
             let mut field =
                 InlineField::new(format!("product-{name}"), name, label, value).version(p.version);
             field.editable = self.can_manage;
@@ -856,7 +857,11 @@ impl State {
             ..Card::default()
         })
     }
-    fn view(&self) -> Result<String> {
+    async fn view(&self, scope: &Scope) -> Result<String> {
+        let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "products").await?;
+        drop(client);
+
         let mut sections = Vec::new();
         let mut dialog = Html::EMPTY;
         let header = if let Some(p) = &self.product {
@@ -865,7 +870,7 @@ impl State {
                 title: "Products",
                 ..BackLink::default()
             })?);
-            sections.push(self.facts(p)?);
+            sections.push(self.facts(p, &words)?);
             sections.push(render(SectionHeading{title:"Selling prices",description:"Prices for the company selected above, per base unit. Earlier prices stay in the history.",..SectionHeading::default()})?);
             if self.company.is_some() {
                 sections.push(self.table(true)?);
@@ -930,7 +935,7 @@ impl State {
             ))?);
             sections.push(self.table(false)?);
             if let Some(d) = &self.draft {
-                dialog = self.create_form(d)?;
+                dialog = self.create_form(d, &words)?;
             }
             let actions = if self.can_manage {
                 render(CreateButton {
@@ -1006,7 +1011,7 @@ impl LiveState<Scope, Error> for State {
             }
             self.load(r.scope).await?;
             Ok(LiveBody {
-                html: self.view()?,
+                html: self.view(r.scope).await?,
                 query: {
                     let mut q = self.list.to_params();
                     q.extend(if self.id.is_some() {

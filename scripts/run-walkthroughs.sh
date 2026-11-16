@@ -93,6 +93,7 @@ WALKTHROUGHS=(
   'base|bulk-import|apps/base/bulk_data|import-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
+  'base|custom-fields-structured|apps/base/custom_fields|structured-fields-walkthrough|migrate|BILIBI_CUSTOM_FIELDS_DEMO=disposable BILIBI_CUSTOM_FIELDS_ROOT=@/artifacts|-'
   'base|database-pool|apps/base/database|pool-walkthrough|none||-'
   'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
@@ -242,6 +243,7 @@ WALKTHROUGHS=(
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
 NOT_RUN=(
+  'apps/web|rules-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
   # They only serve the app, with a reference page, for a person to use in a browser.
   'apps/core/document|upload-resume-proof|serves the New document dialog for a browser upload'
   'apps/core/person|person-contact-panel|serves a reference page only'

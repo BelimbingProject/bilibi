@@ -22,7 +22,10 @@ impl Run {
             .filter(|c| c.outcome != "ok")
             .collect();
         Some(if excluded.is_empty() {
-            format!("Read-only parent oversight: {} consenting children included. No child record links.",self.oversight.len())
+            format!(
+                "Read-only parent oversight: {} consenting children included. No child record links.",
+                self.oversight.len()
+            )
         } else {
             format!(
                 "Partial: {} of {} consenting children not included. {}.",
@@ -152,7 +155,7 @@ impl Reports {
                             limit: 1,
                         },
                         columns: vec![],
-                        offsets: BTreeMap::new(),
+                        pages: BTreeMap::new(),
                     },
                 )
                 .await
@@ -187,10 +190,7 @@ impl Reports {
                             limit: page_size,
                         },
                         columns: columns.iter().map(|c| c.spec.clone()).collect(),
-                        offsets: selected
-                            .iter()
-                            .map(|(id, (offset, _))| (*id, *offset))
-                            .collect(),
+                        pages: selected,
                     },
                 )
                 .await
@@ -230,11 +230,7 @@ impl Reports {
                 }) = child.data
                 {
                     total += count;
-                    for row in projection
-                        .rows
-                        .into_iter()
-                        .take(selected.get(&child.tenant).map_or(0, |(_, take)| *take))
-                    {
+                    for row in projection.rows {
                         let mut cells = vec![json!(child.name)];
                         cells.extend(
                             columns
@@ -394,6 +390,7 @@ impl Reports {
             )
         };
         Ok(Run {
+            reference_names: Vec::new(),
             report,
             oversight: outcomes,
             left_out,

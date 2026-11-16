@@ -112,13 +112,14 @@ impl Profile {
             self.load(scope).await?;
         }
         let client = self.pages.db.get().await?;
+        let words = bilibi_grid::RecordWords::load(&**client, scope, "users").await?;
         let pages: Vec<LandingPage> = self.pages.users.landing_pages(&**client, scope).await?;
         let image_url = self.pages.users.profile_image_url(&**client, scope).await;
         drop(client);
         let name = render(
             &Field::in_form("profile", "name")
                 .id("profile-name")
-                .label("Name")
+                .label(words.get(&crate::record_fields::get("name")))
                 .value(&self.name)
                 .autocomplete("name")
                 .errors(self.errors_for("name"))
@@ -128,7 +129,7 @@ impl Profile {
             &Field::in_form("profile", "email")
                 .id("profile-email")
                 .kind(InputKind::Email)
-                .label("Email")
+                .label(words.get(&crate::record_fields::get("email")))
                 .value(&self.email)
                 .autocomplete("email")
                 .hint("Changing your email marks it as unverified.")
@@ -378,7 +379,7 @@ impl Profile {
                 self.flash.success("Profile picture removed.");
             }
             Err(bilibi_media::Error::Database(Error::Unauthorized)) => {
-                return Err(Error::Unauthorized)
+                return Err(Error::Unauthorized);
             }
             Err(_) => self
                 .flash

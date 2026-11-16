@@ -224,6 +224,7 @@ inventory::submit! {
             ("core-person-006-custom-fields", include_str!("../migrations/006-custom-fields.sql")),
             ("core-person-007-code-suffix", include_str!("../migrations/007-code-suffix.sql")),
             ("core-person-008-search-trigram", include_str!("../migrations/008-search-trigram.sql")),
+            ("core-person-009-custom-search", include_str!("../migrations/009-custom-search.sql")),
         ],
         services: &[bilibi_module_registry::Service { id: SERVICE, factory: |services| {
             let parties = services.get::<bilibi_tenancy::PartyProofs>("base/tenancy.parties")?;
@@ -250,7 +251,6 @@ inventory::submit! {
                 bulk: services.get(bilibi_bulk_data::SERVICE)?,
                 settings: services.get("base/settings.store")?,
                 records: services.get(bilibi_records::SERVICE)?,
-                picklists: services.get(bilibi_picklists::SERVICE)?,
             }))))
         }}],
     }

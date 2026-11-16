@@ -34,6 +34,7 @@ pub struct Terms {
     /// where [`Terms::query`]'s letters-and-digits words miss it. Match
     /// `vector @@ (to_tsquery('simple', query) || plainto_tsquery('simple', plain))`.
     pub plain: Option<String>,
+    pub candidates: String,
 }
 
 /// Read what a person typed into a safe `tsquery` and plain-lookup text.
@@ -47,6 +48,7 @@ pub fn terms(text: &str) -> Terms {
     let text = text.trim_end().to_owned();
     let mut positive = Vec::new();
     let mut negative = Vec::new();
+    let mut candidates = Vec::new();
     let mut plain = true;
     let mut budget = MAX_WORDS;
     let mut rest = text.as_str();
@@ -79,6 +81,9 @@ pub fn terms(text: &str) -> Terms {
             continue;
         }
         budget -= words.len();
+        if !negated {
+            candidates.extend(words.iter().map(|word| format!("'{word}':*")));
+        }
         if negated {
             negative.push(format!("!{}", phrase(&words)));
         } else if quoted {
@@ -103,6 +108,7 @@ pub fn terms(text: &str) -> Terms {
         query,
         prefix,
         plain,
+        candidates: candidates.join(" | "),
     }
 }
 
@@ -221,6 +227,26 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
         None => ("NULL::text".to_owned(), "false".to_owned()),
     };
     let mut matched = format!("{vector} @@ {query}");
+    let mut ranked = vector.clone();
+    let texts = table.custom_search_values("r");
+    if let Some(custom) = decl
+        .custom
+        .and_then(|custom| column(table, custom))
+        .filter(|_| !texts.is_empty())
+    {
+        let active = format!(
+            "to_tsvector('simple', array_to_string(ARRAY[{}]::text[], ' '))",
+            texts.join(", ")
+        );
+        let candidate = "to_tsquery('simple', $6::text)";
+        ranked = format!("({vector} || setweight({active}, 'D'))");
+        let mut candidates = format!("{vector} @@ {candidate} OR {custom} @@ {candidate}");
+        if prefix {
+            let plain = "replace(plainto_tsquery('simple', $5::text)::text, '&', '|')::tsquery";
+            candidates.push_str(&format!(" OR {vector} @@ {plain} OR {custom} @@ {plain}"));
+        }
+        matched = format!("(({candidates}) AND {ranked} @@ {query})");
+    }
     if prefix {
         for c in decl
             .prefix
@@ -235,7 +261,7 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
     // A record never updated was last changed when it was made.
     let updated = format!("COALESCE({}, {at})", time_of(table, decl.updated));
     format!(
-        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({vector}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
+        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({ranked}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
         kind = literal(kind.id),
         title = text_of(table, Some(decl.title)),
         sub0 = text_of(table, decl.subtitle.first().copied()),
@@ -253,7 +279,9 @@ fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool) -> String {
         .map(|kind| branch(kind, limit, prefix))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
-    format!("WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain), hits AS ({branches})")
+    format!(
+        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain, $6::text AS candidates), hits AS ({branches})"
+    )
 }
 
 // Equal ranks read newest first, then by name, as a person scans them.
@@ -264,7 +292,9 @@ const COLUMNS: &str = "kind, id, title, sub0, sub1, state, inactive, updated";
 /// together in their ranking, the kinds in the order of their best hit.
 /// Select from `grouped` `ORDER BY lead, pos`.
 fn grouped(filter: &str) -> String {
-    format!("ranked AS (SELECT *, row_number() OVER ({ORDER}) AS pos FROM hits{filter}), grouped AS (SELECT *, min(pos) OVER (PARTITION BY kind) AS lead FROM ranked)")
+    format!(
+        "ranked AS (SELECT *, row_number() OVER ({ORDER}) AS pos FROM hits{filter}), grouped AS (SELECT *, min(pos) OVER (PARTITION BY kind) AS lead FROM ranked)"
+    )
 }
 
 /// The search box: the best `per_kind` hits of each kind, grouped by kind.
@@ -277,15 +307,15 @@ pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool) -> Stri
 }
 
 /// A results page: how many records each kind matched (up to
-/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$6` names or of
-/// every kind when it is empty, `$7` rows from `$8`, grouped as the search box
+/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$7` names or of
+/// every kind when it is empty, `$8` rows from `$9`, grouped as the search box
 /// groups them, so a kind's group continues on the next page. One row carries
 /// the counts even when the page is empty.
 pub fn page(planned: &[Planned<'_>], prefix: bool) -> String {
     format!(
-        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $7::bigint OFFSET $8::bigint) page ON true",
+        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $8::bigint OFFSET $9::bigint) page ON true",
         hits(planned, MAX_KIND_HITS, prefix),
-        grouped(" WHERE ($6::text = '' OR kind = $6::text)"),
+        grouped(" WHERE ($7::text = '' OR kind = $7::text)"),
         COLUMNS
             .split(", ")
             .map(|name| format!("page.{name}"))

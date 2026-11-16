@@ -123,7 +123,8 @@ impl RecordField {
         }
     }
     pub fn builtin(self) -> Option<BuiltinColumn> {
-        self.slot_id().map(|id| BuiltinColumn::new(&id, self.label))
+        self.slot_id()
+            .map(|id| BuiltinColumn::new(&id, self.label).grid_field(self.vocabulary))
     }
 }
 

@@ -139,6 +139,7 @@ pub struct FormControls {
     pub required_roles: MultiSelect,
     pub chip_roles: MultiSelect,
     pub plain_roles: MultiSelect,
+    pub fact_roles: MultiSelect,
     pub locked_region: RadioGroup,
     pub date: Field,
     pub time: Field,
@@ -333,6 +334,13 @@ impl FormControls {
                 .id("specimen-multi-select-plain")
                 .aria_label("Optional roles")
                 .options(choices(&ROLES))
+                .wrapper_class("mb-0"),
+            fact_roles: MultiSelect::in_form("sample", "fact_roles")
+                .id("specimen-multi-select-fact")
+                .label("Roles")
+                .in_fact()
+                .options(choices(&ROLES))
+                .values(strings(&["admin", "reviewer"]))
                 .wrapper_class("mb-0"),
             locked_region: RadioGroup::new(
                 "specimen-radio-locked",

@@ -1555,7 +1555,10 @@ impl LinksPage {
         let (title, description) = match &modal.editing {
             Some(entry) if modal.ending => (
                 "End Relationship".to_owned(),
-                format!("The relationship with {} ends on the chosen date, inclusive; its history is kept.", entry.other_name),
+                format!(
+                    "The relationship with {} ends on the chosen date, inclusive; its history is kept.",
+                    entry.other_name
+                ),
             ),
             Some(entry) => (
                 "Edit Relationship Dates".to_owned(),
@@ -1566,9 +1569,7 @@ impl LinksPage {
             ),
             None => (
                 "Add Relationship".to_owned(),
-                format!(
-                    "Link {company} to another company or a person."
-                ),
+                format!("Link {company} to another company or a person."),
             ),
         };
         render(&Modal {

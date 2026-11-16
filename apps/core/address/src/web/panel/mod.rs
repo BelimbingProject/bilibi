@@ -112,6 +112,10 @@ impl Panel {
             .into_iter()
             .map(|(id, label)| {
                 let column = bilibi_ui::BuiltinColumn::new(id, label).sortable(id);
+                let column = match id {
+                    "label" | "line1" => column.grid_field(format!("addresses.{id}")),
+                    _ => column,
+                };
                 if id == "priority" {
                     column.right()
                 } else {

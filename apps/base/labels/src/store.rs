@@ -20,18 +20,22 @@ pub enum Kind {
     Menu,
     /// A record type, by its Grid table ID.
     Record,
+    /// A field of a record type, by `table.field` (Grid table and field IDs).
+    Field,
 }
 impl Kind {
     pub fn key(self) -> &'static str {
         match self {
             Self::Menu => "menu",
             Self::Record => "record",
+            Self::Field => "field",
         }
     }
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "menu" => Some(Self::Menu),
             "record" => Some(Self::Record),
+            "field" => Some(Self::Field),
             _ => None,
         }
     }
@@ -39,6 +43,7 @@ impl Kind {
         match self {
             Self::Menu => "Menu item",
             Self::Record => "Record type",
+            Self::Field => "Field",
         }
     }
 }
@@ -67,12 +72,61 @@ impl LabelSet {
     pub fn record(&self, table: &str, default: &str) -> String {
         self.word(Kind::Record, table, default)
     }
+    /// The label for a field of a record type (Grid table and field IDs): the tenant's, or `default`.
+    pub fn field(&self, table: &str, field: &str, default: &str) -> String {
+        self.word(Kind::Field, &subject_id(table, field), default)
+    }
     fn word(&self, kind: Kind, id: &str, default: &str) -> String {
         self.0
             .get(&(kind, id.to_owned()))
             .map_or_else(|| default.to_owned(), Clone::clone)
     }
 }
+
+/// The subject ID of a field: its Grid table ID and field ID joined by a dot.
+pub fn subject_id(table: &str, field: &str) -> String {
+    format!("{table}.{field}")
+}
+
+/// A tenant's field-label overrides, for the owner that draws column heads
+/// before any page is known (Grid). Ask by Grid table and field ID.
+#[derive(Clone, Debug, Default)]
+pub struct FieldLabels(BTreeMap<String, String>);
+impl FieldLabels {
+    /// The tenant's label for the field, when it renamed it.
+    pub fn get(&self, table: &str, field: &str) -> Option<&str> {
+        self.0.get(&subject_id(table, field)).map(String::as_str)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// The tenant's field-label overrides in one read. Reads need no capability: a
+/// label is shown to everyone who sees the field. Never cache across requests
+/// or tenants.
+pub async fn field_labels(client: &impl GenericClient, scope: &Scope) -> Result<FieldLabels> {
+    let rows = client
+        .query(
+            "SELECT subject, label FROM base_labels WHERE tenant_id=$1 AND kind='field' LIMIT 5000",
+            &[&scope.tenant()],
+        )
+        .await?;
+    Ok(FieldLabels(
+        rows.iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+            .collect(),
+    ))
+}
+
+/// Contributed by the owner of record types (Grid): the record types and
+/// fields a tenant may rename, as data, so this module keeps no upward
+/// dependency. `snapshot` runs on each call and must be cheap.
+pub struct SubjectSource {
+    pub snapshot: fn() -> std::result::Result<Vec<Subject>, String>,
+}
+/// The registry consumer a [`SubjectSource`] is submitted to.
+pub const SUBJECTS: &str = "base/labels.subjects";
 
 /// A stored override with the version a writer must still hold.
 #[derive(Clone, Debug)]
@@ -106,11 +160,12 @@ pub struct Plan {
 pub struct Labels {
     pub(crate) db: Db,
     menu: Menu,
+    sources: Vec<&'static SubjectSource>,
 }
 
 impl Labels {
-    pub(crate) fn new(db: Db, menu: Menu) -> Self {
-        Self { db, menu }
+    pub(crate) fn new(db: Db, menu: Menu, sources: Vec<&'static SubjectSource>) -> Self {
+        Self { db, menu, sources }
     }
 
     /// The tenant's overrides. Reads need no capability: a label is shown to
@@ -181,18 +236,27 @@ impl Labels {
             });
         }
         subjects.sort_by(|a, b| (&a.trail, &a.default, &a.id).cmp(&(&b.trail, &b.default, &b.id)));
-        let installed = bilibi_grid::installed().map_err(|_| Error::Internal)?;
-        let mut records: Vec<Subject> = installed
-            .tables()
-            .map(|table| Subject {
-                kind: Kind::Record,
-                id: table.id().to_owned(),
-                default: table.label().to_owned(),
-                trail: String::new(),
-            })
-            .collect();
-        records.sort_by(|a, b| (&a.default, &a.id).cmp(&(&b.default, &b.id)));
-        subjects.extend(records);
+        let mut seeded = Vec::new();
+        for source in &self.sources {
+            seeded.extend((source.snapshot)().map_err(|error| {
+                eprintln!("label subjects unavailable: {error}");
+                Error::Internal
+            })?);
+        }
+        let rank = |kind: Kind| match kind {
+            Kind::Menu => 0,
+            Kind::Record => 1,
+            Kind::Field => 2,
+        };
+        seeded.sort_by(|a, b| {
+            (rank(a.kind), &a.trail, &a.default, &a.id).cmp(&(
+                rank(b.kind),
+                &b.trail,
+                &b.default,
+                &b.id,
+            ))
+        });
+        subjects.extend(seeded);
         Ok(subjects)
     }
 

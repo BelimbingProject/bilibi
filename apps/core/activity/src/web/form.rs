@@ -523,31 +523,59 @@ impl Dialog {
         }
     }
 
-    fn sentences(&self, key: &str) -> Vec<String> {
+    fn sentences(&self, words: &bilibi_grid::RecordWords, key: &str) -> Vec<String> {
         self.errors
             .get(key)
             .map(|messages| {
                 messages
                     .iter()
-                    .map(|m| error_sentence(label_of(key), m))
+                    .map(|m| {
+                        error_sentence(
+                            words.field(
+                                match key {
+                                    "title" => "subject",
+                                    "assignee" => "assignee_user_id",
+                                    "outcome" => "call_outcome",
+                                    _ => key,
+                                },
+                                label_of(key),
+                            ),
+                            m,
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
     }
-    fn field(&self, prefix: &str, key: &str, label: &str) -> Field {
+    fn field(
+        &self,
+        words: &bilibi_grid::RecordWords,
+        prefix: &str,
+        key: &str,
+        label: &str,
+    ) -> Field {
         Field::in_form(FORM, key)
             .id(format!("{prefix}-{}", key.replace('_', "-")))
+            .grid_field(format!(
+                "activities.{}",
+                match key {
+                    "title" => "subject",
+                    "assignee" => "assignee_user_id",
+                    "outcome" => "call_outcome",
+                    _ => key,
+                }
+            ))
             .label(label)
             .value(self.value(key))
-            .errors(self.sentences(key))
+            .errors(self.sentences(words, key))
             .attr("data-debounce", "300")
     }
 
     /// How it repeats: the frequency, how far apart, the weekly days, when
     /// it ends and whether only working days count.
-    fn repeat_fields(&self, prefix: &str) -> Vec<Field> {
+    fn repeat_fields(&self, words: &bilibi_grid::RecordWords, prefix: &str) -> Vec<Field> {
         let mut fields = vec![self
-            .field(prefix, "repeat", "Repeats")
+            .field(words, prefix, "repeat", "Repeats")
             .kind(InputKind::Select)
             .options(choices(&[
                 ("Does not repeat", "none"),
@@ -564,7 +592,7 @@ impl Dialog {
             _ => "months",
         };
         fields.push(
-            self.field(prefix, "repeat_every", "Every")
+            self.field(words, prefix, "repeat_every", "Every")
                 .kind(InputKind::Number)
                 .attr("min", "1")
                 .attr("max", "99")
@@ -588,7 +616,7 @@ impl Dialog {
             );
         }
         fields.push(
-            self.field(prefix, "repeat_end", "Ends")
+            self.field(words, prefix, "repeat_end", "Ends")
                 .kind(InputKind::Select)
                 .options(choices(&[
                     ("After a number of times", "count"),
@@ -597,13 +625,13 @@ impl Dialog {
         );
         if self.value("repeat_end") == "until" {
             fields.push(
-                self.field(prefix, "repeat_until", "Last date")
+                self.field(words, prefix, "repeat_until", "Last date")
                     .kind(InputKind::Date)
                     .required(),
             );
         } else {
             fields.push(
-                self.field(prefix, "repeat_count", "Times")
+                self.field(words, prefix, "repeat_count", "Times")
                     .kind(InputKind::Number)
                     .attr("min", "1")
                     .attr("max", &crate::MAX_OCCURRENCES.to_string())
@@ -627,28 +655,29 @@ impl Dialog {
         &self,
         pages: &Pages,
         clock: &Clock,
+        words: &bilibi_grid::RecordWords,
         prefix: &str,
         cancel_event: &str,
         framed: bool,
     ) -> Result<Html> {
         let mut fields = vec![self
-            .field(prefix, "title", "Subject")
+            .field(words, prefix, "title", "Subject")
             .required()
             .attr("maxlength", "160")];
         let zone = clock.hint();
         match self.kind {
             Kind::Task => {
                 fields.push(
-                    self.field(prefix, "due_at", "Due")
+                    self.field(words, prefix, "due_at", "Due")
                         .kind(InputKind::DatetimeLocal)
                         .hint(&zone),
                 );
                 fields.push(
-                    self.field(prefix, "start_at", "Start")
+                    self.field(words, prefix, "start_at", "Start")
                         .kind(InputKind::DatetimeLocal),
                 );
                 fields.push(
-                    self.field(prefix, "priority", "Priority")
+                    self.field(words, prefix, "priority", "Priority")
                         .kind(InputKind::Select)
                         .options(choices(
                             &Priority::ALL
@@ -660,65 +689,65 @@ impl Dialog {
             }
             Kind::Call => {
                 fields.push(
-                    self.field(prefix, "status", "Status")
+                    self.field(words, prefix, "status", "Status")
                         .kind(InputKind::Select)
                         .options(choices(&[("Held", "held"), ("Planned", "planned")])),
                 );
                 fields.push(
-                    self.field(prefix, "direction", "Direction")
+                    self.field(words, prefix, "direction", "Direction")
                         .kind(InputKind::Select)
                         .options(choices(&[("Outbound", "outbound"), ("Inbound", "inbound")])),
                 );
                 fields.push(
-                    self.field(prefix, "starts_at", "Starts")
+                    self.field(words, prefix, "starts_at", "Starts")
                         .kind(InputKind::DatetimeLocal)
                         .required()
                         .hint(&zone),
                 );
                 fields.push(
-                    self.field(prefix, "ends_at", "Ends")
+                    self.field(words, prefix, "ends_at", "Ends")
                         .kind(InputKind::DatetimeLocal)
                         .required(),
                 );
                 fields.push(
-                    self.field(prefix, "outcome", "Outcome")
+                    self.field(words, prefix, "outcome", "Outcome")
                         .attr("maxlength", "100"),
                 );
             }
             Kind::Meeting => {
                 fields.push(
-                    self.field(prefix, "starts_at", "Starts")
+                    self.field(words, prefix, "starts_at", "Starts")
                         .kind(InputKind::DatetimeLocal)
                         .required()
                         .hint(&zone),
                 );
                 fields.push(
-                    self.field(prefix, "ends_at", "Ends")
+                    self.field(words, prefix, "ends_at", "Ends")
                         .kind(InputKind::DatetimeLocal)
                         .required(),
                 );
                 fields.push(
-                    self.field(prefix, "location", "Location")
+                    self.field(words, prefix, "location", "Location")
                         .attr("maxlength", "255"),
                 );
                 fields.push(
-                    self.field(prefix, "join_url", "Join link")
+                    self.field(words, prefix, "join_url", "Join link")
                         .kind(InputKind::Url)
                         .attr("maxlength", "2000")
                         .hint("An https:// link to the video call, if there is one."),
                 );
                 fields.push(
-                    self.field(prefix, "meeting_type", "Meeting type")
+                    self.field(words, prefix, "meeting_type", "Meeting type")
                         .attr("maxlength", "100"),
                 );
             }
             Kind::Note => {}
         }
         if self.kind != Kind::Note {
-            fields.extend(self.repeat_fields(prefix));
+            fields.extend(self.repeat_fields(words, prefix));
             let options = reminder_choices::options(None, "Default");
             fields.push(
-                self.field(prefix, "reminders", "Reminders")
+                self.field(words, prefix, "reminders", "Reminders")
                     .kind(InputKind::Select)
                     .options(choices(
                         &options
@@ -729,7 +758,7 @@ impl Dialog {
                     .hint("Default is your own setting, then the organisation's. Change yours with Reminder defaults on the Activities list."),
             );
             fields.push(
-                self.field(prefix, "reminder_email", "Email reminders")
+                self.field(words, prefix, "reminder_email", "Email reminders")
                     .kind(InputKind::Select)
                     .options(choices(reminder_choices::EMAIL))
                     .hint("Emails the assignee, and guests without an account who were sent the invitation."),
@@ -743,7 +772,7 @@ impl Dialog {
             fields.push(
                 Field::in_form(FORM, "assignee")
                     .id(format!("{prefix}-assignee"))
-                    .label("Assigned to")
+                    .label(words.field("assignee_user_id", "Assigned to"))
                     .kind(InputKind::Select)
                     .value(
                         self.assignee
@@ -756,17 +785,17 @@ impl Dialog {
                             .map(|(l, v)| (l.as_str(), v.as_str()))
                             .collect::<Vec<_>>(),
                     ))
-                    .errors(self.sentences("assignee")),
+                    .errors(self.sentences(words, "assignee")),
             );
         }
         fields.push(
-            self.field(prefix, "description", "Description")
+            self.field(words, prefix, "description", "Description")
                 .kind(InputKind::Textarea)
                 .attr("rows", "3"),
         );
         if self.kind != Kind::Note {
             fields.push(
-                self.field(prefix, "internal_notes", "Internal notes")
+                self.field(words, prefix, "internal_notes", "Internal notes")
                     .kind(InputKind::Textarea)
                     .attr("rows", "2")
                     .hint("Never sent to guests."),
@@ -779,7 +808,18 @@ impl Dialog {
                 for message in messages {
                     summary.push(
                         format!("{prefix}-{}", key.replace('_', "-")),
-                        error_sentence(label_of(key), message),
+                        error_sentence(
+                            words.field(
+                                match key.as_str() {
+                                    "title" => "subject",
+                                    "assignee" => "assignee_user_id",
+                                    "outcome" => "call_outcome",
+                                    _ => key.as_str(),
+                                },
+                                label_of(key),
+                            ),
+                            message,
+                        ),
                     );
                 }
             }
@@ -813,15 +853,15 @@ impl Dialog {
                 .as_ref()
                 .map(|(value, pill)| (value.as_str(), pill.clone())),
             ("pick_related", "clear_related"),
-            self.sentences("related"),
+            self.sentences(words, "related"),
         ))?);
         body.push(&render(
             Field::in_form(FORM, "shared")
                 .id(format!("{prefix}-shared"))
-                .label("Share with readers of the related record")
+                .label(words.field("shared", "Share with readers of the related record"))
                 .kind(InputKind::Checkbox)
                 .checked(self.shared)
-                .errors(self.sentences("shared"))
+                .errors(self.sentences(words, "shared"))
                 .hint("Otherwise only you, the assignee and the guests see it."),
         )?);
         if !self.guests.is_empty() {

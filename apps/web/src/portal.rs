@@ -247,18 +247,19 @@ pub async fn dispatch(
     ) {
         return Err(Error::Forbidden.into());
     }
-    let rendered = bound
-        .page
-        .0
-        .render(PageRequest {
+    let rendered = crate::render_fields(
+        &app,
+        Some(portal.scope()),
+        bound.page.0.render(PageRequest {
             operation: bound.route.operation,
             scope: Some(&portal),
             path: &path,
             query: &query,
             body: &body,
             framed: false,
-        })
-        .await;
+        }),
+    )
+    .await;
     let page = match rendered {
         // The page's own facade asked for step-up while rendering.
         Err(Error::StepUpRequired { .. }) if get => {
