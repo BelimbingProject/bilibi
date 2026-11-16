@@ -153,6 +153,7 @@ A live file input declared with `UploadSpec::resumable` keeps its chunks in a st
 - The first hash mismatch empties the file and the browser sends it again from the start; a second refuses.
 - An account keeps at most 20 staging files: opening another removes the account's files nobody wrote to within `media.upload.staging_hours`, then its least recently written.
 - The `base/media-staging-sweep` schedule runs hourly once an operator enables it on the Schedule board (and grants `scheduler` its `EXECUTE`, `apps/base/schedule/README.md`). It removes every staging file nobody wrote to within `media.upload.staging_hours`, in every tenant. Files on a disk the setting no longer names are left for the operator.
+- **Enable `base/media-staging-sweep` at install.** Until then nothing removes the staging files of an account that never uploads again; they stay on the staging disk, which is usually the disk that also holds attachments. It is off by default on purpose: no schedule runs until an operator reviews it (ADR 14, Schedule's review rule).
 - Staging files are transport, not records: nothing about them is audited, and they are never scanned. The bytes reach an owner only through `Uploads::consume`, and whatever the owner stores goes through the usual checks and scan.
 
 ## Reading bytes back
