@@ -1106,8 +1106,13 @@ fn shown(
     specs
         .iter()
         .map(|spec| {
-            let column = bilibi_grid::column::resolve(spec, all, &|id| installed.table(id))
-                .map_err(|_| spec.clone())?;
+            let column = bilibi_grid::column::resolve(
+                spec,
+                all,
+                &|id| installed.table(id),
+                &|table, field| catalog.field_name(table, field),
+            )
+            .map_err(|_| spec.clone())?;
             let visible = seen.is_some_and(|root| catalog.resolve(root, spec).is_ok());
             Ok((column.label, visible))
         })

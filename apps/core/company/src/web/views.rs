@@ -931,6 +931,7 @@ pub(super) async fn detail(
     let named = custom_references(scope, &custom_defs.iter().collect::<Vec<_>>(), &[&held]).await?;
     let connection = db.get().await?;
     let client = &**connection;
+    let words = bilibi_grid::RecordWords::load(client, scope, "companies").await?;
     let editable = allowed(client, scope, crate::UPDATE).await? && !company.archived();
     let can_target = allowed(client, scope, crate::TENANT_WIDE).await?
         || crate::organisation::reaches_without_tenant_wide(scope, id);
@@ -1023,13 +1024,13 @@ pub(super) async fn detail(
         ("legal_name", company.legal_name.as_deref().unwrap_or("")),
     ] {
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(&company, name, value, editable, false, statuses.get(name))?,
         });
     }
     facts.push(Fact {
-        title: fields::STATUS.label,
+        title: words.get(&fields::STATUS),
         id: "detail-status",
         value: render(&StatusBody {
             badge: badge(&company.status)?,
@@ -1045,7 +1046,7 @@ pub(super) async fn detail(
         })?,
     });
     facts.push(Fact {
-        title: fields::LEGAL_ENTITY_TYPE_ID.label,
+        title: words.get(&fields::LEGAL_ENTITY_TYPE_ID),
         id: "detail-legal-entity-type",
         value: choice(
             "company-legal-entity-type",
@@ -1068,7 +1069,7 @@ pub(super) async fn detail(
         ("tax_id", company.tax_id.as_str()),
     ] {
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(
                 &company,
@@ -1081,7 +1082,7 @@ pub(super) async fn detail(
         });
     }
     facts.push(Fact {
-        title: fields::JURISDICTION.label,
+        title: words.get(&fields::JURISDICTION),
         id: "detail-jurisdiction",
         value: if masked.contains("jurisdiction") {
             restricted("company-jurisdiction-restricted")?
@@ -1102,7 +1103,7 @@ pub(super) async fn detail(
         ("website", company.website.as_deref().unwrap_or("")),
     ] {
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: text_fact(
                 &company,
@@ -1415,7 +1416,7 @@ pub(super) async fn detail(
         }
     };
     facts.push(Fact {
-        title: fields::PARENT_ID.label,
+        title: words.get(&fields::PARENT_ID),
         id: "detail-parent",
         value,
     });
@@ -1451,7 +1452,7 @@ pub(super) async fn detail(
             field.save_event = "add_activity".into();
             field.editable = editable;
             facts.push(Fact {
-                title: fields::get(name).label,
+                title: words.get(&fields::get(name)),
                 id: "scope-activities-section",
                 value: render(&ActivityBody {
                     activities,
@@ -1477,7 +1478,7 @@ pub(super) async fn detail(
         field.class = "font-mono text-xs".into();
         field.input_class = "font-mono text-xs".into();
         facts.push(Fact {
-            title: fields::get(name).label,
+            title: words.get(&fields::get(name)),
             id: "",
             value: render(&InlineLongText { field, rows: 5 })?,
         });

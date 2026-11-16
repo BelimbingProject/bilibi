@@ -36,7 +36,7 @@ fn found(error: Error) -> bilibi_agent_api::Error {
 }
 fn kind(input: &Value) -> bilibi_agent_api::Result<Kind> {
     Kind::from_key(input["kind"].as_str().unwrap_or_default())
-        .ok_or_else(|| bilibi_agent_api::invalid("kind", "must be menu or record"))
+        .ok_or_else(|| bilibi_agent_api::invalid("kind", "must be menu, record or field"))
 }
 fn subject(input: &Value) -> bilibi_agent_api::Result<&str> {
     input["subject"]
@@ -184,10 +184,10 @@ impl WriteHandler for Write {
 }
 
 fn kind_schema() -> Value {
-    json!({"type":"string","enum":["menu","record"],"description":"menu: a menu item by its menu ID. record: a record type by its Grid table ID."})
+    json!({"type":"string","enum":["menu","record","field"],"description":"menu: a menu item by its menu ID. record: a record type by its Grid table ID. field: a field by table.field (Grid table ID, a dot, Grid field ID)."})
 }
 fn subject_schema() -> Value {
-    json!({"type":"string","maxLength":128,"description":"The stable ID, from base.labels.list."})
+    json!({"type":"string","maxLength":200,"description":"The stable ID, from base.labels.list."})
 }
 fn version_schema() -> Value {
     json!({"type":"string","description":"The identity:version token you read (0:0 when there was no override); a replaced or changed label is refused."})
@@ -211,10 +211,10 @@ fn write_output() -> Value {
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/labels.agent", Provenance { module: "base/labels", source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: "base.labels.list", title: "List labels", summary: "The menu items and record types a tenant may rename, with the module's own word and the tenant's label.", keywords: &["rename", "label", "menu", "terminology"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
-        Operation { key: "base.labels.set", title: "Rename a menu item or record type", summary: "Show your own word for a menu item or record type, such as Clients for Companies; operation keys, routes and permissions never change.", keywords: &["rename", "label", "menu", "terminology"], capability: MANAGE, input: set_schema, output: write_output, handler: Handler::SafeWrite(&Write::Set), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.labels.list", title: "List labels", summary: "The menu items, record types and fields a tenant may rename, with the module's own word and the tenant's label.", keywords: &["rename", "label", "menu", "terminology"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.labels.set", title: "Rename a menu item, record type or field", summary: "Show your own word for a menu item, record type or field, such as Clients for Companies; operation keys, routes and permissions never change.", keywords: &["rename", "label", "menu", "terminology"], capability: MANAGE, input: set_schema, output: write_output, handler: Handler::SafeWrite(&Write::Set), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.clear", title: "Restore a label", summary: "Remove the tenant's label so the module's own word shows again.", keywords: &["restore", "label", "menu"], capability: MANAGE, input: clear_schema, output: write_output, handler: Handler::SafeWrite(&Write::Clear), channels: Channels::Every, step_up: &[] },
     ],
-    guides: &[Guide { key: "base.labels", title: "Tenant labels", summary: "Rename menu items and record types for your tenant without changing keys, routes or permissions.", keywords: &["rename", "label", "terminology"], capability: VIEW,
-        body: "A label is plain text your tenant shows instead of a module's own word for a menu item or a record type: Clients for Companies, say. Read what may be renamed with base.labels.list (kind menu or record; each row has a stable subject ID, the module's default and your current label). Rename with base.labels.set and restore with base.labels.clear, each with the version you read. A label never renames an operation key, a route or a permission key, so everything you call by key keeps its name. Labels are 1 to 60 characters of plain text and apply to your tenant only. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operation." }],
+    guides: &[Guide { key: "base.labels", title: "Tenant labels", summary: "Rename menu items, record types and fields for your tenant without changing keys, routes or permissions.", keywords: &["rename", "label", "terminology"], capability: VIEW,
+        body: "A label is plain text your tenant shows instead of a module's own word for a menu item, a record type or a field: Clients for Companies, say. Read what may be renamed with base.labels.list (kind menu, record or field; a field's subject is table.field; each row has a stable subject ID, the module's default and your current label). Rename with base.labels.set and restore with base.labels.clear, each with the version you read. A label never renames an operation key, a route or a permission key, so everything you call by key keeps its name. Labels are 1 to 60 characters of plain text and apply to your tenant only. For each write, run the dry-run check, show the complete preview, wait for explicit approval, then commit the unchanged operation." }],
 }) }

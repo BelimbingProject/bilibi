@@ -117,6 +117,8 @@ pub struct Catalog {
     tables: BTreeMap<&'static str, Table>,
     /// Fields this account sees masked (ADR 05), by table, with their kinds.
     masks: BTreeMap<&'static str, BTreeMap<String, &'static str>>,
+    /// The tenant's own words for fields (`base/labels`), by table and field ID.
+    names: Arc<bilibi_labels::FieldLabels>,
 }
 impl Catalog {
     pub(crate) fn without_custom_references(mut self) -> Self {
@@ -126,6 +128,11 @@ impl Catalog {
         self
     }
 
+    /// The tenant's word for a field, when it renamed it; every column,
+    /// filter and picker this catalog resolves already carries it.
+    pub fn field_name(&self, table: &str, field: &str) -> Option<String> {
+        self.names.get(table, field).map(str::to_owned)
+    }
     /// The catalog this scope's actor may read, built from the installed snapshot
     /// with a fresh read of grants and field restrictions. A source is described to
     /// the server once per process to settle which of its keys each field reads.
@@ -179,7 +186,9 @@ impl Catalog {
                 let Some(path) = record_field.column else {
                     continue;
                 };
-                let Ok(column) = column::resolve(path, root, &|id| installed.table(id)) else {
+                let Ok(column) =
+                    column::resolve(path, root, &|id| installed.table(id), &|_, _| None)
+                else {
                     continue;
                 };
                 if let Some(field) = column.field {
@@ -258,6 +267,7 @@ impl Catalog {
             user: scope.user(),
             tables,
             masks,
+            names: Arc::new(bilibi_labels::field_labels(client, scope).await?),
         };
         catalog.verify_sources(client).await?;
         Ok(catalog)
@@ -453,7 +463,9 @@ impl Catalog {
     /// or average of a field this account sees masked is refused: over one
     /// linked row it is the hidden value, and narrow rollups give it away.
     pub fn resolve(&self, root: &Table, spec: &str) -> Result<Column, ColumnError> {
-        let column = column::resolve(spec, root, &|id| self.table(id))?;
+        let column = column::resolve(spec, root, &|id| self.table(id), &|table, field| {
+            self.field_name(table, field)
+        })?;
         if matches!(column.agg, Some(Agg::Sum | Agg::Avg)) && self.mask(&column).is_some() {
             return Err(ColumnError::MaskedAggregate);
         }

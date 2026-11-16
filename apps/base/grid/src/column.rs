@@ -208,10 +208,14 @@ struct Walk {
 /// Resolves `spec` against `root`, with `fetch` returning a visible table by id.
 /// Every table on the path must be visible, so a path through a table the account
 /// may not read fails exactly as an unknown one does.
+///
+/// `names` answers a tenant's own word for a field by table and field ID
+/// (`None` keeps the module's label); it never changes a spec or an ID.
 pub fn resolve<'a>(
     spec: &str,
     root: &Table,
     fetch: &dyn Fn(&str) -> Option<&'a Table>,
+    names: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Column, ColumnError> {
     let parsed = parse(spec)?;
     let mut walk = Walk::default();
@@ -242,7 +246,7 @@ pub fn resolve<'a>(
             });
         }
     }
-    build(spec, root, table, walk, parsed.agg)
+    build(spec, root, table, walk, parsed.agg, names)
 }
 
 fn build(
@@ -251,6 +255,7 @@ fn build(
     table: &Table,
     walk: Walk,
     agg: Option<Agg>,
+    names: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Column, ColumnError> {
     let Walk {
         hops,
@@ -258,6 +263,9 @@ fn build(
         tail,
         field,
     } = walk;
+    // The field's word: the tenant's, or the module's.
+    let word =
+        |field: &Field| names(table.id(), field.id).unwrap_or_else(|| table.field_label(field).to_owned());
     let Some(many) = many else {
         let field = field.ok_or(ColumnError::NoField)?;
         if agg.is_some() {
@@ -266,8 +274,8 @@ fn build(
         return Ok(Column {
             spec: spec.into(),
             id: dom_id(spec),
-            label: label(&hops, table.field_label(&field)),
-            short_label: short_label(&hops, table.field_label(&field)),
+            label: label(&hops, &word(&field)),
+            short_label: short_label(&hops, &word(&field)),
             ty: field.ty,
             kind: ColumnKind::Field,
             root: root.id(),
@@ -309,14 +317,14 @@ fn build(
         .collect();
     let short = field.map_or_else(
         || Agg::Count.label().to_string(),
-        |f| format!("{} ({})", table.field_label(&f), agg.label()),
+        |f| format!("{} ({})", word(&f), agg.label()),
     );
     let heading = match field {
         None => format!("{} {}", many.label(), Agg::Count.label().to_lowercase()),
         Some(f) => format!(
             "{} {} {}",
             links.last().expect("many link").label(),
-            lower_first(table.field_label(&f)),
+            lower_first(&word(&f)),
             agg.label().to_lowercase()
         ),
     };

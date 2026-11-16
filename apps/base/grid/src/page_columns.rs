@@ -213,12 +213,20 @@ impl PageColumns {
     }
 
     fn label_record_columns(&mut self) {
+        let root = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.table(&self.table).map(|root| (catalog, root)));
         for column in self.columns.iter_mut().chain(&mut self.suggestions) {
             if let Some(field) = self.record_fields.iter().find(|f| {
                 f.column == Some(column.spec.as_str()) || f.slot == Some(column.spec.as_str())
             }) {
-                column.label = field.label.into();
-                column.short_label = field.label.into();
+                let word = root.map_or_else(
+                    || field.label.to_owned(),
+                    |(catalog, root)| crate::record_word(catalog, root, field),
+                );
+                column.label = word.clone();
+                column.short_label = word;
             }
         }
     }
@@ -309,8 +317,9 @@ impl PageColumns {
                     .iter()
                     .find(|field| field.slot_id().as_deref() == Some(builtin.id.as_str()))
                 {
-                    builtin.label = field.label.into();
-                    builtin.short_label = field.label.into();
+                    let word = crate::record_word(&catalog, root, field);
+                    builtin.label = word.clone();
+                    builtin.short_label = word;
                 }
             }
         }

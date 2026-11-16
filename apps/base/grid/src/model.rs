@@ -582,13 +582,14 @@ impl Installed {
                             table.id()
                         )));
                     }
-                    crate::column::resolve(path, table, &|id| tables.get(id)).map_err(|error| {
-                        invalid(format!(
-                            "record field {} on {}: {error}",
-                            field.id,
-                            table.id()
-                        ))
-                    })?;
+                    crate::column::resolve(path, table, &|id| tables.get(id), &|_, _| None)
+                        .map_err(|error| {
+                            invalid(format!(
+                                "record field {} on {}: {error}",
+                                field.id,
+                                table.id()
+                            ))
+                        })?;
                 }
             }
         }
