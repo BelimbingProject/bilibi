@@ -390,7 +390,7 @@ impl Store<'_> {
 /// A page of the documents shared with the customer, newest revision first
 /// by default. The capability is the caller's check.
 pub(crate) async fn list(
-    client: &Client,
+    client: &Transaction<'_>,
     portal: &PortalScope,
     filter: &PortalFilter,
     rules: &[&PortalStepUp],

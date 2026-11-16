@@ -1277,9 +1277,17 @@ impl Documents {
         filter: &PortalFilter,
     ) -> Result<SharedPage> {
         let rules = self.records.unverified_portal_rules(portal).await?;
-        let client = self.db.get().await?;
+        let mut client = self.db.get().await?;
         bilibi_authz::authorize_portal(&**client, portal, PORTAL_VIEW).await?;
-        customer::list(&client, portal, filter, &rules).await
+        let tx = client
+            .build_transaction()
+            .read_only(true)
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .start()
+            .await?;
+        let page = customer::list(&tx, portal, filter, &rules).await?;
+        tx.commit().await?;
+        Ok(page)
     }
 
     /// The latest file of a document shared with the signed-in portal
