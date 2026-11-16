@@ -96,7 +96,7 @@ The chain follows causes, not traces: the worker names its run as the cause of t
 
 ```rust,ignore
 inventory::submit! { Contribution::new(bilibi_rules::TRIGGERS, CASE_OPENED, provenance!(), &bilibi_rules::Trigger {
-    on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case", version: "version",
+    on: On { event: CASE_OPENED, versions: &[1] }, title: "A case is opened", table: "cases", subject: "/case", logical_event: None, version: "version",
 }) }
 inventory::submit! { Contribution::new(bilibi_rules::ACTIONS, "cx.cases.route", provenance!(), &bilibi_rules::Action {
     title: "Send the case to a queue", table: "cases", subject: "case_id", version: "expected_version", records: &[CASE_ROUTED],
@@ -109,7 +109,9 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "rule
 
 Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `rules`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
 
-`Rules::action_identity(client, scope)` returns the executing rule version and action position as an opaque identity, only inside a Rules action transaction under the `rules` principal. An owner may combine it with its logical source event identity to deduplicate multipart events without merging independent rules or manual requests. This identity grants no authority; owner checks still apply.
+`Rules::action_identity(client, scope)` returns the executing rule version, action position and captured logical event key as an opaque identity, only inside a Rules action transaction under the `rules` principal. An owner may combine it with its source kind and ID to deduplicate multipart events without merging independent rules or manual requests. This identity grants no authority; owner checks still apply.
+
+`Trigger::logical_event` is an optional JSON pointer to the owner's immutable snapshot key in the event payload. Set it for multipart events: every part of one occurrence carries the same nonempty string (at most 200 bytes) or integer, and separate occurrences carry different keys. `None` means each recorded event ID is a separate occurrence. A declared key that is absent or invalid refuses delivery; it never falls back to the live record revision. Rules captures the key, namespaced by event name, on each run during delivery, so later source edits and event retention cannot change it. The pointer is part of the approval fingerprint. `expected_revision` remains solely the current write fence. Runs predating capture refuse with `event_identity_missing`; development databases are disposable.
 
 ## Pages and agents
 
@@ -120,7 +122,7 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Tables
 
-`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules` and `base-rules-002-approval-bindings`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_rules`, `base_rule_versions`, `base_rule_runs` and `base_rule_effects` (migrations `base-rules-001-rules` , `base-rules-002-approval-bindings` and `base-rules-003-logical-events`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 

@@ -30,6 +30,7 @@ pub struct Trigger {
     pub table: &'static str,
     /// JSON pointer to that record's key in the event payload (`/case`).
     pub subject: &'static str,
+    pub logical_event: Option<&'static str>,
     /// The integer Grid field used to detect changes to the evaluated record.
     pub version: &'static str,
 }
@@ -146,6 +147,12 @@ impl Offers {
                         table.capability()
                     ),
                 ));
+            }
+            if trigger
+                .logical_event
+                .is_some_and(|pointer| !pointer.starts_with('/'))
+            {
+                return Err(refuse(entry, "logical event identity needs a JSON pointer"));
             }
             if !trigger.subject.starts_with('/') || trigger.title.trim().is_empty() {
                 return Err(refuse(

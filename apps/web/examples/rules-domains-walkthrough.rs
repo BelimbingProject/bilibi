@@ -240,6 +240,24 @@ async fn main() -> Result<()> {
             "the two-line order recorded both source parts",
         )?;
     }
+    db.get()
+        .await?
+        .batch_execute(&format!(
+            "CREATE SEQUENCE rules_followup_retry_probe;
+         CREATE FUNCTION rules_followup_retry_probe() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.tenant_id=1 AND NEW.rule_id={} AND NEW.event_id={} AND NEW.state='done' THEN
+             IF nextval('rules_followup_retry_probe')=1 THEN
+               RAISE EXCEPTION 'walkthrough failure after effect commit';
+             END IF;
+           END IF;
+           RETURN NEW;
+         END $$;
+         CREATE TRIGGER rules_followup_retry_probe BEFORE UPDATE ON base_rule_runs
+         FOR EACH ROW EXECUTE FUNCTION rules_followup_retry_probe();",
+            rule_ids[0], expected_events[0],
+        ))
+        .await?;
     let executor = Executor::from_services(
         &services,
         Config {
@@ -253,6 +271,18 @@ async fn main() -> Result<()> {
     let worker = tokio::spawn(async move { executor.run(shutdown).await });
     let result: Result<()> = async {
         wait_for_runs(&db, &expected_events, &rule_ids).await?;
+        let retry_completed = async {
+            for _ in 0..300 {
+                let row = db.get().await?.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM base_queue_jobs WHERE tenant_id=1 AND worker_id='base/rules-run' AND args->>'event_id'=$1 AND state='completed' AND attempt>=2), (SELECT last_value FROM rules_followup_retry_probe)",
+                    &[&expected_events[0].to_string()],
+                ).await?;
+                if row.get::<_,bool>(0) && row.get::<_,i64>(1)>=2 { return Ok::<_,Error>(true); }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(false)
+        }.await?;
+        check(retry_completed, "the worker retried after the committed effect and completed successfully")?;
         check(task_count(&db, kind, source).await? == 2, "each independent rule created one task across all source parts")?;
         let client = db.get().await?;
         let rows = client.query("SELECT shared,created_by,assignee_user_id,id FROM core_activities WHERE tenant_id=1 AND related_kind=$1 AND related_id=$2 ORDER BY id", &[&kind,&source.to_string()]).await?;
@@ -263,9 +293,9 @@ async fn main() -> Result<()> {
             check(row.get::<_,i64>(0)==1 && row.get::<_,i64>(1)==expected_events.len() as i64, "every part of one rule returned the same task")?;
         }
         drop(client);
-        write(&plans, &admin, "base.events.replay", json!({"subscriber":"base/rules.triggers","from_event":expected_events[0],"limit":1000})).await?;
-        wait_for_runs(&db, &expected_events, &rule_ids).await?;
-        check(task_count(&db, kind, source).await? == 2, "replaying delivered source parts creates no duplicate tasks")?;
+        let replay = write(&plans, &admin, "base.events.replay", json!({"subscriber":"base/rules.triggers","from_event":expected_events[0],"limit":1000})).await?;
+        check(replay["created"] == 0 && replay["pending"] == 0, "replay of delivered parts is a no-op, not duplicate execution")?;
+        check(task_count(&db, kind, source).await? == 2, "no-op replay leaves task counts unchanged")?;
         let valid = json!({"record_id":source,"expected_revision":revision,"assignee_user_id":recipient,"title":"Review the approved record"});
         write(&plans, &admin, action, valid.clone()).await?;
         check(task_count(&db, kind, source).await? == 3, "a manual request is independent of both rules")?;
@@ -290,6 +320,9 @@ async fn main() -> Result<()> {
     }.await;
     let _ = stop.send(true);
     let _ = worker.await;
+    db.get().await?.batch_execute(
+        "DROP TRIGGER rules_followup_retry_probe ON base_rule_runs; DROP FUNCTION rules_followup_retry_probe(); DROP SEQUENCE rules_followup_retry_probe;",
+    ).await?;
     result?;
     println!("every {domain} rule follow-up check passed");
     Ok(())

@@ -119,7 +119,7 @@ impl Rules {
         }).collect();
         Some(digest(
             &json!({"event": event, "versions": trigger.on.versions, "table": trigger.table,
-            "subject": trigger.subject, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
+            "subject": trigger.subject, "logical_event": trigger.logical_event, "version": trigger.version, "source": root.source().sql, "key": root.key(), "key_column": root.key_field().source_key(), "tenant_scoped": root.source().tenant_scoped,
             "capability": root.capability(), "fields": fields?, "actions": actions?}),
             &Value::Null,
         ))

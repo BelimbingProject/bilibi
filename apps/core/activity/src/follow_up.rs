@@ -122,11 +122,10 @@ impl WriteHandler for FollowUp {
             let tenant = scope.tenant();
             let kind = self.kind.to_owned();
             let source = input["record_id"].as_i64().ok_or(Error::Invalid)?;
-            let revision = input["expected_revision"].as_i64().ok_or(Error::Invalid)?;
             let key = bilibi_rules::Rules::action_identity(tx.sql(), scope)
                 .await?
                 .map(|action| {
-                    let binding = json!([action, kind, source, revision]);
+                    let binding = json!([action, kind, source]);
                     Sha256::digest(binding.to_string().as_bytes())
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
