@@ -62,7 +62,7 @@ pub(crate) fn key_text(value: &Value, bucket: Option<&str>) -> String {
 /// The first and last day of the period a date bucket's key starts, as
 /// `YYYY-MM-DD`, for the range filter a drill into it adds.
 pub(crate) fn bucket_days(value: &Value, bucket: &str) -> Option<(String, String)> {
-    use jiff::{ToSpan, civil::Date};
+    use jiff::{civil::Date, ToSpan};
     let first: Date = cell(value).get(0..10)?.parse().ok()?;
     let last = match bucket {
         "day" => first,

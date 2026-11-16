@@ -3,26 +3,25 @@
 //! (link with the picker, Unlink). Unlink and Delete ask first; every write
 //! calls its contract through `PageContracts`.
 use super::{
-    Clock, INDEX, Pages, Refusal, Region,
     customers::{self, Sharing},
     dialog::{self, NewRevision},
-    event, file_path, path, render, size, store_refusal,
+    event, file_path, path, render, size, store_refusal, Clock, Pages, Refusal, Region, INDEX,
 };
 use crate::{
-    AccessGrant, Document, Duplicate, LIST_CATEGORY, LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE,
-    Link, Marks, RECORD, Reference, Revision, Source,
+    AccessGrant, Document, Duplicate, Link, Marks, Reference, Revision, Source, LIST_CATEGORY,
+    LIST_STATUS, LIST_SUB_CATEGORY, LIST_TYPE, RECORD,
 };
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_records::Hit;
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    ActionLink, BackLink, BuiltinColumn, Button, ButtonVariant, Card, Choice, CommitStates,
-    CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, FlexRow, FlexTable, Form, Header,
-    Html, IconButton, InlineChoice, InlineEdit, InlineField, InputKind, ListColumns, NO_FLASH,
-    PageVariant, RecordPicker, SectionHeading, StatusKind, TableEmpty, page::*, params,
+    page::*, params, ActionLink, BackLink, BuiltinColumn, Button, ButtonVariant, Card, Choice,
+    CommitStates, CommitStatus, ConfirmDialog, Fact, Facts, Field, FlashGroup, FlexRow, FlexTable,
+    Form, Header, Html, IconButton, InlineChoice, InlineEdit, InlineField, InputKind, ListColumns,
+    PageVariant, RecordPicker, SectionHeading, StatusKind, TableEmpty, NO_FLASH,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 #[derive(Template)]

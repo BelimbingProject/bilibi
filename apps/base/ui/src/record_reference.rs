@@ -3,7 +3,7 @@
 //! unavailable), and the `RecordPicker` live control finds one by name.
 //! `base/records` resolves names and hits with the reader's permissions; this
 //! module only draws them, so a page writes no markup of its own.
-use crate::{Button, Field, Html, Restricted, forms::InputKind};
+use crate::{forms::InputKind, Button, Field, Html, Restricted};
 use askama::Template;
 
 /// How a reference reads for this viewer.

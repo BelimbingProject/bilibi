@@ -1,5 +1,5 @@
-use super::Pending;
 use super::fields;
+use super::Pending;
 use crate::{Company, FieldError, NewCompany, Params};
 use askama::Template;
 use bilibi_database::{Error, Result};
@@ -43,7 +43,11 @@ pub(super) fn columns(
     .filter(|(id, _, _)| !masked.contains(*id))
     .map(|(id, label, sort)| {
         let column = BuiltinColumn::new(id, label);
-        if sort { column.sortable(id) } else { column }
+        if sort {
+            column.sortable(id)
+        } else {
+            column
+        }
     })
     .collect();
     // The page's own columns are the defaults; a tenant's custom fields are

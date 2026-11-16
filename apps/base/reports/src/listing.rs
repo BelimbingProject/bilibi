@@ -3,7 +3,7 @@
 //! reads its one page through it; a file keeps it and reads the remaining
 //! pages with only the keys and the cells (`export::tabulate`), never a
 //! whole run per page.
-use crate::{Outcome, grid};
+use crate::{grid, Outcome};
 use bilibi_grid::{Bounds, Column, Filter, PageSpec, Sort};
 use bilibi_tenancy::Scope;
 use serde_json::Value;

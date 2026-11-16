@@ -98,10 +98,10 @@ A fresh Grid catalog asks this module (the `bilibi_grid::CustomColumns` hook it 
 | --- | --- |
 | Number, date, yes/no | Decimal, date and yes/no values; a stored value of another shape reads as empty |
 | Choice, several choices | The code, or the codes joined by `, ` in the order chosen |
-| Record | Grid projects its stored id and carries its Base Records kind. Reports name cells and groups through `Records::resolve` under the reader's scope, including CSV/PDF exports: merges show the survivor and an unnamed record shows Restricted. The column stays available to readers of the root table. Filters compare stored ids only (equals, one_of, empty, not_empty); list column pickers and related paths exclude record fields. |
+| Record | Grid projects its stored id and carries its Base Records kind. [Grid](../grid/README.md#tenant-custom-fields) owns projection and filter rules; its [measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5) limit reference aggregates to count. [Reports](../reports/README.md#the-rule) owns naming and reference freshness on pages and exports. |
 | Text, long text, link, phone, email | Text, and searchable |
 
-Global search finds a record by a word of an active text field through the owner's generated `custom_search_vector`; an archived field's words, codes, numbers, dates, yes/no and record ids never make a record match.
+Global search uses the owner's generated `custom_search_vector` for indexed candidates and the active searchable text for matching; [Search](../search/README.md#make-a-table-searchable) owns the query and ranking contract.
 
 ## Storage
 
@@ -112,7 +112,8 @@ Global search finds a record by a word of an active text field through the owner
 On a fresh disposable database (no unit tests):
 
 ```sh
-BILIBI_CUSTOM_FIELDS_DEMO=disposable DATABASE_URL=… APP_ORIGIN=… \
+BILIBI_CUSTOM_FIELDS_DEMO=disposable BILIBI_CUSTOM_FIELDS_ROOT="$PWD/.local/structured-fields-artifacts" \
+  DATABASE_URL=… APP_ORIGIN=… \
   cargo run -p bilibi-custom-fields --example structured-fields-walkthrough
 ```
 

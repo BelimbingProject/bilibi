@@ -43,12 +43,12 @@
 mod views;
 use crate::page_views::PageViews;
 use crate::view::View;
-use crate::{Catalog, Column, Lens, Lenses, MAX_COLUMNS, Stats, lens};
+use crate::{lens, Catalog, Column, Lens, Lenses, Stats, MAX_COLUMNS};
 use bilibi_database::{Error, Result};
 use bilibi_datetime::DisplayContext;
 use bilibi_tenancy::Scope;
-use bilibi_ui::flex_table::{Cost, FlexColumn, FlexRow, FlexTable, RowMode, step_zoom};
-use bilibi_ui::list_columns::{BuiltinColumn, flex_column};
+use bilibi_ui::flex_table::{step_zoom, Cost, FlexColumn, FlexRow, FlexTable, RowMode};
+use bilibi_ui::list_columns::{flex_column, BuiltinColumn};
 use bilibi_ui::list_state::SpecError;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};

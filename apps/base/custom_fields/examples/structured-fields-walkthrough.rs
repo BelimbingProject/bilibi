@@ -13,12 +13,12 @@
 //! fixture tenant's pick-lists, provisioned as a new tenant's are, and a
 //! direct deny that keeps one account from seeing companies.
 use bilibi_agent_api::{
-    Registry,
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
+    Registry,
 };
-use bilibi_database::{Db, pool};
+use bilibi_database::{pool, Db};
 use bilibi_tenancy::{ProofFuture, Scope};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::os::unix::fs::DirBuilderExt;
 use tokio_postgres::Transaction;
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();

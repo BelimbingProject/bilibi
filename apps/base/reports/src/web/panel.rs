@@ -5,15 +5,15 @@
 //! `PanelCache`, so the dashboard's refreshes are not runs, but only while
 //! the reader's access to the report is unchanged: the provider batches the
 //! access keys and a changed revision remounts the panel.
-use super::{Pages, render, report_path, result};
+use super::{render, report_path, result, Pages};
 use crate::{ReportError, RunInput, RunResult};
 use askama::Template;
 use bilibi_dashboard::{PanelArgs, PanelCache, Provided, ProvidedFuture};
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    ActionLink, Alert, Chart, ChartKind, Html, Series, StatusKind,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
+    ActionLink, Alert, Chart, ChartKind, Html, Series, StatusKind,
 };
 
 /// The dashboard id prefix: a report's entry is `report-<id>`.

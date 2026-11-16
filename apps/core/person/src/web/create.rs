@@ -2,12 +2,12 @@
 //! the same shared modal as legal entity types (`company/web/reference_types`).
 //! `/contacts/new` only sends the browser to the list with that dialog open.
 use super::*;
-use crate::{DuplicateQuery, Person, PersonInput, PersonKind, contributions::CREATE, model};
+use crate::{contributions::CREATE, model, DuplicateQuery, Person, PersonInput, PersonKind};
 use bilibi_agent_api::Error as ContractError;
 use bilibi_custom_fields::Kind;
 use bilibi_ui::{
-    Alert, Button, ButtonVariant, ErrorSummary, Field, InputKind, RestrictedField, StatusKind,
-    error_sentence,
+    error_sentence, Alert, Button, ButtonVariant, ErrorSummary, Field, InputKind, RestrictedField,
+    StatusKind,
 };
 
 const OPEN: &str = "/contacts?new=1";

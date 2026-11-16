@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
-    Person, PersonInput, PersonKind,
     contributions::{RETIRE, UPDATE},
     model::kind_key,
+    Person, PersonInput, PersonKind,
 };
 use bilibi_agent_api::Error as ContractError;
 use bilibi_ui::{

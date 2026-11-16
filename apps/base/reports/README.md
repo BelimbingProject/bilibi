@@ -22,6 +22,12 @@ Oversight reads are live, read-only and bounded. Prepared exports and scheduled 
 - A **filter** on a column the reader cannot see **refuses the run** (`HiddenFilter`), so a filter cannot be used to infer a hidden value.
 - A tenant's **custom fields** are columns like built-in fields (`cf_<key>`, from Grid's scoped catalog: [Custom Fields](../custom_fields/README.md#reports-lists-and-search)). An archived field leaves the columns, so a saved report that uses it leaves it out for every reader, as any column they cannot see.
 
+Custom record fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters and chart groups retain the stored id as identity while labels follow merges and show Restricted when unavailable; equal labels do not combine distinct records. Reference aggregation limits follow [Grid's measure rules](../grid/README.md#grouped-summaries-and-row-pages-g5).
+
+Reports include each custom reference field’s target kind and its table’s readability in their stable access revision. Dashboard revisions and prepared-export downloads use the same fingerprint.
+
+Prepared files retain a deduplicated set of the reference ids and optional labels rendered in every page and group, within the export row cap. Downloads resolve them again as the requester and refuse a changed label or unavailable state. Reference panels rerun on refresh; their HTML is never reused from the panel cache.
+
 ## Facade
 
 `Reports` (service `base/reports.reports`). Reads take a pool connection; writes take the caller's `MutationTransaction`.
@@ -81,7 +87,7 @@ The settings editor groups the two pairs as **Reports · Interactive reads** and
 | `/reports/{id}` | Read first. **Result** runs it as the reader, with ask-when-run answers, a left-out note, and drill-down: a group, a date bucket (as its period's first and last day), the total or a chart bar opens the records behind it, with a way back. Below it, Prepare CSV/PDF and the reader's own exports. **Definition** is the editor, live for the author, read-only for others. **Schedule** holds the reader's own deliveries. **Sharing** is the author's. Make a copy and Delete confirm with `ConfirmDialog`. |
 | `/built-in-reports/{key}` | A built-in report: Result and a read-only Definition, and Make a copy. |
 | `/report-exports/{id}` | A prepared or delivered export, for its requester only, until it expires. |
-| Dashboard | Customize offers the first 100 unplaced reports the reader may run, by name (provider `report`, embed `base/reports.dashboard`); outside Customize only placed reports are read. Each provider call shares one fresh reader catalog across their access revisions (report version and which columns resolve), and a changed revision remounts the panel without its cached HTML. A placed report runs as the reader with its stored answers and shows its chart, or its total as a number, and names any column their access leaves out. It reruns at most once a minute unless its revision changes. Hidden pins survive intervening arrangement edits and return when access does. |
+| Dashboard | Customize offers the first 100 unplaced reports the reader may run, by name (provider `report`, embed `base/reports.dashboard`); outside Customize only placed reports are read. Each provider call shares one fresh reader catalog across their access revisions (report version and which columns resolve), and a changed revision remounts the panel without its cached HTML. A placed report runs as the reader with its stored answers and shows its chart, or its total as a number, and names any column their access leaves out. It reruns at most once a minute unless its revision changes; reference reports follow the freshness rule above. Hidden pins survive intervening arrangement edits and return when access does. |
 | `/reports/{id}/export` | The CSV download, or a PDF with `format=pdf` (`reports.export`), with the answers, drill-downs and records view in the address (`a<i>`, `a<i>_to`, `d<n>`, `v<n>`, `rows`). |
 
 - Answers, drill-downs, the tab and the page are in the address, so a link repeats the question. An ask box shows its stored value until answered; an answer left blank is no filter (`a<i>=` stays in the address), never the stored value.
@@ -121,9 +127,3 @@ A module contributes one in code with `bilibi_reports::builtin!` (key, name, des
 ## Not yet
 
 Computed columns, XLSX, mail attachments, a read replica and owner summary tables are later issues (#128, "Out of scope" and "Reporting store").
-
-Custom record fields are named through Base Records with the reader’s scope on every page and export. Reference grouping keys carry `{stored_id, label}` so drill filters retain the stored id while labels follow merges and show Restricted when unavailable. Reference rollups are not supported.
-
-Reports include each custom reference field’s target kind and its table’s readability in their stable access revision. Dashboard revisions and prepared-export downloads use the same fingerprint.
-
-Prepared files retain a deduplicated set of the reference ids and optional labels rendered in every page and group, within the export row cap. Downloads resolve them again as the requester and refuse a changed label or unavailable state. Reference panels rerun on refresh; their HTML is never reused from the panel cache.

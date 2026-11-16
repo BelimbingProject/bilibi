@@ -10,14 +10,14 @@ mod reference_types;
 pub(super) mod relationships;
 mod setup;
 mod views;
-use crate::{CreateOutcome, Edit, FieldError, Params, lifecycle::Operation};
+use crate::{lifecycle::Operation, CreateOutcome, Edit, FieldError, Params};
 use bilibi_agent_api::page::{Call, PageContracts};
 use bilibi_database::{Db, Error, Result};
 use bilibi_grid::{PageColumns, PageViews};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    CommitStates, CommitStatus, Filter, FlashMap, ListColumns, ListSpec, ListState, NO_FLASH,
-    SortDir, StatusKind, page::*,
+    page::*, CommitStates, CommitStatus, Filter, FlashMap, ListColumns, ListSpec, ListState,
+    SortDir, StatusKind, NO_FLASH,
 };
 use serde_json::Value;
 use std::{
@@ -90,7 +90,7 @@ pub struct RecordPanel {
 /// reauthorizes each on mount, event and refresh; this only decides whether
 /// to place its anchor.
 pub fn record_panels() -> bilibi_module_registry::Result<Vec<RecordPanel>> {
-    use bilibi_module_registry::contributions::{EMBEDS, Embed, EmbedContext};
+    use bilibi_module_registry::contributions::{Embed, EmbedContext, EMBEDS};
     let mut panels = Vec::new();
     for entry in inventory::iter::<bilibi_module_registry::Contribution>
         .into_iter()

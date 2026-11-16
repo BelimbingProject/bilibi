@@ -5,7 +5,7 @@
 //! scoped catalog then asks this module for the tenant's active fields of
 //! those tables (`bilibi_grid::CustomColumns`). Values are read with each key
 //! as a validated literal, never request text.
-use crate::{CustomFields, RECORD_TYPES, definitions::Kind};
+use crate::{definitions::Kind, CustomFields, RECORD_TYPES};
 use bilibi_grid::{CustomColumn, CustomColumns, CustomFuture, CustomTable, FieldType};
 use bilibi_module_registry::{Catalog, Consumer, RegistryError};
 use bilibi_tenancy::{ReadClient, Scope};

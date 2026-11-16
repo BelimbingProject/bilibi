@@ -5,21 +5,21 @@
 //! Delete confirm through the shared dialog. Answers and the page travel in
 //! the address, so a link and the CSV download repeat the same question.
 use super::{
-    Can, Pages, Refusal, builder::Builder, clear_flash, flash_map, index::kind_label, page_error,
-    refusal, render, report_path, result, schedule,
+    builder::Builder, clear_flash, flash_map, index::kind_label, page_error, refusal, render,
+    report_path, result, schedule, Can, Pages, Refusal,
 };
 use crate::{ColumnInfo, FilterDef, Kind, Report, ReportError, RunInput, RunResult};
 use askama::Template;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
-    ActionLink, Alert, Badge, BadgeKind, Button, ButtonVariant, Card, ColumnsOutcome,
-    ConfirmDialog, Fact, Facts, Field, FlashMap, Header, Html, IconButton, IconKind, InputKind,
-    ListColumns, MultiSelect, StatusKind, Tab, Tabs, choices,
+    choices,
     page::{LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState},
-    params,
+    params, ActionLink, Alert, Badge, BadgeKind, Button, ButtonVariant, Card, ColumnsOutcome,
+    ConfirmDialog, Fact, Facts, Field, FlashMap, Header, Html, IconButton, IconKind, InputKind,
+    ListColumns, MultiSelect, StatusKind, Tab, Tabs,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
 const TABS: [(&str, &str); 4] = [
@@ -871,7 +871,8 @@ impl Show {
             Some(Confirm::Unsubscribe(..)) => render(ConfirmDialog {
                 id: "report-unsubscribe-confirm",
                 consequence: "Delete this schedule?",
-                detail: "Its deliveries stop, for everyone it reached, and its history goes with it.",
+                detail:
+                    "Its deliveries stop, for everyone it reached, and its history goes with it.",
                 confirm: "Delete",
                 working: "Deleting…",
                 confirm_event: "unsubscribe",

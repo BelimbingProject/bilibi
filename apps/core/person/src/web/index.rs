@@ -1,13 +1,13 @@
 use super::*;
-use crate::{PersonKind, Search, contributions::CREATE};
+use crate::{contributions::CREATE, PersonKind, Search};
 use bilibi_grid::{Outcome, PageColumns};
 use bilibi_records::Reference;
 use bilibi_ui::{
-    BuiltinColumn, Button, ButtonVariant, Card, CreateButton, Field, Filter, FilterToolbar, Header,
-    InputKind, ListSpec, ListState, Pagination, Selection, SortDir, TableEmpty, ToolbarControl,
     choices,
     list_state::{InvalidPageSize, ParamNames},
     lists::RecordLink,
+    BuiltinColumn, Button, ButtonVariant, Card, CreateButton, Field, Filter, FilterToolbar, Header,
+    InputKind, ListSpec, ListState, Pagination, Selection, SortDir, TableEmpty, ToolbarControl,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, sync::LazyLock};
@@ -586,7 +586,7 @@ impl Index {
     }
 
     /// Starts a CSV export of the list as filtered (or of the ticked
-    /// contacts), with the columns shown, through
+    /// contacts), with the shown non-custom columns, through
     /// `base.bulk_data.export.start`, and opens it.
     async fn export(&mut self, scope: &Scope, credential: &str, event: &str) -> Result<LiveBody> {
         let custom_shown = self
@@ -597,8 +597,8 @@ impl Index {
         let mut input = json!({
             "record_type": EXPORT_TYPE,
             // The columns on screen: the person's arrangement or the defaults.
-            // A custom field is not a Grid column, so the file leaves it out;
-            // its filters still choose the contacts.
+            // This page omits custom columns from list exports; custom filters
+            // still choose the contacts. Reports offer the custom columns.
             "columns": self
                 .columns
                 .columns

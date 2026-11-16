@@ -5,8 +5,8 @@
 //! pill with the reader's own access); every save goes through
 //! `core.person.update` or `core.person.create`, which check it against the
 //! tenant's definitions.
-use super::{Pages, render};
-use bilibi_custom_fields::{Definition, Kind, codes_of};
+use super::{render, Pages};
+use bilibi_custom_fields::{codes_of, Definition, Kind};
 use bilibi_database::{Error, Result};
 use bilibi_datetime::DisplayContext;
 use bilibi_records::{Reference, Resolved};

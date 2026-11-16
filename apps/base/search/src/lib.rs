@@ -17,18 +17,18 @@ mod query;
 mod web;
 
 pub use model::{Kind, Searchable, State};
-pub use query::{MAX_KIND_HITS, MAX_TEXT, MAX_WORDS, Terms, terms};
+pub use query::{terms, Terms, MAX_KIND_HITS, MAX_TEXT, MAX_WORDS};
 
 use bilibi_authz::authorize_key;
 use bilibi_database::{Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{
-    Catalog, RegistryError,
     contributions::{Access, Viewer},
+    Catalog, RegistryError,
 };
 use bilibi_settings::{Settings, Target};
 use bilibi_tenancy::{ReadClient, Scope};
 use query::Planned;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
