@@ -120,6 +120,7 @@ fn build(
     }
     Ok(CustomFields {
         record_types,
+        sources: grid::sources(catalog)?,
         picklists: services.get(bilibi_picklists::SERVICE)?,
         records: services.get(bilibi_records::SERVICE)?,
         settings: services.get("base/settings.store")?,
@@ -130,14 +131,14 @@ inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/grid", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
-        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql"))],
+        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql")), ("base-custom_fields-004-rule-conditions", include_str!("../migrations/004-rule-conditions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let fields = Arc::new(build(services)?);
-                // Grid reads the tenant's active fields into each fresh catalog.
-                let catalog = Catalog::discover(&bilibi_module_registry::discover()?)?;
-                let sources = grid::sources(&catalog)?;
-                bilibi_grid::bind_custom_columns(Box::leak(Box::new(grid::Columns { fields: fields.clone(), sources })))?;
+                // Grid reads the tenant's active fields into each fresh catalog,
+                // and Authz offers them to Field Restrictions.
+                bilibi_grid::bind_custom_columns(Box::leak(Box::new(grid::Columns { fields: fields.clone() })))?;
+                bilibi_authz::field_catalog::bind_tenant_fields(Box::leak(Box::new(grid::Restrictable { fields: fields.clone() })))?;
                 operations::bind(services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(), fields.clone())?;
                 Ok(fields)
             } },
@@ -159,6 +160,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
     contracts: &[
         ("create", "base.custom_fields.define"),
         ("save_field", "base.custom_fields.update"),
+        ("switch_rule_condition", "base.custom_fields.update"),
         ("archive", "base.custom_fields.archive"),
         ("restore", "base.custom_fields.restore"),
     ],

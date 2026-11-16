@@ -16,6 +16,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | Examples | 1 to 10 fact sets with expected `match` or `no_match` outcomes | The rule's author |
 
 - **Fields** are Grid column paths on the trigger's table (`priority`, or `company.name` through a one-link), read as the `rules` principal. No aggregates.
+- **Tenant custom fields** (`cf_<key>`, [Custom Fields](../custom_fields/README.md#rule-conditions)) are fields only when the tenant offered them to rule conditions, and only on the trigger's own record, not through a link. A draft on one that is not offered is refused with that reason; the vocabulary lists only offered ones, under the tenant's label.
 - **Operators**: `eq`, `ne`, `in`, `not_in`, `lt`, `le`, `gt`, `ge` (numbers and dates), `empty`, `not_empty`.
 - **Values compare exactly**: numbers as exact decimals (integer JSON numbers or decimal strings; fractional JSON numbers and values beyond decimal precision are refused), dates and times as instants, text as written, true/false as such. A missing value matches only `empty`; every other comparison with it is false.
 - **No "update any record" action.** An action is one owner's contract with its own schema, preview, checks and audit. The runner binds the action's subject field to the trigger's record; a rule never names a record, tenant, principal or operation outside the installed set.
@@ -33,7 +34,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 - **Versions never change.** Each stores its definition, examples, the person's words, a SHA-256 fingerprint, how it was drafted (`person` or `agent`), who drafted it and who approved it.
 - **Drafting runs nothing.** A new version of a running rule runs only once approved; until then the earlier version keeps running.
 - **A queued run keeps its pinned version.** If another version is approved or the rule is switched off before the run acts, the run is refused (`stale_version`, `rule_off`); nothing silently swaps in the new rule.
-- **Installed bindings are pinned.** Approval stores a fingerprint of the condition fields' types, choices and source mappings, every linked table's join and key bindings, the trigger bindings and the action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the rule **Needs review** until a new version is approved.
+- **Installed bindings are pinned.** Approval stores a fingerprint of the condition fields' types, choices and source mappings (for a custom field, its type and value SQL while it is offered to rules), every linked table's join and key bindings, the trigger bindings and the action schemas. A changed catalog refuses execution (`catalog_changed`) and marks the rule **Needs review** until a new version is approved.
 - **Approval never delegates more.** The approver must hold All reach for every capability the rule reads or acts on, including linked tables; Own or Team reach cannot approve or switch on tenant-wide automation; a rule cannot reach a field the principal may not read.
 
 ## How a run works
@@ -56,7 +57,7 @@ A rule is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customis
 | `rule_limit` | The rule is over a configured size or fact limit |
 | `attempt_limit` | The job exhausted its configured attempt budget; waiting runs are refused |
 | `actor_refused` | Queue refused the principal (a suspended tenant, a withdrawn grant); told through Queue's `EndingBinding` |
-| `catalog_changed` | Installed fields, trigger bindings or action schemas changed, or an owner was unmounted; draft and approve a new version |
+| `catalog_changed` | Installed fields, trigger bindings or action schemas changed, a condition's custom field was archived or withdrawn from rules, or an owner was unmounted; draft and approve a new version |
 | `record_changed` | Skipped: the record changed after the rule matched |
 | `action_refused` | An action's owner refused it; the effect's receipt keeps the owner's own words |
 
@@ -128,11 +129,11 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Seeing it work
 
-`apps/web/examples/rules-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). It calls startup validation with a customer Extension in the supplied composition, proves refusal in Shared service and admission in Isolated installation, and calls the protected owner mutation to prove that switching to shared refuses and preserves the saved mode. A tenant administrator is refused by the same mutation. Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/rule_cases` mounted (never a Platform member), it runs the same approved rule in both installation modes: an urgent 1500.00 case goes to the priority desk exactly once, and a normal case remains unchanged. It also proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off rule, self-triggering and multi-rule cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst held to its tenant's bound while the other tenant runs at once.
+`apps/web/examples/rules-walkthrough.rs` on a fresh disposable database, migrated and seeded first (its header has the commands). It calls startup validation with a customer Extension in the supplied composition, proves refusal in Shared service and admission in Isolated installation, and calls the protected owner mutation to prove that switching to shared refuses and preserves the saved mode. A tenant administrator is refused by the same mutation. Unmounted, the engine offers no trigger and refuses a draft on an unknown one. With the reference owner `fixtures/containers/rule_cases` mounted (never a Platform member), it runs the same approved rule in both installation modes: an urgent 1500.00 case goes to the priority desk exactly once, and a normal case remains unchanged. It also proves two tenants with the same facts and different destinations, a restart and a crash-retry with one effect, an agent's draft approved by a person, a person's draft in the page's input shape and its next version, refusals for a denied capability, a restricted field, an archived company, a suspended tenant, a stale version and a switched-off rule, a condition on a tenant custom field (refused until offered, then routed; refused when the field is restricted or archived), self-triggering and multi-rule cycles refused at approval and a noncyclic chain stopped at the chain budget, a threshold change as a new version, and a burst held to its tenant's bound while the other tenant runs at once.
 
 The official Domain companion walkthrough is `apps/web/examples/rules-domains-walkthrough.rs`. See the [companion handoff](../../../docs/rules-logical-event-handoff.md) for mounts, source prerequisites and execution instructions.
 
 ## Not yet
 
-- Tenant custom fields as conditions: [#730](https://github.com/BelimbingProject/bilibi/issues/730).
+- Custom fields of a linked record (`company.cf_segment`) as conditions.
 - Shadow runs against past records, configuration packs, a bounded text formula, AI observations as inputs and script or Wasm tooling for isolated installations: later items of [#682](https://github.com/BelimbingProject/bilibi/issues/682).

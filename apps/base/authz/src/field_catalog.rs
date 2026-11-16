@@ -13,9 +13,15 @@
 //! identities fail closed. The snapshot is built once, at the first call
 //! (the `base/authz` Ready check makes that boot); never call it from a
 //! contribution validator, since a source may read another consumer's snapshot.
+//!
+//! A tenant's own fields of an installed table (its custom fields, #730) are
+//! data, not declarations: the one [`TenantFields`] hook, which
+//! `base/custom_fields` binds, adds them per tenant in [`tenant_catalog`].
+//! None is personal, so they are withheld, never masked.
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{Consumer, Entry, RegistryError};
-use std::{collections::BTreeSet, sync::OnceLock};
+use bilibi_tenancy::{ReadClient, Scope};
+use std::{borrow::Cow, collections::BTreeSet, future::Future, pin::Pin, sync::OnceLock};
 
 /// The registry consumer the field owner submits its [`CatalogSource`] to.
 pub const FIELD_CATALOG: &str = "base/authz.field_catalog";
@@ -23,8 +29,8 @@ pub const FIELD_CATALOG: &str = "base/authz.field_catalog";
 /// One restrictable field, by the id restrictions store and its display label.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogField {
-    pub id: &'static str,
-    pub label: &'static str,
+    pub id: Cow<'static, str>,
+    pub label: Cow<'static, str>,
     /// The field's personal kind (`name`, `email`, `phone`, `identifier`,
     /// `date`, `free_text`) when its owner marks it personal. Only such a
     /// field may be masked, since the kind shapes the partial value.
@@ -60,7 +66,7 @@ pub struct CatalogSource {
 
 /// The validated snapshot: tables ordered by label, then id; fields in the
 /// order their owner declared them.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FieldCatalog {
     tables: Vec<CatalogTable>,
     source: Option<&'static str>,
@@ -112,7 +118,8 @@ impl FieldCatalog {
                 }
                 let mut fields = BTreeSet::new();
                 for field in &table.fields {
-                    if !valid_id(field.id) || !fields.insert(field.id) || field.label.is_empty() {
+                    if !valid_id(&field.id) || !fields.insert(&*field.id) || field.label.is_empty()
+                    {
                         return Err(format!(
                             "field catalog field {}.{} is invalid or repeated",
                             table.id, field.id
@@ -156,7 +163,7 @@ impl FieldCatalog {
         for (id, table) in grouped {
             let mut fields = BTreeSet::new();
             for field in &table.fields {
-                if !fields.insert(field.id) {
+                if !fields.insert(&*field.id) {
                     return Err(format!(
                         "field catalog field {id}.{} is contributed more than once",
                         field.id
@@ -200,6 +207,72 @@ pub fn field_catalog() -> Result<&'static FieldCatalog> {
             eprintln!("authz field catalog unavailable: {error}");
             Error::Internal
         })
+}
+
+/// A tenant's own field of an installed table, restrictable like a declared
+/// one: `id` is the field id restrictions store (`cf_<key>`), `label` the
+/// tenant's current label.
+#[derive(Clone, Debug)]
+pub struct TenantField {
+    pub table: &'static str,
+    pub table_label: &'static str,
+    pub record_types: &'static [&'static str],
+    pub id: String,
+    pub label: String,
+}
+pub type TenantFieldsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<TenantField>>> + Send + 'a>>;
+/// What the module owning tenant-defined fields answers: the tenant's
+/// restrictable fields, read on the caller's connection.
+pub trait TenantFields: Send + Sync {
+    fn fields<'a>(&'a self, client: &'a dyn ReadClient, scope: &'a Scope)
+        -> TenantFieldsFuture<'a>;
+}
+static TENANT_FIELDS: OnceLock<&'static dyn TenantFields> = OnceLock::new();
+/// Binds the hook once at boot (`base/custom_fields` does).
+pub fn bind_tenant_fields(hook: &'static dyn TenantFields) -> bilibi_module_registry::Result<()> {
+    TENANT_FIELDS
+        .set(hook)
+        .map_err(|_| RegistryError::Service("duplicate Authz tenant-field binding".into()))
+}
+
+/// The installed catalog plus the tenant's own fields of its tables: what an
+/// operator of `scope`'s tenant may restrict now.
+pub async fn tenant_catalog(client: &dyn ReadClient, scope: &Scope) -> Result<FieldCatalog> {
+    let mut catalog = field_catalog()?.clone();
+    let Some(hook) = TENANT_FIELDS.get() else {
+        return Ok(catalog);
+    };
+    for field in hook.fields(client, scope).await? {
+        if !valid_id(&field.id) || field.label.is_empty() {
+            continue;
+        }
+        let position = match catalog.tables.iter().position(|t| t.id == field.table) {
+            Some(position) => position,
+            None => {
+                catalog.tables.push(CatalogTable {
+                    id: field.table,
+                    label: field.table_label,
+                    record_types: field.record_types,
+                    fields: Vec::new(),
+                });
+                catalog.tables.len() - 1
+            }
+        };
+        let table = &mut catalog.tables[position];
+        if !table.fields.iter().any(|known| known.id == field.id) {
+            table.fields.push(CatalogField {
+                id: field.id.into(),
+                label: field.label.into(),
+                personal: None,
+                restriction_aliases: Vec::new(),
+            });
+        }
+    }
+    catalog
+        .tables
+        .sort_by(|a, b| a.label.cmp(b.label).then(a.id.cmp(b.id)));
+    Ok(catalog)
 }
 
 inventory::submit! {

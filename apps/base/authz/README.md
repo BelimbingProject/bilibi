@@ -121,6 +121,8 @@ applies to it, and it never sees or writes a role-restricted field. P8 owns the
 protected-field catalog contract and restriction administration; Grid supplies
 that catalog as data, with no Authz→Grid dependency.
 
+**Tenant fields.** A tenant's custom fields are data, so they cannot be in the deployment snapshot. `base/custom_fields` binds the one `field_catalog::TenantFields` hook, and `field_catalog::tenant_catalog(client, scope)` (what the Field Restrictions screen and `put_many` check against) adds the tenant's active `cf_<key>` fields to their tables. They are withheld only: none is personal, so mask mode is refused. An archived field's restriction stays listed and can be removed.
+
 A `CatalogField` may declare alternate restriction identities for the same
 record value. Each alias names its target table, field and that table's audit
 record types. `withheld_by_record_type` maps a restriction on either identity

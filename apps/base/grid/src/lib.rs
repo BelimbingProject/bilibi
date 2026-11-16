@@ -46,7 +46,8 @@ pub use catalog::{
 };
 pub use column::{Agg, Column, ColumnError, ColumnKind};
 pub use custom::{
-    bind_custom_columns, key_shaped, CustomColumn, CustomColumns, CustomFuture, CustomTable,
+    bind_custom_columns, custom_field_id, custom_key, custom_tables, key_shaped, CustomColumn,
+    CustomColumns, CustomFuture, CustomTable,
 };
 pub use model::{
     id_valid, GridContribution, Installed, Join, Link, LinkDecl, LinkKind, RecordFields, Source,
@@ -155,8 +156,8 @@ fn restriction_snapshot(
                     .fields
                     .into_iter()
                     .map(|(id, label, personal)| CatalogField {
-                        id,
-                        label,
+                        id: id.into(),
+                        label: label.into(),
                         personal,
                         restriction_aliases: Vec::new(),
                     })

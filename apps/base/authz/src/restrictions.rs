@@ -109,10 +109,12 @@ impl FieldRestrictions {
         }
     }
 
-    /// What may be restricted. Requires nothing: the catalog is deployment
-    /// metadata, not tenant data. Pages still gate on their route capability.
-    pub fn catalog(&self) -> Result<&'static FieldCatalog> {
-        crate::field_catalog::field_catalog()
+    /// What an operator of `actor`'s tenant may restrict: the installed
+    /// catalog plus the tenant's own fields (custom fields). Requires nothing;
+    /// pages still gate on their route capability.
+    pub async fn catalog(&self, actor: &Scope) -> Result<FieldCatalog> {
+        let client = self.db.get().await?;
+        crate::field_catalog::tenant_catalog(&**client, actor).await
     }
 
     /// The tenant's roles, by name, for choosing whom a field is restricted for.
@@ -138,7 +140,8 @@ impl FieldRestrictions {
     pub async fn list(&self, actor: &Scope) -> Result<Vec<RestrictionSummary>> {
         let client = self.db.get().await?;
         self.administrator(&**client, actor).await?;
-        list_in(&**client, actor.tenant(), self.catalog()?).await
+        let catalog = crate::field_catalog::tenant_catalog(&**client, actor).await?;
+        list_in(&**client, actor.tenant(), &catalog).await
     }
 
     /// Restrict `field` of `table` for exactly `roles`, withheld, creating the
@@ -192,7 +195,7 @@ impl FieldRestrictions {
         roles: &[i64],
         mode: Mode,
     ) -> Result<Vec<RestrictionSummary>> {
-        let catalog = self.catalog()?;
+        let catalog = self.catalog(actor).await?;
         let fields: BTreeSet<(String, String)> = fields.iter().cloned().collect();
         let roles: BTreeSet<i64> = roles.iter().copied().collect();
         if fields.is_empty()
@@ -283,7 +286,7 @@ impl FieldRestrictions {
             })
         })
         .await?;
-        let summaries = list_in(tx.sql(), tenant, catalog).await?;
+        let summaries = list_in(tx.sql(), tenant, &catalog).await?;
         tx.commit().await?;
         Ok(summaries
             .into_iter()
@@ -395,7 +398,7 @@ async fn list_in(
                     table_label: catalog
                         .table(&table)
                         .map_or_else(|| table.clone(), |t| t.label.to_owned()),
-                    field_label: known.map_or_else(|| field.clone(), |(_, f)| f.label.to_owned()),
+                    field_label: known.map_or_else(|| field.clone(), |(_, f)| f.label.to_string()),
                     restrictable: known.is_some(),
                     maskable: known.is_some_and(|(_, f)| f.personal.is_some()),
                     mode: Mode::Mask,

@@ -36,6 +36,9 @@ pub struct CustomColumn {
     /// Whether people find a record by this field's text in global search
     /// (free text, links, phone numbers and email addresses).
     pub searchable: bool,
+    /// Whether the tenant offered it to Base Rules conditions; Rules reads
+    /// no other custom field (#730).
+    pub rule_condition: bool,
 }
 
 /// The tenant-defined fields one Grid table takes, kept in its JSON field
@@ -68,6 +71,17 @@ pub(crate) fn hook() -> Option<&'static dyn CustomColumns> {
     HOOK.get().copied()
 }
 
+/// The tenant's custom fields of every table that takes them, as the
+/// definitions module states them, whatever the reader's grants: for a caller
+/// that pins what the tenant defined (Base Rules' approval fingerprint).
+/// Empty when no module binds the hook.
+pub async fn custom_tables(client: &dyn ReadClient, scope: &Scope) -> Result<Vec<CustomTable>> {
+    match hook() {
+        Some(hook) => hook.tables(client, scope).await,
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Whether `key` is a custom field key: the only text that enters a custom
 /// field's id and its SQL literal.
 pub fn key_shaped(key: &str) -> bool {
@@ -77,11 +91,18 @@ pub fn key_shaped(key: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// The custom key a field id `cf_<key>` names, or `None` for any other id:
+/// the one reading of the custom-field id, for callers that hold only the id
+/// (a restriction, a rule condition, an audit reader).
+pub fn custom_key(id: &str) -> Option<&str> {
+    id.strip_prefix("cf_").filter(|key| key_shaped(key))
+}
+
 /// A field id `cf_<key>` as the `&'static str` every catalog field carries.
 /// Keys never change and are never reused, so each distinct key text is kept
 /// once for the process however many catalogs name it; labels, which tenants
 /// rename, are not kept here (`Table::field_label`).
-pub(crate) fn field_id(key: &str) -> &'static str {
+pub fn custom_field_id(key: &str) -> &'static str {
     static IDS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let id = format!("cf_{key}");
     let mut ids = IDS

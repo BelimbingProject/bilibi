@@ -5,7 +5,9 @@
 //! (`opened`, `routed`, `flagged`) and three contracts (`open`, `route`,
 //! `flag`). It offers the events as rule triggers and `route` and `flag` as
 //! rule actions, admits the `rules` principal to those two contracts and
-//! offers it the capabilities they need. Mount it only to prove `base/rules`
+//! offers it the capabilities they need. A case takes tenant custom fields
+//! (record type `rule_case`), so a tenant can offer one to rule conditions.
+//! Mount it only to prove `base/rules`
 //! (`apps/web/examples/rules-walkthrough.rs`); it is never a Platform member.
 use bilibi_agent_api::{
     job::{PrincipalWrite, PRINCIPAL_WRITES},
@@ -16,6 +18,7 @@ use bilibi_authz::{
     CapabilityDefinition, OfferedCapabilities, VocabularyContribution, OFFERED_CAPABILITIES,
     VOCABULARY,
 };
+use bilibi_custom_fields::{CustomFields, GridSource, RecordType, GRID_SOURCES, RECORD_TYPES};
 use bilibi_database::{Change, Error, MutationTransaction};
 use bilibi_events::{EventType, Events, NewEvent, On, EVENTS};
 use bilibi_grid::{Field, FieldType, GridContribution, LinkDecl, LinkKind, Source, TableDecl};
@@ -34,6 +37,7 @@ pub const OPENED: &str = "rule_cases/cases.opened";
 pub const ROUTED: &str = "rule_cases/cases.routed";
 pub const FLAGGED: &str = "rule_cases/cases.flagged";
 pub const TABLE: &str = "rule_cases";
+pub const RECORD_TYPE: &str = "rule_case";
 
 macro_rules! provenance {
     () => {
@@ -48,19 +52,27 @@ macro_rules! provenance {
 inventory::submit! {
     Module {
         id: MODULE, layer: Layer::Domains,
-        dependencies: &["base/agent_api", "base/authz", "base/database", "base/events", "base/grid", "base/rules", "base/tenancy", "core/company"],
-        migrations: &[("rule-cases-cases-001-cases", include_str!("../migrations/001-cases.sql")), ("rule-cases-cases-002-links", include_str!("../migrations/002-links.sql"))],
+        dependencies: &["base/agent_api", "base/authz", "base/custom_fields", "base/database", "base/events", "base/grid", "base/rules", "base/tenancy", "core/company"],
+        migrations: &[("rule-cases-cases-001-cases", include_str!("../migrations/001-cases.sql")), ("rule-cases-cases-002-links", include_str!("../migrations/002-links.sql")), ("rule-cases-cases-003-custom-fields", include_str!("../migrations/003-custom-fields.sql"))],
         services: &[Service { id: "rule_cases/cases.events", factory: |services| {
             let events: Arc<Events> = services.get(bilibi_events::SERVICE)?;
             let _ = EVENT_STORE.set(events.clone());
+            let _ = CUSTOM_FIELDS.set(services.get(bilibi_custom_fields::SERVICE)?);
             Ok(events)
         } }],
     }
 }
 static EVENT_STORE: OnceLock<Arc<Events>> = OnceLock::new();
+static CUSTOM_FIELDS: OnceLock<Arc<CustomFields>> = OnceLock::new();
 fn events() -> Result<&'static Events, Error> {
     EVENT_STORE.get().map(Arc::as_ref).ok_or(Error::Internal)
 }
+fn custom_fields() -> Result<&'static CustomFields, Error> {
+    CUSTOM_FIELDS.get().map(Arc::as_ref).ok_or(Error::Internal)
+}
+
+inventory::submit! { Contribution::new(RECORD_TYPES, RECORD_TYPE, provenance!(), &RecordType { id: RECORD_TYPE, label: "Cases" }) }
+inventory::submit! { Contribution::new(GRID_SOURCES, RECORD_TYPE, provenance!(), &GridSource { record_type: RECORD_TYPE, table: TABLE, column: "custom_fields" }) }
 
 inventory::submit! { Contribution::new(VOCABULARY, "rule_cases/cases.vocabulary", provenance!(), &VocabularyContribution {
     domains: &["rule-cases"], verbs: &["open", "route", "flag"],
@@ -79,7 +91,7 @@ inventory::submit! { Contribution::new(EVENTS, FLAGGED, provenance!(), &EventTyp
 static GRID: GridContribution = GridContribution {
     record_fields: &[],
     tables: &[TableDecl::new("rule_cases", "Cases", VIEW,
-        Source::tenant("SELECT id,title,priority,amount,margin,queue,routed,flags,company_id,created_at,version,parent_id,owner_user_id FROM rule_cases_cases WHERE tenant_id=$1"), "id", &[
+        Source::tenant("SELECT id,title,priority,amount,margin,queue,routed,flags,company_id,created_at,version,parent_id,owner_user_id,custom_fields FROM rule_cases_cases WHERE tenant_id=$1"), "id", &[
             Field::new("id", "ID", FieldType::Integer).protected(),
             Field::new("version", "Version", FieldType::Integer).protected(),
             Field::new("parent_id", "Parent", FieldType::Integer).protected(),
@@ -94,6 +106,7 @@ static GRID: GridContribution = GridContribution {
             Field::new("flags", "Flags", FieldType::Integer).protected(),
             Field::new("company_id", "Company ID", FieldType::Integer).protected(),
             Field::new("created_at", "Opened", FieldType::DateTime).protected(),
+            Field::new("custom_fields", "Custom fields", FieldType::String).hidden(),
          ]).owner("owner_user_id").label_field("title").time_field("created_at").record_types(&["rule_cases/cases.case"])],
     links: &[
         LinkDecl::on("parent", "Parent", LinkKind::One, TABLE, "parent_id", TABLE, "id"),
@@ -185,10 +198,26 @@ impl WriteHandler for Open {
             let parent = input["parent_id"].as_i64();
             let owner = scope.user();
             writable(tx.sql(), tenant, company).await?;
+            let patch: serde_json::Map<String, Value> = input["custom"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|pair| (bilibi_agent_api::text_field(pair, "key"), pair["value"].clone()))
+                .collect();
+            let custom = match custom_fields()?
+                .validate_locked(tx.sql(), scope, RECORD_TYPE, &patch, &serde_json::Map::new())
+                .await?
+            {
+                Ok(values) => Value::Object(values),
+                Err(errors) => {
+                    let first = errors.first().map_or("is not valid", |error| error.message.as_str());
+                    return Err(invalid("custom", first));
+                }
+            };
             let id = tx.mutate(move |sql| Box::pin(async move {
                 let id: i64 = sql.query_one(
-                    "INSERT INTO rule_cases_cases(tenant_id,company_id,title,priority,amount,margin,parent_id,owner_user_id) VALUES($1,$2,$3,$4,$5::text::numeric,$6::text::numeric,$7,$8) RETURNING id",
-                    &[&tenant, &company, &title, &priority, &amount, &margin, &parent, &owner],
+                    "INSERT INTO rule_cases_cases(tenant_id,company_id,title,priority,amount,margin,parent_id,owner_user_id,custom_fields) VALUES($1,$2,$3,$4,$5::text::numeric,$6::text::numeric,$7,$8,$9) RETURNING id",
+                    &[&tenant, &company, &title, &priority, &amount, &margin, &parent, &owner, &custom],
                 ).await.map_err(|_| Error::Invalid)?.get(0);
                 Ok((id, vec![Change { kind: "rule_cases/cases.case".into(), id, old: Value::Null, new: json!({"title": title, "priority": priority, "amount": amount, "company": company}) }]))
             })).await?;
@@ -321,7 +350,11 @@ fn open_schema() -> Value {
         "title":{"type":"string","maxLength":160},
         "priority":{"type":"string","enum":["low","normal","urgent"]},
         "amount":{"type":"string","maxLength":24,"description":"A decimal amount, such as 1500.00"},
-        "margin":{"type":"string","maxLength":24}
+        "margin":{"type":"string","maxLength":24},
+        "custom":{"type":"array","description":"Tenant custom field values as {key, value} pairs","items":{"type":"object","required":["key"],"properties":{
+            "key":{"type":"string","maxLength":40},
+            "value":{"type":"string","maxLength":1000,"nullable":true}
+        }}}
     }})
 }
 fn route_schema() -> Value {

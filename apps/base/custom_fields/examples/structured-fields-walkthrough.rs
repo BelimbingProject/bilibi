@@ -1,7 +1,8 @@
 //! Structured custom fields (#685) through the real doors on a disposable,
 //! migrated database: several choices from a governed pick-list and a record
 //! field pointing at a company, kept in the contact's own JSON column, then
-//! read through reports (Grid's scoped catalog) and global search. Each line
+//! read through reports (Grid's scoped catalog) and global search; a company
+//! field restricted for the reader's role leaves the record's History. Each line
 //! is `ok` or `FAIL`; the run fails if any check does.
 //!
 //! ```text
@@ -773,6 +774,103 @@ async fn main() -> Result<(), Failure> {
     proof.check(
         "an archived field leaves the report columns",
         !after.iter().any(|s| s == "cf_old_note") && after.iter().any(|s| s == "cf_memo"),
+    );
+
+    println!("-- a restricted field leaves the record's History (#730)");
+    admin
+        .plan(
+            "base.custom_fields.define",
+            json!({"record_type": "company", "key": "segment", "label": "Segment", "kind": "text"}),
+        )
+        .await?;
+    let company = admin
+        .read("core.company.get", json!({"company_id": 1}))
+        .await?;
+    let saved = admin
+        .plan("core.company.update", json!({"company_id": 1, "version": company["version"], "fields": {"custom": [{"key": "segment", "value": "Enterprise-SECRET"}]}}))
+        .await?;
+    proof.check(
+        "the company's Segment holds Enterprise-SECRET",
+        result(&saved)["company_id"] == 1,
+    );
+    // The History embed a company page mounts, as the reader opens it.
+    let history = app
+        .services
+        .get::<bilibi_ui::page::PageService<Scope, bilibi_database::Error>>(
+            "base/audit_views.history",
+        )?;
+    let trail = |reader: &Scope| {
+        let history = history.clone();
+        let reader = reader.clone();
+        let token = admin.token.clone();
+        async move {
+            let path = std::collections::HashMap::from([
+                ("panel".to_owned(), "company-record-history".to_owned()),
+                ("kinds".to_owned(), "company".to_owned()),
+                ("id".to_owned(), "1".to_owned()),
+            ]);
+            let empty = std::collections::HashMap::new();
+            let mut panel = history
+                .0
+                .mount(bilibi_ui::page::PageRequest {
+                    operation: "record",
+                    scope: Some(&reader),
+                    path: &path,
+                    query: &empty,
+                    body: &[],
+                    framed: false,
+                })
+                .await?
+                .ok_or("the History embed did not mount")?;
+            let shown = panel
+                .update(bilibi_ui::page::LiveRequest {
+                    scope: &reader,
+                    credential: &token,
+                    input: bilibi_ui::page::LiveInput::Refresh,
+                })
+                .await?;
+            Ok::<String, Failure>(shown.html)
+        }
+    };
+    let before = trail(&admin.scope).await?;
+    proof.check(
+        "unrestricted, History shows the Segment value",
+        before.contains("Enterprise-SECRET"),
+    );
+    let role: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT pr.role_id FROM principal_roles pr JOIN roles r ON r.tenant_id=pr.tenant_id AND r.id=pr.role_id WHERE pr.tenant_id=1 AND pr.user_id=$1 AND r.grant_all ORDER BY pr.role_id LIMIT 1",
+            &[&admin.scope.user()],
+        )
+        .await?
+        .get(0);
+    let restrictions = app
+        .services
+        .get::<bilibi_authz::restrictions::FieldRestrictions>("base/authz.field_restrictions")?;
+    restrictions
+        .put(&admin.scope, "companies", "cf_segment", &[role])
+        .await?;
+    let after = trail(&admin.scope).await?;
+    proof.check(
+        "restricted for the reader's role, History no longer shows the value",
+        !after.contains("Enterprise-SECRET"),
+    );
+    proof.check(
+        "and names the change as a withheld custom_fields.segment",
+        after.contains("custom_fields.segment"),
+    );
+    proof.check(
+        "while the unrestricted Partner value stays in History",
+        after.contains("partner"),
+    );
+    restrictions
+        .remove(&admin.scope, "companies", "cf_segment")
+        .await?;
+    proof.check(
+        "once the restriction is removed, History shows the value again",
+        trail(&admin.scope).await?.contains("Enterprise-SECRET"),
     );
 
     if proof.failed.is_empty() {
