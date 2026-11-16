@@ -332,9 +332,23 @@ async fn main() -> Result<()> {
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
+    let customer_release = Composition {
+        version: "walkthrough",
+        commit: None,
+        tag: None,
+        pin: PinState::Unpinned,
+        containers: vec![Container {
+            layer: Layer::Extensions,
+            id: "customer_example",
+            modules: vec!["customer_example/change"],
+            commit: None,
+            version: None,
+            extension_code: Some(ExtensionCode::Customer),
+        }],
+    };
     let mut services = Services::default();
     services.provide("bootstrap.database", Arc::new(db.clone()))?;
-    services.provide("bootstrap.composition", Arc::new(bilibi_web::composition()))?;
+    services.provide("bootstrap.composition", Arc::new(customer_release))?;
     services.install(&modules)?;
     services
         .get::<Grants>("base/authz.grants")?
@@ -406,25 +420,7 @@ async fn main() -> Result<()> {
         "mounted subscribers: {:?}",
         events.subscribers().collect::<Vec<_>>()
     );
-    let customer_release = Composition {
-        version: "walkthrough",
-        commit: None,
-        tag: None,
-        pin: PinState::Unpinned,
-        containers: vec![Container {
-            layer: Layer::Extensions,
-            id: "customer_example",
-            modules: vec!["customer_example/change"],
-            commit: None,
-            version: None,
-            extension_code: Some(ExtensionCode::Customer),
-        }],
-    };
-    let mut customer_services = Services::default();
-    customer_services.provide("bootstrap.database", Arc::new(db.clone()))?;
-    customer_services.provide("bootstrap.composition", Arc::new(customer_release))?;
-    customer_services.install(&modules)?;
-    let customer_instances = customer_services.get::<Instances>(bilibi_base::system::SERVICE)?;
+    let customer_instances = proof.services.get::<Instances>(bilibi_base::system::SERVICE)?;
     let client = db.get().await?;
     client.execute(
         "INSERT INTO user_bootstrap(id,tenant_name,company_name,company_code,admin_email,tenant_id,user_id,company_id,affiliation_settled_at) VALUES(1,'Walkthrough','Company 001','C001','admin@example.test',1,4,1,now()) ON CONFLICT DO NOTHING",
