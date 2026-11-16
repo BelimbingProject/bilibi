@@ -155,7 +155,7 @@ impl Reports {
                             limit: 1,
                         },
                         columns: vec![],
-                        offsets: BTreeMap::new(),
+                        pages: BTreeMap::new(),
                     },
                 )
                 .await
@@ -190,10 +190,7 @@ impl Reports {
                             limit: page_size,
                         },
                         columns: columns.iter().map(|c| c.spec.clone()).collect(),
-                        offsets: selected
-                            .iter()
-                            .map(|(id, (offset, _))| (*id, *offset))
-                            .collect(),
+                        pages: selected,
                     },
                 )
                 .await
@@ -233,11 +230,7 @@ impl Reports {
                 }) = child.data
                 {
                     total += count;
-                    for row in projection
-                        .rows
-                        .into_iter()
-                        .take(selected.get(&child.tenant).map_or(0, |(_, take)| *take))
-                    {
+                    for row in projection.rows {
                         let mut cells = vec![json!(child.name)];
                         cells.extend(
                             columns

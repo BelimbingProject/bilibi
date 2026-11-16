@@ -46,7 +46,7 @@ const PREPARER: &str = "base/reports.preparer";
 const EXPORT_ENDED: &str = "base/reports.export_ended";
 const SWEEPER: &str = "base/reports.sweeper";
 const DELIVERER: &str = "base/reports.deliverer";
-const MIGRATIONS: [(&str, &str); 8] = [
+const MIGRATIONS: [(&str, &str); 9] = [
     (
         "base-reports-001-reports",
         include_str!("../migrations/001-reports.sql"),
@@ -78,6 +78,10 @@ const MIGRATIONS: [(&str, &str); 8] = [
     (
         "base-reports-008-reference-names",
         include_str!("../migrations/008-reference-names.sql"),
+    ),
+    (
+        "base-reports-009-delivery-sweep",
+        include_str!("../migrations/009-delivery-sweep.sql"),
     ),
 ];
 const KIND: &str = "base_report";
@@ -555,7 +559,11 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    offsets: BTreeMap::new(),
+                    pages: proof
+                        .children()
+                        .iter()
+                        .map(|child| (child.tenant(), (0, 1)))
+                        .collect(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {

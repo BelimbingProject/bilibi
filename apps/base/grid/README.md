@@ -6,11 +6,13 @@
 
 ## Parent oversight
 
-`OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.offsets` allows callers to compose globally bounded pages, without widening the proven directory. `latest` and `list` values stay per child, with null combined cells.
+`OversightQueries` (`base/grid.oversight`) accepts Tenancy's sealed `OversightScope`, never a supplied child ID or invented child actor. `catalog(proof, grant, rows)` intersects one child's consent with the parent's live catalog; `builder_catalog(scope, rows)` intersects fields across children granting each table. `read(proof, root, OversightSpec)` re-proves consent, runs bounded read-only child queries, then audits before returning each answer. `OversightResult` has explicit per-child outcomes and grant versions and composable totals; no child record links are returned. `RowsSummary` computes totals only for row-level grants; `Rows.pages` supplies each child’s `(offset, limit)` for a globally bounded page; children absent from the map return only counts, without reading or projecting row keys. The map never widens the proven directory. `latest` and `list` values stay per child, with null combined cells.
 
 **Unknown classification denies the whole source.** Every field in the complete original `TableDecl` must be explicitly marked `.personal(kind)` or `.non_personal()` by its owner before the table can enter either the consent or oversight catalog. Hidden/derived fields and fields removed by parent restrictions or child withholding still count. Absence of a personal mark is unknown, never evidence of non-personal data. `.personal` still requires the owning module's personal-data store contract; do not label unknown production fields non-personal to bypass it. Core Contacts, accounts, affiliations, addresses and companies remain unavailable to oversight until their owners complete classification and the required privacy/store contracts. Existing grants and explicit personal selections cannot enable an unclassified source. This does not remove ordinary same-tenant access. Only Grid's non-business reference sources are fully classified here.
 
 Global operator settings `tenancy.oversight.max_children` (50), `concurrency` (4), `child_timeout_ms` (2,000), `total_timeout_ms` (10,000) and `cache_seconds` (60; 0 disables) have settings-editor controls. Cache entries are bounded, in memory and keyed by reader, query, grant version and live catalog; every hit requires fresh authorization and audit. A revoked, withheld, masked, expired or unauditable answer cannot survive through the cache.
+
+Source description caching follows [The scoped catalog](#the-scoped-catalog); live capabilities, masks and consent are always rechecked.
 
 Grid owns flexible columns on list pages: the catalog every module declares its
 tables into, the paths a person walks through it to pick columns without writing
@@ -100,12 +102,7 @@ unknown one. Platform capabilities need the operator identity. A system identity
 has no `Scope` and reads nothing. Build the catalog again wherever the page
 refreshes its own capabilities; there is no cache of grants.
 
-The first catalog for a source asks PostgreSQL to describe (not run) its
-statement and keeps the selected keys for the process, since the SQL is static.
-A declared field its source does not select, a placeholder that is not bigint, or
-an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared`
-naming the table and field (the owner must fix it; callers' `?` maps it to an
-internal error and logs the cause).
+The first catalog for a source asks PostgreSQL to describe (not run) its statement and keeps the selected keys and parameter count for the process, keyed by static SQL and tenant-scoped status. Ordinary and oversight catalogs reuse these descriptions across calls and children. A declared field its source does not select, a placeholder that is not bigint, or an edge without `from_key`/`to_key` fails with `CatalogError::Misdeclared` naming the table and field (the owner must fix it; callers' `?` maps it to an internal error and logs the cause).
 
 `restriction_catalog` and `restrictable` give the Authz screens the protected-field
 catalog as **data**: Authz does not depend on Grid. Each field carries its personal kind, so only personal fields can be masked.
