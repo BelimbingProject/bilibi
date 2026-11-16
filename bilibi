@@ -30,6 +30,10 @@ case ${1:-help} in
             exec "$root/scripts/start-app.sh"
         fi
         ;;
+    stop)
+        [[ $# == 1 ]] || { echo 'Usage: ./bilibi stop' >&2; exit 1; }
+        exec python3 "$root/scripts/dev-process.py" down
+        ;;
     status|update)
         activate_cargo
         python3 -c 'import tomllib' 2>/dev/null || { echo 'Python 3.11+ is required. See README.md (supported environment).' >&2; exit 1; }
@@ -62,6 +66,8 @@ Usage: ./bilibi <command>
 
 Run Bilibi on this computer
   start         Install anything missing, run Bilibi, and open it in your browser.
+  stop          Stop Bilibi running from this folder, from any terminal.
+                Closing its terminal or pressing Ctrl-C stops it too.
   add <name>    Add a Domain or Extension, such as: ./bilibi add finance
                 Or paste the add command that the Software page shows.
                 Then run ./bilibi start again to use it.
