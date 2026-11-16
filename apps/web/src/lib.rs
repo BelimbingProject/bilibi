@@ -334,6 +334,11 @@ pub async fn media_cleanup(db: &Db, tenant: i64, hours: u64) -> Result<()> {
     media::cleanup(db, tenant, hours).await
 }
 
+/// `media-reconcile` command: files no row needs and assets whose file is gone.
+pub async fn media_reconcile(db: &Db) -> Result<()> {
+    media::reconcile(db).await
+}
+
 pub fn router(app: App) -> Router {
     let perf = app.perf.clone();
     let pages = routes::install(Router::new(), &app.routes, &app.downloads);

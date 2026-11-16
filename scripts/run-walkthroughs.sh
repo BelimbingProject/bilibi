@@ -102,6 +102,7 @@ WALKTHROUGHS=(
   'base|media-attachments|apps/base/media|attachments-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|media-scan|apps/base/media|scan-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|media-scan-no-scanner|apps/base/media|scan-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|no-scanner'
+  'base|media-reconcile|apps/base/media|reconcile-walkthrough|migrate|BILIBI_DISPOSABLE_MEDIA_DEMO=yes BILIBI_MEDIA_DEMO_ROOT=@/media|-'
   'base|perf|apps/base/perf|perf-walkthrough|migrate|BILIBI_DISPOSABLE_PERF_DEMO=yes|-;inspect'
   'base|queue|apps/base/queue|queue-walkthrough|migrate|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|-;inspect'
   'base|queue-execution|apps/base/queue|execution-walkthrough|none|BILIBI_DISPOSABLE_QUEUE_DEMO=yes|prepare;inspect'
