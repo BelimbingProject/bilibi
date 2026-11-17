@@ -231,8 +231,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// The host part of a bind address (`127.0.0.1:3000` is `127.0.0.1`,
-/// `[::1]:3000` is `::1`), the "dev" status bar's listen address.
 /// Seconds since `./bilibi start` began. The launcher leaves its start time (Unix
 /// nanoseconds) in the file named by `BILIBI_START_FILE`; the first listening app
 /// takes it, so a watched rebuild or a direct run prints nothing.
@@ -247,6 +245,8 @@ fn launcher_start_seconds() -> Option<f64> {
     Some(now.saturating_sub(started) as f64 / 1e9)
 }
 
+/// The host part of a bind address (`127.0.0.1:3000` is `127.0.0.1`,
+/// `[::1]:3000` is `::1`), the "dev" status bar's listen address.
 fn listen_host(bind: &str) -> &str {
     let host = bind.rsplit_once(':').map_or(bind, |(host, _)| host);
     host.strip_prefix('[')
