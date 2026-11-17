@@ -185,6 +185,11 @@ async fn main() -> Result<()> {
                 &app.services,
                 bilibi_base::schedule::scheduler::Config::default(),
             )?;
+            // Long-lived readers run beside the job slots, one owner per key.
+            let residents = bilibi_base::residents::Supervisor::from_services(
+                &app.services,
+                bilibi_base::residents::Config::default(),
+            )?;
             // The outcomes the installer write land in the audit
             // trail through the owning module, not through the workers.
             let software: Arc<bilibi_base::software::Software> =
@@ -196,6 +201,7 @@ async fn main() -> Result<()> {
             let downloading = tokio::spawn(software.run_downloads(stopped.clone()));
             let history = tokio::spawn(app.perf.clone().run(stopped.clone()));
             let worker = tokio::spawn(executor.run(stopped.clone()));
+            let readers = tokio::spawn(residents.run(stopped.clone()));
             let ticker = tokio::spawn(scheduler.run(stopped));
             let shutdown = stop.clone();
             // The peer address feeds the OAuth per-sender throttle.
@@ -214,6 +220,7 @@ async fn main() -> Result<()> {
             settling.await.map_err(|_| Error::Internal)??;
             downloading.await.map_err(|_| Error::Internal)??;
             worker.await.map_err(|_| Error::Internal)??;
+            readers.await.map_err(|_| Error::Internal)??;
             history.await.map_err(|_| Error::Internal)??;
             ticker.await.map_err(|_| Error::Internal)??;
             result?;

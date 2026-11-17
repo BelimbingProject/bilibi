@@ -160,6 +160,13 @@ pub(super) async fn page(pages: &Pages, scope: &Scope) -> Result<String> {
     .await
     .ok()
     .and_then(|result| result.ok());
+    let readers = tokio::time::timeout(Duration::from_secs(3), async {
+        let client = pages.db.get().await?;
+        bilibi_residents::health_status(&**client).await
+    })
+    .await
+    .ok()
+    .and_then(|result| result.ok());
     let performance = match (diagnostics.recorder, diagnostics.store) {
         (bilibi_perf::Health::Unavailable, _) | (_, bilibi_perf::Store::Unavailable) => {
             "Unavailable".to_owned()
@@ -263,6 +270,7 @@ pub(super) async fn page(pages: &Pages, scope: &Scope) -> Result<String> {
                 ("Database", text(connected)),
                 ("Cache", text("Settings read directly from PostgreSQL")),
                 ("Queue", queue),
+                ("Resident readers", readers),
                 ("Mail", mail),
                 ("Performance", text(performance)),
             ],

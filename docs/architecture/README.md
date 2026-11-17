@@ -164,7 +164,7 @@ These are the rules every module follows for its data:
 - **Soft delete** is an explicit query policy, decided by each owner.
 - **UTC storage.** Times are stored in UTC; `base/datetime` owns how they are shown: timezone, clock mode and periods.
 - **No unbounded reads.** Page through the rows, or ask PostgreSQL for the total.
-- **Shared services:** private files go through `base/media`, jobs through `base/queue`, and outbound HTTP through `base/integration`.
+- **Shared services:** private files go through `base/media`, jobs through `base/queue`, live connections that stay open through `base/residents`, and outbound HTTP through `base/integration`.
 - **Settings over constants.** A value an operator may change is a setting with an editor. Secrets are encrypted and masked by default. An explicitly authorized, password-confirmed and audited reveal can show one (`apps/base/settings_editor/src/reveal.rs`).
 
 ## Tenants, companies and who you are

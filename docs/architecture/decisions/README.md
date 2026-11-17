@@ -3,7 +3,7 @@
 **Document Type:** Index of architecture decision records
 **Status:** Active
 **Scope:** Decisions that shape Bilibi's architecture
-**Last Updated:** 2026-11-16
+**Last Updated:** 2026-11-17
 
 Each record states one decision, its context and its consequences. The architecture overview is [`../README.md`](../README.md).
 
@@ -60,6 +60,12 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 ### Scheduled work
 
 | [17 One global schedule, fanned out under per-tenant consent](./17-per-tenant-scheduled-work.md) | Accepted |
+
+### Background work
+
+| Record | Status |
+| --- | --- |
+| [32 Live connections are held by resident readers, outside the queue, one owner per key](./32-resident-readers.md) | Accepted; implemented |
 
 ### Software delivery
 
