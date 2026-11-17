@@ -116,7 +116,7 @@ struct ErrorCell<'a> {
 /// The status badge and, in a normal row, what happens next.
 #[derive(Template)]
 #[template(
-    source = r#"{% import "flex_table.html" as flex %}{{ badge|safe }}{% if let Some(i) = next %}<span class="block whitespace-nowrap text-xs text-ink-muted">Starts again {% call flex::instant(id=id, i=i) %}{% endcall %}</span>{% endif %}"#,
+    source = r#"{% import "flex_table.html" as flex %}{{ badge }}{% if let Some(i) = next %}<span class="block whitespace-nowrap text-xs text-ink-muted">Starts again {% call flex::instant(id=id, i=i) %}{% endcall %}</span>{% endif %}"#,
     ext = "html"
 )]
 struct StatusCell<'a> {

@@ -1,6 +1,6 @@
 //! Tokio supervision edge: one per server process. It claims due readings,
-//! runs each reader in its own task, renews the leases it holds with one
-//! statement per beat, and hands them back on shutdown. PostgreSQL leases give
+//! runs each reader in its own task, renews eligible leases in one update
+//! per beat, and hands them back on shutdown. PostgreSQL leases give
 //! one owner per key; they do not make a reader's effects exactly-once.
 use crate::{
     reading::{Ended, ReaderService, Reading},
@@ -29,7 +29,7 @@ pub struct Config {
     /// How often a process looks for due readings and expired leases.
     pub poll_interval: Duration,
     /// Lease length; the heartbeat is a third of it. A dead owner's readings
-    /// are taken over after at most this long.
+    /// become eligible for takeover when their leases expire.
     pub lease_seconds: i32,
     /// How long a cancelled reader may take to return before it is dropped.
     /// At most a heartbeat, so a reader that can no longer renew has stopped
@@ -219,8 +219,9 @@ impl Supervisor {
         Duration::from_secs(self.config.lease_seconds as u64)
     }
     /// Runs until `shutdown` turns true. Then every reader is cancelled and
-    /// waited for (at most the grace period) and its lease handed back, so
-    /// another process starts it within a poll instead of a lease. The
+    /// waited for (at most the grace period), then handback is attempted
+    /// within another grace period. Success makes it due at the next poll;
+    /// failure leaves lease expiry as the recovery path. The
     /// heartbeat keeps running until the last reader has stopped. A process
     /// that is killed instead leaves its leases to expire. A loop that ends
     /// while the process runs, by a panic, is started again after a poll.
@@ -320,7 +321,7 @@ impl Supervisor {
         }
         while readings.join_next().await.is_some() {}
     }
-    /// Renews every held lease with one statement per beat and tells the
+    /// Renews eligible leases with one update per beat and tells the
     /// reading whose lease did not renew. A beat that cannot reach the
     /// database fails once without stopping anything; a reading stops before
     /// the lease it last proved can run out.

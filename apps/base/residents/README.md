@@ -33,7 +33,7 @@ inventory::submit! { Contribution::new(bilibi_residents::READERS, "voice/source"
 
 | Part | Rule |
 | --- | --- |
-| Entry ID | The reader ID: lowercase letters, digits, `_`, `/`, `-`, at most 128 bytes. A meta-term, never a vendor or product name |
+| Entry ID | The reader ID: starts with a lowercase letter or digit; contains lowercase letters, digits, `_`, `/`, `-`, at most 128 bytes. A meta-term, never a vendor or product name |
 | `service` | A service of the same module, resolving to `ReaderService(Arc<dyn Resident>)` |
 | `principal` | A system principal the same module declares; boot refuses another module's |
 | `capability` | Inside that principal's declaration. The tenant's grant decides (`Grants::set_system`), or a standing grant (`bilibi_authz::STANDING_GRANTS`) when no tenant should have to switch it on; a tenant's deny still wins |
@@ -48,9 +48,9 @@ inventory::submit! { Contribution::new(bilibi_residents::READERS, "voice/source"
 | `keep(tx, scope, reader, key)` | Makes sure a reading exists for this tenant, reader and key. Idempotent: a kept reading is unchanged; a released row is reused without clearing its old lease |
 | `release(tx, scope, reader, key)` | Marks it released. A running reader is cancelled at its owner's next heartbeat; its row retains the ownership barrier until it stops or its lease expires. Idempotent |
 
-- Both join your audited `MutationTransaction` and return a `Change` (`base/residents.reader`), so the reading commits or rolls back with your write. Take the service from `bilibi_residents::SERVICE`.
+- Both join your audited `MutationTransaction` and record a `Change` (`base/residents.reader`), so the reading commits or rolls back with your write. Take the service from `bilibi_residents::SERVICE`.
 - `scope` is the sealed scope of whoever runs your command (a person, or a queued job's `Execution::scope()`); its tenant must be the transaction's. Neither call grants anything: authorize your own command first.
-- A key is a reference such as a record ID: lowercase letters, digits, `.`, `_`, `:`, `/`, `-`, at most 128 bytes. Never a name, address or number of a person: operators see keys.
+- A key is a reference such as a record ID: starts with a lowercase letter or digit; contains lowercase letters, digits, `.`, `_`, `:`, `/`, `-`, at most 128 bytes. Never a name, address or number of a person: operators see keys.
 - Keep is level-triggered. A scheduled task that keeps every key that should exist, and releases the others, repairs any drift.
 
 ## Write the reader
@@ -95,10 +95,10 @@ impl Resident for SourceReader {
 | Event | What happens |
 | --- | --- |
 | Claim | Each process polls once a second and claims due readings with `FOR UPDATE SKIP LOCKED`, up to its capacity, writing its owner label and a fresh lease token |
-| Heartbeat | Every 10 seconds (a third of the default 30-second lease), one statement renews every reading the process holds |
-| Owner dies | Its leases run out; the next poll of any process takes the readings over at once (`owner_lost` is recorded, without backoff) |
+| Heartbeat | Every 10 seconds (a third of the default 30-second lease), one update renews eligible leases; a follow-up read distinguishes locked leases from lost ones when any did not renew |
+| Owner dies | Its leases run out; readings become due without backoff (`owner_lost` is recorded). Takeover waits for a successful poll by a process that declares the reader and has spare capacity |
 | Lease lost | A confirmed loss cancels the reader immediately; an unproven renewal cancels it before the conservative lease deadline minus grace. `Reading::begin` refuses writes without a live lease |
-| Clean stop | On shutdown every reader is cancelled and waited for, then its lease is handed back, so another process starts it within a poll instead of a lease |
+| Clean stop | On shutdown every reader is cancelled and waited for, then handback is attempted within the grace period. Successful handback makes the reading due at the next poll; otherwise its lease expires |
 | Failure | `Ended::Failed`, a panic or a refused principal backs off `min(300, 2^failures)` seconds; a run of 60 seconds or more clears the count |
 | Authority | Proven before each start, in every `Reading::begin`, and again every five minutes while reading: a suspended tenant, a removed declaration or a withdrawn grant stops the reader with `actor_refused` until it is restored |
 | Database error | Claim and preparation waits are bounded by one heartbeat. Heartbeat waits also end by the earliest held lease deadline minus grace. Reproof yields to shutdown and lease loss. After a child stops, it is removed from heartbeats before handback, which is bounded by grace; failed handback leaves expiry as the recovery path |
@@ -116,9 +116,9 @@ A process claims only readers its own composition declares, so during a rolling 
 | Column | Meaning |
 | --- | --- |
 | Reader, Key, Tenant | What is read, for whom |
-| Status | Running, Starting (due, waiting for a process with a free place), Waiting to retry (waiting out the delay after it ended or failed, with the time it starts again), Taking over (its owner stopped renewing the lease; the next poll takes it over), Not mounted (not running, and this server has no reader of that ID) |
+| Status | Running, Starting (due, waiting for a process with a free place), Waiting to retry (waiting out a restart delay or the previous owner’s release barrier, with the next eligible start time), Taking over (its owner stopped renewing the lease; the next poll takes it over), Not mounted (not running, and this server has no reader of that ID) |
 | Owner | The host name and process ID of the server process that holds, or last held, the lease |
-| Last heartbeat, Started | When the owner last renewed the lease, and when this run began |
+| Last heartbeat, Running since | When the owner last renewed the lease, and when the current running lease began |
 | Last error | The reader's last failure code and when it happened |
 
 - The page needs the platform operator and `admin.system.readers.view` (in the System Viewer role).
