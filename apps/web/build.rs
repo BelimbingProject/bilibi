@@ -143,18 +143,17 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Watch HEAD and its loose branch ref when present. A packed branch has no
-/// loose ref until a later Git operation creates it; that change may not be
-/// noticed until another input triggers a rebuild. Missing paths would rerun
-/// the script on every build, so only existing paths are watched.
 fn watch_head(dir: &Path) {
-    let branch = git(dir, &["symbolic-ref", "-q", "HEAD"]);
-    for path in ["HEAD"]
+    let branch = git(dir, &["symbolic-ref", "-q", "HEAD"])
+        .and_then(|name| git(dir, &["rev-parse", "--git-path", &name]))
+        .map(|path| dir.join(path));
+    let packed = branch.as_ref().is_some_and(|path| !path.is_file());
+    for path in ["HEAD", "refs/heads"]
         .into_iter()
-        .chain(branch.as_deref())
+        .chain(packed.then_some("packed-refs"))
         .filter_map(|name| git(dir, &["rev-parse", "--git-path", name]))
         .map(|path| dir.join(path))
-        .filter(|path| path.is_file())
+        .filter(|path| path.exists())
     {
         println!("cargo:rerun-if-changed={}", path.display());
     }
