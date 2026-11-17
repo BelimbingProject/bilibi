@@ -79,6 +79,8 @@ def run(phase, command):
     started = time.time()
     write(phase, started=started)
     tail = b''
+    cargo_line = b''
+    compiled = 0
     # Keep stdout/stderr separate, and preserve their terminal behaviour (Cargo
     # colours, progress and terminal width), rather than piping Cargo through tee.
     with selectors.DefaultSelector() as selector:
@@ -127,10 +129,21 @@ def run(phase, command):
                     remaining = memoryview(chunk)
                     while remaining:
                         remaining = remaining[os.write(key.data, remaining):]
+                    if phase == 'build' and key.data == 2:
+                        lines = re.split(rb'[\r\n]', cargo_line + chunk)
+                        cargo_line = lines.pop()
+                        for line in lines:
+                            plain = re.sub(rb'\x1b\[[0-9;]*m', b'', line)
+                            if re.match(rb'^\s*Compiling\s+', plain):
+                                compiled += 1
                     if phase in CAPTURE:
                         tail = (tail + chunk)[-LIMIT:]
                         write(phase, started=started, output=redact(tail))
             result = process.wait()
+            if phase == 'build':
+                code = result if result >= 0 else 128 - result
+                print(f'Rust build took {int(time.time() - started)}s ({compiled} crates compiled, exit {code}). '
+                      'Timing report: target/cargo-timings/cargo-timing.html', flush=True)
             if phase == 'migrate' and result != 0 and b'requires a fresh database' in tail:
                 hint = FRESH_DATABASE_HINT.encode()
                 os.write(2, hint)
