@@ -143,14 +143,13 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Rerun when HEAD moves: the HEAD file, the branch file it points at, the
-/// packed refs, and the HEAD reflog. A packed branch has no loose file until
-/// its next commit and the symbolic HEAD does not change, but Git appends to
-/// `logs/HEAD` on every commit, checkout, reset and merge. A missing path would
-/// rerun every build, so only existing paths are watched.
+/// Watch HEAD and its loose branch ref when present. A packed branch has no
+/// loose ref until a later Git operation creates it; that change may not be
+/// noticed until another input triggers a rebuild. Missing paths would rerun
+/// the script on every build, so only existing paths are watched.
 fn watch_head(dir: &Path) {
     let branch = git(dir, &["symbolic-ref", "-q", "HEAD"]);
-    for path in ["HEAD", "logs/HEAD", "packed-refs"]
+    for path in ["HEAD"]
         .into_iter()
         .chain(branch.as_deref())
         .filter_map(|name| git(dir, &["rev-parse", "--git-path", name]))

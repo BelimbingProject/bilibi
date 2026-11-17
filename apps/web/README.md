@@ -251,7 +251,7 @@ MCP uses the same retryable lock-contention body as `/api/v1`. Authentication re
 
 `bilibi-web status` prints what the program is made of: the Platform version, its commit and release tag, and each mounted Domain or Extension with its version and commit, as `scripts/discover-modules.py --pin` recorded them at build time. It needs no database.
 
-`build.rs` compiles the pin and checks Git drift. The private `src/composition.rs` validates the mounted set and exposes the stable registry `Composition` through `bilibi_web::composition`. Only this executable host watches Git, so a commit rebuilds the host and final link instead of every registry consumer.
+`build.rs` compiles the pin and checks Git drift. The private `src/composition.rs` validates the mounted set and exposes the stable registry `Composition` through `bilibi_web::composition`. Only this executable host watches Git, so a commit normally rebuilds the host and final link instead of every registry consumer. If the current branch ref is packed when the build runs, a later commit can leave the compiled-in commit stale until another input triggers a rebuild.
 
 The status bar shows the same facts through `bilibi_ui::version_badges`. The scheme, the catalogue and the states a build can be in are in `docs/versions.md`.
 
