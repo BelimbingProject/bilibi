@@ -45,8 +45,8 @@ inventory::submit! { Contribution::new(bilibi_residents::READERS, "voice/source"
 
 | Call | Effect |
 | --- | --- |
-| `keep(tx, scope, reader, key)` | Makes sure a reading exists for this tenant, reader and key. Idempotent: an existing reading is left as it is |
-| `release(tx, scope, reader, key)` | Removes it. A running reader is cancelled at its owner's next heartbeat. Idempotent |
+| `keep(tx, scope, reader, key)` | Makes sure a reading exists for this tenant, reader and key. Idempotent: a kept reading is unchanged; a released row is reused without clearing its old lease |
+| `release(tx, scope, reader, key)` | Marks it released. A running reader is cancelled at its owner's next heartbeat; its row retains the ownership barrier until it stops or its lease expires. Idempotent |
 
 - Both join your audited `MutationTransaction` and return a `Change` (`base/residents.reader`), so the reading commits or rolls back with your write. Take the service from `bilibi_residents::SERVICE`.
 - `scope` is the sealed scope of whoever runs your command (a person, or a queued job's `Execution::scope()`); its tenant must be the transaction's. Neither call grants anything: authorize your own command first.
@@ -105,6 +105,8 @@ impl Resident for SourceReader {
 
 Lease time is conservatively measured from before the claim or renewal request. Each reading independently watches that deadline, reserves the cancellation grace, and caps its final wait at lease expiry, including during reproof.
 
+Release immediately fences writes and stops renewals, even if keep follows before the next heartbeat. Keep reuses the row but cannot start a replacement until the previous reader has stopped and handed back its token, or its lease deadline has passed. Released keys are omitted from the operator list and System Info. Handback deletes released rows; bounded poll cleanup removes unowned or expired released rows, including declarations no longer mounted.
+
 A process claims only readers its own composition declares, so during a rolling update an older process leaves a new module's readings to the newer one.
 
 ## What operators see
@@ -158,7 +160,7 @@ It migrates the database, installs the walkthrough fixture, starts private serve
 | Takeover | The owning process is killed; the other takes its keys after the lease, with `owner_lost` recorded and no overlap in the writes |
 | Fenced write | A reader whose lease was taken is refused by `Reading::begin` and cancelled; the unowned lease runs out and the reading starts again |
 | Failure and backoff | A reader that fails, then panics, is restarted after its backoff and then runs; one whose connection closes is restarted without a failure |
-| Release | A released key cancels its reader and leaves no row |
+| Release and keep | Two processes keep running while a released key is kept again; connection lifetime events prove the old reader stops before its replacement starts. The row is reused, then removed after final release; operator status excludes it |
 | Withdrawn grant | Revoking the principal's grant stops the readers; granting it again starts them |
 | Clean stop | A stopped process cancels its readers, hands its leases back, and a new process starts them sooner than a lease could expire, its first write after the old owner's last |
 | Tenancy | The same key in another tenant is its own reading, refused there until that tenant grants the principal |

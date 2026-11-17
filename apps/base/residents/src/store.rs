@@ -33,7 +33,7 @@ impl State {
     }
 }
 /// The four states, from the stored one and the clock.
-const STATE: &str = "CASE WHEN state='running' AND lease_expires_at>clock_timestamp() THEN 'running' WHEN state='running' THEN 'lost' WHEN available_at>clock_timestamp() THEN 'retrying' ELSE 'starting' END";
+const STATE: &str = "CASE WHEN state='stopping' AND lease_expires_at>clock_timestamp() THEN 'retrying' WHEN state='stopping' THEN 'starting' WHEN state='running' AND lease_expires_at>clock_timestamp() THEN 'running' WHEN state='running' THEN 'lost' WHEN available_at>clock_timestamp() THEN 'retrying' ELSE 'starting' END";
 
 /// One reading as operators see it: no lease token, and a key that is a
 /// reference, never a person's data.
@@ -106,7 +106,9 @@ pub(crate) async fn list(
         })
     };
     let state = filter.state.map(State::as_str);
-    let from = format!("FROM (SELECT *, {STATE} AS shown FROM base_resident_readings) r WHERE ($1::text IS NULL OR shown=$1) AND ($2::text IS NULL OR reader_id ILIKE $2 OR key ILIKE $2 OR owner ILIKE $2)");
+    let from = format!(
+        "FROM (SELECT *, {STATE} AS shown FROM base_resident_readings WHERE kept) r WHERE ($1::text IS NULL OR shown=$1) AND ($2::text IS NULL OR reader_id ILIKE $2 OR key ILIKE $2 OR owner ILIKE $2)"
+    );
     let total = client
         .query_one(&format!("SELECT count(*) {from}"), &[&state, &pattern])
         .await?
@@ -128,7 +130,7 @@ pub(crate) async fn list(
 pub async fn health_status(client: &impl GenericClient) -> Result<String> {
     let row = client
         .query_one(
-            &format!("SELECT count(*) FILTER (WHERE shown='running'), count(*) FILTER (WHERE shown='starting'), count(*) FILTER (WHERE shown='retrying'), count(*) FILTER (WHERE shown='lost') FROM (SELECT {STATE} AS shown FROM base_resident_readings) r"),
+            &format!("SELECT count(*) FILTER (WHERE shown='running'), count(*) FILTER (WHERE shown='starting'), count(*) FILTER (WHERE shown='retrying'), count(*) FILTER (WHERE shown='lost') FROM (SELECT {STATE} AS shown FROM base_resident_readings WHERE kept) r"),
             &[],
         )
         .await?;
@@ -175,9 +177,10 @@ pub(crate) async fn claim(
 ) -> Result<Vec<Claim>> {
     let mut client = db.get().await?;
     let tx = client.transaction().await?;
-    tx.execute("WITH expired AS (SELECT id FROM base_resident_readings WHERE state='running' AND lease_expires_at<=now() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_resident_readings r SET state='waiting',lease_token=NULL,lease_expires_at=NULL,available_at=now(),last_error='owner_lost',last_error_at=clock_timestamp(),updated_at=clock_timestamp() FROM expired e WHERE r.id=e.id", &[]).await?;
+    tx.execute("WITH released AS (SELECT id FROM base_resident_readings WHERE NOT kept AND (lease_expires_at IS NULL OR lease_expires_at<=now()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 100) DELETE FROM base_resident_readings r USING released d WHERE r.id=d.id", &[]).await?;
+    tx.execute("WITH expired AS (SELECT id FROM base_resident_readings WHERE kept AND state IN ('running','stopping') AND lease_expires_at<=now() ORDER BY lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT 100) UPDATE base_resident_readings r SET state='waiting',lease_token=NULL,lease_expires_at=NULL,available_at=now(),last_error=CASE WHEN r.state='running' THEN 'owner_lost' ELSE r.last_error END,last_error_at=CASE WHEN r.state='running' THEN clock_timestamp() ELSE r.last_error_at END,updated_at=clock_timestamp() FROM expired e WHERE r.id=e.id", &[]).await?;
     let rows = if limit > 0 {
-        tx.query("WITH candidate AS (SELECT id FROM base_resident_readings WHERE state='waiting' AND available_at<=now() AND reader_id=ANY($1) ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE base_resident_readings r SET state='running',owner=$3,lease_token=gen_random_uuid()::text,lease_expires_at=clock_timestamp()+make_interval(secs=>$4::integer),started_at=clock_timestamp(),heartbeat_at=clock_timestamp(),starts=starts+1,updated_at=clock_timestamp() FROM candidate c WHERE r.id=c.id RETURNING r.id,r.tenant_id,r.reader_id,r.reader_module,r.key,r.lease_token,r.failures", &[&readers, &limit, &owner, &lease_seconds]).await?
+        tx.query("WITH candidate AS (SELECT id FROM base_resident_readings WHERE kept AND state='waiting' AND available_at<=now() AND reader_id=ANY($1) ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE base_resident_readings r SET state='running',owner=$3,lease_token=gen_random_uuid()::text,lease_expires_at=clock_timestamp()+make_interval(secs=>$4::integer),started_at=clock_timestamp(),heartbeat_at=clock_timestamp(),starts=starts+1,updated_at=clock_timestamp() FROM candidate c WHERE r.id=c.id RETURNING r.id,r.tenant_id,r.reader_id,r.reader_module,r.key,r.lease_token,r.failures", &[&readers, &limit, &owner, &lease_seconds]).await?
     } else {
         Vec::new()
     };
@@ -238,5 +241,5 @@ pub(crate) async fn end(
     failures: i32,
     code: Option<&str>,
 ) -> Result<bool> {
-    Ok(db.get().await?.execute("UPDATE base_resident_readings SET state='waiting',lease_token=NULL,lease_expires_at=NULL,available_at=clock_timestamp()+make_interval(secs=>$3::double precision),failures=$4,last_error=COALESCE($5,last_error),last_error_at=CASE WHEN $5::text IS NULL THEN last_error_at ELSE clock_timestamp() END,updated_at=clock_timestamp() WHERE id=$1 AND state='running' AND lease_token=$2", &[&id, &token, &delay.as_secs_f64(), &failures, &code]).await? == 1)
+    Ok(db.get().await?.query_one("WITH removed AS (DELETE FROM base_resident_readings WHERE id=$1 AND lease_token=$2 AND NOT kept RETURNING id), ended AS (UPDATE base_resident_readings SET state='waiting',lease_token=NULL,lease_expires_at=NULL,available_at=clock_timestamp()+make_interval(secs=>CASE WHEN state='stopping' THEN 0 ELSE $3::double precision END),failures=$4,last_error=COALESCE($5,last_error),last_error_at=CASE WHEN $5::text IS NULL THEN last_error_at ELSE clock_timestamp() END,updated_at=clock_timestamp() WHERE id=$1 AND state IN ('running','stopping') AND lease_token=$2 AND kept RETURNING id) SELECT EXISTS (SELECT 1 FROM removed UNION ALL SELECT 1 FROM ended)", &[&id, &token, &delay.as_secs_f64(), &failures, &code]).await?.get(0))
 }

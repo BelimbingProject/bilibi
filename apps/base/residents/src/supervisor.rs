@@ -3,10 +3,9 @@
 //! statement per beat, and hands them back on shutdown. PostgreSQL leases give
 //! one owner per key; they do not make a reader's effects exactly-once.
 use crate::{
-    Residents, SERVICE,
     reading::{Ended, ReaderService, Reading},
     registry::valid_code,
-    store,
+    store, Residents, SERVICE,
 };
 use bilibi_authz::{SystemAuthentication, SystemScope};
 use bilibi_database::{Db, Error, MutationBoundary, Result};
@@ -141,7 +140,6 @@ impl Drop for Registration {
 enum Finish {
     Closed,
     Failed(&'static str),
-    /// The lease is no longer this process's: nothing may be written.
     Lost,
     /// The process is shutting down.
     Stopped,
@@ -227,11 +225,6 @@ impl Supervisor {
     /// that is killed instead leaves its leases to expire. A loop that ends
     /// while the process runs, by a panic, is started again after a poll.
     pub async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-        if self.readers.is_empty() {
-            // Nothing this process could claim: no polling at all.
-            let _ = shutdown.wait_for(|stop| *stop).await;
-            return Ok(());
-        }
         let (quiet, quieted) = watch::channel(false);
         let mut loops = JoinSet::new();
         let mut running = BTreeMap::new();
@@ -489,13 +482,12 @@ impl Supervisor {
             claim.failures
         };
         let (delay, failures, code) = match finish {
-            // Not ours any more: the row belongs to its new owner, or is gone.
             Finish::Lost => {
                 eprintln!(
                     "resident reader {} reading {} lost its lease",
                     claim.reader, claim.id
                 );
-                return;
+                (Duration::ZERO, claim.failures, None)
             }
             Finish::Stopped => (Duration::ZERO, claim.failures, None),
             Finish::Closed => (self.config.restart_delay, kept, None),

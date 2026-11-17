@@ -58,13 +58,13 @@ impl Residents {
             return Err(Error::Invalid);
         }
         let tenant = tenant_of(tx, scope)?;
-        if tx.sql().query_opt("SELECT id FROM base_resident_readings WHERE tenant_id=$1 AND reader_id=$2 AND key=$3", &[&tenant, &reader.id, &key]).await?.is_some() {
+        if tx.sql().query_opt("SELECT id FROM base_resident_readings WHERE tenant_id=$1 AND reader_id=$2 AND key=$3 AND kept", &[&tenant, &reader.id, &key]).await?.is_some() {
             return Ok(false);
         }
         let key = key.to_owned();
         tx.mutate(move |sql| Box::pin(async move {
             let new = json!({"reader": reader.id, "key": key, "kept": true});
-            let (id, old) = match sql.query_opt("INSERT INTO base_resident_readings(tenant_id,reader_id,reader_module,key) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,reader_id,key) DO NOTHING RETURNING id", &[&tenant, &reader.id, &reader.module, &key]).await? {
+            let (id, old) = match sql.query_opt("INSERT INTO base_resident_readings(tenant_id,reader_id,reader_module,key) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,reader_id,key) DO UPDATE SET kept=true,available_at=CASE WHEN base_resident_readings.state='waiting' THEN now() ELSE base_resident_readings.available_at END,updated_at=clock_timestamp() WHERE NOT base_resident_readings.kept RETURNING id", &[&tenant, &reader.id, &reader.module, &key]).await? {
                 Some(row) => (row.get(0), Value::Null),
                 // Another transaction kept the same key first: nothing changed.
                 None => (sql.query_one("SELECT id FROM base_resident_readings WHERE tenant_id=$1 AND reader_id=$2 AND key=$3", &[&tenant, &reader.id, &key]).await?.get(0), new.clone()),
@@ -73,10 +73,10 @@ impl Residents {
             Ok((added, vec![Change { kind: "base/residents.reader".into(), id, old, new }]))
         })).await
     }
-    /// Stops reading `key`: removes the reading in the caller's audited
-    /// transaction. A running reader is cancelled at its owner's next
-    /// heartbeat, and `Reading::begin` refuses its writes from the commit on.
-    /// Idempotent; `true` when a reading was removed. Not limited to readers
+    /// Stops reading `key` in the caller's audited transaction, retaining its
+    /// lease until the reader stops or expires. The next heartbeat cancels
+    /// it, and `Reading::begin` refuses writes from the commit on.
+    /// Idempotent; `true` when a kept reading was released. Not limited to readers
     /// this composition declares, so an owner can clear what it left behind.
     pub async fn release(
         &self,
@@ -90,7 +90,7 @@ impl Residents {
         }
         let tenant = tenant_of(tx, scope)?;
         // The row lock waits for a reader's fenced write in flight.
-        let Some(row) = tx.sql().query_opt("SELECT id FROM base_resident_readings WHERE tenant_id=$1 AND reader_id=$2 AND key=$3 FOR UPDATE", &[&tenant, &reader, &key]).await? else {
+        let Some(row) = tx.sql().query_opt("SELECT id FROM base_resident_readings WHERE tenant_id=$1 AND reader_id=$2 AND key=$3 AND kept FOR UPDATE", &[&tenant, &reader, &key]).await? else {
             return Ok(false);
         };
         let id: i64 = row.get(0);
@@ -98,7 +98,7 @@ impl Residents {
         tx.mutate(move |sql| {
             Box::pin(async move {
                 sql.execute(
-                    "DELETE FROM base_resident_readings WHERE tenant_id=$1 AND id=$2",
+                    "UPDATE base_resident_readings SET kept=false,state=CASE WHEN state='running' THEN 'stopping' ELSE state END,available_at=COALESCE(lease_expires_at,available_at),updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2",
                     &[&tenant, &id],
                 )
                 .await?;

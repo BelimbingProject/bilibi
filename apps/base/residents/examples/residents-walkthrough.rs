@@ -7,18 +7,18 @@
 //! launcher prepared, for a person to look at the Resident readers page.
 //! The specimen module and its reader are linked only into this example.
 use bilibi_authz::{
-    CapabilityDefinition, SystemPrincipalDefinition, VOCABULARY, VocabularyContribution,
-    grants::Grants,
+    grants::Grants, CapabilityDefinition, SystemPrincipalDefinition, VocabularyContribution,
+    VOCABULARY,
 };
 use bilibi_base::step_up::StepUp;
-use bilibi_database::{Change, Db, Error, MutationBoundary, Result, pool};
+use bilibi_database::{pool, Change, Db, Error, MutationBoundary, Result};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service, Services};
 use bilibi_residents::{
-    Config, Ended, Filter, READERS, ReadFuture, Reader, ReaderService, Reading, Resident,
-    Residents, SERVICE, Supervisor,
+    Config, Ended, Filter, ReadFuture, Reader, ReaderService, Reading, Resident, Residents,
+    Supervisor, READERS, SERVICE,
 };
 use bilibi_tenancy::{Authentication, Scope};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     process::Stdio,
     sync::{Arc, OnceLock},
@@ -144,6 +144,9 @@ impl Resident for Specimen {
             loop {
                 tokio::select! {
                     _ = reading.cancelled() => {
+                        if reading.key() == "recycled-1" {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
                         self.note(reading, "cancelled").await;
                         return Ended::Closed;
                     }
@@ -510,10 +513,28 @@ async fn main() -> Result<()> {
     )?;
 
     println!("== Fenced write: a reading whose lease moved on writes nothing and is cancelled");
+    let fenced_after: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT COALESCE(max(id),0) FROM resident_walkthrough_events",
+            &[],
+        )
+        .await?
+        .get(0);
+    let starts_before: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT starts FROM base_resident_readings WHERE key='steady-3'",
+            &[],
+        )
+        .await?
+        .get(0);
     db.get().await?.execute("UPDATE base_resident_readings SET lease_token=gen_random_uuid()::text WHERE key='steady-3'", &[]).await?;
-    until(&db, 20, "Reading::begin refused the old owner's write", "SELECT count(*)=1 FROM resident_walkthrough_events WHERE key='steady-3' AND what='refused_write'").await?;
-    until(&db, 20, "the heartbeat cancelled its reader", "SELECT count(*)=1 FROM resident_walkthrough_events WHERE key='steady-3' AND what='cancelled'").await?;
-    until(&db, 20, "the unowned lease ran out and steady-3 was started again", "SELECT count(*)=1 FROM base_resident_readings WHERE key='steady-3' AND state='running' AND starts=2 AND last_error='owner_lost' AND lease_expires_at>clock_timestamp()").await?;
+    until(&db, 20, "Reading::begin refused the old owner's write", &format!("SELECT count(*)>=1 FROM resident_walkthrough_events WHERE key='steady-3' AND what='refused_write' AND id>{fenced_after}")).await?;
+    until(&db, 20, "the heartbeat cancelled its reader", &format!("SELECT count(*)>=1 FROM resident_walkthrough_events WHERE key='steady-3' AND what='cancelled' AND id>{fenced_after}")).await?;
+    until(&db, 20, "the unowned lease ran out and steady-3 was started again", &format!("SELECT count(*)=1 FROM base_resident_readings WHERE key='steady-3' AND state='running' AND starts>{starts_before} AND last_error='owner_lost' AND lease_expires_at>clock_timestamp()")).await?;
 
     println!("== Takeover: the owner is killed");
     let mut a = a;
@@ -543,6 +564,15 @@ async fn main() -> Result<()> {
     until(&db, 20, "a reader whose connection closes is started again without a failure", "SELECT count(*)=1 FROM base_resident_readings WHERE key='closing-1' AND starts>=3 AND failures=0 AND last_error IS NULL").await?;
 
     println!("== Release: the key stops being read");
+    let release_after: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT COALESCE(max(id),0) FROM resident_walkthrough_events",
+            &[],
+        )
+        .await?
+        .get(0);
     for key in ["closing-1", "steady-4"] {
         let mut client = db.get().await?;
         let mut tx = boundary
@@ -561,12 +591,13 @@ async fn main() -> Result<()> {
         )?;
         tx.commit().await?;
     }
-    until(&db, 20, "the released reader was cancelled", "SELECT count(*)=1 FROM resident_walkthrough_events WHERE key='steady-4' AND what='cancelled'").await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    check(
-        truth(&db, "SELECT (SELECT count(*)=0 FROM base_resident_readings WHERE key IN ('steady-4','closing-1')) AND (SELECT count(*)=0 FROM resident_walkthrough_beats WHERE key='steady-4' AND at>clock_timestamp()-interval '700 milliseconds')").await?,
+    until(&db, 20, "the released reader was cancelled", &format!("SELECT count(*)>=1 FROM resident_walkthrough_events WHERE key='steady-4' AND what='cancelled' AND id>{release_after}")).await?;
+    until(
+        &db,
+        20,
         "no reading is left and nothing is written for it",
-    )?;
+        "SELECT (SELECT count(*)=0 FROM base_resident_readings WHERE key IN ('steady-4','closing-1')) AND (SELECT count(*)=0 FROM resident_walkthrough_beats WHERE key='steady-4' AND at>clock_timestamp()-interval '700 milliseconds')",
+    ).await?;
     check(
         truth(&db, "SELECT count(*) FILTER (WHERE event='created')=6 AND count(*) FILTER (WHERE event='deleted')=2 FROM base_audit_mutations WHERE auditable_type='base/residents.reader'").await?,
         "every keep and release is in the audit trail",
@@ -642,6 +673,105 @@ async fn main() -> Result<()> {
         truth(&db, "SELECT bool_and(b.last<c.first) FROM (SELECT key, max(at) AS last FROM resident_walkthrough_beats WHERE owner='B' GROUP BY key) b JOIN (SELECT key, min(at) AS first FROM resident_walkthrough_beats WHERE owner='C' GROUP BY key) c USING (key)").await?,
         "worker B's last write precedes worker C's first for every key",
     )?;
+
+    println!("== Release then keep: the old connection stops before the next opens");
+    let d = worker("D", 8)?;
+    keep(&manager, "recycled-1").await?;
+    until(
+        &db,
+        20,
+        "the recycled connection is open",
+        "SELECT count(*)>0 FROM resident_walkthrough_beats WHERE key='recycled-1'",
+    )
+    .await?;
+    let original_id: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT id FROM base_resident_readings WHERE key='recycled-1'",
+            &[],
+        )
+        .await?
+        .get(0);
+    {
+        let mut client = db.get().await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                manager.mutation_context("residents.specimen.release"),
+            )
+            .await?;
+        check(
+            residents
+                .release(&mut tx, &manager, READER, "recycled-1")
+                .await?,
+            "the active key is released",
+        )?;
+        tx.commit().await?;
+    }
+    check(
+        keep(&manager, "recycled-1").await?,
+        "keeping a released key wants it again",
+    )?;
+    check(
+        !keep(&manager, "recycled-1").await?,
+        "repeated keep is unchanged",
+    )?;
+    let reused_id: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT id FROM base_resident_readings WHERE key='recycled-1'",
+            &[],
+        )
+        .await?
+        .get(0);
+    check(
+        original_id == reused_id,
+        "release and keep preserve the per-key barrier row",
+    )?;
+    until(&db, 20, "a replacement connection opened", "SELECT count(*)=2 FROM resident_walkthrough_events WHERE key='recycled-1' AND what='started'").await?;
+    check(
+        truth(&db, "SELECT count(*)=3 AND min(active)=0 AND max(active)=1 FROM (SELECT sum(CASE what WHEN 'started' THEN 1 ELSE -1 END) OVER (ORDER BY id) AS active FROM resident_walkthrough_events WHERE key='recycled-1' AND what IN ('started','cancelled')) lifetimes").await?,
+        "connection lifetime events never overlap across release and keep",
+    )?;
+    {
+        let mut client = db.get().await?;
+        let mut tx = boundary
+            .begin(
+                &mut client,
+                manager.mutation_context("residents.specimen.release"),
+            )
+            .await?;
+        residents
+            .release(&mut tx, &manager, READER, "recycled-1")
+            .await?;
+        tx.commit().await?;
+    }
+    until(
+        &db,
+        20,
+        "the released barrier is removed after the reader stops",
+        "SELECT NOT EXISTS (SELECT 1 FROM base_resident_readings WHERE key='recycled-1')",
+    )
+    .await?;
+    {
+        let client = db.get().await?;
+        let page = residents
+            .list(&**client, &admin, &Filter::default(), 1, 25)
+            .await?;
+        check(
+            page.total == 4 && page.entries.iter().all(|entry| entry.key != "recycled-1"),
+            "released connections are absent from the operator list",
+        )?;
+        check(
+            bilibi_residents::health_status(&**client).await?
+                == "4 running, 0 starting, 0 waiting to retry",
+            "System Info excludes the released connection",
+        )?;
+    }
+
+    stop(d, "D").await?;
 
     println!("== Tenancy: a key in another tenant is its own reading under that tenant's grant");
     check(
