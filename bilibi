@@ -5,6 +5,72 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 cd "$root"
 # shellcheck source=scripts/lib/prerequisites.sh
 source "$root/scripts/lib/prerequisites.sh"
+# Long commands end with how long they took, on success and on failure, keeping
+# their exit status. start prints "Started in N s" from the app itself when it
+# listens, so here it reports only a start that never got that far.
+report_elapsed() {
+    local status=$? ns seconds duration label message colour
+    if [[ $timed == start ]]; then
+        [[ -e $BILIBI_START_FILE ]] || exit "$status"
+        rm -f -- "$BILIBI_START_FILE"
+        (( status != 0 )) || status=1
+    fi
+    ns=$(( $(date +%s%N) - start_ns ))
+    seconds=$(( ns / 1000000000 ))
+    if (( status != 0 )); then
+        duration=$(awk -v ns="$ns" 'BEGIN { printf "%.1f s", ns / 1e9 }')
+    elif (( seconds >= 60 )); then
+        duration="$(( seconds / 60 )) m $(( seconds % 60 )) s"
+    else
+        duration=$(awk -v ns="$ns" 'BEGIN { printf "%.1f s", ns / 1e9 }')
+    fi
+    label=$timed
+    [[ $timed != start ]] || label=Start
+    if (( status != 0 )); then
+        message="$label failed after $duration"
+        colour='\e[1;31m'
+    else
+        message="$label finished in $duration"
+        colour='\e[1;32m'
+    fi
+    if [[ -t 2 && -z ${NO_COLOR-} ]]; then
+        printf "$colour%s\e[0m\n" "$message" >&2
+    else
+        printf '%s\n' "$message" >&2
+    fi
+    exit "$status"
+}
+# Starts the clock once a command's arguments are valid.
+begin_timing() {
+    timed=$1
+    start_ns=$(date +%s%N)
+    trap report_elapsed EXIT
+    # Ctrl-C reaches the child too; the front door waits for it to stop.
+    trap ':' INT
+    if [[ $timed == start ]]; then
+        # The app prints "Started in N s" and deletes this file when it listens;
+        # a file still here at exit means the start did not finish.
+        export BILIBI_START_FILE="$root/.local/dev/start-time"
+        mkdir -p "$root/.local/dev"
+        printf '%s\n' "$start_ns" > "$BILIBI_START_FILE"
+    fi
+}
+# Runs the last step as a child instead of exec, so the time can print, while
+# `kill <pid of ./bilibi>` and a closed terminal still stop it. The child gets
+# the terminal and Ctrl-C as a foreground command would.
+run_child() {
+    local child status=0
+    ( trap - INT QUIT; exec "$@" ) <&0 &
+    child=$!
+    trap 'kill -TERM "$child" 2>/dev/null || true' TERM HUP
+    wait "$child" || status=$?
+    while kill -0 "$child" 2>/dev/null; do
+        status=0
+        wait "$child" || status=$?
+    done
+    return "$status"
+}
+timed=
 case ${1:-help} in
     start|setup|add)
         command=$1
@@ -13,6 +79,7 @@ case ${1:-help} in
         else
             [[ $# == 1 ]] || { echo "Usage: ./bilibi $command" >&2; exit 1; }
         fi
+        begin_timing "$command"
         export BILIBI_FRONT_DOOR=1
         activate_cargo
         if [[ $command == setup ]] || ! development_prerequisites; then
@@ -22,12 +89,14 @@ case ${1:-help} in
         fi
         development_prerequisites || { echo 'Prerequisites still fail. Run ./bilibi setup and check .local/setup.log.' >&2; exit 1; }
         if [[ $command == add ]]; then
-            exec python3 "$root/scripts/platform.py" "$@"
+            run_child python3 "$root/scripts/platform.py" "$@"
+            exit
         fi
         python3 "$root/scripts/install-platform-hook.py" --warn
         if [[ $command == start ]]; then
             python3 "$root/scripts/platform.py" status
-            exec "$root/scripts/start-app.sh"
+            run_child "$root/scripts/start-app.sh"
+            exit
         fi
         ;;
     stop)
@@ -39,14 +108,19 @@ case ${1:-help} in
         python3 -c 'import tomllib' 2>/dev/null || { echo 'Python 3.11+ is required. See README.md (supported environment).' >&2; exit 1; }
         if [[ $1 == update ]]; then
             [[ $# == 1 ]] || { echo 'Usage: ./bilibi update' >&2; exit 1; }
-            exec python3 "$root/scripts/update-platform.py"
+            begin_timing update
+            run_child python3 "$root/scripts/update-platform.py"
+            exit
         fi
         exec python3 "$root/scripts/platform.py" "$@"
         ;;
     new)
+        [[ $# == 2 ]] || { echo 'Usage: ./bilibi new <name>' >&2; exit 1; }
         activate_cargo
         python3 -c 'import tomllib' 2>/dev/null || { echo 'Python 3.11+ is required. See README.md.' >&2; exit 1; }
-        exec python3 "$root/scripts/new-application.py" "${@:2}"
+        begin_timing new
+        run_child python3 "$root/scripts/new-application.py" "${@:2}"
+        exit
         ;;
     check|build|release)
         echo "./bilibi $1 works in an application, not here."

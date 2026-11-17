@@ -171,7 +171,15 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(|_| Error::Internal)?;
             // Colour only on a terminal without NO_COLOR, so logs and services stay plain.
-            if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+            let colour = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+            if let Some(seconds) = launcher_start_seconds() {
+                if colour {
+                    println!("\x1b[1;32mStarted in {seconds:.1} s\x1b[0m");
+                } else {
+                    println!("Started in {seconds:.1} s");
+                }
+            }
+            if colour {
                 println!("\x1b[1;32mBilibi listening at \x1b[4m{origin}\x1b[0m");
             } else {
                 println!("Bilibi listening at {origin}");
@@ -228,6 +236,20 @@ async fn main() -> Result<()> {
         _ => return Err(Error::Invalid),
     }
     Ok(())
+}
+
+/// Seconds since `./bilibi start` began. The launcher leaves its start time (Unix
+/// nanoseconds) in the file named by `BILIBI_START_FILE`; the first listening app
+/// takes it, so a watched rebuild or a direct run prints nothing.
+fn launcher_start_seconds() -> Option<f64> {
+    let path = std::env::var_os("BILIBI_START_FILE")?;
+    let started: u128 = std::fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    std::fs::remove_file(&path).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(now.saturating_sub(started) as f64 / 1e9)
 }
 
 /// The host part of a bind address (`127.0.0.1:3000` is `127.0.0.1`,
