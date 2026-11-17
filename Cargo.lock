@@ -607,6 +607,7 @@ dependencies = [
  "bilibi-queue",
  "bilibi-records",
  "bilibi-reports",
+ "bilibi-residents",
  "bilibi-rules",
  "bilibi-schedule",
  "bilibi-search",
@@ -1589,6 +1590,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-residents"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "axum",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "bilibi-rules"
 version = "0.2.1"
 dependencies = [
@@ -1811,6 +1837,7 @@ dependencies = [
  "bilibi-module-registry",
  "bilibi-perf",
  "bilibi-queue",
+ "bilibi-residents",
  "bilibi-settings",
  "bilibi-step-up",
  "bilibi-tenancy",

@@ -1,0 +1,10 @@
+{#- Every reading on the server. The header, toolbar, table and pager are
+    rendered by src/web.rs through the shared models; this file lays them out. -#}
+{%- import "components.html" as ui -%}
+<div data-shared-ui>
+{% call ui::page(id="readers-index") %}
+{{ header }}
+{{ toolbar }}
+{{ card }}
+{% endcall %}
+</div>

@@ -248,7 +248,7 @@ bilibi_menu::contribute!(
 );
 inventory::submit! {
     Module { id: "base/system", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/authz", "base/locale", "base/mail", "base/menu", "base/perf", "base/settings", "base/tenancy", "base/ui", "base/audit", "base/step_up", "base/queue"],
+        dependencies: &["base/module_registry", "base/database", "base/authz", "base/locale", "base/mail", "base/menu", "base/perf", "base/settings", "base/tenancy", "base/ui", "base/audit", "base/step_up", "base/queue", "base/residents"],
         migrations: &[], services: &[
         Service { id: "base/system.install-role", factory: |_| Ok(Arc::new(bilibi_database::seeds::SeedService(Arc::new(instance::InstallRole)))) },
         Service { id: SERVICE, factory: |services| {

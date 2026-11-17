@@ -32,6 +32,7 @@ pub use bilibi_privacy as privacy;
 pub use bilibi_queue as queue;
 pub use bilibi_records as records;
 pub use bilibi_reports as reports;
+pub use bilibi_residents as residents;
 pub use bilibi_rules as rules;
 pub use bilibi_schedule as schedule;
 pub use bilibi_search as search;

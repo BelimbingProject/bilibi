@@ -43,7 +43,7 @@ installation without `MAIL_HOST`.
 Unavailable probes stay visible. Disk capacity has no installed portable
 probe. Queue supplies job states but no executor-heartbeat health boundary;
 its health is unavailable rather than inferring an active executor from an
-empty or reachable queue. Perf combines recorder and history-store health and
+empty or reachable queue. The Resident readers line counts readings by state (`bilibi_residents::health_status`), platform-wide and without any reader, key or tenant. Perf combines recorder and history-store health and
 reports disabled collection explicitly. Settings has no value cache; its row
 says that values are read directly from PostgreSQL.
 
