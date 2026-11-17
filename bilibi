@@ -115,9 +115,10 @@ case ${1:-help} in
         exec python3 "$root/scripts/platform.py" "$@"
         ;;
     new)
-        begin_timing new
+        [[ $# == 2 ]] || { echo 'Usage: ./bilibi new <name>' >&2; exit 1; }
         activate_cargo
         python3 -c 'import tomllib' 2>/dev/null || { echo 'Python 3.11+ is required. See README.md.' >&2; exit 1; }
+        begin_timing new
         run_child python3 "$root/scripts/new-application.py" "${@:2}"
         exit
         ;;
