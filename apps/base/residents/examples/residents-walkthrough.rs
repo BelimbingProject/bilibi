@@ -7,18 +7,18 @@
 //! launcher prepared, for a person to look at the Resident readers page.
 //! The specimen module and its reader are linked only into this example.
 use bilibi_authz::{
-    grants::Grants, CapabilityDefinition, SystemPrincipalDefinition, VocabularyContribution,
-    VOCABULARY,
+    CapabilityDefinition, SystemPrincipalDefinition, VOCABULARY, VocabularyContribution,
+    grants::Grants,
 };
 use bilibi_base::step_up::StepUp;
-use bilibi_database::{pool, Change, Db, Error, MutationBoundary, Result};
+use bilibi_database::{Change, Db, Error, MutationBoundary, Result, pool};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service, Services};
 use bilibi_residents::{
-    Config, Ended, Filter, ReadFuture, Reader, ReaderService, Reading, Resident, Residents,
-    Supervisor, READERS, SERVICE,
+    Config, Ended, Filter, READERS, ReadFuture, Reader, ReaderService, Reading, Resident,
+    Residents, SERVICE, Supervisor,
 };
 use bilibi_tenancy::{Authentication, Scope};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     process::Stdio,
     sync::{Arc, OnceLock},
@@ -488,6 +488,13 @@ async fn main() -> Result<()> {
     keep(&manager, "steady-3").await?;
     keep(&manager, "steady-4").await?;
     until(&db, 20, "worker A is full, so worker B owns steady-3 and steady-4", "SELECT count(*)=2 FROM base_resident_readings WHERE state='running' AND owner='B' AND key IN ('steady-3','steady-4')").await?;
+    until(
+        &db,
+        20,
+        "every current reader has handled an event before sampling",
+        "SELECT count(*)=4 AND bool_and(EXISTS (SELECT 1 FROM resident_walkthrough_beats b WHERE b.tenant_id=r.tenant_id AND b.key=r.key AND b.owner=r.owner AND b.at>=r.started_at)) FROM base_resident_readings r",
+    )
+    .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     check(
         truth(&db, "SELECT count(*)=4 AND bool_and(owners=1 AND beats>=3) FROM (SELECT key, count(DISTINCT owner) AS owners, count(*) AS beats FROM resident_walkthrough_beats WHERE at>clock_timestamp()-interval '1500 milliseconds' GROUP BY key) recent").await?,
@@ -581,6 +588,14 @@ async fn main() -> Result<()> {
         .await?;
     until(&db, 20, "after the grant every reading runs again", "SELECT count(*)=4 AND bool_and(state='running' AND lease_expires_at>clock_timestamp()) FROM base_resident_readings").await?;
 
+    until(
+        &db,
+        20,
+        "every current reader has handled an event before shutdown",
+        "SELECT count(*)=4 AND bool_and(EXISTS (SELECT 1 FROM resident_walkthrough_beats b WHERE b.tenant_id=r.tenant_id AND b.key=r.key AND b.owner=r.owner AND b.at>=r.started_at)) FROM base_resident_readings r",
+    )
+    .await?;
+
     println!("== Clean stop: leases are handed back, not left to expire");
     let before: i64 = db
         .get()
@@ -648,8 +663,16 @@ async fn main() -> Result<()> {
         for status in &page.entries {
             println!(
                 "   reader={} key={} tenant={} state={:?} mounted={} owner={:?} starts={} failures={} last_error={:?} heartbeat={}",
-                status.reader, status.key, status.tenant, status.state, status.mounted, status.owner,
-                status.starts, status.failures, status.last_error, status.heartbeat_at.is_some()
+                status.reader,
+                status.key,
+                status.tenant,
+                status.state,
+                status.mounted,
+                status.owner,
+                status.starts,
+                status.failures,
+                status.last_error,
+                status.heartbeat_at.is_some()
             );
         }
         check(

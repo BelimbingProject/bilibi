@@ -6,6 +6,8 @@
 
 A resident reader is a long-lived background worker. A module declares the reader once, keeps one key per connection it wants held (a source ID), and the Platform starts a reading for each key in one server process, restarts it when it fails, and moves it to another process when its owner stops. Decision: [ADR 32](../../../docs/architecture/decisions/32-resident-readers.md).
 
+The first consumer will be cx/voice, in a separate Domain pull request after this one merges. This pull request ships the Platform mechanism and the walkthrough specimen; cx/voice adoption will retain its checkpoint, replay and one-transaction-per-answer contract.
+
 ## Why not a queue job
 
 **A job that never finishes takes a queue slot for good.**
@@ -93,13 +95,15 @@ impl Resident for SourceReader {
 | Event | What happens |
 | --- | --- |
 | Claim | Each process polls once a second and claims due readings with `FOR UPDATE SKIP LOCKED`, up to its capacity, writing its owner label and a fresh lease token |
-| Heartbeat | Every third of the lease (30 seconds), one statement renews every reading the process holds |
+| Heartbeat | Every 10 seconds (a third of the default 30-second lease), one statement renews every reading the process holds |
 | Owner dies | Its leases run out; the next poll of any process takes the readings over at once (`owner_lost` is recorded, without backoff) |
-| Lease lost | A heartbeat that does not renew a reading cancels its reader; `Reading::begin` already refuses its writes |
+| Lease lost | A confirmed loss cancels the reader immediately; an unproven renewal cancels it before the conservative lease deadline minus grace. `Reading::begin` refuses writes without a live lease |
 | Clean stop | On shutdown every reader is cancelled and waited for, then its lease is handed back, so another process starts it within a poll instead of a lease |
 | Failure | `Ended::Failed`, a panic or a refused principal backs off `min(300, 2^failures)` seconds; a run of 60 seconds or more clears the count |
 | Authority | Proven before each start, in every `Reading::begin`, and again every five minutes while reading: a suspended tenant, a removed declaration or a withdrawn grant stops the reader with `actor_refused` until it is restored |
-| Database error | One failed heartbeat does not stop a reader while the next still falls inside its lease; after that the process stops what it can no longer prove it owns |
+| Database error | Claim and preparation waits are bounded by one heartbeat. Heartbeat waits also end by the earliest held lease deadline minus grace. Reproof yields to shutdown and lease loss. After a child stops, it is removed from heartbeats before handback, which is bounded by grace; failed handback leaves expiry as the recovery path |
+
+Lease time is conservatively measured from before the claim or renewal request. Each reading independently watches that deadline, reserves the cancellation grace, and caps its final wait at lease expiry, including during reproof.
 
 A process claims only readers its own composition declares, so during a rolling update an older process leaves a new module's readings to the newer one.
 
@@ -123,17 +127,19 @@ A process claims only readers its own composition declares, so during a rolling 
 
 The Web host starts one `Supervisor` beside the queue executor (`Config::default()`). A private host builds it with `Supervisor::from_services(&services, config)` after `Services::install` and runs it with a Tokio watch shutdown receiver.
 
-| `Config` field | Default | Meaning |
+These limits are internal tuning with safe defaults that operators do not yet need to change; the owner granted an exception to a Settings surface for this release. Add Settings and an operator editor if operators need to tune them.
+
+| `Config` field | Default | Purpose and default rationale |
 | --- | --- | --- |
-| `capacity` | 512 | Readings one process holds at once |
-| `poll_interval` | 1 s | How often a process looks for due readings |
-| `lease_seconds` | 30 | Lease length; the heartbeat is a third of it |
-| `grace` | 5 s | How long a cancelled reader may take to stop |
-| `restart_delay` | 1 s | Wait after `Ended::Closed` |
-| `max_backoff` | 300 s | Longest wait after a failure |
-| `healthy_after` | 60 s | A run this long clears the failure count |
-| `reproof` | 300 s | How often a running reader's authority is proven again |
-| `owner` | host name and process ID | The label operators see |
+| `capacity` | 512 | Caps concurrent connections while allowing hundreds of sources |
+| `poll_interval` | 1 s | Finds due readings promptly without continuous polling |
+| `lease_seconds` | 30 | Allows transient database delays with a 10-second heartbeat and bounded takeover |
+| `grace` | 5 s | Allows cooperative cleanup within the lease safety window |
+| `restart_delay` | 1 s | Avoids a tight reconnect loop after ordinary closure |
+| `max_backoff` | 300 s | Limits repeated failures while retrying at least every five minutes |
+| `healthy_after` | 60 s | Two default lease periods distinguish a healthy run from repeated early failures |
+| `reproof` | 300 s | Bounds idle authority revocation latency without frequent authorization queries |
+| `owner` | host name and process ID | Distinguishes server processes without personal data |
 
 ## Running proof (no unit tests)
 

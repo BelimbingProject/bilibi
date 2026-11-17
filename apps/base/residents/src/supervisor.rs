@@ -3,9 +3,10 @@
 //! statement per beat, and hands them back on shutdown. PostgreSQL leases give
 //! one owner per key; they do not make a reader's effects exactly-once.
 use crate::{
+    Residents, SERVICE,
     reading::{Ended, ReaderService, Reading},
     registry::valid_code,
-    store, Residents, SERVICE,
+    store,
 };
 use bilibi_authz::{SystemAuthentication, SystemScope};
 use bilibi_database::{Db, Error, MutationBoundary, Result};
@@ -300,21 +301,24 @@ impl Supervisor {
             let free = self.config.capacity.saturating_sub(readings.len());
             // Infrastructure errors expose no SQL and never end the loop;
             // readings that stay unclaimed are simply due at the next poll.
-            match store::claim(
+            let claimed_at = Instant::now();
+            let claims = tokio::select! {
+                _ = stop.wait_for(|stop| *stop) => break,
+                result = tokio::time::timeout(self.lease() / 3, store::claim(
                 &self.db,
                 &self.owner,
                 &self.ids,
                 self.config.lease_seconds,
                 free.min(CLAIM_BATCH) as i64,
-            )
-            .await
-            {
-                Ok(claims) => {
+                )) => result,
+            };
+            match claims {
+                Ok(Ok(claims)) => {
                     for claim in claims {
-                        readings.spawn(self.clone().hold(claim, stop.clone()));
+                        readings.spawn(self.clone().hold(claim, claimed_at, stop.clone()));
                     }
                 }
-                Err(_) => eprintln!("resident claim infrastructure unavailable"),
+                _ => eprintln!("resident claim infrastructure unavailable"),
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
@@ -337,18 +341,27 @@ impl Supervisor {
                 _ = tick.tick() => {}
                 changed = stop.changed() => { if changed.is_err() || *stop.borrow() { return; } }
             }
-            let (ids, tokens): (Vec<i64>, Vec<String>) = self
-                .held()
-                .iter()
-                .map(|(id, held)| (*id, held.token.clone()))
-                .unzip();
+            let (ids, tokens, deadline) = {
+                let held = self.held();
+                let deadline = held
+                    .values()
+                    .filter(|entry| !*entry.lost.borrow())
+                    .map(|entry| entry.renewed_at + lease - self.config.grace)
+                    .min();
+                let (ids, tokens): (Vec<i64>, Vec<String>) = held
+                    .iter()
+                    .filter(|(_, entry)| !*entry.lost.borrow())
+                    .map(|(id, entry)| (*id, entry.token.clone()))
+                    .unzip();
+                (ids, tokens, deadline)
+            };
             if ids.is_empty() {
                 continue;
             }
             let asked = Instant::now();
             // Bounded: a hung statement must not hide that leases are running out.
-            let answer = tokio::time::timeout(
-                beat,
+            let answer = tokio::time::timeout_at(
+                deadline.unwrap_or(asked + beat).min(asked + beat),
                 store::heartbeat(&self.db, &ids, &tokens, self.config.lease_seconds),
             )
             .await;
@@ -370,7 +383,8 @@ impl Supervisor {
                 let unknown = answer.as_ref().is_none_or(|beat| beat.busy.contains(id));
                 if renewed {
                     entry.renewed_at = asked;
-                } else if !unknown || entry.renewed_at.elapsed() + beat >= lease {
+                } else if !unknown || entry.renewed_at.elapsed() + beat + self.config.grace >= lease
+                {
                     // Gone, or not provable before the lease can run out.
                     let _ = entry.lost.send(true);
                 }
@@ -379,14 +393,22 @@ impl Supervisor {
     }
     /// One reading from claim to ending: the reader in its own task, so its
     /// panic fails this reading and nothing else.
-    async fn hold(self: Arc<Self>, claim: store::Claim, mut stop: watch::Receiver<bool>) {
+    async fn hold(
+        self: Arc<Self>,
+        claim: store::Claim,
+        claimed_at: Instant,
+        mut stop: watch::Receiver<bool>,
+    ) {
+        if claimed_at.elapsed() + self.config.grace >= self.lease() {
+            return;
+        }
         let (lost_sender, mut lost) = watch::channel(false);
         let (cancel, cancelled) = watch::channel(false);
         self.held().insert(
             claim.id,
             Held {
                 token: claim.token.clone(),
-                renewed_at: Instant::now(),
+                renewed_at: claimed_at,
                 lost: lost_sender,
             },
         );
@@ -406,7 +428,16 @@ impl Supervisor {
             if *stop.borrow() {
                 break Finish::Stopped;
             }
+            let cancel_at = self
+                .held()
+                .get(&claim.id)
+                .map(|entry| entry.renewed_at + self.lease() - self.config.grace)
+                .unwrap_or_else(Instant::now);
+            if *lost.borrow() || Instant::now() >= cancel_at {
+                break Finish::Lost;
+            }
             tokio::select! {
+                _ = tokio::time::sleep_until(cancel_at) => continue,
                 result = child.join_next() => break match result {
                     Some(Ok(finish)) => finish,
                     _ => Finish::Failed("reader_panicked"),
@@ -418,7 +449,14 @@ impl Supervisor {
                     // or a slow answer leaves it to the next proof and to
                     // `Reading::begin`. Bounded, so shutdown and a lost lease
                     // are never kept waiting behind it.
-                    let proof = tokio::time::timeout(self.config.grace, self.prove(&claim)).await;
+                    let proof = tokio::select! {
+                        _ = lost.changed() => break Finish::Lost,
+                        _ = stop.wait_for(|stop| *stop) => break Finish::Stopped,
+                        proof = tokio::time::timeout_at(
+                            cancel_at.min(Instant::now() + self.config.grace),
+                            self.prove(&claim),
+                        ) => proof,
+                    };
                     if let Ok(Err(Error::Unauthorized | Error::Forbidden)) = proof {
                         break Finish::Failed("actor_refused");
                     }
@@ -428,14 +466,23 @@ impl Supervisor {
         if !child.is_empty() {
             // Still reading: ask it to stop, wait the grace period, then drop it.
             let _ = cancel.send(true);
-            if tokio::time::timeout(self.config.grace, child.join_next())
-                .await
-                .is_err()
+            let expires_at = self
+                .held()
+                .get(&claim.id)
+                .map(|entry| entry.renewed_at + self.lease())
+                .unwrap_or_else(Instant::now);
+            if tokio::time::timeout_at(
+                expires_at.min(Instant::now() + self.config.grace),
+                child.join_next(),
+            )
+            .await
+            .is_err()
             {
                 child.abort_all();
             }
             while child.join_next().await.is_some() {}
         }
+        drop(registration);
         let kept = if started.elapsed() >= self.config.healthy_after {
             0
         } else {
@@ -462,17 +509,20 @@ impl Supervisor {
             }
         };
         // `Ok(false)`: released or taken over while the reader was ending.
-        if store::end(&self.db, claim.id, &claim.token, delay, failures, code)
-            .await
-            .is_err()
-        {
+        if !matches!(
+            tokio::time::timeout(
+                self.config.grace,
+                store::end(&self.db, claim.id, &claim.token, delay, failures, code),
+            )
+            .await,
+            Ok(Ok(_))
+        ) {
             // The lease expires on its own and the next poll takes it over.
             eprintln!(
                 "resident reader {} reading {} could not hand its lease back",
                 claim.reader, claim.id
             );
         }
-        drop(registration);
     }
     fn backoff(&self, failures: i32) -> Duration {
         Duration::from_secs(1u64 << failures.clamp(0, 20) as u32).min(self.config.max_backoff)
@@ -491,7 +541,7 @@ impl Supervisor {
     async fn read(
         self: Arc<Self>,
         claim: Arc<store::Claim>,
-        cancel: watch::Receiver<bool>,
+        mut cancel: watch::Receiver<bool>,
     ) -> Finish {
         let Some(bound) = self
             .readers
@@ -500,10 +550,18 @@ impl Supervisor {
         else {
             return Finish::Failed("reader_refused");
         };
-        let reading = match self.prepare(&claim, bound, cancel).await {
-            Ok(reading) => reading,
-            Err(Error::Unauthorized | Error::Forbidden) => return Finish::Failed("actor_refused"),
-            Err(_) => return Finish::Failed("prepare_unavailable"),
+        let cancelled = cancel.clone();
+        let prepared = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|cancel| *cancel) => return Finish::Stopped,
+            result = tokio::time::timeout(self.lease() / 3, self.prepare(&claim, bound, cancelled)) => result,
+        };
+        let reading = match prepared {
+            Ok(Ok(reading)) => reading,
+            Ok(Err(Error::Unauthorized | Error::Forbidden)) => {
+                return Finish::Failed("actor_refused");
+            }
+            _ => return Finish::Failed("prepare_unavailable"),
         };
         match bound.service.0.read(&reading).await {
             Ended::Closed => Finish::Closed,
