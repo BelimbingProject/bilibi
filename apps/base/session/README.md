@@ -11,7 +11,6 @@
 **A session row stores only the SHA-256 of its cookie token, in lowercase hex (`session_id(token)`), never the token.** Whoever reads `sessions` (the SQL console, a backup, a replica, a slow-query log) cannot use a row to sign in.
 
 - Methods that take a `token` hash it once: `check`, `check_portal`, `activity`, `activity_portal`, `hold`, `switch`, `describe`, `delete`, the session `revoke` and `revoke_sign_in` keep, and `announce_tenant_switch`.
-- `hold_current` rechecks the staff browser session sealed in a scope and holds its row against revocation and identity switches until the caller's transaction ends.
 - Methods that take an `id` take the stored digest, as listed rows carry it: `terminate`, `terminate_own`, `is_live`, `announce` and `Terminated::id`. The host hashes a socket's cookie once to match announcements.
 - A module that writes a session row itself (Core User's sign-in and tenant switch) stores `session_id(token)`. The `sessions_id_digest` check (migration `009-token-digest`) refuses anything else; that migration also ended every earlier session.
 - The session hash Tenancy seals, and SSO's `user_external_sessions.session_hash`, is the token's SHA-256, which is `decode(sessions.id, 'hex')`.
@@ -29,6 +28,8 @@ authorization do not renew activity. Renewals are throttled, and activity takes
 a row lock while deciding whether renewal is due; a revocation between lookup
 and renewal is refused. Expiry is enforced during authentication and never
 depends on the cleanup job.
+
+`hold_current(tx, scope)` rechecks the non-impersonated staff browser session sealed in the scope, including its holder, CSRF, and idle and absolute expiry. It holds the session row against revocation and identity switches until the transaction ends. The caller rechecks account standing separately.
 
 The idle lifetime and the renewal throttle are the operator settings
 `session.lifetime_minutes` (default 120) and

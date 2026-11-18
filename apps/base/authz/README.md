@@ -35,9 +35,13 @@ Reconciliation serializes runs, adopts an existing same-named role in place, and
 synchronizes contributed system-role metadata/capabilities. It preserves role IDs,
 assignments, custom roles, direct grants/denies and field restrictions. It removes
 obsolete grants from contributed roles, and clears redundant grants on grant-all
-roles. Run it again after installing contributions or provisioning new tenants.
+roles. Run it again after installing contributions or provisioning tenants without their roles.
 `seed-production` also supplies the initial versioned reconciliation through the
-Database seed ledger. For first-owner bootstrap, Authz reconciles the tenant's system roles and audits the assignment on the caller's system-attributed transaction. `Grants::grant_first_administrator_in` assigns Core Administrator for the platform operator's `create-owner` command. `Grants::grant_first_tenant_owner_in` assigns Tenant Owner for a customer tenant created by `tenant-provision --owner-email`. Both refuse user- or agent-attributed transactions. Ordinary assignments use `assign_role`, which checks the actor and requires step-up. The schema keeps one role
+Database seed ledger.
+
+For first-owner bootstrap, Authz reconciles system roles and audits the assignment on a system-attributed transaction for the target tenant. `Grants::grant_first_administrator_in` assigns the grant-all Core Administrator role for the platform operator. `Grants::grant_first_tenant_owner_in` assigns the contributed Tenant Owner role for a customer tenant. Ordinary assignments use `assign_role`, which checks the actor and requires step-up.
+
+The schema keeps one role
 instance per tenant; a custom role is owned by a company of that tenant
 (`roles.company_id`, migration `011-role-company`, K15). Base holds the bare
 column and Core Company contributes the scoped foreign key; `create_role`

@@ -321,11 +321,10 @@ API upgrade: `list` takes `&mut tokio_postgres::Client` to own its read-only tra
 
 ```sh
 cargo run -p bilibi-web -- tenant-provision --tenant-name "Acme tenant" --company-name "Acme Sdn. Bhd." --company-code acme
-APP_ORIGIN=https://bilibi.example cargo run -p bilibi-web -- tenant-provision --tenant-name "Acme tenant" --company-name "Acme Sdn. Bhd." --company-code acme --owner-email owner@acme.example
 cargo run -p bilibi-web -- platform-provision --company-name "Example Operations" --company-code example_operations
 ```
 
-`provision_tenant` atomically creates a tenant and its primary company. The first-owner command uses `provision_tenant_in` to create them in the same transaction as the owner invitation and bootstrap receipt. See [Server installation](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant) for mail setup and retry behavior. `provision_platform_operator` resolves or creates the explicitly marked operator tenant and its primary company. A fresh provision records one retained `company.*.provisioned` audit action by the `provision` system principal. PostgreSQL assigns the IDs.
+`provision_tenant` atomically creates a tenant and its primary company. `provision_tenant_in` uses the caller's transaction, which the caller must roll back on a refusal. For first-owner setup, see [Server installation](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). `provision_platform_operator` resolves or creates the explicitly marked operator tenant and its primary company. A fresh provision records one retained `company.*.provisioned` audit action by the `provision` system principal. PostgreSQL assigns the IDs.
 
 ## Platform-operator setup and dashboard panels (K17)
 

@@ -207,7 +207,7 @@ The installer unit is skipped quietly while `/opt/bilibi/build/bin/bilibi-instal
 
 ## The first account
 
-A fresh database has no accounts, so nobody can sign in. `create-owner` creates the first one: the server owner, a Core Administrator of the organisation that runs this server (the platform operator). Run it once, after the first release is in service:
+A fresh database has no accounts, so nobody can sign in. `create-owner` creates the platform operator's first account. This server owner is a Core Administrator of the organisation that runs the server. Run it once, after the first release is in service:
 
 ```sh
 sudo scripts/install-server.sh create-owner production
@@ -238,6 +238,8 @@ Sign in as one of them at https://erp.example.com/login. To add people, use User
 If nobody can sign in any more, that is account recovery, which this command does not do. If an owner only lost their phone, see [Lost phone](#lost-phone).
 ```
 
+If the earlier run left the existing owner's Person, business affiliation and first desk unfinished, rerunning completes that setup.
+
 The command is the same `bilibi-web create-owner` the script runs for you, in the instance's environment. From a script with no terminal, give every answer as a flag and the password on standard input:
 
 ```sh
@@ -255,7 +257,7 @@ Behind the scenes this is the development seed's bootstrap with your details ins
 
 ### The first owner of a customer tenant
 
-An installation operator can create a customer tenant, its primary company and its first owner in one server command. The instance needs mail delivery and a valid public `APP_ORIGIN` for the one-time sign-in link.
+After putting a release in service, run this command once for each customer tenant. It creates the tenant and its primary company and invites its first Tenant Owner. Set up [mail delivery](../apps/base/mail/README.md#choosing-the-transport) first. The invitation uses the installation's HTTPS `APP_ORIGIN`. Dev instances also accept loopback HTTP.
 
 ```sh
 sudo scripts/install-server.sh tenant-provision production \
@@ -264,11 +266,13 @@ sudo scripts/install-server.sh tenant-provision production \
     --owner-email owner@acme.example
 ```
 
-There is deliberately no password flag. The owner follows the emailed link, chooses a password through the ordinary invitation page and enrols a second factor when the installation's sign-in policy requires one. The link works once and uses the ordinary invitation duration (seven days by default). On acceptance User creates the owner's Person, business affiliation and first desk in the primary company in the same audited transaction.
+The link works once and uses the [default invitation duration](../apps/core/user/README.md#membership-invitations). A recipient with a Bilibi sign-in uses it to accept the invitation. A recipient new to Bilibi chooses a password on the invitation page and enrols a second factor when the installation's sign-in policy requires one. Acceptance gives the owner a Person, business affiliation and first desk in the primary company.
 
-The command commits the tenant, primary company, owner invitation and contributed Tenant Owner role together. The audit log records `user.tenant_owner.invited` as **System · tenant-provision**. The email address supplies the initial Person name.
+The audit log records `user.tenant_owner.invited` as **System · tenant-provision**. The part of the email address before `@` supplies the initial Person name.
 
-If sending fails after commit, the command exits unsuccessfully. Rerun it with the same tenant, company and owner email to send a fresh link for the original pending invitation. This also works for expired invitations. Reissue invalidates the previous link and records `user.tenant_owner.reissued`. The command refuses independently provisioned tenants, mismatched or ambiguous tenants, and invitations that were accepted or revoked. Use the signed-in Users page to invite later administrators.
+If sending fails after commit, the command exits unsuccessfully. Rerun it with the same tenant name, company name and code, and owner email to send a fresh link for the original pending invitation. This also works for expired invitations. Reissue invalidates the previous link and records `user.tenant_owner.reissued`. If the tenant name is already in use, reissue requires a unique tenant and primary company match with the original bootstrap receipt and a still-pending invitation. The command refuses to adopt an independently provisioned tenant or replace an accepted or revoked invitation. Use the signed-in Users page to invite later administrators.
+
+When running the binary directly, use the same flags with `bilibi-web tenant-provision` and load the instance's database and mail settings and `APP_ORIGIN` into its environment. The installer wrapper loads these settings and runs the command as the Bilibi service account.
 
 ## Lost phone
 
@@ -347,8 +351,8 @@ Script commands:
 | --- | --- |
 | `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
-| `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | The first account, the server owner; asks for anything not given, refuses once an owner exists (it then only finishes an unfinished Person, business affiliation and first desk) |
-| `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | Create a customer tenant and primary company and invite its first Tenant Owner, or reissue the original pending invitation |
+| `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
+| `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
 | `two-factor-reset <instance> --email <address>` | Turn off one account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `switch <instance> <n>` | Put a kept release in service |
