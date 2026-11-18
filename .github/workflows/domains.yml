@@ -274,7 +274,7 @@ jobs:
       - name: Join the Finance lint and release build results
         id: finance
         if: >-
-          needs.domain.outputs.finance_lint != '' &&
+          always() && needs.domain.outputs.finance_lint != '' &&
           needs.domain.outputs.finance_release == needs.domain.outputs.finance_lint &&
           needs.domain.outputs.finance_tested != ''
         env:
@@ -285,7 +285,7 @@ jobs:
             '.[0] | [.platform.commit, .domain.commit] == ($linted | split(" ") | .[:2])' <<< "$TESTED" >/dev/null
           printf '%s\n' "$TESTED" > "$RUNNER_TEMP/tested-set.json"
       - uses: actions/upload-artifact@v7
-        if: steps.finance.outcome == 'success'
+        if: always() && steps.finance.outcome == 'success'
         with:
           name: tested-domains-finance
           path: ${{ runner.temp }}/tested-set.json

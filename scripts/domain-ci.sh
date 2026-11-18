@@ -2,7 +2,8 @@
 # The mounted-container gates for a Domain or Extension repository's CI. Run it
 # from a Platform checkout with the container already mounted at
 # apps/<domains|extensions>/<container> (docs/domain-ci/ci.yml does that) and
-# DATABASE_URL naming an empty PostgreSQL 18 database. Nothing here is a unit
+# DATABASE_URL naming an empty PostgreSQL 18 database for build and boot.
+# Nothing here is a unit
 # test: it builds the composed app, migrates a fresh database, and loads `/`.
 #
 # DOMAIN_CI_BUILD=release (default) does the locked release build and boots
