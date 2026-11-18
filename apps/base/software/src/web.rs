@@ -1,6 +1,6 @@
 //! `/system/software` (`base/software.pages`, operation `index`): the Software
 //! page. Everything it shows comes from the module's own contracts through
-//! `PageContracts` (`base.software.status` and `.catalogue` as reads;
+//! `PageContracts` (`base.software.status` as the shared status and discovery read;
 //! `.install`, `.undo` as reviewed plans committed with the owner's
 //! authenticator code; `.cancel` as a plain submit), so the page and an agent
 //! see the same facts and get the same refusals. The
@@ -40,15 +40,12 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    time::Duration,
 };
 
 pub const PATH: &str = "/system/software";
 pub(crate) const PAGES: &str = "base/software.pages";
 const DENIED: &str = "You do not have permission to change the software.";
 const UNAVAILABLE: &str = "The software service did not answer. Nothing was queued; try again.";
-/// How long a read catalogue is shown before it is read again.
-const CATALOGUE_KEEP: Duration = Duration::from_secs(300);
 
 /// The module's page adapter; every field is shared by mounted states.
 #[derive(Clone)]
@@ -206,7 +203,6 @@ struct View {
     install_error: Option<String>,
     columns: ListColumns,
     rows_changed: bool,
-    catalogue: Option<(std::time::Instant, Value)>,
 }
 
 // The job panel and history use one schema.
@@ -293,7 +289,6 @@ impl View {
                 .map(|columns| columns.with_record_fields(job_fields::ALL.iter().copied()))
                 .map_err(|_| Error::Internal)?,
             rows_changed: true,
-            catalogue: None,
         })
     }
     fn flash(&mut self, kind: StatusKind, message: impl Into<String>) {
@@ -307,18 +302,6 @@ impl View {
             event: kind.event(),
             contract: kind.contract(),
         }
-    }
-
-    /// The published catalogue, read through the contract and kept for a while.
-    async fn catalogue(&mut self, scope: &Scope) -> Result<Value> {
-        if let Some((at, value)) = &self.catalogue {
-            if at.elapsed() < CATALOGUE_KEEP {
-                return Ok(value.clone());
-            }
-        }
-        let value = read(&self.pages.contracts, scope, "base.software.catalogue").await?;
-        self.catalogue = Some((std::time::Instant::now(), value.clone()));
-        Ok(value)
     }
 
     async fn event(
@@ -634,12 +617,13 @@ impl View {
         let can_manage = effective_capabilities(&**client, scope)
             .await?
             .contains(MANAGE);
+        drop(client);
         let status = read(&pages.contracts, scope, "base.software.status").await?;
         let releases = self.query.get("tab").is_some_and(|tab| tab == "releases");
         let catalogue = if releases {
             Value::Null
         } else {
-            self.catalogue(scope).await?
+            status["catalogue"].clone()
         };
         let lost = match &self.dialog {
             Some(Dialog::Review(review)) if review.kind == Kind::Undo => {
@@ -1202,6 +1186,41 @@ impl View {
                         content.push(&item_body);
                         content
                     },
+                    ..Card::default()
+                })?);
+            }
+            for item in catalogue["uncatalogued"][kind]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let id = text(&item["id"]);
+                let mut facts = vec![
+                    Fact {
+                        title: "Status",
+                        value: Html::text("Installed, not in the catalogue"),
+                        ..Fact::default()
+                    },
+                    Fact {
+                        title: "Installed version",
+                        value: Html::text(item["version"].as_str().unwrap_or("Version unknown")),
+                        ..Fact::default()
+                    },
+                ];
+                if let Some(code) = item["extension_code"].as_str() {
+                    facts.push(Fact {
+                        title: "Code review kind",
+                        value: Html::text(code),
+                        ..Fact::default()
+                    });
+                }
+                body.push(&render(Card {
+                    id: &format!("software-installed-{kind}-{id}"),
+                    title: id,
+                    body: render(Facts {
+                        items: facts,
+                        ..Facts::default()
+                    })?,
                     ..Card::default()
                 })?);
             }

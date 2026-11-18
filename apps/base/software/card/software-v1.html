@@ -389,6 +389,14 @@ function discoveryView() {
         item.local_steps ? el('div', {}, [el('p', { class: 'small', text: 'Developer commands' }), el('p', { class: 'small muted', text: 'Run these commands in the Bilibi code folder on your computer, then test it in the browser.' }), el('pre', { text: item.local_steps.join('\n') })]) : null,
       ]));
     }
+    for (const item of (catalogue.uncatalogued || {})[kind] || []) {
+      cards.push(el('div', { class: 'card stack', id: 'installed-' + kind + '-' + item.id }, [
+        el('h3', { text: item.id }),
+        el('p', { class: 'small', text: 'Installed, not in the catalogue' }),
+        el('p', { class: 'small', text: 'Installed version: ' + (item.version || 'Version unknown') }),
+        item.extension_code ? el('p', { class: 'small', text: 'Code review kind: ' + item.extension_code }) : null,
+      ]));
+    }
     sections.push(el('div', { class: 'stack', id: 'available-' + kind }, [
       el('h2', { text: kind === 'domains' ? 'Available domains' : 'Available extensions' }),
       el('p', { text: kind === 'domains' ? 'Domains add business features, such as Finance.' : 'Extensions adapt Bilibi or connect it to other software.' }),
@@ -666,7 +674,7 @@ async function refreshHome() {
     const opened = await tool('read', { key: 'base.software.status', input: {} });
     if (!opened.failed) {
       const status = unwrap(opened.body) || {};
-      Object.assign(state.data, { instance: status.instance || state.data.instance, installed: status.installed, installed_asset: status.installed_asset, plugins: status.plugins, job: status.job, undo: status.undo, jobs: status.jobs });
+      Object.assign(state.data, { instance: status.instance || state.data.instance, installed: status.installed, installed_asset: status.installed_asset, plugins: status.plugins, catalogue: status.catalogue, uncatalogued: status.uncatalogued, job: status.job, undo: status.undo, jobs: status.jobs });
       banner(state.data.instance);
     }
   } catch (_) {}
@@ -694,6 +702,8 @@ async function pollOnce() {
     state.data.job = status.job;
     state.data.installed = status.installed || state.data.installed;
     state.data.installed_asset = status.installed_asset;
+    state.data.catalogue = status.catalogue;
+    state.data.uncatalogued = status.uncatalogued;
     state.releases = null;
     renderJob();
     if (!(status.job.state === 'queued' || status.job.state === 'running')) stopPolling();

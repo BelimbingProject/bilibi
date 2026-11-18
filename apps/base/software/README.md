@@ -37,7 +37,7 @@ Official modules (repositories under BelimbingProject) are checked against every
 - Each entry includes `recommended_version`, a plain `compatibility` sentence, `official`, `local_steps`, and `next_step`. Each release includes `fits_running` and `tested_with_running`.
 - No compatible release, no published release, or no exact tested pair is stated plainly. A development build or an unreleased commit does not inherit a released commit’s evidence.
 - Domains were tested individually; separate pairs do not prove a combined composition. Check your composition locally.
-- The published catalogue is read over HTTPS through `base/integration` as the requesting person and cached for five minutes. **Software › Catalogue address** can point to an operator’s catalogue. An unavailable catalogue returns `available: false` and a reason; installed status and installation remain available.
+- The published catalogue is read over HTTPS through `base/integration` as the requesting person and cached for five minutes, including an unavailable answer. **Software › Catalogue address** can point to an operator’s catalogue. An unavailable catalogue returns `available: false` and a reason; installed status and installation remain available.
 - `domains` and optional `extensions` hold repository and release information; extensions without CI evidence are labelled as not recorded as tested. `plugins` retains the existing release add-on information.
 
 ## Data sources
@@ -84,6 +84,10 @@ Install takes an exact GitHub asset or an uploaded bundle from the accepted appl
 ## Page and ChatGPT card
 
 The **Software** page (`/system/software`) has one menu entry and two shared tabs: **Domains and Extensions** and **Releases**. Each catalogue item is one compact card with its description, installed version (when installed) and one **Status** line. Official modules show **Installed**, **Not installed** or **Update available: X**, plus a short warning such as **Needs Bilibi X** only when no listed version fits this server. Modules from an operator’s own catalogue are not kept in step with the Platform, so they keep a **Compatibility** line: **Yes · tested with Bilibi X**, **Yes, not tested yet** or **No · needs Bilibi X**. **Developer commands** folds away the repository, exact test evidence and local build commands.
+
+Installed Domains and Extensions missing from the selected catalogue also have a card, labelled **Installed, not in the catalogue**. Each card shows the installed version or **Version unknown**. Extensions also show the recorded code review kind. These cards remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
+
+The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` and `base.software.status` lists installed modules missing from the catalogue. `base.software.open` returns both the status and catalogue facts.
 
 **Releases** (`?tab=releases`) shows the installed version, the current or last install (its **Install steps** stay open while the job is active, failed or interrupted, and fold when it completes), a short backup table with folded backup details, and **Get an update**. Backup file locations are folded and only available to accounts that can manage software. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. The old `/system/software/releases` page redirects to the Releases tab.
 
