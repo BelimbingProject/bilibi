@@ -251,7 +251,11 @@ embed's subject arguments on every update. Shell embeds use the same contract; W
 renders them into the shell with `Page::render` and mounts them with
 `Page::mount` (`apps/web/src/shell.rs`, `live.rs`).
 
-On record pages, render `bilibi_ui::LivePanelStack` with the rendered sections as `parts` and only the bottom-stack `PanelSpec::id` values as `panel_ids`, both in display order. Render each panel target once. Use `bilibi_ui::LivePanelAnchor` for header History and other standalone targets. Render the page header and dialogs outside the stack. Each provider supplies its own card without an outer margin and keeps the panel ID on its root.
+On record pages, render `bilibi_ui::LivePanelStack` with the rendered sections as `parts` and only the bottom-stack `PanelSpec::id` values as `panel_ids`, both in display order. Render each panel target once. Use `bilibi_ui::LivePanelAnchor` for header History and other standalone targets. Keep the page header and host dialogs outside the stack.
+
+Each bottom-stack provider renders its own card without an outer margin. The wide stack uses the [standard section spacing](../DESIGN.md#compact-scale) between rendered sections and mounted panels. Empty anchors, including refused mounts, take no space.
+
+Give each conditional host section a stable ID on its outer element so inserting or removing it keeps neighbouring panels in place during a parent refresh. The shared anchor puts `data-live-ignore` on the keyed `<id>-slot` wrapper and leaves the inner `<id>` target available for fragment patches.
 
 Each instance owns separate state, even for the same embed/service. An unchanged
 spec preserves that state across parent refresh; a changed or removed spec drops

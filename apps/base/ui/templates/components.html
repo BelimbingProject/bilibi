@@ -165,7 +165,9 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 {% endmacro %}
 
 {#- Fragments the shared models rendered (a notice, a chart, a table),
-    stacked a compact step apart, or a section step apart when wide. -#}
+    stacked a compact step apart, or a section step apart when wide.
+    Trim fragment edges so interleaved whitespace cannot make the keyed
+    patcher move retained siblings when a section appears. -#}
 {% macro stack(parts, wide=false) -%}
 <div class="{% if wide %}ui-wide-stack{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part.as_str().trim_ascii()|safe }}{% endfor %}{{ caller() }}</div>
 {%- endmacro %}

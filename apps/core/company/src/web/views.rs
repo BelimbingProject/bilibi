@@ -861,7 +861,7 @@ struct DetailBody {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "components.html" as ui %}{% call ui::facts(container_id="company-parent-chain") %}{% call ui::fact(title="Parent chain", id="company-parent-chain-links") %}{{ links|safe }}{% endcall %}{% endcall %}"#,
+    source = r#"{% import "components.html" as ui %}{% call ui::facts(container_id="company-parent-chain") %}{% call ui::fact(title="Parent chain", id="company-parent-chain-links") %}{{ links }}{% endcall %}{% endcall %}"#,
     ext = "html"
 )]
 struct ParentChain {
