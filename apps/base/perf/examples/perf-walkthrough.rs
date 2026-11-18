@@ -1,15 +1,51 @@
-//! Manual walkthrough against an explicitly supplied disposable DB. No test
-//! harness or assertions; it prints what the recorder accepts, drops, stores and
-//! prunes, and how long the observed business work took meanwhile.
+//! Walkthrough against an explicitly supplied disposable DB. It shows what
+//! the recorder accepts, drops, stores and prunes, and checks lock recovery.
 use bilibi_database::{pool, timing, Error, Result};
 use bilibi_module_registry::Services;
-use bilibi_perf::{Config, Filter, Finish, Kind, Outcome, Recorder, Sample, Submit, Windows};
+use bilibi_perf::{
+    Config, Filter, Finish, Kind, Outcome, Recorder, Sample, Store, Submit, Windows,
+};
 use bilibi_settings::Settings;
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 use tokio::{sync::watch, time::sleep};
+use tokio_postgres::Transaction;
+
+async fn reader_waiting(lock: &Transaction<'_>) -> Result<bool> {
+    Ok(lock.query_one(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='relation' AND NOT granted \
+         AND mode='AccessShareLock' AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) \
+         AND relation='base_perf_samples'::regclass)",
+        &[],
+    ).await?.get(0))
+}
+
+async fn blocked_read<T>(
+    lock: &Transaction<'_>,
+    name: &str,
+    read: impl Future<Output = T>,
+) -> Result<T> {
+    tokio::pin!(read);
+    let wait = async {
+        while !reader_waiting(lock).await? {
+            sleep(Duration::from_millis(25)).await;
+        }
+        Ok::<_, Error>(())
+    };
+    tokio::select! {
+        result = wait => result?,
+        _ = &mut read => panic!("{name} finished before reaching the PostgreSQL lock"),
+    }
+    let result = read.await;
+    assert!(
+        !reader_waiting(lock).await?,
+        "{name} left a PostgreSQL reader blocked"
+    );
+    Ok(result)
+}
 
 async fn flush(recorder: &Recorder) {
     for _ in 0..100 {
@@ -73,7 +109,7 @@ async fn main() -> Result<()> {
     )?;
     services.install(&modules)?;
     let settings = services.get::<Settings>("base/settings.store")?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
     let config = Config {
@@ -271,17 +307,15 @@ async fn main() -> Result<()> {
          SELECT 'request','/steady','ok',40,now()-interval '30 minutes'+n*interval '1 second' FROM generate_series(1,30) n").await?;
     let now = SystemTime::now();
     let ago = |minutes: u64| now - Duration::from_secs(minutes * 60);
-    for row in recorder
-        .regressions(&Windows {
-            baseline_from: ago(180),
-            baseline_to: ago(60),
-            current_from: ago(60),
-            current_to: now + Duration::from_secs(60),
-            min_samples: 20,
-            limit: 10,
-        })
-        .await?
-    {
+    let windows = Windows {
+        baseline_from: ago(180),
+        baseline_to: ago(60),
+        current_from: ago(60),
+        current_to: now + Duration::from_secs(60),
+        min_samples: 20,
+        limit: 10,
+    };
+    for row in recorder.regressions(&windows).await? {
         println!(
             "   {} {}: {:.0} ms mean -> p95 {:.0} ms ({:+.1}%)",
             row.kind.as_str(),
@@ -324,6 +358,34 @@ async fn main() -> Result<()> {
 
     let _ = stop.send(true);
     writer.await.map_err(|_| Error::Internal)??;
+
+    println!("\n== 8. PostgreSQL stops every read while the history lock is held");
+    let filter = Filter::default();
+    let expected_total = recorder.list_samples(&filter).await?.total;
+    let lock = client.transaction().await?;
+    lock.batch_execute("LOCK TABLE base_perf_samples IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let diagnostics = blocked_read(&lock, "diagnostics", recorder.diagnostics()).await?;
+    assert_eq!(diagnostics.store, Store::Unavailable);
+    assert!(
+        blocked_read(&lock, "sample list", recorder.list_samples(&filter))
+            .await?
+            .is_err()
+    );
+    assert!(
+        blocked_read(&lock, "regressions", recorder.regressions(&windows))
+            .await?
+            .is_err()
+    );
+    assert!(
+        blocked_read(&lock, "slowest", recorder.slowest(ago(180), now, 10))
+            .await?
+            .is_err()
+    );
+    lock.rollback().await?;
+    assert_eq!(recorder.list_samples(&filter).await?.total, expected_total);
+    println!("PASS Performance reads stopped in PostgreSQL before releasing the lock");
+
     println!("\nRun again with `-- inspect` in another process to read the persisted rows.");
     Ok(())
 }

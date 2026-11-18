@@ -5,9 +5,13 @@ use crate::{
     recorder::{Recorder, Stats, SLOW_THRESHOLD_MS},
     sample::{Kind, Outcome, Process, Sample, SizeClass},
 };
-use bilibi_database::{Error, Result};
-use std::time::{Duration, SystemTime};
-use tokio::time::timeout;
+use bilibi_database::{Connection, Error, Result};
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, SystemTime},
+};
+use tokio::time::{timeout_at, Instant};
 use tokio_postgres::{Client, Row};
 
 pub const PAGE_SIZES: [i64; 4] = [25, 50, 100, 300];
@@ -139,6 +143,55 @@ fn recorded(row: &Row) -> Result<Recorded> {
 const FILTERED: &str = "($1::text IS NULL OR kind=$1) AND ($2::text IS NULL OR identity=$2) AND ($3::text IS NULL OR outcome=$3) AND ($4::timestamptz IS NULL OR observed_at>=$4) AND ($5::timestamptz IS NULL OR observed_at<$5)";
 
 impl Recorder {
+    async fn bounded_read<T>(
+        &self,
+        client: Option<&mut Client>,
+        query: impl for<'a> FnOnce(&'a Client) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
+    ) -> Result<T> {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        let run = async |client: &mut Client| {
+            timeout_at(deadline, async {
+                let tx = client.build_transaction().read_only(true).start().await?;
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis();
+                let statement_ms = remaining
+                    .checked_sub(500)
+                    .filter(|ms| *ms > 0)
+                    .ok_or(Error::Internal)?;
+                let transaction_ms = remaining - 250;
+                tx.batch_execute(&format!(
+                    "SET LOCAL statement_timeout = '{statement_ms}ms'; \
+                     SET LOCAL transaction_timeout = '{transaction_ms}ms'"
+                ))
+                .await?;
+                match query(tx.client()).await {
+                    Ok(value) => {
+                        tx.commit().await?;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        tx.rollback().await?;
+                        Err(error)
+                    }
+                }
+            })
+            .await
+            .map_err(|_| Error::Internal)?
+        };
+        if let Some(client) = client {
+            return run(client).await;
+        }
+        let mut connection = timeout_at(deadline, self.db.get())
+            .await
+            .map_err(|_| Error::Internal)??;
+        let result = run(&mut connection).await;
+        if result.is_err() {
+            drop(Connection::take(connection));
+        }
+        result
+    }
+
     /// One bounded page, newest first. A page size outside `PAGE_SIZES`, a page
     /// below one or a malformed identity filter is refused, not clamped.
     pub async fn list_samples(&self, filter: &Filter) -> Result<Page> {
@@ -147,7 +200,7 @@ impl Recorder {
 
     pub(crate) async fn list_samples_on(
         &self,
-        client: Option<&Client>,
+        client: Option<&mut Client>,
         filter: &Filter,
     ) -> Result<Page> {
         if filter.page < 1
@@ -160,14 +213,8 @@ impl Recorder {
         {
             return Err(Error::Invalid);
         }
-        let read = async {
-            let connection;
-            let client = if let Some(client) = client {
-                client
-            } else {
-                connection = self.db.get().await?;
-                &**connection
-            };
+        let filter = filter.clone();
+        self.bounded_read(client, move |client| Box::pin(async move {
             let kind = filter.kind.map(Kind::as_str);
             let outcome = filter.outcome.map(Outcome::as_str);
             let identity = filter.identity.as_deref();
@@ -191,10 +238,7 @@ impl Recorder {
                 page: filter.page,
                 page_size: filter.page_size,
             })
-        };
-        timeout(READ_TIMEOUT, read)
-            .await
-            .map_err(|_| Error::Internal)?
+        })).await
     }
 
     /// Store and recorder health. Silence is not health: an empty history with
@@ -204,7 +248,7 @@ impl Recorder {
         self.diagnostics_on(None).await
     }
 
-    pub(crate) async fn diagnostics_on(&self, client: Option<&Client>) -> Diagnostics {
+    pub(crate) async fn diagnostics_on(&self, client: Option<&mut Client>) -> Diagnostics {
         let stats = self.stats();
         let recorder = if !stats.running {
             Health::Unavailable
@@ -213,24 +257,19 @@ impl Recorder {
         } else {
             Health::Available
         };
-        let read = async {
-            let connection;
-            let client = if let Some(client) = client {
-                client
-            } else {
-                connection = self.db.get().await?;
-                &**connection
-            };
-            let row = client
-                .query_one(
-                    "SELECT count(*)::bigint, max(observed_at) FROM base_perf_samples",
-                    &[],
-                )
-                .await?;
-            Ok::<_, Error>((row.get::<_, i64>(0), row.get::<_, Option<SystemTime>>(1)))
-        };
-        let (store, samples, last_observed_at) = match timeout(READ_TIMEOUT, read).await {
-            Ok(Ok((samples, last))) => (Store::Available, Some(samples), last),
+        let read = self.bounded_read(client, |client| {
+            Box::pin(async move {
+                let row = client
+                    .query_one(
+                        "SELECT count(*)::bigint, max(observed_at) FROM base_perf_samples",
+                        &[],
+                    )
+                    .await?;
+                Ok::<_, Error>((row.get::<_, i64>(0), row.get::<_, Option<SystemTime>>(1)))
+            })
+        });
+        let (store, samples, last_observed_at) = match read.await {
+            Ok((samples, last)) => (Store::Available, Some(samples), last),
             _ => (Store::Unavailable, None, None),
         };
         Diagnostics {
@@ -269,7 +308,7 @@ impl Recorder {
 
     pub(crate) async fn regressions_on(
         &self,
-        client: Option<&Client>,
+        client: Option<&mut Client>,
         windows: &Windows,
     ) -> Result<Vec<Regression>> {
         if windows.baseline_from >= windows.baseline_to
@@ -280,16 +319,10 @@ impl Recorder {
         {
             return Err(Error::Invalid);
         }
-        let read = async {
-            let connection;
-            let client = if let Some(client) = client {
-                client
-            } else {
-                connection = self.db.get().await?;
-                &**connection
-            };
-            let threshold = self
-                .settings
+        let windows = *windows;
+        let settings = self.settings.clone();
+        self.bounded_read(client, move |client| Box::pin(async move {
+            let threshold = settings
                 .get_global(client, SLOW_THRESHOLD_MS)
                 .await?
                 .as_f64()
@@ -328,10 +361,7 @@ impl Recorder {
                     })
                 })
                 .collect::<Result<Vec<_>>>()
-        };
-        timeout(READ_TIMEOUT, read)
-            .await
-            .map_err(|_| Error::Internal)?
+        })).await
     }
 
     /// Routes, events and jobs with the highest p95 duration among the samples
@@ -347,7 +377,7 @@ impl Recorder {
 
     pub(crate) async fn slowest_on(
         &self,
-        client: Option<&Client>,
+        client: Option<&mut Client>,
         from: SystemTime,
         to: SystemTime,
         limit: i64,
@@ -355,14 +385,7 @@ impl Recorder {
         if from >= to || !(1..=100).contains(&limit) {
             return Err(Error::Invalid);
         }
-        let read = async {
-            let connection;
-            let client = if let Some(client) = client {
-                client
-            } else {
-                connection = self.db.get().await?;
-                &**connection
-            };
+        self.bounded_read(client, move |client| Box::pin(async move {
             let rows = client
                 .query(
                     "SELECT kind, identity, count(*)::bigint AS samples, avg(duration_ms)::float8 AS average, \
@@ -386,9 +409,6 @@ impl Recorder {
                     })
                 })
                 .collect::<Result<Vec<_>>>()
-        };
-        timeout(READ_TIMEOUT, read)
-            .await
-            .map_err(|_| Error::Internal)?
+        })).await
     }
 }

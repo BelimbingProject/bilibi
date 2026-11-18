@@ -153,13 +153,13 @@ impl Index {
         let hour = Duration::from_secs(3600);
         let recorder = &self.pages.recorder;
         let mut client = self.pages.db.get().await?;
-        let diagnostics = recorder.diagnostics_on(Some(&**client)).await;
+        let diagnostics = recorder.diagnostics_on(Some(&mut client)).await;
         if diagnostics.store == Store::Unavailable {
             client = self.pages.replace_connection(client).await?;
         }
         let views = if self.tab == TABS[1].0 {
             let mut samples = recorder
-                .list_samples_on(Some(&**client), &self.filter())
+                .list_samples_on(Some(&mut client), &self.filter())
                 .await;
             if let Ok(page) = &samples {
                 if self
@@ -167,7 +167,7 @@ impl Index {
                     .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
                 {
                     samples = recorder
-                        .list_samples_on(Some(&**client), &self.filter())
+                        .list_samples_on(Some(&mut client), &self.filter())
                         .await;
                 }
             }
@@ -184,12 +184,12 @@ impl Index {
                 min_samples: 5,
                 limit: 10,
             };
-            let regressions = recorder.regressions_on(Some(&**client), &windows).await;
+            let regressions = recorder.regressions_on(Some(&mut client), &windows).await;
             if regressions.is_err() {
                 client = self.pages.replace_connection(client).await?;
             }
             let slowest = recorder
-                .slowest_on(Some(&**client), now - hour * 24, now, 10)
+                .slowest_on(Some(&mut client), now - hour * 24, now, 10)
                 .await;
             if slowest.is_err() {
                 client = self.pages.replace_connection(client).await?;

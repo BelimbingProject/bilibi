@@ -169,7 +169,7 @@ Diagnostics hold codes, counts, IDs and kinds only: never a personal value, secr
 
 No unit tests. Each walkthrough runs on a fresh disposable database ([runtime parity](../../../docs/runtime-parity.md)) with `BILIBI_DISPOSABLE_PRIVACY_DEMO=yes` and `DATABASE_URL`.
 
-Run the requests walkthrough with `job-read` after `seed` on a fresh disposable database to check that a person-backed Privacy locate job returns the directly linked Person while holding the pool's only connection.
+The `privacy-job-read` CI walkthrough runs `seed` and `job-read` on its own disposable database. It checks that a person-backed Privacy locate job returns the directly linked Person while holding the pool's only connection.
 
 The requests walkthrough also covers detached private/shared/held addresses, saved Contacts CSV copies and a publishing export racing erasure, a fresh post-erasure export, ID-only real 2FA reset attribution, and an inactive SCIM document in access disclosure. Invitation checks exercise access and portability with no identifier, registration links versus unconfirmed email candidates, erasure of copied values and earlier audit evidence, link revocation, record holds and Person/tenant isolation. The retention walkthrough checks invitation lifecycle clocks, opt-in company settings, multiple batches, both legal holds and cleanup after release. These checks fail the executable when the observed export or persisted state violates the contract. File handlers have explicit company desks, as required by ADR 19; no oversight classification is widened.
 
