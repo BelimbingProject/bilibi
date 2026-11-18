@@ -41,8 +41,16 @@ fn ensure(ok: bool, message: &str) -> Result<()> {
     }
 }
 
-/// The authenticator code for `key` (base32) at `offset` 30-second steps.
-fn code(key: &str, offset: i64) -> String {
+fn now_step() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+        / 30
+}
+
+/// The authenticator code for `key` (base32) at the given 30-second step.
+fn code(key: &str, step: u64) -> String {
     use hmac::{Hmac, KeyInit, Mac};
     let mut secret = Vec::new();
     let (mut buffer, mut bits) = (0u64, 0u32);
@@ -57,11 +65,6 @@ fn code(key: &str, offset: i64) -> String {
             secret.push((buffer >> bits) as u8);
         }
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs() as i64;
-    let step = (now / 30 + offset) as u64;
     let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&secret).expect("key");
     mac.update(&step.to_be_bytes());
     let digest = mac.finalize().into_bytes();
@@ -81,7 +84,7 @@ async fn enroll(app: &bilibi_web::App, scope: &Scope) -> Result<String> {
         .await
         .map_err(|e| format!("begin two-factor: {e:?}"))?;
     app.user
-        .confirm_two_factor(scope, &code(&enrollment.key, -1))
+        .confirm_two_factor(scope, &code(&enrollment.key, now_step()))
         .await
         .map_err(|e| format!("confirm two-factor: {e:?}"))?;
     Ok(enrollment.key)
@@ -168,6 +171,8 @@ async fn main() -> Result<()> {
         .get::<MutationBoundary>("base/database.mutations")?;
     let settings = app.services.get::<Settings>("base/settings.store")?;
     let second_key = enroll(&app, &second).await?;
+    // Enrollment can also accept the next step if the six digits coincide.
+    let last_possible_enrollment_step = now_step() + 1;
     erasure_approval::publish_rules(&app, &mut client, &admin, 1).await?;
     let chromium =
         std::env::var("BILIBI_PRIVACY_DEMO_CHROMIUM").unwrap_or_else(|_| "chromium".into());
@@ -235,17 +240,15 @@ async fn main() -> Result<()> {
             &[],
         )
         .await?;
-    let decided = erasure_approval::decide(
-        &app,
-        &privacy,
-        &mut client,
-        &admin,
-        &second.clone().presenting_step_up(&code(&second_key, 0)),
-        &verified,
-        true,
-    )
-    .await?;
-    let id = decided.id;
+    let sent = privacy
+        .submit_erasure(&mut client, &admin, verified.id, verified.version)
+        .await?;
+    while now_step() <= last_possible_enrollment_step {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let approver = second.presenting_step_up(&code(&second_key, now_step()));
+    erasure_approval::vote(&app, &approver, &sent, true).await?;
+    let id = sent.id;
     let missing = wait(&privacy, &client, &admin, id, |r| {
         r.finish_error.is_some() || r.status != "running"
     })
