@@ -166,7 +166,8 @@ impl JobContracts {
     }
 
     /// Schema, capability and the owner's preview: what a commit would do,
-    /// writing nothing. Answers the preview's result, or the refusal typed as
+    /// making no business writes. Normal refusals retain owner authorization
+    /// decisions. Answers the preview's result, or the refusal typed as
     /// the other doors do (`InvalidInput`, `Forbidden`, `NotFound`,
     /// `Backend(Conflict)` …).
     pub async fn preview(
@@ -189,9 +190,30 @@ impl JobContracts {
         let reservations = crate::PreviewReservations::default();
         let output = owner
             .preview(&crate::TransactionRead(&tx, &reservations), &scope, input)
-            .await?;
-        tx.commit().await.map_err(bilibi_database::Error::from)?;
-        Ok(output.envelope(key))
+            .await;
+        // A normal refusal may have recorded the owner's authorization decision.
+        // Preserve that evidence; infrastructure failures still roll back.
+        if matches!(
+            &output,
+            Ok(_)
+                | Err(Error::Forbidden
+                    | Error::NotFound
+                    | Error::InvalidInput(_)
+                    | Error::Backend(
+                        bilibi_database::Error::Unauthorized
+                            | bilibi_database::Error::Forbidden
+                            | bilibi_database::Error::NotFound
+                            | bilibi_database::Error::Invalid
+                            | bilibi_database::Error::Refused(_)
+                            | bilibi_database::Error::Conflict
+                            | bilibi_database::Error::StepUpRequired { .. }
+                    ))
+        ) {
+            tx.commit().await.map_err(bilibi_database::Error::from)?;
+        } else {
+            tx.rollback().await.map_err(bilibi_database::Error::from)?;
+        }
+        output.map(|output| output.envelope(key))
     }
 
     /// The owner's preview, then its commit on `tx`, which must be this

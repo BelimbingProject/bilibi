@@ -188,12 +188,12 @@ impl AddressService {
     }
 
     pub async fn create(&self, scope: &Scope, input: &AddressInput) -> WriteResult<Address> {
+        let input = self.validate(input).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("address.create"))
             .await?;
-        let input = self.validate_on(tx.sql(), input).await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         let result = store::create(&mut tx, &scope, &input).await?;
         tx.commit().await?;
@@ -205,12 +205,12 @@ impl AddressService {
         id: AddressId,
         update: &Update,
     ) -> WriteResult<Address> {
+        let input = self.validate(&update.address).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("address.update"))
             .await?;
-        let input = self.validate_on(tx.sql(), &update.address).await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         let result = store::update(&mut tx, &scope, id, update.version, &input, false).await?;
         tx.commit().await?;
@@ -251,6 +251,7 @@ impl AddressService {
         input: &AddressInput,
         attachment: &AttachmentInput,
     ) -> WriteResult<AttachedAddress> {
+        let input = self.validate(input).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -259,7 +260,6 @@ impl AddressService {
                 scope.mutation_context("address.create_and_attach"),
             )
             .await?;
-        let input = self.validate_on(tx.sql(), input).await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         let result = store::create_and_attach(&mut tx, &scope, owner, &input, attachment).await?;
         tx.commit().await?;

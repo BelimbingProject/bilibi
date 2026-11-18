@@ -2,7 +2,7 @@
 //! when the restriction is lifted before the plan commits. The same gap #603
 //! closed for people. On a fresh disposable database, through the registered
 //! handler; each line prints `ok` or `FAIL`, and any `FAIL` exits 1.
-use bilibi_address::{AddressInput, AddressService, Location, SERVICE};
+use bilibi_address::{AddressInput, AddressService, Location, Update, WriteError, SERVICE};
 use bilibi_agent_api::{Definitions, Handler, OperationClient, DEFINITIONS};
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, ReadClient};
@@ -105,8 +105,25 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         let options = addresses.options(&Location::default()).await?;
         let long_postcode = "1".repeat(100);
         let no_country = AddressInput::default();
+        let invalid = AddressInput {
+            country_iso: Some("invalid".into()),
+            ..AddressInput::default()
+        };
+        let refused_create = addresses.create(&manager, &invalid).await;
+        let refused_update = addresses
+            .update(
+                &manager,
+                bilibi_address::AddressId::new(1)?,
+                &Update {
+                    version: 1,
+                    address: invalid,
+                },
+            )
+            .await;
         Ok::<_, bilibi_database::Error>(
-            options.admin1.is_empty()
+            matches!(refused_create, Err(WriteError::Invalid(_)))
+                && matches!(refused_update, Err(WriteError::Invalid(_)))
+                && options.admin1.is_empty()
                 && options.postcodes.is_empty()
                 && options.localities.is_empty()
                 && addresses.validate(&no_country).await.is_ok()
@@ -127,7 +144,7 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     db.resize(pool_size);
     check(
         matches!(empty, Ok(Ok(true))),
-        "empty lookups and validation need no pool slot",
+        "empty lookups and malformed standalone writes need no pool slot",
     );
 
     let created = addresses

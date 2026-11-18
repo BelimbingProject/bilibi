@@ -3,7 +3,7 @@
 mod panel;
 mod view;
 
-use crate::{Filter, Kind, Outcome, Recorder, Windows, VIEW};
+use crate::{Filter, Kind, Outcome, Recorder, Store, Windows, VIEW};
 use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_locale::Locales;
@@ -147,10 +147,19 @@ impl Index {
         let now = SystemTime::now();
         let hour = Duration::from_secs(3600);
         let recorder = &self.pages.recorder;
-        let client = self.pages.db.get().await?;
+        let mut client = self.pages.db.get().await?;
         let sql = Some(&**client);
         let diagnostics = recorder.diagnostics_on(sql).await;
-        let views = if self.tab == TABS[1].0 {
+        let views = if diagnostics.store == Store::Unavailable {
+            if self.tab == TABS[1].0 {
+                view::Views::Samples(Err(Error::Internal))
+            } else {
+                view::Views::Slowdowns {
+                    regressions: Err(Error::Internal),
+                    slowest: Err(Error::Internal),
+                }
+            }
+        } else if self.tab == TABS[1].0 {
             let mut samples = recorder.list_samples_on(sql, &self.filter()).await;
             if let Ok(page) = &samples {
                 if self
@@ -170,11 +179,32 @@ impl Index {
                 min_samples: 5,
                 limit: 10,
             };
+            let regressions = recorder.regressions_on(sql, &windows).await;
+            let slowest = if regressions.is_ok() {
+                recorder.slowest_on(sql, now - hour * 24, now, 10).await
+            } else {
+                Err(Error::Internal)
+            };
             view::Views::Slowdowns {
-                regressions: recorder.regressions_on(sql, &windows).await,
-                slowest: recorder.slowest_on(sql, now - hour * 24, now, 10).await,
+                regressions,
+                slowest,
             }
         };
+        let failed = diagnostics.store == Store::Unavailable
+            || match &views {
+                view::Views::Samples(samples) => samples.is_err(),
+                view::Views::Slowdowns {
+                    regressions,
+                    slowest,
+                } => regressions.is_err() || slowest.is_err(),
+            };
+        if failed {
+            // A read deadline stops the future, not necessarily PostgreSQL.
+            // Close the uncertain connection instead of returning it to the
+            // pool or queueing display reads behind its outstanding query.
+            drop(bilibi_database::Connection::take(client));
+            client = self.pages.db.get().await?;
+        }
         let locale = self
             .pages
             .locales

@@ -51,12 +51,45 @@ struct PreviewWorker {
     contracts: Arc<JobContracts>,
 }
 impl Handler for PreviewWorker {
-    fn perform<'a>(&'a self, execution: &'a Execution, _: Value) -> HandlerFuture<'a> {
+    fn perform<'a>(&'a self, execution: &'a Execution, args: Value) -> HandlerFuture<'a> {
         Box::pin(async move {
             let Ok(mut connection) = self.db.get().await else {
                 return Outcome::Cancel("no_connection");
             };
             let client: &mut tokio_postgres::Client = &mut connection;
+            if args["refusal"] == true {
+                let Some(scope) = execution.scope() else {
+                    return Outcome::Cancel("missing_scope");
+                };
+                let count =
+                    async |client: &tokio_postgres::Client| -> bilibi_database::Result<i64> {
+                        Ok(client.query_one("SELECT count(*) FROM authz_decision_log WHERE tenant_id=$1 AND user_id=$2 AND capability='reports.view' AND NOT allowed", &[&scope.tenant(), &scope.user()]).await?.get(0))
+                    };
+                let Ok(before) = count(client).await else {
+                    return Outcome::Cancel("no_before_count");
+                };
+                let refusal = self
+                    .contracts
+                    .preview(
+                        client,
+                        execution,
+                        "base.reports.delete",
+                        &json!({"id": 1, "version": 1}),
+                    )
+                    .await;
+                let after = count(client).await;
+                return if matches!(refusal, Err(bilibi_agent_api::Error::Forbidden))
+                    && matches!(after, Ok(after) if after == before + 1)
+                {
+                    println!("PASS job owner refusal retains its reports.view denial log");
+                    Outcome::Completed
+                } else {
+                    eprintln!(
+                        "FAIL job refusal log: {refusal:?}, before={before}, after={after:?}"
+                    );
+                    Outcome::Cancel("missing_owner_refusal_log")
+                };
+            }
             let pause = self
                 .contracts
                 .preview(
@@ -96,7 +129,7 @@ inventory::submit! { Module {
 } }
 inventory::submit! { Contribution::new(bilibi_queue::WORKERS, PREVIEW_WORKER, PREVIEW_SOURCE, &Worker {
     max_attempts: 1,
-    validate: |args| if args == json!({}) { Ok(args) } else { Err(bilibi_database::Error::Invalid) },
+    validate: |args| if args == json!({}) || args == json!({"refusal": true}) { Ok(args) } else { Err(bilibi_database::Error::Invalid) },
 }) }
 inventory::submit! { Contribution::new(bilibi_queue::HANDLERS, PREVIEW_WORKER, PREVIEW_SOURCE, &HandlerBinding {
     service: PREVIEW_SERVICE, capability: "reports.author",
@@ -916,6 +949,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             )
             .await?;
+            client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES($1,$2,'reports.author',true,'all'),($1,$2,'reports.view',false,'all') ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=EXCLUDED.is_allowed", &[&viewer.tenant(), &viewer.user()]).await?;
+            let refusal_job = write(
+                &boundary,
+                &db,
+                &viewer,
+                "reports.walkthrough.refusal_preview",
+                async |tx| {
+                    Ok(queue
+                        .enqueue_for(tx, &viewer, PREVIEW_WORKER, json!({"refusal": true}))
+                        .await?
+                        .id())
+                },
+            )
+            .await?;
             let executor = bilibi_queue::Executor::from_services(
                 &app.services,
                 bilibi_queue::Config::default(),
@@ -924,6 +971,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let workers = tokio::spawn(executor.run(stopped));
             let mut shown = None;
             let mut preview_state = String::new();
+            let mut refusal_state = String::new();
             for _ in 0..60 {
                 preview_state = client
                     .query_one(
@@ -932,9 +980,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await?
                     .get(0);
+                refusal_state = client
+                    .query_one(
+                        "SELECT state FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+                        &[&viewer.tenant(), &refusal_job],
+                    )
+                    .await?
+                    .get(0);
                 let listed = reports.exports(&manager, Some(rows_id)).await?;
                 shown = listed.into_iter().find(|e| e.id == *export);
                 if shown.as_ref().is_some_and(|e| e.state != "queued")
+                    && matches!(
+                        refusal_state.as_str(),
+                        "completed" | "cancelled" | "discarded"
+                    )
                     && matches!(
                         preview_state.as_str(),
                         "completed" | "cancelled" | "discarded"
@@ -946,6 +1005,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             stop.send(true)?;
             workers.await??;
+            client.execute("DELETE FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability IN ('reports.author','reports.view')", &[&viewer.tenant(), &viewer.user()]).await?;
+            checks.check(
+                "job refusal preserves the owner's authorization decision",
+                refusal_state == "completed",
+                refusal_state,
+            );
             let saved: bool = client
                 .query_one(
                     "SELECT EXISTS (SELECT 1 FROM base_reports WHERE tenant_id=$1 AND name=$2)",
