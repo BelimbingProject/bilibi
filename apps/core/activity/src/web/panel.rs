@@ -371,14 +371,19 @@ impl Panel {
             })?);
         }
         if let Some(dialog) = &self.dialog {
-            content.push(&dialog.render(
-                &self.pages,
-                &clock,
-                &words,
-                &format!("{anchor}-new"),
-                "close_modal",
-                self.framed,
-            )?);
+            content.push(
+                &dialog
+                    .render(
+                        &self.pages,
+                        scope,
+                        &clock,
+                        &words,
+                        &format!("{anchor}-new"),
+                        "close_modal",
+                        self.framed,
+                    )
+                    .await?,
+            );
         }
         let card = render(Card {
             id: &format!("{anchor}-card"),

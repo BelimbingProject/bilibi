@@ -651,9 +651,10 @@ impl Dialog {
 
     /// The dialog: its fields for the kind, the related-record picker, and
     /// Cancel and Save.
-    pub fn render(
+    pub async fn render(
         &self,
         pages: &Pages,
+        scope: &Scope,
         clock: &Clock,
         words: &bilibi_grid::RecordWords,
         prefix: &str,
@@ -764,7 +765,9 @@ impl Dialog {
                     .hint("Emails the assignee, and guests without an account who were sent the invitation."),
             );
         }
-        let mut assignees = vec![("Me".to_owned(), "me".to_owned())];
+        let names = pages.names(scope, &[scope.user()]).await?;
+        let own_name = names.get(&scope.user()).cloned().unwrap_or_default();
+        let mut assignees = vec![(own_name, "me".to_owned())];
         if let Some((user, name)) = &self.assignee {
             assignees.insert(0, (name.clone(), user.to_string()));
         }

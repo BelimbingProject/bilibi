@@ -909,7 +909,7 @@ impl Detail {
     ) -> Result<Html> {
         let names = self
             .pages
-            .names(scope, &[a.assignee_user_id, a.created_by])
+            .names(scope, &[a.assignee_user_id, a.created_by, scope.user()])
             .await?;
         let name = |id: i64| names.get(&id).cloned().unwrap_or_default();
         let soon = self.pages.activities.imminent_window(scope).await?;
@@ -1052,8 +1052,9 @@ impl Detail {
         let assignee = a.assignee_user_id.to_string();
         let assignee_name = name(a.assignee_user_id);
         let mut options = vec![(assignee_name.as_str(), assignee.as_str())];
+        let own_name = name(scope.user());
         if a.assignee_user_id != scope.user() {
-            options.push(("Me", "me"));
+            options.push((own_name.as_str(), "me"));
         }
         items.push((
             "Assigned to",
@@ -1806,14 +1807,19 @@ impl Detail {
             })?);
         }
         if let Some(dialog) = &self.dialog {
-            body.push(&dialog.render(
-                &self.pages,
-                &clock,
-                &words,
-                "activity-new",
-                "close_modal",
-                self.framed,
-            )?);
+            body.push(
+                &dialog
+                    .render(
+                        &self.pages,
+                        scope,
+                        &clock,
+                        &words,
+                        "activity-new",
+                        "close_modal",
+                        self.framed,
+                    )
+                    .await?,
+            );
         }
         if let (Some(form), true) = (&self.series_form, editable) {
             body.push(&series_dialog(&a, form)?);

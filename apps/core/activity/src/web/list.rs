@@ -730,14 +730,10 @@ impl Index {
         let lanes: Vec<CalendarLane> = people
             .iter()
             .map(|id| {
-                let label = if *id == me {
-                    "Me".to_owned()
-                } else {
-                    names
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Account {id}"))
-                };
+                let label = names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Account {id}"));
                 CalendarLane::new(id.to_string(), label)
             })
             .collect();
@@ -915,6 +911,11 @@ impl Index {
             ],
         })?);
         let form = self.list.filters_form();
+        let names = self.pages.names(scope, &[scope.user()]).await?;
+        let assigned_to = format!(
+            "Assigned to {}",
+            names.get(&scope.user()).cloned().unwrap_or_default()
+        );
         let mut controls = vec![
             ToolbarControl::search(
                 "activities-search",
@@ -955,7 +956,7 @@ impl Index {
                 &form["mine"],
                 choices(&[
                     ("Everyone's I may see", "any"),
-                    ("Assigned to me", "assignee"),
+                    (assigned_to.as_str(), "assignee"),
                     ("I am a guest", "guest"),
                 ]),
             ),
@@ -1009,14 +1010,19 @@ impl Index {
             body.push(&reminder_defaults::dialog(dialog)?);
         }
         if let Some(dialog) = &self.dialog {
-            body.push(&dialog.render(
-                &self.pages,
-                &clock,
-                &words,
-                "activities-new",
-                "close_modal",
-                self.framed,
-            )?);
+            body.push(
+                &dialog
+                    .render(
+                        &self.pages,
+                        scope,
+                        &clock,
+                        &words,
+                        "activities-new",
+                        "close_modal",
+                        self.framed,
+                    )
+                    .await?,
+            );
         }
         let region = render(Region {
             id: "activities-region",
