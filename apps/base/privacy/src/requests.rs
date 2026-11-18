@@ -832,7 +832,7 @@ impl Privacy {
         tx.batch_execute("SAVEPOINT privacy_locate").await?;
         let found = async {
             tx.batch_execute(LOCATE_TIMEOUT).await?;
-            self.locate_matches(tx.client(), scope, request).await
+            self.locate_matches(tx, scope, request).await
         }
         .await;
         match found {
@@ -857,7 +857,7 @@ impl Privacy {
     }
     async fn locate_matches(
         &self,
-        client: &Client,
+        tx: &Transaction<'_>,
         scope: &Scope,
         request: &RequestView,
     ) -> Result<Vec<(String, String, Located)>> {
@@ -865,7 +865,7 @@ impl Privacy {
         for (key, _, data) in self.stores.iter() {
             let mut located = data
                 .handler
-                .locate(client, scope, &subject_for(request, key))
+                .locate(tx, scope, &subject_for(request, key))
                 .await?;
             if located.candidates.len() > MAX_CANDIDATES {
                 located.candidates.truncate(MAX_CANDIDATES);

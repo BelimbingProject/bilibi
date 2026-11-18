@@ -8,7 +8,7 @@ use crate::{
 use bilibi_database::{Error, Result};
 use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
-use tokio_postgres::Row;
+use tokio_postgres::{Client, Row};
 
 pub const PAGE_SIZES: [i64; 4] = [25, 50, 100, 300];
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -142,6 +142,14 @@ impl Recorder {
     /// One bounded page, newest first. A page size outside `PAGE_SIZES`, a page
     /// below one or a malformed identity filter is refused, not clamped.
     pub async fn list_samples(&self, filter: &Filter) -> Result<Page> {
+        self.list_samples_on(None, filter).await
+    }
+
+    pub(crate) async fn list_samples_on(
+        &self,
+        client: Option<&Client>,
+        filter: &Filter,
+    ) -> Result<Page> {
         if filter.page < 1
             || filter.page > 1_000_000
             || !PAGE_SIZES.contains(&filter.page_size)
@@ -153,7 +161,13 @@ impl Recorder {
             return Err(Error::Invalid);
         }
         let read = async {
-            let client = self.db.get().await?;
+            let connection;
+            let client = if let Some(client) = client {
+                client
+            } else {
+                connection = self.db.get().await?;
+                &**connection
+            };
             let kind = filter.kind.map(Kind::as_str);
             let outcome = filter.outcome.map(Outcome::as_str);
             let identity = filter.identity.as_deref();
@@ -187,6 +201,10 @@ impl Recorder {
     /// a running writer reads as available with zero samples, and a missing
     /// writer or store says so.
     pub async fn diagnostics(&self) -> Diagnostics {
+        self.diagnostics_on(None).await
+    }
+
+    pub(crate) async fn diagnostics_on(&self, client: Option<&Client>) -> Diagnostics {
         let stats = self.stats();
         let recorder = if !stats.running {
             Health::Unavailable
@@ -196,7 +214,13 @@ impl Recorder {
             Health::Available
         };
         let read = async {
-            let client = self.db.get().await?;
+            let connection;
+            let client = if let Some(client) = client {
+                client
+            } else {
+                connection = self.db.get().await?;
+                &**connection
+            };
             let row = client
                 .query_one(
                     "SELECT count(*)::bigint, max(observed_at) FROM base_perf_samples",
@@ -240,6 +264,14 @@ impl Recorder {
     /// `perf.slow_threshold_ms`, ranked by how much their mean grew against the
     /// baseline window. The windows must be ordered and must not overlap.
     pub async fn regressions(&self, windows: &Windows) -> Result<Vec<Regression>> {
+        self.regressions_on(None, windows).await
+    }
+
+    pub(crate) async fn regressions_on(
+        &self,
+        client: Option<&Client>,
+        windows: &Windows,
+    ) -> Result<Vec<Regression>> {
         if windows.baseline_from >= windows.baseline_to
             || windows.current_from >= windows.current_to
             || windows.baseline_to > windows.current_from
@@ -249,10 +281,16 @@ impl Recorder {
             return Err(Error::Invalid);
         }
         let read = async {
-            let client = self.db.get().await?;
+            let connection;
+            let client = if let Some(client) = client {
+                client
+            } else {
+                connection = self.db.get().await?;
+                &**connection
+            };
             let threshold = self
                 .settings
-                .get_global(&**client, SLOW_THRESHOLD_MS)
+                .get_global(client, SLOW_THRESHOLD_MS)
                 .await?
                 .as_f64()
                 .ok_or(Error::Invalid)?;
@@ -304,11 +342,27 @@ impl Recorder {
         to: SystemTime,
         limit: i64,
     ) -> Result<Vec<Slowest>> {
+        self.slowest_on(None, from, to, limit).await
+    }
+
+    pub(crate) async fn slowest_on(
+        &self,
+        client: Option<&Client>,
+        from: SystemTime,
+        to: SystemTime,
+        limit: i64,
+    ) -> Result<Vec<Slowest>> {
         if from >= to || !(1..=100).contains(&limit) {
             return Err(Error::Invalid);
         }
         let read = async {
-            let client = self.db.get().await?;
+            let connection;
+            let client = if let Some(client) = client {
+                client
+            } else {
+                connection = self.db.get().await?;
+                &**connection
+            };
             let rows = client
                 .query(
                     "SELECT kind, identity, count(*)::bigint AS samples, avg(duration_ms)::float8 AS average, \

@@ -335,7 +335,7 @@ pub trait Progress: Send + Sync {
 pub trait Handler: Send + Sync {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located>;

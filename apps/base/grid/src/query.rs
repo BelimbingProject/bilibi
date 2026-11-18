@@ -281,9 +281,6 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     if ids.len() > MAX_ROWS {
         return Err(QueryError::Limit("page exceeds 100 IDs"));
     }
-    if specs.len() > MAX_COLUMNS {
-        return Err(QueryError::Limit("more than 32 column specs"));
-    }
     if ids
         .iter()
         .any(|id| !matches!(id, Value::Number(_) | Value::String(_)) || id.to_string().len() > 256)
@@ -292,13 +289,7 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
             "keys must be scalar numbers/strings up to 256 bytes",
         ));
     }
-    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
-    let columns = catalog
-        .resolve_all(root, specs)
-        .map_err(|(spec, error)| QueryError::Column(spec, error))?;
-    if columns.iter().map(|c| c.depth).sum::<usize>() > MAX_HOPS {
-        return Err(QueryError::Limit("more than 128 total hops"));
-    }
+    let (root, columns) = projection_columns(catalog, root, specs)?;
     let today = today();
     let months = trend_months(today);
     // A series or an earlier total of a masked value would show it.
@@ -960,18 +951,34 @@ pub(crate) async fn bounded<T>(
     result
 }
 
-/// Project fields on a connection already held by the caller's transaction.
-pub async fn project_on<S: AsRef<str>>(
+fn projection_columns<'a, S: AsRef<str>>(
+    catalog: &'a Catalog,
+    root: &str,
+    specs: &[S],
+) -> Result<(&'a Table, Vec<Column>), QueryError> {
+    if specs.len() > MAX_COLUMNS {
+        return Err(QueryError::Limit("more than 32 column specs"));
+    }
+    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
+    let columns = catalog
+        .resolve_all(root, specs)
+        .map_err(|(spec, error)| QueryError::Column(spec, error))?;
+    if columns.iter().map(|c| c.depth).sum::<usize>() > MAX_HOPS {
+        return Err(QueryError::Limit("more than 128 total hops"));
+    }
+    Ok((root, columns))
+}
+
+pub async fn validate_projection_on<S: AsRef<str>>(
     tx: &tokio_postgres::Transaction<'_>,
     scope: &Scope,
     root: &str,
-    ids: &[Value],
     specs: &[S],
     bounds: Bounds,
-) -> Result<Projection, QueryError> {
+) -> Result<(), QueryError> {
     bounded(tx, bounds, async {
         let catalog = Catalog::for_scope(tx, scope).await?;
-        project_catalog(tx, &catalog, root, ids, specs, &Lenses::default(), bounds).await
+        projection_columns(&catalog, root, specs).map(|_| ())
     })
     .await
 }

@@ -296,7 +296,7 @@ async fn answer(
     let (state, finished): (String, bool) = (state.get(0), state.get(1));
     // Counted before the store acts, while every match is still there.
     let left = if state == "pending" {
-        unconfirmed(&client, scope, data.handler, &subject).await?
+        unconfirmed(&mut client, scope, data.handler, &subject).await?
     } else {
         0
     };
@@ -440,7 +440,7 @@ async fn answer(
 /// How many of the store's records matched only an email or phone given and
 /// were not confirmed as the person's when the request was verified.
 async fn unconfirmed(
-    client: &tokio_postgres::Client,
+    client: &mut tokio_postgres::Client,
     scope: &Scope,
     handler: &dyn bilibi_personal_data::Handler,
     subject: &bilibi_personal_data::Subject,
@@ -448,7 +448,9 @@ async fn unconfirmed(
     if subject.identifiers.is_empty() {
         return Ok(0);
     }
-    let located = handler.locate(client, scope, subject).await?;
+    let tx = client.transaction().await?;
+    let located = handler.locate(&tx, scope, subject).await?;
+    tx.commit().await?;
     let matched: i64 = located.kinds.iter().map(|k| k.by_identifier).sum();
     Ok((matched - subject.confirmed.len() as i64).max(0))
 }

@@ -1,6 +1,6 @@
 //! Manual walkthrough of password, reset and verification flows against an
 //! explicitly supplied disposable database, run after `migrate`.
-//! No test harness or assertions; prints each outcome for inspection, and reads
+//! Prints outcomes for inspection, checks single-use reset tokens, and reads
 //! the dev mailbox exactly as a developer would to follow an emailed link. It
 //! stores the development instance role first: the dev mailbox sends nowhere
 //! else.
@@ -316,6 +316,11 @@ async fn main() -> Result<()> {
         a.map_err(|_| Error::Internal)?,
         b.map_err(|_| Error::Internal)?,
     );
+    assert!(matches!(
+        (&a, &b),
+        (Ok(_), Err(CredentialError::InvalidOrExpiredToken))
+            | (Err(CredentialError::InvalidOrExpiredToken), Ok(_))
+    ));
     println!(
         "two simultaneous resets with one token: {} / {}",
         outcome(&a),

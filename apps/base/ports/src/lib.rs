@@ -237,49 +237,36 @@ impl Ports {
         let reads = self
             .facts
             .iter()
-            .copied()
             .filter(|fact| fact.record_kind == kind)
-            .filter_map(|fact| {
-                let provider = self.providers.get(fact.port).copied()?;
-                let db = db.clone();
-                let scope = scope.clone();
-                let id = id.to_owned();
-                Some(tokio::spawn(async move {
-                    tokio::time::timeout(Duration::from_millis(100), async {
-                        let mut client = db.get().await.ok()?;
-                        let tx = client
-                            .build_transaction()
-                            .read_only(true)
-                            .start()
-                            .await
-                            .ok()?;
-                        tx.batch_execute("SET LOCAL statement_timeout = '75ms'")
-                            .await
-                            .ok()?;
-                        let answer = provider
-                            .call((&tx).into(), &scope, serde_json::json!({"id": id}))
-                            .await
-                            .ok()?;
-                        let value: RecordFactValue = serde_json::from_value(answer).ok()?;
-                        if value.label.is_empty()
-                            || value.label.chars().count() > 80
-                            || value.value.chars().count() > 160
-                        {
-                            return None;
-                        }
-                        Some(value)
-                    })
-                    .await
-                    .ok()
-                    .flatten()
-                }))
+            .map(|fact| async move {
+                tokio::time::timeout(Duration::from_millis(100), async {
+                    let mut client = db.get_detached("record fact provider").await.ok()?;
+                    let tx = client
+                        .build_transaction()
+                        .read_only(true)
+                        .start()
+                        .await
+                        .ok()?;
+                    tx.batch_execute("SET LOCAL statement_timeout = '75ms'")
+                        .await
+                        .ok()?;
+                    let value: RecordFactValue = self
+                        .call(&tx, scope, fact.port, &serde_json::json!({"id": id}))
+                        .await
+                        .ok()?;
+                    if value.label.is_empty()
+                        || value.label.chars().count() > 80
+                        || value.value.chars().count() > 160
+                    {
+                        return None;
+                    }
+                    Some(value)
+                })
+                .await
+                .ok()
+                .flatten()
             });
-        join_all(reads)
-            .await
-            .into_iter()
-            .filter_map(|result| result.ok())
-            .flatten()
-            .collect()
+        join_all(reads).await.into_iter().flatten().collect()
     }
     /// Whether a mounted module provides `id`, for a page that withholds a
     /// control rather than offering one that would answer `Unavailable`.

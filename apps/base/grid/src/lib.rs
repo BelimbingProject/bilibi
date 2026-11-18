@@ -26,8 +26,8 @@ pub use oversight::{
 pub use page_columns::{Outcome, PageColumns, ViewCaller};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
-    project, project_lenses, project_on, project_within, scalar_access, scalar_expression,
-    scalar_join, stats, Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS,
+    project, project_lenses, project_within, scalar_access, scalar_expression, scalar_join, stats,
+    validate_projection_on, Lenses, Projection, QueryError, Row, ScalarJoin, Stats, BOUNDS,
     MAX_ESTIMATED_COST,
 };
 pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};

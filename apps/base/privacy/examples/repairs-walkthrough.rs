@@ -78,7 +78,7 @@ static PROBE: Probe = Probe;
 impl Handler for Probe {
     fn locate<'a>(
         &'a self,
-        _client: &'a Client,
+        _client: &'a tokio_postgres::Transaction<'_>,
         _scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {

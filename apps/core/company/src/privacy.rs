@@ -57,11 +57,12 @@ static COMPANIES: Companies = Companies;
 impl Handler for Companies {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let (emails, phones) = subject.patterns();
             if emails.is_empty() && phones.is_empty() {
                 return Ok(Located::default());

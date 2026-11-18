@@ -5,7 +5,7 @@
 //! plain SQL over the same rows, or proves a refusal; it prints PASS/FAIL and
 //! exits non-zero on any failure. No test runner or mocks.
 use bilibi_base::{
-    agent_api::Registry,
+    agent_api::{job::JobContracts, Registry},
     authz::grants::Grants,
     grid,
     reports::{
@@ -14,9 +14,13 @@ use bilibi_base::{
     },
     tenancy::{Authentication, Scope},
 };
-use bilibi_database::{pool, MutationBoundary};
+use bilibi_database::{pool, Db, MutationBoundary};
+use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
+use bilibi_queue::{
+    Execution, Handler, HandlerBinding, HandlerFuture, HandlerService, Outcome, Queue, Worker,
+};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -30,6 +34,72 @@ bilibi_walkthrough_fixture::inventory::submit! { bilibi_walkthrough_fixture::reg
         bilibi_walkthrough_fixture::authz::RoleDefinition { code: "viewer", name: "viewer", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view"] },
     ],
     system_principals: &[],
+}) }
+
+const PREVIEW_MODULE: &str = "extensions/report_preview_walkthrough";
+const PREVIEW_WORKER: &str = "report-preview-walkthrough/check";
+const PREVIEW_SERVICE: &str = "extensions/report_preview_walkthrough.worker";
+const PREVIEW_SOURCE: Provenance = Provenance {
+    module: PREVIEW_MODULE,
+    source: file!(),
+    line: line!(),
+};
+const PREVIEW_NAME: &str = "Job preview without saving";
+
+struct PreviewWorker {
+    db: Arc<Db>,
+    contracts: Arc<JobContracts>,
+}
+impl Handler for PreviewWorker {
+    fn perform<'a>(&'a self, execution: &'a Execution, _: Value) -> HandlerFuture<'a> {
+        Box::pin(async move {
+            let Ok(mut connection) = self.db.get().await else {
+                return Outcome::Cancel("no_connection");
+            };
+            let client: &mut tokio_postgres::Client = &mut connection;
+            let pause = self
+                .contracts
+                .preview(
+                    client,
+                    execution,
+                    "base.reports.pause_subscription",
+                    &json!({"subscription": 1, "version": 1, "paused": true}),
+                )
+                .await;
+            let create = self.contracts.preview(client, execution, "base.reports.create",
+                &json!({"name": PREVIEW_NAME, "record_type": "reference_items", "kind": "rows", "definition": {"columns": ["name"]}})).await;
+            match (&pause, &create) {
+                (Ok(pause), Ok(create))
+                    if pause["result"]["summary"]
+                        == "Pause this scheduled report; deliveries not started are cancelled"
+                        && create["result"]["report"]["name"] == PREVIEW_NAME =>
+                {
+                    Outcome::Completed
+                }
+                _ => {
+                    eprintln!("Report job previews: {pause:?}, {create:?}");
+                    Outcome::Cancel("incorrect_preview")
+                }
+            }
+        })
+    }
+}
+inventory::submit! { Module {
+    id: PREVIEW_MODULE, layer: Layer::Extensions,
+    dependencies: &["base/agent_api", "base/database", "base/queue", "base/reports"],
+    migrations: &[], services: &[Service { id: PREVIEW_SERVICE, factory: |services| {
+        Ok(Arc::new(HandlerService(Arc::new(PreviewWorker {
+            db: services.get("base/database.pool")?,
+            contracts: services.get(bilibi_base::agent_api::job::SERVICE)?,
+        }))))
+    }}],
+} }
+inventory::submit! { Contribution::new(bilibi_queue::WORKERS, PREVIEW_WORKER, PREVIEW_SOURCE, &Worker {
+    max_attempts: 1,
+    validate: |args| if args == json!({}) { Ok(args) } else { Err(bilibi_database::Error::Invalid) },
+}) }
+inventory::submit! { Contribution::new(bilibi_queue::HANDLERS, PREVIEW_WORKER, PREVIEW_SOURCE, &HandlerBinding {
+    service: PREVIEW_SERVICE, capability: "reports.author",
 }) }
 
 // A source the planner thinks is heavy (20 million rows) that returns one
@@ -832,6 +902,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // as failed, not preparing. Nothing derives that from the job
             // row, so the walkthrough runs an executor until it is told.
             client.execute("UPDATE base_queue_jobs SET state='cancelled', cancelled_at=now(), failure_code='actor_refused' WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?;
+            let queue = app.services.get::<Queue>(bilibi_queue::SERVICE)?;
+            let preview_job = write(
+                &boundary,
+                &db,
+                &manager,
+                "reports.walkthrough.preview",
+                async |tx| {
+                    Ok(queue
+                        .enqueue_for(tx, &manager, PREVIEW_WORKER, json!({}))
+                        .await?
+                        .id())
+                },
+            )
+            .await?;
             let executor = bilibi_queue::Executor::from_services(
                 &app.services,
                 bilibi_queue::Config::default(),
@@ -839,16 +923,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (stop, stopped) = tokio::sync::watch::channel(false);
             let workers = tokio::spawn(executor.run(stopped));
             let mut shown = None;
+            let mut preview_state = String::new();
             for _ in 0..60 {
+                preview_state = client
+                    .query_one(
+                        "SELECT state FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+                        &[&manager.tenant(), &preview_job],
+                    )
+                    .await?
+                    .get(0);
                 let listed = reports.exports(&manager, Some(rows_id)).await?;
                 shown = listed.into_iter().find(|e| e.id == *export);
-                if shown.as_ref().is_some_and(|e| e.state != "queued") {
+                if shown.as_ref().is_some_and(|e| e.state != "queued")
+                    && matches!(
+                        preview_state.as_str(),
+                        "completed" | "cancelled" | "discarded"
+                    )
+                {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             stop.send(true)?;
             workers.await??;
+            let saved: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM base_reports WHERE tenant_id=$1 AND name=$2)",
+                    &[&manager.tenant(), &PREVIEW_NAME],
+                )
+                .await?
+                .get(0);
+            checks.check(
+                "job previews a pause and a row draft on a plain client without saving",
+                preview_state == "completed" && !saved,
+                preview_state,
+            );
             let told: Option<String> = client.query_one("SELECT ending FROM base_queue_jobs WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?.get(0);
             checks.check(
                 "Queue tells Reports once that the job ended",

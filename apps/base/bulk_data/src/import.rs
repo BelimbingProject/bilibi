@@ -529,7 +529,7 @@ impl BulkData {
             let key = work.source_key(cells);
             match pass {
                 Pass::Preview => {
-                    batch.push(work.check(&*client, planned, row, key).await?);
+                    batch.push(work.check(client, planned, row, key).await?);
                     next += 1;
                     if batch.len() == BATCH
                         && !self
@@ -755,7 +755,7 @@ impl Work<'_> {
     /// A dry-run row: the owner's preview of the write, nothing written.
     async fn check(
         &self,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         planned: Planned,
         row: i32,
         key: Option<String>,

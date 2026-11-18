@@ -123,11 +123,12 @@ static PAYLOADS: Payloads = Payloads;
 impl Handler for Payloads {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let mut by_person = 0;
             for (name, declaration) in declared()? {
                 let Some(pointer) = declaration.person else {

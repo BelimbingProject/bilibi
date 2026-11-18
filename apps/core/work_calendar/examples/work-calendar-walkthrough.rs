@@ -1004,12 +1004,23 @@ async fn main() -> Result<(), Failure> {
         json!({"kind": "holiday", "set": "race-set", "name": "First holiday"}),
     );
     print_days(&days);
-    let events: i64 = client.query_one("SELECT count(*) FROM base_events WHERE name='core/work_calendar.changed' AND subject='race'", &[]).await?.get(0);
-    assert!(
-        events > 0,
-        "the racing writes must publish a calendar change"
+    let events = client
+        .query(
+            "SELECT payload FROM base_events WHERE tenant_id=$1 AND name=$2 AND subject=$3",
+            &[
+                &admin.scope.tenant(),
+                &"core/work_calendar.changed",
+                &"race",
+            ],
+        )
+        .await?;
+    assert_eq!(events.len(), 1, "the race must publish exactly one change");
+    let payload: Value = events[0].get(0);
+    assert_eq!(
+        payload,
+        json!({"calendar": "race", "from": "2027-05-03", "to": "2027-05-03"})
     );
-    println!("changed events for race: {events}");
+    println!("changed events for race: {}", events.len());
 
     println!("== a read held while a plan commits answers from one snapshot");
     // Monday 2026-11-02 is a holiday; one plan moves it to the Sunday before

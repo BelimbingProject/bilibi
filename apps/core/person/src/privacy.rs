@@ -111,16 +111,32 @@ fn files_of(subject: &Subject) -> String {
     subject.person.get().to_string()
 }
 
+async fn optional_locate<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<Option<T>> {
+    tx.batch_execute("SAVEPOINT person_locate_optional").await?;
+    let result = read.await;
+    if matches!(&result, Err(Error::Database(_))) {
+        tx.batch_execute("ROLLBACK TO SAVEPOINT person_locate_optional")
+            .await?;
+    }
+    tx.batch_execute("RELEASE SAVEPOINT person_locate_optional")
+        .await?;
+    Ok(result.ok())
+}
+
 struct People;
 static PEOPLE: People = People;
 impl Handler for People {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        tx: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = tx.client();
             let (emails, phones) = identifiers(subject);
             let row = client
                 .query_one(
@@ -137,29 +153,41 @@ impl Handler for People {
             let files = services()?;
             let id = files_of(subject);
             // Files are counted only when this reader may see them.
-            if let Ok(count) = files
-                .media
-                .count_attachments(
-                    client,
-                    scope,
-                    AttachmentSubject {
-                        kind: ATTACHMENT_SUBJECT,
-                        id: &id,
-                    },
-                )
-                .await
-            {
+            let attachments = async {
+                files
+                    .media
+                    .count_attachments(
+                        client,
+                        scope,
+                        AttachmentSubject {
+                            kind: ATTACHMENT_SUBJECT,
+                            id: &id,
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        bilibi_media::Error::Postgres(error) => error.into(),
+                        other => media_error(other),
+                    })
+            };
+            if let Some(count) = optional_locate(tx, attachments).await? {
                 kinds.push(KindCount {
                     kind: ATTACHMENT_KIND.into(),
                     by_person: count,
                     by_identifier: 0,
                 });
             }
-            if let Ok(documents) = files
-                .artifacts
-                .subject_documents(client, scope, &FILES, &id)
-                .await
-            {
+            let documents = async {
+                files
+                    .artifacts
+                    .subject_documents(client, scope, &FILES, &id)
+                    .await
+                    .map_err(|error| match error {
+                        bilibi_artifacts::Error::Sql(error) => error.into(),
+                        other => artifact_error(other),
+                    })
+            };
+            if let Some(documents) = optional_locate(tx, documents).await? {
                 kinds.push(KindCount {
                     kind: DOCUMENT_KIND.into(),
                     by_person: documents.len() as i64,

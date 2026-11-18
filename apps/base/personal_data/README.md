@@ -30,7 +30,7 @@ inventory::submit! { Contribution::new(PERSONAL_DATA, "core/person.people", prov
 
 | Call | Gets | Answers |
 | --- | --- | --- |
-| `locate` | plain connection | Counts per kind (by person, by identifier only) and identifier-only `Candidate`s |
+| `locate` | caller transaction | Counts per kind (by person, by identifier only) and identifier-only `Candidate`s |
 | `export` | plain connection, `Disclosure` | Every record (never a first page) and `FileRef`s |
 | `file` | plain connection, `Disclosure` | One listed file's bytes, read through its owner (`File::Read`), or `File::Withheld` with a reason (`not_cleared`: not past its malware check; `missing`: bytes no longer stored), which the bundle lists without bytes instead of failing |
 | `erase` | the erasure `MutationTransaction`, `Erasure`, `Holds` | Actions, erased records, kept records with reason and hold |

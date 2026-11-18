@@ -275,7 +275,7 @@ A job a person started calls a write contract as that person through `base/agent
 |---|---|
 | `writable(key)`, `readable(key)` | Whether a job may call the contract: a registered reviewed write (or a read), open to `Channel::Job`, with no step-up. Owners check theirs at boot |
 | `principal_writable(key, principal)` | `writable`, and the contract's owner admits that principal (`PRINCIPAL_WRITES`) |
-| `preview(client, execution, key, input)` | Schema, live capability, the owner's preview; writes nothing (a dry run) |
+| `preview(&mut client, execution, key, input)` | Schema, live capability and the owner's dry run on a transaction borrowed from the supplied connection |
 | `commit(tx, execution, key, input)` | The owner's preview, then its commit on `tx`, which must come from `Execution::begin`: the lease, the caller's identity and the enqueue's trace ID hold. Record your own result in the same `tx`, then commit it |
 | `read(client, execution, key, input)` | A read contract, as `Registry::call` |
 

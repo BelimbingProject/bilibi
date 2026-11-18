@@ -9,7 +9,7 @@ use bilibi_base::media::{AttachmentSubject, Media, Rules, Upload};
 use bilibi_core::person as person_files;
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_party_ids::{OrganisationId, PersonId};
-use bilibi_personal_data::Identifier;
+use bilibi_personal_data::{Identifier, Stores, Subject};
 use bilibi_privacy::{
     ConfirmedRecord, HoldTarget, NewRequest, Privacy, RequestKind, RequestView, SERVICE,
 };
@@ -460,6 +460,45 @@ async fn main() -> Result<()> {
         "attachment {} submitted; document {}",
         attachment.public_id, document.id
     );
+
+    let people = Stores::installed()?
+        .get("core/person.people")
+        .ok_or("missing Person store")?
+        .1
+        .handler;
+    let subject = Subject {
+        person: ada,
+        identifiers: vec![],
+        confirmed: vec![],
+    };
+    for (break_lookup, missing, remaining) in [
+        (
+            "ALTER TABLE base_media_attachments RENAME TO walkthrough_missing_attachments",
+            "base/media/attachment",
+            "core.person document",
+        ),
+        (
+            "ALTER TABLE base_artifacts RENAME TO walkthrough_missing_artifacts",
+            "core.person document",
+            "base/media/attachment",
+        ),
+    ] {
+        let tx = client.transaction().await?;
+        tx.batch_execute(break_lookup).await?;
+        let located = people.locate(&tx, &admin, &subject).await?;
+        assert!(located.kinds.iter().all(|count| count.kind != missing));
+        for kind in ["person", remaining] {
+            assert!(
+                located
+                    .kinds
+                    .iter()
+                    .any(|count| count.kind == kind && count.by_person == 1),
+                "locate must retain the {kind} count after an optional query fails: {located:?}",
+            );
+        }
+        tx.query_one("SELECT 1", &[]).await?;
+        tx.rollback().await?;
+    }
 
     println!("== case files: attachments on a record about a person (#478)");
     case_files::install(&client, media.clone()).await?;

@@ -292,33 +292,39 @@ impl WriteHandler for Write {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let reports = bound()?;
-            let tx = client.transaction().ok_or(Error::Internal)?;
+            let sql = client.sql_client().await?;
             let value = match self {
                 Self::Create => {
                     let draft = draft(input)?;
-                    reports.check_draft(Some(tx), scope, &draft).await?;
+                    reports
+                        .check_draft(client.transaction(), scope, &draft)
+                        .await?;
                     json!({"summary": format!("Save the new report {}", draft.name.trim()), "report": crate::after(&draft)})
                 }
                 Self::Update => {
                     let draft = draft(input)?;
-                    let current = reports.get_on(tx, scope, id(input)?).await?;
+                    let current = reports.get_on(sql, scope, id(input)?).await?;
                     if !current.owned {
                         return Err(ReportError::NotOwner.into());
                     }
-                    reports.check_draft(Some(tx), scope, &draft).await?;
+                    reports
+                        .check_draft(client.transaction(), scope, &draft)
+                        .await?;
                     json!({"summary": format!("Change the report {}", current.name), "version": current.version, "before": crate::snapshot(&current), "after": crate::after(&draft)})
                 }
                 Self::Copy => {
                     let current = match builtin(input) {
-                        Some(key) => reports.builtin_on(tx, scope, key).await?,
-                        None => reports.get_on(tx, scope, id(input)?).await?,
+                        Some(key) => reports.builtin_on(sql, scope, key).await?,
+                        None => reports.get_on(sql, scope, id(input)?).await?,
                     };
                     let draft = crate::copy_of(&current, input["name"].as_str());
-                    reports.check_draft(Some(tx), scope, &draft).await?;
+                    reports
+                        .check_draft(client.transaction(), scope, &draft)
+                        .await?;
                     json!({"summary": format!("Save a copy of {} as {}", current.name, draft.name), "report": crate::after(&draft)})
                 }
                 Self::Share => {
-                    let current = reports.get_on(tx, scope, id(input)?).await?;
+                    let current = reports.get_on(sql, scope, id(input)?).await?;
                     if !current.owned {
                         return Err(ReportError::NotOwner.into());
                     }
@@ -327,14 +333,14 @@ impl WriteHandler for Write {
                         "after": {"shared_with_everyone": input["everyone"].as_bool() == Some(true), "roles": input["roles"]}})
                 }
                 Self::Delete => {
-                    let current = reports.get_on(tx, scope, id(input)?).await?;
+                    let current = reports.get_on(sql, scope, id(input)?).await?;
                     if !current.owned {
                         return Err(ReportError::NotOwner.into());
                     }
                     json!({"summary": format!("Delete the report {}; people it is shared with lose it too", current.name), "version": current.version})
                 }
                 Self::Subscribe => {
-                    let current = reports.get_on(tx, scope, id(input)?).await?;
+                    let current = reports.get_on(sql, scope, id(input)?).await?;
                     let plan = plan(input)?;
                     json!({"summary": format!("Deliver {} {} at {} as {}{}{}", current.name, plan.frequency.key(), clock(plan.at_minute), plan.format.key().to_uppercase(), if plan.roles.is_empty() { String::new() } else { format!(", also to {} role(s)", plan.roles.len()) }, if plan.people.is_empty() { String::new() } else { format!(", {} person(s)", plan.people.len()) })})
                 }
@@ -346,7 +352,7 @@ impl WriteHandler for Write {
                     json!({"summary": "Delete this scheduled report and its delivery history"})
                 }
                 Self::PrepareExport => {
-                    let current = reports.get_on(tx, scope, id(input)?).await?;
+                    let current = reports.get_on(sql, scope, id(input)?).await?;
                     let format = export_format(input)?;
                     json!({"summary": format!("Prepare {} as {} in the background; you get a notice when it is ready", current.name, format.key().to_uppercase())})
                 }

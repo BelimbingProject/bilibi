@@ -657,11 +657,10 @@ impl Reports {
     ) -> Result<(), QueryError> {
         match draft.kind {
             Kind::Rows => {
-                bilibi_grid::project_on(
+                bilibi_grid::validate_projection_on(
                     tx,
                     scope,
                     &draft.record_type,
-                    &[],
                     &draft.definition.columns,
                     bounds,
                 )

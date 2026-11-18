@@ -1,5 +1,5 @@
-//! Opt-in manual service walkthrough. No test harness, assertions or unit tests.
-//! Uses a disposable migrated database and prints outcomes for inspection.
+//! Service walkthrough on a disposable migrated database.
+//! Prints outcomes and checks the slugs from concurrent creations.
 use bilibi_database::{pool, Error, Result};
 use bilibi_module_registry::Services;
 use bilibi_security::Scope;
@@ -124,10 +124,15 @@ async fn main() -> Result<()> {
             async move { queries.create(&actor, &input).await }
         })
     );
-    let (a, b) = (
-        a.map_err(|_| Error::Internal)?,
-        b.map_err(|_| Error::Internal)?,
-    );
+    let a = a
+        .map_err(|_| Error::Internal)?
+        .expect("first query was saved");
+    let b = b
+        .map_err(|_| Error::Internal)?
+        .expect("second query was saved");
+    assert_ne!(a.slug, b.slug);
+    assert_ne!(a.slug, first.slug);
+    assert_ne!(b.slug, first.slug);
     println!("concurrent same-name creations: {a:?} / {b:?}");
     println!(
         "list: {:?}",

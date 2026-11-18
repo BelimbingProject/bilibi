@@ -16,7 +16,7 @@
 //! an approved rule's action as `rules`. The same schema, live capability
 //! (the principal's own tenant grants), preview and commit apply; system
 //! scopes still cannot enter the other doors.
-use crate::{Error, Handler, OperationClient, RegisteredOperation, Registry, Result};
+use crate::{Error, Handler, RegisteredOperation, Registry, Result};
 use bilibi_database::MutationTransaction;
 use bilibi_module_registry::{Entry, RegistryError};
 use bilibi_queue::Execution;
@@ -171,7 +171,7 @@ impl JobContracts {
     /// `Backend(Conflict)` …).
     pub async fn preview(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &mut (impl GenericClient + Sync),
         execution: &Execution,
         key: &str,
         input: &Value,
@@ -182,10 +182,16 @@ impl JobContracts {
         let Handler::SafeWrite(owner) = registered.definition.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        Ok(owner
-            .preview(client as &dyn OperationClient, &scope, input)
-            .await?
-            .envelope(key))
+        let tx = client
+            .transaction()
+            .await
+            .map_err(bilibi_database::Error::from)?;
+        let reservations = crate::PreviewReservations::default();
+        let output = owner
+            .preview(&crate::TransactionRead(&tx, &reservations), &scope, input)
+            .await?;
+        tx.commit().await.map_err(bilibi_database::Error::from)?;
+        Ok(output.envelope(key))
     }
 
     /// The owner's preview, then its commit on `tx`, which must be this

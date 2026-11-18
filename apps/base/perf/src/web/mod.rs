@@ -147,24 +147,20 @@ impl Index {
         let now = SystemTime::now();
         let hour = Duration::from_secs(3600);
         let recorder = &self.pages.recorder;
-        let (diagnostics, views) = if self.tab == TABS[1].0 {
-            let filter = self.filter();
-            let diagnostics = tokio::spawn({
-                let recorder = recorder.clone();
-                async move { recorder.diagnostics().await }
-            });
-            let (diagnostics, mut samples) =
-                tokio::join!(diagnostics, recorder.list_samples(&filter));
-            let diagnostics = diagnostics.map_err(|_| Error::Internal)?;
+        let client = self.pages.db.get().await?;
+        let sql = Some(&**client);
+        let diagnostics = recorder.diagnostics_on(sql).await;
+        let views = if self.tab == TABS[1].0 {
+            let mut samples = recorder.list_samples_on(sql, &self.filter()).await;
             if let Ok(page) = &samples {
                 if self
                     .list
                     .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
                 {
-                    samples = recorder.list_samples(&self.filter()).await;
+                    samples = recorder.list_samples_on(sql, &self.filter()).await;
                 }
             }
-            (diagnostics, view::Views::Samples(samples))
+            view::Views::Samples(samples)
         } else {
             let windows = Windows {
                 baseline_from: now - hour * 2,
@@ -174,30 +170,11 @@ impl Index {
                 min_samples: 5,
                 limit: 10,
             };
-            let diagnostics = tokio::spawn({
-                let recorder = recorder.clone();
-                async move { recorder.diagnostics().await }
-            });
-            let regressions = tokio::spawn({
-                let recorder = recorder.clone();
-                async move { recorder.regressions(&windows).await }
-            });
-            let (diagnostics, regressions, slowest) = tokio::join!(
-                diagnostics,
-                regressions,
-                recorder.slowest(now - hour * 24, now, 10)
-            );
-            let diagnostics = diagnostics.map_err(|_| Error::Internal)?;
-            let regressions = regressions.map_err(|_| Error::Internal)?;
-            (
-                diagnostics,
-                view::Views::Slowdowns {
-                    regressions,
-                    slowest,
-                },
-            )
+            view::Views::Slowdowns {
+                regressions: recorder.regressions_on(sql, &windows).await,
+                slowest: recorder.slowest_on(sql, now - hour * 24, now, 10).await,
+            }
         };
-        let client = self.pages.db.get().await?;
         let locale = self
             .pages
             .locales
