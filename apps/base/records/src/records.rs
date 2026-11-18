@@ -87,6 +87,10 @@ impl Resolved {
 /// One picker hit.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Hit {
+    /// Whether this search covered several installed kinds, even if only
+    /// one kind matched. Presentation metadata stays out of agent replies.
+    #[serde(skip)]
+    multiple_kinds: bool,
     pub kind: String,
     pub id: String,
     pub label: String,
@@ -216,7 +220,16 @@ impl Records {
             .map(|hit| bilibi_ui::PickerHit {
                 value: format!("{}:{}", hit.kind, hit.id),
                 label: hit.label.clone(),
-                kind_label: self.kind_label(&hit.kind).to_owned(),
+                kind_label: if hit.multiple_kinds {
+                    let noun = self.kind_nouns(&hit.kind).0;
+                    let mut chars = noun.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                },
             })
             .collect()
     }
@@ -448,6 +461,7 @@ impl Records {
             .copied()
             .filter(|key| self.kinds.contains_key(key))
             .collect();
+        let multiple_kinds = kinds.len() > 1;
         let mut hits = Vec::new();
         for key in kinds {
             let Some(kind) = self.kind(key) else {
@@ -483,6 +497,7 @@ impl Records {
                     };
                     if selectable && seen.len() < limit && seen.insert(resolved.id.clone()) {
                         hits.push(Hit {
+                            multiple_kinds,
                             label,
                             path: resolved.path,
                             kind: resolved.reference.kind,

@@ -233,7 +233,7 @@ Below `md` the board shows one column at a time with a column switcher whose lin
 
 ## Record references
 
-`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven type-ahead inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`.
+`RelatedRecord` (a named pill through `RecordLink`, or unavailable) and `RecordPicker` (a server-driven combobox inside the owner's live `Form`) show and choose a reference to another module's record. Base Records resolves names and hits with the reader's permissions; this crate only draws them: [`../records/README.md`](../records/README.md). The picker shares the `Combobox` dropdown and keyboard controls, while typing still posts the search field after a 300 ms debounce. Hits show the record name; `PickerHit::kind_label` is empty for a single-kind search, or a singular noun for a search across kinds. A picker that is a record page's fact (saving a pick or clear at once) uses `in_fact()`: its label is for screen readers and its clear button says Remove. Several pickers on one page share fixed pick and clear events and tell them apart with `key(field)`, sent as `key`.
 
 ## File preview
 

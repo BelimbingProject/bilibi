@@ -56,7 +56,7 @@ An owner may override `RecordOwner::select` to refuse a new choice while keeping
 | --- | --- |
 | Accept a new reference | `check(client, scope, kind, id)` on the connection you already hold: your write's `tx.sql()` in a commit, and in a preview the `OperationClient` the plan hands you. Store the `Reference` it returns. |
 | Show references | `resolve(scope, &references)` → `Resolved { label, path, … }`, in the order given; `resolved.pill(id, framed)` gives the `RelatedRecord`. |
-| Pick a record | `search(scope, &kinds, text)` → hits; `records.picker_hits(&hits)` feeds `RecordPicker`. |
+| Pick a record | `search(scope, &kinds, text)` → hits; `records.picker_hits(&hits)` feeds `RecordPicker`, with a singular kind label only when the search covered several installed kinds. |
 | Filter your own counts and pages by an existing reference | `matching(tx, scope, kind, id)` → an owner-built `ReferenceMatch` subquery, or `None` for an unavailable source; see below. |
 | Who points here | `referrers(scope, kind, id)` → a count per holder table the reader may read, through Grid's bounded `summarize`, for the record `id` names now (a merged id counts its survivor's referrers); a malformed id of a mounted kind is refused. |
 | Merge two records (owner) | `redirect(tx, scope, kind, from, to)` in the owner's merge transaction, at `READ COMMITTED`. |
