@@ -1,6 +1,6 @@
 //! Walkthrough against an explicitly supplied disposable DB. It shows what
 //! the recorder accepts, drops, stores and prunes, and checks lock recovery.
-use bilibi_database::{pool, timing, Error, Result};
+use bilibi_database::{pool, pool_with, timing, Db, Error, PoolLimits, Result};
 use bilibi_module_registry::Services;
 use bilibi_perf::{
     Config, Filter, Finish, Kind, Outcome, Recorder, Sample, Store, Submit, Windows,
@@ -23,8 +23,18 @@ async fn reader_waiting(lock: &Transaction<'_>) -> Result<bool> {
     ).await?.get(0))
 }
 
+async fn backend_pid(db: &Db) -> Result<i32> {
+    let client = db.get().await?;
+    Ok(client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0))
+}
+
 async fn blocked_read<T>(
     lock: &Transaction<'_>,
+    db: &Db,
+    expected_pid: i32,
     name: &str,
     read: impl Future<Output = T>,
 ) -> Result<T> {
@@ -43,6 +53,11 @@ async fn blocked_read<T>(
     assert!(
         !reader_waiting(lock).await?,
         "{name} left a PostgreSQL reader blocked"
+    );
+    assert_eq!(
+        backend_pid(db).await?,
+        expected_pid,
+        "{name} discarded a connection after PostgreSQL recovered it"
     );
     Ok(result)
 }
@@ -360,31 +375,59 @@ async fn main() -> Result<()> {
     writer.await.map_err(|_| Error::Internal)??;
 
     println!("\n== 8. PostgreSQL stops every read while the history lock is held");
+    let read_pool = pool_with(
+        &url,
+        PoolLimits {
+            size: 1,
+            wait: Duration::from_secs(1),
+        },
+    )?;
+    let recorder = Recorder::new(read_pool.clone(), settings, Config::default())?;
+    let pid = backend_pid(&read_pool).await?;
     let filter = Filter::default();
     let expected_total = recorder.list_samples(&filter).await?.total;
     let lock = client.transaction().await?;
     lock.batch_execute("LOCK TABLE base_perf_samples IN ACCESS EXCLUSIVE MODE")
         .await?;
-    let diagnostics = blocked_read(&lock, "diagnostics", recorder.diagnostics()).await?;
+    let diagnostics = blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "diagnostics",
+        recorder.diagnostics(),
+    )
+    .await?;
     assert_eq!(diagnostics.store, Store::Unavailable);
-    assert!(
-        blocked_read(&lock, "sample list", recorder.list_samples(&filter))
-            .await?
-            .is_err()
-    );
-    assert!(
-        blocked_read(&lock, "regressions", recorder.regressions(&windows))
-            .await?
-            .is_err()
-    );
-    assert!(
-        blocked_read(&lock, "slowest", recorder.slowest(ago(180), now, 10))
-            .await?
-            .is_err()
-    );
+    assert!(blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "sample list",
+        recorder.list_samples(&filter)
+    )
+    .await?
+    .is_err());
+    assert!(blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "regressions",
+        recorder.regressions(&windows)
+    )
+    .await?
+    .is_err());
+    assert!(blocked_read(
+        &lock,
+        &read_pool,
+        pid,
+        "slowest",
+        recorder.slowest(ago(180), now, 10)
+    )
+    .await?
+    .is_err());
     lock.rollback().await?;
     assert_eq!(recorder.list_samples(&filter).await?.total, expected_total);
-    println!("PASS Performance reads stopped in PostgreSQL before releasing the lock");
+    println!("PASS Performance reads stopped and reused the recovered PostgreSQL connection");
 
     println!("\nRun again with `-- inspect` in another process to read the persisted rows.");
     Ok(())

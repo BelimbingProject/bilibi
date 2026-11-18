@@ -3,7 +3,7 @@
 mod panel;
 mod view;
 
-use crate::{Filter, Kind, Outcome, Recorder, Store, Windows, VIEW};
+use crate::{Filter, Kind, Outcome, Recorder, Windows, VIEW};
 use bilibi_database::{Connection, Db, Error, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_locale::Locales;
@@ -154,25 +154,30 @@ impl Index {
         let recorder = &self.pages.recorder;
         let mut client = self.pages.db.get().await?;
         let diagnostics = recorder.diagnostics_on(Some(&mut client)).await;
-        if diagnostics.store == Store::Unavailable {
+        if !diagnostics.reusable {
             client = self.pages.replace_connection(client).await?;
         }
         let views = if self.tab == TABS[1].0 {
-            let mut samples = recorder
+            let samples = recorder
                 .list_samples_on(Some(&mut client), &self.filter())
                 .await;
+            if !samples.reusable {
+                client = self.pages.replace_connection(client).await?;
+            }
+            let mut samples = samples.value;
             if let Ok(page) = &samples {
                 if self
                     .list
                     .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
                 {
-                    samples = recorder
+                    let retry = recorder
                         .list_samples_on(Some(&mut client), &self.filter())
                         .await;
+                    if !retry.reusable {
+                        client = self.pages.replace_connection(client).await?;
+                    }
+                    samples = retry.value;
                 }
-            }
-            if samples.is_err() {
-                client = self.pages.replace_connection(client).await?;
             }
             view::Views::Samples(samples)
         } else {
@@ -185,18 +190,18 @@ impl Index {
                 limit: 10,
             };
             let regressions = recorder.regressions_on(Some(&mut client), &windows).await;
-            if regressions.is_err() {
+            if !regressions.reusable {
                 client = self.pages.replace_connection(client).await?;
             }
             let slowest = recorder
                 .slowest_on(Some(&mut client), now - hour * 24, now, 10)
                 .await;
-            if slowest.is_err() {
+            if !slowest.reusable {
                 client = self.pages.replace_connection(client).await?;
             }
             view::Views::Slowdowns {
-                regressions,
-                slowest,
+                regressions: regressions.value,
+                slowest: slowest.value,
             }
         };
         let locale = self
@@ -211,7 +216,7 @@ impl Index {
             .display(&**client, scope, None, locale)
             .await?;
         self.data = Some(view::Data {
-            diagnostics,
+            diagnostics: diagnostics.value,
             views,
             display,
         });

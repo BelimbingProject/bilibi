@@ -142,67 +142,106 @@ fn recorded(row: &Row) -> Result<Recorded> {
 
 const FILTERED: &str = "($1::text IS NULL OR kind=$1) AND ($2::text IS NULL OR identity=$2) AND ($3::text IS NULL OR outcome=$3) AND ($4::timestamptz IS NULL OR observed_at>=$4) AND ($5::timestamptz IS NULL OR observed_at<$5)";
 
+pub(crate) struct ReadOutcome<T> {
+    pub value: T,
+    pub reusable: bool,
+}
+
+impl<T> ReadOutcome<T> {
+    fn map<U>(self, convert: impl FnOnce(T) -> U) -> ReadOutcome<U> {
+        ReadOutcome {
+            value: convert(self.value),
+            reusable: self.reusable,
+        }
+    }
+}
+
 impl Recorder {
     async fn bounded_read<T>(
         &self,
         client: Option<&mut Client>,
         query: impl for<'a> FnOnce(&'a Client) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
-    ) -> Result<T> {
+    ) -> ReadOutcome<Result<T>> {
         let deadline = Instant::now() + READ_TIMEOUT;
         let run = async |client: &mut Client| {
-            timeout_at(deadline, async {
+            let completed = timeout_at(deadline, async {
                 let tx = client.build_transaction().read_only(true).start().await?;
-                let remaining = deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_millis();
-                let statement_ms = remaining
-                    .checked_sub(500)
-                    .filter(|ms| *ms > 0)
-                    .ok_or(Error::Internal)?;
-                let transaction_ms = remaining - 250;
-                tx.batch_execute(&format!(
-                    "SET LOCAL statement_timeout = '{statement_ms}ms'; \
-                     SET LOCAL transaction_timeout = '{transaction_ms}ms'"
-                ))
-                .await?;
-                match query(tx.client()).await {
-                    Ok(value) => {
-                        tx.commit().await?;
-                        Ok(value)
-                    }
-                    Err(error) => {
-                        tx.rollback().await?;
-                        Err(error)
-                    }
+                let result = async {
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis();
+                    let statement_ms = remaining
+                        .checked_sub(500)
+                        .filter(|ms| *ms > 0)
+                        .ok_or(Error::Internal)?;
+                    let transaction_ms = remaining - 250;
+                    tx.batch_execute(&format!(
+                        "SET LOCAL statement_timeout = '{statement_ms}ms'; \
+                         SET LOCAL transaction_timeout = '{transaction_ms}ms'"
+                    ))
+                    .await?;
+                    query(tx.client()).await
                 }
+                .await;
+                if result.is_ok() {
+                    tx.commit().await?;
+                } else {
+                    tx.rollback().await?;
+                }
+                Ok::<_, Error>(result)
             })
-            .await
-            .map_err(|_| Error::Internal)?
+            .await;
+            match completed {
+                Ok(Ok(value)) => ReadOutcome {
+                    value,
+                    reusable: !client.is_closed(),
+                },
+                Ok(Err(error)) => ReadOutcome {
+                    value: Err(error),
+                    reusable: false,
+                },
+                Err(_) => ReadOutcome {
+                    value: Err(Error::Internal),
+                    reusable: false,
+                },
+            }
         };
         if let Some(client) = client {
             return run(client).await;
         }
-        let mut connection = timeout_at(deadline, self.db.get())
-            .await
-            .map_err(|_| Error::Internal)??;
-        let result = run(&mut connection).await;
-        if result.is_err() {
+        let mut connection = match timeout_at(deadline, self.db.get()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                return ReadOutcome {
+                    value: Err(error.into()),
+                    reusable: false,
+                }
+            }
+            Err(_) => {
+                return ReadOutcome {
+                    value: Err(Error::Internal),
+                    reusable: false,
+                }
+            }
+        };
+        let outcome = run(&mut connection).await;
+        if !outcome.reusable {
             drop(Connection::take(connection));
         }
-        result
+        outcome
     }
 
     /// One bounded page, newest first. A page size outside `PAGE_SIZES`, a page
     /// below one or a malformed identity filter is refused, not clamped.
     pub async fn list_samples(&self, filter: &Filter) -> Result<Page> {
-        self.list_samples_on(None, filter).await
+        self.list_samples_on(None, filter).await.value
     }
 
     pub(crate) async fn list_samples_on(
         &self,
         client: Option<&mut Client>,
         filter: &Filter,
-    ) -> Result<Page> {
+    ) -> ReadOutcome<Result<Page>> {
         if filter.page < 1
             || filter.page > 1_000_000
             || !PAGE_SIZES.contains(&filter.page_size)
@@ -211,7 +250,10 @@ impl Recorder {
                 .as_ref()
                 .is_some_and(|identity| identity.is_empty() || identity.len() > 255)
         {
-            return Err(Error::Invalid);
+            return ReadOutcome {
+                value: Err(Error::Invalid),
+                reusable: true,
+            };
         }
         let filter = filter.clone();
         self.bounded_read(client, move |client| Box::pin(async move {
@@ -245,10 +287,13 @@ impl Recorder {
     /// a running writer reads as available with zero samples, and a missing
     /// writer or store says so.
     pub async fn diagnostics(&self) -> Diagnostics {
-        self.diagnostics_on(None).await
+        self.diagnostics_on(None).await.value
     }
 
-    pub(crate) async fn diagnostics_on(&self, client: Option<&mut Client>) -> Diagnostics {
+    pub(crate) async fn diagnostics_on(
+        &self,
+        client: Option<&mut Client>,
+    ) -> ReadOutcome<Diagnostics> {
         let stats = self.stats();
         let recorder = if !stats.running {
             Health::Unavailable
@@ -268,18 +313,20 @@ impl Recorder {
                 Ok::<_, Error>((row.get::<_, i64>(0), row.get::<_, Option<SystemTime>>(1)))
             })
         });
-        let (store, samples, last_observed_at) = match read.await {
-            Ok((samples, last)) => (Store::Available, Some(samples), last),
-            _ => (Store::Unavailable, None, None),
-        };
-        Diagnostics {
-            recorder,
-            store,
-            recording: store == Store::Available && self.recording(),
-            samples,
-            last_observed_at,
-            stats,
-        }
+        read.await.map(|result| {
+            let (store, samples, last_observed_at) = match result {
+                Ok((samples, last)) => (Store::Available, Some(samples), last),
+                Err(_) => (Store::Unavailable, None, None),
+            };
+            Diagnostics {
+                recorder,
+                store,
+                recording: store == Store::Available && self.recording(),
+                samples,
+                last_observed_at,
+                stats,
+            }
+        })
     }
     /// The one-line status System info shows.
     pub async fn health_status(&self) -> String {
@@ -303,21 +350,24 @@ impl Recorder {
     /// `perf.slow_threshold_ms`, ranked by how much their mean grew against the
     /// baseline window. The windows must be ordered and must not overlap.
     pub async fn regressions(&self, windows: &Windows) -> Result<Vec<Regression>> {
-        self.regressions_on(None, windows).await
+        self.regressions_on(None, windows).await.value
     }
 
     pub(crate) async fn regressions_on(
         &self,
         client: Option<&mut Client>,
         windows: &Windows,
-    ) -> Result<Vec<Regression>> {
+    ) -> ReadOutcome<Result<Vec<Regression>>> {
         if windows.baseline_from >= windows.baseline_to
             || windows.current_from >= windows.current_to
             || windows.baseline_to > windows.current_from
             || !(5..=100_000).contains(&windows.min_samples)
             || !(1..=100).contains(&windows.limit)
         {
-            return Err(Error::Invalid);
+            return ReadOutcome {
+                value: Err(Error::Invalid),
+                reusable: true,
+            };
         }
         let windows = *windows;
         let settings = self.settings.clone();
@@ -372,7 +422,7 @@ impl Recorder {
         to: SystemTime,
         limit: i64,
     ) -> Result<Vec<Slowest>> {
-        self.slowest_on(None, from, to, limit).await
+        self.slowest_on(None, from, to, limit).await.value
     }
 
     pub(crate) async fn slowest_on(
@@ -381,9 +431,12 @@ impl Recorder {
         from: SystemTime,
         to: SystemTime,
         limit: i64,
-    ) -> Result<Vec<Slowest>> {
+    ) -> ReadOutcome<Result<Vec<Slowest>>> {
         if from >= to || !(1..=100).contains(&limit) {
-            return Err(Error::Invalid);
+            return ReadOutcome {
+                value: Err(Error::Invalid),
+                reusable: true,
+            };
         }
         self.bounded_read(client, move |client| Box::pin(async move {
             let rows = client

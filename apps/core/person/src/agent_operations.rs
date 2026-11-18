@@ -178,9 +178,9 @@ impl ReadHandler for Read {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
-            let client = client.sql_client().await?;
             match self {
                 Self::List => {
+                    let client = client.sql_client().await?;
                     let page = identity::search(client, scope, &parse::<Search>(input)?).await?;
                     Ok(Output::Page(Page {
                         entries: records(client, scope, page.entries).await?,
@@ -190,6 +190,7 @@ impl ReadHandler for Read {
                     }))
                 }
                 Self::Get => {
+                    let client = client.sql_client().await?;
                     let person = identity::read(client, scope, id(input)?).await?;
                     Ok(Output::Data(record(client, scope, person).await?))
                 }

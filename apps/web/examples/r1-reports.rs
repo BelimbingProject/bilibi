@@ -96,7 +96,7 @@ impl Handler for PreviewWorker {
                     client,
                     execution,
                     "base.reports.pause_subscription",
-                    &json!({"subscription": 1, "version": 1, "paused": true}),
+                    &json!({"subscription": args["subscription"], "version": 1, "paused": true}),
                 )
                 .await;
             let create = self.contracts.preview(client, execution, "base.reports.create",
@@ -129,7 +129,15 @@ inventory::submit! { Module {
 } }
 inventory::submit! { Contribution::new(bilibi_queue::WORKERS, PREVIEW_WORKER, PREVIEW_SOURCE, &Worker {
     max_attempts: 1,
-    validate: |args| if args == json!({}) || args == json!({"refusal": true}) { Ok(args) } else { Err(bilibi_database::Error::Invalid) },
+    validate: |args| {
+        if args == json!({"refusal": true})
+            || args["subscription"].as_i64().is_some_and(|id| id > 0 && args == json!({"subscription": id}))
+        {
+            Ok(args)
+        } else {
+            Err(bilibi_database::Error::Invalid)
+        }
+    },
 }) }
 inventory::submit! { Contribution::new(bilibi_queue::HANDLERS, PREVIEW_WORKER, PREVIEW_SOURCE, &HandlerBinding {
     service: PREVIEW_SERVICE, capability: "reports.author",
@@ -910,6 +918,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("== Phase 2: prepared exports and schedules");
+    let plan = Plan {
+        frequency: Frequency::Weekly,
+        at_minute: 8 * 60,
+        weekday: Some(1),
+        monthday: None,
+        format: Format::Csv,
+        include_owner: true,
+        skip_empty: true,
+        roles: Vec::new(),
+        people: Vec::new(),
+    };
+    let subscription = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &plan).await
+    })
+    .await?;
     let prepared = write(
         &boundary,
         &db,
@@ -944,7 +967,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "reports.walkthrough.preview",
                 async |tx| {
                     Ok(queue
-                        .enqueue_for(tx, &manager, PREVIEW_WORKER, json!({}))
+                        .enqueue_for(
+                            tx,
+                            &manager,
+                            PREVIEW_WORKER,
+                            json!({"subscription": subscription}),
+                        )
                         .await?
                         .id())
                 },
@@ -1019,10 +1047,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?
                 .get(0);
+            let pause_state: Option<(bool, i64)> = client
+                .query_opt(
+                    "SELECT paused,version FROM base_report_subscriptions WHERE tenant_id=$1 AND id=$2",
+                    &[&manager.tenant(), &subscription],
+                )
+                .await?
+                .map(|row| (row.get(0), row.get(1)));
             checks.check(
                 "job previews a pause and a row draft on a plain client without saving",
-                preview_state == "completed" && !saved,
-                preview_state,
+                preview_state == "completed" && pause_state == Some((false, 1)) && !saved,
+                format!("job {preview_state}, subscription {pause_state:?}, report saved {saved}"),
             );
             let told: Option<String> = client.query_one("SELECT ending FROM base_queue_jobs WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?.get(0);
             checks.check(
@@ -1140,17 +1175,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Err(error) => checks.check("a prepared export is accepted", false, error.to_string()),
     }
-    let plan = Plan {
-        frequency: Frequency::Weekly,
-        at_minute: 8 * 60,
-        weekday: Some(1),
-        monthday: None,
-        format: Format::Csv,
-        include_owner: true,
-        skip_empty: true,
-        roles: Vec::new(),
-        people: Vec::new(),
-    };
     let refused = write(&boundary, &db, &viewer, "reports.subscribe", async |tx| {
         reports.subscribe(tx, &viewer, rows_id, &plan).await
     })
@@ -1160,10 +1184,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matches!(refused, Err(ReportError::Forbidden)),
         format!("{refused:?}").chars().take(60).collect::<String>(),
     );
-    let subscription = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
-        reports.subscribe(tx, &manager, rows_id, &plan).await
-    })
-    .await?;
     let held = reports.subscriptions(&manager, rows_id).await?;
     let next = held
         .first()
