@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# Bring a pull-request checkout up to the live tip of its base branch, so the
-# mounted Domain checks (.github/workflows/domains.yml) test a consistent pair.
-#
-# A pull request checks out GitHub's merge ref, which GitHub computed when the
-# PR was last pushed. Each Domain is checked out at its live main, so a Platform
-# change that merged with its Domain companion afterwards leaves the merge ref
-# older than the Domain, and the pair fails for reasons the PR did not cause.
-# Merging the live base into the checkout makes the Platform side as new as the
-# Domain side. Usage: merge-live-base.sh <base-branch> [selected-base-commit]
+# Merge the base into GitHub's PR merge ref. See docs/domain-ci/README.md for
+# when mounted jobs use a preselected commit or fetch the live tip.
+# Usage: merge-live-base.sh <base-branch> [selected-base-commit]
 set -euo pipefail
 base=${1:?usage: merge-live-base.sh <base-branch> [selected-base-commit]}
 selected_tip=${2:-}

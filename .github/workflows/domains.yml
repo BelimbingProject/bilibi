@@ -1,17 +1,5 @@
-# Mount every official Domain and Extension from catalogue.json and run the
-# shared mounted gates. Companion branches are selected only on pull requests
-# (docs/versions.md); main pushes always check main HEADs. Manual runs retain
-# the existing Domain tested-set recording and catalogue publishing.
-# The Release workflow calls this with domains at their latest release, and
-# records the sets in its publish job after the reviewed tag passes.
-#
-# A pull request is checked as the change on top of its live base branch, not
-# on GitHub's merge ref, which can be older than the Domains it is mounted with.
-#
-# A pull request whose files cannot affect a mount passes Official compatibility
-# without mounting. Other pull requests lint and boot a debug build. main and
-# manual runs still do the locked release build. A push to main also runs
-# the debug build, to save the cache a pull request restores.
+# See docs/domain-ci/README.md for the mounted gates and Finance phase inputs.
+# See docs/versions.md for companion branches and tested-set publishing.
 name: Domains on this change
 
 on:

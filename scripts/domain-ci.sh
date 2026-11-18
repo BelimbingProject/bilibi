@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
 # The mounted-container gates for a Domain or Extension repository's CI. Run it
 # from a Platform checkout with the container already mounted at
-# apps/<domains|extensions>/<container> (docs/domain-ci/ci.yml does that) and
-# DATABASE_URL naming an empty PostgreSQL 18 database for build and boot.
-# Nothing here is a unit
-# test: it builds the composed app, migrates a fresh database, and loads `/`.
-#
-# DOMAIN_CI_BUILD=release (default) does the locked release build and boots
-# that binary. DOMAIN_CI_BUILD=check skips it and boots the debug binary.
-# Pull requests use check. main, tags and manual runs use release
-# (docs/domain-ci/README.md). DOMAIN_CI_PHASE defaults to all; the Platform
-# workflow runs Finance lint and build phases in parallel and requires both.
+# apps/<domains|extensions>/<container>. See docs/domain-ci/README.md for the
+# phase requirements and the build profile used by each workflow.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$root"
