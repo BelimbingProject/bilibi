@@ -129,6 +129,9 @@ jobs:
           RESOLUTION_ERROR: ${{ matrix.error }}
         run: |
           echo "$RESOLUTION_ERROR" >&2
+          message='Choose Re-run all jobs to refresh the selected Finance revision.'
+          echo "::error::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
       # Tags are fetched so the pin can name the release each side is at.
@@ -253,10 +256,13 @@ jobs:
           path: ${{ runner.temp }}/tested-set.json
 
       - name: Explain a compatibility failure
-        if: failure()
+        if: failure() && matrix.error == ''
         working-directory: .
         run: |
           message="$CONTAINER_ROLE/$CONTAINER_ID ($CONTAINER_REPOSITORY at $CONTAINER_REF) broke on this Platform change. Fix it in the same task with a companion PR linked from the Platform PR; see docs/versions.md#platform-changes-and-companion-prs."
+          if [ "$DOMAIN_CI_PHASE" != all ]; then
+            message="$message If you update the Finance ref, choose Re-run all jobs to test the new revision."
+          fi
           echo "::error::$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
@@ -337,7 +343,7 @@ jobs:
             fi
             pass 'Every official Domain and Extension passed.'
           else
-            fail 'Official compatibility failed. Read the failing domains/<id> or extensions/<id> job. A break requires a companion PR in the same task, linked from the Platform PR (docs/versions.md#platform-changes-and-companion-prs).'
+            fail 'Official compatibility failed. Read the failing domains/<id> or extensions/<id> job. A break requires a companion PR in the same task, linked from the Platform PR (docs/versions.md#platform-changes-and-companion-prs). If you create or update a Finance companion branch, choose Re-run all jobs to refresh its selected revision.'
           fi
 
   # Publishes catalogue.json from this change plus every tested set so far to
