@@ -4,7 +4,7 @@ mod panel;
 mod view;
 
 use crate::{Filter, Kind, Outcome, Recorder, Windows, VIEW};
-use bilibi_database::{Connection, Db, Error, Result};
+use bilibi_database::{Db, Error, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_locale::Locales;
 use bilibi_module_registry::{
@@ -67,11 +67,6 @@ impl Pages {
         let client = self.db.get().await?;
         bilibi_authz::authorize_operator(&**client, scope, VIEW).await?;
         Ok(())
-    }
-
-    async fn replace_connection(&self, client: Connection) -> Result<Connection> {
-        drop(Connection::take(client));
-        self.db.get().await.map_err(Error::from)
     }
 }
 
@@ -152,31 +147,32 @@ impl Index {
         let now = SystemTime::now();
         let hour = Duration::from_secs(3600);
         let recorder = &self.pages.recorder;
-        let mut client = self.pages.db.get().await?;
-        let diagnostics = recorder.diagnostics_on(Some(&mut client)).await;
-        if !diagnostics.reusable {
-            client = self.pages.replace_connection(client).await?;
-        }
+        let client = self.pages.db.get().await?;
+        let locale = self
+            .pages
+            .locales
+            .resolve(&**client, scope, None)
+            .await?
+            .locale;
+        let display = self
+            .pages
+            .display
+            .display(&**client, scope, None, locale)
+            .await?;
+        let mut connection = Some(client);
+        let diagnostics = recorder.diagnostics_on(&mut connection).await;
         let views = if self.tab == TABS[1].0 {
-            let samples = recorder
-                .list_samples_on(Some(&mut client), &self.filter())
+            let mut samples = recorder
+                .list_samples_on(&mut connection, &self.filter())
                 .await;
-            if !samples.reusable {
-                client = self.pages.replace_connection(client).await?;
-            }
-            let mut samples = samples.value;
             if let Ok(page) = &samples {
                 if self
                     .list
                     .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
                 {
-                    let retry = recorder
-                        .list_samples_on(Some(&mut client), &self.filter())
+                    samples = recorder
+                        .list_samples_on(&mut connection, &self.filter())
                         .await;
-                    if !retry.reusable {
-                        client = self.pages.replace_connection(client).await?;
-                    }
-                    samples = retry.value;
                 }
             }
             view::Views::Samples(samples)
@@ -189,34 +185,17 @@ impl Index {
                 min_samples: 5,
                 limit: 10,
             };
-            let regressions = recorder.regressions_on(Some(&mut client), &windows).await;
-            if !regressions.reusable {
-                client = self.pages.replace_connection(client).await?;
-            }
+            let regressions = recorder.regressions_on(&mut connection, &windows).await;
             let slowest = recorder
-                .slowest_on(Some(&mut client), now - hour * 24, now, 10)
+                .slowest_on(&mut connection, now - hour * 24, now, 10)
                 .await;
-            if !slowest.reusable {
-                client = self.pages.replace_connection(client).await?;
-            }
             view::Views::Slowdowns {
-                regressions: regressions.value,
-                slowest: slowest.value,
+                regressions,
+                slowest,
             }
         };
-        let locale = self
-            .pages
-            .locales
-            .resolve(&**client, scope, None)
-            .await?
-            .locale;
-        let display = self
-            .pages
-            .display
-            .display(&**client, scope, None, locale)
-            .await?;
         self.data = Some(view::Data {
-            diagnostics: diagnostics.value,
+            diagnostics,
             views,
             display,
         });

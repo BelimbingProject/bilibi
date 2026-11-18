@@ -142,106 +142,71 @@ fn recorded(row: &Row) -> Result<Recorded> {
 
 const FILTERED: &str = "($1::text IS NULL OR kind=$1) AND ($2::text IS NULL OR identity=$2) AND ($3::text IS NULL OR outcome=$3) AND ($4::timestamptz IS NULL OR observed_at>=$4) AND ($5::timestamptz IS NULL OR observed_at<$5)";
 
-pub(crate) struct ReadOutcome<T> {
-    pub value: T,
-    pub reusable: bool,
-}
-
-impl<T> ReadOutcome<T> {
-    fn map<U>(self, convert: impl FnOnce(T) -> U) -> ReadOutcome<U> {
-        ReadOutcome {
-            value: convert(self.value),
-            reusable: self.reusable,
-        }
-    }
-}
-
 impl Recorder {
     async fn bounded_read<T>(
         &self,
-        client: Option<&mut Client>,
+        connection: &mut Option<Connection>,
         query: impl for<'a> FnOnce(&'a Client) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
-    ) -> ReadOutcome<Result<T>> {
+    ) -> Result<T> {
         let deadline = Instant::now() + READ_TIMEOUT;
-        let run = async |client: &mut Client| {
-            let completed = timeout_at(deadline, async {
-                let tx = client.build_transaction().read_only(true).start().await?;
-                let result = async {
-                    let remaining = deadline
-                        .saturating_duration_since(Instant::now())
-                        .as_millis();
-                    let statement_ms = remaining
-                        .checked_sub(500)
-                        .filter(|ms| *ms > 0)
-                        .ok_or(Error::Internal)?;
-                    let transaction_ms = remaining - 250;
-                    tx.batch_execute(&format!(
-                        "SET LOCAL statement_timeout = '{statement_ms}ms'; \
-                         SET LOCAL transaction_timeout = '{transaction_ms}ms'"
-                    ))
-                    .await?;
-                    query(tx.client()).await
-                }
-                .await;
-                if result.is_ok() {
-                    tx.commit().await?;
-                } else {
-                    tx.rollback().await?;
-                }
-                Ok::<_, Error>(result)
-            })
+        let client = match connection {
+            Some(client) => client,
+            None => {
+                let client = timeout_at(deadline, self.db.get())
+                    .await
+                    .map_err(|_| Error::Internal)??;
+                connection.insert(client)
+            }
+        };
+        let completed = timeout_at(deadline, async {
+            let tx = client.build_transaction().read_only(true).start().await?;
+            let result = async {
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis();
+                let statement_ms = remaining
+                    .checked_sub(500)
+                    .filter(|ms| *ms > 0)
+                    .ok_or(Error::Internal)?;
+                let transaction_ms = remaining - 250;
+                tx.batch_execute(&format!(
+                    "SET LOCAL statement_timeout = '{statement_ms}ms'; \
+                     SET LOCAL transaction_timeout = '{transaction_ms}ms'"
+                ))
+                .await?;
+                query(tx.client()).await
+            }
             .await;
-            match completed {
-                Ok(Ok(value)) => ReadOutcome {
-                    value,
-                    reusable: !client.is_closed(),
-                },
-                Ok(Err(error)) => ReadOutcome {
-                    value: Err(error),
-                    reusable: false,
-                },
-                Err(_) => ReadOutcome {
-                    value: Err(Error::Internal),
-                    reusable: false,
-                },
+            if result.is_ok() {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
             }
+            Ok::<_, Error>(result)
+        })
+        .await;
+        let (value, reusable) = match completed {
+            Ok(Ok(value)) => (value, !client.is_closed()),
+            Ok(Err(error)) => (Err(error), false),
+            Err(_) => (Err(Error::Internal), false),
         };
-        if let Some(client) = client {
-            return run(client).await;
+        if !reusable {
+            drop(connection.take().map(Connection::take));
         }
-        let mut connection = match timeout_at(deadline, self.db.get()).await {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(error)) => {
-                return ReadOutcome {
-                    value: Err(error.into()),
-                    reusable: false,
-                }
-            }
-            Err(_) => {
-                return ReadOutcome {
-                    value: Err(Error::Internal),
-                    reusable: false,
-                }
-            }
-        };
-        let outcome = run(&mut connection).await;
-        if !outcome.reusable {
-            drop(Connection::take(connection));
-        }
-        outcome
+        value
     }
 
     /// One bounded page, newest first. A page size outside `PAGE_SIZES`, a page
     /// below one or a malformed identity filter is refused, not clamped.
     pub async fn list_samples(&self, filter: &Filter) -> Result<Page> {
-        self.list_samples_on(None, filter).await.value
+        self.list_samples_on(&mut None, filter).await
     }
 
     pub(crate) async fn list_samples_on(
         &self,
-        client: Option<&mut Client>,
+        connection: &mut Option<Connection>,
         filter: &Filter,
-    ) -> ReadOutcome<Result<Page>> {
+    ) -> Result<Page> {
         if filter.page < 1
             || filter.page > 1_000_000
             || !PAGE_SIZES.contains(&filter.page_size)
@@ -250,13 +215,10 @@ impl Recorder {
                 .as_ref()
                 .is_some_and(|identity| identity.is_empty() || identity.len() > 255)
         {
-            return ReadOutcome {
-                value: Err(Error::Invalid),
-                reusable: true,
-            };
+            return Err(Error::Invalid);
         }
         let filter = filter.clone();
-        self.bounded_read(client, move |client| Box::pin(async move {
+        self.bounded_read(connection, move |client| Box::pin(async move {
             let kind = filter.kind.map(Kind::as_str);
             let outcome = filter.outcome.map(Outcome::as_str);
             let identity = filter.identity.as_deref();
@@ -287,13 +249,10 @@ impl Recorder {
     /// a running writer reads as available with zero samples, and a missing
     /// writer or store says so.
     pub async fn diagnostics(&self) -> Diagnostics {
-        self.diagnostics_on(None).await.value
+        self.diagnostics_on(&mut None).await
     }
 
-    pub(crate) async fn diagnostics_on(
-        &self,
-        client: Option<&mut Client>,
-    ) -> ReadOutcome<Diagnostics> {
+    pub(crate) async fn diagnostics_on(&self, connection: &mut Option<Connection>) -> Diagnostics {
         let stats = self.stats();
         let recorder = if !stats.running {
             Health::Unavailable
@@ -302,7 +261,7 @@ impl Recorder {
         } else {
             Health::Available
         };
-        let read = self.bounded_read(client, |client| {
+        let read = self.bounded_read(connection, |client| {
             Box::pin(async move {
                 let row = client
                     .query_one(
@@ -313,20 +272,18 @@ impl Recorder {
                 Ok::<_, Error>((row.get::<_, i64>(0), row.get::<_, Option<SystemTime>>(1)))
             })
         });
-        read.await.map(|result| {
-            let (store, samples, last_observed_at) = match result {
-                Ok((samples, last)) => (Store::Available, Some(samples), last),
-                Err(_) => (Store::Unavailable, None, None),
-            };
-            Diagnostics {
-                recorder,
-                store,
-                recording: store == Store::Available && self.recording(),
-                samples,
-                last_observed_at,
-                stats,
-            }
-        })
+        let (store, samples, last_observed_at) = match read.await {
+            Ok((samples, last)) => (Store::Available, Some(samples), last),
+            Err(_) => (Store::Unavailable, None, None),
+        };
+        Diagnostics {
+            recorder,
+            store,
+            recording: store == Store::Available && self.recording(),
+            samples,
+            last_observed_at,
+            stats,
+        }
     }
     /// The one-line status System info shows.
     pub async fn health_status(&self) -> String {
@@ -350,28 +307,25 @@ impl Recorder {
     /// `perf.slow_threshold_ms`, ranked by how much their mean grew against the
     /// baseline window. The windows must be ordered and must not overlap.
     pub async fn regressions(&self, windows: &Windows) -> Result<Vec<Regression>> {
-        self.regressions_on(None, windows).await.value
+        self.regressions_on(&mut None, windows).await
     }
 
     pub(crate) async fn regressions_on(
         &self,
-        client: Option<&mut Client>,
+        connection: &mut Option<Connection>,
         windows: &Windows,
-    ) -> ReadOutcome<Result<Vec<Regression>>> {
+    ) -> Result<Vec<Regression>> {
         if windows.baseline_from >= windows.baseline_to
             || windows.current_from >= windows.current_to
             || windows.baseline_to > windows.current_from
             || !(5..=100_000).contains(&windows.min_samples)
             || !(1..=100).contains(&windows.limit)
         {
-            return ReadOutcome {
-                value: Err(Error::Invalid),
-                reusable: true,
-            };
+            return Err(Error::Invalid);
         }
         let windows = *windows;
         let settings = self.settings.clone();
-        self.bounded_read(client, move |client| Box::pin(async move {
+        self.bounded_read(connection, move |client| Box::pin(async move {
             let threshold = settings
                 .get_global(client, SLOW_THRESHOLD_MS)
                 .await?
@@ -422,23 +376,20 @@ impl Recorder {
         to: SystemTime,
         limit: i64,
     ) -> Result<Vec<Slowest>> {
-        self.slowest_on(None, from, to, limit).await.value
+        self.slowest_on(&mut None, from, to, limit).await
     }
 
     pub(crate) async fn slowest_on(
         &self,
-        client: Option<&mut Client>,
+        connection: &mut Option<Connection>,
         from: SystemTime,
         to: SystemTime,
         limit: i64,
-    ) -> ReadOutcome<Result<Vec<Slowest>>> {
+    ) -> Result<Vec<Slowest>> {
         if from >= to || !(1..=100).contains(&limit) {
-            return ReadOutcome {
-                value: Err(Error::Invalid),
-                reusable: true,
-            };
+            return Err(Error::Invalid);
         }
-        self.bounded_read(client, move |client| Box::pin(async move {
+        self.bounded_read(connection, move |client| Box::pin(async move {
             let rows = client
                 .query(
                     "SELECT kind, identity, count(*)::bigint AS samples, avg(duration_ms)::float8 AS average, \
