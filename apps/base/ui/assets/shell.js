@@ -248,6 +248,7 @@
   const RECORDS_PAUSE = 150;
   const RECORDS_TEXT = 200;
 
+  // The agent's page and section results use the same rules in web/src/page_search.rs.
   const searchWords = (text) => text.match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
 
   // Compare whole words for typos, with adjacent swaps counting as one edit.
@@ -412,7 +413,7 @@
     // found"; writes only what changed.
     apply() {
       const query = Array.from((this.input()?.value ?? '').trim().toLowerCase())
-        .slice(0, RECORDS_TEXT).join('').replace(/\s+/g, ' ');
+        .slice(0, RECORDS_TEXT).join('').trimEnd().replace(/\s+/g, ' ');
       if (query !== this.query) {
         this.active = null;
         this.query = query;
