@@ -166,21 +166,21 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 
 {#- Fragments the shared models rendered (a notice, a chart, a table),
     stacked a compact step apart, or a section step apart when wide. -#}
-{% macro stack(parts, wide=false) %}
-<div class="{% if wide %}flex flex-col gap-4{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part|safe }}{% endfor %}{{ caller() }}</div>
-{% endmacro %}
+{% macro stack(parts, wide=false) -%}
+<div class="{% if wide %}flex flex-col gap-4 [&>.inline-flex]:self-start{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part.as_str().trim_ascii()|safe }}{% endfor %}{{ caller() }}</div>
+{%- endmacro %}
 
 {#- The ignored wrapper preserves the mounted fragment across parent patches.
     A missing or refused mount leaves an empty target and takes no space. -#}
-{% macro live_panel_anchor(id) %}
+{% macro live_panel_anchor(id) -%}
 <div id="{{ id }}-slot" data-live-ignore class="[&:has(>:empty)]:hidden"><div id="{{ id }}"></div></div>
-{% endmacro %}
+{%- endmacro %}
 
 {#- Keep the section gap between in-flow children, including mounted panels.
     Each panel provider renders its own surface. -#}
-{% macro live_panel_stack(parts, panel_ids) %}
+{% macro live_panel_stack(parts, panel_ids) -%}
 {% call stack(parts=parts, wide=true) %}{% for id in panel_ids %}{% call live_panel_anchor(id=id) %}{% endcall %}{% endfor %}{% endcall %}
-{% endmacro %}
+{%- endmacro %}
 
 {#- Fragments on one wrapping line (a page header's several actions). -#}
 {% macro cluster(parts) %}
