@@ -296,7 +296,7 @@ impl WriteHandler for Write {
             let value = match self {
                 Self::Create => {
                     let draft = draft(input)?;
-                    reports.check_on(tx, scope, &draft).await?;
+                    reports.check_draft(Some(tx), scope, &draft).await?;
                     json!({"summary": format!("Save the new report {}", draft.name.trim()), "report": crate::after(&draft)})
                 }
                 Self::Update => {
@@ -305,7 +305,7 @@ impl WriteHandler for Write {
                     if !current.owned {
                         return Err(ReportError::NotOwner.into());
                     }
-                    reports.check_on(tx, scope, &draft).await?;
+                    reports.check_draft(Some(tx), scope, &draft).await?;
                     json!({"summary": format!("Change the report {}", current.name), "version": current.version, "before": crate::snapshot(&current), "after": crate::after(&draft)})
                 }
                 Self::Copy => {
@@ -314,7 +314,7 @@ impl WriteHandler for Write {
                         None => reports.get_on(tx, scope, id(input)?).await?,
                     };
                     let draft = crate::copy_of(&current, input["name"].as_str());
-                    reports.check_on(tx, scope, &draft).await?;
+                    reports.check_draft(Some(tx), scope, &draft).await?;
                     json!({"summary": format!("Save a copy of {} as {}", current.name, draft.name), "report": crate::after(&draft)})
                 }
                 Self::Share => {

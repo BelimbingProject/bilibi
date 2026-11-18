@@ -510,15 +510,18 @@ impl Reports {
     /// filter, grouping and measure suits its column. A dry run refused only
     /// by size or cost still saves: the bound applies to each run.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
+        if draft.definition.oversight {
+            return self.check_draft(None, scope, draft).await;
+        }
         let mut client = self.db.get().await.map_err(Error::from)?;
         let tx = client.transaction().await.map_err(Error::from)?;
-        self.check_on(&tx, scope, draft).await?;
+        self.check_draft(Some(&tx), scope, draft).await?;
         tx.commit().await.map_err(Error::from)?;
         Ok(())
     }
-    async fn check_on(
+    async fn check_draft(
         &self,
-        tx: &tokio_postgres::Transaction<'_>,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
         scope: &Scope,
         draft: &Draft,
     ) -> Outcome<()> {
@@ -540,11 +543,9 @@ impl Reports {
             return Err(ReportError::Invalid(errors));
         }
         let catalog = if draft.definition.oversight {
-            self.oversight
-                .builder_catalog_on(tx, scope, draft.kind == Kind::Rows)
-                .await
-                .map_err(grid)?
+            self.catalog(scope, true, draft.kind == Kind::Rows).await?
         } else {
+            let tx = tx.ok_or(Error::Internal)?;
             Catalog::for_scope(tx, scope)
                 .await
                 .map_err(|e| ReportError::Database(e.into()))?
@@ -582,10 +583,11 @@ impl Reports {
         if draft.definition.oversight {
             // Every spec has resolved against live consent; execution uses
             // the same bounded audited path as a reader, never a child Scope.
+            let proof = self.oversight.prove(scope).await.map_err(grid)?;
             let spec = if draft.kind == Kind::Rows {
                 bilibi_grid::OversightSpec::Rows {
                     page: PageSpec {
-                        bounds: self.bounds_on(tx, scope, false).await?,
+                        bounds: self.bounds(scope, false).await?,
                         filters,
                         sorts: draft.definition.sorts(),
                         timezone: "UTC".into(),
@@ -593,11 +595,15 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    pages: BTreeMap::new(),
+                    pages: proof
+                        .children()
+                        .iter()
+                        .map(|child| (child.tenant(), (0, 1)))
+                        .collect(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {
-                    bounds: self.bounds_on(tx, scope, false).await?,
+                    bounds: self.bounds(scope, false).await?,
                     filters,
                     groupings: draft.definition.groupings(),
                     measures: draft.definition.measures(),
@@ -607,10 +613,10 @@ impl Reports {
             };
             let probe = self
                 .oversight
-                .probe_on(tx, scope, &draft.record_type, &spec)
+                .read(&proof, &draft.record_type, &spec)
                 .await
                 .map_err(grid)?;
-            if !probe {
+            if !probe.children.is_empty() && probe.children.iter().all(|c| c.outcome == "refused") {
                 return Err(ReportError::Invalid(field_errors(
                     "definition",
                     "This question is not supported by any consenting child's catalog.",
@@ -618,6 +624,7 @@ impl Reports {
             }
             return Ok(());
         }
+        let tx = tx.ok_or(Error::Internal)?;
         let bounds = self.bounds_on(tx, scope, false).await?;
         let probe = self.probe(tx, scope, draft, filters, bounds).await;
         match probe {
@@ -1340,7 +1347,7 @@ impl Reports {
         bilibi_authz::authorize_key(tx.sql(), scope, AUTHOR)
             .await
             .map_err(denied)?;
-        self.check_on(tx.sql(), scope, draft).await?;
+        self.check_draft(Some(tx.sql()), scope, draft).await?;
         let (tenant, owner) = (scope.tenant(), scope.user());
         let draft = draft.clone();
         Ok(tx
@@ -1386,7 +1393,7 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let before = self.owned(tx, scope, id, version, AUTHOR).await?;
-        self.check_on(tx.sql(), scope, draft).await?;
+        self.check_draft(Some(tx.sql()), scope, draft).await?;
         let (tenant, draft) = (scope.tenant(), draft.clone());
         let updated = tx
             .mutate(move |sql| {
