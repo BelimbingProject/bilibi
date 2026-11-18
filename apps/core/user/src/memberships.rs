@@ -7,6 +7,7 @@ use crate::{
     password::{self, check_policy},
     UserService,
 };
+use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Context, Error, Result};
 use bilibi_mail::{Address, Message};
 use bilibi_security::Scope;
@@ -355,6 +356,19 @@ impl UserService {
         signed_in: &Scope,
         raw_token: &str,
     ) -> std::result::Result<i64, InvitationError> {
+        if signed_in.impersonator().is_some() {
+            let client = self.db.get().await.map_err(Error::from)?;
+            record_action(
+                &**client,
+                &Attribution::from_scope(signed_in),
+                None,
+                "user.invitation.accept.refused",
+                json!({"result": "refused", "reason": "impersonating"}),
+                false,
+            )
+            .await?;
+            return Err(Error::Forbidden.into());
+        }
         if !token_shaped(raw_token) {
             return Err(InvitationError::Link);
         }

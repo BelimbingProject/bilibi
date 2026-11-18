@@ -2,13 +2,14 @@
 //! Exercises the operator command and ordinary invitation acceptance against a fresh database.
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
-use bilibi_user::InvitationError;
+use bilibi_user::{AccountInput, InvitationError};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
 const OWNER: &str = "owner@customer.example.test";
+const PASSWORD: &str = "owner-proof-password";
 
 fn mailbox_dir() -> PathBuf {
     std::env::var("BILIBI_MAIL_DIR")
@@ -225,7 +226,27 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::Internal)?;
     let user = app
         .user
-        .accept_new_member_invitation(&token, "owner-proof-password")
+        .accept_new_member_invitation(&token, PASSWORD)
+        .await
+        .map_err(|_| Error::Internal)?;
+    let login = app
+        .user
+        .login(OWNER, PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let owner = app.security.guard(&login.token).await?;
+    let retry_email = "retry@customer.example.test";
+    let retry_account = app
+        .user
+        .create_account(
+            &owner,
+            &AccountInput {
+                name: "Second workspace invitee".into(),
+                email: retry_email.into(),
+                password: PASSWORD.into(),
+                ..AccountInput::default()
+            },
+        )
         .await
         .map_err(|_| Error::Internal)?;
     let client = db.get_detached("tenant owner walkthrough checks").await?;
@@ -311,7 +332,6 @@ async fn main() -> Result<()> {
     let blocked = directory.join("blocked-delivery");
     std::fs::write(&blocked, b"file in place of mailbox").map_err(|_| Error::Internal)?;
     let retry_workspace = "Delivery retry workspace";
-    let retry_email = "retry@customer.example.test";
     expect_output(
         provision(retry_workspace, Some(retry_email), Some(&blocked))?,
         Some(
@@ -393,6 +413,48 @@ async fn main() -> Result<()> {
         }
         expect_output(output, None)?;
     }
+    let auth = app
+        .services
+        .get::<bilibi_tenancy::Authentication>("base/tenancy.authentication")?;
+    let viewing = auth
+        .authenticate_session(
+            &**client,
+            tenant,
+            retry_account.id,
+            Some(user),
+            None,
+            String::new(),
+        )
+        .await?;
+    let signed_in = auth
+        .authenticate(&**client, tenant, retry_account.id, String::new())
+        .await?;
+    let mut expected: serde_json::Value =
+        serde_json::from_str(&snapshot(&client).await?).map_err(|_| Error::Internal)?;
+    let actions = expected["actions"].as_i64().ok_or(Error::Internal)?;
+    expected["actions"] = serde_json::json!(actions + 1);
+    drop(client);
+    assert!(matches!(
+        app.user
+            .accept_member_invitation(&viewing, &new_token)
+            .await,
+        Err(InvitationError::Access(Error::Forbidden))
+    ));
+    let client = db.get().await?;
+    let after: serde_json::Value =
+        serde_json::from_str(&snapshot(&client).await?).map_err(|_| Error::Internal)?;
+    let audited: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=$1 AND actor_id=$2
+         AND impersonator_id=$3 AND event='user.invitation.accept.refused'
+         AND payload->>'reason'='impersonating')",
+            &[&tenant, &retry_account.id, &user],
+        )
+        .await?
+        .get(0);
+    if !audited || after != expected {
+        return Err(Error::Internal);
+    }
     drop(client);
     if !reissued.same_invitation(&original)
         || reissued.digest == delivered.digest
@@ -404,7 +466,7 @@ async fn main() -> Result<()> {
         )
         || app
             .user
-            .accept_new_member_invitation(&new_token, "owner-proof-password")
+            .accept_member_invitation(&signed_in, &new_token)
             .await
             .map_err(|_| Error::Internal)?
             != original.user
