@@ -764,14 +764,12 @@ impl Dialog {
                     .options(choices(reminder_choices::EMAIL))
                     .hint("Emails the assignee, and guests without an account who were sent the invitation."),
             );
-        }
-        let names = pages.names(scope, &[scope.user()]).await?;
-        let own_name = names.get(&scope.user()).cloned().unwrap_or_default();
-        let mut assignees = vec![(own_name, "me".to_owned())];
-        if let Some((user, name)) = &self.assignee {
-            assignees.insert(0, (name.clone(), user.to_string()));
-        }
-        if self.kind != Kind::Note {
+            let names = pages.names(scope, &[scope.user()]).await?;
+            let own_name = names.get(&scope.user()).cloned().unwrap_or_default();
+            let mut assignees = vec![(own_name, "me".to_owned())];
+            if let Some((user, name)) = &self.assignee {
+                assignees.insert(0, (name.clone(), user.to_string()));
+            }
             fields.push(
                 Field::in_form(FORM, "assignee")
                     .id(format!("{prefix}-assignee"))

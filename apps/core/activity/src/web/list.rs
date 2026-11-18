@@ -911,11 +911,6 @@ impl Index {
             ],
         })?);
         let form = self.list.filters_form();
-        let names = self.pages.names(scope, &[scope.user()]).await?;
-        let assigned_to = format!(
-            "Assigned to {}",
-            names.get(&scope.user()).cloned().unwrap_or_default()
-        );
         let mut controls = vec![
             ToolbarControl::search(
                 "activities-search",
@@ -956,7 +951,7 @@ impl Index {
                 &form["mine"],
                 choices(&[
                     ("Everyone's I may see", "any"),
-                    (assigned_to.as_str(), "assignee"),
+                    ("Assigned to me", "assignee"),
                     ("I am a guest", "guest"),
                 ]),
             ),
