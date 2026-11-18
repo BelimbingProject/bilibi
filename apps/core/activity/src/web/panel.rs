@@ -373,6 +373,7 @@ impl Panel {
         if let Some(dialog) = &self.dialog {
             content.push(&dialog.render(
                 &self.pages,
+                scope,
                 &clock,
                 &words,
                 &format!("{anchor}-new"),

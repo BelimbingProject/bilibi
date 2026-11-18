@@ -722,25 +722,23 @@ impl Index {
         filter.page_size = crate::CALENDAR_LIMIT;
         let page = self.pages.activities.list(scope, &filter).await?;
         let me = scope.user();
-        let mut people: Vec<i64> = page.entries.iter().map(|a| a.assignee_user_id).collect();
-        people.push(me);
-        people.sort_unstable_by_key(|id| (*id != me, *id));
+        let mut people: Vec<i64> = page
+            .entries
+            .iter()
+            .map(|a| a.assignee_user_id)
+            .filter(|id| *id != me)
+            .collect();
+        people.sort_unstable();
         people.dedup();
         let names = self.pages.names(scope, &people).await?;
-        let lanes: Vec<CalendarLane> = people
-            .iter()
-            .map(|id| {
-                let label = if *id == me {
-                    "Me".to_owned()
-                } else {
-                    names
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Account {id}"))
-                };
-                CalendarLane::new(id.to_string(), label)
-            })
-            .collect();
+        let mut lanes = vec![CalendarLane::new(me.to_string(), &scope.user_name)];
+        lanes.extend(people.iter().map(|id| {
+            let label = names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| format!("Account {id}"));
+            CalendarLane::new(id.to_string(), label)
+        }));
         let state = CalendarState::parse(&self.calendar_query, today, &lanes);
         let shown: Vec<String> = state
             .shown_lanes(&lanes)
@@ -1011,6 +1009,7 @@ impl Index {
         if let Some(dialog) = &self.dialog {
             body.push(&dialog.render(
                 &self.pages,
+                scope,
                 &clock,
                 &words,
                 "activities-new",
