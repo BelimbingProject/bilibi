@@ -204,6 +204,30 @@ pub const DEMOTED_ACTION_CLASS: &str = "inline-flex items-center gap-1 whitespac
 /// The default `count` of `section_heading`: no badge.
 pub const NO_COUNT: Option<usize> = None;
 
+/// A live panel target for hosts that place a panel outside the section stack.
+/// The stable wrapper preserves the provider's fragment during parent patches.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::live_panel_anchor(id=id) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct LivePanelAnchor<'a> {
+    pub id: &'a str,
+}
+
+/// Record sections followed by live panels, with the standard section gap.
+/// Pass the stable `PanelSpec::id` values in display order. Each provider
+/// supplies its own card, and empty or refused mounts use no layout space.
+#[derive(Template, Debug)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::live_panel_stack(parts=parts, panel_ids=panel_ids) %}{% endcall %}"#,
+    ext = "html"
+)]
+pub struct LivePanelStack<'a> {
+    pub parts: &'a [Html],
+    pub panel_ids: &'a [&'a str],
+}
+
 fn class_tokens(class: &str) -> impl Iterator<Item = &str> {
     class.split_whitespace()
 }

@@ -2080,7 +2080,6 @@ impl Panel {
         body.push(&render(&pagination)?);
         let card = render(&Card {
             id: &card,
-            class: "mt-6",
             inner_class: "p-0",
             role: "region",
             labelledby: &heading,

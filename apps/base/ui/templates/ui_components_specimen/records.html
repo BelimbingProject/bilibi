@@ -23,6 +23,9 @@
 </div>
 {% endcall %}
 </div>
+{% call ui::card(id="specimen-live-panels", title="Live panel stack") %}
+{{ live_panels }}
+{% endcall %}
 {% call ui::card(id="specimen-related", title="Record references", inner_class="space-y-3 p-4") %}
 <p class="text-xs text-ink-muted">A named pill and an unavailable one, then the record picker with hits and with a choice</p>
 {{ related }}

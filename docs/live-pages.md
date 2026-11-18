@@ -251,6 +251,8 @@ embed's subject arguments on every update. Shell embeds use the same contract; W
 renders them into the shell with `Page::render` and mounts them with
 `Page::mount` (`apps/web/src/shell.rs`, `live.rs`).
 
+On record pages, render `bilibi_ui::LivePanelStack` with the page's rendered sections as `parts` and its contributed `PanelSpec::id` values as `panel_ids`, both in display order. Render the page header and dialogs outside the stack. Each provider supplies its own card without an outer margin and keeps the panel ID on its root. For a standalone target, use `bilibi_ui::LivePanelAnchor`.
+
 Each instance owns separate state, even for the same embed/service. An unchanged
 spec preserves that state across parent refresh; a changed or removed spec drops
 it. Parent-route access and panel access are rechecked before panel events and

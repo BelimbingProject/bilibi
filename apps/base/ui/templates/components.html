@@ -170,6 +170,18 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 <div class="{% if wide %}space-y-4{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part|safe }}{% endfor %}</div>
 {% endmacro %}
 
+{#- The ignored wrapper preserves the mounted fragment across parent patches.
+    A missing or refused mount leaves an empty target and takes no space. -#}
+{% macro live_panel_anchor(id) %}
+<div id="{{ id }}-slot" data-live-ignore class="[&:has(>:empty)]:hidden"><div id="{{ id }}"></div></div>
+{% endmacro %}
+
+{#- Keep the section gap between in-flow children, including mounted panels.
+    Each panel provider renders its own surface. -#}
+{% macro live_panel_stack(parts, panel_ids) %}
+<div class="flex flex-col gap-4">{% for part in parts %}{{ part|safe }}{% endfor %}{% for id in panel_ids %}{% call live_panel_anchor(id=id) %}{% endcall %}{% endfor %}</div>
+{% endmacro %}
+
 {#- Fragments on one wrapping line (a page header's several actions). -#}
 {% macro cluster(parts) %}
 <div class="flex flex-wrap items-center gap-2">{% for part in parts %}{{ part|safe }}{% endfor %}</div>

@@ -1,1 +1,2 @@
-<div class="flex items-center gap-3"><div id="person-record-history-slot" data-live-ignore><div id="person-record-history"></div></div>{{ retire }}{{ back }}</div>
+{% import "components.html" as ui %}
+<div class="flex items-center gap-3">{% call ui::live_panel_anchor(id="person-record-history") %}{% endcall %}{{ retire }}{{ back }}</div>
