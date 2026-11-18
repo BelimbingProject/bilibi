@@ -1,5 +1,4 @@
 //! Server-side tenant and platform provisioning commands.
-use bilibi_authz::grants::Grants;
 use bilibi_company::{self as primary, NewCompany, ProvisionOutcome};
 use bilibi_database::{Db, Error, Result};
 use bilibi_user::FirstTenantOwnerError;
@@ -87,10 +86,9 @@ pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
             }
             Err(error) => return Err(error),
         }
-        let grants = app.services.get::<Grants>("base/authz.grants")?;
         return match app
             .user
-            .provision_tenant_owner(&grants, &tenant_name, &company, &email, &origin)
+            .provision_tenant_owner(&tenant_name, &company, &email)
             .await
         {
             Ok(invitation) => {

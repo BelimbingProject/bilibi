@@ -6,7 +6,6 @@ use crate::{
 };
 use bilibi_affiliation::{AffiliationInput, EffectiveDates, OrganisationId};
 use bilibi_audit::{record_action, Attribution};
-use bilibi_authz::grants::Grants;
 use bilibi_company::{NewCompany, ProvisionOutcome};
 use bilibi_database::{Change, Connection, Context, Error, MutationTransaction, Result};
 use bilibi_mail::{Address, Message};
@@ -53,11 +52,9 @@ impl From<tokio_postgres::Error> for FirstTenantOwnerError {
 impl UserService {
     pub async fn provision_tenant_owner(
         &self,
-        grants: &Grants,
         tenant_name: &str,
         company: &NewCompany,
         owner_email: &str,
-        origin: &str,
     ) -> std::result::Result<Invitation, FirstTenantOwnerError> {
         let tenant_name = tenant_name.trim();
         let email = validate_email(owner_email)
@@ -81,6 +78,7 @@ impl UserService {
             )
         })?;
         let name = person.name;
+        let origin = self.origin.as_str();
         if !url::Url::parse(origin).is_ok_and(|url| {
             matches!(url.scheme(), "http" | "https") && url.origin().ascii_serialization() == origin
         }) {
@@ -209,10 +207,8 @@ impl UserService {
                 (Invitation { id, user, email }, TENANT_OWNER_REISSUED)
             } else {
                 (
-                    Self::invite_tenant_owner_in(
-                        &mut tx, grants, company, name, email, token_hash, days,
-                    )
-                    .await?,
+                    self.invite_tenant_owner_in(&mut tx, company, name, email, token_hash, days)
+                        .await?,
                     TENANT_OWNER_INVITED,
                 )
             };
@@ -242,8 +238,8 @@ impl UserService {
     }
 
     async fn invite_tenant_owner_in(
+        &self,
         tx: &mut MutationTransaction<'_>,
-        grants: &Grants,
         company: i64,
         name: String,
         email: String,
@@ -292,7 +288,8 @@ impl UserService {
                 })
             })
             .await?;
-        let role = grants
+        let role = self
+            .sso_grants
             .grant_first_tenant_owner_in(tx, tenant, invitation.user)
             .await?;
         let user = invitation.user;

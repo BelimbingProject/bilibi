@@ -180,6 +180,46 @@ async fn retry_state(client: &tokio_postgres::Client) -> Result<RetryState> {
     })
 }
 
+async fn verify_owner(
+    client: &tokio_postgres::Client,
+    user: i64,
+    workspace: &str,
+    email: &str,
+) -> Result<(i64, i64)> {
+    let row = client
+        .query_one(
+            "SELECT t.id,c.id,u.status,i.email,p.kind,
+                EXISTS(SELECT 1 FROM principal_roles x JOIN roles r ON r.tenant_id=x.tenant_id AND r.id=x.role_id WHERE x.tenant_id=t.id AND x.user_id=u.id AND r.code='tenant_owner' AND r.is_system AND NOT r.grant_all)
+                AND (SELECT count(*) FROM principal_roles x WHERE x.tenant_id=t.id AND x.user_id=u.id)=1,
+                EXISTS(SELECT 1 FROM person_affiliations a WHERE a.tenant_id=t.id AND a.person_id=u.person_id AND a.organisation_id=c.id AND a.unlinked_at IS NULL),
+                EXISTS(SELECT 1 FROM user_desks d WHERE d.tenant_id=t.id AND d.person_id=u.person_id AND d.company_id=c.id),
+                EXISTS(SELECT 1 FROM user_invitations accepted WHERE accepted.tenant_id=t.id AND accepted.id=b.invitation_id AND accepted.accepted_at IS NOT NULL)
+             FROM tenants t
+             JOIN tenant_primary_companies x ON x.tenant_id=t.id
+             JOIN companies c ON c.tenant_id=t.id AND c.id=x.company_id
+             JOIN users u ON u.tenant_id=t.id AND u.id=$1
+             JOIN user_identities i ON i.id=u.identity_id
+             JOIN persons p ON p.tenant_id=t.id AND p.id=u.person_id
+             JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.user_id=u.id AND b.company_id=c.id
+             WHERE t.name=$2 AND c.name='Customer Company Sdn. Bhd.' AND c.code='customer'",
+            &[&user, &workspace],
+        )
+        .await?;
+    let owner_ready = row.get::<_, String>(2) == "active"
+        && row.get::<_, String>(3) == email
+        && row.get::<_, String>(4) == "human"
+        && row.get::<_, bool>(5)
+        && row.get::<_, bool>(6)
+        && row.get::<_, bool>(7)
+        && row.get::<_, bool>(8);
+    if !owner_ready {
+        return Err(Error::Refused(format!(
+            "Owner account {user} was not fully set up for {workspace}"
+        )));
+    }
+    Ok((row.get(0), row.get(1)))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("BILIBI_TENANT_OWNER_DEMO").as_deref() != Ok("disposable") {
@@ -256,34 +296,7 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::Unauthorized)?;
     let revoked = app.security.guard(&retry_login.token).await?;
     let client = db.get().await?;
-    let row = client
-        .query_one(
-            "SELECT t.id,c.id,u.status,i.email,p.kind,
-                EXISTS(SELECT 1 FROM principal_roles x JOIN roles r ON r.tenant_id=x.tenant_id AND r.id=x.role_id WHERE x.tenant_id=t.id AND x.user_id=u.id AND r.code='tenant_owner' AND r.is_system AND NOT r.grant_all)
-                AND (SELECT count(*) FROM principal_roles x WHERE x.tenant_id=t.id AND x.user_id=u.id)=1,
-                EXISTS(SELECT 1 FROM person_affiliations a WHERE a.tenant_id=t.id AND a.person_id=u.person_id AND a.organisation_id=c.id AND a.unlinked_at IS NULL),
-                EXISTS(SELECT 1 FROM user_desks d WHERE d.tenant_id=t.id AND d.person_id=u.person_id AND d.company_id=c.id),
-                b.invitation_id=(SELECT accepted.id FROM user_invitations accepted WHERE accepted.tenant_id=t.id AND accepted.id=b.invitation_id AND accepted.accepted_at IS NOT NULL)
-             FROM tenants t
-             JOIN tenant_primary_companies x ON x.tenant_id=t.id
-             JOIN companies c ON c.tenant_id=t.id AND c.id=x.company_id
-             JOIN users u ON u.tenant_id=t.id AND u.id=$1
-             JOIN user_identities i ON i.id=u.identity_id
-             JOIN persons p ON p.tenant_id=t.id AND p.id=u.person_id
-             JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.user_id=u.id
-             WHERE t.name=$2 AND c.name='Customer Company Sdn. Bhd.' AND c.code='customer'",
-            &[&user, &workspace],
-        )
-        .await?;
-    let tenant: i64 = row.get(0);
-    let company: i64 = row.get(1);
-    let owner_ready = row.get::<_, String>(2) == "active"
-        && row.get::<_, String>(3) == OWNER
-        && row.get::<_, String>(4) == "human"
-        && row.get::<_, bool>(5)
-        && row.get::<_, bool>(6)
-        && row.get::<_, bool>(7)
-        && row.get::<_, bool>(8);
+    let (tenant, company) = verify_owner(&client, user, &workspace, OWNER).await?;
     let action_row = client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=$1 AND system_principal='provision' AND event='company.tenant.provisioned'),
@@ -301,7 +314,7 @@ async fn main() -> Result<()> {
         .await?;
     let mutation_audit = mutation_row.get::<_, bool>(0) && mutation_row.get::<_, bool>(1);
     println!(
-        "Customer owner accepted: tenant={tenant} company={company} user={user} invitation_tenant={} owner_ready={owner_ready}",
+        "Customer owner accepted: tenant={tenant} company={company} user={user} invitation_tenant={}",
         invitation.tenant_name
     );
     println!(
@@ -311,7 +324,7 @@ async fn main() -> Result<()> {
         mutation_row.get::<_, bool>(0),
         mutation_row.get::<_, bool>(1)
     );
-    if invitation.tenant_name != workspace || !owner_ready || !action_audit || !mutation_audit {
+    if invitation.tenant_name != workspace || !action_audit || !mutation_audit {
         return Err(Error::Internal);
     }
 
@@ -496,6 +509,12 @@ async fn main() -> Result<()> {
     {
         return Err(Error::Internal);
     }
-    println!("Verified delivery recovery, expired link replacement and refusal to change or adopt an existing owner.");
+    let client = db.get().await?;
+    let (retry_tenant, _) =
+        verify_owner(&client, original.user, retry_workspace, retry_email).await?;
+    if retry_tenant != original.tenant {
+        return Err(Error::Internal);
+    }
+    println!("Verified owner setup with an existing sign-in, delivery recovery, expired link replacement and refusal to change or adopt an existing owner.");
     Ok(())
 }
