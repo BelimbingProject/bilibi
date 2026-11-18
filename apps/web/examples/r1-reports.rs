@@ -1606,6 +1606,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("{refused:?}, report saved: {saved}, audit counts: {checked:?} to {audited:?}"),
     );
 
+    let budget_key = "tenancy.oversight.total_timeout_ms";
+    client
+        .execute(
+            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted)
+             VALUES($1,0,'global',0,'1000',false)
+             ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=EXCLUDED.value",
+            &[&budget_key],
+        )
+        .await?;
+    let mut blocker = db.get_detached("the walkthrough's audit lock").await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&2_i64],
+    )
+    .await?;
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        reports.check(&manager, &oversight_rows),
+    )
+    .await;
+    lock.rollback().await?;
+    drop(blocker);
+    client
+        .execute(
+            "DELETE FROM base_settings WHERE key=$1 AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[&budget_key],
+        )
+        .await?;
+    reports.check(&manager, &oversight_rows).await?;
+    let after_retry = audit_counts().await?;
+    checks.check(
+        "a blocked audit times out without writing late and the next check can audit",
+        matches!(timed, Ok(Err(ReportError::TooHeavy(_))))
+            && after_retry == (audited.0 + 1, audited.1 + 1),
+        format!("{timed:?}, parent and child audit counts: {audited:?} to {after_retry:?}"),
+    );
+
+    client
+        .batch_execute(
+            "INSERT INTO base_grid_ref_items(id,tenant_id,group_id,name,category,quantity,unit_cost)
+             SELECT 10000+n,2,9304,'Distinct item ' || n,'parts',1,1
+             FROM generate_series(1,1000) n",
+        )
+        .await?;
+    oversight_summary.definition.groupings[0].column = "name".into();
+    let refused = reports.check(&manager, &oversight_summary).await;
+    checks.check(
+        "an oversight summary over the group limit cannot be saved",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition")),
+        format!("{refused:?}"),
+    );
+
     client
         .execute(
             "DELETE FROM field_restrictions WHERE table_id='reference_items'",

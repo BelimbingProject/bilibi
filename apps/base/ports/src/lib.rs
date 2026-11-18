@@ -186,7 +186,7 @@ fn validate(entries: &[Entry]) -> RegistryResult<()> {
 inventory::submit! { Consumer::new::<Port>(PORTS, "base/ports", validate) }
 
 /// The mounted ports, built once from the catalog.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct Ports {
     providers: BTreeMap<&'static str, &'static dyn PortProvider>,
     facts: Vec<&'static RecordFact>,
@@ -239,12 +239,12 @@ impl Ports {
             .iter()
             .copied()
             .filter(|fact| fact.record_kind == kind)
-            .map(|fact| {
+            .filter_map(|fact| {
+                let provider = self.providers.get(fact.port).copied()?;
                 let db = db.clone();
                 let scope = scope.clone();
                 let id = id.to_owned();
-                let ports = self.clone();
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     tokio::time::timeout(Duration::from_millis(100), async {
                         let mut client = db.get().await.ok()?;
                         let tx = client
@@ -256,10 +256,11 @@ impl Ports {
                         tx.batch_execute("SET LOCAL statement_timeout = '75ms'")
                             .await
                             .ok()?;
-                        let value: RecordFactValue = ports
-                            .call(&tx, &scope, fact.port, &serde_json::json!({"id": id}))
+                        let answer = provider
+                            .call((&tx).into(), &scope, serde_json::json!({"id": id}))
                             .await
                             .ok()?;
+                        let value: RecordFactValue = serde_json::from_value(answer).ok()?;
                         if value.label.is_empty()
                             || value.label.chars().count() > 80
                             || value.value.chars().count() > 160
@@ -271,7 +272,7 @@ impl Ports {
                     .await
                     .ok()
                     .flatten()
-                })
+                }))
             });
         join_all(reads)
             .await

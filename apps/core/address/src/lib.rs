@@ -92,8 +92,16 @@ impl AddressService {
     /// Normalize and check the location against Geonames: the only way to a
     /// `ValidAddress`, which every store write takes.
     pub async fn validate(&self, input: &AddressInput) -> WriteResult<ValidAddress> {
+        let client = self.db.get().await.map_err(Error::from)?;
+        self.validate_on(&**client, input).await
+    }
+    async fn validate_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        input: &AddressInput,
+    ) -> WriteResult<ValidAddress> {
         let input = model::normalize(input).map_err(WriteError::Invalid)?;
-        location::check(&self.geonames, &input).await?;
+        location::check(client, &self.geonames, &input).await?;
         Ok(ValidAddress(input))
     }
     /// The location cascade a form runs as values change (see `location`).
@@ -106,7 +114,8 @@ impl AddressService {
         location::suggest(&self.geonames, incoming, previous, previous_auto).await
     }
     pub async fn options(&self, location: &Location) -> Result<Options> {
-        location::options(&self.geonames, location).await
+        let client = self.db.get().await?;
+        location::options(&**client, &self.geonames, location).await
     }
 
     pub async fn read(&self, scope: &Scope, id: AddressId) -> Result<Address> {
@@ -172,12 +181,12 @@ impl AddressService {
     }
 
     pub async fn create(&self, scope: &Scope, input: &AddressInput) -> WriteResult<Address> {
-        let input = self.validate(input).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("address.create"))
             .await?;
+        let input = self.validate_on(tx.sql(), input).await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         let result = store::create(&mut tx, &scope, &input).await?;
         tx.commit().await?;
@@ -189,12 +198,12 @@ impl AddressService {
         id: AddressId,
         update: &Update,
     ) -> WriteResult<Address> {
-        let input = self.validate(&update.address).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
             .begin(&mut client, scope.mutation_context("address.update"))
             .await?;
+        let input = self.validate_on(tx.sql(), &update.address).await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         let result = store::update(&mut tx, &scope, id, update.version, &input, false).await?;
         tx.commit().await?;
@@ -235,7 +244,6 @@ impl AddressService {
         input: &AddressInput,
         attachment: &AttachmentInput,
     ) -> WriteResult<AttachedAddress> {
-        let input = self.validate(input).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
         let mut tx = self
             .mutations
@@ -244,6 +252,7 @@ impl AddressService {
                 scope.mutation_context("address.create_and_attach"),
             )
             .await?;
+        let input = self.validate_on(tx.sql(), input).await?;
         let scope = self.fresh(tx.sql(), scope).await?;
         let result = store::create_and_attach(&mut tx, &scope, owner, &input, attachment).await?;
         tx.commit().await?;

@@ -9,7 +9,8 @@
 //! nothing, so the person types every value themselves.
 use crate::model::{AddressInput, FieldError, WriteError, WriteResult};
 use bilibi_database::Result;
-use bilibi_geonames::{normalize_iso, Geonames};
+use bilibi_geonames::{country_summary, normalize_iso, Geonames};
+use bilibi_tenancy::ReadClient;
 use serde::{Deserialize, Serialize};
 
 /// The four interdependent facts, as a form holds them (blank = "").
@@ -126,15 +127,19 @@ async fn matching_admin1(geonames: &Geonames, country: &str, raw: &str) -> Resul
         .map(|a| a.code))
 }
 
-pub async fn options(geonames: &Geonames, location: &Location) -> Result<Options> {
+pub async fn options(
+    client: &impl ReadClient,
+    geonames: &Geonames,
+    location: &Location,
+) -> Result<Options> {
     let country = location.country_iso.as_str();
     let mut localities: Vec<String> = Vec::new();
     let exact = geonames
-        .lookup_postcode(country, &location.postcode)
+        .lookup_postcode_on(client, country, &location.postcode)
         .await?;
     let admin1 = (!location.admin1_code.trim().is_empty()).then_some(location.admin1_code.as_str());
     let cities = geonames
-        .search_city_names(country, &location.locality, admin1)
+        .search_city_names_on(client, country, &location.locality, admin1)
         .await?;
     for name in exact.into_iter().map(|m| m.place_name).chain(cities) {
         if !name.trim().is_empty() && !localities.contains(&name) {
@@ -142,9 +147,9 @@ pub async fn options(geonames: &Geonames, location: &Location) -> Result<Options
         }
     }
     Ok(Options {
-        admin1: geonames.admin1_options(country, false).await?,
+        admin1: geonames.admin1_options_on(client, country, false).await?,
         postcodes: geonames
-            .search_postcodes(country, &location.postcode)
+            .search_postcodes_on(client, country, &location.postcode)
             .await?,
         localities,
     })
@@ -153,15 +158,19 @@ pub async fn options(geonames: &Geonames, location: &Location) -> Result<Options
 /// The write-time check on normalized input: the country is imported and the
 /// division belongs to it. Postcode and locality stay free text, because
 /// Geonames rarely covers every street address.
-pub async fn check(geonames: &Geonames, input: &AddressInput) -> WriteResult<()> {
+pub async fn check(
+    client: &impl ReadClient,
+    geonames: &Geonames,
+    input: &AddressInput,
+) -> WriteResult<()> {
     let mut errors = Vec::new();
     if let Some(country) = input.country_iso.as_deref() {
         let iso = normalize_iso(country).unwrap_or_default();
-        if geonames.get_country(&iso).await?.is_none() {
+        if country_summary(client, &iso).await?.is_none() {
             errors.push(FieldError::new("country_iso", "is not a known country"));
         }
         if let Some(code) = input.admin1_code.as_deref() {
-            match geonames.get_admin1(code).await? {
+            match geonames.get_admin1_on(client, code).await? {
                 Some(admin1) if admin1.country_iso == iso => {}
                 Some(_) => {
                     errors.push(FieldError::new("admin1_code", "belongs to another country"))
