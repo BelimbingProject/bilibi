@@ -587,7 +587,7 @@ impl Handler for DocumentData {
                         .await?;
                     crate::deletion::restore(&mut tx, tenant, id).await?;
                     tx.commit().await?;
-                    progress.record(step).await?;
+                    progress.record(client, step).await?;
                     continue;
                 }
                 let company = OrganisationId::new(company).map_err(|_| Error::Internal)?;
