@@ -71,7 +71,7 @@ jobs:
       - name: Decide whether this change can affect a mount
         id: decide
         run: python3 scripts/compatibility.py affected domains
-      - name: Select the Platform base and mounted revisions
+      - name: Select mounts and pin Finance revisions
         id: select
         if: steps.decide.outputs.affected == 'true'
         env:
@@ -85,8 +85,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
-      finance_linted: ${{ steps.linted.outputs.pair }}
-      finance_built: ${{ steps.tested.outputs.finance }}
+      finance_lint: ${{ matrix.phase == 'lint' && steps.composition.outputs.identity || '' }}
+      finance_debug: ${{ matrix.phase == 'build' && matrix.build == 'check' && steps.composition.outputs.identity || '' }}
+      finance_release: ${{ matrix.phase == 'build' && matrix.build == 'release' && steps.composition.outputs.identity || '' }}
+      finance_tested: ${{ steps.tested.outputs.finance }}
 
     strategy:
       fail-fast: false
@@ -137,21 +139,37 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Bring this change up to the selected base commit
+      - name: Bring this change up to its base
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
           BASE_COMMIT: ${{ needs.catalogue.outputs.platform_base }}
-        run: ./scripts/merge-live-base.sh "$BASE_REF" "$BASE_COMMIT"
+        run: |
+          args=("$BASE_REF")
+          if [ "$DOMAIN_CI_PHASE" != all ]; then
+            args+=("${BASE_COMMIT:?Finance requires a selected base commit}")
+          fi
+          ./scripts/merge-live-base.sh "${args[@]}"
 
       - name: Check out the Domain or Extension
         uses: actions/checkout@v7
         with:
           repository: ${{ matrix.repository }}
-          ref: ${{ matrix.commit }}
+          ref: ${{ matrix.commit || matrix.ref }}
           path: container
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Move the Domain or Extension to its latest release
+        if: matrix.latest_release
+        working-directory: container
+        run: |
+          latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)
+          if [ -z "$latest" ]; then
+            echo "::error::$CONTAINER_REPOSITORY has no release tag yet (docs/versions.md); tag one or run this with domains_at=main"
+            exit 1
+          fi
+          git checkout --quiet "$latest"
 
       # Same real nested checkout as docs/domain-ci/ci.yml.
       - name: Mount the Domain or Extension
@@ -194,13 +212,20 @@ jobs:
       - name: Verify the gates left the Domain or Extension clean
         run: git -C "apps/$CONTAINER_ROLE/$CONTAINER_ID" diff --exit-code
 
-      - name: Report the linted Finance pair
-        id: linted
-        if: matrix.phase == 'lint'
+      - name: Report the Finance composition
+        id: composition
+        if: matrix.phase != 'all'
         run: |
-          platform=$(git rev-parse HEAD)
-          mounted=$(git -C "apps/$CONTAINER_ROLE/$CONTAINER_ID" rev-parse HEAD)
-          printf 'pair=%s %s\n' "$platform" "$mounted" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          from pathlib import Path
+
+          pin = tomllib.loads(Path('.local/composition/manifest.txt').read_text())
+          platform = pin['platform']
+          finance = pin['containers']['domains/finance']['head']
+          lockfile = pin['cargo_lock_sha256']
+          print(f'identity={platform} {finance} {lockfile}')
+          PY
 
       # The existing tested-set format records Domain pairs only. Extension
       # gates are equally required, without changing catalogue publishing.
@@ -248,14 +273,17 @@ jobs:
     steps:
       - name: Join the Finance lint and release build results
         id: finance
-        if: needs.domain.outputs.finance_linted != '' && needs.domain.outputs.finance_built != ''
+        if: >-
+          needs.domain.outputs.finance_lint != '' &&
+          needs.domain.outputs.finance_release == needs.domain.outputs.finance_lint &&
+          needs.domain.outputs.finance_tested != ''
         env:
-          LINTED: ${{ needs.domain.outputs.finance_linted }}
-          BUILT: ${{ needs.domain.outputs.finance_built }}
+          LINTED: ${{ needs.domain.outputs.finance_lint }}
+          TESTED: ${{ needs.domain.outputs.finance_tested }}
         run: |
           jq -e --arg linted "$LINTED" \
-            '.[0] | ([.platform.commit, .domain.commit] | join(" ")) == $linted' <<< "$BUILT" >/dev/null
-          printf '%s\n' "$BUILT" > "$RUNNER_TEMP/tested-set.json"
+            '.[0] | [.platform.commit, .domain.commit] == ($linted | split(" ") | .[:2])' <<< "$TESTED" >/dev/null
+          printf '%s\n' "$TESTED" > "$RUNNER_TEMP/tested-set.json"
       - uses: actions/upload-artifact@v7
         if: steps.finance.outcome == 'success'
         with:
@@ -269,6 +297,10 @@ jobs:
           MOUNTED: ${{ needs.domain.result }}
           HAS_CONTAINERS: ${{ needs.catalogue.outputs.has_containers }}
           AFFECTED: ${{ needs.catalogue.outputs.affected }}
+          MATRIX: ${{ needs.catalogue.outputs.matrix }}
+          FINANCE_LINT: ${{ needs.domain.outputs.finance_lint }}
+          FINANCE_DEBUG: ${{ needs.domain.outputs.finance_debug }}
+          FINANCE_RELEASE: ${{ needs.domain.outputs.finance_release }}
         run: |
           pass() {
             echo "compatible=true" >> "$GITHUB_OUTPUT"
@@ -285,6 +317,12 @@ jobs:
             exit 0
           fi
           if [ "$SELECTION" = success ] && { [ "$MOUNTED" = success ] || { [ "$HAS_CONTAINERS" = false ] && [ "$MOUNTED" = skipped ]; }; }; then
+            if ! jq -e --arg lint "$FINANCE_LINT" --arg debug "$FINANCE_DEBUG" --arg release "$FINANCE_RELEASE" '
+              all(.include[] | select(.phase == "build");
+                  $lint != "" and $lint == (if .build == "check" then $debug else $release end))
+            ' <<< "$MATRIX" >/dev/null; then
+              fail 'Finance lint and build jobs must use the same Platform commit, Finance commit and Cargo.lock hash.'
+            fi
             pass 'Every official Domain and Extension passed.'
           else
             fail 'Official compatibility failed. Read the failing domains/<id> or extensions/<id> job. A break requires a companion PR in the same task, linked from the Platform PR (docs/versions.md#platform-changes-and-companion-prs).'

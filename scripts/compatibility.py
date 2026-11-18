@@ -76,21 +76,22 @@ def matrix(event, event_name, ref, domains_at):
             url = facts['repository']
             repository = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', url)
             expect(repository, f'{role}/{container}: CI needs a GitHub repository URL')
-            selected_ref = 'latest release' if latest_release else overrides.get((role, container), 'refs/heads/main')
-            commit, error = '', ''
-            try:
-                if latest_release:
-                    tags = release_tags(repository.group(1))
-                    expect(tags, f'{url} has no release tag yet (docs/versions.md); tag one or run with domains_at=main')
-                    version = max(tags, key=version_tuple)
-                    selected_ref = f'refs/tags/v{version}'
-                    _, commit = tags[version]
-                else:
-                    commit = branch_commit(url, selected_ref)
-            except Refused as refusal:
-                error = str(refusal)
-
             finance = (role, container) == ('domains', 'finance')
+            selected_ref = overrides.get((role, container), 'refs/heads/main')
+            commit, error = '', ''
+            if finance:
+                try:
+                    if latest_release:
+                        tags = release_tags(repository.group(1))
+                        expect(tags, f'{url} has no release tag yet (docs/versions.md); tag one or run with domains_at=main')
+                        version = max(tags, key=version_tuple)
+                        selected_ref = f'refs/tags/v{version}'
+                        _, commit = tags[version]
+                    else:
+                        commit = branch_commit(url, selected_ref)
+                except Refused as refusal:
+                    error = str(refusal)
+
             phases = [(build, 'build' if finance else 'all') for build in profiles]
             if finance:
                 phases.append(('check', 'lint'))
@@ -99,6 +100,7 @@ def matrix(event, event_name, ref, domains_at):
                 'id': container,
                 'repository': repository.group(1),
                 'ref': selected_ref,
+                'latest_release': latest_release and not finance,
                 'commit': commit,
                 'error': error,
                 'build': build,
@@ -206,10 +208,10 @@ def matrix_main():
     try:
         event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
         event_name = os.environ['GITHUB_EVENT_NAME']
-        if event_name == 'pull_request':
+        selected = matrix(event, event_name, os.environ.get('GITHUB_REF', ''), os.environ.get('DOMAINS_AT', ''))
+        if event_name == 'pull_request' and any(row['phase'] == 'lint' for row in selected['include']):
             base = event['pull_request']['base']['ref']
             write_output('platform_base', branch_commit('origin', f'refs/heads/{base}'))
-        selected = matrix(event, event_name, os.environ.get('GITHUB_REF', ''), os.environ.get('DOMAINS_AT', ''))
         encoded = json.dumps(selected, separators=(',', ':'))
         print(encoded)
         write_output('matrix', encoded)
