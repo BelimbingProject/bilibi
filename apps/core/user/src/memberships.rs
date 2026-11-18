@@ -67,11 +67,11 @@ impl From<tokio_postgres::Error> for InvitationError {
 /// account administration, which is never done while viewing as someone else.
 const IMPERSONATING_INVITE: &str = "Invitations cannot be sent while viewing as someone else.";
 
-fn digest(token: &str) -> Vec<u8> {
+pub(crate) fn digest(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
-fn token() -> Result<String> {
+pub(crate) fn token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Internal)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -424,6 +424,7 @@ impl UserService {
             tx.rollback().await?;
             return refusal;
         }
+        self.settle_tenant_owner_in(&mut tx, tenant, user).await?;
         tx.commit().await?;
         Ok(user)
     }
@@ -457,6 +458,7 @@ impl UserService {
             tx.rollback().await?;
             return refusal;
         }
+        self.settle_tenant_owner_in(&mut tx, tenant, user).await?;
         tx.commit().await?;
         Ok(user)
     }

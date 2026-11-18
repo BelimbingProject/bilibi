@@ -291,6 +291,8 @@ action with the account, email and role, as the seed does. The host then
 calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and names that owner. Use this, not an
 `INSERT INTO users`, for any setup path that needs a first account.
 
+`create_first_tenant_owner(grants, tenant_company, input)` is the corresponding server-authorized seam for a customer tenant, behind `bilibi-web tenant-provision --owner-email`. It proves that the target is a live non-operator tenant and its primary company, locks the tenant's accounts, and refuses when any undeleted account or owner-bootstrap receipt exists. On one `MutationBoundary` transaction as **System · tenant-provision**, it creates an ordinary pending membership invitation, assigns the reconciled `core_admin` grant-all role through `Grants::grant_first_administrator_in`, and records `user_tenant_owner_bootstraps`; no credential enters an argument, log or receipt. Accepting that invitation uses the ordinary membership door and settles the receipt by creating the Human Person, business affiliation and first desk in the same transaction. Use this seam, not a direct account insert or a second role path, for a customer tenant's first owner.
+
 ## Two-factor authentication (the step-up provider)
 
 Authenticator-app codes (TOTP, RFC 6238: HMAC-SHA-1, 6 digits, 30 s) for the signed-in account. It is the second factor behind Base Step-up (`apps/base/step_up/README.md`).

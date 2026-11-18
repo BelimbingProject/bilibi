@@ -8,6 +8,7 @@
 #   install-server.sh create <instance> --role dev|staging|production --site <host> [--port <n>] [--tls internal|cloudflare] [--cloudflare-token-stdin]
 #   install-server.sh release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh create-owner <instance> [bilibi-web create-owner flags]
+#   install-server.sh tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> [--owner-email <address> [--owner-name <name>]]
 #   install-server.sh two-factor-reset <instance> --email <address>
 #   install-server.sh installer <bilibi-installer binary> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>
 #   install-server.sh switch <instance> <release number>
@@ -897,6 +898,20 @@ create_owner() {
     [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
     with_env "$instance" bilibi-build "$dir/current/bilibi-web" create-owner "$@"
 }
+# =========================================================== tenant-provision
+# A customer tenant, primary company and optional first-owner invitation. The
+# binary owns validation, idempotence and auditing; this wrapper supplies only
+# the selected instance environment and never accepts a password.
+tenant_provision() {
+    local instance=${1:-}
+    [[ -n $instance ]] || usage
+    need_root tenant-provision "$@"
+    shift
+    instance_exists "$instance" || fail "no instance named $instance"
+    local dir; dir=$(instance_dir "$instance")
+    [[ -x $dir/current/bilibi-web ]] || fail "$instance has no release in service" "put one in service first: $0 release $instance <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>"
+    with_env "$instance" bilibi-build "$dir/current/bilibi-web" tenant-provision "$@"
+}
 # ========================================================= two-factor-reset
 # Turns off one account's authenticator, for a person nobody else can reset
 # (the only admin lost their phone): `bilibi-web two-factor-reset` in the
@@ -949,6 +964,7 @@ case ${1:-} in
     create) shift; create "$@" ;;
     release) shift; release "$@" ;;
     create-owner) shift; create_owner "$@" ;;
+    tenant-provision) shift; tenant_provision "$@" ;;
     two-factor-reset) shift; two_factor_reset "$@" ;;
     installer) shift; installer "$@" ;;
     switch) shift; switch "$@" ;;

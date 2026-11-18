@@ -41,7 +41,7 @@ Database seed ledger. `Grants::grant_first_administrator_in` is the one
 bootstrap seam: on a system-attributed `MutationTransaction` of a tenant it
 reconciles that tenant's system roles and assigns the grant-all `core_admin`
 role as an audited change, for `bilibi-web create-owner` (Core User's
-`create_first_administrator`, which proves the tenant holds no account). It
+`create_first_administrator`, which proves the operator tenant holds no account) and `bilibi-web tenant-provision --owner-email` (Core User's `create_first_tenant_owner`, which proves a customer tenant holds no account). It
 refuses a user- or agent-attributed transaction; every other assignment goes
 through `assign_role`, which proves the actor and asks for step-up. Neither path runs at app boot. The schema keeps one role
 instance per tenant; a custom role is owned by a company of that tenant

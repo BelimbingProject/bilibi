@@ -253,6 +253,23 @@ Everything the command creates is written the way the app writes it, so it shows
 
 Behind the scenes this is the development seed's bootstrap with your details instead of the seed's, through the same owners: Company provisions the operator company, User creates the account and receipt, Authz grants the role, and User gives the owner a Person, business affiliation and first desk ([`apps/core/user/README.md`](../apps/core/user/README.md), Bootstrap administrator).
 
+### The first owner of a customer tenant
+
+An installation operator can create a customer tenant, its primary company and its first owner in one server command. Mail delivery must already be configured for the instance because the owner receives a one-time sign-in setup link:
+
+```sh
+sudo scripts/install-server.sh tenant-provision production \
+    --tenant-name "Acme workspace" \
+    --company-name "Acme Sdn. Bhd." --company-code acme \
+    --owner-email owner@acme.example --owner-name "Acme Owner"
+```
+
+There is deliberately no password flag. The owner follows the emailed link, chooses a password through the ordinary invitation page and enrols a second factor when the installation's sign-in policy requires one. The link works once and uses the ordinary invitation duration (seven days by default). On acceptance User creates the owner's Person, business affiliation and first desk in the primary company in the same audited transaction.
+
+The server command is the authority, as `create-owner` is for the platform operator: it is not a web endpoint and accepts no tenant, actor or role ID. User proves the live customer tenant and its primary company again, then Authz assigns the contributed Core Administrator owner role. The writes appear in the audit log as **System · tenant-provision**, including `user.tenant_owner.invited`, the account, invitation, role and bootstrap receipt; acceptance records the ordinary invitation action and the Person, affiliation and desk changes.
+
+**Rerunning the exact command is safe but does not replace an owner.** Company resolves the existing tenant only when its exact name, primary-company name and code match. User then refuses without writing when that tenant has any account or an earlier owner-bootstrap receipt. A different company, suspended tenant, platform-operator tenant or ambiguous tenant name is also refused. Use the signed-in Users page to invite later administrators; recovery of an existing owner is not provisioning.
+
 ## Lost phone
 
 Bilibi has no 2FA recovery codes. A person who loses their phone asks another admin to reset their 2FA (Users › the person › **Reset 2FA**, which needs the admin's own code). When the person is the only admin, the server owner resets it from the server:
@@ -331,6 +348,7 @@ Script commands:
 | `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
 | `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | The first account, the server owner; asks for anything not given, refuses once an owner exists (it then only finishes an unfinished Person, business affiliation and first desk) |
+| `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> [--owner-email <address> [--owner-name <name>]]` | Create a customer tenant and primary company; with an owner email, assign its first Core Administrator through the emailed invitation flow and refuse once any account exists |
 | `two-factor-reset <instance> --email <address>` | Turn off one account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `switch <instance> <n>` | Put a kept release in service |
