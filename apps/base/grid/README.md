@@ -115,7 +115,7 @@ The first catalog for a source asks PostgreSQL to describe (not run) its stateme
 `restriction_catalog` and `restrictable` give the Authz screens the protected-field
 catalog as **data**: Authz does not depend on Grid. Each field carries its personal kind, so only personal fields can be masked.
 
-**Masked fields (ADR 05) stay in the scoped catalog, with partial values.** A field restricted in mask mode for the actor (`authz::fields::masked`) is not removed: projected cells show its partial value by kind (`a•••@example.com`, `•••• 1234`), a `list` rollup masks each item, and a count is unchanged. A sum or average of a masked field does not resolve (`MaskedAggregate`): over one linked row it is the hidden value, and narrow rollups give it away. Trend and change-since lenses add nothing to a masked column. `Catalog::mask(column)` names a column's mask. Text search skips masked fields, so a match cannot say what one holds. Grouped summaries and filtered row pages refuse a masked field as a grouping, filter, sort or value aggregate (`Unsupported`); only its count is allowed. `query::reveal(db, scope, &Reveal, table, field, key)` reads one masked field of one record in full, through the same scoped source; a withheld or unrestricted field is `Forbidden`. It needs a sealed `Reveal` grant for that reader and field, which only `base/privacy` issues, after the capability, reason and Step-up, recording the reveal.
+**Masked fields (ADR 05) stay in the scoped catalog, with partial values.** A field restricted in mask mode for the actor (`authz::fields::masked`) is not removed: projected cells show its partial value by kind (`a•••@example.com`, `•••• 1234`), a `list` rollup masks each item, and a count is unchanged. A sum or average of a masked field does not resolve (`MaskedAggregate`): over one linked row it is the hidden value, and narrow rollups give it away. Trend and change-since lenses add nothing to a masked column. `Catalog::mask(column)` names a column's mask. Text search skips masked fields, so a match cannot say what one holds. Grouped summaries and filtered row pages refuse a masked field as a grouping, filter, sort or value aggregate (`Unsupported`); only its count is allowed. `query::reveal_on(tx, scope, &Reveal, table, field, key)` reads one masked field of one record in full, through the same scoped source; a withheld or unrestricted field is `Forbidden`. It needs a sealed `Reveal` grant for that reader and field, which only `base/privacy` issues, after the capability, reason and Step-up, recording the reveal.
 
 ## Column paths
 
@@ -219,9 +219,7 @@ reference rows on success. No unit tests or test runner are involved.
 
 ## Reads inside an existing transaction
 
-Use `project_on`, `page_keys_on`, `summarize_on` and `query::reveal_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone reads keep their own read-only repeatable-read transaction.
-
-`OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on that same transaction. Probes run bounded child reads serially and return whether the question is supported. One named, non-waiting detached checkout writes child evidence and the parent summary so both survive a plan rollback. The probe deadline bounds that checkout and its audit work.
+Use `project_on`, `page_keys_on`, `summarize_on` and `query::reveal_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
 
 ## Grouped summaries and row pages (G5)
 

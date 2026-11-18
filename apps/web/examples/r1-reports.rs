@@ -26,7 +26,7 @@ bilibi_walkthrough_fixture::inventory::submit! { bilibi_walkthrough_fixture::reg
     verbs: &[],
     capabilities: &[],
     roles: &[
-        bilibi_walkthrough_fixture::authz::RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view", "reports.author", "reports.share", "reports.export", "reports.schedule", "tenancy.oversight.view"] },
+        bilibi_walkthrough_fixture::authz::RoleDefinition { code: "manager", name: "manager", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view", "reports.author", "reports.share", "reports.export", "reports.schedule"] },
         bilibi_walkthrough_fixture::authz::RoleDefinition { code: "viewer", name: "viewer", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view"] },
     ],
     system_principals: &[],
@@ -1531,132 +1531,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "deleted, its shares go with it",
         shares == 0 && matches!(gone, Err(ReportError::NotFound)),
         format!("{shares} share(s)"),
-    );
-
-    println!("== Oversight probe audit");
-    client
-        .execute(
-            "UPDATE tenants SET parent_id=$1 WHERE id=$2",
-            &[&1_i64, &2_i64],
-        )
-        .await?;
-    let consent = json!({"reference_items":{"level":"rows","withheld":[],"personal":[]}});
-    client
-        .execute(
-            "INSERT INTO base_tenancy_oversight(tenant_id,parent_id,active,tables) VALUES($1,$2,true,$3)
-             ON CONFLICT(tenant_id) DO UPDATE SET parent_id=EXCLUDED.parent_id,active=true,tables=EXCLUDED.tables",
-            &[&2_i64, &1_i64, &consent],
-        )
-        .await?;
-    let mut oversight_summary = summary_draft("Oversight check", vec![]);
-    oversight_summary.definition.oversight = true;
-    let oversight_rows = Draft {
-        name: "Rolled-back oversight report".into(),
-        kind: Kind::Rows,
-        definition: Definition {
-            oversight: true,
-            columns: vec!["name".into()],
-            ..Definition::default()
-        },
-        ..oversight_summary.clone()
-    };
-    let audit_counts = async || -> Result<(i64, i64), tokio_postgres::Error> {
-        let counts = client
-            .query_one(
-                "SELECT count(*) FILTER (WHERE tenant_id=$1 AND event='tenancy.oversight.query'),
-                        count(*) FILTER (WHERE tenant_id=$2 AND event='tenancy.oversight.read')
-                 FROM base_audit_actions WHERE tenant_id IN ($1,$2) AND
-                 payload->>'table'='reference_items' AND payload->>'row_count'='1'",
-                &[&1_i64, &2_i64],
-            )
-            .await?;
-        Ok((counts.get(0), counts.get(1)))
-    };
-    let before = audit_counts().await?;
-    reports.check(&manager, &oversight_summary).await?;
-    let checked = audit_counts().await?;
-    checks.check(
-        "a standalone oversight check records both audits",
-        checked == (before.0 + 1, before.1 + 1),
-        format!("parent and child audit counts: {before:?} to {checked:?}"),
-    );
-
-    let refused = write(&boundary, &db, &manager, "reports.create", async |tx| {
-        reports.create(tx, &manager, &oversight_rows).await?;
-        let invalid = Draft {
-            name: String::new(),
-            ..oversight_rows.clone()
-        };
-        reports.create(tx, &manager, &invalid).await
-    })
-    .await;
-    let saved: bool = client
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM base_reports WHERE tenant_id=$1 AND name=$2)",
-            &[&1_i64, &oversight_rows.name],
-        )
-        .await?
-        .get(0);
-    let audited = audit_counts().await?;
-    checks.check(
-        "both oversight audits survive a later step rolling back the report",
-        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("name"))
-            && !saved
-            && audited == (checked.0 + 1, checked.1 + 1),
-        format!("{refused:?}, report saved: {saved}, audit counts: {checked:?} to {audited:?}"),
-    );
-
-    let budget_key = "tenancy.oversight.total_timeout_ms";
-    client
-        .execute(
-            "INSERT INTO base_settings(key,tenant_id,scope_type,scope_id,value,is_encrypted)
-             VALUES($1,0,'global',0,'1000',false)
-             ON CONFLICT(key,tenant_id,scope_type,scope_id) DO UPDATE SET value=EXCLUDED.value",
-            &[&budget_key],
-        )
-        .await?;
-    let mut blocker = db.get_detached("the walkthrough's audit lock").await?;
-    let lock = blocker.transaction().await?;
-    lock.query_one(
-        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
-        &[&2_i64],
-    )
-    .await?;
-    let timed = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        reports.check(&manager, &oversight_rows),
-    )
-    .await;
-    lock.rollback().await?;
-    drop(blocker);
-    client
-        .execute(
-            "DELETE FROM base_settings WHERE key=$1 AND tenant_id=0 AND scope_type='global' AND scope_id=0",
-            &[&budget_key],
-        )
-        .await?;
-    reports.check(&manager, &oversight_rows).await?;
-    let after_retry = audit_counts().await?;
-    checks.check(
-        "a blocked audit times out without writing late and the next check can audit",
-        matches!(timed, Ok(Err(ReportError::TooHeavy(_))))
-            && after_retry == (audited.0 + 1, audited.1 + 1),
-        format!("{timed:?}, parent and child audit counts: {audited:?} to {after_retry:?}"),
-    );
-
-    client
-        .batch_execute(
-            "INSERT INTO base_grid_ref_items(id,tenant_id,group_id,name,category,quantity,unit_cost)
-             SELECT 10000+n,2,9304,'Distinct item ' || n,'parts',1,1
-             FROM generate_series(1,1000) n",
-        )
-        .await?;
-    oversight_summary.definition.groupings[0].column = "name".into();
-    let refused = reports.check(&manager, &oversight_summary).await;
-    checks.check(
-        "an oversight summary over the group limit cannot be saved",
-        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition")),
-        format!("{refused:?}"),
     );
 
     client

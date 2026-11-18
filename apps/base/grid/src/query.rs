@@ -188,33 +188,6 @@ pub async fn project_lenses<S: AsRef<str>>(
     read(db, scope, root, ids, specs, lenses, Bounds::default()).await
 }
 
-/// The full value of one masked field of one record (ADR 05): the same read
-/// as [`project`], with only that field unmasked. `None` when the record is
-/// gone or the scope may not read it. The field must be masked for this scope
-/// now: a withheld or unrestricted field is `Forbidden`. Only a sealed
-/// [`Reveal`](bilibi_personal_data::Reveal) for this reader and this field
-/// opens it: `base/privacy` issues one after the reader's capability, reason
-/// and Step-up, and records the reveal.
-pub async fn reveal(
-    db: &Db,
-    scope: &Scope,
-    grant: &bilibi_personal_data::Reveal,
-    table: &str,
-    field: &str,
-    key: &Value,
-) -> Result<Option<Value>, QueryError> {
-    let mut client = db.get().await.map_err(Error::from)?;
-    let tx = client
-        .build_transaction()
-        .read_only(true)
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .start()
-        .await?;
-    let value = reveal_on(&tx, scope, grant, table, field, key).await?;
-    tx.commit().await?;
-    Ok(value)
-}
-
 async fn read<S: AsRef<str>>(
     db: &Db,
     scope: &Scope,
@@ -914,33 +887,19 @@ pub(crate) async fn bounded<T>(
     read: impl std::future::Future<Output = Result<T, QueryError>>,
 ) -> Result<T, QueryError> {
     bounds.check()?;
-    at_read_savepoint(tx, false, async {
-        tx.batch_execute(&bounds.sql()).await?;
-        read.await
-    })
-    .await
-}
-
-pub(crate) async fn at_read_savepoint<T>(
-    tx: &tokio_postgres::Transaction<'_>,
-    keep_success: bool,
-    work: impl std::future::Future<Output = Result<T, QueryError>>,
-) -> Result<T, QueryError> {
     tx.batch_execute("SAVEPOINT grid_bounded_read")
         .await
         .map_err(Error::from)?;
-    let result = work.await;
-    if !keep_success || result.is_err() {
-        tx.batch_execute(
-            "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
-        )
-        .await
-        .map_err(Error::from)?;
-    } else {
-        tx.batch_execute("RELEASE SAVEPOINT grid_bounded_read")
-            .await
-            .map_err(Error::from)?;
+    let result = async {
+        tx.batch_execute(&bounds.sql()).await?;
+        read.await
     }
+    .await;
+    tx.batch_execute(
+        "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
+    )
+    .await
+    .map_err(Error::from)?;
     result
 }
 
@@ -960,8 +919,9 @@ pub async fn project_on<S: AsRef<str>>(
     .await
 }
 
-/// Read one revealed field on the caller's transaction, with the same grant
-/// and current masking checks as [`reveal`].
+/// Read one masked field in full on the caller's transaction. A sealed
+/// [`Reveal`](bilibi_personal_data::Reveal) names the reader, table and field.
+/// A withheld or unrestricted field is `Forbidden`; a missing row returns `None`.
 pub async fn reveal_on(
     tx: &tokio_postgres::Transaction<'_>,
     scope: &Scope,

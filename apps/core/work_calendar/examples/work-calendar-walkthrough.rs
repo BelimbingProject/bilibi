@@ -945,17 +945,31 @@ async fn main() -> Result<(), Failure> {
     );
     opened?;
     client.batch_execute("DROP TRIGGER walkthrough_gate ON core_work_calendar_holidays; DROP TRIGGER walkthrough_gate ON core_work_calendar_includes; DROP FUNCTION walkthrough_gate()").await?;
-    show("first holiday", holiday?.map(Value::from));
-    show("include", include?.map(Value::from));
-    print_days(
-        &admin
-            .read(
-                "core.work_calendar.days",
-                json!({"code": "race", "from": "2027-05-03", "to": "2027-05-03"}),
-            )
-            .await?,
+    let holiday = holiday??;
+    let include = include??;
+    assert_eq!(holiday[0]["added_or_renamed"], json!(1));
+    assert_eq!(include[0]["included"], json!(true));
+    show("first holiday", Ok(Value::from(holiday)));
+    show("include", Ok(Value::from(include)));
+    let days = admin
+        .read(
+            "core.work_calendar.days",
+            json!({"code": "race", "from": "2027-05-03", "to": "2027-05-03"}),
+        )
+        .await?;
+    let day = &days["days"][0];
+    assert_eq!(day["date"], json!("2027-05-03"));
+    assert_eq!(day["type"], json!("holiday"));
+    assert_eq!(
+        day["reason"],
+        json!({"kind": "holiday", "set": "race-set", "name": "First holiday"}),
     );
+    print_days(&days);
     let events: i64 = client.query_one("SELECT count(*) FROM base_events WHERE name='core/work_calendar.changed' AND subject='race'", &[]).await?.get(0);
+    assert!(
+        events > 0,
+        "the racing writes must publish a calendar change"
+    );
     println!("changed events for race: {events}");
 
     println!("== a read held while a plan commits answers from one snapshot");
@@ -988,9 +1002,10 @@ async fn main() -> Result<(), Failure> {
             .map(|r| r["included"].clone()),
     );
     let open = json!({"code": "snap", "operation": "is_open", "at": "2026-11-02T10:00:00Z"});
-    admin
-        .ask("is_open Monday 10:00Z before the plan", open.clone())
-        .await;
+    let before = admin
+        .read("core.work_calendar.business_time", open.clone())
+        .await?;
+    assert_eq!(before["result"], json!(false));
     let moved = [
         op(
             "core.work_calendar.update",
@@ -1033,23 +1048,35 @@ async fn main() -> Result<(), Failure> {
     );
     opened?;
     client.batch_execute("DROP VIEW core_work_calendar_rules; ALTER TABLE walkthrough_rules RENAME TO core_work_calendar_rules; DROP FUNCTION walkthrough_read_gate()").await?;
+    assert!(
+        waited,
+        "the snapshot read must reach the gate before the plan commits"
+    );
+    let committed = committed?;
+    assert_eq!(committed.len(), 2);
+    let held = held??;
+    assert_eq!(
+        held["result"],
+        json!(false),
+        "the held read mixed calendar snapshots"
+    );
     println!("the read waited at the gate while the plan committed: {waited}");
-    show("the plan", committed.map(Value::from));
+    show("the plan", Ok(Value::from(committed)));
     show(
         "is_open Monday 10:00Z, read across the commit",
-        held?.map(|answer| answer["result"].clone()),
+        Ok(held["result"].clone()),
     );
-    admin
-        .ask("is_open Monday 10:00Z after the plan", open)
-        .await;
-    print_days(
-        &admin
-            .read(
-                "core.work_calendar.days",
-                json!({"code": "snap", "from": "2026-11-01", "to": "2026-11-02"}),
-            )
-            .await?,
-    );
+    let after = admin.read("core.work_calendar.business_time", open).await?;
+    assert_eq!(after["result"], json!(false));
+    let days = admin
+        .read(
+            "core.work_calendar.days",
+            json!({"code": "snap", "from": "2026-11-01", "to": "2026-11-02"}),
+        )
+        .await?;
+    assert_eq!(days["days"][1]["reason"]["kind"], json!("substitute"));
+    assert_eq!(days["days"][1]["reason"]["holiday"], json!("2026-11-01"));
+    print_days(&days);
 
     println!("== replacing the first rule moves the dates before it too");
     show("create early (from 2026-01-01, 09:00-18:00)", admin.write("core.work_calendar.create", json!({"code": "early", "name": "Early", "timezone": "UTC", "effective_from": "2026-01-01", "week": week(&["09:00-18:00"], json!({"type": "off"}), json!({"type": "rest"}))})).await);
