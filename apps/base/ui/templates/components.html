@@ -167,13 +167,13 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 {#- Fragments the shared models rendered (a notice, a chart, a table),
     stacked a compact step apart, or a section step apart when wide. -#}
 {% macro stack(parts, wide=false) -%}
-<div class="{% if wide %}flex flex-col gap-4 [&>.inline-flex]:self-start{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part.as_str().trim_ascii()|safe }}{% endfor %}{{ caller() }}</div>
+<div class="{% if wide %}ui-wide-stack{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part.as_str().trim_ascii()|safe }}{% endfor %}{{ caller() }}</div>
 {%- endmacro %}
 
 {#- The ignored wrapper preserves the mounted fragment across parent patches.
     A missing or refused mount leaves an empty target and takes no space. -#}
 {% macro live_panel_anchor(id) -%}
-<div id="{{ id }}-slot" data-live-ignore class="[&:has(>:empty)]:hidden"><div id="{{ id }}"></div></div>
+<div id="{{ id }}-slot" data-live-ignore data-live-panel-slot><div id="{{ id }}"></div></div>
 {%- endmacro %}
 
 {#- Keep the section gap between in-flow children, including mounted panels.

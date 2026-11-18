@@ -700,6 +700,17 @@ body:has(dialog:modal) #flash-group > #connection-server-error {
   padding-top: calc(--spacing(3.5) + --spacing(3));
 }
 
+[data-live-panel-slot]:has(> :empty) {
+  display: none;
+}
+
+@layer utilities {
+  :where(.ui-wide-stack > :nth-last-child(n + 2 of :not([hidden], [data-live-panel-slot]:has(> :empty)))) {
+    margin-block-start: 0;
+    margin-block-end: --spacing(4);
+  }
+}
+
 /* The shared header leaves 12 px below its action row. A list page's own
  * stack spacing (`space-y-*`) must not add a second gap before the toolbar. */
 [data-page="list"] > [data-page-header] {

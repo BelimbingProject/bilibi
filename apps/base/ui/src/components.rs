@@ -216,8 +216,9 @@ pub struct LivePanelAnchor<'a> {
 }
 
 /// Record sections followed by live panels, with the standard section gap.
-/// Pass the stable `PanelSpec::id` values in display order. Each provider
-/// supplies its own card, and empty or refused mounts use no layout space.
+/// Pass only the bottom-stack `PanelSpec::id` values, once each, in display
+/// order. Render header and other standalone targets with `LivePanelAnchor`.
+/// Providers supply their own cards. Empty or refused mounts use no layout space.
 #[derive(Template, Debug)]
 #[template(
     source = r#"{% import "components.html" as ui %}{% call ui::live_panel_stack(parts=parts, panel_ids=panel_ids) %}{% endcall %}"#,
