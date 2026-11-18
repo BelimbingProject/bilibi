@@ -82,6 +82,23 @@ fn token_shaped(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+async fn record_acceptance_refusal(
+    client: &tokio_postgres::Client,
+    scope: &Scope,
+    reason: &str,
+) -> Result<()> {
+    record_action(
+        client,
+        &Attribution::from_scope(scope),
+        None,
+        "user.invitation.accept.refused",
+        json!({"result": "refused", "reason": reason}),
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
 impl UserService {
     /// Reads an open invitation for its emailed acceptance page. Invalid,
     /// expired, used and revoked links have the same answer.
@@ -358,31 +375,14 @@ impl UserService {
     ) -> std::result::Result<i64, InvitationError> {
         if signed_in.impersonator().is_some() {
             let client = self.db.get().await.map_err(Error::from)?;
-            record_action(
-                &**client,
-                &Attribution::from_scope(signed_in),
-                None,
-                "user.invitation.accept.refused",
-                json!({"result": "refused", "reason": "impersonating"}),
-                false,
-            )
-            .await?;
+            record_acceptance_refusal(&client, signed_in, "impersonating").await?;
             return Err(Error::Forbidden.into());
         }
         if !token_shaped(raw_token) {
             return Err(InvitationError::Link);
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let signed_in = self.fresh(&**client, signed_in).await?;
-        let identity: i64 = client
-            .query_opt(
-                "SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2 AND status='active' AND deleted_at IS NULL",
-                &[&signed_in.tenant(), &signed_in.user()],
-            )
-            .await?
-            .and_then(|row| row.get(0))
-            .ok_or(InvitationError::Link)?;
-        self.accept_with_identity(&mut client, raw_token, identity)
+        self.accept_with_identity(&mut client, raw_token, signed_in)
             .await
     }
 
@@ -451,12 +451,12 @@ impl UserService {
         &self,
         client: &mut tokio_postgres::Client,
         raw_token: &str,
-        identity: i64,
+        signed_in: &Scope,
     ) -> std::result::Result<i64, InvitationError> {
         let row = client
             .query_opt(
-                "SELECT v.tenant_id,v.user_id FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN user_identities i ON i.id=$2 AND lower(i.email)=v.email AND i.kind='staff' AND i.status='active' AND i.deleted_at IS NULL WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM users m WHERE m.tenant_id=v.tenant_id AND m.identity_id=i.id AND m.deleted_at IS NULL)",
-                &[&digest(raw_token), &identity],
+                "SELECT v.tenant_id,v.user_id FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL",
+                &[&digest(raw_token)],
             )
             .await?
             .ok_or(InvitationError::Link)?;
@@ -469,6 +469,15 @@ impl UserService {
             )
             .await?;
         self.lock_tenant_owner_in(&tx, tenant, user).await?;
+        let identity = match self.hold_invitation_sign_in(tx.sql(), signed_in).await {
+            Ok(identity) => identity,
+            Err(error @ (Error::Unauthorized | Error::Forbidden | Error::NotFound)) => {
+                tx.rollback().await?;
+                record_acceptance_refusal(client, signed_in, "source_session_unavailable").await?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let invitation = match finish_acceptance(&mut tx, raw_token, tenant, user, identity).await {
             Ok(invitation) => invitation,
             Err(error) => {
@@ -484,6 +493,28 @@ impl UserService {
             .await?;
         tx.commit().await?;
         Ok(user)
+    }
+
+    async fn hold_invitation_sign_in(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+    ) -> Result<i64> {
+        let row = tx
+            .query_opt(
+                "SELECT i.id FROM tenants t JOIN users u ON u.tenant_id=t.id
+             JOIN user_identities i ON i.id=u.identity_id
+             WHERE t.id=$1 AND u.id=$2 AND t.status='active' AND t.deleted_at IS NULL
+               AND u.kind='staff' AND u.status='active' AND u.deleted_at IS NULL
+               AND i.kind='staff' AND i.status='active' AND i.deleted_at IS NULL
+             FOR SHARE OF t,u,i",
+                &[&scope.tenant(), &scope.user()],
+            )
+            .await?
+            .ok_or(Error::Unauthorized)?;
+        self.fresh(tx, scope).await?;
+        self.sessions.hold_current(tx, scope).await?;
+        Ok(row.get(0))
     }
 }
 
@@ -574,6 +605,8 @@ async fn finish_acceptance(
                        AND EXISTS (SELECT 1 FROM user_identities i
                            WHERE i.id=$4 AND lower(i.email)=v.email AND i.kind='staff'
                              AND i.status='active' AND i.deleted_at IS NULL FOR SHARE OF i)
+                       AND NOT EXISTS (SELECT 1 FROM users m WHERE m.tenant_id=v.tenant_id
+                           AND m.identity_id=$4 AND m.deleted_at IS NULL)
                      RETURNING v.id",
                     &[&tenant, &user, &token_hash, &identity],
                 )

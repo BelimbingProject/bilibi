@@ -412,6 +412,27 @@ impl Sessions {
             .ok_or(Error::Unauthorized)?;
         Ok(scope)
     }
+    pub async fn hold_current(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+    ) -> Result<()> {
+        let fingerprint = scope
+            .browser_session_fingerprint()
+            .ok_or(Error::Unauthorized)?;
+        if scope.impersonator().is_some() || scope.actor().kind() != AccountKind::Staff {
+            return Err(Error::Unauthorized);
+        }
+        let idle = self.policy(tx).await?.idle_seconds as f64;
+        tx.query_opt(
+            "SELECT id FROM sessions WHERE id=encode($1,'hex') AND tenant_id=$2 AND user_id=$3
+             AND csrf=$4 AND impersonator_id IS NULL AND ended_reason IS NULL
+             AND expires_at>clock_timestamp() AND last_activity>clock_timestamp()-make_interval(secs => $5)
+             FOR SHARE",
+            &[&fingerprint, &scope.tenant(), &scope.user(), &scope.csrf, &idle],
+        ).await?.ok_or(Error::Unauthorized)?;
+        Ok(())
+    }
     /// Call only for authenticated HTTP navigation or accepted user activity.
     /// The conditional update cannot revive an idle or absolutely expired session.
     pub async fn activity(

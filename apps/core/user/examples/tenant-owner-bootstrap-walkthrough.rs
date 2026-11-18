@@ -249,6 +249,12 @@ async fn main() -> Result<()> {
         )
         .await
         .map_err(|_| Error::Internal)?;
+    let retry_login = app
+        .user
+        .login(retry_email, PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let revoked = app.security.guard(&retry_login.token).await?;
     let client = db.get_detached("tenant owner walkthrough checks").await?;
     let row = client
         .query_one(
@@ -426,19 +432,27 @@ async fn main() -> Result<()> {
             String::new(),
         )
         .await?;
-    let signed_in = auth
-        .authenticate(&**client, tenant, retry_account.id, String::new())
+    drop(client);
+    app.user
+        .logout(&retry_login.token, &retry_login.csrf)
         .await?;
+    let client = db.get().await?;
     let mut expected: serde_json::Value =
         serde_json::from_str(&snapshot(&client).await?).map_err(|_| Error::Internal)?;
     let actions = expected["actions"].as_i64().ok_or(Error::Internal)?;
-    expected["actions"] = serde_json::json!(actions + 1);
+    expected["actions"] = serde_json::json!(actions + 2);
     drop(client);
     assert!(matches!(
         app.user
             .accept_member_invitation(&viewing, &new_token)
             .await,
         Err(InvitationError::Access(Error::Forbidden))
+    ));
+    assert!(matches!(
+        app.user
+            .accept_member_invitation(&revoked, &new_token)
+            .await,
+        Err(InvitationError::Access(Error::Unauthorized))
     ));
     let client = db.get().await?;
     let after: serde_json::Value =
@@ -447,7 +461,10 @@ async fn main() -> Result<()> {
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=$1 AND actor_id=$2
          AND impersonator_id=$3 AND event='user.invitation.accept.refused'
-         AND payload->>'reason'='impersonating')",
+         AND payload->>'reason'='impersonating')
+         AND EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=$1 AND actor_id=$2
+         AND impersonator_id IS NULL AND event='user.invitation.accept.refused'
+         AND payload->>'reason'='source_session_unavailable')",
             &[&tenant, &retry_account.id, &user],
         )
         .await?
@@ -456,6 +473,12 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
     drop(client);
+    let retry_login = app
+        .user
+        .login(retry_email, PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let signed_in = app.security.guard(&retry_login.token).await?;
     if !reissued.same_invitation(&original)
         || reissued.digest == delivered.digest
         || !reissued.unexpired
