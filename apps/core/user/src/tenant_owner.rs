@@ -23,6 +23,8 @@ const TENANT_OWNER_REISSUED: &str = "user.tenant_owner.reissued";
 pub enum FirstTenantOwnerError {
     #[error("a matching tenant already exists without a matching owner bootstrap receipt")]
     TenantExists,
+    #[error("more than one tenant matches the supplied tenant and primary company")]
+    AmbiguousTenant,
     #[error("the bootstrap owner has no pending invitation for this address")]
     OwnerNotPending,
     #[error("Invalid owner fields")]
@@ -101,7 +103,7 @@ impl UserService {
         self.mailer.ready().await?;
         let message = Message::text(
             Address::new(Some(&name), &email)?,
-            format!("You're invited to {tenant_name}"),
+            "You're invited to become a tenant owner",
             format!(
                 "You are invited to become the owner of {tenant_name}.\n\nOpen this link to set up your sign-in:\n\n{origin}/accept/{raw_token}\n\nThe link works once and expires in {days} days. If you did not expect this, you can ignore this email.\n"
             ),
@@ -119,17 +121,18 @@ impl UserService {
         // cannot rotate a link that an earlier run is still sending.
         let invitation = {
             let sql = tokio_postgres::Client::transaction(&mut client).await?;
-            let receipts = sql
+            let matches = sql
                 .query(
-                    "SELECT b.tenant_id,b.company_id,b.invitation_id
-                     FROM user_tenant_owner_bootstraps b
-                     JOIN tenants t ON t.id=b.tenant_id
-                     JOIN tenant_primary_companies p ON p.tenant_id=b.tenant_id AND p.company_id=b.company_id
-                     JOIN companies c ON c.tenant_id=b.tenant_id AND c.id=b.company_id
-                     LEFT JOIN platform_operator o ON o.tenant_id=b.tenant_id
-                     WHERE t.name=$1 AND t.status='active' AND o.tenant_id IS NULL
+                    "SELECT t.id,p.company_id,b.invitation_id
+                     FROM tenants t
+                     JOIN tenant_primary_companies p ON p.tenant_id=t.id
+                     JOIN companies c ON c.tenant_id=p.tenant_id AND c.id=p.company_id
+                     LEFT JOIN platform_operator o ON o.tenant_id=t.id
+                     LEFT JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.company_id=c.id
+                         AND t.status='active' AND o.tenant_id IS NULL
+                     WHERE t.name=$1 AND t.deleted_at IS NULL
                        AND c.deleted_at IS NULL AND c.name=$2 AND c.code=$3
-                     ORDER BY b.tenant_id LIMIT 2 FOR SHARE OF p,c",
+                     ORDER BY t.id LIMIT 2 FOR SHARE OF t,p,c",
                     &[
                         &tenant_name,
                         &company.name.trim(),
@@ -137,8 +140,13 @@ impl UserService {
                     ],
                 )
                 .await?;
-            let (tenant, company, retry_invitation) = match receipts.as_slice() {
-                [row] => (row.get(0), row.get(1), Some(row.get::<_, i64>(2))),
+            let (tenant, company, retry_invitation) = match matches.as_slice() {
+                [row] => {
+                    let invitation = row
+                        .get::<_, Option<i64>>(2)
+                        .ok_or(FirstTenantOwnerError::TenantExists)?;
+                    (row.get(0), row.get(1), Some(invitation))
+                }
                 [] => {
                     let exists: bool = sql
                         .query_one(
@@ -159,7 +167,7 @@ impl UserService {
                         }
                     }
                 }
-                _ => return Err(FirstTenantOwnerError::TenantExists),
+                _ => return Err(FirstTenantOwnerError::AmbiguousTenant),
             };
             let mut tx = self.mutations.adopt_deployment(
                 sql,

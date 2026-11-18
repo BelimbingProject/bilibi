@@ -28,6 +28,7 @@ fn invitation_token(
     before: usize,
     origin: &str,
     recipient: &str,
+    tenant: &str,
 ) -> Result<String> {
     if count(mailbox)? != before + 1 {
         return Err(Error::Internal);
@@ -43,6 +44,7 @@ fn invitation_token(
     if !message
         .lines()
         .any(|line| line.starts_with("To: ") && line.ends_with(&recipient))
+        || !message.contains(&format!("You are invited to become the owner of {tenant}."))
     {
         return Err(Error::Internal);
     }
@@ -85,14 +87,18 @@ async fn snapshot(client: &tokio_postgres::Client) -> Result<String> {
         .get(0))
 }
 
-fn provisioning_command(tenant: &str) -> Result<Command> {
+fn web_command() -> Result<Command> {
     let executable = std::env::current_exe().map_err(|_| Error::Internal)?;
     let web = executable
         .parent()
         .and_then(|examples| examples.parent())
         .map(|debug| debug.join("bilibi-web"))
         .ok_or(Error::Internal)?;
-    let mut command = Command::new(web);
+    Ok(Command::new(web))
+}
+
+fn provisioning_command(tenant: &str) -> Result<Command> {
+    let mut command = web_command()?;
     command.args([
         "tenant-provision",
         "--tenant-name",
@@ -187,8 +193,9 @@ async fn main() -> Result<()> {
     let before_mail = count(&mailbox)?;
     let client = db.get().await?;
     let before_preflight = snapshot(&client).await?;
+    let invalid_address = format!("{}@customer.example.test", "a".repeat(65));
     expect_output(
-        provision("Invalid\nworkspace", Some(OWNER), None)?,
+        provision("Invalid address workspace", Some(&invalid_address), None)?,
         Some("Cannot prepare the owner invitation: Invalid email message"),
     )?;
     for (flag, value) in [
@@ -207,8 +214,9 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
     drop(client);
-    expect_output(provision("Customer workspace", Some(OWNER), None)?, None)?;
-    let token = invitation_token(&mailbox, before_mail, &origin, OWNER)?;
+    let workspace = "Customer workspace ".repeat(10) + "headquarters";
+    expect_output(provision(&workspace, Some(OWNER), None)?, None)?;
+    let token = invitation_token(&mailbox, before_mail, &origin, OWNER, &workspace)?;
     let app = bilibi_web::App::new(db.clone(), &origin)?;
     let invitation = app
         .user
@@ -236,8 +244,8 @@ async fn main() -> Result<()> {
              JOIN user_identities i ON i.id=u.identity_id
              JOIN persons p ON p.tenant_id=t.id AND p.id=u.person_id
              JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.user_id=u.id
-             WHERE t.name='Customer workspace' AND c.name='Customer Company Sdn. Bhd.' AND c.code='customer'",
-            &[&user],
+             WHERE t.name=$2 AND c.name='Customer Company Sdn. Bhd.' AND c.code='customer'",
+            &[&user, &workspace],
         )
         .await?;
     let tenant: i64 = row.get(0);
@@ -276,18 +284,14 @@ async fn main() -> Result<()> {
         mutation_row.get::<_, bool>(0),
         mutation_row.get::<_, bool>(1)
     );
-    if invitation.tenant_name != "Customer workspace"
-        || !owner_ready
-        || !action_audit
-        || !mutation_audit
-    {
+    if invitation.tenant_name != workspace || !owner_ready || !action_audit || !mutation_audit {
         return Err(Error::Internal);
     }
 
     let before_retry = snapshot(&client).await?;
     let mail_before_retry = count(&mailbox)?;
     expect_output(
-        provision("Customer workspace", Some(OWNER), None)?,
+        provision(&workspace, Some(OWNER), None)?,
         Some("the bootstrap owner has no pending invitation for this address"),
     )?;
     if snapshot(&client).await? != before_retry || count(&mailbox)? != mail_before_retry {
@@ -327,7 +331,13 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
     expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
-    let first_token = invitation_token(&mailbox, mail_before_retry, &origin, retry_email)?;
+    let first_token = invitation_token(
+        &mailbox,
+        mail_before_retry,
+        &origin,
+        retry_email,
+        retry_workspace,
+    )?;
     let delivered = retry_state(&client).await?;
     if !delivered.same_invitation(&original)
         || delivered.digest == original.digest
@@ -341,8 +351,48 @@ async fn main() -> Result<()> {
         &[&original.tenant, &original.invitation],
     ).await?;
     expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
-    let new_token = invitation_token(&mailbox, mail_before_retry + 1, &origin, retry_email)?;
+    let new_token = invitation_token(
+        &mailbox,
+        mail_before_retry + 1,
+        &origin,
+        retry_email,
+        retry_workspace,
+    )?;
     let reissued = retry_state(&client).await?;
+    expect_output(provision(retry_workspace, None, None)?, None)?;
+    let ambiguous = snapshot(&client).await?;
+    expect_output(
+        provision(retry_workspace, Some(retry_email), None)?,
+        Some("more than one tenant matches the supplied tenant and primary company"),
+    )?;
+    if snapshot(&client).await? != ambiguous || count(&mailbox)? != mail_before_retry + 2 {
+        return Err(Error::Internal);
+    }
+    for (command, name) in [
+        ("tenant-provision", "Legacy tenant"),
+        ("platform-provision", "Legacy platform"),
+    ] {
+        let output = web_command()?
+            .args([
+                command,
+                "--tenant-name",
+                name,
+                "--company-name",
+                "Original company",
+                "--company-code",
+                "studio",
+                "--company-name",
+                "--Studio",
+            ])
+            .output()
+            .map_err(|_| Error::Internal)?;
+        if !String::from_utf8_lossy(&output.stdout).contains("“--Studio”") {
+            return Err(Error::Refused(format!(
+                "{command} did not use the last company name"
+            )));
+        }
+        expect_output(output, None)?;
+    }
     drop(client);
     if !reissued.same_invitation(&original)
         || reissued.digest == delivered.digest

@@ -554,8 +554,14 @@ async fn finish_acceptance(
         Box::pin(async move {
             let invitation: i64 = sql
                 .query_opt(
-                    "UPDATE user_invitations SET accepted_at=now() WHERE tenant_id=$1 AND user_id=$2 AND token_hash=$3 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>clock_timestamp() RETURNING id",
-                    &[&tenant, &user, &token_hash],
+                    "UPDATE user_invitations v SET accepted_at=now()
+                     WHERE v.tenant_id=$1 AND v.user_id=$2 AND v.token_hash=$3
+                       AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp()
+                       AND EXISTS (SELECT 1 FROM user_identities i
+                           WHERE i.id=$4 AND lower(i.email)=v.email AND i.kind='staff'
+                             AND i.status='active' AND i.deleted_at IS NULL FOR SHARE OF i)
+                     RETURNING v.id",
+                    &[&tenant, &user, &token_hash, &identity],
                 )
                 .await?
                 .ok_or(Error::NotFound)?
