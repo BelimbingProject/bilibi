@@ -107,7 +107,9 @@ impl Browser {
         reason = "Chromium takes its command pipes on fixed descriptors, set between fork and exec"
     )]
     fn launch(binary: &Path, network: &Network) -> Result<(Self, pipe::Sender, pipe::Receiver)> {
-        let dir = std::env::temp_dir().join(format!("bilibi-pdf-{}", uuid::Uuid::new_v4()));
+        // Chromium creates Unix sockets under TMPDIR as well as its profile;
+        // both must fit the socket path limit even when the caller's TMPDIR does not.
+        let dir = Path::new("/tmp").join(format!("bilibi-pdf-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         let guard = DirGuard(Some(dir.clone()));
         let (to_browser_read, to_browser) = pipe_pair()?;
@@ -115,6 +117,7 @@ impl Browser {
         let (read_fd, write_fd) = (to_browser_read.as_raw_fd(), from_browser_write.as_raw_fd());
         let mut command = Command::new(binary);
         command
+            .env("TMPDIR", &dir)
             .args([
                 "--headless",
                 "--remote-debugging-pipe",
