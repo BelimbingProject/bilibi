@@ -275,17 +275,25 @@ jobs:
         id: finance
         if: >-
           always() && needs.domain.outputs.finance_lint != '' &&
-          needs.domain.outputs.finance_release == needs.domain.outputs.finance_lint &&
+          needs.domain.outputs.finance_release != '' &&
           needs.domain.outputs.finance_tested != ''
         env:
           LINTED: ${{ needs.domain.outputs.finance_lint }}
+          BUILT: ${{ needs.domain.outputs.finance_release }}
           TESTED: ${{ needs.domain.outputs.finance_tested }}
         run: |
+          if [ "$BUILT" != "$LINTED" ]; then
+            message='Finance tested set skipped because the release build and lint used different compositions. Choose Re-run all jobs to resolve Cargo.lock again in both phases.'
+            echo "::warning::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           jq -e --arg linted "$LINTED" \
             '.[0] | [.platform.commit, .domain.commit] == ($linted | split(" ") | .[:2])' <<< "$TESTED" >/dev/null
           printf '%s\n' "$TESTED" > "$RUNNER_TEMP/tested-set.json"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
-        if: always() && steps.finance.outcome == 'success'
+        if: always() && steps.finance.outputs.ready == 'true'
         with:
           name: tested-domains-finance
           path: ${{ runner.temp }}/tested-set.json
@@ -317,11 +325,15 @@ jobs:
             exit 0
           fi
           if [ "$SELECTION" = success ] && { [ "$MOUNTED" = success ] || { [ "$HAS_CONTAINERS" = false ] && [ "$MOUNTED" = skipped ]; }; }; then
-            if ! jq -e --arg lint "$FINANCE_LINT" --arg debug "$FINANCE_DEBUG" --arg release "$FINANCE_RELEASE" '
-              all(.include[] | select(.phase == "build");
-                  $lint != "" and $lint == (if .build == "check" then $debug else $release end))
-            ' <<< "$MATRIX" >/dev/null; then
-              fail 'Finance lint and build jobs must use the same Platform commit, Finance commit and Cargo.lock hash.'
+            mismatches=$(jq -r --arg lint "$FINANCE_LINT" --arg debug "$FINANCE_DEBUG" --arg release "$FINANCE_RELEASE" '
+              [.include[] | select(.phase == "build")
+               | if .build == "check" then {name: "debug", identity: $debug}
+                 else {name: "release", identity: $release} end
+               | select($lint == "" or .identity != $lint) | .name]
+              | join(" and ")
+            ' <<< "$MATRIX") || fail 'Could not read the official compatibility matrix.'
+            if [ -n "$mismatches" ]; then
+              fail "Finance build composition mismatch ($mismatches). Lint and builds must use the same Platform commit, Finance commit and Cargo.lock hash. Choose Re-run all jobs to resolve Cargo.lock again in every Finance job."
             fi
             pass 'Every official Domain and Extension passed.'
           else
