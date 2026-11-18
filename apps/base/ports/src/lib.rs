@@ -43,6 +43,7 @@ pub struct RecordFactValue {
 }
 
 const MAX_FACTS_PER_KIND: usize = 8;
+const MAX_CONCURRENT_FACTS: usize = 4;
 
 fn validate_facts(entries: &[Entry]) -> RegistryResult<()> {
     let mut per_kind = BTreeMap::<&str, usize>::new();
@@ -221,7 +222,7 @@ impl Ports {
         }
         Ok(Self { providers, facts })
     }
-    /// Read every fact for `kind` concurrently (boot allows at most eight per
+    /// Read facts with at most four concurrent providers (boot allows eight per
     /// kind), omitting failures and timeouts.
     /// Each provider receives a separate read-only transaction with a database
     /// statement timeout; pool acquisition and all calls share the deadline.
@@ -234,37 +235,42 @@ impl Ports {
     ) -> Vec<RecordFactValue> {
         use futures_util::future::join_all;
         use std::time::Duration;
+        let slots = tokio::sync::Semaphore::new(MAX_CONCURRENT_FACTS);
         let reads = self
             .facts
             .iter()
             .filter(|fact| fact.record_kind == kind)
-            .map(|fact| async move {
-                tokio::time::timeout(Duration::from_millis(100), async {
-                    let mut client = db.get().await.ok()?;
-                    let tx = client
-                        .build_transaction()
-                        .read_only(true)
-                        .start()
-                        .await
-                        .ok()?;
-                    tx.batch_execute("SET LOCAL statement_timeout = '75ms'")
-                        .await
-                        .ok()?;
-                    let value: RecordFactValue = self
-                        .call(&tx, scope, fact.port, &serde_json::json!({"id": id}))
-                        .await
-                        .ok()?;
-                    if value.label.is_empty()
-                        || value.label.chars().count() > 80
-                        || value.value.chars().count() > 160
-                    {
-                        return None;
-                    }
-                    Some(value)
-                })
-                .await
-                .ok()
-                .flatten()
+            .map(|fact| {
+                let slots = &slots;
+                async move {
+                    tokio::time::timeout(Duration::from_millis(100), async {
+                        let _slot = slots.acquire().await.ok()?;
+                        let mut client = db.get_detached("record fact provider").await.ok()?;
+                        let tx = client
+                            .build_transaction()
+                            .read_only(true)
+                            .start()
+                            .await
+                            .ok()?;
+                        tx.batch_execute("SET LOCAL statement_timeout = '75ms'")
+                            .await
+                            .ok()?;
+                        let value: RecordFactValue = self
+                            .call(&tx, scope, fact.port, &serde_json::json!({"id": id}))
+                            .await
+                            .ok()?;
+                        if value.label.is_empty()
+                            || value.label.chars().count() > 80
+                            || value.value.chars().count() > 160
+                        {
+                            return None;
+                        }
+                        Some(value)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                }
             });
         join_all(reads).await.into_iter().flatten().collect()
     }

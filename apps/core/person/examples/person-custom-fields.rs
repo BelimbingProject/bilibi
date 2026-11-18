@@ -312,7 +312,7 @@ async fn main() -> Result<(), Failure> {
         .await?;
     let foreign = registry
         .call(
-            &**client,
+            &mut **client,
             other,
             "core.person.get",
             &json!({"person_id": nadia_id}),
@@ -379,7 +379,7 @@ async fn main() -> Result<(), Failure> {
     tx.commit().await?;
     let read = registry
         .call(
-            &**client,
+            &mut **client,
             manager,
             "core.person.get",
             &json!({"person_id": nadia_id}),
@@ -585,7 +585,7 @@ async fn main() -> Result<(), Failure> {
     }
     let listed = registry
         .call(
-            &**client,
+            &mut **client,
             manager,
             "core.person.list",
             &json!({"custom": [{"key": "tier", "op": "eq", "value": second.code}], "sort": "cf_credit_limit", "descending": true}),

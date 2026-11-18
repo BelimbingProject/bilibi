@@ -33,11 +33,12 @@ static ADDRESSES: Addresses = Addresses;
 impl Handler for Addresses {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let count: i64 = client
                 .query_one(
                     "SELECT count(*) FROM address_person_subjects WHERE tenant_id=$1 AND person_id=$2",

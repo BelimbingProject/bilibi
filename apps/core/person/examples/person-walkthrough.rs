@@ -1,13 +1,13 @@
 //! Manual inspection through real application services on a disposable DB.
-//! Prints behavior/evidence; no assertions, mocks, test runner or People module.
+//! Prints behavior and checks the concurrent writes through the owner services.
 use bilibi_agent_api::{
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
     Registry,
 };
-use bilibi_database::{pool, MutationBoundary, MutationTransaction};
+use bilibi_database::{pool, Error, MutationBoundary, MutationTransaction};
 use bilibi_person::{
     create_person, lock_for_account_binding, update_person, DuplicateQuery, Person, PersonId,
-    PersonInput, PersonKind, PersonService, Search, Update, SERVICE,
+    PersonInput, PersonKind, PersonService, Search, Update, WriteError, SERVICE,
 };
 use bilibi_tenancy::{PartyProofs, ProofFuture, Scope};
 use serde_json::json;
@@ -95,10 +95,10 @@ async fn main() -> Result<(), Failure> {
     let viewer = app.security.guard(&viewer_login.token).await?;
     let staff = app.security.guard(&staff_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
-    let client: &tokio_postgres::Client = &client;
+    let client: &mut tokio_postgres::Client = &mut client;
     let before: i64 = client
         .query_one("SELECT count(*) FROM users", &[])
         .await?
@@ -157,10 +157,22 @@ async fn main() -> Result<(), Failure> {
     );
     let concurrent = human("Concurrent Contact");
     let (left, right) = tokio::join!(
-        people.create(&manager, &concurrent),
-        people.create(&manager, &concurrent)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let concurrent = concurrent.clone();
+            async move { people.create(&manager, &concurrent).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let concurrent = concurrent.clone();
+            async move { people.create(&manager, &concurrent).await }
+        })
     );
-    show("concurrent same-name codes", (left?.code, right?.code));
+    let (left, right) = (left??, right??);
+    assert_ne!(left.code, right.code);
+    show("concurrent same-name codes", (left.code, right.code));
     show(
         "non-Latin name gets a generated code",
         people.create(&manager, &human("林美玲")).await?.code,
@@ -336,10 +348,27 @@ async fn main() -> Result<(), Failure> {
         version: 1,
         identity: human("Amina Second"),
     };
+    let id = alice.id;
     let (first, second_save) = tokio::join!(
-        people.update(&manager, alice.id, &first_edit),
-        people.update(&manager, alice.id, &second_edit)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let first_edit = first_edit.clone();
+            async move { people.update(&manager, id, &first_edit).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let second_edit = second_edit.clone();
+            async move { people.update(&manager, id, &second_edit).await }
+        })
     );
+    let (first, second_save) = (first?, second_save?);
+    assert!(matches!(
+        (&first, &second_save),
+        (Ok(_), Err(WriteError::Backend(Error::Conflict)))
+            | (Err(WriteError::Backend(Error::Conflict)), Ok(_))
+    ));
     show("concurrent version writes", (&first, &second_save));
     let current = people.read(&manager, alice.id).await?;
     show(
@@ -469,10 +498,11 @@ async fn main() -> Result<(), Failure> {
     let gated_id = gated.id.get().to_string();
     let audit_rows =
         "SELECT count(*) FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id=$1";
+    let sql = &*client;
     let audited = |label: &'static str| {
         let gated_id = gated_id.clone();
         async move {
-            let rows: i64 = client.query_one(audit_rows, &[&gated_id]).await?.get(0);
+            let rows: i64 = sql.query_one(audit_rows, &[&gated_id]).await?.get(0);
             show(label, rows);
             Ok::<_, Failure>(())
         }
@@ -672,15 +702,22 @@ async fn main() -> Result<(), Failure> {
         )
         .await?;
     let (first_provision, concurrent_provision) = tokio::join!(
-        people.ensure_platform_orchestrator(&manager),
-        people.ensure_platform_orchestrator(&manager)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            async move { people.ensure_platform_orchestrator(&manager).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            async move { people.ensure_platform_orchestrator(&manager).await }
+        })
     );
-    let (system, created) = first_provision?;
-    show("operator system identity created", (&system, created));
-    show(
-        "concurrent provisioning resolves same identity",
-        concurrent_provision?,
-    );
+    let (system, created) = first_provision??;
+    let (concurrent, concurrently_created) = concurrent_provision??;
+    assert_eq!(system.id, concurrent.id);
+    assert_ne!(created, concurrently_created);
+    show("concurrent provisioning resolves one identity", system.id);
     show(
         "repeat system provisioning preserves identity",
         people.ensure_platform_orchestrator(&manager).await?,

@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
             .call::<_, Line>(&tx, &admin, ORDER_LINE, &line(1, pending))
             .await,
     );
-    let elsewhere = db.get().await?;
+    let elsewhere = db.get_detached("a single visibility observer must use another connection to prove the open transaction's line is not committed; walkthrough only").await?;
     show(
         &format!("admin reads line {pending} on another connection"),
         ports

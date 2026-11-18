@@ -115,6 +115,9 @@ working unchanged, and `page_postcodes` reports each row's `provenance`
   10, city names 15, exact postcode places 100).
 - Lookups are ungated global reads. Capability checks belong to the screens
   that call them (`admin.geonames.list` for the indexes).
+- Callers holding a client can use `country_summary` or the `_on` variants of
+  `get_admin1`, `admin1_options`, `search_postcodes`, `search_city_names` and
+  `lookup_postcode` on that client.
 
 ## Catalog contributions
 

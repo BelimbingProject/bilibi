@@ -1123,17 +1123,14 @@ impl Authorization {
             .await
     }
 }
-async fn require_operator_marker(client: &(impl GenericClient + Sync), tenant: i64) -> Result<()> {
+async fn require_operator_marker(client: &dyn ProofClient, tenant: i64) -> Result<()> {
     client
         .query_opt("SELECT t.id FROM tenants t JOIN platform_operator o ON o.tenant_id=t.id WHERE o.singleton=true AND t.id=$1 AND t.status='active' AND t.deleted_at IS NULL", &[&tenant])
         .await?
         .map(|_| ())
         .ok_or(Error::Forbidden)
 }
-pub async fn prove_operator(
-    client: &(impl GenericClient + Sync),
-    scope: &Scope,
-) -> Result<OperatorProof> {
+pub async fn prove_operator(client: &dyn ProofClient, scope: &Scope) -> Result<OperatorProof> {
     // Operator standing is an account's: a principal decides a platform
     // capability through Authz's own operator gate and never holds a proof
     // that administers tenants or writes global settings. A customer is

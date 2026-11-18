@@ -2,7 +2,7 @@
 //! when the restriction is lifted before the plan commits. The same gap #603
 //! closed for people. On a fresh disposable database, through the registered
 //! handler; each line prints `ok` or `FAIL`, and any `FAIL` exits 1.
-use bilibi_address::{AddressInput, AddressService, SERVICE};
+use bilibi_address::{AddressInput, AddressService, Location, Update, WriteError, SERVICE};
 use bilibi_agent_api::{Definitions, Handler, OperationClient, DEFINITIONS};
 use bilibi_database::{pool, MutationBoundary};
 use bilibi_tenancy::{Authentication, ProofClient, ProofFuture, ReadClient};
@@ -34,6 +34,9 @@ impl ReadClient for Caller<'_, '_> {
     }
 }
 impl OperationClient for Caller<'_, '_> {
+    fn sql_client(&self) -> ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(self.0.client()) })
+    }
     fn transaction(&self) -> Option<&Transaction<'_>> {
         Some(self.0)
     }
@@ -93,6 +96,56 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         println!("{}: {what}", if ok { "ok" } else { "FAIL" });
         failures += usize::from(!ok);
     };
+
+    let pool_size = db.status().max_size;
+    db.resize(1);
+    let held = db.get().await?;
+    let geo = addresses.geonames();
+    let empty = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let options = addresses.options(&Location::default()).await?;
+        let long_postcode = "1".repeat(100);
+        let no_country = AddressInput::default();
+        let invalid = AddressInput {
+            country_iso: Some("invalid".into()),
+            ..AddressInput::default()
+        };
+        let refused_create = addresses.create(&manager, &invalid).await;
+        let refused_update = addresses
+            .update(
+                &manager,
+                bilibi_address::AddressId::new(1)?,
+                &Update {
+                    version: 1,
+                    address: invalid,
+                },
+            )
+            .await;
+        Ok::<_, bilibi_database::Error>(
+            matches!(refused_create, Err(WriteError::Invalid(_)))
+                && matches!(refused_update, Err(WriteError::Invalid(_)))
+                && options.admin1.is_empty()
+                && options.postcodes.is_empty()
+                && options.localities.is_empty()
+                && addresses.validate(&no_country).await.is_ok()
+                && geo.get_country(" ").await?.is_none()
+                && geo.get_admin1(" ").await?.is_none()
+                && geo.list_admin1("invalid").await?.is_empty()
+                && geo.admin1_options("", true).await?.is_empty()
+                && geo.search_postcodes("MY", &long_postcode).await?.is_empty()
+                && geo
+                    .search_city_names("MY", "", Some("SG.01"))
+                    .await?
+                    .is_empty()
+                && geo.lookup_postcode("MY", " ").await?.is_empty(),
+        )
+    })
+    .await;
+    drop(held);
+    db.resize(pool_size);
+    check(
+        matches!(empty, Ok(Ok(true))),
+        "empty lookups and malformed standalone writes need no pool slot",
+    );
 
     let created = addresses
         .create(

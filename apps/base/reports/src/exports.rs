@@ -357,6 +357,7 @@ impl Reports {
         // Expired exports of the company go first; a failure here is not
         // this export's concern.
         let _ = owned.purge_expired(&mut client).await;
+        drop(client);
         let cap = match self.queued_rows(scope).await {
             Ok(cap) => cap,
             Err(_) => {
@@ -408,22 +409,21 @@ impl Reports {
                 };
             }
         };
-        let days = {
-            let Ok(client) = self.db.get().await else {
+        let Ok(mut client) = self.db.get().await else {
+            return self
+                .give_up(execution, scope, export, "database_unavailable", quiet)
+                .await;
+        };
+        let days = match self
+            .setting(&**client, scope, contributions::EXPORT_DAYS_KEY)
+            .await
+        {
+            Ok(days) => days as i64,
+            Err(_) => {
+                drop(client);
                 return self
-                    .give_up(execution, scope, export, "database_unavailable", quiet)
+                    .give_up(execution, scope, export, "settings_unavailable", quiet)
                     .await;
-            };
-            match self
-                .setting(&**client, scope, contributions::EXPORT_DAYS_KEY)
-                .await
-            {
-                Ok(days) => days as i64,
-                Err(_) => {
-                    return self
-                        .give_up(execution, scope, export, "settings_unavailable", quiet)
-                        .await;
-                }
             }
         };
         let reference = Reference {
@@ -433,6 +433,7 @@ impl Reports {
         let stored = owned
             .put_expiring(&mut client, reference, &file.bytes, file.content_type, days)
             .await;
+        drop(client);
         let metadata = match stored {
             Ok(metadata) => metadata,
             Err(_) => {

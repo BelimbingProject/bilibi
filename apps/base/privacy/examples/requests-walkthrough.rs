@@ -7,9 +7,9 @@ use bilibi_artifacts::{Artifacts, Reference};
 use bilibi_authz::grants::Grants;
 use bilibi_base::media::{AttachmentSubject, Media, Rules, Upload};
 use bilibi_core::person as person_files;
-use bilibi_database::{pool, MutationBoundary};
+use bilibi_database::{pool, pool_with, MutationBoundary, PoolLimits};
 use bilibi_party_ids::{OrganisationId, PersonId};
-use bilibi_personal_data::Identifier;
+use bilibi_personal_data::{Identifier, Stores, Subject};
 use bilibi_privacy::{
     ConfirmedRecord, HoldTarget, NewRequest, Privacy, RequestKind, RequestView, SERVICE,
 };
@@ -33,6 +33,8 @@ mod case_files;
 mod erasure_approval;
 #[path = "support/invitations.rs"]
 mod invitations;
+#[path = "support/job_reads.rs"]
+mod job_reads;
 
 // The same browser-bound write authority as the masking/export walkthroughs.
 struct Browser<'a> {
@@ -77,7 +79,7 @@ async fn write(
 
 async fn read(
     app: &bilibi_web::App,
-    client: &Client,
+    client: &mut Client,
     scope: &Scope,
     key: &str,
     input: Value,
@@ -235,13 +237,25 @@ async fn main() -> Result<()> {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
     bilibi_base::link();
     bilibi_core::link();
-    let db = pool(&std::env::var("DATABASE_URL")?)?;
+    let step = std::env::args().nth(1);
+    let database_url = std::env::var("DATABASE_URL")?;
+    let db = if step.as_deref() == Some("job-read") {
+        pool_with(
+            &database_url,
+            PoolLimits {
+                size: 1,
+                wait: Duration::from_secs(1),
+            },
+        )?
+    } else {
+        pool(&database_url)?
+    };
     let modules = bilibi_module_registry::discover()?;
     bilibi_database::migrate(&db, &modules).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
     // Production seeds (the request flow) build their own app: run them first,
     // in their own process.
-    if std::env::args().nth(1).as_deref() == Some("seed") {
+    if step.as_deref() == Some("seed") {
         return Ok(bilibi_web::seed::production(&db).await?);
     }
     // File creation and background work require real desks (ADR 19). The
@@ -268,12 +282,15 @@ async fn main() -> Result<()> {
         .login("admin@example.test", bilibi_walkthrough_fixture::PASSWORD)
         .await?;
     let admin = app.security.guard(&admin_login.token).await?;
-    let second = login(&app, "ai@agent.my").await?;
-    let other = login(&app, "manager@other.example.test").await?;
     let privacy = app.services.get::<Privacy>(SERVICE)?;
     let boundary = app
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
+    if step.as_deref() == Some("job-read") {
+        return job_reads::run(&app, &db, &admin, &privacy, &boundary).await;
+    }
+    let second = login(&app, "ai@agent.my").await?;
+    let other = login(&app, "manager@other.example.test").await?;
     let settings = app.services.get::<Settings>("base/settings.store")?;
     let media = app.services.get::<Media>("base/media.store")?;
     let artifacts = app.services.get::<Artifacts>("base/artifacts.store")?;
@@ -460,6 +477,45 @@ async fn main() -> Result<()> {
         "attachment {} submitted; document {}",
         attachment.public_id, document.id
     );
+
+    let people = Stores::installed()?
+        .get("core/person.people")
+        .ok_or("missing Person store")?
+        .1
+        .handler;
+    let subject = Subject {
+        person: ada,
+        identifiers: vec![],
+        confirmed: vec![],
+    };
+    for (break_lookup, missing, remaining) in [
+        (
+            "ALTER TABLE base_media_attachments RENAME TO walkthrough_missing_attachments",
+            "base/media/attachment",
+            "core.person document",
+        ),
+        (
+            "ALTER TABLE base_artifacts RENAME TO walkthrough_missing_artifacts",
+            "core.person document",
+            "base/media/attachment",
+        ),
+    ] {
+        let tx = client.transaction().await?;
+        tx.batch_execute(break_lookup).await?;
+        let located = people.locate(&tx, &admin, &subject).await?;
+        assert!(located.kinds.iter().all(|count| count.kind != missing));
+        for kind in ["person", remaining] {
+            assert!(
+                located
+                    .kinds
+                    .iter()
+                    .any(|count| count.kind == kind && count.by_person == 1),
+                "locate must retain the {kind} count after an optional query fails: {located:?}",
+            );
+        }
+        tx.query_one("SELECT 1", &[]).await?;
+        tx.rollback().await?;
+    }
 
     println!("== case files: attachments on a record about a person (#478)");
     case_files::install(&client, media.clone()).await?;
@@ -721,7 +777,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("received {} due {}", access.id, access.due_at);
-    for (store, label, located) in privacy.locate(&client, &admin, access.id).await? {
+    for (store, label, located) in privacy.locate(&admin, access.id).await? {
         if store == "core/portal.invitations"
             && (located.kinds.len() != 1
                 || located.kinds[0].by_person != 5
@@ -1074,7 +1130,7 @@ async fn main() -> Result<()> {
         )
         .await?
         .get(0);
-    for (store, _, located) in privacy.locate(&client, &admin, erasure.id).await? {
+    for (store, _, located) in privacy.locate(&admin, erasure.id).await? {
         if !located.candidates.is_empty() {
             println!(
                 "  candidates in {store}: {:?}",
@@ -1379,7 +1435,7 @@ async fn main() -> Result<()> {
     }
     let import_get = read(
         &app,
-        &client,
+        &mut client,
         &admin,
         "base.bulk_data.import.get",
         json!({"run_id": ada_import}),
@@ -1387,7 +1443,7 @@ async fn main() -> Result<()> {
     .await?;
     let mapping_list = read(
         &app,
-        &client,
+        &mut client,
         &admin,
         "base.bulk_data.mapping.list",
         json!({"record_type": "core/person.contacts"}),

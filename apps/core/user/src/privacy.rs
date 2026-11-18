@@ -85,11 +85,12 @@ static ACCOUNTS: Accounts = Accounts;
 impl Handler for Accounts {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let row = client
                 .query_one(
                     "SELECT count(*) FILTER (WHERE u.person_id=$2), count(*) FILTER (WHERE u.person_id IS DISTINCT FROM $2 AND lower(i.email)=ANY($3)), \

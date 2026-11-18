@@ -180,19 +180,19 @@ impl ReadHandler for Read {
         Box::pin(async move {
             match self {
                 Self::List => {
-                    let client = persons()?.db.get().await.map_err(Error::from)?;
-                    let page = identity::search(&**client, scope, &parse::<Search>(input)?).await?;
+                    let client = client.sql_client().await?;
+                    let page = identity::search(client, scope, &parse::<Search>(input)?).await?;
                     Ok(Output::Page(Page {
-                        entries: records(&**client, scope, page.entries).await?,
+                        entries: records(client, scope, page.entries).await?,
                         page: page.page as u64,
                         page_size: page.page_size as u64,
                         total: page.total as u64,
                     }))
                 }
                 Self::Get => {
-                    let client = persons()?.db.get().await.map_err(Error::from)?;
-                    let person = identity::read(&**client, scope, id(input)?).await?;
-                    Ok(Output::Data(record(&**client, scope, person).await?))
+                    let client = client.sql_client().await?;
+                    let person = identity::read(client, scope, id(input)?).await?;
+                    Ok(Output::Data(record(client, scope, person).await?))
                 }
                 Self::Duplicates => {
                     let people = persons()?

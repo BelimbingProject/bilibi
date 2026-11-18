@@ -472,7 +472,19 @@ impl Tenants {
         reason: &str,
     ) -> Result<std::result::Result<MovePlan, MoveRefusal>> {
         let client = self.db.get().await?;
-        prove_operator(&**client, proof.scope()).await?;
+        self.preview_move_on(&**client, proof, id, change, reason)
+            .await
+    }
+    /// Check a move on the caller's held connection or transaction.
+    pub async fn preview_move_on(
+        &self,
+        client: &dyn crate::ProofClient,
+        proof: &OperatorProof,
+        id: i64,
+        change: Move,
+        reason: &str,
+    ) -> Result<std::result::Result<MovePlan, MoveRefusal>> {
+        prove_operator(client, proof.scope()).await?;
         let tenant = if id > 0 {
             client
                 .query_opt(&format!("{SELECT} AND t.id = $1"), &[&id])

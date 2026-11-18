@@ -1369,6 +1369,7 @@ impl CompanyPage {
                         },
                         version: expected,
                     };
+                    drop(client);
                     let status = match self.company.save_fact(scope, credential, &edit).await {
                         Ok(()) => CommitStatus::Saved,
                         Err(crate::WriteError::Access(Error::Unauthorized)) => {

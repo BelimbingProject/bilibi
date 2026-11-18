@@ -958,3 +958,30 @@ fn days(
     }
     parts.join(" AND ")
 }
+
+/// Validate a summary using the caller's already held transaction.
+pub async fn validate_summary_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    spec: &SummarySpec,
+) -> Result<(), QueryError> {
+    crate::query::bounded(tx, spec.bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        summarize_catalog(tx, &catalog, root, spec).await.map(drop)
+    })
+    .await
+}
+/// Validate a page query using the caller's already held transaction.
+pub async fn validate_page_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    spec: &PageSpec,
+) -> Result<(), QueryError> {
+    crate::query::bounded(tx, spec.bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        page_keys_catalog(tx, &catalog, root, spec).await.map(drop)
+    })
+    .await
+}

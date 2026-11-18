@@ -217,6 +217,10 @@ edges and global text keys; then demonstrates cardinality refusal, input bounds,
 cost rejection, timeout and a successful projection after failure. It removes its
 reference rows on success. No unit tests or test runner are involved.
 
+## Reads inside an existing transaction
+
+Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
+
 ## Grouped summaries and row pages (G5)
 
 The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant and user bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.

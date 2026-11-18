@@ -105,16 +105,20 @@ fn move_input(input: &Value) -> Result<(i64, String)> {
 
 impl TenantService {
     /// What a suspend or reactivate would do, with nothing written.
-    async fn review_move(&self, scope: &Scope, input: &Value, key: &str) -> Result<Value> {
+    async fn review_move(
+        &self,
+        client: &dyn bilibi_agent_api::OperationClient,
+        scope: &Scope,
+        input: &Value,
+        key: &str,
+    ) -> Result<Value> {
         let change = move_of(key);
-        let client = self.db.get().await.map_err(Error::from)?;
-        let proof = bilibi_authz::authorize_operator(&**client, scope, change.capability()).await?;
-        // `preview_move` reads on a connection of its own.
-        drop(client);
+        bilibi_authz::authorize_proof(client, scope, change.capability()).await?;
+        let proof = bilibi_tenancy::prove_operator(client, scope).await?;
         let (id, reason) = move_input(input)?;
         let plan = self
             .tenants
-            .preview_move(&proof, id, change, &reason)
+            .preview_move_on(client, &proof, id, change, &reason)
             .await?
             .map_err(|refusal| move_refusal(refusal, change))?;
         let (summary, effects) = match change {

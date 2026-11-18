@@ -1666,6 +1666,82 @@ impl Store<'_> {
         })
     }
 
+    /// Pins an exact revision for a checked record in the caller's mutation.
+    /// The document row lock serializes protection with delete and merge.
+    pub(crate) async fn protect_revision(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        revision: i32,
+        owner: &Reference,
+        reason: &str,
+    ) -> WriteResult<()> {
+        let (document, owner, existing_link) = self
+            .prepare_link(On::Commit(tx.sql()), scope, id, owner)
+            .await?;
+        if existing_link.is_none() {
+            self.link(tx, scope, id, &owner).await?;
+        }
+        if reason.trim().is_empty() || reason.trim().chars().count() > 255 {
+            return Err(WriteError::field(
+                "reason",
+                "must contain 1 to 255 characters",
+            ));
+        }
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND revision=$3 FOR SHARE",
+                &[&scope.tenant(), &document.id, &revision],
+            )
+            .await.map_err(Error::from)?
+            .is_none()
+        {
+            return Err(WriteError::NotFound);
+        }
+        let tenant = scope.tenant();
+        let user = scope.user();
+        let reason = reason.trim().to_owned();
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM core_document_revision_protections WHERE tenant_id=$1 AND document_id=$2 AND revision=$3 AND record_kind=$4 AND record_id=$5",
+                &[&tenant, &document.id, &revision, &owner.kind, &owner.id],
+            )
+            .await.map_err(Error::from)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        tx.mutate(move |sql| {
+            Box::pin(async move {
+                let row = sql
+                    .query_one(
+                        "INSERT INTO core_document_revision_protections(tenant_id,document_id,revision,record_kind,record_id,reason,protected_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+                        &[&tenant, &document.id, &revision, &owner.kind, &owner.id, &reason, &user],
+                    )
+                    .await?;
+                let protection_id: i64 = row.get(0);
+                Ok(((), vec![Change {
+                    kind: crate::PROTECTION_RECORD.into(),
+                    id: protection_id,
+                    old: json!({}),
+                    new: json!({
+                        "document_id": document.id,
+                        "revision": revision,
+                        "record_kind": owner.kind,
+                        "record_id": owner.id,
+                        "reason": reason,
+                        "protected_by": user,
+                    }),
+                }]))
+            })
+        })
+        .await
+        .map_err(write_error)
+    }
+
     pub(crate) async fn add_revision(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -1777,6 +1853,12 @@ impl Store<'_> {
         let link = find_link(on.client(), scope.tenant(), id, record)
             .await?
             .ok_or(WriteError::NotFound)?;
+        if on.client().query_opt(
+            "SELECT 1 FROM core_document_revision_protections WHERE tenant_id=$1 AND document_id=$2 AND record_kind=$3 AND record_id=$4 LIMIT 1",
+            &[&scope.tenant(), &id, &record.kind, &record.id],
+        ).await?.is_some() {
+            return Err(WriteError::Protected);
+        }
         Ok((document, link))
     }
 

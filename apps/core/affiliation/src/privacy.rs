@@ -39,11 +39,12 @@ static AFFILIATIONS: Affiliations = Affiliations;
 impl Handler for Affiliations {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let (emails, phones) = identifiers(subject);
             let row = client
                 .query_one(

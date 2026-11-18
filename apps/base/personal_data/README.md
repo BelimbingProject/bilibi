@@ -2,6 +2,8 @@
 
 **Use it for:** declaring each store of a person's data, so privacy requests, holds and retention reach it.
 
+Stores can report `KeptReason::Evidence` when immutable evidence is still referenced by its owning record. The privacy certificate reports it as kept; no cleanup is scheduled by the personal-data store.
+
 **Not for:** running those requests (use `base/privacy`) or a personal-data registry of your own.
 
 **The contract every store of a person's data implements, below Grid, Authz and Audit, so any module can answer for its data without a dependency cycle.** `base/privacy` runs it. Decision: [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md).
@@ -30,14 +32,15 @@ inventory::submit! { Contribution::new(PERSONAL_DATA, "core/person.people", prov
 
 | Call | Gets | Answers |
 | --- | --- | --- |
-| `locate` | plain connection | Counts per kind (by person, by identifier only) and identifier-only `Candidate`s |
+| `locate` | caller transaction | Counts per kind (by person, by identifier only) and identifier-only `Candidate`s |
 | `export` | plain connection, `Disclosure` | Every record (never a first page) and `FileRef`s |
 | `file` | plain connection, `Disclosure` | One listed file's bytes, read through its owner (`File::Read`), or `File::Withheld` with a reason (`not_cleared`: not past its malware check; `missing`: bytes no longer stored), which the bundle lists without bytes instead of failing |
 | `erase` | the erasure `MutationTransaction`, `Erasure`, `Holds` | Actions, erased records, kept records with reason and hold |
-| `after_erase` | plain connection, `Erasure`, `Holds`, `Progress` | Work after commit (files, documents), each step recorded through `Progress` |
+| `after_erase` | mutable connection, `Erasure`, `Holds`, `Progress` | Work after commit (files, documents), each step recorded through `Progress` |
 
 - Act on records linked to the person and on `Subject.confirmed`; never on another identifier match.
 - Changes record `[erased]` (`ERASED`) where a value was, so erasure reads apart from absence.
+- `Progress::record(client, step)` borrows the mutable connection given to `after_erase`; recording commits each completed step before the handler continues, without a second pool checkout.
 - Every call is idempotent, and decides by current values (not an earlier erasure's marker): a record changed after an erasure is erased again.
 - `ErasedRecord.person` names the record's person when the grant names none (a sweep), so kept evidence still honours a hold on that person.
 

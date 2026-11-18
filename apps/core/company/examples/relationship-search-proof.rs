@@ -129,20 +129,20 @@ async fn main() -> Result<(), Error> {
         .await?;
     let manager = app.security.guard(&login.token).await?;
     let tenant = manager.tenant();
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
-    let client: &tokio_postgres::Client = &client;
+    let client: &mut tokio_postgres::Client = &mut client;
     // Re-runs start from the seeded state.
     client.batch_execute("DELETE FROM company_relationships WHERE source_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'search\\_%') OR target_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'search\\_%'); DELETE FROM companies WHERE code LIKE 'search\\_%'; DELETE FROM persons WHERE code LIKE 'search-person-%' OR code LIKE 'crowd-person-%' OR code='search-rare'").await?;
+    let sql = &*client;
     let role = |code: &'static str| async move {
-        client
-            .query_one(
-                "SELECT id FROM company_relationship_roles WHERE tenant_id=$1 AND code=$2",
-                &[&tenant, &code],
-            )
-            .await
-            .map(|row| row.get::<_, i64>(0))
+        sql.query_one(
+            "SELECT id FROM company_relationship_roles WHERE tenant_id=$1 AND code=$2",
+            &[&tenant, &code],
+        )
+        .await
+        .map(|row| row.get::<_, i64>(0))
     };
     let (vendor, customer) = (role("vendor").await?, role("customer").await?);
 
@@ -152,7 +152,7 @@ async fn main() -> Result<(), Error> {
     let alpha = company(&companies, &manager, "Alpha Supplier", "search_alpha").await?;
     let beta = company(&companies, &manager, "Beta Buyer", "search_beta").await?;
     let link = |from: OrganisationId, to: OrganisationId| async move {
-        client
+        sql
             .query_one(
                 "INSERT INTO company_relationships(tenant_id,source_organisation_id,target_organisation_id,role_id,effective_from) VALUES($1,$2,$3,$4,'2026-01-01') RETURNING id",
                 &[&tenant, &from.get(), &to.get(), &vendor],
@@ -165,13 +165,13 @@ async fn main() -> Result<(), Error> {
     // Beta buys from the source: on the source's page it is incoming.
     let beta_link = link(beta, source).await?;
     let people = |source: OrganisationId, prefix: &'static str, label: &'static str, count: i64| async move {
-        client
+        sql
             .execute(
                 &format!("INSERT INTO persons(tenant_id,name,kind,code) SELECT $1,'{label} '||lpad(n::text,5,'0'),'human','{prefix}-'||n FROM generate_series(1,$2::bigint) n"),
                 &[&tenant, &count],
             )
             .await?;
-        client
+        sql
             .execute(
                 &format!("INSERT INTO company_relationships(tenant_id,source_organisation_id,target_person_id,role_id,effective_from) SELECT $1,$2,p.id,$3,'2026-01-01' FROM persons p WHERE p.tenant_id=$1 AND p.code LIKE '{prefix}-%' ORDER BY p.id DESC"),
                 &[&tenant, &source.get(), &customer],

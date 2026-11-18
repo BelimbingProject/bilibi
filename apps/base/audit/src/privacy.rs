@@ -31,11 +31,12 @@ static HISTORY: History = History;
 impl Handler for History {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let count: i64 = client
                 .query_one(
                     "SELECT count(*) FROM base_audit_mutations WHERE tenant_id=$1 AND auditable_type=ANY($2) AND auditable_id=$3",

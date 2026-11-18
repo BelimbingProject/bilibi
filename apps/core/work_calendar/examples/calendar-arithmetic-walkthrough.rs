@@ -774,7 +774,7 @@ async fn main() -> Result<(), Failure> {
         input["code"] = json!("arithmetic-office");
         let answer = registry
             .call(
-                &**client,
+                &mut **client,
                 &scope,
                 "core.work_calendar.business_time",
                 &input,

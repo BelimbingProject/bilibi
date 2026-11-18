@@ -254,7 +254,8 @@ pub(crate) fn invalid(error: WriteError, prefix: &str, field: &str) -> bilibi_ag
         | WriteError::Quarantined
         | WriteError::ScanPending
         | WriteError::Retained
-        | WriteError::LegalHold) => bilibi_agent_api::invalid("file", error.to_string()),
+        | WriteError::LegalHold
+        | WriteError::Protected) => bilibi_agent_api::invalid("file", error.to_string()),
         WriteError::Invalid(errors) => {
             let mut fields = Fields::new();
             for e in errors {

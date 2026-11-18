@@ -184,11 +184,12 @@ static STORE: Store = Store;
 impl Handler for Store {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let tenant = scope.tenant();
             let person = subject.person.get();
             let (emails, phones) = identifiers(subject);
