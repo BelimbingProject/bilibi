@@ -76,7 +76,7 @@ jobs:
         run: python3 scripts/compatibility.py
 
   domain:
-    name: ${{ matrix.role }}/${{ matrix.id }}${{ matrix.build == 'check' && github.event_name == 'push' && ' (debug cache)' || '' }}
+    name: ${{ matrix.role }}/${{ matrix.id }} (${{ matrix.build }}, ${{ matrix.phase }})
     needs: catalogue
     if: needs.catalogue.outputs.has_containers == 'true'
     runs-on: ubuntu-latest
@@ -96,6 +96,7 @@ jobs:
       # do the locked release build that a tested set records. main also runs
       # the debug build so pull requests restore a warm cache.
       DOMAIN_CI_BUILD: ${{ matrix.build }}
+      DOMAIN_CI_PHASE: ${{ matrix.phase }}
 
     services:
       postgres:
@@ -179,7 +180,7 @@ jobs:
         with:
           workspaces: bilibi
           prefix-key: v1-workspace
-          key: ${{ matrix.role }}-${{ matrix.id }}-${{ env.DOMAIN_CI_BUILD }}
+          key: ${{ matrix.role }}-${{ matrix.id }}-${{ env.DOMAIN_CI_BUILD }}${{ matrix.phase == 'lint' && '-lint' || '' }}
           cache-workspace-crates: true
           cache-on-failure: true
       - uses: actions/setup-node@v6
@@ -199,7 +200,7 @@ jobs:
       # The existing tested-set format records Domain pairs only. Extension
       # gates are equally required, without changing catalogue publishing.
       - name: Describe the tested set
-        if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release'
+        if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release' && matrix.phase == 'build'
         env:
           # The Release workflow passes the version from its reviewed tag.
           PLATFORM_VERSION: ${{ inputs.platform_version }}
@@ -210,7 +211,7 @@ jobs:
           fi
           python3 scripts/catalogue.py tested "${args[@]}" | tee "$RUNNER_TEMP/tested-set.json"
       - uses: actions/upload-artifact@v7
-        if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release'
+        if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release' && matrix.phase == 'build'
         with:
           name: tested-${{ matrix.role }}-${{ matrix.id }}
           path: ${{ runner.temp }}/tested-set.json
@@ -269,7 +270,7 @@ jobs:
     name: Record the tested sets
     needs: [domain, compatibility]
     if: >-
-      always() && inputs.platform_version == '' &&
+      needs.compatibility.result == 'success' && inputs.platform_version == '' &&
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10

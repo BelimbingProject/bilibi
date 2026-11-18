@@ -42,13 +42,15 @@ def matrix(event, event_name, ref):
             repository = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', facts['repository'])
             expect(repository, f'{role}/{container}: CI needs a GitHub repository URL')
             for build in builds(event_name, ref):
-                entries.append({
-                    'role': role,
-                    'id': container,
-                    'repository': repository.group(1),
-                    'ref': 'refs/heads/main',
-                    'build': build,
-                })
+                for phase in ('lint', 'build'):
+                    entries.append({
+                        'role': role,
+                        'id': container,
+                        'repository': repository.group(1),
+                        'ref': 'refs/heads/main',
+                        'build': build,
+                        'phase': phase,
+                    })
 
     # Other event types ignore companion directives, including manual runs
     # whose payload might be copied from a pull request.

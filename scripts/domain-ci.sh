@@ -8,12 +8,18 @@
 # DOMAIN_CI_BUILD=release (default) does the locked release build and boots
 # that binary. DOMAIN_CI_BUILD=check skips it and boots the debug binary.
 # Pull requests use check. main, tags and manual runs use release
-# (docs/domain-ci/README.md).
+# (docs/domain-ci/README.md). DOMAIN_CI_PHASE defaults to all; the Platform
+# workflow runs lint and build phases in parallel and requires both.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$root"
 : "${DATABASE_URL:?DATABASE_URL must name an empty PostgreSQL 18 database}"
 build=${DOMAIN_CI_BUILD:-release}
+phase=${DOMAIN_CI_PHASE:-all}
+case "$phase" in
+  all|lint|build) ;;
+  *) echo "DOMAIN_CI_PHASE must be all, lint or build (got ${phase})" >&2; exit 1 ;;
+esac
 case "$build" in
   check|release) ;;
   *) echo "DOMAIN_CI_BUILD must be check or release (got ${build})" >&2; exit 1 ;;
@@ -38,9 +44,14 @@ cargo metadata --format-version 1 >/dev/null
 python3 scripts/discover-modules.py --pin
 cat .local/composition/manifest.txt
 
-step "Format and lint every workspace member (profile: ${build})"
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+if [[ "$phase" != build ]]; then
+  step "Format and lint every workspace member (profile: ${build})"
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+fi
+if [[ "$phase" == lint ]]; then
+  exit 0
+fi
 
 if [[ "$build" == release ]]; then
   step 'Locked release build of every workspace member'
