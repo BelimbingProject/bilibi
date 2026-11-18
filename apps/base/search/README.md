@@ -92,7 +92,7 @@ The operator edits the first four on System Settings, for every tenant (Global),
 
 ## Not in this phase
 
-Typo tolerance and matching inside a word (`pg_trgm`), scripts written without spaces, stemming per language, synonyms, highlighted snippets, facets beyond kind, saved searches and alerts, usage reports, semantic search and any external engine. Advanced list filters belong to `ListState`.
+Typo tolerance and matching inside a word for kinds that do not opt in with `.title_trigrams()`, and for text other than the title; scripts written without spaces, stemming per language, synonyms, highlighted snippets, facets beyond kind, saved searches and alerts, usage reports, semantic search and any external engine. Advanced list filters belong to `ListState`.
 
 ## Runtime checks
 
