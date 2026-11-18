@@ -319,12 +319,14 @@ API upgrade: `list` takes `&mut tokio_postgres::Client` to own its read-only tra
 
 ## Provisioning
 
+These commands provision tenant and company data. For the combined customer tenant and owner command, see [Server installation](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant).
+
 ```sh
 cargo run -p bilibi-web -- tenant-provision --tenant-name "Acme tenant" --company-name "Acme Sdn. Bhd." --company-code acme
 cargo run -p bilibi-web -- platform-provision --company-name "Example Operations" --company-code example_operations
 ```
 
-`provision_tenant` atomically creates a tenant and its primary company. `provision_tenant_in` uses the caller's transaction, which the caller must roll back on a refusal. For first-owner setup, see [Server installation](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). `provision_platform_operator` resolves or creates the explicitly marked operator tenant and its primary company. A fresh provision records one retained `company.*.provisioned` audit action by the `provision` system principal. PostgreSQL assigns the IDs.
+`provision_tenant` atomically creates a tenant and its primary company. `provision_tenant_in` uses the caller's transaction, which the caller must roll back on a refusal. `provision_platform_operator` resolves or creates the explicitly marked operator tenant and its primary company. A fresh provision records one retained `company.*.provisioned` audit action by the `provision` system principal. PostgreSQL assigns the IDs.
 
 ## Platform-operator setup and dashboard panels (K17)
 

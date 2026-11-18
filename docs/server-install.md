@@ -266,11 +266,13 @@ sudo scripts/install-server.sh tenant-provision production \
     --owner-email owner@acme.example
 ```
 
-Use a separate email address for each first owner. The address must be unused by any staff sign-in on the installation when the invitation is sent and when it is accepted. The link works once and uses the [default invitation duration](../apps/core/user/README.md#membership-invitations). The recipient chooses a password for a new sign-in owned by this tenant and enrols a second factor when the installation's sign-in policy requires one. Acceptance gives the owner a Person, business affiliation and first desk in the primary company.
+Use a separate email address for each first owner. The address must be unused by any staff sign-in on the installation when the invitation is sent and when it is accepted. The link works once and uses the [default invitation duration](../apps/core/user/README.md#membership-invitations). The recipient chooses a password on the invitation page, then signs in with the new credentials and enrols a second factor if required. Acceptance gives the owner a Person, business affiliation and first desk in the primary company.
 
 The audit log records `user.tenant_owner.invited` as **System · tenant-provision**. The part of the email address before `@` supplies the initial Person name.
 
-If sending fails after commit, the command exits unsuccessfully. Rerun it with the same tenant name, company name and code, and owner email to send a fresh link for the original pending invitation. For an address that becomes unavailable before acceptance, keep the tenant name, company name and code and pass an unused address in `--owner-email`. Reissue also works for expired links. It saves the pending address, invalidates the previous link and records `user.tenant_owner.reissued` before sending. Reissue requires a unique match with the original bootstrap receipt and a still-pending invitation. The command refuses to adopt an independently provisioned tenant or replace an accepted or revoked invitation. Use the signed-in Users page to invite later administrators.
+The command exits unsuccessfully if delivery fails after commit. To recover from failed delivery or an expired link, rerun it with the same tenant name, company name and code. Use the same owner email to resend, or supply a different unused address in `--owner-email` to change the recipient. Reissue invalidates the previous link and records `user.tenant_owner.reissued` before sending. It requires a unique matching bootstrap receipt and an invitation that has yet to be accepted or revoked. For a fresh bootstrap, choose a tenant name that is unused on the installation.
+
+Use the signed-in Users page to invite later administrators.
 
 Ordinary membership invitations can link the owner’s sign-in to another tenant. Cross-tenant access through shared sign-ins, including SSO, remains a [known limitation](https://github.com/BelimbingProject/bilibi/issues/787).
 

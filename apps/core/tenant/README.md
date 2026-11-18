@@ -48,7 +48,7 @@ On a fresh disposable database, `BILIBI_TENANT_DEMO=disposable cargo run -p bili
 - Each owner rechecks authorization on the mutation transaction and returns every affected row as a `Change`. Tenant, companies, primary assignment, audit and plan consumption commit or roll back together.
 - The actor remains the person. The committed action records the agent connection, and the shared trace links all mutations to it. Revoking the grant immediately ends further calls, including a previously reviewed plan.
 
-Creating a tenant does not create accounts, switch the caller into that tenant or confer access to its business data. No general cross-tenant company operation is exposed. The ChatGPT plugin stays a thin adapter and discovers these contracts through the registry.
+The reviewed create operation leaves account setup separate. The caller stays in their current tenant without access to the new tenant's business data. See [first-owner setup](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant) for the server command. No general cross-tenant company operation is exposed. The ChatGPT plugin stays a thin adapter and discovers these contracts through the registry.
 
 ## Where to go next
 

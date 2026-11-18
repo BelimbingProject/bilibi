@@ -53,9 +53,9 @@ fn parse(command: &str, args: &[String]) -> Result<Options> {
     Ok(options)
 }
 
-/// `tenant-provision` creates a customer tenant and, when `--owner-email` is
-/// present, prepares its first owner through the ordinary invitation flow.
-/// `platform-provision` retains its existing company-only contract.
+/// `--owner-email` selects Core User's first-owner bootstrap, which also
+/// handles reissue. The other provisioning paths create tenant and company
+/// data through Core Company.
 pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
     let options = parse(command, args)?;
     let company = NewCompany {
