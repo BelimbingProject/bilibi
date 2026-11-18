@@ -23,6 +23,10 @@ pub struct Searchable {
     pub table: &'static str,
     /// The field a hit is named by; operators cannot restrict it.
     pub title: &'static str,
+    /// Match inside the protected title and accept close spellings. The
+    /// owner's Grid source must expose a title indexed with `lower(title)`
+    /// and `gin_trgm_ops` in the owner's migration.
+    pub title_trigrams: bool,
     /// Up to two fields shown under the title, each left out for a reader
     /// whose role restricts it.
     pub subtitle: &'static [&'static str],
@@ -36,7 +40,7 @@ pub struct Searchable {
     /// a hit is offered only to a reader that route admits.
     pub link: &'static str,
     /// Marks the records that are no longer current, which stay findable,
-    /// ranked after current ones and labelled with their state.
+    /// ranked after current ones in the same match tier and labelled with their state.
     pub state: Option<State>,
     /// The date or time the results page shows as Updated.
     pub updated: Option<&'static str>,
@@ -65,6 +69,7 @@ impl Searchable {
         Self {
             table,
             title,
+            title_trigrams: false,
             subtitle: &[],
             vector,
             prefix: &[],
@@ -78,6 +83,12 @@ impl Searchable {
     pub const fn subtitle(self, fields: &'static [&'static str]) -> Self {
         Self {
             subtitle: fields,
+            ..self
+        }
+    }
+    pub const fn title_trigrams(self) -> Self {
+        Self {
+            title_trigrams: true,
             ..self
         }
     }
@@ -291,6 +302,9 @@ fn check_fields(table: &Table, decl: &Searchable) -> std::result::Result<(), Str
             "title {} must be a shown field operators cannot restrict",
             decl.title
         ));
+    }
+    if decl.title_trigrams && title.ty != FieldType::String {
+        return Err(format!("trigram title {} must be text", decl.title));
     }
     if !field(decl.vector)?.hidden {
         return Err(format!(

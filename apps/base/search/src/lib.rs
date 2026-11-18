@@ -451,13 +451,21 @@ impl Search {
         if planned.is_empty() {
             return Ok(found);
         }
+        let title_words = query::title_words(&terms);
+        let trigrams =
+            !title_words.is_empty() && planned.iter().any(|plan| plan.kind.decl.title_trigrams);
+        if trigrams {
+            // Transaction-local so other trigram reads retain their own threshold.
+            tx.batch_execute("SET LOCAL pg_trgm.word_similarity_threshold = 0.5")
+                .await?;
+        }
         let prefix = terms.prefix.as_deref();
         let (tenant, user) = (scope.tenant(), scope.user());
         let pattern = prefix.unwrap_or_default();
         let plain = terms.plain.as_deref().unwrap_or_default();
         let (sql, filter, limit, offset) = match mode {
             Mode::Suggest => (
-                query::suggestions(&planned, tuning.suggestions, prefix.is_some()),
+                query::suggestions(&planned, tuning.suggestions, prefix.is_some(), trigrams),
                 String::new(),
                 0i64,
                 0i64,
@@ -467,14 +475,21 @@ impl Search {
                 page,
                 page_size,
             } => (
-                query::page(&planned, prefix.is_some()),
+                query::page(&planned, prefix.is_some(), trigrams),
                 kind.unwrap_or_default().to_owned(),
                 i64::try_from(page_size).map_err(|_| Error::Invalid)?,
                 i64::try_from((page - 1).saturating_mul(page_size)).map_err(|_| Error::Invalid)?,
             ),
         };
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            vec![&tenant, &user, &words, &pattern, &plain, &terms.candidates];
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
+            &tenant,
+            &user,
+            &words,
+            &pattern,
+            &plain,
+            &terms.candidates,
+            &title_words,
+        ];
         if matches!(mode, Mode::Page { .. }) {
             params.extend([
                 &filter as &(dyn tokio_postgres::types::ToSql + Sync),

@@ -15,6 +15,15 @@ pub const MAX_WORDS: usize = 8;
 /// The most hits one kind ranks for a results page; its count stops there.
 pub const MAX_KIND_HITS: i64 = 500;
 
+/// Short inputs and phrase or exclusion searches keep their usual matching.
+pub(crate) fn title_words(terms: &Terms) -> Vec<String> {
+    let words = terms.plain.as_deref().map_or_else(Vec::new, words);
+    if words.len() > MAX_WORDS || words.iter().flat_map(|word| word.chars()).take(3).count() < 3 {
+        return Vec::new();
+    }
+    words
+}
+
 /// What a person typed, made safe to search with.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Terms {
@@ -195,7 +204,7 @@ fn literal(value: &str) -> String {
 /// selected or matched: a subtitle shows nothing and a prefix field takes no
 /// part, so it cannot answer whether a value exists. A masked field is never
 /// matched either, and its subtitle is shown only in its partial form.
-fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
+fn branch(planned: &Planned<'_>, limit: i64, prefix: bool, trigrams: bool) -> String {
     let Planned {
         kind, table, boost, ..
     } = planned;
@@ -257,13 +266,35 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
             matched.push_str(&format!(" OR lower(({c})::text) LIKE $4::text"));
         }
     }
+    let title = text_of(table, Some(decl.title));
+    let mut quality = if prefix {
+        format!("CASE WHEN lower({title}) = lower($5::text) THEN 0 ELSE 1 END")
+    } else {
+        "1".to_owned()
+    };
+    let mut rank = format!("ts_rank_cd({ranked}, {query})");
+    if decl.title_trigrams && trigrams {
+        let name = format!("lower({title})");
+        let part = format!("{name} LIKE ('%' || $4::text)");
+        // The indexed phrase comparison picks candidates. Each query word
+        // must still be present or close, so one good word cannot match alone.
+        let close = format!(
+            "(lower($5::text) <% {name} AND NOT EXISTS (SELECT 1 FROM unnest($7::text[]) AS term(word) WHERE strpos({name}, word) = 0 AND NOT (word <% {name})))"
+        );
+        quality = format!(
+            "CASE WHEN {name} = lower($5::text) THEN 0 WHEN {matched} THEN 1 WHEN {part} THEN 2 ELSE 3 END"
+        );
+        rank = format!(
+            "CASE WHEN {matched} THEN {rank} ELSE word_similarity(lower($5::text), {name}) END"
+        );
+        matched = format!("{matched} OR {part} OR {close}");
+    }
     let at = time_of(table, table.time_field());
     // A record never updated was last changed when it was made.
     let updated = format!("COALESCE({}, {at})", time_of(table, decl.updated));
     format!(
-        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, (ts_rank_cd({ranked}, {query}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, id LIMIT {limit})",
+        "(SELECT {kind}::text AS kind, ({key})::text AS id, {title} AS title, {sub0} AS sub0, {sub1} AS sub1, {state} AS state, {inactive} AS inactive, {quality} AS quality, (({rank}) * {boost:.4})::float8 AS rank, {at} AS at, {updated} AS updated FROM {source} r WHERE {matched} {ORDER} LIMIT {limit})",
         kind = literal(kind.id),
-        title = text_of(table, Some(decl.title)),
         sub0 = text_of(table, decl.subtitle.first().copied()),
         sub1 = text_of(table, decl.subtitle.get(1).copied()),
         source = table.scoped_source(),
@@ -273,19 +304,19 @@ fn branch(planned: &Planned<'_>, limit: i64, prefix: bool) -> String {
 // Binds the reader as each owner's source expects ($1 tenant, $2 user), the
 // tsquery ($3), the prefix pattern ($4) and the plain text ($5), which every
 // statement references.
-fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool) -> String {
+fn hits(planned: &[Planned<'_>], limit: i64, prefix: bool, trigrams: bool) -> String {
     let branches = planned
         .iter()
-        .map(|kind| branch(kind, limit, prefix))
+        .map(|kind| branch(kind, limit, prefix, trigrams))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     format!(
-        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain, $6::text AS candidates), hits AS ({branches})"
+        "WITH input AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $3::text AS words, $4::text AS prefix, $5::text AS plain, $6::text AS candidates, $7::text[] AS title_words), hits AS ({branches})"
     )
 }
 
 // Equal ranks read newest first, then by name, as a person scans them.
-const ORDER: &str = "ORDER BY inactive, rank DESC, at DESC NULLS LAST, title, kind, id";
+const ORDER: &str = "ORDER BY quality, inactive, rank DESC, at DESC NULLS LAST, title, kind, id";
 const COLUMNS: &str = "kind, id, title, sub0, sub1, state, inactive, updated";
 
 /// The hits (those `filter` keeps) as every caller lists them: each kind's
@@ -298,24 +329,24 @@ fn grouped(filter: &str) -> String {
 }
 
 /// The search box: the best `per_kind` hits of each kind, grouped by kind.
-pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool) -> String {
+pub fn suggestions(planned: &[Planned<'_>], per_kind: i64, prefix: bool, trigrams: bool) -> String {
     format!(
         "{}, {} SELECT NULL::jsonb AS counts, {COLUMNS} FROM grouped ORDER BY lead, pos",
-        hits(planned, per_kind, prefix),
+        hits(planned, per_kind, prefix, trigrams),
         grouped("")
     )
 }
 
 /// A results page: how many records each kind matched (up to
-/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$7` names or of
-/// every kind when it is empty, `$8` rows from `$9`, grouped as the search box
+/// [`MAX_KIND_HITS`]) and one page of the hits of the kind `$8` names or of
+/// every kind when it is empty, `$9` rows from `$10`, grouped as the search box
 /// groups them, so a kind's group continues on the next page. One row carries
 /// the counts even when the page is empty.
-pub fn page(planned: &[Planned<'_>], prefix: bool) -> String {
+pub fn page(planned: &[Planned<'_>], prefix: bool, trigrams: bool) -> String {
     format!(
-        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $8::bigint OFFSET $9::bigint) page ON true",
-        hits(planned, MAX_KIND_HITS, prefix),
-        grouped(" WHERE ($7::text = '' OR kind = $7::text)"),
+        "{}, counted AS (SELECT kind, count(*) AS n FROM hits GROUP BY kind), {} SELECT (SELECT COALESCE(jsonb_object_agg(kind, n), '{{}}'::jsonb) FROM counted) AS counts, {} FROM (SELECT 1) one LEFT JOIN LATERAL (SELECT * FROM grouped ORDER BY lead, pos LIMIT $9::bigint OFFSET $10::bigint) page ON true",
+        hits(planned, MAX_KIND_HITS, prefix, trigrams),
+        grouped(" WHERE ($8::text = '' OR kind = $8::text)"),
         COLUMNS
             .split(", ")
             .map(|name| format!("page.{name}"))

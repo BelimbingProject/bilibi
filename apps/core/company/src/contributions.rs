@@ -205,6 +205,7 @@ inventory::submit! { bilibi_module_registry::Contribution::new(bilibi_custom_fie
 // one stays findable, ranked after current ones and marked.
 static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("companies", "name", "search_vector", "/companies/{id}")
+        .title_trigrams()
         .subtitle(&["code", "legal_name"])
         .state("status", &["archived"])
         .updated("updated_at")

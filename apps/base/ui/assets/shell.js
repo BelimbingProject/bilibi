@@ -248,6 +248,44 @@
   const RECORDS_PAUSE = 150;
   const RECORDS_TEXT = 200;
 
+  const searchWords = (text) => text.match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
+
+  // Compare whole words for typos, with adjacent swaps counting as one edit.
+  function closeSearchWord(query, label) {
+    if (label.includes(query)) return true;
+    const from = Array.from(query);
+    const to = Array.from(label);
+    const limit = from.length >= 6 ? 2 : 1;
+    if (from.length < 4 || Math.abs(from.length - to.length) > limit) return false;
+    let previous = Array.from({length: to.length + 1}, (_, i) => i);
+    let beforePrevious = previous;
+    for (let i = 1; i <= from.length; i++) {
+      const row = [i];
+      for (let j = 1; j <= to.length; j++) {
+        row[j] = Math.min(previous[j] + 1, row[j - 1] + 1,
+          previous[j - 1] + Number(from[i - 1] !== to[j - 1]));
+        if (i > 1 && j > 1 && from[i - 1] === to[j - 2] && from[i - 2] === to[j - 1]) {
+          row[j] = Math.min(row[j], beforePrevious[j - 2] + 1);
+        }
+      }
+      beforePrevious = previous;
+      previous = row;
+    }
+    return previous[to.length] <= limit;
+  }
+
+  function pageSearchRank(option, query, words) {
+    if (!query) return Infinity;
+    const labels = option.dataset.pageSearchLabels.toLowerCase().split('\n');
+    if (labels.includes(query)) return 0;
+    if (labels.some((label) => label.includes(query))) return 1;
+    if (words.length && labels.some((label) => {
+      const parts = searchWords(label);
+      return words.every((word) => parts.some((part) => closeSearchWord(word, part)));
+    })) return 2;
+    return Infinity;
+  }
+
   class PageSearch {
     constructor(shell) {
       this.shell = shell;
@@ -344,10 +382,41 @@
       if (this.isOpen()) this.dialog().close();
     }
 
+    rankPages(query) {
+      const words = searchWords(query);
+      const groups = new Map();
+      for (const option of this.options()) {
+        const home = option.dataset.pageSearchHome;
+        if (!home) continue;
+        const rank = pageSearchRank(option, query, words);
+        const hidden = rank === Infinity;
+        if (option.hidden !== hidden) option.hidden = hidden;
+        const group = rank === 2 ? 'close' : home;
+        if (!groups.has(group)) groups.set(group, []);
+        groups.get(group).push({
+          option, rank, account: home === 'account', position: Number(option.dataset.pageSearchPosition),
+        });
+      }
+      for (const [id, matches] of groups) {
+        const group = this.root.querySelector(`#app-search-group-${id}`);
+        matches.sort((a, b) => a.rank - b.rank || Number(a.account) - Number(b.account) || a.position - b.position);
+        let next = group.firstElementChild.nextElementSibling;
+        for (const {option} of matches) {
+          if (option === next) next = next.nextElementSibling;
+          else group.insertBefore(option, next);
+        }
+      }
+    }
+
     // Shows the matching rows and their groups, then the hint or "No pages
     // found"; writes only what changed.
     apply() {
-      const query = (this.input()?.value ?? '').trim().toLowerCase();
+      const query = Array.from((this.input()?.value ?? '').trim().toLowerCase())
+        .slice(0, RECORDS_TEXT).join('').replace(/\s+/g, ' ');
+      if (query !== this.query) {
+        this.active = null;
+        this.query = query;
+      }
       const searching = this.searchesRecords();
       const asked = this.recordQuery();
       const answered = this.records()?.dataset.query ?? '';
@@ -355,17 +424,11 @@
       // earlier query go at once, with their groups, "All results" and the
       // notice, so neither Enter nor a click opens one; the reply shows them.
       const records = asked !== '' && answered === asked;
+      this.rankPages(query);
       const shown = [];
       for (const option of this.options()) {
-        let hit;
-        if ('pageSearchRemote' in option.dataset) {
-          hit = records;
-        } else {
-          const labels = (option.dataset.pageSearchLabels ?? '').toLowerCase().split('\n');
-          hit = query !== '' && labels.some((label) => label.includes(query));
-        }
-        if (option.hidden === hit) option.hidden = !hit;
-        if (hit) shown.push(option);
+        if ('pageSearchRemote' in option.dataset && option.hidden === records) option.hidden = !records;
+        if (!option.hidden) shown.push(option);
       }
       for (const group of this.root.querySelectorAll('[data-page-search-group]')) {
         const empty = !group.querySelector('[data-page-search-option]:not([hidden])');

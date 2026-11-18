@@ -82,6 +82,7 @@ inventory::submit! { Contribution::new(bilibi_custom_fields::GRID_SOURCES, "pers
 // for a reader no held role restricts them for (as the Contacts search does).
 static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("persons", "name", "search_vector", "/contacts/{id}")
+        .title_trigrams()
         .subtitle(&["code", "email"])
         .prefix(&["code", "email", "phone"])
         .state("identity", &["retired"])

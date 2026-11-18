@@ -49,7 +49,7 @@ impl SearchPage {
 
 /// The search dialog over `pages`: Pages first, then `records` (the rendered
 /// `shell.search.records` embed, empty when no module answers it), then
-/// Account.
+/// Account and a group for close page matches.
 pub fn page_search(pages: &[SearchPage], records: Html) -> askama::Result<Html> {
     let label = if records.is_empty() {
         "Search pages"
@@ -83,6 +83,7 @@ pub fn page_search(pages: &[SearchPage], records: Html) -> askama::Result<Html> 
         groups: [
             ("pages", "Pages", group(false)),
             ("account", "Account", group(true)),
+            ("close", "Close matches", Vec::new()),
         ],
         records,
     })
@@ -95,7 +96,7 @@ struct PageSearch<'a> {
     label: &'static str,
     dialog_class: String,
     option_class: &'static str,
-    groups: [(&'static str, &'static str, Vec<&'a SearchPage>); 2],
+    groups: [(&'static str, &'static str, Vec<&'a SearchPage>); 3],
     records: Html,
 }
 

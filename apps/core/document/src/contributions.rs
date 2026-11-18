@@ -387,6 +387,7 @@ bilibi_records::holder!(
 // The same grant-filtered Grid source governs discovery and record reads.
 static SEARCH: bilibi_search::Searchable =
     bilibi_search::Searchable::new("documents", "name", "search_vector", "/documents/{id}")
+        .title_trigrams()
         .subtitle(&["sync_id", "category"])
         .updated("updated_at")
         .custom("custom_search_vector");
