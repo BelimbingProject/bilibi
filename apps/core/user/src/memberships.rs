@@ -500,15 +500,18 @@ impl UserService {
         tx: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
     ) -> Result<i64> {
+        bilibi_person::hold_account_standing(tx, scope).await?;
+        let person = scope.actor().person().map(|person| person.get());
         let row = tx
             .query_opt(
                 "SELECT i.id FROM tenants t JOIN users u ON u.tenant_id=t.id
              JOIN user_identities i ON i.id=u.identity_id
              WHERE t.id=$1 AND u.id=$2 AND t.status='active' AND t.deleted_at IS NULL
                AND u.kind='staff' AND u.status='active' AND u.deleted_at IS NULL
+               AND u.person_id IS NOT DISTINCT FROM $3
                AND i.kind='staff' AND i.status='active' AND i.deleted_at IS NULL
              FOR SHARE OF t,u,i",
-                &[&scope.tenant(), &scope.user()],
+                &[&scope.tenant(), &scope.user(), &person],
             )
             .await?
             .ok_or(Error::Unauthorized)?;

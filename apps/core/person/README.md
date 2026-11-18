@@ -125,6 +125,8 @@ to manufacture a replacement in that tenant.
 
 User owns optional staff account links (K9); Person does not add competing account storage or depend on User. `bilibi_person::lock_for_account_binding` supplies the small integration seam: a scoped, live, non-system Person locked on the caller's mutation transaction. It returns a non-deserializable `BindingIdentity` borrowed from that transaction with tenant, Person ID and kind, containing no contacts. The caller authorizes its account operation, then stores the tenant-scoped optional Person FK. Hold the Person lock through the later User write. A first desk is a separate Company → Person → User write owned by Core User. The seam never creates or implies an account link or desk, and retired/system identities refuse. Person creation never writes users, sessions, credentials or grants.
 
+`hold_account_standing` holds a signed-in account's linked Person live until the caller's transaction ends. It takes a shared Person lock before the caller locks and rechecks the account link.
+
 Tenancy's `PartyProofs::person` uses this owner to prove live scoped Person IDs;
 that proof conveys existence, not a capability or account binding. `files`
 (K15) is the private-file owner: the Media attachment subject `core.person`

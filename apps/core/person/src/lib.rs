@@ -23,9 +23,9 @@ pub use files::{PersonFiles, ARTIFACT_OWNER, ATTACHMENT_SUBJECT, FILES};
 // updated on the caller's connection, and the account binder's locks and standing.
 pub use identity::{
     account_standing, create as create_person, create_with_code as create_person_with_code,
-    lock_for_account_binding, preview as preview_person, preview_update as preview_update_person,
-    preview_with_code as preview_person_with_code, read as read_person, search as search_persons,
-    update as update_person, BindingIdentity,
+    hold_account_standing, lock_for_account_binding, preview as preview_person,
+    preview_update as preview_update_person, preview_with_code as preview_person_with_code,
+    read as read_person, search as search_persons, update as update_person, BindingIdentity,
 };
 pub use model::{
     validate as validate_person, CreatePreview, Custom, CustomFieldError, CustomFilter,

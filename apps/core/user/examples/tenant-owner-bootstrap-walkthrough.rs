@@ -2,10 +2,12 @@
 //! Exercises the operator command and ordinary invitation acceptance against a fresh database.
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
+use bilibi_tenancy::Scope;
 use bilibi_user::{AccountInput, InvitationError};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::Duration,
 };
 
 const OWNER: &str = "owner@customer.example.test";
@@ -220,12 +222,87 @@ async fn verify_owner(
     Ok((row.get(0), row.get(1)))
 }
 
+async fn verify_retirement_refusal(
+    app: &bilibi_web::App,
+    retirement_db: &bilibi_database::Db,
+    source: &Scope,
+    token: &str,
+) -> Result<()> {
+    let client = app.db.get().await?;
+    let mut expected: serde_json::Value =
+        serde_json::from_str(&snapshot(&client).await?).map_err(|_| Error::Internal)?;
+    let actions = expected["actions"].as_i64().ok_or(Error::Internal)?;
+    expected["actions"] = serde_json::json!(actions + 1);
+    let accepting_pid: i32 = client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0);
+    drop(client);
+
+    let mut retirement = retirement_db.get().await?;
+    let tx = retirement.transaction().await?;
+    let person = source.actor().person().ok_or(Error::Internal)?;
+    let updated = tx
+        .execute(
+            "UPDATE persons SET retired_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND retired_at IS NULL",
+            &[&source.tenant(), &person.get()],
+        )
+        .await?;
+    assert_eq!(updated, 1);
+    let acceptance = app.user.accept_member_invitation(source, token);
+    tokio::pin!(acceptance);
+    let waits_for_retirement = async {
+        loop {
+            let blocked: bool = tx
+                .query_one(
+                    "SELECT pg_backend_pid()=ANY(pg_blocking_pids($1))",
+                    &[&accepting_pid],
+                )
+                .await?
+                .get(0);
+            if blocked {
+                return Ok::<(), Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        _ = &mut acceptance => return Err(Error::Refused("Acceptance finished before the Person retirement committed".into())),
+        blocked = tokio::time::timeout(Duration::from_secs(5), waits_for_retirement) => {
+            blocked.map_err(|_| Error::Refused("Acceptance did not wait for the Person retirement".into()))??;
+        }
+    }
+    tx.commit().await?;
+    assert!(matches!(
+        acceptance.await,
+        Err(InvitationError::Access(Error::Unauthorized))
+    ));
+
+    let client = app.db.get().await?;
+    let after: serde_json::Value =
+        serde_json::from_str(&snapshot(&client).await?).map_err(|_| Error::Internal)?;
+    let audited: bool = client
+        .query_one(
+            "SELECT tenant_id=$1 AND actor_id=$2 AND event='user.invitation.accept.refused'
+                AND payload->>'reason'='source_session_unavailable'
+             FROM base_audit_actions ORDER BY id DESC LIMIT 1",
+            &[&source.tenant(), &source.user()],
+        )
+        .await?
+        .get(0);
+    if !audited || after != expected {
+        return Err(Error::Internal);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::var("BILIBI_TENANT_OWNER_DEMO").as_deref() != Ok("disposable") {
         return Err(Error::Invalid);
     }
-    let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
+    let database_url = std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?;
+    let db = pool(&database_url)?;
     assert_eq!(db.status().max_size, 1, "run with DATABASE_POOL_SIZE=1");
     bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let directory = mailbox_dir();
@@ -515,6 +592,13 @@ async fn main() -> Result<()> {
     if retry_tenant != original.tenant {
         return Err(Error::Internal);
     }
+    drop(client);
+    let before = count(&mailbox)?;
+    let workspace = "Retired source workspace";
+    expect_output(provision(workspace, Some(retry_email), None)?, None)?;
+    let token = invitation_token(&mailbox, before, &origin, retry_email, workspace)?;
+    verify_retirement_refusal(&app, &pool(&database_url)?, &signed_in, &token).await?;
+    println!("Verified acceptance refused and audited after concurrent source Person retirement.");
     println!("Verified owner setup with an existing sign-in, delivery recovery, expired link replacement and refusal to change or adopt an existing owner.");
     Ok(())
 }
