@@ -56,6 +56,8 @@ pub const SERVICE: &str = "core/document.documents";
 pub const RECORD: &str = "core.document.document";
 /// The audit kind of a revision.
 pub const REVISION_RECORD: &str = "core.document.revision";
+/// The audit kind of a durable reference protecting a document revision.
+pub const PROTECTION_RECORD: &str = "core.document.revision.protection";
 /// The audit kind of a link to a related record.
 pub const LINK_RECORD: &str = "core.document.link";
 /// The audit kind of an explicit document access grant.
@@ -434,6 +436,8 @@ pub enum WriteError {
     Retained,
     #[error("This file is under legal hold and cannot be deleted.")]
     LegalHold,
+    #[error("This document has a revision protected by a related record.")]
+    Protected,
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -542,6 +546,24 @@ impl Documents {
     ) -> WriteResult<Document> {
         let scope = self.fresh(tx.sql(), scope).await?;
         self.store().create(tx, &scope, draft).await
+    }
+
+    /// Protects one exact revision for a related record. A protected revision
+    /// cannot be deleted or merged out from under that record. Needs `core.document.manage`
+    /// and the document's explicit manage grant.
+    pub async fn protect_revision(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        id: i64,
+        revision: i32,
+        owner: &Reference,
+        reason: &str,
+    ) -> WriteResult<()> {
+        let scope = self.fresh(tx.sql(), scope).await?;
+        self.store()
+            .protect_revision(tx, &scope, id, revision, owner, reason)
+            .await
     }
 
     /// Changes the fields `patch` names, fenced on `version`. Needs
@@ -1322,6 +1344,7 @@ inventory::submit! { Module {
         ("core-document-012-erasure", include_str!("../migrations/012-erasure.sql")),
         ("core-document-013-search", include_str!("../migrations/013-search.sql")),
         ("core-document-014-custom-search", include_str!("../migrations/014-custom-search.sql")),
+        ("core-document-015-revision-protections", include_str!("../migrations/015-revision-protections.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;

@@ -21,7 +21,7 @@
 use bilibi_database::{pool, Db};
 use bilibi_document::{
     CustomerShareInput, Documents, Draft, MarkPatch, MergeSource, Patch, Recipient, Reference,
-    RevisionInput, ShareInput, Source, Upload, SERVICE,
+    RevisionInput, ShareInput, Source, Upload, WriteError, SERVICE,
 };
 use bilibi_media::{Media, ScanFacts, ScanFuture, Scanner, Verdict};
 use bilibi_queue::{Config, Executor};
@@ -284,6 +284,121 @@ async fn main() -> Result<()> {
         .unlink(&mut tx, &scope, a.id, &other)
         .await?);
     trail.finish("unlink", &[a.id]).await?;
+
+    // A record's signed evidence pins the exact linked revision. Delete and
+    // source merge refuse; a survivor merge leaves the pin at its same number.
+    let owner = documents
+        .links(&scope, a.id)
+        .await?
+        .into_iter()
+        .find(|link| link.record.id == "1")
+        .map(|link| link.record)
+        .ok_or("the document lost its company link")?;
+    trail.start().await?;
+    write!(app, scope, "core.document.protect_revision", |tx| documents
+        .protect_revision(
+            &mut tx,
+            &scope,
+            a.id,
+            1,
+            &owner,
+            "Audit coverage protected revision",
+        )
+        .await?);
+    trail.finish("protect revision", &[a.id]).await?;
+    let pinned = MergeSource {
+        id: a.id,
+        version: a.version,
+    };
+    let read = db.get().await?;
+    let delete_preview = documents
+        .preview_delete(&**read, &scope, a.id, a.version)
+        .await;
+    drop(read);
+    if !matches!(delete_preview, Err(WriteError::Protected)) {
+        return Err("delete preview did not refuse the protected document".into());
+    }
+    let unlink_attempt = write!(app, scope, "core.document.unlink", |tx| documents
+        .unlink(&mut tx, &scope, a.id, &owner)
+        .await);
+    if !matches!(unlink_attempt, Err(WriteError::Protected)) {
+        return Err("unlink removed the protected evidence reference".into());
+    }
+    let delete_attempt = write!(app, scope, "core.document.delete", |tx| documents
+        .delete(&mut tx, &scope, a.id, a.version)
+        .await);
+    if !matches!(delete_attempt, Err(WriteError::Protected))
+        || documents.get(&scope, a.id).await.is_err()
+    {
+        return Err("delete removed a protected revision".into());
+    }
+    let merge_target = write!(app, scope, "core.document.create", |tx| documents
+        .create(
+            &mut tx,
+            &scope,
+            &link(
+                "Audit merge receiver",
+                "https://example.test/merge-receiver"
+            )
+        )
+        .await?);
+    let merge_target = MergeSource {
+        id: merge_target.id,
+        version: merge_target.version,
+    };
+    let read = db.get().await?;
+    let merge_preview = documents
+        .preview_merge(&**read, &scope, merge_target, &[pinned])
+        .await;
+    drop(read);
+    if !matches!(merge_preview, Err(WriteError::MergeRefused(_))) {
+        return Err("source merge preview did not refuse the protected document".into());
+    }
+    let merge_attempt = write!(app, scope, "core.document.merge", |tx| documents
+        .merge(&mut tx, &scope, merge_target, &[pinned])
+        .await);
+    if !matches!(merge_attempt, Err(WriteError::MergeRefused(_))) {
+        return Err("source merge committed a protected document".into());
+    }
+    let survivor_source = write!(app, scope, "core.document.create", |tx| documents
+        .create(
+            &mut tx,
+            &scope,
+            &link(
+                "Audit survivor merge source",
+                "https://example.test/survivor-source"
+            )
+        )
+        .await?);
+    let survivor_source = MergeSource {
+        id: survivor_source.id,
+        version: survivor_source.version,
+    };
+    let current = documents.get(&scope, a.id).await?;
+    trail.start().await?;
+    write!(app, scope, "core.document.merge", |tx| documents
+        .merge(
+            &mut tx,
+            &scope,
+            MergeSource {
+                id: a.id,
+                version: current.version
+            },
+            &[survivor_source],
+        )
+        .await?);
+    trail
+        .finish("merge into protected survivor", &[a.id, survivor_source.id])
+        .await?;
+    let retained_revision = documents
+        .revisions(&scope, a.id)
+        .await?
+        .into_iter()
+        .find(|revision| revision.revision == 1)
+        .ok_or("the protected revision became unreachable")?;
+    if retained_revision.external_url.as_deref() != Some("https://example.test/a") {
+        return Err("the survivor merge changed the protected revision URL".into());
+    }
 
     trail.start().await?;
     write!(app, scope, "core.document.share", |tx| documents
