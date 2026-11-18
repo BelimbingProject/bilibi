@@ -1,65 +1,42 @@
-//! The first owner of a customer tenant, prepared by a deployment operator.
-//!
-//! The server command carries authority only into this narrow bootstrap: a
-//! system-attributed transaction proves a live customer tenant and its primary
-//! company, proves that it has no account or earlier owner receipt, creates an
-//! ordinary membership invitation, and grants the contributed `core_admin`
-//! role. The emailed link remains the normal credential setup path.
-//!
-//! Acceptance settles the receipt in the invitation transaction by creating
-//! the owner's Person, business affiliation and first desk through their
-//! owners. A regular invitation has no receipt and keeps its ordinary path.
+//! Deployment bootstrap and invitation settlement for a customer tenant.
 use crate::{
-    accounts::{validate_email, validate_name, FieldError},
+    accounts::{field_error, validate_email, FieldError},
     memberships::{digest, token},
     Invitation, UserService,
 };
 use bilibi_affiliation::{AffiliationInput, EffectiveDates, OrganisationId};
 use bilibi_audit::{record_action, Attribution};
 use bilibi_authz::grants::Grants;
+use bilibi_company::{NewCompany, ProvisionOutcome};
 use bilibi_database::{Change, Context, Error, MutationTransaction, Result};
 use bilibi_mail::{Address, Message};
-use bilibi_person::{PersonInput, PersonKind};
+use bilibi_person::{validate_person, PersonInput, PersonKind};
 use bilibi_settings::Setting;
 use serde_json::json;
-use tokio_postgres::GenericClient;
 
 pub const TENANT_OWNER_PRINCIPAL: &str = "tenant-provision";
 const TENANT_OWNER_ACTION: &str = "user.tenant_owner.bootstrap";
 const TENANT_OWNER_INVITED: &str = "user.tenant_owner.invited";
-
-/// The customer tenant and primary company reported by Company provisioning.
-#[derive(Clone, Copy, Debug)]
-pub struct TenantCompany {
-    pub tenant: i64,
-    pub company: i64,
-}
-
-/// The runtime details of a customer tenant's first owner. Credentials are
-/// deliberately absent: the owner chooses them through the emailed invitation.
-#[derive(Clone, Debug, Default)]
-pub struct FirstTenantOwner {
-    pub name: String,
-    pub email: String,
-}
-
-/// What the deployment bootstrap prepared.
-#[derive(Clone, Debug)]
-pub struct FirstTenantOwnerCreated {
-    pub invitation: i64,
-    pub user: i64,
-    pub email: String,
-    pub role: i64,
-}
+const TENANT_OWNER_REISSUED: &str = "user.tenant_owner.reissued";
 
 #[derive(Debug, thiserror::Error)]
 pub enum FirstTenantOwnerError {
-    #[error("the tenant already has {count} account(s), the first being {first}")]
-    AccountsExist { count: i64, first: String },
+    #[error("a matching tenant already exists without a matching owner bootstrap receipt")]
+    TenantExists,
+    #[error("the bootstrap owner has no pending invitation for this address")]
+    OwnerNotPending,
     #[error("Invalid owner fields")]
     Validation(Vec<FieldError>),
-    #[error("not a live customer tenant and its primary company")]
-    NotCustomer,
+    #[error("Invalid company fields")]
+    CompanyValidation(Vec<bilibi_company::FieldError>),
+    #[error("APP_ORIGIN must be the installation's HTTP or HTTPS origin")]
+    Origin,
+    #[error("Cannot prepare the owner invitation: {0}")]
+    Mail(#[from] bilibi_mail::Error),
+    #[error(
+        "Owner invitation delivery failed after commit. Rerun the same command to reissue it."
+    )]
+    Delivery,
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -70,48 +47,43 @@ impl From<tokio_postgres::Error> for FirstTenantOwnerError {
     }
 }
 
-pub fn validate_first_tenant_owner(input: &FirstTenantOwner) -> Vec<FieldError> {
-    let mut errors = Vec::new();
-    errors.extend(validate_name(&input.name));
-    errors.extend(validate_email(&input.email).err());
-    errors
-}
-
-async fn accounts(
-    client: &(impl GenericClient + Sync),
-    tenant: i64,
-) -> Result<Option<(i64, String)>> {
-    let row = client
-        .query_one(
-            "SELECT count(*), (SELECT COALESCE(i.email,v.email,'') FROM users a LEFT JOIN user_identities i ON i.id=a.identity_id LEFT JOIN user_invitations v ON v.tenant_id=a.tenant_id AND v.user_id=a.id WHERE a.tenant_id=$1 AND a.deleted_at IS NULL ORDER BY a.id LIMIT 1) FROM users WHERE tenant_id=$1 AND deleted_at IS NULL",
-            &[&tenant],
-        )
-        .await?;
-    let count: i64 = row.get(0);
-    Ok((count > 0).then(|| (count, row.get::<_, Option<String>>(1).unwrap_or_default())))
-}
-
 impl UserService {
-    /// Prepares the first owner of a customer tenant. The caller is a trusted
-    /// server command, not a request handler. It refuses any existing account
-    /// or earlier receipt and never promotes or replaces one.
-    pub async fn create_first_tenant_owner(
+    pub async fn provision_tenant_owner(
         &self,
         grants: &Grants,
-        target: TenantCompany,
-        input: &FirstTenantOwner,
-    ) -> std::result::Result<FirstTenantOwnerCreated, FirstTenantOwnerError> {
-        let errors = validate_first_tenant_owner(input);
-        if !errors.is_empty() {
-            return Err(FirstTenantOwnerError::Validation(errors));
-        }
-        let email = validate_email(&input.email)
+        tenant_name: &str,
+        company: &NewCompany,
+        owner_email: &str,
+        origin: &str,
+    ) -> std::result::Result<Invitation, FirstTenantOwnerError> {
+        let tenant_name = tenant_name.trim();
+        let email = validate_email(owner_email)
             .map_err(|error| FirstTenantOwnerError::Validation(vec![error]))?;
-        let name = input.name.trim().to_owned();
-        // A fresh tenant has nobody who could have changed its tenant-scoped
-        // invitation setting yet. Read the contributed default so bootstrap
-        // follows the same contract without duplicating the value here.
-        let invitation_days = match self
+        let name = email
+            .split_once('@')
+            .map_or("", |(local, _)| local)
+            .to_owned();
+        let person = validate_person(&PersonInput {
+            name,
+            kind: PersonKind::Human,
+            email: Some(email.clone()),
+            phone: None,
+        })
+        .map_err(|errors| {
+            FirstTenantOwnerError::Validation(
+                errors
+                    .into_iter()
+                    .map(|error| field_error("owner_email", error.message))
+                    .collect(),
+            )
+        })?;
+        let name = person.name;
+        if !url::Url::parse(origin).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https") && url.origin().ascii_serialization() == origin
+        }) {
+            return Err(FirstTenantOwnerError::Origin);
+        }
+        let days = match self
             .settings
             .definitions()
             .lookup(crate::INVITATION_DAYS_KEY)?
@@ -126,64 +98,149 @@ impl UserService {
         };
         let raw_token = token()?;
         let token_hash = digest(&raw_token);
+        self.mailer.ready().await?;
+        let message = Message::text(
+            Address::new(Some(&name), &email)?,
+            format!("You're invited to {tenant_name}"),
+            format!(
+                "You are invited to become the owner of {tenant_name}.\n\nOpen this link to set up your sign-in:\n\n{origin}/accept/{raw_token}\n\nThe link works once and expires in {days} days. If you did not expect this, you can ignore this email.\n"
+            ),
+        );
+        let rendered = self.mailer.render(&message).await?;
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let mut tx = self
-            .mutations
-            .begin(
-                &mut client,
-                Context::system(target.tenant, TENANT_OWNER_PRINCIPAL, TENANT_OWNER_ACTION),
+        let sql = tokio_postgres::Client::transaction(&mut client).await?;
+        sql.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('tenant-owner:' || $1,0))",
+            &[&tenant_name],
+        )
+        .await?;
+        let candidates = sql
+            .query(
+                "SELECT id FROM tenants WHERE name=$1 AND deleted_at IS NULL ORDER BY id LIMIT 2 FOR SHARE",
+                &[&tenant_name],
             )
             .await?;
-        tx.sql()
-            .batch_execute("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
-            .await?;
-        let Some(tenant_name) = tx
-            .sql()
-            .query_opt(
-                "SELECT t.name FROM tenants t JOIN tenant_primary_companies p ON p.tenant_id=t.id JOIN companies c ON c.tenant_id=t.id AND c.id=p.company_id AND c.deleted_at IS NULL LEFT JOIN platform_operator o ON o.tenant_id=t.id WHERE t.id=$1 AND t.status='active' AND t.deleted_at IS NULL AND p.company_id=$2 AND o.tenant_id IS NULL",
-                &[&target.tenant, &target.company],
-            )
-            .await?
-            .map(|row| row.get::<_, String>(0))
-        else {
-            return Err(FirstTenantOwnerError::NotCustomer);
+        let (tenant, company, retry_invitation) = match candidates.as_slice() {
+            [] => match bilibi_company::provision_tenant_in(&sql, tenant_name, company).await? {
+                ProvisionOutcome::Provisioned(ready) => (ready.tenant.id, ready.company.id, None),
+                ProvisionOutcome::Refused(errors) => {
+                    return Err(FirstTenantOwnerError::CompanyValidation(errors));
+                }
+            },
+            [row] => {
+                let tenant: i64 = row.get(0);
+                let receipt = sql
+                    .query_opt(
+                        "SELECT b.company_id,b.invitation_id FROM user_tenant_owner_bootstraps b
+                         JOIN tenants t ON t.id=b.tenant_id
+                         JOIN tenant_primary_companies p ON p.tenant_id=b.tenant_id AND p.company_id=b.company_id
+                         JOIN companies c ON c.tenant_id=b.tenant_id AND c.id=b.company_id
+                         LEFT JOIN platform_operator o ON o.tenant_id=b.tenant_id
+                         WHERE b.tenant_id=$1 AND t.status='active' AND o.tenant_id IS NULL
+                           AND c.deleted_at IS NULL AND c.name=$2 AND c.code=$3
+                         FOR SHARE OF p,c",
+                        &[&tenant, &company.name.trim(), &company.code.as_deref().map(str::trim)],
+                    )
+                    .await?
+                    .ok_or(FirstTenantOwnerError::TenantExists)?;
+                (tenant, receipt.get(0), Some(receipt.get::<_, i64>(1)))
+            }
+            _ => return Err(FirstTenantOwnerError::TenantExists),
         };
-        if tx
-            .sql()
-            .query_opt(
-                "SELECT 1 FROM user_tenant_owner_bootstraps WHERE tenant_id=$1",
-                &[&target.tenant],
-            )
-            .await?
-            .is_some()
-        {
-            let (count, first) = accounts(tx.sql(), target.tenant)
+        let mut tx = self.mutations.adopt_deployment(
+            sql,
+            Context::system(tenant, TENANT_OWNER_PRINCIPAL, TENANT_OWNER_ACTION),
+        )?;
+        let (invitation, event) = if let Some(id) = retry_invitation {
+            let user = tx
+                .sql()
+                .query_opt(
+                    "SELECT i.user_id FROM user_tenant_owner_bootstraps b
+                     JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.user_id=b.user_id AND i.id=b.invitation_id
+                     JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
+                     WHERE b.tenant_id=$1 AND b.affiliation_settled_at IS NULL AND i.id=$2
+                       AND i.email=$3 AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+                       AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL
+                     FOR UPDATE OF i",
+                    &[&tenant, &id, &email],
+                )
                 .await?
-                .unwrap_or((1, String::new()));
-            return Err(FirstTenantOwnerError::AccountsExist { count, first });
-        }
-        if let Some((count, first)) = accounts(tx.sql(), target.tenant).await? {
-            return Err(FirstTenantOwnerError::AccountsExist { count, first });
-        }
+                .ok_or(FirstTenantOwnerError::OwnerNotPending)?
+                .get(0);
+            tx.mutate(move |sql| {
+                Box::pin(async move {
+                    sql.execute(
+                        "UPDATE user_invitations SET token_hash=$3,expires_at=clock_timestamp()+make_interval(days=>$4::int) WHERE tenant_id=$1 AND id=$2",
+                        &[&tenant, &id, &token_hash, &days],
+                    )
+                    .await?;
+                    Ok(((), vec![Change {
+                        kind: "user.invitation".into(),
+                        id,
+                        old: json!({"user_id": user, "status": "pending"}),
+                        new: json!({"user_id": user, "status": "pending", "reissued": true}),
+                    }]))
+                })
+            })
+            .await?;
+            (Invitation { id, user, email }, TENANT_OWNER_REISSUED)
+        } else {
+            (
+                Self::invite_tenant_owner_in(
+                    &mut tx, grants, company, name, email, token_hash, days,
+                )
+                .await?,
+                TENANT_OWNER_INVITED,
+            )
+        };
+        let mut who = Attribution::system(Some(TENANT_OWNER_PRINCIPAL))?;
+        who.tenant = Some(tenant);
+        record_action(
+            tx.sql(),
+            &who,
+            None,
+            event,
+            if event == TENANT_OWNER_INVITED {
+                json!({"user_id": invitation.user, "invitation_id": invitation.id, "role": "tenant_owner"})
+            } else {
+                json!({"user_id": invitation.user, "invitation_id": invitation.id})
+            },
+            true,
+        )
+        .await?;
+        tx.commit().await?;
+        drop(client);
+        self.mailer
+            .deliver_rendered(rendered)
+            .await
+            .map_err(|_| FirstTenantOwnerError::Delivery)?;
+        Ok(invitation)
+    }
 
-        let tenant = target.tenant;
-        let company = target.company;
-        let days = invitation_days;
-        let (insert_name, insert_email) = (name.clone(), email.clone());
+    async fn invite_tenant_owner_in(
+        tx: &mut MutationTransaction<'_>,
+        grants: &Grants,
+        company: i64,
+        name: String,
+        email: String,
+        token_hash: Vec<u8>,
+        days: i32,
+    ) -> Result<Invitation> {
+        let tenant = tx.context().tenant;
         let invitation: Invitation = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let user: i64 = sql
                         .query_one(
                             "INSERT INTO users(tenant_id,name,status) VALUES($1,$2,'invited') RETURNING id",
-                            &[&tenant, &insert_name],
+                            &[&tenant, &name],
                         )
                         .await?
                         .get(0);
                     let id: i64 = sql
                         .query_one(
-                            "INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at) VALUES($1,$2,$3,$4,NULL,now()+make_interval(days=>$5::int)) RETURNING id",
-                            &[&tenant, &user, &insert_email, &token_hash, &days],
+                            "INSERT INTO user_invitations(tenant_id,user_id,email,token_hash,invited_by,expires_at) VALUES($1,$2,$3,$4,NULL,clock_timestamp()+make_interval(days=>$5::int)) RETURNING id",
+                            &[&tenant, &user, &email, &token_hash, &days],
                         )
                         .await?
                         .get(0);
@@ -191,20 +248,20 @@ impl UserService {
                         Invitation {
                             id,
                             user,
-                            email: insert_email.clone(),
+                            email: email.clone(),
                         },
                         vec![
                             Change {
                                 kind: "user".into(),
                                 id: user,
                                 old: json!(null),
-                                new: json!({"name": insert_name, "status": "invited"}),
+                                new: json!({"name": name, "status": "invited"}),
                             },
                             Change {
                                 kind: "user.invitation".into(),
                                 id,
                                 old: json!(null),
-                                new: json!({"user_id": user, "email": insert_email, "status": "pending", "source": "tenant_owner_bootstrap"}),
+                                new: json!({"user_id": user, "email": email, "status": "pending", "source": "tenant_owner_bootstrap"}),
                             },
                         ],
                     ))
@@ -212,14 +269,15 @@ impl UserService {
             })
             .await?;
         let role = grants
-            .grant_first_administrator_in(&mut tx, tenant, invitation.user)
+            .grant_first_tenant_owner_in(tx, tenant, invitation.user)
             .await?;
         let user = invitation.user;
+        let invitation_id = invitation.id;
         tx.mutate(move |sql| {
             Box::pin(async move {
                 sql.execute(
-                    "INSERT INTO user_tenant_owner_bootstraps(tenant_id,user_id,company_id) VALUES($1,$2,$3)",
-                    &[&tenant, &user, &company],
+                    "INSERT INTO user_tenant_owner_bootstraps(tenant_id,user_id,company_id,invitation_id) VALUES($1,$2,$3,$4)",
+                    &[&tenant, &user, &company, &invitation_id],
                 )
                 .await?;
                 Ok((
@@ -234,42 +292,7 @@ impl UserService {
             })
         })
         .await?;
-        let mut who = Attribution::system(Some(TENANT_OWNER_PRINCIPAL))?;
-        who.tenant = Some(tenant);
-        record_action(
-            tx.sql(),
-            &who,
-            None,
-            TENANT_OWNER_INVITED,
-            json!({"user_id": invitation.user, "role": "core_admin", "invitation_id": invitation.id}),
-            true,
-        )
-        .await?;
-        let message = Message::text(
-            Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?,
-            format!("You're invited to {tenant_name}"),
-            format!(
-                "You are invited to become the owner of {tenant_name}.\n\nOpen this link to set up your sign-in:\n\n{}/accept/{raw_token}\n\nThe link works once and expires in {invitation_days} days. If you did not expect this, you can ignore this email.\n",
-                self.origin
-            ),
-        );
-        tx.commit().await?;
-        drop(client);
-        // This facade is called by a short-lived server command, so wait for
-        // its ordinary invitation delivery after commit. A background task
-        // could be cancelled when the command's runtime exits.
-        if let Err(error) = self.mailer.deliver(&message).await {
-            eprintln!(
-                "mail: tenant owner invitation {} was not delivered: {error}",
-                invitation.id
-            );
-        }
-        Ok(FirstTenantOwnerCreated {
-            invitation: invitation.id,
-            user: invitation.user,
-            email,
-            role,
-        })
+        Ok(invitation)
     }
 
     /// Completes a customer-owner receipt while accepting its ordinary

@@ -7,6 +7,7 @@ CREATE TABLE user_tenant_owner_bootstraps (
  tenant_id bigint PRIMARY KEY REFERENCES tenants(id),
  user_id bigint NOT NULL,
  company_id bigint NOT NULL,
+ invitation_id bigint NOT NULL REFERENCES user_invitations(id),
  affiliation_settled_at timestamptz,
  created_at timestamptz NOT NULL DEFAULT now(),
  FOREIGN KEY(tenant_id,user_id) REFERENCES users(tenant_id,id),

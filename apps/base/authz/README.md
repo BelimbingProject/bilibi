@@ -37,13 +37,7 @@ assignments, custom roles, direct grants/denies and field restrictions. It remov
 obsolete grants from contributed roles, and clears redundant grants on grant-all
 roles. Run it again after installing contributions or provisioning new tenants.
 `seed-production` also supplies the initial versioned reconciliation through the
-Database seed ledger. `Grants::grant_first_administrator_in` is the one
-bootstrap seam: on a system-attributed `MutationTransaction` of a tenant it
-reconciles that tenant's system roles and assigns the grant-all `core_admin`
-role as an audited change, for `bilibi-web create-owner` (Core User's
-`create_first_administrator`, which proves the operator tenant holds no account) and `bilibi-web tenant-provision --owner-email` (Core User's `create_first_tenant_owner`, which proves a customer tenant holds no account). It
-refuses a user- or agent-attributed transaction; every other assignment goes
-through `assign_role`, which proves the actor and asks for step-up. Neither path runs at app boot. The schema keeps one role
+Database seed ledger. For first-owner bootstrap, Authz reconciles the tenant's system roles and audits the assignment on the caller's system-attributed transaction. `Grants::grant_first_administrator_in` assigns Core Administrator for the platform operator's `create-owner` command. `Grants::grant_first_tenant_owner_in` assigns Tenant Owner for a customer tenant created by `tenant-provision --owner-email`. Both refuse user- or agent-attributed transactions. Ordinary assignments use `assign_role`, which checks the actor and requires step-up. The schema keeps one role
 instance per tenant; a custom role is owned by a company of that tenant
 (`roles.company_id`, migration `011-role-company`, K15). Base holds the bare
 column and Core Company contributes the scoped foreign key; `create_role`

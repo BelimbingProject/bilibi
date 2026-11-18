@@ -321,18 +321,11 @@ API upgrade: `list` takes `&mut tokio_postgres::Client` to own its read-only tra
 
 ```sh
 cargo run -p bilibi-web -- tenant-provision --tenant-name "Acme tenant" --company-name "Acme Sdn. Bhd." --company-code acme
-cargo run -p bilibi-web -- tenant-provision --tenant-name "Acme tenant" --company-name "Acme Sdn. Bhd." --company-code acme --owner-email owner@acme.example
+APP_ORIGIN=https://bilibi.example cargo run -p bilibi-web -- tenant-provision --tenant-name "Acme tenant" --company-name "Acme Sdn. Bhd." --company-code acme --owner-email owner@acme.example
 cargo run -p bilibi-web -- platform-provision --company-name "Example Operations" --company-code example_operations
 ```
 
-`primary::provision_tenant` atomically creates a tenant and its primary
-company. `provision_tenant_once` is the retry seam for the first-owner command: it resolves only one live customer tenant whose exact tenant name, primary-company name and code match, and otherwise refuses rather than creating a look-alike. `provision_platform_operator` resolves the explicit operator tenant
-or creates and marks it, and re-running creates neither a second operator
-nor a second company (`bilibi-web create-owner` calls it first when no
-operator company exists, then creates the first account). Both are deployment writes recorded as one retained
-`company.*.provisioned` audit action by the `provision` system principal,
-through Tenancy's `provision_tenant` / `provision_platform_operator`
-seams. Ids come from PostgreSQL.
+`provision_tenant` atomically creates a tenant and its primary company. The first-owner command uses `provision_tenant_in` to create them in the same transaction as the owner invitation and bootstrap receipt. See [Server installation](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant) for mail setup and retry behavior. `provision_platform_operator` resolves or creates the explicitly marked operator tenant and its primary company. A fresh provision records one retained `company.*.provisioned` audit action by the `provision` system principal. PostgreSQL assigns the IDs.
 
 ## Platform-operator setup and dashboard panels (K17)
 

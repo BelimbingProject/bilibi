@@ -910,6 +910,28 @@ impl Grants {
         tenant: i64,
         user: i64,
     ) -> Result<i64> {
+        self.grant_bootstrap_role_in(tx, tenant, user, "core_admin", true)
+            .await
+    }
+
+    pub async fn grant_first_tenant_owner_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        tenant: i64,
+        user: i64,
+    ) -> Result<i64> {
+        self.grant_bootstrap_role_in(tx, tenant, user, "tenant_owner", false)
+            .await
+    }
+
+    async fn grant_bootstrap_role_in(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        tenant: i64,
+        user: i64,
+        code: &str,
+        grant_all: bool,
+    ) -> Result<i64> {
         if tx.context().actor.kind != "system" || tx.context().tenant != tenant {
             return Err(Error::Forbidden);
         }
@@ -917,8 +939,8 @@ impl Grants {
         let role: i64 = tx
             .sql()
             .query_opt(
-                "SELECT id FROM roles WHERE tenant_id=$1 AND code='core_admin' AND is_system AND grant_all",
-                &[&tenant],
+                "SELECT id FROM roles WHERE tenant_id=$1 AND code=$2 AND is_system AND grant_all=$3",
+                &[&tenant, &code, &grant_all],
             )
             .await?
             .map(|row| row.get(0))

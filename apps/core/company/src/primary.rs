@@ -233,24 +233,33 @@ pub async fn provision_tenant(
     tenant_name: &str,
     company: &NewCompany,
 ) -> Result<ProvisionOutcome> {
+    let mut client = db.get().await?;
+    let tx = client.transaction().await?;
+    let outcome = provision_tenant_in(&tx, tenant_name, company).await?;
+    match outcome {
+        ProvisionOutcome::Provisioned(_) => tx.commit().await?,
+        ProvisionOutcome::Refused(_) => tx.rollback().await?,
+    }
+    Ok(outcome)
+}
+
+pub async fn provision_tenant_in(
+    sql: &Transaction<'_>,
+    tenant_name: &str,
+    company: &NewCompany,
+) -> Result<ProvisionOutcome> {
     if tenant_name.trim().is_empty() {
         return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
             "tenant_name",
             "can't be blank",
         )]));
     }
-    let mut client = db.get().await?;
-    let tx = client.transaction().await?;
-    let sql: &Transaction<'_> = &tx;
     let tenant = bilibi_tenancy::provision_tenant(sql, tenant_name).await?;
     crate::relationship_roles::ensure_defaults(sql, tenant.id).await?;
     bilibi_picklists::provision_deployment(sql, tenant.id).await?;
     let created = match provisioned_company(sql, tenant.id, company).await? {
         Ok(created) => created,
-        Err(errors) => {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(errors));
-        }
+        Err(errors) => return Ok(ProvisionOutcome::Refused(errors)),
     };
     insert_assignment(sql, tenant.id, created.id, None).await?;
     record(
@@ -260,131 +269,6 @@ pub async fn provision_tenant(
         json!({"summary":format!("Provisioned tenant “{}” on company “{}”",tenant.name,created.name),"subject":{"kind":"company","id":created.id,"name":created.name},"context":{"tenant_id":tenant.id,"tenant_name":tenant.name,"code":created.code}}),
     )
     .await?;
-    tx.commit().await?;
-    Ok(ProvisionOutcome::Provisioned(Box::new(Provisioned {
-        tenant,
-        tenant_created: true,
-        company: created,
-        company_created: true,
-    })))
-}
-
-/// Provisions a customer tenant for the server-side first-owner path, or
-/// resolves the one live customer tenant whose exact name and primary-company
-/// name/code already match. The transaction lock makes concurrent retries
-/// serialize on the tenant name. A matching tenant with different company
-/// facts, a suspended tenant or an ambiguous name is refused rather than
-/// creating a look-alike tenant.
-pub async fn provision_tenant_once(
-    db: &Db,
-    tenant_name: &str,
-    company: &NewCompany,
-) -> Result<ProvisionOutcome> {
-    let tenant_name = tenant_name.trim();
-    if tenant_name.is_empty() {
-        return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
-            "tenant_name",
-            "can't be blank",
-        )]));
-    }
-    let mut client = db.get().await?;
-    let tx = client.transaction().await?;
-    tx.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended('tenant-owner:' || lower($1),0))",
-        &[&tenant_name],
-    )
-    .await?;
-    let rows = tx
-        .query(
-            "SELECT t.id,t.parent_id,t.name,t.status,o.tenant_id IS NOT NULL FROM tenants t LEFT JOIN platform_operator o ON o.tenant_id=t.id WHERE t.name=$1 AND t.deleted_at IS NULL ORDER BY t.id LIMIT 2",
-            &[&tenant_name],
-        )
-        .await?;
-    if rows.len() > 1 {
-        tx.rollback().await?;
-        return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
-            "tenant_name",
-            "matches more than one existing tenant",
-        )]));
-    }
-    if let Some(row) = rows.first() {
-        let tenant_id: i64 = row.get(0);
-        if row.get::<_, bool>(4) {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
-                "tenant_name",
-                "belongs to the platform operator",
-            )]));
-        }
-        if row.get::<_, String>(3) != "active" {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
-                "tenant_name",
-                "is suspended",
-            )]));
-        }
-        let Some(company_row) = tx
-            .query_opt(
-                &format!(
-                    "SELECT {} FROM companies WHERE tenant_id=$1 AND id=(SELECT company_id FROM tenant_primary_companies WHERE tenant_id=$1) AND deleted_at IS NULL",
-                    crate::organisation::COLUMNS
-                ),
-                &[&tenant_id],
-            )
-            .await?
-        else {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
-                "tenant_name",
-                "has no live primary company",
-            )]));
-        };
-        let existing = Company::from_row(&company_row, &HashSet::new());
-        if existing.name != company.name.trim()
-            || company.code.as_deref().map(str::trim) != Some(existing.code.as_str())
-        {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
-                "company_name",
-                "does not match this tenant's primary company and code",
-            )]));
-        }
-        let tenant = TenantIdentity {
-            id: tenant_id,
-            parent_id: row.get(1),
-            name: row.get(2),
-            status: bilibi_tenancy::TenantStatus::Active,
-            is_platform_operator: false,
-            suspension: None,
-        };
-        tx.commit().await?;
-        return Ok(ProvisionOutcome::Provisioned(Box::new(Provisioned {
-            tenant,
-            tenant_created: false,
-            company: existing,
-            company_created: false,
-        })));
-    }
-    let sql: &Transaction<'_> = &tx;
-    let tenant = bilibi_tenancy::provision_tenant(sql, tenant_name).await?;
-    crate::relationship_roles::ensure_defaults(sql, tenant.id).await?;
-    bilibi_picklists::provision_deployment(sql, tenant.id).await?;
-    let created = match provisioned_company(sql, tenant.id, company).await? {
-        Ok(created) => created,
-        Err(errors) => {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(errors));
-        }
-    };
-    insert_assignment(sql, tenant.id, created.id, None).await?;
-    record(
-        sql,
-        tenant.id,
-        "company.tenant.provisioned",
-        json!({"summary":format!("Provisioned tenant “{}” on company “{}”",tenant.name,created.name),"subject":{"kind":"company","id":created.id,"name":created.name},"context":{"tenant_id":tenant.id,"tenant_name":tenant.name,"code":created.code}}),
-    )
-    .await?;
-    tx.commit().await?;
     Ok(ProvisionOutcome::Provisioned(Box::new(Provisioned {
         tenant,
         tenant_created: true,

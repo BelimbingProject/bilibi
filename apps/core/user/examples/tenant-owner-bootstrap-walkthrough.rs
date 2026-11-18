@@ -1,10 +1,12 @@
 //! Disposable proof of the server-side customer-tenant first-owner path.
-//! It runs the one operator command, follows the dev-mailbox invitation,
-//! proves the role and workplace setup, then reruns the command and proves the
-//! existing owner was refused without another write or message.
+//! Exercises the operator command and ordinary invitation acceptance against a fresh database.
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
-use std::{path::PathBuf, process::ExitStatus, time::Duration};
+use bilibi_user::InvitationError;
+use std::{
+    path::{Path, PathBuf},
+    process::Output,
+};
 
 const OWNER: &str = "owner@customer.example.test";
 
@@ -14,31 +16,31 @@ fn mailbox_dir() -> PathBuf {
         .into()
 }
 
-fn count(mailbox: &Mailbox) -> usize {
-    mailbox.entries().map(|entries| entries.len()).unwrap_or(0)
+fn count(mailbox: &Mailbox) -> Result<usize> {
+    mailbox
+        .entries()
+        .map(|entries| entries.len())
+        .map_err(|_| Error::Internal)
 }
 
-async fn invitation_token(mailbox: &Mailbox, before: usize) -> Result<String> {
-    for _ in 0..50 {
-        if count(mailbox) > before {
-            let newest = mailbox
-                .entries()
-                .map_err(|_| Error::Internal)?
-                .into_iter()
-                .next()
-                .ok_or(Error::Internal)?;
-            let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
-            return message
-                .lines()
-                .find_map(|line| line.split("/accept/").nth(1))
-                .and_then(|rest| rest.split_whitespace().next())
-                .filter(|token| token.len() == 64)
-                .map(str::to_owned)
-                .ok_or(Error::Internal);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+fn invitation_token(mailbox: &Mailbox, before: usize, origin: &str) -> Result<String> {
+    if count(mailbox)? != before + 1 {
+        return Err(Error::Internal);
     }
-    Err(Error::Internal)
+    let newest = mailbox
+        .entries()
+        .map_err(|_| Error::Internal)?
+        .into_iter()
+        .next()
+        .ok_or(Error::Internal)?;
+    let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
+    let prefix = format!("{origin}/accept/");
+    message
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .filter(|token| token.len() == 64)
+        .map(str::to_owned)
+        .ok_or(Error::Internal)
 }
 
 async fn snapshot(client: &tokio_postgres::Client) -> Result<String> {
@@ -51,6 +53,14 @@ async fn snapshot(client: &tokio_postgres::Client) -> Result<String> {
                 'invitations',(SELECT count(*) FROM user_invitations),
                 'owner_receipts',(SELECT count(*) FROM user_tenant_owner_bootstraps),
                 'roles',(SELECT count(*) FROM principal_roles),
+                'bootstrap_state',(SELECT jsonb_agg(jsonb_build_array(to_jsonb(b),to_jsonb(u),to_jsonb(i),identity.email,grants.roles) ORDER BY b.tenant_id)
+                    FROM user_tenant_owner_bootstraps b
+                    JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
+                    JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.id=b.invitation_id
+                    LEFT JOIN user_identities identity ON identity.id=u.identity_id
+                    CROSS JOIN LATERAL (SELECT jsonb_agg(jsonb_build_array(r.id,r.code,r.grant_all) ORDER BY r.id) AS roles
+                        FROM principal_roles pr JOIN roles r ON r.tenant_id=pr.tenant_id AND r.id=pr.role_id
+                        WHERE pr.tenant_id=u.tenant_id AND pr.user_id=u.id) grants),
                 'people',(SELECT count(*) FROM persons),
                 'affiliations',(SELECT count(*) FROM person_affiliations),
                 'desks',(SELECT count(*) FROM user_desks),
@@ -63,39 +73,87 @@ async fn snapshot(client: &tokio_postgres::Client) -> Result<String> {
         .get(0))
 }
 
-fn command() -> Vec<String> {
-    [
-        "--tenant-name",
-        "Customer workspace",
-        "--company-name",
-        "Customer Company Sdn. Bhd.",
-        "--company-code",
-        "customer",
-        "--owner-email",
-        OWNER,
-        "--owner-name",
-        "Customer Owner",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-/// Run the actual server command in its own process, as an installation
-/// operator does. A process owns one module-service binding; the walkthrough
-/// then opens a separate app process to follow the invitation.
-fn provision() -> Result<ExitStatus> {
+fn provision(tenant: &str, email: Option<&str>, mailbox: Option<&Path>) -> Result<Output> {
     let executable = std::env::current_exe().map_err(|_| Error::Internal)?;
     let web = executable
         .parent()
         .and_then(|examples| examples.parent())
         .map(|debug| debug.join("bilibi-web"))
         .ok_or(Error::Internal)?;
-    std::process::Command::new(web)
-        .arg("tenant-provision")
-        .args(command())
-        .status()
-        .map_err(|_| Error::Internal)
+    let mut command = std::process::Command::new(web);
+    command.args([
+        "tenant-provision",
+        "--tenant-name",
+        tenant,
+        "--company-name",
+        "Customer Company Sdn. Bhd.",
+        "--company-code",
+        "customer",
+    ]);
+    if let Some(email) = email {
+        command.args(["--owner-email", email]);
+    }
+    if let Some(mailbox) = mailbox {
+        command.env("BILIBI_MAIL_DIR", mailbox);
+    }
+    command.output().map_err(|_| Error::Internal)
+}
+
+fn expect_output(output: Output, refusal: Option<&str>) -> Result<()> {
+    let matches = match refusal {
+        None => output.status.success(),
+        Some(message) => {
+            output.status.code() == Some(1)
+                && String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .any(|line| line == message)
+        }
+    };
+    if !matches {
+        return Err(Error::Refused(format!(
+            "Unexpected result from tenant-provision: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
+struct RetryState {
+    tenant: i64,
+    user: i64,
+    invitation: i64,
+    digest: Vec<u8>,
+    unexpired: bool,
+    reissues: i64,
+}
+
+impl RetryState {
+    fn same_invitation(&self, other: &Self) -> bool {
+        (self.tenant, self.user, self.invitation) == (other.tenant, other.user, other.invitation)
+    }
+}
+
+async fn retry_state(client: &tokio_postgres::Client) -> Result<RetryState> {
+    let row = client
+        .query_one(
+            "SELECT b.tenant_id,b.user_id,i.id,i.token_hash,i.expires_at>clock_timestamp(),
+             (SELECT count(*) FROM base_audit_actions a WHERE a.tenant_id=b.tenant_id
+                AND a.system_principal='tenant-provision' AND a.event='user.tenant_owner.reissued')
+         FROM tenants t
+         JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id
+         JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.id=b.invitation_id
+         WHERE t.name='Delivery retry workspace'",
+            &[],
+        )
+        .await?;
+    Ok(RetryState {
+        tenant: row.get(0),
+        user: row.get(1),
+        invitation: row.get(2),
+        digest: row.get(3),
+        unexpired: row.get(4),
+        reissues: row.get(5),
+    })
 }
 
 #[tokio::main]
@@ -105,16 +163,23 @@ async fn main() -> Result<()> {
     }
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
     bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
-    let mailbox = Mailbox::new(mailbox_dir(), 100);
-    let before_mail = count(&mailbox);
-    if !provision()?.success() {
+    let directory = mailbox_dir();
+    let mailbox = Mailbox::new(directory.clone(), 100);
+    let origin = std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?;
+    let before_mail = count(&mailbox)?;
+    let client = db.get().await?;
+    let before_preflight = snapshot(&client).await?;
+    expect_output(
+        provision("Invalid\nworkspace", Some(OWNER), None)?,
+        Some("Cannot prepare the owner invitation: Invalid email message"),
+    )?;
+    if snapshot(&client).await? != before_preflight || count(&mailbox)? != before_mail {
         return Err(Error::Internal);
     }
-    let token = invitation_token(&mailbox, before_mail).await?;
-    let app = bilibi_web::App::new(
-        db.clone(),
-        &std::env::var("APP_ORIGIN").map_err(|_| Error::Invalid)?,
-    )?;
+    drop(client);
+    expect_output(provision("Customer workspace", Some(OWNER), None)?, None)?;
+    let token = invitation_token(&mailbox, before_mail, &origin)?;
+    let app = bilibi_web::App::new(db.clone(), &origin)?;
     let invitation = app
         .user
         .member_invitation(&token)
@@ -129,7 +194,8 @@ async fn main() -> Result<()> {
     let row = client
         .query_one(
             "SELECT t.id,c.id,u.status,i.email,p.kind,
-                EXISTS(SELECT 1 FROM principal_roles x JOIN roles r ON r.tenant_id=x.tenant_id AND r.id=x.role_id WHERE x.tenant_id=t.id AND x.user_id=u.id AND r.code='core_admin' AND r.is_system AND r.grant_all),
+                EXISTS(SELECT 1 FROM principal_roles x JOIN roles r ON r.tenant_id=x.tenant_id AND r.id=x.role_id WHERE x.tenant_id=t.id AND x.user_id=u.id AND r.code='tenant_owner' AND r.is_system AND NOT r.grant_all)
+                AND (SELECT count(*) FROM principal_roles x WHERE x.tenant_id=t.id AND x.user_id=u.id)=1,
                 EXISTS(SELECT 1 FROM person_affiliations a WHERE a.tenant_id=t.id AND a.person_id=u.person_id AND a.organisation_id=c.id AND a.unlinked_at IS NULL),
                 EXISTS(SELECT 1 FROM user_desks d WHERE d.tenant_id=t.id AND d.person_id=u.person_id AND d.company_id=c.id),
                 b.affiliation_settled_at IS NOT NULL
@@ -189,13 +255,82 @@ async fn main() -> Result<()> {
     }
 
     let before_retry = snapshot(&client).await?;
-    let mail_before_retry = count(&mailbox);
-    let refused = !provision()?.success();
-    let after_retry = snapshot(&client).await?;
-    let unchanged = before_retry == after_retry && mail_before_retry == count(&mailbox);
-    println!("Existing owner refused: {refused}; no retry writes or mail: {unchanged}");
-    if !refused || !unchanged {
+    let mail_before_retry = count(&mailbox)?;
+    expect_output(
+        provision("Customer workspace", Some(OWNER), None)?,
+        Some("the bootstrap owner has no pending invitation for this address"),
+    )?;
+    if snapshot(&client).await? != before_retry || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
     }
+
+    expect_output(provision("Independent workspace", None, None)?, None)?;
+    let independent = snapshot(&client).await?;
+    expect_output(
+        provision("Independent workspace", Some(OWNER), None)?,
+        Some("a matching tenant already exists without a matching owner bootstrap receipt"),
+    )?;
+    if snapshot(&client).await? != independent || count(&mailbox)? != mail_before_retry {
+        return Err(Error::Internal);
+    }
+
+    let blocked = directory.join("blocked-delivery");
+    std::fs::write(&blocked, b"file in place of mailbox").map_err(|_| Error::Internal)?;
+    let retry_workspace = "Delivery retry workspace";
+    let retry_email = "retry@customer.example.test";
+    expect_output(
+        provision(retry_workspace, Some(retry_email), Some(&blocked))?,
+        Some(
+            "Owner invitation delivery failed after commit. Rerun the same command to reissue it.",
+        ),
+    )?;
+    let original = retry_state(&client).await?;
+    if !original.unexpired || original.reissues != 0 || count(&mailbox)? != mail_before_retry {
+        return Err(Error::Internal);
+    }
+    let before_wrong_address = snapshot(&client).await?;
+    expect_output(
+        provision(retry_workspace, Some(OWNER), None)?,
+        Some("the bootstrap owner has no pending invitation for this address"),
+    )?;
+    if snapshot(&client).await? != before_wrong_address || count(&mailbox)? != mail_before_retry {
+        return Err(Error::Internal);
+    }
+    expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
+    let first_token = invitation_token(&mailbox, mail_before_retry, &origin)?;
+    let delivered = retry_state(&client).await?;
+    if !delivered.same_invitation(&original)
+        || delivered.digest == original.digest
+        || !delivered.unexpired
+        || delivered.reissues != 1
+    {
+        return Err(Error::Internal);
+    }
+    client.execute(
+        "UPDATE user_invitations SET expires_at=clock_timestamp()-interval '1 minute' WHERE tenant_id=$1 AND id=$2",
+        &[&original.tenant, &original.invitation],
+    ).await?;
+    expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
+    let new_token = invitation_token(&mailbox, mail_before_retry + 1, &origin)?;
+    let reissued = retry_state(&client).await?;
+    drop(client);
+    if !reissued.same_invitation(&original)
+        || reissued.digest == delivered.digest
+        || !reissued.unexpired
+        || reissued.reissues != 2
+        || !matches!(
+            app.user.member_invitation(&first_token).await,
+            Err(InvitationError::Link)
+        )
+        || app
+            .user
+            .accept_new_member_invitation(&new_token, "owner-proof-password")
+            .await
+            .map_err(|_| Error::Internal)?
+            != original.user
+    {
+        return Err(Error::Internal);
+    }
+    println!("Verified delivery recovery, expired link replacement and refusal to change or adopt an existing owner.");
     Ok(())
 }

@@ -77,10 +77,7 @@ pub use preferences::{
     list_pins, normalize_label, normalize_url, presentation, Pin, PreferenceError, Presentation,
     MAX_PINS, THEMES, THEME_KEY,
 };
-pub use tenant_owner::{
-    validate_first_tenant_owner, FirstTenantOwner, FirstTenantOwnerCreated, FirstTenantOwnerError,
-    TenantCompany,
-};
+pub use tenant_owner::FirstTenantOwnerError;
 pub use two_factor::{
     safe_return, Enrollment, TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError,
     TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
