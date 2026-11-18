@@ -6,7 +6,10 @@ use bilibi_perf::{
     Config, Filter, Finish, Kind, Outcome, Recorder, Sample, Store, Submit, Windows,
 };
 use bilibi_settings::Settings;
+use bilibi_tenancy::{Authentication, Scope};
+use bilibi_ui::page::{LiveInput, LiveRequest, PageRequest, PageService};
 use std::{
+    collections::HashMap,
     future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
@@ -102,6 +105,87 @@ async fn show(recorder: &Recorder, label: &str) -> Result<()> {
 async fn work(millis: u64) -> u32 {
     sleep(Duration::from_millis(millis)).await;
     42
+}
+
+async fn partial_page_outcomes(db: &Db, services: &Services) -> Result<()> {
+    db.resize(1);
+    let authentication = services.get::<Authentication>("base/tenancy.authentication")?;
+    let pages = services.get::<PageService<Scope, Error>>("base/perf.pages")?;
+    let client = db.get().await?;
+    let scope = authentication
+        .authenticate(&**client, 1, 6, String::new())
+        .await?;
+    client
+        .batch_execute(
+            "INSERT INTO base_perf_samples(kind,identity,outcome,duration_ms,observed_at)
+             VALUES ('request','/perf-sample','ok',731,now()),
+                    ('request','/perf-history-fault','ok',10,now()-interval '3 hours');
+             INSERT INTO base_perf_samples(kind,identity,outcome,duration_ms,observed_at)
+             SELECT 'request','/perf-regression','ok',duration,now()-age
+             FROM (VALUES (50,interval '90 minutes'),(2300,interval '30 minutes')) AS windows(duration,age),
+                  generate_series(1,6);
+             CREATE TEMP VIEW base_perf_samples AS
+             SELECT id, kind, identity, outcome, duration_ms, db_duration_ms, db_count, response_size_class,
+                    memory_bytes, run_queue, alive_tasks, threads, open_fds, cpu_ms, pool_in_use, pool_waiting,
+                    observed_at + interval '0 seconds' / (identity <> '/perf-history-fault')::int AS observed_at
+             FROM public.base_perf_samples;",
+        )
+        .await?;
+    drop(client);
+
+    let refresh = async |query| {
+        let mut live = pages
+            .0
+            .mount(PageRequest {
+                operation: "index",
+                scope: Some(&scope),
+                path: &HashMap::new(),
+                query: &query,
+                body: &[],
+                framed: false,
+            })
+            .await?
+            .ok_or(Error::Internal)?;
+        live.update(LiveRequest {
+            scope: &scope,
+            credential: "",
+            input: LiveInput::Refresh,
+        })
+        .await
+    };
+    let samples = refresh(HashMap::from([
+        ("tab".into(), "samples".into()),
+        ("identity".into(), "/perf-sample".into()),
+    ]))
+    .await?;
+    assert!(samples.html.contains("history cannot be read"));
+    assert!(
+        samples.html.contains("731 ms"),
+        "All Samples lost the matching row when diagnostics failed"
+    );
+
+    let client = db.get().await?;
+    client
+        .batch_execute(
+            "DROP VIEW pg_temp.base_perf_samples;
+             CREATE TEMP VIEW base_perf_samples AS
+             SELECT kind, identity, observed_at,
+                    duration_ms / (identity <> '/perf-history-fault')::int AS duration_ms
+             FROM public.base_perf_samples;",
+        )
+        .await?;
+    drop(client);
+    let slowdowns = refresh(HashMap::new()).await?;
+    assert!(slowdowns.html.contains("The slowest list is unavailable."));
+    assert!(
+        slowdowns.html.contains("/perf-regression") && slowdowns.html.contains("2300.0 ms"),
+        "Slowdowns lost the known regression when the 24-hour ranking failed"
+    );
+    db.get()
+        .await?
+        .batch_execute("DROP VIEW pg_temp.base_perf_samples")
+        .await?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -428,6 +512,11 @@ async fn main() -> Result<()> {
     lock.rollback().await?;
     assert_eq!(recorder.list_samples(&filter).await?.total, expected_total);
     println!("PASS Performance reads stopped and reused the recovered PostgreSQL connection");
+    drop(client);
+
+    println!("\n== 9. Page refresh keeps successful history beside unavailable sections");
+    partial_page_outcomes(&db, &services).await?;
+    println!("PASS both Performance tabs rendered partial results");
 
     println!("\nRun again with `-- inspect` in another process to read the persisted rows.");
     Ok(())

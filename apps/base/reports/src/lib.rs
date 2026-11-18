@@ -510,12 +510,13 @@ impl Reports {
     /// filter, grouping and measure suits its column. A dry run refused only
     /// by size or cost still saves: the bound applies to each run.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
+        Self::check_draft_shape(draft)?;
         if draft.definition.oversight {
-            return self.check_draft(None, scope, draft).await;
+            return self.check_draft_catalog(None, scope, draft).await;
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
         let tx = client.transaction().await.map_err(Error::from)?;
-        self.check_draft(Some(&tx), scope, draft).await?;
+        self.check_draft_catalog(Some(&tx), scope, draft).await?;
         tx.commit().await.map_err(Error::from)?;
         Ok(())
     }
@@ -525,6 +526,11 @@ impl Reports {
         scope: &Scope,
         draft: &Draft,
     ) -> Outcome<()> {
+        Self::check_draft_shape(draft)?;
+        self.check_draft_catalog(tx, scope, draft).await
+    }
+
+    fn check_draft_shape(draft: &Draft) -> Outcome<()> {
         let mut errors = FieldErrors::new();
         let name = draft.name.trim();
         if name.is_empty() || name.chars().count() > 120 {
@@ -542,6 +548,15 @@ impl Reports {
         if !errors.is_empty() {
             return Err(ReportError::Invalid(errors));
         }
+        Ok(())
+    }
+
+    async fn check_draft_catalog(
+        &self,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
         let catalog = if draft.definition.oversight {
             self.catalog(scope, true, draft.kind == Kind::Rows).await?
         } else {
@@ -556,6 +571,7 @@ impl Reports {
                 "is not a record type you can read",
             ))
         })?;
+        let mut errors = FieldErrors::new();
         for spec in draft.definition.specs() {
             if let Err(error) = catalog.resolve(root, spec) {
                 errors
