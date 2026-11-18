@@ -828,8 +828,7 @@ impl RequestPage {
             "locate_again" => self.located = None,
             "open_verify" => {
                 if self.located.is_none() {
-                    let client = self.pages.db.get().await?;
-                    self.located = Some(self.pages.privacy.locate(&client, scope, id).await?);
+                    self.located = Some(self.pages.privacy.locate(scope, id).await?);
                 }
                 let mut candidates = Vec::new();
                 for (store, label, found) in self.located.iter().flatten() {
@@ -1063,6 +1062,7 @@ impl RequestPage {
         // all when withheld), never in full past a mask.
         let contact_masks = bilibi_authz::fields::masks_for(&**client, scope, "persons").await?;
         let contact_restricted = restrictions.get("persons").cloned().unwrap_or_default();
+        drop(client);
         let shown = |field: &str, value: &str| match contact_masks.get(field) {
             Some(kind) => bilibi_authz::fields::partial(kind, value),
             None if contact_restricted.contains(field) => "restricted".to_owned(),
@@ -1086,7 +1086,7 @@ impl RequestPage {
             && !request.approval_awaiting;
         let erasure = request.kind == RequestKind::Erasure;
         if open && self.located.is_none() {
-            self.located = Some(match pages.privacy.locate(&client, scope, self.id).await {
+            self.located = Some(match pages.privacy.locate(scope, self.id).await {
                 Ok(found) => found,
                 Err(_) => {
                     self.flash = Some((

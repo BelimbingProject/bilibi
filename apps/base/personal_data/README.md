@@ -30,14 +30,15 @@ inventory::submit! { Contribution::new(PERSONAL_DATA, "core/person.people", prov
 
 | Call | Gets | Answers |
 | --- | --- | --- |
-| `locate` | plain connection | Counts per kind (by person, by identifier only) and identifier-only `Candidate`s |
+| `locate` | caller transaction | Counts per kind (by person, by identifier only) and identifier-only `Candidate`s |
 | `export` | plain connection, `Disclosure` | Every record (never a first page) and `FileRef`s |
 | `file` | plain connection, `Disclosure` | One listed file's bytes, read through its owner (`File::Read`), or `File::Withheld` with a reason (`not_cleared`: not past its malware check; `missing`: bytes no longer stored), which the bundle lists without bytes instead of failing |
 | `erase` | the erasure `MutationTransaction`, `Erasure`, `Holds` | Actions, erased records, kept records with reason and hold |
-| `after_erase` | plain connection, `Erasure`, `Holds`, `Progress` | Work after commit (files, documents), each step recorded through `Progress` |
+| `after_erase` | mutable connection, `Erasure`, `Holds`, `Progress` | Work after commit (files, documents), each step recorded through `Progress` |
 
 - Act on records linked to the person and on `Subject.confirmed`; never on another identifier match.
 - Changes record `[erased]` (`ERASED`) where a value was, so erasure reads apart from absence.
+- `Progress::record(client, step)` borrows the mutable connection given to `after_erase`; recording commits each completed step before the handler continues, without a second pool checkout.
 - Every call is idempotent, and decides by current values (not an earlier erasure's marker): a record changed after an erasure is erased again.
 - `ErasedRecord.person` names the record's person when the grant names none (a sweep), so kept evidence still honours a hold on that person.
 

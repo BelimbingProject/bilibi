@@ -127,19 +127,19 @@ async fn main() -> Result<(), Error> {
         .await?;
     let manager = app.security.guard(&login.token).await?;
     let tenant = manager.tenant();
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
-    let client: &tokio_postgres::Client = &client;
+    let client: &mut tokio_postgres::Client = &mut client;
     client.batch_execute("DELETE FROM company_relationships WHERE source_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'scale\\_%') OR target_organisation_id IN (SELECT id FROM companies WHERE code LIKE 'scale\\_%'); DELETE FROM companies WHERE code LIKE 'scale\\_%'; DELETE FROM persons WHERE code LIKE 'scale-person-%'").await?;
+    let sql = &*client;
     let role = |code: &'static str| async move {
-        client
-            .query_one(
-                "SELECT id FROM company_relationship_roles WHERE tenant_id=$1 AND code=$2",
-                &[&tenant, &code],
-            )
-            .await
-            .map(|row| row.get::<_, i64>(0))
+        sql.query_one(
+            "SELECT id FROM company_relationship_roles WHERE tenant_id=$1 AND code=$2",
+            &[&tenant, &code],
+        )
+        .await
+        .map(|row| row.get::<_, i64>(0))
     };
     let (vendor, customer) = (role("vendor").await?, role("customer").await?);
 
@@ -149,7 +149,7 @@ async fn main() -> Result<(), Error> {
     let alpha = company(&companies, &manager, "Alpha Supplier", "scale_alpha").await?;
     let beta = company(&companies, &manager, "Beta Buyer", "scale_beta").await?;
     let link = |from: OrganisationId, to: OrganisationId, role: i64| async move {
-        client
+        sql
             .query_one(
                 "INSERT INTO company_relationships(tenant_id,source_organisation_id,target_organisation_id,role_id,effective_from) VALUES($1,$2,$3,$4,'2026-01-01') RETURNING id",
                 &[&tenant, &from.get(), &to.get(), &role],

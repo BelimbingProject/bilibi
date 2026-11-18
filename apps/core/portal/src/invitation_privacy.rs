@@ -21,11 +21,12 @@ static INVITATIONS: Invitations = Invitations;
 impl Handler for Invitations {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let emails = crate::privacy::emails(subject);
             let counts = client
                 .query_one(

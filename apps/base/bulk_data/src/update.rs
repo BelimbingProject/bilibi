@@ -800,7 +800,7 @@ impl BulkData {
     async fn resolve(
         &self,
         execution: &Execution,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
         registered: &Registered,
         bulk: &crate::BulkUpdate,
@@ -901,7 +901,7 @@ impl BulkData {
                 input.insert(bulk.get_id.into(), crate::typed(record));
                 match self
                     .jobs
-                    .read(&*client, execution, bulk.get, &Value::Object(input))
+                    .read(client, execution, bulk.get, &Value::Object(input))
                     .await
                 {
                     Ok(answer) => {

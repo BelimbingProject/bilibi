@@ -282,6 +282,7 @@ async fn answer(
     let Some((key, data)) = privacy.stores.get(store) else {
         // The store's module is no longer mounted (#561): it cannot answer,
         // and waiting for it would strand the request.
+        drop(client);
         return unmounted(privacy, execution, scope, id, store).await;
     };
     let subject = requests::subject_for(&request, key);
@@ -295,7 +296,7 @@ async fn answer(
     let (state, finished): (String, bool) = (state.get(0), state.get(1));
     // Counted before the store acts, while every match is still there.
     let left = if state == "pending" {
-        unconfirmed(&client, scope, data.handler, &subject).await?
+        unconfirmed(&mut client, scope, data.handler, &subject).await?
     } else {
         0
     };
@@ -414,7 +415,6 @@ async fn answer(
             }
             let holds = Holds::acquire(scope, &grant).await?;
             let progress = Steps {
-                db: privacy.db.clone(),
                 execution,
                 scope,
                 id,
@@ -440,7 +440,7 @@ async fn answer(
 /// How many of the store's records matched only an email or phone given and
 /// were not confirmed as the person's when the request was verified.
 async fn unconfirmed(
-    client: &tokio_postgres::Client,
+    client: &mut tokio_postgres::Client,
     scope: &Scope,
     handler: &dyn bilibi_personal_data::Handler,
     subject: &bilibi_personal_data::Subject,
@@ -448,7 +448,9 @@ async fn unconfirmed(
     if subject.identifiers.is_empty() {
         return Ok(0);
     }
-    let located = handler.locate(client, scope, subject).await?;
+    let tx = client.transaction().await?;
+    let located = handler.locate(&tx, scope, subject).await?;
+    tx.commit().await?;
     let matched: i64 = located.kinds.iter().map(|k| k.by_identifier).sum();
     Ok((matched - subject.confirmed.len() as i64).max(0))
 }
@@ -525,7 +527,6 @@ async fn stored_answer(
 /// `after_erase` steps, each saved in its own transaction as soon as the
 /// handler reports it, so a retry still counts what earlier attempts did.
 struct Steps<'a> {
-    db: Db,
     execution: &'a Execution,
     scope: &'a Scope,
     id: i64,
@@ -534,12 +535,15 @@ struct Steps<'a> {
     minimum: &'a Minimum,
 }
 impl Progress for Steps<'_> {
-    fn record<'a>(&'a self, mut step: Erased) -> HandlerFuture<'a, ()> {
+    fn record<'a>(
+        &'a self,
+        client: &'a mut tokio_postgres::Client,
+        mut step: Erased,
+    ) -> HandlerFuture<'a, ()> {
         Box::pin(async move {
-            let mut client = self.db.get().await?;
             let mut tx = self
                 .execution
-                .begin(&mut client, "privacy.request.erase_step")
+                .begin(client, "privacy.request.erase_step")
                 .await?;
             clear_evidence(&tx, self.grant, &mut step, self.minimum).await?;
             let mut answer = stored_answer(&tx, self.scope, self.id, self.key).await?;
@@ -816,6 +820,7 @@ async fn finish(
     let access = request.kind != RequestKind::Erasure;
     if access && !current_export(&**client, scope, &request).await? {
         // An erasure of the person was approved since the stores read: read again.
+        drop(client);
         restart_export(privacy, execution, scope, &request).await?;
         guard.release().await?;
         return Ok(Finish::Done);
@@ -881,6 +886,7 @@ async fn finish(
         if !current_export(tx.sql(), scope, &request).await? {
             tx.rollback().await?;
             documents::discard_export(privacy, &mut client, scope, &request, &artifact).await?;
+            drop(client);
             restart_export(privacy, execution, scope, &request).await?;
             guard.release().await?;
             return Ok(Finish::Done);
@@ -1320,14 +1326,17 @@ struct Resumed<'a> {
     answer: &'a std::sync::Mutex<Answer>,
 }
 impl Progress for Resumed<'_> {
-    fn record<'a>(&'a self, mut step: Erased) -> HandlerFuture<'a, ()> {
+    fn record<'a>(
+        &'a self,
+        client: &'a mut tokio_postgres::Client,
+        mut step: Erased,
+    ) -> HandlerFuture<'a, ()> {
         Box::pin(async move {
-            let mut client = self.privacy.db.get().await?;
             let tx = self
                 .privacy
                 .boundary
                 .begin(
-                    &mut client,
+                    client,
                     self.scope.mutation_context("privacy.request.resume"),
                 )
                 .await?;

@@ -805,33 +805,66 @@ impl Privacy {
     /// What every mounted store holds about the request's subject, with each
     /// store's records that match only an email or phone listed one by one,
     /// for the operator to confirm when verifying.
-    pub async fn locate(
+    pub async fn locate(&self, scope: &Scope, id: i64) -> Result<Vec<(String, String, Located)>> {
+        let mut client = self.db.get().await?;
+        let request = locate_request(&**client, scope, id).await?;
+        // Store reads may log authorization decisions; preserve those writes.
+        let tx = client.transaction().await?;
+        let found = self.locate_on(&tx, scope, &request).await?;
+        tx.commit().await?;
+        Ok(found)
+    }
+    pub(crate) async fn locate_request_on(
         &self,
-        client: &Client,
+        tx: &Transaction<'_>,
         scope: &Scope,
         id: i64,
     ) -> Result<Vec<(String, String, Located)>> {
-        bilibi_authz::authorize_key(client, scope, REQUEST_VIEW).await?;
-        let mut request = load(client, scope.tenant(), id, false).await?;
-        request.confirmed = confirmed(client, scope.tenant(), id).await?;
-        self.locate_all(scope, &request).await
+        let request = locate_request(tx, scope, id).await?;
+        self.locate_on(tx, scope, &request).await
     }
-    /// Every store's locate on one connection of its own, each statement cut
-    /// off after [`LOCATE_TIMEOUT`]: a store's identifier match may scan all
-    /// it keeps (#565). The handlers read committed data.
-    async fn locate_all(
+    /// Bound candidate matching on the caller's held transaction. The savepoint
+    /// restores local timeouts and recovers failed reads; cancellation rolls
+    /// back the caller's transaction, so session settings never leak to the pool.
+    async fn locate_on(
         &self,
+        tx: &Transaction<'_>,
         scope: &Scope,
         request: &RequestView,
     ) -> Result<Vec<(String, String, Located)>> {
-        let bounded = Bounded::open(&self.db).await?;
-        let found = self.locate_on(bounded.client()?, scope, request).await;
-        bounded.release().await;
-        found
+        let previous: String = tx
+            .query_one("SELECT current_setting('statement_timeout')", &[])
+            .await?
+            .get(0);
+        tx.batch_execute("SAVEPOINT privacy_locate").await?;
+        let found = async {
+            tx.batch_execute(LOCATE_TIMEOUT).await?;
+            self.locate_matches(tx, scope, request).await
+        }
+        .await;
+        match found {
+            Ok(found) => {
+                // Keep the owners' decision logs while restoring the caller's bound.
+                tx.query_one(
+                    "SELECT set_config('statement_timeout',$1,true)",
+                    &[&previous],
+                )
+                .await?;
+                tx.batch_execute("RELEASE SAVEPOINT privacy_locate").await?;
+                Ok(found)
+            }
+            Err(error) => {
+                tx.batch_execute(
+                    "ROLLBACK TO SAVEPOINT privacy_locate; RELEASE SAVEPOINT privacy_locate",
+                )
+                .await?;
+                Err(error)
+            }
+        }
     }
-    async fn locate_on(
+    async fn locate_matches(
         &self,
-        client: &Client,
+        tx: &Transaction<'_>,
         scope: &Scope,
         request: &RequestView,
     ) -> Result<Vec<(String, String, Located)>> {
@@ -839,7 +872,7 @@ impl Privacy {
         for (key, _, data) in self.stores.iter() {
             let mut located = data
                 .handler
-                .locate(client, scope, &subject_for(request, key))
+                .locate(tx, scope, &subject_for(request, key))
                 .await?;
             if located.candidates.len() > MAX_CANDIDATES {
                 located.candidates.truncate(MAX_CANDIDATES);
@@ -892,7 +925,7 @@ impl Privacy {
         confirm.sort();
         confirm.dedup();
         if !confirm.is_empty() {
-            let located = self.locate_all(scope, &request).await?;
+            let located = self.locate_on(tx.sql(), scope, &request).await?;
             let listed = |c: &ConfirmedRecord| {
                 located.iter().any(|(store, _, found)| {
                     *store == c.store
@@ -1425,41 +1458,17 @@ impl Privacy {
 }
 
 /// How long one statement of a store's locate may run.
-const LOCATE_TIMEOUT: &str = "SET statement_timeout = '20s'";
-/// A pooled connection with [`LOCATE_TIMEOUT`] set. `release` resets it and
-/// returns it to the pool; dropped otherwise (a cancelled read, a failed
-/// reset), the connection is closed, so the timeout never reaches another
-/// caller of the pool.
-struct Bounded(Option<bilibi_database::Connection>);
-impl Bounded {
-    async fn open(db: &bilibi_database::Db) -> Result<Self> {
-        let bounded = Self(Some(db.get().await?));
-        bounded.client()?.batch_execute(LOCATE_TIMEOUT).await?;
-        Ok(bounded)
-    }
-    fn client(&self) -> Result<&Client> {
-        let object = self.0.as_ref().ok_or(Error::Internal)?;
-        let client: &Client = object;
-        Ok(client)
-    }
-    async fn release(mut self) {
-        if let Some(client) = self.0.take() {
-            if client
-                .batch_execute("RESET statement_timeout")
-                .await
-                .is_err()
-            {
-                drop(bilibi_database::Connection::take(client));
-            }
-        }
-    }
-}
-impl Drop for Bounded {
-    fn drop(&mut self) {
-        if let Some(client) = self.0.take() {
-            drop(bilibi_database::Connection::take(client));
-        }
-    }
+const LOCATE_TIMEOUT: &str = "SET LOCAL statement_timeout = '20s'";
+
+async fn locate_request(
+    client: &impl GenericClient,
+    scope: &Scope,
+    id: i64,
+) -> Result<RequestView> {
+    bilibi_authz::authorize_key(client, scope, REQUEST_VIEW).await?;
+    let mut request = load(client, scope.tenant(), id, false).await?;
+    request.confirmed = confirmed(client, scope.tenant(), id).await?;
+    Ok(request)
 }
 
 /// The person's erasure guard: approving an erasure takes it exclusively;

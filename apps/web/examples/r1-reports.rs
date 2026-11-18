@@ -5,7 +5,7 @@
 //! plain SQL over the same rows, or proves a refusal; it prints PASS/FAIL and
 //! exits non-zero on any failure. No test runner or mocks.
 use bilibi_base::{
-    agent_api::Registry,
+    agent_api::{job::JobContracts, Registry},
     authz::grants::Grants,
     grid,
     reports::{
@@ -14,9 +14,13 @@ use bilibi_base::{
     },
     tenancy::{Authentication, Scope},
 };
-use bilibi_database::{pool, MutationBoundary};
+use bilibi_database::{pool, Db, MutationBoundary};
+use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Service};
+use bilibi_queue::{
+    Execution, Handler, HandlerBinding, HandlerFuture, HandlerService, Outcome, Queue, Worker,
+};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -30,6 +34,113 @@ bilibi_walkthrough_fixture::inventory::submit! { bilibi_walkthrough_fixture::reg
         bilibi_walkthrough_fixture::authz::RoleDefinition { code: "viewer", name: "viewer", description: "Walkthrough fixture role", grant_all: false, capabilities: &["reports.view"] },
     ],
     system_principals: &[],
+}) }
+
+const PREVIEW_MODULE: &str = "extensions/report_preview_walkthrough";
+const PREVIEW_WORKER: &str = "report-preview-walkthrough/check";
+const PREVIEW_SERVICE: &str = "extensions/report_preview_walkthrough.worker";
+const PREVIEW_SOURCE: Provenance = Provenance {
+    module: PREVIEW_MODULE,
+    source: file!(),
+    line: line!(),
+};
+const PREVIEW_NAME: &str = "Job preview without saving";
+
+struct PreviewWorker {
+    db: Arc<Db>,
+    contracts: Arc<JobContracts>,
+}
+impl Handler for PreviewWorker {
+    fn perform<'a>(&'a self, execution: &'a Execution, args: Value) -> HandlerFuture<'a> {
+        Box::pin(async move {
+            let Ok(mut connection) = self.db.get().await else {
+                return Outcome::Cancel("no_connection");
+            };
+            let client: &mut tokio_postgres::Client = &mut connection;
+            if args["refusal"] == true {
+                let Some(scope) = execution.scope() else {
+                    return Outcome::Cancel("missing_scope");
+                };
+                let count =
+                    async |client: &tokio_postgres::Client| -> bilibi_database::Result<i64> {
+                        Ok(client.query_one("SELECT count(*) FROM authz_decision_log WHERE tenant_id=$1 AND user_id=$2 AND capability='reports.view' AND NOT allowed", &[&scope.tenant(), &scope.user()]).await?.get(0))
+                    };
+                let Ok(before) = count(client).await else {
+                    return Outcome::Cancel("no_before_count");
+                };
+                let refusal = self
+                    .contracts
+                    .preview(
+                        client,
+                        execution,
+                        "base.reports.delete",
+                        &json!({"id": 1, "version": 1}),
+                    )
+                    .await;
+                let after = count(client).await;
+                return if matches!(refusal, Err(bilibi_agent_api::Error::Forbidden))
+                    && matches!(after, Ok(after) if after == before + 1)
+                {
+                    println!("PASS job owner refusal retains its reports.view denial log");
+                    Outcome::Completed
+                } else {
+                    eprintln!(
+                        "FAIL job refusal log: {refusal:?}, before={before}, after={after:?}"
+                    );
+                    Outcome::Cancel("missing_owner_refusal_log")
+                };
+            }
+            let pause = self
+                .contracts
+                .preview(
+                    client,
+                    execution,
+                    "base.reports.pause_subscription",
+                    &json!({"subscription": args["subscription"], "version": 1, "paused": true}),
+                )
+                .await;
+            let create = self.contracts.preview(client, execution, "base.reports.create",
+                &json!({"name": PREVIEW_NAME, "record_type": "reference_items", "kind": "rows", "definition": {"columns": ["name"]}})).await;
+            match (&pause, &create) {
+                (Ok(pause), Ok(create))
+                    if pause["result"]["summary"]
+                        == "Pause this scheduled report; deliveries not started are cancelled"
+                        && create["result"]["report"]["name"] == PREVIEW_NAME =>
+                {
+                    Outcome::Completed
+                }
+                _ => {
+                    eprintln!("Report job previews: {pause:?}, {create:?}");
+                    Outcome::Cancel("incorrect_preview")
+                }
+            }
+        })
+    }
+}
+inventory::submit! { Module {
+    id: PREVIEW_MODULE, layer: Layer::Extensions,
+    dependencies: &["base/agent_api", "base/database", "base/queue", "base/reports"],
+    migrations: &[], services: &[Service { id: PREVIEW_SERVICE, factory: |services| {
+        Ok(Arc::new(HandlerService(Arc::new(PreviewWorker {
+            db: services.get("base/database.pool")?,
+            contracts: services.get(bilibi_base::agent_api::job::SERVICE)?,
+        }))))
+    }}],
+} }
+inventory::submit! { Contribution::new(bilibi_queue::WORKERS, PREVIEW_WORKER, PREVIEW_SOURCE, &Worker {
+    max_attempts: 1,
+    validate: |args| {
+        if args == json!({"refusal": true})
+            || args["subscription"].as_i64().is_some_and(|id| id > 0 && args == json!({"subscription": id}))
+        {
+            Ok(args)
+        } else {
+            Err(bilibi_database::Error::Invalid)
+        }
+    },
+}) }
+inventory::submit! { Contribution::new(bilibi_queue::HANDLERS, PREVIEW_WORKER, PREVIEW_SOURCE, &HandlerBinding {
+    service: PREVIEW_SERVICE, capability: "reports.author",
 }) }
 
 // A source the planner thinks is heavy (20 million rows) that returns one
@@ -180,10 +291,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let boundary = app
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
-    let client: &tokio_postgres::Client = &client;
+    let client: &mut tokio_postgres::Client = &mut client;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;
     let viewer = auth.authenticate(client, 1, 2, String::new()).await?;
     let other = auth.authenticate(client, 2, 5, String::new()).await?;
@@ -250,8 +361,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("== Running as the author");
+    let sql = &*client;
     let expected = |active: bool| async move {
-        let rows = client.query("SELECT category, count(*)::float8, sum(quantity)::float8, max(unit_cost)::float8 FROM base_grid_ref_items WHERE tenant_id=1 AND active=$1 GROUP BY category", &[&active]).await?;
+        let rows = sql.query("SELECT category, count(*)::float8, sum(quantity)::float8, max(unit_cost)::float8 FROM base_grid_ref_items WHERE tenant_id=1 AND active=$1 GROUP BY category", &[&active]).await?;
         Ok::<_, tokio_postgres::Error>(
             rows.iter()
                 .map(|r| {
@@ -806,6 +918,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("== Phase 2: prepared exports and schedules");
+    let plan = Plan {
+        frequency: Frequency::Weekly,
+        at_minute: 8 * 60,
+        weekday: Some(1),
+        monthday: None,
+        format: Format::Csv,
+        include_owner: true,
+        skip_empty: true,
+        roles: Vec::new(),
+        people: Vec::new(),
+    };
+    let subscription = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
+        reports.subscribe(tx, &manager, rows_id, &plan).await
+    })
+    .await?;
     let prepared = write(
         &boundary,
         &db,
@@ -832,6 +959,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // as failed, not preparing. Nothing derives that from the job
             // row, so the walkthrough runs an executor until it is told.
             client.execute("UPDATE base_queue_jobs SET state='cancelled', cancelled_at=now(), failure_code='actor_refused' WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?;
+            let queue = app.services.get::<Queue>(bilibi_queue::SERVICE)?;
+            let preview_job = write(
+                &boundary,
+                &db,
+                &manager,
+                "reports.walkthrough.preview",
+                async |tx| {
+                    Ok(queue
+                        .enqueue_for(
+                            tx,
+                            &manager,
+                            PREVIEW_WORKER,
+                            json!({"subscription": subscription}),
+                        )
+                        .await?
+                        .id())
+                },
+            )
+            .await?;
+            client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES($1,$2,'reports.author',true,'all'),($1,$2,'reports.view',false,'all') ON CONFLICT(tenant_id,user_id,capability) DO UPDATE SET is_allowed=EXCLUDED.is_allowed", &[&viewer.tenant(), &viewer.user()]).await?;
+            let refusal_job = write(
+                &boundary,
+                &db,
+                &viewer,
+                "reports.walkthrough.refusal_preview",
+                async |tx| {
+                    Ok(queue
+                        .enqueue_for(tx, &viewer, PREVIEW_WORKER, json!({"refusal": true}))
+                        .await?
+                        .id())
+                },
+            )
+            .await?;
             let executor = bilibi_queue::Executor::from_services(
                 &app.services,
                 bilibi_queue::Config::default(),
@@ -839,16 +999,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (stop, stopped) = tokio::sync::watch::channel(false);
             let workers = tokio::spawn(executor.run(stopped));
             let mut shown = None;
+            let mut preview_state = String::new();
+            let mut refusal_state = String::new();
             for _ in 0..60 {
+                preview_state = client
+                    .query_one(
+                        "SELECT state FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+                        &[&manager.tenant(), &preview_job],
+                    )
+                    .await?
+                    .get(0);
+                refusal_state = client
+                    .query_one(
+                        "SELECT state FROM base_queue_jobs WHERE tenant_id=$1 AND id=$2",
+                        &[&viewer.tenant(), &refusal_job],
+                    )
+                    .await?
+                    .get(0);
                 let listed = reports.exports(&manager, Some(rows_id)).await?;
                 shown = listed.into_iter().find(|e| e.id == *export);
-                if shown.as_ref().is_some_and(|e| e.state != "queued") {
+                if shown.as_ref().is_some_and(|e| e.state != "queued")
+                    && matches!(
+                        refusal_state.as_str(),
+                        "completed" | "cancelled" | "discarded"
+                    )
+                    && matches!(
+                        preview_state.as_str(),
+                        "completed" | "cancelled" | "discarded"
+                    )
+                {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             stop.send(true)?;
             workers.await??;
+            client.execute("DELETE FROM principal_capabilities WHERE tenant_id=$1 AND user_id=$2 AND capability IN ('reports.author','reports.view')", &[&viewer.tenant(), &viewer.user()]).await?;
+            checks.check(
+                "job refusal preserves the owner's authorization decision",
+                refusal_state == "completed",
+                refusal_state,
+            );
+            let saved: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM base_reports WHERE tenant_id=$1 AND name=$2)",
+                    &[&manager.tenant(), &PREVIEW_NAME],
+                )
+                .await?
+                .get(0);
+            let pause_state: Option<(bool, i64)> = client
+                .query_opt(
+                    "SELECT paused,version FROM base_report_subscriptions WHERE tenant_id=$1 AND id=$2",
+                    &[&manager.tenant(), &subscription],
+                )
+                .await?
+                .map(|row| (row.get(0), row.get(1)));
+            checks.check(
+                "job previews a pause and a row draft on a plain client without saving",
+                preview_state == "completed" && pause_state == Some((false, 1)) && !saved,
+                format!("job {preview_state}, subscription {pause_state:?}, report saved {saved}"),
+            );
             let told: Option<String> = client.query_one("SELECT ending FROM base_queue_jobs WHERE id=(SELECT job_id FROM base_report_exports WHERE id=$1)", &[export]).await?.get(0);
             checks.check(
                 "Queue tells Reports once that the job ended",
@@ -965,17 +1175,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Err(error) => checks.check("a prepared export is accepted", false, error.to_string()),
     }
-    let plan = Plan {
-        frequency: Frequency::Weekly,
-        at_minute: 8 * 60,
-        weekday: Some(1),
-        monthday: None,
-        format: Format::Csv,
-        include_owner: true,
-        skip_empty: true,
-        roles: Vec::new(),
-        people: Vec::new(),
-    };
     let refused = write(&boundary, &db, &viewer, "reports.subscribe", async |tx| {
         reports.subscribe(tx, &viewer, rows_id, &plan).await
     })
@@ -985,10 +1184,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matches!(refused, Err(ReportError::Forbidden)),
         format!("{refused:?}").chars().take(60).collect::<String>(),
     );
-    let subscription = write(&boundary, &db, &manager, "reports.subscribe", async |tx| {
-        reports.subscribe(tx, &manager, rows_id, &plan).await
-    })
-    .await?;
     let held = reports.subscriptions(&manager, rows_id).await?;
     let next = held
         .first()

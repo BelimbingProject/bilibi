@@ -147,41 +147,6 @@ impl Index {
         let now = SystemTime::now();
         let hour = Duration::from_secs(3600);
         let recorder = &self.pages.recorder;
-        let (diagnostics, views) = if self.tab == TABS[1].0 {
-            let filter = self.filter();
-            let (diagnostics, mut samples) =
-                tokio::join!(recorder.diagnostics(), recorder.list_samples(&filter));
-            if let Ok(page) = &samples {
-                if self
-                    .list
-                    .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
-                {
-                    samples = recorder.list_samples(&self.filter()).await;
-                }
-            }
-            (diagnostics, view::Views::Samples(samples))
-        } else {
-            let windows = Windows {
-                baseline_from: now - hour * 2,
-                baseline_to: now - hour,
-                current_from: now - hour,
-                current_to: now,
-                min_samples: 5,
-                limit: 10,
-            };
-            let (diagnostics, regressions, slowest) = tokio::join!(
-                recorder.diagnostics(),
-                recorder.regressions(&windows),
-                recorder.slowest(now - hour * 24, now, 10),
-            );
-            (
-                diagnostics,
-                view::Views::Slowdowns {
-                    regressions,
-                    slowest,
-                },
-            )
-        };
         let client = self.pages.db.get().await?;
         let locale = self
             .pages
@@ -194,6 +159,41 @@ impl Index {
             .display
             .display(&**client, scope, None, locale)
             .await?;
+        let mut connection = Some(client);
+        let diagnostics = recorder.diagnostics_on(&mut connection).await;
+        let views = if self.tab == TABS[1].0 {
+            let mut samples = recorder
+                .list_samples_on(&mut connection, &self.filter())
+                .await;
+            if let Ok(page) = &samples {
+                if self
+                    .list
+                    .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
+                {
+                    samples = recorder
+                        .list_samples_on(&mut connection, &self.filter())
+                        .await;
+                }
+            }
+            view::Views::Samples(samples)
+        } else {
+            let windows = Windows {
+                baseline_from: now - hour * 2,
+                baseline_to: now - hour,
+                current_from: now - hour,
+                current_to: now,
+                min_samples: 5,
+                limit: 10,
+            };
+            let regressions = recorder.regressions_on(&mut connection, &windows).await;
+            let slowest = recorder
+                .slowest_on(&mut connection, now - hour * 24, now, 10)
+                .await;
+            view::Views::Slowdowns {
+                regressions,
+                slowest,
+            }
+        };
         self.data = Some(view::Data {
             diagnostics,
             views,

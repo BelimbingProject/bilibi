@@ -58,6 +58,10 @@ pub type OperationFuture<'a> = Pin<Box<dyn Future<Output = Result<json::Output>>
 /// Object-safe read adapter, including list queries. Owners can pass this same
 /// client to Tenancy proof providers without opening an unrelated connection.
 pub trait OperationClient: bilibi_tenancy::ReadClient {
+    /// The same connection for an owner's existing GenericClient read API.
+    /// When this adapter wraps a transaction, queries still join that transaction.
+    /// Use only read operations, as for every operation preview.
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client>;
     /// The write door's existing transaction, when present. Owners whose
     /// proof adapters take Transaction borrow it instead of taking a second
     /// pooled connection. Use only reads and transaction-local locks during preview.
@@ -68,7 +72,11 @@ pub trait OperationClient: bilibi_tenancy::ReadClient {
         true
     }
 }
-impl<T: GenericClient + Sync> OperationClient for T {}
+impl<T: GenericClient + Sync> OperationClient for T {
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(GenericClient::client(self)) })
+    }
+}
 
 type PreviewReservations = Mutex<BTreeSet<(&'static str, String)>>;
 
@@ -95,6 +103,9 @@ impl bilibi_tenancy::ReadClient for TransactionRead<'_, '_, '_> {
     }
 }
 impl OperationClient for TransactionRead<'_, '_, '_> {
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(self.0.client()) })
+    }
     fn transaction(&self) -> Option<&tokio_postgres::Transaction<'_>> {
         Some(self.0)
     }
@@ -139,7 +150,11 @@ impl bilibi_tenancy::ReadClient for Pooled<'_> {
         Box::pin(async move { Ok(self.connection().await?.query(sql, params).await?) })
     }
 }
-impl OperationClient for Pooled<'_> {}
+impl OperationClient for Pooled<'_> {
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(&***self.connection().await?) })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -173,6 +188,9 @@ pub enum Kind {
 /// identity fields. They must apply owner authorization and field restrictions.
 pub trait ReadHandler: Send + Sync {
     fn owner(&self) -> &'static str;
+    fn requires_transaction(&self) -> bool {
+        false
+    }
     fn call<'a>(
         &'a self,
         client: &'a dyn OperationClient,
@@ -771,12 +789,12 @@ impl Registry {
         Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":guide.body}))
     }
     /// Runs read operation `key` for `scope` on the caller's connection, for
-    /// a caller that already holds one (a walkthrough, a test fixture). A door
-    /// that serves requests uses [`Registry::read`], which holds none while the
-    /// handler runs.
+    /// a caller that already holds one (a walkthrough, a test fixture). Request
+    /// doors use [`Registry::read`], which releases its authorization connection
+    /// before dispatch.
     pub async fn call(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &mut (impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
         input: &Value,
@@ -786,8 +804,33 @@ impl Registry {
         let Handler::Read(handler) = op.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        Ok(handler.call(client, scope, input).await?.envelope(key))
+        let output = if handler.requires_transaction() {
+            transactional_read(client, handler, scope, input).await?
+        } else {
+            handler.call(client, scope, input).await?
+        };
+        Ok(output.envelope(key))
     }
+
+    pub async fn call_in(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        key: &str,
+        input: &Value,
+    ) -> Result<Value> {
+        let op = self.admitted(key, scope, input)?;
+        authorize_read(tx, scope, op.capability, input).await?;
+        let Handler::Read(handler) = op.handler else {
+            return Err(Error::WritesNotEnabled);
+        };
+        let reservations = PreviewReservations::default();
+        let output = handler
+            .call(&TransactionRead(tx, &reservations), scope, input)
+            .await?;
+        Ok(output.envelope(key))
+    }
+
     /// Runs read operation `key` for `scope` from the pool, as the `/api/v1`,
     /// MCP and page doors do. The capability check takes a pooled connection
     /// and returns it; the handler then runs with no connection held here, on
@@ -809,11 +852,17 @@ impl Registry {
         let Handler::Read(handler) = op.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        let client = Pooled {
-            db,
-            connection: tokio::sync::OnceCell::new(),
+        let output = if handler.requires_transaction() {
+            let mut client = db.get().await.map_err(bilibi_database::Error::from)?;
+            transactional_read(&mut **client, handler, scope, input).await?
+        } else {
+            let client = Pooled {
+                db,
+                connection: tokio::sync::OnceCell::new(),
+            };
+            handler.call(&client, scope, input).await?
         };
-        Ok(handler.call(&client, scope, input).await?.envelope(key))
+        Ok(output.envelope(key))
     }
     /// Operation `key` when `scope`'s channel may call it and `input` fits
     /// its schema.
@@ -826,6 +875,50 @@ impl Registry {
         schema::validate(&registered.input, input).map_err(Error::InvalidInput)?;
         Ok(op)
     }
+}
+async fn transactional_read(
+    client: &mut (impl GenericClient + Sync),
+    handler: &dyn ReadHandler,
+    scope: &Scope,
+    input: &Value,
+) -> Result<json::Output> {
+    let tx = client
+        .transaction()
+        .await
+        .map_err(bilibi_database::Error::from)?;
+    let reservations = PreviewReservations::default();
+    let output = handler
+        .call(&TransactionRead(&tx, &reservations), scope, input)
+        .await;
+    finish_read_transaction(tx, &output).await?;
+    output
+}
+
+async fn finish_read_transaction<T>(
+    tx: tokio_postgres::Transaction<'_>,
+    output: &Result<T>,
+) -> Result<()> {
+    if matches!(
+        output,
+        Ok(_)
+            | Err(Error::Forbidden
+                | Error::NotFound
+                | Error::InvalidInput(_)
+                | Error::Backend(
+                    bilibi_database::Error::Unauthorized
+                        | bilibi_database::Error::Forbidden
+                        | bilibi_database::Error::NotFound
+                        | bilibi_database::Error::Invalid
+                        | bilibi_database::Error::Refused(_)
+                        | bilibi_database::Error::Conflict
+                        | bilibi_database::Error::StepUpRequired { .. }
+                ))
+    ) {
+        tx.commit().await.map_err(bilibi_database::Error::from)?;
+    } else {
+        tx.rollback().await.map_err(bilibi_database::Error::from)?;
+    }
+    Ok(())
 }
 /// An operation's explicit company decides it, else the scope's workplace,
 /// leaving the browser's chosen desk unchanged. Reads, plan previews and

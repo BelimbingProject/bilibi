@@ -469,18 +469,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .submit(&call("base.grid.view.save"), save(format!("Limit {index}")))
             .await?;
     }
-    let first_call = call("base.grid.view.save");
-    let second_call = Call {
-        scope: &second_admin,
-        credential: &second_token,
-        service: "core/company.pages",
-        event: "grid",
-        contract: "base.grid.view.save",
-    };
-    let (first, second) = tokio::join!(
-        contracts.submit(&first_call, save("Concurrent first".into())),
-        contracts.submit(&second_call, save("Concurrent second".into())),
-    );
+    let first = tokio::spawn({
+        let contracts = contracts.clone();
+        let scope = admin.clone();
+        let token = token.clone();
+        let input = save("Concurrent first".into());
+        async move {
+            contracts
+                .submit(
+                    &Call {
+                        scope: &scope,
+                        credential: &token,
+                        service: "core/company.pages",
+                        event: "grid",
+                        contract: "base.grid.view.save",
+                    },
+                    input,
+                )
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let contracts = contracts.clone();
+        let scope = second_admin.clone();
+        let token = second_token.clone();
+        let input = save("Concurrent second".into());
+        async move {
+            contracts
+                .submit(
+                    &Call {
+                        scope: &scope,
+                        credential: &token,
+                        service: "core/company.pages",
+                        event: "grid",
+                        contract: "base.grid.view.save",
+                    },
+                    input,
+                )
+                .await
+        }
+    });
+    let (first, second) = tokio::join!(first, second);
+    let (first, second) = (first?, second?);
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
     let refused = first
         .err()

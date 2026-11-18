@@ -281,9 +281,6 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
     if ids.len() > MAX_ROWS {
         return Err(QueryError::Limit("page exceeds 100 IDs"));
     }
-    if specs.len() > MAX_COLUMNS {
-        return Err(QueryError::Limit("more than 32 column specs"));
-    }
     if ids
         .iter()
         .any(|id| !matches!(id, Value::Number(_) | Value::String(_)) || id.to_string().len() > 256)
@@ -292,13 +289,7 @@ pub(crate) async fn project_catalog<S: AsRef<str>>(
             "keys must be scalar numbers/strings up to 256 bytes",
         ));
     }
-    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
-    let columns = catalog
-        .resolve_all(root, specs)
-        .map_err(|(spec, error)| QueryError::Column(spec, error))?;
-    if columns.iter().map(|c| c.depth).sum::<usize>() > MAX_HOPS {
-        return Err(QueryError::Limit("more than 128 total hops"));
-    }
+    let (root, columns) = projection_columns(catalog, root, specs)?;
     let today = today();
     let months = trend_months(today);
     // A series or an earlier total of a masked value would show it.
@@ -933,4 +924,61 @@ fn statement(
     // key bare, allowing its index to bound the page lookup. Type identifiers
     // come from PostgreSQL metadata, never from a request.
     format!("WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $4::text::date AS trend_from, $5::text::date AS trend_to, $6::text::date AS since) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101", source(root), field("r", root, root.key()))
+}
+
+/// Run a bounded read within a caller's transaction. The savepoint restores
+/// transaction-local limits and recovers SQL type errors a report preview
+/// must return as input refusals, without aborting its surrounding plan.
+pub(crate) async fn bounded<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    bounds: Bounds,
+    read: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Result<T, QueryError> {
+    bounds.check()?;
+    tx.batch_execute("SAVEPOINT grid_bounded_read")
+        .await
+        .map_err(Error::from)?;
+    let result = async {
+        tx.batch_execute(&bounds.sql()).await?;
+        read.await
+    }
+    .await;
+    tx.batch_execute(
+        "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
+    )
+    .await
+    .map_err(Error::from)?;
+    result
+}
+
+fn projection_columns<'a, S: AsRef<str>>(
+    catalog: &'a Catalog,
+    root: &str,
+    specs: &[S],
+) -> Result<(&'a Table, Vec<Column>), QueryError> {
+    if specs.len() > MAX_COLUMNS {
+        return Err(QueryError::Limit("more than 32 column specs"));
+    }
+    let root = catalog.table(root).ok_or(QueryError::ForbiddenRoot)?;
+    let columns = catalog
+        .resolve_all(root, specs)
+        .map_err(|(spec, error)| QueryError::Column(spec, error))?;
+    if columns.iter().map(|c| c.depth).sum::<usize>() > MAX_HOPS {
+        return Err(QueryError::Limit("more than 128 total hops"));
+    }
+    Ok((root, columns))
+}
+
+pub async fn validate_projection_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    specs: &[S],
+    bounds: Bounds,
+) -> Result<(), QueryError> {
+    bounded(tx, bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        projection_columns(&catalog, root, specs).map(|_| ())
+    })
+    .await
 }

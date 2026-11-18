@@ -247,11 +247,12 @@ static DOCUMENTS: DocumentData = DocumentData;
 impl Handler for DocumentData {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let count: i64 = client
                 .query_one(
                     &format!("SELECT count(*) FROM ({LINKED}) x"),
@@ -560,7 +561,7 @@ impl Handler for DocumentData {
                     }
                 }
                 tx.commit().await?;
-                progress.record(step).await?;
+                progress.record(client, step).await?;
             }
             Ok(())
         })

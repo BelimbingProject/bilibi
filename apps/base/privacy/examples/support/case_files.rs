@@ -187,11 +187,12 @@ impl Cases {
 impl Handler for Cases {
     fn locate<'a>(
         &'a self,
-        client: &'a Client,
+        client: &'a tokio_postgres::Transaction<'_>,
         scope: &'a Scope,
         subject: &'a Subject,
     ) -> HandlerFuture<'a, Located> {
         Box::pin(async move {
+            let client = client.client();
             let (own, _) = cases(client, scope, subject.person).await?;
             let mut files = 0;
             for case in own {

@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
         .get::<Grants>("base/authz.grants")?
         .reconcile()
         .await?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
     // The viewer may reveal and read history; staff may read history but not reveal.
@@ -279,7 +279,7 @@ async fn main() -> Result<()> {
     println!("== a contact with history: admin sets Ada's email and phone");
     let ada = registry
         .call(
-            &**client,
+            &mut **client,
             &admin,
             "core.person.get",
             &json!({"person_id": 1}),
@@ -325,7 +325,7 @@ async fn main() -> Result<()> {
             label,
             registry
                 .call(
-                    &**client,
+                    &mut **client,
                     scope,
                     "core.person.get",
                     &json!({"person_id": 1}),
@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
     show(
         "viewer lists contacts",
         registry
-            .call(&**client, &viewer, "core.person.list", &json!({}))
+            .call(&mut **client, &viewer, "core.person.list", &json!({}))
             .await
             .map(|v| contacts(&v)),
     );
@@ -347,7 +347,7 @@ async fn main() -> Result<()> {
         "viewer searches by Ada's email",
         registry
             .call(
-                &**client,
+                &mut **client,
                 &viewer,
                 "core.person.list",
                 &json!({"search": "ada.manager@corp"}),
@@ -359,7 +359,7 @@ async fn main() -> Result<()> {
         "admin searches by Ada's email",
         registry
             .call(
-                &**client,
+                &mut **client,
                 &admin,
                 "core.person.list",
                 &json!({"search": "ada.manager@corp"}),

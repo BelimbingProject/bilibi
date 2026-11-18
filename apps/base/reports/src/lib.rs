@@ -437,6 +437,14 @@ impl Reports {
     /// background pair.
     async fn bounds(&self, scope: &Scope, background: bool) -> Result<bilibi_grid::Bounds, Error> {
         let client = self.db.get().await?;
+        self.bounds_on(&**client, scope, background).await
+    }
+    async fn bounds_on(
+        &self,
+        client: &dyn bilibi_tenancy::ReadClient,
+        scope: &Scope,
+        background: bool,
+    ) -> Result<bilibi_grid::Bounds, Error> {
         let (ms, cost) = if background {
             (
                 contributions::QUEUED_STATEMENT_MS_KEY,
@@ -446,9 +454,9 @@ impl Reports {
             (contributions::STATEMENT_MS_KEY, contributions::MAX_COST_KEY)
         };
         Ok(bilibi_grid::Bounds {
-            statement_ms: u32::try_from(self.setting(&**client, scope, ms).await?)
+            statement_ms: u32::try_from(self.setting(client, scope, ms).await?)
                 .map_err(|_| Error::Internal)?,
-            max_cost: self.setting(&**client, scope, cost).await? as f64,
+            max_cost: self.setting(client, scope, cost).await? as f64,
         })
     }
 
@@ -482,8 +490,16 @@ impl Reports {
     /// One report the reader may run, with its definition.
     pub async fn get(&self, scope: &Scope, id: i64) -> Outcome<Report> {
         let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
-        match store::read(&**client, scope.tenant(), scope.user(), id, false).await {
+        self.get_on(&**client, scope, id).await
+    }
+    async fn get_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        id: i64,
+    ) -> Outcome<Report> {
+        authorize(client, scope, VIEW).await?;
+        match store::read(client, scope.tenant(), scope.user(), id, false).await {
             Err(Error::NotFound) => Err(ReportError::NotFound),
             other => Ok(other?),
         }
@@ -494,6 +510,27 @@ impl Reports {
     /// filter, grouping and measure suits its column. A dry run refused only
     /// by size or cost still saves: the bound applies to each run.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
+        Self::check_draft_shape(draft)?;
+        if draft.definition.oversight {
+            return self.check_draft_catalog(None, scope, draft).await;
+        }
+        let mut client = self.db.get().await.map_err(Error::from)?;
+        let tx = client.transaction().await.map_err(Error::from)?;
+        self.check_draft_catalog(Some(&tx), scope, draft).await?;
+        tx.commit().await.map_err(Error::from)?;
+        Ok(())
+    }
+    async fn check_draft(
+        &self,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        Self::check_draft_shape(draft)?;
+        self.check_draft_catalog(tx, scope, draft).await
+    }
+
+    fn check_draft_shape(draft: &Draft) -> Outcome<()> {
         let mut errors = FieldErrors::new();
         let name = draft.name.trim();
         if name.is_empty() || name.chars().count() > 120 {
@@ -511,15 +548,30 @@ impl Reports {
         if !errors.is_empty() {
             return Err(ReportError::Invalid(errors));
         }
-        let catalog = self
-            .catalog(scope, draft.definition.oversight, draft.kind == Kind::Rows)
-            .await?;
+        Ok(())
+    }
+
+    async fn check_draft_catalog(
+        &self,
+        tx: Option<&tokio_postgres::Transaction<'_>>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        let catalog = if draft.definition.oversight {
+            self.catalog(scope, true, draft.kind == Kind::Rows).await?
+        } else {
+            let tx = tx.ok_or(Error::Internal)?;
+            Catalog::for_scope(tx, scope)
+                .await
+                .map_err(|e| ReportError::Database(e.into()))?
+        };
         let root = catalog.table(&draft.record_type).ok_or_else(|| {
             ReportError::Invalid(field_errors(
                 "record_type",
                 "is not a record type you can read",
             ))
         })?;
+        let mut errors = FieldErrors::new();
         for spec in draft.definition.specs() {
             if let Err(error) = catalog.resolve(root, spec) {
                 errors
@@ -588,8 +640,9 @@ impl Reports {
             }
             return Ok(());
         }
-        let bounds = self.bounds(scope, false).await?;
-        let probe = self.probe(scope, draft, filters, bounds).await;
+        let tx = tx.ok_or(Error::Internal)?;
+        let bounds = self.bounds_on(tx, scope, false).await?;
+        let probe = self.probe(tx, scope, draft, filters, bounds).await;
         match probe {
             Ok(()) => Ok(()),
             Err(QueryError::Column(spec, error)) => Err(ReportError::Invalid(field_errors(
@@ -612,6 +665,7 @@ impl Reports {
     /// One page or one summary under the author's scope, to prove the shape.
     async fn probe(
         &self,
+        tx: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
         draft: &Draft,
         filters: Vec<Filter>,
@@ -619,17 +673,16 @@ impl Reports {
     ) -> Result<(), QueryError> {
         match draft.kind {
             Kind::Rows => {
-                bilibi_grid::project_within(
-                    &self.db,
+                bilibi_grid::validate_projection_on(
+                    tx,
                     scope,
                     &draft.record_type,
-                    &[],
                     &draft.definition.columns,
                     bounds,
                 )
                 .await?;
-                bilibi_grid::page_keys(
-                    &self.db,
+                bilibi_grid::validate_page_on(
+                    tx,
                     scope,
                     &draft.record_type,
                     &PageSpec {
@@ -641,11 +694,11 @@ impl Reports {
                         limit: 1,
                     },
                 )
-                .await?;
+                .await
             }
             Kind::Summary | Kind::Matrix => {
-                bilibi_grid::summarize(
-                    &self.db,
+                bilibi_grid::validate_summary_on(
+                    tx,
                     scope,
                     &draft.record_type,
                     &SummarySpec {
@@ -657,10 +710,9 @@ impl Reports {
                         max_groups: bilibi_grid::MAX_RESULT_GROUPS,
                     },
                 )
-                .await?;
+                .await
             }
         }
-        Ok(())
     }
 
     /// The record types the reader can report on, as `(id, label)`, by label.
@@ -1006,8 +1058,15 @@ impl Reports {
     /// their catalog includes. Needs `reports.view`.
     pub async fn builtins(&self, scope: &Scope) -> Outcome<Vec<Report>> {
         let client = self.db.get().await.map_err(Error::from)?;
-        authorize(&**client, scope, VIEW).await?;
-        let catalog = Catalog::for_scope(&**client, scope)
+        self.builtins_on(&**client, scope).await
+    }
+    async fn builtins_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Outcome<Vec<Report>> {
+        authorize(client, scope, VIEW).await?;
+        let catalog = Catalog::for_scope(client, scope)
             .await
             .map_err(|e| ReportError::Database(e.into()))?;
         Ok(self
@@ -1020,13 +1079,22 @@ impl Reports {
 
     /// One built-in report the reader can run.
     pub async fn builtin(&self, scope: &Scope, key: &str) -> Outcome<Report> {
-        self.builtins(scope)
+        let client = self.db.get().await.map_err(Error::from)?;
+        self.builtin_on(&**client, scope, key).await
+    }
+
+    async fn builtin_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        key: &str,
+    ) -> Outcome<Report> {
+        self.builtins_on(client, scope)
             .await?
             .into_iter()
             .find(|r| r.builtin == Some(key))
             .ok_or(ReportError::NotFound)
     }
-
     /// Saves the reader's own copy of a built-in report. Needs `reports.author`.
     pub async fn copy_builtin(
         &self,
@@ -1035,7 +1103,7 @@ impl Reports {
         key: &str,
         name: Option<&str>,
     ) -> Outcome<i64> {
-        let original = self.builtin(scope, key).await?;
+        let original = self.builtin_on(tx.sql(), scope, key).await?;
         self.create(tx, scope, &copy_of(&original, name)).await
     }
 
@@ -1293,7 +1361,7 @@ impl Reports {
         bilibi_authz::authorize_key(tx.sql(), scope, AUTHOR)
             .await
             .map_err(denied)?;
-        self.check(scope, draft).await?;
+        self.check_draft(Some(tx.sql()), scope, draft).await?;
         let (tenant, owner) = (scope.tenant(), scope.user());
         let draft = draft.clone();
         Ok(tx
@@ -1339,7 +1407,7 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let before = self.owned(tx, scope, id, version, AUTHOR).await?;
-        self.check(scope, draft).await?;
+        self.check_draft(Some(tx.sql()), scope, draft).await?;
         let (tenant, draft) = (scope.tenant(), draft.clone());
         let updated = tx
             .mutate(move |sql| {

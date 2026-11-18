@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     let mut located = None;
-    for (store, _, found) in privacy.locate(&client, &admin, access.id).await? {
+    for (store, _, found) in privacy.locate(&admin, access.id).await? {
         if store == STORE {
             located = Some(found.kinds.iter().map(|k| k.by_person).sum::<i64>());
         }

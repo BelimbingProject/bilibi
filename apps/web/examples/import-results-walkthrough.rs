@@ -64,9 +64,9 @@ impl Person<'_> {
             .map_err(|error| error.to_string())
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self.db.get().await.map_err(|error| error.to_string())?;
+        let mut client = self.db.get().await.map_err(|error| error.to_string())?;
         self.registry
-            .call(&**client, &self.scope, key, &input)
+            .call(&mut **client, &self.scope, key, &input)
             .await
             .map(|out| out["result"].clone())
             .map_err(|error| error.to_string())

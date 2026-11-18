@@ -366,8 +366,11 @@ refusal cancels the job; anything else retries up to 3 attempts and then discard
 Delivery is at least once, completion included: a failing callback retries the whole
 job and the retry stores another artifact (retention owns cleanup), so key the
 business effect on `request_id` and do callback writes inside `execution.begin(..)`,
-which fences them against an expired or cancelled lease. A render holds one pool
-connection for its duration; `View` needs the Web host's `/pdf/render` route and
+which fences them against an expired or cancelled lease. The worker releases
+its authorization connection before calling `pdf_request`. It checks out a
+connection for an `Inline` or `View` render, or after the owner's `Document`
+renderer returns bytes for persistence. The connection is released before
+`pdf_rendered`. `View` needs the Web host's `/pdf/render` route and
 `pdf.render_origin`, so a private host without HTTP renders `Inline` or `Document`.
 No Domain owner is wired yet: the production worker catalog stays empty.
 

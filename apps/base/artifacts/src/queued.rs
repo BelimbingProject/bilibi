@@ -196,7 +196,7 @@ impl<O: QueuedPdfOwner> PdfRenderHandler<O> {
         let Some(scope) = execution.scope() else {
             return Outcome::Cancel("pdf_forbidden");
         };
-        let Ok(mut client) = self.artifacts.db.get().await else {
+        let Ok(client) = self.artifacts.db.get().await else {
             return Outcome::Retry("pdf_database_unavailable");
         };
         let owned = self.artifacts.for_owner(scope, job.company, &*self.owner);
@@ -206,6 +206,7 @@ impl<O: QueuedPdfOwner> PdfRenderHandler<O> {
         {
             return failed(&error, "pdf_authorize_failed");
         }
+        drop(client);
         let request = match self
             .owner
             .pdf_request(execution, job.company, &job.reference, &job.request_id)
@@ -217,30 +218,45 @@ impl<O: QueuedPdfOwner> PdfRenderHandler<O> {
         let reference = job.reference.clone();
         let rendered = match request.mode {
             PdfMode::Inline => {
+                let Ok(mut client) = self.artifacts.db.get().await else {
+                    return Outcome::Retry("pdf_database_unavailable");
+                };
                 owned
                     .render_inline_with(&mut client, reference, &request.data, &request.options)
                     .await
             }
             PdfMode::View => {
+                let Ok(mut client) = self.artifacts.db.get().await else {
+                    return Outcome::Retry("pdf_database_unavailable");
+                };
                 owned
                     .render_view_with(&mut client, reference, &request.data, &request.options)
                     .await
             }
             PdfMode::Document => {
-                match self
-                    .render_document(&owned, &mut client, &job.reference, &request)
+                if !request.data.is_object() {
+                    return failed(&Error::Invalid, "pdf_render_failed");
+                }
+                let bytes = match self
+                    .owner
+                    .render_pdf(scope, job.company, &job.reference, &request.data)
                     .await
                 {
-                    Ok(artifact) => Ok(artifact),
-                    Err(error) => Err(error),
-                }
+                    Ok(bytes) => bytes,
+                    Err(error) => return failed(&error, "pdf_render_failed"),
+                };
+                let Ok(mut client) = self.artifacts.db.get().await else {
+                    return Outcome::Retry("pdf_database_unavailable");
+                };
+                owned
+                    .persist_pdf(&mut client, reference, &bytes, &request.options)
+                    .await
             }
         };
         let artifact = match rendered {
             Ok(artifact) => artifact,
             Err(error) => return failed(&error, "pdf_render_failed"),
         };
-        drop(client);
         let rendered = Rendered {
             request_id: job.request_id,
             job_id: execution.job_id,
@@ -255,23 +271,5 @@ impl<O: QueuedPdfOwner> PdfRenderHandler<O> {
             Ok(()) => Outcome::Completed,
             Err(error) => failed(&error, "pdf_completion_failed"),
         }
-    }
-    async fn render_document(
-        &self,
-        owned: &Owned<'_, O>,
-        client: &mut tokio_postgres::Client,
-        reference: &Reference,
-        request: &PdfRequest,
-    ) -> crate::Result<PdfArtifact> {
-        if !request.data.is_object() {
-            return Err(Error::Invalid);
-        }
-        let bytes = self
-            .owner
-            .render_pdf(owned.scope, owned.company, reference, &request.data)
-            .await?;
-        owned
-            .persist_pdf(client, reference.clone(), &bytes, &request.options)
-            .await
     }
 }

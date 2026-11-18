@@ -22,27 +22,29 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Failure = Box<dyn std::error::Error>;
-struct Browser<'a> {
-    app: &'a bilibi_web::App,
-    token: &'a str,
+#[derive(Clone)]
+struct Browser {
+    app: std::sync::Arc<bilibi_web::App>,
+    token: String,
 }
-impl PlanAuthority for Browser<'_> {
+impl PlanAuthority for Browser {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.hold(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, &self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
     }
 }
 
-struct Agent<'a> {
-    plans: &'a Plans,
-    registry: &'a Registry,
-    browser: Browser<'a>,
+#[derive(Clone)]
+struct Agent {
+    plans: std::sync::Arc<Plans>,
+    registry: std::sync::Arc<Registry>,
+    browser: Browser,
     scope: Scope,
-    db: &'a bilibi_database::Db,
+    db: bilibi_database::Db,
 }
 fn op(key: &str, input: Value) -> PlannedOperation {
     PlannedOperation {
@@ -50,7 +52,7 @@ fn op(key: &str, input: Value) -> PlannedOperation {
         input,
     }
 }
-impl Agent<'_> {
+impl Agent {
     /// Dry-run a write; return the first refusal when it is invalid.
     async fn plan(&self, ops: &[PlannedOperation]) -> Result<(), String> {
         let plan = self
@@ -98,13 +100,8 @@ impl Agent<'_> {
         Ok(self.commit(&ops).await?.remove(0))
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self
-            .db
-            .get_detached("the walkthrough's own checking connection")
-            .await
-            .map_err(|error| error.to_string())?;
         self.registry
-            .call(&**client, &self.scope, key, &input)
+            .read(&self.db, &self.scope, key, &input)
             .await
             .map(|out| out["result"].clone())
             .map_err(|error| error.to_string())
@@ -134,6 +131,41 @@ fn week(working: &[&str], saturday: Value, sunday: Value) -> Value {
     let day = json!({"type": "working", "periods": working});
     json!({"monday": day, "tuesday": day, "wednesday": day, "thursday": day, "friday": day, "saturday": saturday, "sunday": sunday})
 }
+async fn wait_for_gate(
+    client: &tokio_postgres::Client,
+    key: i32,
+    with_peer: bool,
+) -> Result<(), Failure> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = client
+                .query_one(
+                    "SELECT EXISTS (
+                       SELECT 1 FROM pg_locks w
+                       WHERE w.locktype='advisory' AND w.classid=0 AND w.objid=$1::integer::oid
+                         AND w.objsubid=1 AND NOT w.granted
+                         AND w.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                         AND (NOT $2 OR EXISTS (
+                           SELECT 1 FROM pg_stat_activity peer
+                           WHERE peer.datname=current_database() AND peer.wait_event_type='Lock'
+                             AND w.pid=ANY(pg_blocking_pids(peer.pid))
+                         ))
+                     )",
+                    &[&key, &with_peer],
+                )
+                .await?
+                .get(0);
+            if waiting {
+                return Ok::<(), tokio_postgres::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("calendar gate {key} did not reach the expected lock state"))??;
+    Ok(())
+}
+
 fn print_days(days: &Value) {
     for day in days["days"].as_array().into_iter().flatten() {
         let reason = &day["reason"];
@@ -221,7 +253,7 @@ async fn main() -> Result<(), Failure> {
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_web::migrate(&db).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let app = bilibi_web::App::new(db.clone(), "http://localhost")?;
+    let app = std::sync::Arc::new(bilibi_web::App::new(db.clone(), "http://localhost")?);
     app.services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
         .reconcile()
@@ -243,14 +275,14 @@ async fn main() -> Result<(), Failure> {
         agents.push((login.token.clone(), app.security.guard(&login.token).await?));
     }
     let agent = |index: usize| Agent {
-        plans: &plans,
-        registry: &registry,
+        plans: plans.clone(),
+        registry: registry.clone(),
         browser: Browser {
-            app: &app,
-            token: &agents[index].0,
+            app: app.clone(),
+            token: agents[index].0.clone(),
         },
         scope: agents[index].1.clone(),
-        db: &db,
+        db: db.clone(),
     };
     let (admin, viewer, other, second) = (agent(0), agent(1), agent(2), agent(3));
     let manager = agent(4);
@@ -932,25 +964,63 @@ async fn main() -> Result<(), Failure> {
         .get_detached("the walkthrough's own checking connection")
         .await?;
     gate.execute("SELECT pg_advisory_lock(4242)", &[]).await?;
-    let (holiday, include, opened) =
-        tokio::join!(admin.commit(&first), second.commit(&second_ops), async {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            gate.execute("SELECT pg_advisory_unlock(4242)", &[]).await
-        });
+    let (holiday, include, (waited, opened)) = tokio::join!(
+        tokio::spawn({
+            let admin = admin.clone();
+            async move { admin.commit(&first).await }
+        }),
+        tokio::spawn({
+            let second = second.clone();
+            async move { second.commit(&second_ops).await }
+        }),
+        async {
+            let waited = wait_for_gate(&client, 4242, true).await;
+            (
+                waited,
+                gate.execute("SELECT pg_advisory_unlock(4242)", &[]).await,
+            )
+        }
+    );
     opened?;
     client.batch_execute("DROP TRIGGER walkthrough_gate ON core_work_calendar_holidays; DROP TRIGGER walkthrough_gate ON core_work_calendar_includes; DROP FUNCTION walkthrough_gate()").await?;
-    show("first holiday", holiday.map(Value::from));
-    show("include", include.map(Value::from));
-    print_days(
-        &admin
-            .read(
-                "core.work_calendar.days",
-                json!({"code": "race", "from": "2027-05-03", "to": "2027-05-03"}),
-            )
-            .await?,
+    waited?;
+    let holiday = holiday??;
+    let include = include??;
+    assert_eq!(holiday[0]["added_or_renamed"], json!(1));
+    assert_eq!(include[0]["included"], json!(true));
+    show("first holiday", Ok(Value::from(holiday)));
+    show("include", Ok(Value::from(include)));
+    let days = admin
+        .read(
+            "core.work_calendar.days",
+            json!({"code": "race", "from": "2027-05-03", "to": "2027-05-03"}),
+        )
+        .await?;
+    let day = &days["days"][0];
+    assert_eq!(day["date"], json!("2027-05-03"));
+    assert_eq!(day["type"], json!("holiday"));
+    assert_eq!(
+        day["reason"],
+        json!({"kind": "holiday", "set": "race-set", "name": "First holiday"}),
     );
-    let events: i64 = client.query_one("SELECT count(*) FROM base_events WHERE name='core/work_calendar.changed' AND subject='race'", &[]).await?.get(0);
-    println!("changed events for race: {events}");
+    print_days(&days);
+    let events = client
+        .query(
+            "SELECT payload FROM base_events WHERE tenant_id=$1 AND name=$2 AND subject=$3",
+            &[
+                &admin.scope.tenant(),
+                &"core/work_calendar.changed",
+                &"race",
+            ],
+        )
+        .await?;
+    assert_eq!(events.len(), 1, "the race must publish exactly one change");
+    let payload: Value = events[0].get(0);
+    assert_eq!(
+        payload,
+        json!({"calendar": "race", "from": "2027-05-03", "to": "2027-05-03"})
+    );
+    println!("changed events for race: {}", events.len());
 
     println!("== a read held while a plan commits answers from one snapshot");
     // Monday 2026-11-02 is a holiday; one plan moves it to the Sunday before
@@ -981,10 +1051,12 @@ async fn main() -> Result<(), Failure> {
             .await
             .map(|r| r["included"].clone()),
     );
-    let open = json!({"code": "snap", "operation": "is_open", "at": "2026-11-02T10:00:00Z"});
-    admin
-        .ask("is_open Monday 10:00Z before the plan", open.clone())
-        .await;
+    let monday = json!({"code": "snap", "from": "2026-11-02", "to": "2026-11-02"});
+    let direct = json!({"kind": "holiday", "set": "snap-set", "name": "Founders' Day"});
+    let before = admin
+        .read("core.work_calendar.days", monday.clone())
+        .await?;
+    assert_eq!(before["days"][0]["reason"], direct);
     let moved = [
         op(
             "core.work_calendar.update",
@@ -1001,21 +1073,19 @@ async fn main() -> Result<(), Failure> {
     // The plan reads no rule version, so it commits past the gate.
     client.batch_execute("CREATE FUNCTION walkthrough_read_gate() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_lock_shared(4243); PERFORM pg_advisory_unlock_shared(4243); RETURN true; END $$; ALTER TABLE core_work_calendar_rules RENAME TO walkthrough_rules; CREATE VIEW core_work_calendar_rules AS SELECT * FROM walkthrough_rules WHERE walkthrough_read_gate()").await?;
     gate.execute("SELECT pg_advisory_lock(4243)", &[]).await?;
-    let (held, (waited, committed, opened)) = tokio::join!(
-        admin.read("core.work_calendar.business_time", open.clone()),
+    let (held, (committed, opened)) = tokio::join!(
+        tokio::spawn({
+            let admin = admin.clone();
+            let monday = monday.clone();
+            async move { admin.read("core.work_calendar.days", monday).await }
+        }),
         async {
-            // Commit once the read waits at the gate (10 s at most).
-            let mut waited = false;
-            for _ in 0..200 {
-                waited = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4243 AND NOT granted)", &[]).await.is_ok_and(|row| row.get::<_, bool>(0));
-                if waited {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let committed = async {
+                wait_for_gate(&client, 4243, false).await?;
+                Ok::<_, Failure>(admin.commit(&moved).await?)
             }
-            let committed = admin.commit(&moved).await;
+            .await;
             (
-                waited,
                 committed,
                 gate.execute("SELECT pg_advisory_unlock(4243)", &[]).await,
             )
@@ -1023,23 +1093,24 @@ async fn main() -> Result<(), Failure> {
     );
     opened?;
     client.batch_execute("DROP VIEW core_work_calendar_rules; ALTER TABLE walkthrough_rules RENAME TO core_work_calendar_rules; DROP FUNCTION walkthrough_read_gate()").await?;
-    println!("the read waited at the gate while the plan committed: {waited}");
-    show("the plan", committed.map(Value::from));
-    show(
-        "is_open Monday 10:00Z, read across the commit",
-        held.map(|answer| answer["result"].clone()),
+    let committed = committed?;
+    assert_eq!(committed.len(), 2);
+    let held = held??;
+    let after = admin.read("core.work_calendar.days", monday).await?;
+    for answer in [&held, &after] {
+        assert_eq!(answer["days"][0]["date"], json!("2026-11-02"));
+        assert_eq!(answer["days"][0]["type"], json!("holiday"));
+    }
+    assert_eq!(held["days"][0]["reason"], direct);
+    assert_eq!(
+        after["days"][0]["reason"],
+        json!({"kind": "substitute", "set": "snap-set", "name": "Founders' Day", "holiday": "2026-11-01"}),
     );
-    admin
-        .ask("is_open Monday 10:00Z after the plan", open)
-        .await;
-    print_days(
-        &admin
-            .read(
-                "core.work_calendar.days",
-                json!({"code": "snap", "from": "2026-11-01", "to": "2026-11-02"}),
-            )
-            .await?,
-    );
+    show("the plan", Ok(Value::from(committed)));
+    println!("Monday held across the commit:");
+    print_days(&held);
+    println!("Monday after the commit:");
+    print_days(&after);
 
     println!("== replacing the first rule moves the dates before it too");
     show("create early (from 2026-01-01, 09:00-18:00)", admin.write("core.work_calendar.create", json!({"code": "early", "name": "Early", "timezone": "UTC", "effective_from": "2026-01-01", "week": week(&["09:00-18:00"], json!({"type": "off"}), json!({"type": "rest"}))})).await);

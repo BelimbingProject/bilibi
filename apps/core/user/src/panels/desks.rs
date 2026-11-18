@@ -105,7 +105,7 @@ impl Desks {
         }
         let client = self.pages.db.get().await?;
         let can_manage = if self.company {
-            self.pages.allowed(scope, bilibi_company::UPDATE).await?
+            bilibi_authz::holds_proof(&**client, scope, bilibi_company::UPDATE).await?
                 && bilibi_company::authorize_target(
                     &**client,
                     scope,

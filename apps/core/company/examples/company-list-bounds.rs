@@ -50,7 +50,7 @@ async fn main() -> Result<(), Failure> {
         .await?;
     let manager = login(&app, "manager@example.test").await?;
     let registry = app.services.get::<Registry>("base/agent_api.registry")?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
 
@@ -79,13 +79,13 @@ async fn main() -> Result<(), Failure> {
         let manager = manager.clone();
         let db = db.clone();
         async move {
-            let client = db
+            let mut client = db
                 .get_detached("the walkthrough's own checking connection")
                 .await?;
             let started = Instant::now();
             let result = registry
                 .call(
-                    &**client,
+                    &mut **client,
                     &manager,
                     "core.company.list",
                     &json!({"search": search, "page_size": 5}),
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Failure> {
         .collect();
     let third = registry
         .call(
-            &**client,
+            &mut **client,
             &manager,
             "core.company.list",
             &json!({"search": "bulkfill", "page": 3, "page_size": 5}),
