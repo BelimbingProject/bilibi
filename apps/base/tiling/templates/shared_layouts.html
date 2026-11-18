@@ -10,10 +10,9 @@
 <div data-shared-ui>
 {% call feedback::flash_group(messages=flash) %}{% endcall %}
 {% call ui::page(id="shared-workspaces-page") %}
-<h1 class="text-xl font-semibold text-action">Shared workspaces</h1>
-<p class="mt-1 text-sm text-muted">Publish a workspace for everyone in this company, or limit it to roles.</p>
+{% call ui::header(subtitle="You can tile several pages side by side in one tab; that is a workspace. Save its layout here to share it with the whole company, or only with selected roles.") %}Shared workspaces{% endcall %}
 {%- if tree.is_empty() %}
-<a id="shared-workspace-start" href="/workspace" class="mt-3 inline-block text-sm text-link underline">Open a workspace to share its current tiles</a>
+<a id="shared-workspace-start" href="/workspace" class="inline-block text-sm text-link underline">Open a workspace to share its current tiles</a>
 {%- else %}
 <form id="shared-workspace-form" data-event="publish_layout" class="mt-4 space-y-2">
 {% call form::input(field=label) %}{% endcall %}
@@ -22,7 +21,7 @@
 {% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, id="shared-workspace-publish", button_type="submit") %}Publish{% endcall %}
 </form>
 {%- endif %}
-{{ table|safe }}
+{% call ui::card(inner_class="p-0") %}{{ table }}{% endcall %}
 {% endcall %}
 {%- if pending_delete %}
 {% call dialog::confirm_dialog(id="shared-workspace-delete-confirmation", consequence="The shared workspace will be deleted for everyone in this company.", detail="Personal copies are unaffected. This cannot be undone.", confirm="Delete", working="Deleting…", confirm_event="confirm_delete_layout", cancel_event="cancel_delete_layout") %}{% endcall %}
