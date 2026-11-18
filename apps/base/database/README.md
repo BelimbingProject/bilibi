@@ -95,7 +95,7 @@ Why: once more callers than connections each hold one and ask for a second, ever
 - **A second ask warns, then attempts the checkout** under the normal pool limits; it can still time out. Each pool logs once per pair of call sites: `warning: second pooled connection: this task already holds a pooled connection (taken at A) and asked for another at B. …`
 - Set `RUST_BACKTRACE=1` to print the stack at the warning site under the line; it does not reconstruct the async await chain or the first checkout's stack.
 - `scripts/run-walkthroughs.sh` lists every warning of a run in the job summary under "Second pooled connections" and raises one annotation. It does not fail the run during this warning-only pilot.
-- Warnings become refusals in a later change after two weeks of CI walkthrough runs on `main` with no hit that was not a real nested take. Unresolved real nesting stays warned; only genuine single-purpose exceptions use `get_detached`.
+- The switch to refusals requires fixing the outstanding sites and then two weeks of CI walkthrough runs on `main` without a real second checkout. [Issue #758](https://github.com/BelimbingProject/bilibi/issues/758) tracks the switch.
 
 # Schema ownership
 

@@ -42,10 +42,12 @@ Prepared files retain a deduplicated set of the reference ids and optional label
 | `subscribe`, `subscriptions`, `pause`, `unsubscribe` | `reports.schedule` (roles: `reports.share` too) | Scheduled deliveries; see Schedules. |
 | `builtins`, `builtin`, `run_builtin`, `copy_builtin` | `reports.view` / `reports.author` | Built-in reports modules contribute; see Built-in reports. |
 | `record_types`, `columns` | `reports.view` | What a builder may offer: readable record types, and a type's own fields plus fields one link away. |
-| `check` | — | Shape bounds, every column against the author's catalog, then a bounded dry run. A dry run refused only by size or cost still saves. |
+| `check` | — | Validates the draft shape before checking out a connection, then checks every column against the author's catalog and does a bounded dry run. A dry run refused only by size or cost still saves. |
 | `create`, `copy` | `reports.author` | Saves a report owned by the actor. A copy is unshared. |
 | `update`, `delete` | `reports.author`, owner | At `version`; a stale version is `Conflict`, decided before the write. |
 | `share` | `reports.share`, owner | Everyone, chosen roles (at most 50), or nobody. Replaces the list. |
+
+Tenant report previews validate drafts on the plan's transaction using [Grid's transaction-bound validation](../grid/README.md#reads-inside-an-existing-transaction).
 
 ## Definition
 

@@ -789,9 +789,9 @@ impl Registry {
         Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":guide.body}))
     }
     /// Runs read operation `key` for `scope` on the caller's connection, for
-    /// a caller that already holds one (a walkthrough, a test fixture). A door
-    /// that serves requests uses [`Registry::read`], which holds none while the
-    /// handler runs.
+    /// a caller that already holds one (a walkthrough, a test fixture). Request
+    /// doors use [`Registry::read`], which releases its authorization connection
+    /// before dispatch.
     pub async fn call(
         &self,
         client: &mut (impl GenericClient + Sync),

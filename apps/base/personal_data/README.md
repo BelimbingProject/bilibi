@@ -34,7 +34,7 @@ inventory::submit! { Contribution::new(PERSONAL_DATA, "core/person.people", prov
 | `export` | plain connection, `Disclosure` | Every record (never a first page) and `FileRef`s |
 | `file` | plain connection, `Disclosure` | One listed file's bytes, read through its owner (`File::Read`), or `File::Withheld` with a reason (`not_cleared`: not past its malware check; `missing`: bytes no longer stored), which the bundle lists without bytes instead of failing |
 | `erase` | the erasure `MutationTransaction`, `Erasure`, `Holds` | Actions, erased records, kept records with reason and hold |
-| `after_erase` | plain connection, `Erasure`, `Holds`, `Progress` | Work after commit (files, documents), each step recorded through `Progress` |
+| `after_erase` | mutable connection, `Erasure`, `Holds`, `Progress` | Work after commit (files, documents), each step recorded through `Progress` |
 
 - Act on records linked to the person and on `Subject.confirmed`; never on another identifier match.
 - Changes record `[erased]` (`ERASED`) where a value was, so erasure reads apart from absence.
