@@ -914,16 +914,33 @@ pub(crate) async fn bounded<T>(
     read: impl std::future::Future<Output = Result<T, QueryError>>,
 ) -> Result<T, QueryError> {
     bounds.check()?;
-    tx.batch_execute("SAVEPOINT grid_bounded_read").await?;
-    let result = async {
+    at_read_savepoint(tx, false, async {
         tx.batch_execute(&bounds.sql()).await?;
         read.await
+    })
+    .await
+}
+
+pub(crate) async fn at_read_savepoint<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    keep_success: bool,
+    work: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Result<T, QueryError> {
+    tx.batch_execute("SAVEPOINT grid_bounded_read")
+        .await
+        .map_err(Error::from)?;
+    let result = work.await;
+    if !keep_success || result.is_err() {
+        tx.batch_execute(
+            "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
+        )
+        .await
+        .map_err(Error::from)?;
+    } else {
+        tx.batch_execute("RELEASE SAVEPOINT grid_bounded_read")
+            .await
+            .map_err(Error::from)?;
     }
-    .await;
-    tx.batch_execute(
-        "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
-    )
-    .await?;
     result
 }
 

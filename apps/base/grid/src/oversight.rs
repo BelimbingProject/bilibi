@@ -19,6 +19,10 @@ use tokio::{
 
 pub const OVERSIGHT_QUERIES: &str = "base/grid.oversight";
 
+const POLICY_TIMEOUT: Duration = Duration::from_secs(60);
+const TOTAL_TIMEOUT: &str = "oversight total time bound exceeded";
+const CHILD_TIMEOUT: &str = "oversight child read timed out";
+
 #[derive(Clone, Debug)]
 pub enum OversightSpec {
     Summary(SummarySpec),
@@ -132,12 +136,14 @@ impl OversightQueries {
     }
     /// A bounded intersection for builders; no results or child identities.
     pub async fn builder_catalog(&self, scope: &Scope, rows: bool) -> Result<Catalog, QueryError> {
-        timeout(Duration::from_secs(60), async {
-            let client = self.db.get().await.map_err(Error::from)?;
-            self.builder_catalog_on(&**client, scope, rows).await
-        })
-        .await
-        .map_err(|_| QueryError::TooHeavy("oversight policy lookup timed out"))?
+        let mut client = timeout(POLICY_TIMEOUT, self.db.get())
+            .await
+            .map_err(|_| QueryError::TooHeavy("oversight policy lookup timed out"))?
+            .map_err(Error::from)?;
+        let tx = client.transaction().await?;
+        let catalog = self.builder_catalog_on(&tx, scope, rows).await?;
+        tx.commit().await?;
+        Ok(catalog)
     }
     pub async fn read(
         &self,
@@ -201,12 +207,7 @@ impl OversightQueries {
                     let (outcome, data) = match result {
                         Ok(Ok(data)) => ("ok", Some(data)),
                         Err(_) => ("timed_out", None),
-                        Ok(Err(ref error)) if revoked(error) => ("revoked", None),
-                        Ok(Err(QueryError::TooHeavy(why))) if why.contains("time") => {
-                            ("timed_out", None)
-                        }
-                        Ok(Err(QueryError::TooHeavy(_))) => ("over_cost", None),
-                        Ok(Err(_)) => ("refused", None),
+                        Ok(Err(error)) => (child_refusal(&error), None),
                     };
                     ChildResult {
                         tenant: grant.tenant(),
@@ -498,20 +499,19 @@ impl OversightQueries {
     /// The same bounded builder intersection on the caller's connection.
     pub async fn builder_catalog_on(
         &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
+        tx: &tokio_postgres::Transaction<'_>,
         scope: &Scope,
         rows: bool,
     ) -> Result<Catalog, QueryError> {
-        let deadline = self.deadline_on(client).await?;
-        timeout_at(deadline, async {
-            let proof = self.tenancy.prove(client, scope).await?;
-            if proof.children().len() > self.setting_on(client, "max_children").await? as usize {
+        let deadline = self.deadline_on(tx).await?;
+        budgeted(tx, deadline, TOTAL_TIMEOUT, None, async {
+            let proof = self.tenancy.prove(tx, scope).await?;
+            if proof.children().len() > self.setting_on(tx, "max_children").await? as usize {
                 return Err(QueryError::Limit("too many consenting children"));
             }
-            Ok(Catalog::oversight_builder(client, &proof, rows).await?)
+            Ok(Catalog::oversight_builder(tx, &proof, rows).await?)
         })
         .await
-        .map_err(|_| QueryError::TooHeavy("oversight catalog timed out"))?
     }
     /// Validate a saved question on the caller's transaction. Each child read
     /// is bounded, audited, and SQL refusals recover at a savepoint. No child
@@ -524,22 +524,18 @@ impl OversightQueries {
         spec: &OversightSpec,
     ) -> Result<bool, QueryError> {
         let deadline = self.deadline_on(tx).await?;
-        let over_time = || QueryError::TooHeavy("oversight total time bound exceeded");
-        let (scope, child_ms, audit) = timeout_at(deadline, async {
+        let (scope, child_ms) = budgeted(tx, deadline, TOTAL_TIMEOUT, None, async {
             let scope = self.tenancy.prove(tx, scope).await?;
             if scope.children().len() > self.setting_on(tx, "max_children").await? as usize {
                 return Err(QueryError::Limit("too many consenting children"));
             }
-            let child_ms = self.setting_on(tx, "child_timeout_ms").await?;
-            let audit = self
-                .db
-                .get_detached("oversight audit")
-                .await
-                .map_err(Error::from)?;
-            Ok::<_, QueryError>((scope, child_ms, audit))
+            Ok((scope, self.setting_on(tx, "child_timeout_ms").await?))
         })
-        .await
-        .map_err(|_| over_time())??;
+        .await?;
+        let mut audit = timeout_at(deadline, self.db.try_get_detached("oversight audit"))
+            .await
+            .map_err(|_| QueryError::TooHeavy(TOTAL_TIMEOUT))?
+            .map_err(Error::from)?;
         let mut spec = spec.bounded(child_ms);
         if let OversightSpec::Rows { page, pages, .. } = &mut spec {
             *pages = scope
@@ -552,86 +548,69 @@ impl OversightQueries {
         let mut children = Vec::new();
         let mut rows = 0;
         for grant in scope.children() {
-            let start = Instant::now();
-            if start >= deadline {
-                return Err(over_time());
-            }
-            let child_deadline = deadline.min(start + Duration::from_millis(u64::from(child_ms)));
-            let mut bounds = spec.bounds();
-            bounds.statement_ms = bounds
-                .statement_ms
-                .min(child_deadline.duration_since(start).as_millis().max(100) as u32);
-            let result = crate::query::bounded(tx, bounds, async {
-                timeout_at(child_deadline, async {
+            let child_deadline =
+                deadline.min(Instant::now() + Duration::from_millis(u64::from(child_ms)));
+            let result = budgeted(
+                tx,
+                child_deadline,
+                CHILD_TIMEOUT,
+                Some(spec.bounds()),
+                async {
                     let catalog = Catalog::for_oversight(tx, &scope, grant, spec.rows()).await?;
                     let data = read_catalog(tx, &catalog, grant, root, &spec).await?;
                     Ok((format!("{catalog:?}"), data))
-                })
-                .await
-                .map_err(|_| QueryError::TooHeavy("oversight child read timed out"))?
-            })
+                },
+            )
             .await;
             if Instant::now() >= deadline {
-                return Err(over_time());
+                return Err(QueryError::TooHeavy(TOTAL_TIMEOUT));
             }
             let result = match result {
-                Ok((policy, data)) => timeout_at(child_deadline, async {
-                    audit_child(&**audit, &scope, grant, root, &spec, &policy, &data).await?;
-                    Ok(data.count())
-                })
-                .await
-                .unwrap_or(Err(QueryError::TooHeavy("oversight child audit timed out"))),
+                Ok((policy, data)) => {
+                    audit_before(&mut audit, child_deadline, CHILD_TIMEOUT, async |client| {
+                        audit_child(client, &scope, grant, root, &spec, &policy, &data).await?;
+                        Ok(data.count())
+                    })
+                    .await
+                }
                 Err(error) => Err(error),
             };
             let outcome = match result {
                 Ok(count) => {
                     rows += count;
-                    supported = true;
                     "ok"
                 }
-                Err(ref error) if revoked(error) => "revoked",
-                Err(QueryError::TooHeavy(why)) if why.contains("time") => {
-                    supported = true;
-                    "timed_out"
+                Err(QueryError::Database(error)) if !matches!(error, Error::Forbidden) => {
+                    return Err(error.into())
                 }
-                Err(QueryError::Limit(_) | QueryError::TooHeavy(_)) => {
-                    supported = true;
-                    "over_cost"
-                }
-                Err(QueryError::Database(error)) => return Err(error.into()),
-                Err(_) => "refused",
+                Err(error) => child_refusal(&error),
             };
+            supported |= matches!(outcome, "ok" | "timed_out" | "over_cost");
             children.push((grant.tenant(), outcome));
         }
-        if Instant::now() >= deadline {
-            return Err(over_time());
-        }
-        timeout_at(
-            deadline,
-            record_query(&**audit, &scope, root, rows, children.into_iter()),
-        )
-        .await
-        .map_err(|_| over_time())??;
-        if Instant::now() >= deadline {
-            return Err(over_time());
-        }
+        audit_before(&mut audit, deadline, TOTAL_TIMEOUT, async |client| {
+            record_query(client, &scope, root, rows, children.into_iter()).await
+        })
+        .await?;
         Ok(supported)
     }
 
     async fn deadline_on(
         &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
+        tx: &tokio_postgres::Transaction<'_>,
     ) -> Result<Instant, QueryError> {
         let start = Instant::now();
-        let millis = timeout(
-            Duration::from_secs(60),
-            self.setting_on(client, "total_timeout_ms"),
+        let millis = budgeted(
+            tx,
+            start + POLICY_TIMEOUT,
+            "oversight policy lookup timed out",
+            None,
+            self.setting_on(tx, "total_timeout_ms"),
         )
-        .await
-        .map_err(|_| QueryError::TooHeavy("oversight policy lookup timed out"))??;
+        .await?;
         let deadline = start + Duration::from_millis(u64::from(millis));
         if Instant::now() >= deadline {
-            return Err(QueryError::TooHeavy("oversight total time bound exceeded"));
+            return Err(QueryError::TooHeavy(TOTAL_TIMEOUT));
         }
         Ok(deadline)
     }
@@ -659,12 +638,143 @@ impl OversightData {
     }
 }
 
-fn revoked(error: &QueryError) -> bool {
-    matches!(
-        error,
+fn child_refusal(error: &QueryError) -> &'static str {
+    match error {
         QueryError::Database(Error::Forbidden)
-            | QueryError::Catalog(crate::CatalogError::Database(Error::Forbidden))
-    )
+        | QueryError::Catalog(crate::CatalogError::Database(Error::Forbidden)) => "revoked",
+        QueryError::TooHeavy(why) if why.contains("time") => "timed_out",
+        QueryError::TooHeavy(_) => "over_cost",
+        _ => "refused",
+    }
+}
+
+async fn budgeted<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    deadline: Instant,
+    time_error: &'static str,
+    bounds: Option<Bounds>,
+    work: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Result<T, QueryError> {
+    if Instant::now() >= deadline {
+        return Err(QueryError::TooHeavy(time_error));
+    }
+    if let Some(bounds) = bounds {
+        bounds.check()?;
+    }
+    crate::query::at_read_savepoint(tx, bounds.is_none(), async {
+        match timeout_at(deadline, async {
+            let previous = if bounds.is_none() {
+                Some(
+                    tx.query_one("SHOW statement_timeout", &[])
+                        .await?
+                        .get::<_, String>(0),
+                )
+            } else {
+                None
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(QueryError::TooHeavy(time_error));
+            }
+            let millis = (remaining.as_millis() + 1) as u32;
+            let sql = match bounds {
+                Some(mut bounds) => {
+                    bounds.statement_ms = bounds.statement_ms.min(millis);
+                    bounds.sql()
+                }
+                None => format!("SET LOCAL statement_timeout = '{millis}ms'"),
+            };
+            tx.batch_execute(&sql).await?;
+            let value = work.await?;
+            if let Some(previous) = previous {
+                tx.query_one(
+                    "SELECT set_config('statement_timeout', $1, true)",
+                    &[&previous],
+                )
+                .await?;
+            }
+            Ok(value)
+        })
+        .await
+        {
+            Ok(result) if Instant::now() < deadline => result.map_err(|error| {
+                if sql_cancelled(&error) {
+                    QueryError::TooHeavy(time_error)
+                } else {
+                    error
+                }
+            }),
+            Ok(_) => Err(QueryError::TooHeavy(time_error)),
+            Err(_) => {
+                tx.cancel_token()
+                    .cancel_query(tokio_postgres::NoTls)
+                    .await?;
+                Err(QueryError::TooHeavy(time_error))
+            }
+        }
+    })
+    .await
+}
+
+fn sql_cancelled(error: &QueryError) -> bool {
+    let traced = match error {
+        QueryError::Database(Error::Database(traced))
+        | QueryError::Catalog(crate::CatalogError::Database(Error::Database(traced))) => traced,
+        _ => return false,
+    };
+    std::error::Error::source(traced)
+        .and_then(|source| source.downcast_ref::<tokio_postgres::error::DbError>())
+        .is_some_and(|error| error.code() == &tokio_postgres::error::SqlState::QUERY_CANCELED)
+}
+
+async fn audit_before<T>(
+    client: &mut tokio_postgres::Client,
+    deadline: Instant,
+    time_error: &'static str,
+    work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<T, QueryError>,
+) -> Result<T, QueryError> {
+    if Instant::now() >= deadline {
+        return Err(QueryError::TooHeavy(time_error));
+    }
+    let tx = client.transaction().await?;
+    match budgeted(&tx, deadline, time_error, None, work(&tx)).await {
+        Ok(value) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                tx.rollback().await.map_err(Error::from)?;
+                return Err(QueryError::TooHeavy(time_error));
+            }
+            let cancel = tx.cancel_token();
+            let millis = remaining.as_millis() + 1;
+            match timeout_at(deadline, async {
+                tx.batch_execute(&format!("SET LOCAL statement_timeout = '{millis}ms'"))
+                    .await?;
+                tx.commit().await
+            })
+            .await
+            {
+                Ok(result) => {
+                    result?;
+                    if Instant::now() >= deadline {
+                        return Err(QueryError::TooHeavy(time_error));
+                    }
+                    Ok(value)
+                }
+                Err(_) => {
+                    cancel.cancel_query(tokio_postgres::NoTls).await?;
+                    client
+                        .batch_execute("ROLLBACK")
+                        .await
+                        .map_err(Error::from)?;
+                    Err(QueryError::TooHeavy(time_error))
+                }
+            }
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(Error::from)?;
+            Err(error)
+        }
+    }
 }
 
 async fn audit_child(

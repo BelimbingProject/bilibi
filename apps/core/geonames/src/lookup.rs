@@ -5,7 +5,7 @@
 use crate::model::*;
 use crate::query::*;
 use bilibi_database::{Db, MutationBoundary, Result};
-use bilibi_tenancy::ProofClient;
+use bilibi_tenancy::{ProofClient, ReadClient};
 use std::sync::Arc;
 use tokio_postgres::GenericClient;
 
@@ -240,6 +240,15 @@ impl Geonames {
 
     /// A country's divisions by name; an invalid country is empty.
     pub async fn list_admin1(&self, country_iso: &str) -> Result<Vec<Admin1Summary>> {
+        self.list_admin1_on(&**self.db.get().await?, country_iso)
+            .await
+    }
+
+    async fn list_admin1_on(
+        &self,
+        client: &(impl ReadClient + ?Sized),
+        country_iso: &str,
+    ) -> Result<Vec<Admin1Summary>> {
         let Some(iso) = normalize_iso(country_iso) else {
             return Ok(Vec::new());
         };
@@ -247,7 +256,7 @@ impl Geonames {
             "SELECT {} FROM geonames_admin1 WHERE country_iso=$1 ORDER BY name, code LIMIT {MAX_LIST}",
             Admin1Summary::COLUMNS
         );
-        let rows = self.db.get().await?.query(&sql, &[&iso]).await?;
+        let rows = client.query(&sql, &[&iso]).await?;
         Ok(rows.iter().map(Admin1Summary::from_row).collect())
     }
 
@@ -258,8 +267,18 @@ impl Geonames {
         country_iso: &str,
         name_and_code: bool,
     ) -> Result<Vec<(String, String)>> {
+        self.admin1_options_on(&**self.db.get().await?, country_iso, name_and_code)
+            .await
+    }
+
+    pub async fn admin1_options_on(
+        &self,
+        client: &(impl ReadClient + ?Sized),
+        country_iso: &str,
+        name_and_code: bool,
+    ) -> Result<Vec<(String, String)>> {
         Ok(self
-            .list_admin1(country_iso)
+            .list_admin1_on(client, country_iso)
             .await?
             .into_iter()
             .map(|admin1| {
@@ -333,6 +352,16 @@ impl Geonames {
     /// prefix within one country, ascending, at most ten. An empty prefix is
     /// the country's first ten; an invalid country is empty.
     pub async fn search_postcodes(&self, country_iso: &str, prefix: &str) -> Result<Vec<String>> {
+        self.search_postcodes_on(&**self.db.get().await?, country_iso, prefix)
+            .await
+    }
+
+    pub async fn search_postcodes_on(
+        &self,
+        client: &(impl ReadClient + ?Sized),
+        country_iso: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
         let prefix = prefix.trim();
         let Some(iso) = normalize_iso(country_iso) else {
             return Ok(Vec::new());
@@ -341,10 +370,7 @@ impl Geonames {
             return Ok(Vec::new());
         }
         let pattern = format!("{}%", escape_like(prefix));
-        let rows = self
-            .db
-            .get()
-            .await?
+        let rows = client
             .query(
                 &format!(
                     "SELECT DISTINCT postcode FROM geonames_postcodes \
@@ -364,6 +390,17 @@ impl Geonames {
     /// the same country; another country's identity matches nothing.
     pub async fn search_city_names(
         &self,
+        country_iso: &str,
+        query: &str,
+        admin1_code: Option<&str>,
+    ) -> Result<Vec<String>> {
+        self.search_city_names_on(&**self.db.get().await?, country_iso, query, admin1_code)
+            .await
+    }
+
+    pub async fn search_city_names_on(
+        &self,
+        client: &(impl ReadClient + ?Sized),
         country_iso: &str,
         query: &str,
         admin1_code: Option<&str>,
@@ -388,10 +425,7 @@ impl Geonames {
         } else {
             (Some(format!("{escaped}%")), Some(format!("%{escaped}%")))
         };
-        let rows = self
-            .db
-            .get()
-            .await?
+        let rows = client
             .query(
                 &format!(
                     "SELECT name FROM geonames_cities WHERE country_iso=$1 \
@@ -419,6 +453,16 @@ impl Geonames {
         country_iso: &str,
         postcode: &str,
     ) -> Result<Vec<PostcodeSummary>> {
+        self.lookup_postcode_on(&**self.db.get().await?, country_iso, postcode)
+            .await
+    }
+
+    pub async fn lookup_postcode_on(
+        &self,
+        client: &(impl ReadClient + ?Sized),
+        country_iso: &str,
+        postcode: &str,
+    ) -> Result<Vec<PostcodeSummary>> {
         let postcode = postcode.trim();
         let Some(iso) = normalize_iso(country_iso) else {
             return Ok(Vec::new());
@@ -431,7 +475,7 @@ impl Geonames {
              ORDER BY place_name, id LIMIT {POSTCODE_LOOKUP_LIMIT}",
             PostcodeSummary::COLUMNS
         );
-        let rows = self.db.get().await?.query(&sql, &[&iso, &postcode]).await?;
+        let rows = client.query(&sql, &[&iso, &postcode]).await?;
         Ok(rows.iter().map(PostcodeSummary::from_row).collect())
     }
 

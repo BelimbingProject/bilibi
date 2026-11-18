@@ -358,7 +358,11 @@ impl Catalog {
         let mut catalog = Self::for_scope(client, oversight.parent()).await?;
         let mut children = Vec::new();
         for grant in oversight.children() {
-            children.push(Self::for_oversight(client, oversight, grant, rows).await?);
+            match Self::for_oversight(client, oversight, grant, rows).await {
+                Ok(child) => children.push(child),
+                Err(CatalogError::Database(Error::Forbidden)) => {}
+                Err(error) => return Err(error),
+            }
         }
         catalog
             .tables
