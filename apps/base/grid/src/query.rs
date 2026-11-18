@@ -934,3 +934,79 @@ fn statement(
     // come from PostgreSQL metadata, never from a request.
     format!("WITH input AS (SELECT (id #>> '{{}}')::{key_cast} AS key, min(ord) AS ord FROM jsonb_array_elements($3::jsonb) WITH ORDINALITY AS x(id,ord) GROUP BY 1), actor AS (SELECT $1::bigint AS tenant, $2::bigint AS usr, $4::text::date AS trend_from, $5::text::date AS trend_to, $6::text::date AS since) SELECT {select} FROM input JOIN {} r ON {} = input.key CROSS JOIN actor ORDER BY input.ord LIMIT 101", source(root), field("r", root, root.key()))
 }
+
+/// Run a bounded read within a caller's transaction. The savepoint restores
+/// transaction-local limits and recovers SQL type errors a report preview
+/// must return as input refusals, without aborting its surrounding plan.
+pub(crate) async fn bounded<T>(
+    tx: &tokio_postgres::Transaction<'_>,
+    bounds: Bounds,
+    read: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Result<T, QueryError> {
+    bounds.check()?;
+    tx.batch_execute("SAVEPOINT grid_bounded_read").await?;
+    let result = async {
+        tx.batch_execute(&bounds.sql()).await?;
+        read.await
+    }
+    .await;
+    tx.batch_execute(
+        "ROLLBACK TO SAVEPOINT grid_bounded_read; RELEASE SAVEPOINT grid_bounded_read",
+    )
+    .await?;
+    result
+}
+
+/// Project fields on a connection already held by the caller's transaction.
+pub async fn project_on<S: AsRef<str>>(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    ids: &[Value],
+    specs: &[S],
+    bounds: Bounds,
+) -> Result<Projection, QueryError> {
+    bounded(tx, bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        project_catalog(tx, &catalog, root, ids, specs, &Lenses::default(), bounds).await
+    })
+    .await
+}
+
+/// Read one revealed field on the caller's transaction, with the same grant
+/// and current masking checks as [`reveal`].
+pub async fn reveal_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    grant: &bilibi_personal_data::Reveal,
+    table: &str,
+    field: &str,
+    key: &Value,
+) -> Result<Option<Value>, QueryError> {
+    grant
+        .check(scope, table, field)
+        .map_err(QueryError::Database)?;
+    bounded(tx, Bounds::default(), async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        if !catalog.masked(table, field) {
+            return Err(QueryError::Database(Error::Forbidden));
+        }
+        let catalog = Catalog::revealing(tx, scope, table, field).await?;
+        let projection = project_catalog(
+            tx,
+            &catalog,
+            table,
+            std::slice::from_ref(key),
+            &[field],
+            &Lenses::default(),
+            Bounds::default(),
+        )
+        .await?;
+        Ok(projection
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|mut row| row.cells.remove(field)))
+    })
+    .await
+}

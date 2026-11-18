@@ -541,7 +541,7 @@ async fn main() -> Result<()> {
     page_locates(&app, &admin, paged.id).await?;
 
     println!("== #564: matches past the candidate cap are counted, not lost");
-    let located = privacy.locate(&client, &admin.scope, paged.id).await?;
+    let located = privacy.locate(&admin.scope, paged.id).await?;
     let probe = located
         .iter()
         .find(|(store, _, _)| store == STORE)

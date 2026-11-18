@@ -236,7 +236,7 @@ impl ReadHandler for Get {
     }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
@@ -244,29 +244,28 @@ impl ReadHandler for Get {
             let id = input["company_id"]
                 .as_i64()
                 .ok_or(bilibi_database::Error::Invalid)?;
-            let client = db()?.get().await.map_err(bilibi_database::Error::from)?;
-            bilibi_authz::authorize_key(&**client, scope, VIEW).await?;
+            let client = client.sql_client().await?;
+            bilibi_authz::authorize_key(client, scope, VIEW).await?;
             let (company, masked) =
-                crate::detail(&**client, scope, id)
+                crate::detail(client, scope, id)
                     .await
                     .map_err(|error| match error {
                         bilibi_database::Error::NotFound => bilibi_agent_api::Error::NotFound,
                         other => other.into(),
                     })?;
-            let primary = crate::primary::is_primary(&**client, scope, id).await?;
-            let extension_values =
-                crate::field_contributions::read(&**client, scope, &[id]).await?;
+            let primary = crate::primary::is_primary(client, scope, id).await?;
+            let extension_values = crate::field_contributions::read(client, scope, &[id]).await?;
             let mut value = company.to_json();
             if let Some(fields) = extension_values.get(&id) {
                 for (field, field_value) in fields {
                     value_map_insert(&mut value, field, field_value.clone());
                 }
             }
-            let held = crate::field_contributions::custom_read(&**client, scope, &[id]).await?;
+            let held = crate::field_contributions::custom_read(client, scope, &[id]).await?;
             let held = held.get(&id);
             value["custom"] = Value::Array(
                 crate::field_contributions::custom_fields()?
-                    .active(&**client, scope, crate::field_contributions::CUSTOM_RECORD_TYPE)
+                    .active(client, scope, crate::field_contributions::CUSTOM_RECORD_TYPE)
                     .await?
                     .into_iter()
                     .map(|field| {

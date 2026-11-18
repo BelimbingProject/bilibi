@@ -58,6 +58,10 @@ pub type OperationFuture<'a> = Pin<Box<dyn Future<Output = Result<json::Output>>
 /// Object-safe read adapter, including list queries. Owners can pass this same
 /// client to Tenancy proof providers without opening an unrelated connection.
 pub trait OperationClient: bilibi_tenancy::ReadClient {
+    /// The same connection for an owner's existing GenericClient read API.
+    /// When this adapter wraps a transaction, queries still join that transaction.
+    /// Use only read operations, as for every operation preview.
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client>;
     /// The write door's existing transaction, when present. Owners whose
     /// proof adapters take Transaction borrow it instead of taking a second
     /// pooled connection. Use only reads and transaction-local locks during preview.
@@ -68,7 +72,11 @@ pub trait OperationClient: bilibi_tenancy::ReadClient {
         true
     }
 }
-impl<T: GenericClient + Sync> OperationClient for T {}
+impl<T: GenericClient + Sync> OperationClient for T {
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(GenericClient::client(self)) })
+    }
+}
 
 type PreviewReservations = Mutex<BTreeSet<(&'static str, String)>>;
 
@@ -95,6 +103,9 @@ impl bilibi_tenancy::ReadClient for TransactionRead<'_, '_, '_> {
     }
 }
 impl OperationClient for TransactionRead<'_, '_, '_> {
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(self.0.client()) })
+    }
     fn transaction(&self) -> Option<&tokio_postgres::Transaction<'_>> {
         Some(self.0)
     }
@@ -139,7 +150,11 @@ impl bilibi_tenancy::ReadClient for Pooled<'_> {
         Box::pin(async move { Ok(self.connection().await?.query(sql, params).await?) })
     }
 }
-impl OperationClient for Pooled<'_> {}
+impl OperationClient for Pooled<'_> {
+    fn sql_client(&self) -> bilibi_tenancy::ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(&***self.connection().await?) })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

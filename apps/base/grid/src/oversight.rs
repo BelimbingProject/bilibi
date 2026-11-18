@@ -306,54 +306,7 @@ impl OversightQueries {
                 .start()
                 .await?;
             tx.batch_execute(&spec.bounds().sql()).await?;
-            let data = match spec {
-                OversightSpec::Summary(spec) | OversightSpec::RowsSummary(spec) => {
-                    let summary =
-                        crate::summary::summarize_catalog(&tx, &catalog, root, spec).await?;
-                    OversightData::Summary(summary)
-                }
-                OversightSpec::Rows {
-                    page,
-                    columns,
-                    pages,
-                } => {
-                    let mut page = page.clone();
-                    let (keys, total) = if let Some((offset, limit)) = pages.get(&grant.tenant()) {
-                        page.offset = *offset;
-                        page.limit = *limit;
-                        let keys =
-                            crate::summary::page_keys_catalog(&tx, &catalog, root, &page).await?;
-                        (keys.keys, keys.total)
-                    } else {
-                        let summary = crate::summary::summarize_catalog(
-                            &tx,
-                            &catalog,
-                            root,
-                            &SummarySpec {
-                                bounds: page.bounds,
-                                filters: page.filters.clone(),
-                                groupings: vec![],
-                                measures: vec![],
-                                timezone: page.timezone.clone(),
-                                max_groups: 1,
-                            },
-                        )
-                        .await?;
-                        (vec![], summary.total.rows)
-                    };
-                    let projection = crate::query::project_catalog(
-                        &tx,
-                        &catalog,
-                        root,
-                        &keys,
-                        columns,
-                        &Lenses::default(),
-                        page.bounds,
-                    )
-                    .await?;
-                    OversightData::Rows { projection, total }
-                }
-            };
+            let data = read_catalog(&tx, &catalog, grant, root, spec).await?;
             tx.commit().await?;
             data
         };
@@ -515,4 +468,160 @@ pub(crate) fn service(
         services.get("base/settings.store")?,
         services.get(bilibi_tenancy::OVERSIGHT)?,
     )))
+}
+
+async fn read_catalog(
+    tx: &tokio_postgres::Transaction<'_>,
+    catalog: &Catalog,
+    grant: &ChildGrant,
+    root: &str,
+    spec: &OversightSpec,
+) -> Result<OversightData, QueryError> {
+    Ok(match spec {
+        OversightSpec::Summary(spec) | OversightSpec::RowsSummary(spec) => {
+            let summary = crate::summary::summarize_catalog(tx, catalog, root, spec).await?;
+            OversightData::Summary(summary)
+        }
+        OversightSpec::Rows {
+            page,
+            columns,
+            pages,
+        } => {
+            let mut page = page.clone();
+            let (keys, total) = if let Some((offset, limit)) = pages.get(&grant.tenant()) {
+                page.offset = *offset;
+                page.limit = *limit;
+                let keys = crate::summary::page_keys_catalog(tx, catalog, root, &page).await?;
+                (keys.keys, keys.total)
+            } else {
+                let summary = crate::summary::summarize_catalog(
+                    tx,
+                    catalog,
+                    root,
+                    &SummarySpec {
+                        bounds: page.bounds,
+                        filters: page.filters.clone(),
+                        groupings: vec![],
+                        measures: vec![],
+                        timezone: page.timezone.clone(),
+                        max_groups: 1,
+                    },
+                )
+                .await?;
+                (vec![], summary.total.rows)
+            };
+            let projection = crate::query::project_catalog(
+                tx,
+                catalog,
+                root,
+                &keys,
+                columns,
+                &Lenses::default(),
+                page.bounds,
+            )
+            .await?;
+            OversightData::Rows { projection, total }
+        }
+    })
+}
+
+impl OversightQueries {
+    /// Reprove oversight on the caller's held connection.
+    pub async fn prove_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+    ) -> Result<OversightScope, QueryError> {
+        Ok(self.tenancy.prove(client, scope).await?)
+    }
+    /// The same bounded builder intersection on the caller's connection.
+    pub async fn builder_catalog_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        rows: bool,
+    ) -> Result<Catalog, QueryError> {
+        let proof = self.prove_on(client, scope).await?;
+        if proof.children().len() > self.setting_on(client, "max_children").await? as usize {
+            return Err(QueryError::Limit("too many consenting children"));
+        }
+        timeout(
+            Duration::from_millis(u64::from(
+                self.setting_on(client, "total_timeout_ms").await?,
+            )),
+            async { Ok(Catalog::oversight_builder(client, &proof, rows).await?) },
+        )
+        .await
+        .map_err(|_| QueryError::TooHeavy("oversight catalog timed out"))?
+    }
+    /// Validate a saved question on the caller's transaction without taking
+    /// pool slots for child tasks. No child data leaves this probe. Each child
+    /// read is bounded and audited, and SQL refusals recover at a savepoint.
+    pub async fn probe_on(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &OversightScope,
+        root: &str,
+        spec: &OversightSpec,
+    ) -> Result<bool, QueryError> {
+        let scope = self.prove_on(tx, scope.parent()).await?;
+        if scope.children().len() > self.setting_on(tx, "max_children").await? as usize {
+            return Err(QueryError::Limit("too many consenting children"));
+        }
+        let spec = spec.bounded(self.setting_on(tx, "child_timeout_ms").await?);
+        let deadline = Instant::now()
+            + Duration::from_millis(u64::from(self.setting_on(tx, "total_timeout_ms").await?));
+        let mut supported = scope.children().is_empty();
+        for grant in scope.children() {
+            if Instant::now() >= deadline {
+                return Err(QueryError::TooHeavy("oversight total time bound exceeded"));
+            }
+            let result = crate::query::bounded(tx, spec.bounds(), async {
+                let catalog = Catalog::for_oversight(tx, &scope, grant, spec.rows()).await?;
+                read_catalog(tx, &catalog, grant, root, &spec).await
+            })
+            .await;
+            match result {
+                Ok(data) => {
+                    let count = match data {
+                        OversightData::Summary(s) => s.total.rows,
+                        OversightData::Rows { projection, .. } => projection.rows.len() as i64,
+                    };
+                    let (columns, filters) = spec.evidence();
+                    record_oversight_read(
+                        tx,
+                        &scope,
+                        grant,
+                        OversightRead {
+                            table: root,
+                            level: if spec.rows() { "rows" } else { "aggregates" },
+                            columns: &columns,
+                            filters: &filters,
+                            rows: count,
+                        },
+                    )
+                    .await?;
+                    supported = true;
+                }
+                Err(QueryError::Limit(_) | QueryError::TooHeavy(_)) => supported = true,
+                Err(QueryError::Database(error)) if !matches!(error, Error::Forbidden) => {
+                    return Err(error.into())
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(supported)
+    }
+    async fn setting_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        suffix: &str,
+    ) -> Result<u32, QueryError> {
+        Ok(self
+            .settings
+            .get_global(client, &format!("tenancy.oversight.{suffix}"))
+            .await?
+            .as_u64()
+            .ok_or(Error::Internal)? as u32)
+    }
 }

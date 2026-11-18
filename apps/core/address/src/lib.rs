@@ -120,11 +120,17 @@ impl AddressService {
         let address = store::read(&**client, &scope, id).await?;
         let owners = store::owners(&**client, &scope, id).await?;
         let country_name = match address.address.country_iso.as_deref() {
-            Some(iso) => self.geonames.get_country(iso).await?.map(|c| c.country),
+            Some(iso) => bilibi_geonames::country_summary(&**client, iso)
+                .await?
+                .map(|c| c.country),
             None => None,
         };
         let admin1_name = match address.address.admin1_code.as_deref() {
-            Some(code) => self.geonames.get_admin1(code).await?.map(|a| a.name),
+            Some(code) => self
+                .geonames
+                .get_admin1_on(&**client, code)
+                .await?
+                .map(|a| a.name),
             None => None,
         };
         Ok(Detail {

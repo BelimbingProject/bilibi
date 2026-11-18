@@ -217,6 +217,12 @@ edges and global text keys; then demonstrates cardinality refusal, input bounds,
 cost rejection, timeout and a successful projection after failure. It removes its
 reference rows on success. No unit tests or test runner are involved.
 
+## Reads inside an existing transaction
+
+Use `project_on`, `page_keys_on`, `summarize_on` and `query::reveal_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone reads keep their own read-only repeatable-read transaction.
+
+`OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on that same transaction. Probes run bounded child reads serially and audit each included read, returning only whether the question is supported, without returning child data or reserving additional pool connections.
+
 ## Grouped summaries and row pages (G5)
 
 The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant and user bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.

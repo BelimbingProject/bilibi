@@ -1945,7 +1945,7 @@ async fn main() -> Result<()> {
             },
         )
         .await?;
-    let found = privacy.locate(&client, &second.scope, request.id).await?;
+    let found = privacy.locate(&second.scope, request.id).await?;
     let candidates: Vec<String> = found
         .iter()
         .flat_map(|(store, _, located)| {
@@ -2021,7 +2021,7 @@ async fn main() -> Result<()> {
             },
         )
         .await?;
-    for (store, _, located) in privacy.locate(&client, &second.scope, request.id).await? {
+    for (store, _, located) in privacy.locate(&second.scope, request.id).await? {
         if store == "core/person.people" {
             for kind in located.kinds {
                 println!(

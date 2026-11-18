@@ -168,6 +168,7 @@ impl Editor {
     pub(super) async fn body(&self, scope: &Scope) -> Result<String> {
         let client = self.pages.db.get().await?;
         Instances::authorize_in(&**client, scope).await?;
+        drop(client);
         let instance = self.pages.instances.resolve().await?;
         let draft = |key: &str| {
             self.draft
@@ -205,6 +206,7 @@ impl Editor {
         )?;
         let mut body = render(role_step)?;
         body.push(&render(bilibi_ui::Alert { kind: StatusKind::Warning, body: Html::text("Production is the live system. Changing to or from Production changes the server's warnings and 2FA rules. It does not copy or remove any data. Every role change needs a fresh 2FA code."), ..Default::default() })?);
+        let client = self.pages.db.get().await?;
         for (key, label, hint) in [
             (
                 INSTANCE_LABEL_KEY,

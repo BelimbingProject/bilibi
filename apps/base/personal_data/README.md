@@ -38,6 +38,7 @@ inventory::submit! { Contribution::new(PERSONAL_DATA, "core/person.people", prov
 
 - Act on records linked to the person and on `Subject.confirmed`; never on another identifier match.
 - Changes record `[erased]` (`ERASED`) where a value was, so erasure reads apart from absence.
+- `Progress::record(client, step)` borrows the mutable connection given to `after_erase`; recording commits each completed step before the handler continues, without a second pool checkout.
 - Every call is idempotent, and decides by current values (not an earlier erasure's marker): a record changed after an erasure is erased again.
 - `ErasedRecord.person` names the record's person when the grant names none (a sweep), so kept evidence still honours a hold on that person.
 

@@ -27,6 +27,20 @@ fn reason_text(reason: &str) -> Result<&str> {
     Ok(reason)
 }
 
+fn reveal_reason<'a>(table: &str, field: &str, record: &Value, reason: &'a str) -> Result<&'a str> {
+    let reason = reason_text(reason)?;
+    if table.is_empty()
+        || table.len() > 200
+        || field.is_empty()
+        || field.len() > 200
+        || !matches!(record, Value::Number(_) | Value::String(_))
+        || record.to_string().len() > 256
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(reason)
+}
+
 impl Privacy {
     /// The full value of `field` of the `table` record keyed `record`, for a
     /// reader who sees it masked. Needs `privacy.field.reveal`, a reason (a
@@ -41,25 +55,51 @@ impl Privacy {
         record: &Value,
         reason: &str,
     ) -> Result<Option<String>> {
-        let reason = reason_text(reason)?;
-        if table.is_empty()
-            || table.len() > 200
-            || field.is_empty()
-            || field.len() > 200
-            || !matches!(record, Value::Number(_) | Value::String(_))
-            || record.to_string().len() > 256
-        {
-            return Err(Error::Invalid);
-        }
-        // Checked first, then the value is read, then the reveal is recorded
-        // and committed before the value is returned: no value without a
-        // record, no record of a reveal that read nothing, and no connection
-        // held while another is taken.
+        let reason = reveal_reason(table, field, record, reason)?;
         bilibi_authz::authorize_key(&**self.db.get().await?, scope, FIELD_REVEAL).await?;
         let target = format!("{table}.{field}:{}", record_text(record));
         self.step_up.require(scope, STEP_UP_REVEAL, &target).await?;
+        // Step-up owns its proof/evidence connection. Finish it before taking
+        // this facade's read/record connection, including under concurrent load.
+        let mut client = self.db.get().await?;
+        let tx = client.transaction().await?;
+        let value = self
+            .read_reveal_on(&tx, scope, table, field, record, reason)
+            .await?;
+        tx.commit().await?;
+        Ok(value)
+    }
+    /// Reveal and record on the write plan's held transaction. The plan
+    /// returns the value only after that transaction commits.
+    pub(crate) async fn reveal_field_on(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        table: &str,
+        field: &str,
+        record: &Value,
+        reason: &str,
+    ) -> Result<Option<String>> {
+        let reason = reveal_reason(table, field, record, reason)?;
+        bilibi_authz::authorize_key(tx, scope, FIELD_REVEAL).await?;
+        let target = format!("{table}.{field}:{}", record_text(record));
+        self.step_up.require(scope, STEP_UP_REVEAL, &target).await?;
+        self.read_reveal_on(tx, scope, table, field, record, reason)
+            .await
+    }
+    /// The one disclosure path, after the caller completed its capability and
+    /// Step-up checks. Recheck before recording and returning the full value.
+    async fn read_reveal_on(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        table: &str,
+        field: &str,
+        record: &Value,
+        reason: &str,
+    ) -> Result<Option<String>> {
         let grant = self.issuer.reveal(scope, table, field);
-        let value = bilibi_grid::query::reveal(&self.db, scope, &grant, table, field, record)
+        let value = bilibi_grid::query::reveal_on(tx, scope, &grant, table, field, record)
             .await
             .map_err(|error| match error {
                 QueryError::Database(error) => error,
@@ -67,19 +107,14 @@ impl Privacy {
                 _ => Error::Invalid,
             })?
             .ok_or(Error::NotFound)?;
-        let mut client = self.db.get().await?;
-        let tx = client.transaction().await?;
-        // Rechecked in the recording transaction: a capability removed since
-        // the read returns nothing.
-        bilibi_authz::authorize_key(&*tx, scope, FIELD_REVEAL).await?;
+        bilibi_authz::authorize_key(tx, scope, FIELD_REVEAL).await?;
         record_action(
-            &*tx,
+            tx,
             scope,
             "privacy.field.revealed",
-            json!({"table": table, "field": field, "record": record, "reason": reason}),
+            json!({"table":table,"field":field,"record":record,"reason":reason}),
         )
         .await?;
-        tx.commit().await?;
         Ok(match value {
             Value::Null => None,
             Value::String(text) => Some(text),

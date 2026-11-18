@@ -449,7 +449,7 @@ impl Handler for People {
                 if let Some(hold) = person_hold {
                     step.kept
                         .push(kept(KeptReason::LegalHold, None, Some(hold)));
-                    progress.record(step).await?;
+                    progress.record(client, step).await?;
                     continue;
                 }
                 match files
@@ -470,7 +470,7 @@ impl Handler for People {
                     Err(error) => return Err(artifact_error(error)),
                 }
                 // Saved now: a failure on the next document keeps this one counted.
-                progress.record(step).await?;
+                progress.record(client, step).await?;
             }
             Ok(())
         })

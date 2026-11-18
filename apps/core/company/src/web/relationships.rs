@@ -700,6 +700,7 @@ impl RolesPage {
         let client = self.shared.db.get().await?;
         let can_create = allowed(&**client, scope, CREATE).await?;
         let can_update = allowed(&**client, scope, UPDATE).await?;
+        drop(client);
         let roles = self
             .shared
             .company
@@ -866,7 +867,6 @@ impl RolesPage {
         })
     }
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
-        let client = self.shared.db.get().await?;
         let kind = get(value, "type");
         if kind != "grid" {
             self.flash.clear();
@@ -877,6 +877,7 @@ impl RolesPage {
             }
             "toggle_retired" => self.include_retired = !self.include_retired,
             "new" => {
+                let client = self.shared.db.get().await?;
                 if !allowed(&**client, scope, CREATE).await? {
                     return access(Error::Forbidden, &mut self.flash);
                 }
@@ -887,9 +888,11 @@ impl RolesPage {
                 });
             }
             "edit" => {
+                let client = self.shared.db.get().await?;
                 if !allowed(&**client, scope, UPDATE).await? {
                     return access(Error::Forbidden, &mut self.flash);
                 }
+                drop(client);
                 match self
                     .shared
                     .company
@@ -963,9 +966,11 @@ impl RolesPage {
                 }
             }
             "request_retire" => {
+                let client = self.shared.db.get().await?;
                 if !allowed(&**client, scope, UPDATE).await? {
                     return access(Error::Forbidden, &mut self.flash);
                 }
+                drop(client);
                 match self
                     .shared
                     .company
@@ -1320,6 +1325,7 @@ impl LinksPage {
             .ok_or(Error::NotFound)?;
         let writable = writable(&**client, scope, self.company.get()).await?;
         let can_update = writable == Writable::Yes;
+        drop(client);
         // A search the owner refuses (too long, or too many linked people to
         // search by name) shows why in place of the rows.
         let (mut links, refusal) = match self.links(scope).await {
@@ -1612,7 +1618,6 @@ impl LinksPage {
         }
     }
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
-        let client = self.shared.db.get().await?;
         let kind = get(value, "type");
         if !matches!(kind, "grid" | "validate") {
             self.flash.clear();
@@ -1629,15 +1634,17 @@ impl LinksPage {
                 self.list.put_page(None);
             }
             "new" => {
+                let client = self.shared.db.get().await?;
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
-                let roles = self.roles(scope).await?;
                 // The form opens with today as the start.
                 let today: String = client
                     .query_one("SELECT CURRENT_DATE::text", &[])
                     .await?
                     .get(0);
+                drop(client);
+                let roles = self.roles(scope).await?;
                 self.modal = Some(LinkModal {
                     editing: None,
                     ending: false,
@@ -1653,9 +1660,15 @@ impl LinksPage {
                 });
             }
             "edit" | "end" => {
+                let client = self.shared.db.get().await?;
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
+                let today: String = client
+                    .query_one("SELECT CURRENT_DATE::text", &[])
+                    .await?
+                    .get(0);
+                drop(client);
                 match self.find(scope, link_id(value)?).await? {
                     Some(entry) => {
                         let dates = &entry.relationship.dates;
@@ -1672,10 +1685,6 @@ impl LinksPage {
                             ),
                         ]);
                         if kind == "end" {
-                            let today: String = client
-                                .query_one("SELECT CURRENT_DATE::text", &[])
-                                .await?
-                                .get(0);
                             values.insert("effective_to".into(), today);
                         }
                         self.modal = Some(LinkModal {
@@ -1753,9 +1762,11 @@ impl LinksPage {
                 }
             }
             "save_relationship" => {
+                let client = self.shared.db.get().await?;
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
+                drop(client);
                 let Some(modal) = self.modal.as_mut() else {
                     return Ok(());
                 };
@@ -1879,9 +1890,11 @@ impl LinksPage {
                 }
             }
             "request_unlink" => {
+                let client = self.shared.db.get().await?;
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
+                drop(client);
                 match self.find(scope, link_id(value)?).await? {
                     Some(entry) => self.pending_unlink = Some(entry),
                     None => self.flash.error("Relationship not found."),
@@ -1892,9 +1905,11 @@ impl LinksPage {
                 let Some(entry) = self.pending_unlink.take() else {
                     return Ok(());
                 };
+                let client = self.shared.db.get().await?;
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
+                drop(client);
                 let input = json!({"relationship_id": entry.relationship.id.get(), "version": entry.relationship.version});
                 match self
                     .shared

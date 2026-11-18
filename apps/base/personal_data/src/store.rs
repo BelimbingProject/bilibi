@@ -323,7 +323,7 @@ pub struct Deferral {
 /// Where a store's `after_erase` records each step as it goes, so a retry
 /// after a failure still reports what earlier attempts did.
 pub trait Progress: Send + Sync {
-    fn record<'a>(&'a self, step: Erased) -> HandlerFuture<'a, ()>;
+    fn record<'a>(&'a self, client: &'a mut Client, step: Erased) -> HandlerFuture<'a, ()>;
 }
 
 /// Implement on the store owner's own type. `base/privacy` checks the

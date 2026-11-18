@@ -316,7 +316,7 @@ async fn main() -> Result<()> {
         .await?;
     let mut candidates = None;
     let mut summaries = std::collections::HashMap::new();
-    for (store, _, found) in privacy.locate(&client, &admin, access.id).await? {
+    for (store, _, found) in privacy.locate(&admin, access.id).await? {
         if store == STORE {
             for candidate in &found.candidates {
                 println!("  candidate {}: {}", candidate.id, candidate.summary);

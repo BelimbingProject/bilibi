@@ -34,6 +34,9 @@ impl ReadClient for Caller<'_, '_> {
     }
 }
 impl OperationClient for Caller<'_, '_> {
+    fn sql_client(&self) -> ProofFuture<'_, &tokio_postgres::Client> {
+        Box::pin(async move { Ok(self.0.client()) })
+    }
     fn transaction(&self) -> Option<&Transaction<'_>> {
         Some(self.0)
     }

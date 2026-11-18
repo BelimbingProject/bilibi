@@ -290,7 +290,7 @@ impl BulkData {
                 Err(bilibi_artifacts::Error::Database(error)) => return Err(error),
                 Err(_) => return Err(Error::Internal),
             }
-            progress.record(step).await?;
+            progress.record(client, step).await?;
         }
         Ok(gone)
     }

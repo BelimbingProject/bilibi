@@ -86,8 +86,7 @@ impl Person<'_> {
             .app
             .services
             .get::<Registry>("base/agent_api.registry")?;
-        let client = self.db.get().await?;
-        Ok(registry.call(&**client, &self.scope, key, &input).await?["result"].clone())
+        Ok(registry.read(self.db, &self.scope, key, &input).await?["result"].clone())
     }
     /// The ids of the contacts a global search finds.
     async fn found(&self, text: &str) -> Result<Vec<String>, Failure> {

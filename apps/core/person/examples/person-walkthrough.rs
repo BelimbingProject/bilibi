@@ -157,9 +157,20 @@ async fn main() -> Result<(), Failure> {
     );
     let concurrent = human("Concurrent Contact");
     let (left, right) = tokio::join!(
-        people.create(&manager, &concurrent),
-        people.create(&manager, &concurrent)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let concurrent = concurrent.clone();
+            async move { people.create(&manager, &concurrent).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let concurrent = concurrent.clone();
+            async move { people.create(&manager, &concurrent).await }
+        })
     );
+    let (left, right) = (left?, right?);
     show("concurrent same-name codes", (left?.code, right?.code));
     show(
         "non-Latin name gets a generated code",
@@ -336,10 +347,22 @@ async fn main() -> Result<(), Failure> {
         version: 1,
         identity: human("Amina Second"),
     };
+    let id = alice.id;
     let (first, second_save) = tokio::join!(
-        people.update(&manager, alice.id, &first_edit),
-        people.update(&manager, alice.id, &second_edit)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let first_edit = first_edit.clone();
+            async move { people.update(&manager, id, &first_edit).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            let second_edit = second_edit.clone();
+            async move { people.update(&manager, id, &second_edit).await }
+        })
     );
+    let (first, second_save) = (first?, second_save?);
     show("concurrent version writes", (&first, &second_save));
     let current = people.read(&manager, alice.id).await?;
     show(
@@ -672,9 +695,18 @@ async fn main() -> Result<(), Failure> {
         )
         .await?;
     let (first_provision, concurrent_provision) = tokio::join!(
-        people.ensure_platform_orchestrator(&manager),
-        people.ensure_platform_orchestrator(&manager)
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            async move { people.ensure_platform_orchestrator(&manager).await }
+        }),
+        tokio::spawn({
+            let people = people.clone();
+            let manager = manager.clone();
+            async move { people.ensure_platform_orchestrator(&manager).await }
+        })
     );
+    let (first_provision, concurrent_provision) = (first_provision?, concurrent_provision?);
     let (system, created) = first_provision?;
     show("operator system identity created", (&system, created));
     show(

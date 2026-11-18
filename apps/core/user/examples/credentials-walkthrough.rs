@@ -301,8 +301,20 @@ async fn main() -> Result<()> {
         .get(0);
     println!("the next request replaced the expired token: {}", rows == 0);
     let (a, b) = tokio::join!(
-        users.reset_password(email, &racing, "race-secret-5"),
-        users.reset_password(email, &racing, "race-secret-6")
+        tokio::spawn({
+            let users = users.clone();
+            let racing = racing.clone();
+            async move { users.reset_password(email, &racing, "race-secret-5").await }
+        }),
+        tokio::spawn({
+            let users = users.clone();
+            let racing = racing.clone();
+            async move { users.reset_password(email, &racing, "race-secret-6").await }
+        })
+    );
+    let (a, b) = (
+        a.map_err(|_| Error::Internal)?,
+        b.map_err(|_| Error::Internal)?,
     );
     println!(
         "two simultaneous resets with one token: {} / {}",

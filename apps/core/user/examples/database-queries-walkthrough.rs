@@ -110,7 +110,24 @@ async fn main() -> Result<()> {
         Error::Internal
     })?;
     println!("created: {first:?}");
-    let (a, b) = tokio::join!(queries.create(actor, &input), queries.create(actor, &input));
+    let (a, b) = tokio::join!(
+        tokio::spawn({
+            let queries = queries.clone();
+            let input = input.clone();
+            let actor = (*actor).clone();
+            async move { queries.create(&actor, &input).await }
+        }),
+        tokio::spawn({
+            let queries = queries.clone();
+            let input = input.clone();
+            let actor = (*actor).clone();
+            async move { queries.create(&actor, &input).await }
+        })
+    );
+    let (a, b) = (
+        a.map_err(|_| Error::Internal)?,
+        b.map_err(|_| Error::Internal)?,
+    );
     println!("concurrent same-name creations: {a:?} / {b:?}");
     println!(
         "list: {:?}",
