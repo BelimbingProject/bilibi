@@ -139,16 +139,16 @@ async fn settle(privacy: &Privacy, client: &Client, scope: &Scope, id: i64) -> R
 /// sees it. Run once for a person-owned pin and once for a company-owned pin.
 async fn prove_pin_commits_while_erasure_waits(
     db: &bilibi_database::Db,
+    client: &mut Client,
     boundary: &MutationBoundary,
     documents: &Documents,
     scope: &Scope,
     document_id: i64,
     owner: &Reference,
 ) -> Result<()> {
-    let mut pin_client = db.get_detached("privacy walkthrough pin race").await?;
     let mut pin_tx = boundary
         .begin(
-            &mut pin_client,
+            client,
             scope.mutation_context("core.document.protect_revision"),
         )
         .await?;
@@ -194,9 +194,7 @@ async fn prove_pin_commits_while_erasure_waits(
 
     let mut observed_wait = false;
     for _ in 0..100 {
-        let monitor = db
-            .get_detached("observe privacy walkthrough lock wait")
-            .await?;
+        let monitor = db.get().await?;
         observed_wait = monitor
             .query_opt(
                 "SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock'",
@@ -407,9 +405,27 @@ async fn main() -> Result<()> {
     let [(a, a_file), (b, _), (c, c_file), (d, _), (e, e_file), (f, _), (g, _), (h, h_file), (i, i_file)] =
         <[_; 9]>::try_from(filed).map_err(|_| "nine documents")?;
     println!("== concurrent pin and erasure lock ordering");
-    prove_pin_commits_while_erasure_waits(&db, &boundary, &documents, &admin, h, &person).await?;
+    prove_pin_commits_while_erasure_waits(
+        &db,
+        &mut client,
+        &boundary,
+        &documents,
+        &admin,
+        h,
+        &person,
+    )
+    .await?;
     println!("  ok: person-owned pin committed while erasure waited; fresh check sees it");
-    prove_pin_commits_while_erasure_waits(&db, &boundary, &documents, &admin, i, &company).await?;
+    prove_pin_commits_while_erasure_waits(
+        &db,
+        &mut client,
+        &boundary,
+        &documents,
+        &admin,
+        i,
+        &company,
+    )
+    .await?;
     println!("  ok: shared company-owned pin committed while erasure waited; fresh check sees it");
     let e_subject = e_file
         .strip_prefix("upload:")
