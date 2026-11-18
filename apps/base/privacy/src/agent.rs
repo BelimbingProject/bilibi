@@ -84,9 +84,9 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let privacy = privacy()?;
-            let client = privacy.db.get().await.map_err(Error::from)?;
             let data = match self {
                 Self::Requests => {
+                    let client = privacy.db.get().await.map_err(Error::from)?;
                     let open = input["open"].as_bool().unwrap_or(false);
                     let search = input["search"].as_str().unwrap_or("");
                     let offset = input["offset"].as_i64().unwrap_or(0);
@@ -97,10 +97,10 @@ impl ReadHandler for Read {
                     json!({"requests": rows.iter().map(request_json).collect::<Vec<_>>(), "total": total})
                 }
                 Self::Request => {
+                    let client = privacy.db.get().await.map_err(Error::from)?;
                     json!({"request": request_json(&privacy.request(&**client, scope, id(input, "id")?).await?)})
                 }
                 Self::Locate => {
-                    drop(client);
                     let found = privacy.locate(scope, id(input, "id")?).await?;
                     json!({"stores": found.iter().map(|(store, label, located)| json!({
                         "store": store, "label": label, "kinds": located.kinds,
@@ -108,6 +108,7 @@ impl ReadHandler for Read {
                     })).collect::<Vec<_>>()})
                 }
                 Self::Holds => {
+                    let client = privacy.db.get().await.map_err(Error::from)?;
                     let page = privacy
                         .holds(
                             &**client,
@@ -128,6 +129,7 @@ impl ReadHandler for Read {
                         }
                         None => None,
                     };
+                    let client = privacy.db.get().await.map_err(Error::from)?;
                     let (company, classes) =
                         privacy.retention_classes(&client, scope, company).await?;
                     json!({"company_id": company.map(OrganisationId::get), "classes": classes})

@@ -512,9 +512,9 @@ impl Reports {
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let tx = client.transaction().await.map_err(Error::from)?;
-        let result = self.check_on(&tx, scope, draft).await;
-        tx.rollback().await.map_err(Error::from)?;
-        result
+        self.check_on(&tx, scope, draft).await?;
+        tx.commit().await.map_err(Error::from)?;
+        Ok(())
     }
     async fn check_on(
         &self,
@@ -582,7 +582,6 @@ impl Reports {
         if draft.definition.oversight {
             // Every spec has resolved against live consent; execution uses
             // the same bounded audited path as a reader, never a child Scope.
-            let proof = self.oversight.prove_on(tx, scope).await.map_err(grid)?;
             let spec = if draft.kind == Kind::Rows {
                 bilibi_grid::OversightSpec::Rows {
                     page: PageSpec {
@@ -594,11 +593,7 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    pages: proof
-                        .children()
-                        .iter()
-                        .map(|child| (child.tenant(), (0, 1)))
-                        .collect(),
+                    pages: BTreeMap::new(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {
@@ -612,7 +607,7 @@ impl Reports {
             };
             let probe = self
                 .oversight
-                .probe_on(tx, &proof, &draft.record_type, &spec)
+                .probe_on(tx, scope, &draft.record_type, &spec)
                 .await
                 .map_err(grid)?;
             if !probe {
@@ -1063,11 +1058,8 @@ impl Reports {
 
     /// One built-in report the reader can run.
     pub async fn builtin(&self, scope: &Scope, key: &str) -> Outcome<Report> {
-        self.builtins(scope)
-            .await?
-            .into_iter()
-            .find(|r| r.builtin == Some(key))
-            .ok_or(ReportError::NotFound)
+        let client = self.db.get().await.map_err(Error::from)?;
+        self.builtin_on(&**client, scope, key).await
     }
 
     async fn builtin_on(
