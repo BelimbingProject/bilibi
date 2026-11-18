@@ -191,28 +191,7 @@ impl JobContracts {
         let output = owner
             .preview(&crate::TransactionRead(&tx, &reservations), &scope, input)
             .await;
-        // A normal refusal may have recorded the owner's authorization decision.
-        // Preserve that evidence; infrastructure failures still roll back.
-        if matches!(
-            &output,
-            Ok(_)
-                | Err(Error::Forbidden
-                    | Error::NotFound
-                    | Error::InvalidInput(_)
-                    | Error::Backend(
-                        bilibi_database::Error::Unauthorized
-                            | bilibi_database::Error::Forbidden
-                            | bilibi_database::Error::NotFound
-                            | bilibi_database::Error::Invalid
-                            | bilibi_database::Error::Refused(_)
-                            | bilibi_database::Error::Conflict
-                            | bilibi_database::Error::StepUpRequired { .. }
-                    ))
-        ) {
-            tx.commit().await.map_err(bilibi_database::Error::from)?;
-        } else {
-            tx.rollback().await.map_err(bilibi_database::Error::from)?;
-        }
+        crate::finish_read_transaction(tx, &output).await?;
         output.map(|output| output.envelope(key))
     }
 
@@ -258,7 +237,7 @@ impl JobContracts {
     /// capability decision as `Registry::call`.
     pub async fn read(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &mut (impl GenericClient + Sync),
         execution: &Execution,
         key: &str,
         input: &Value,

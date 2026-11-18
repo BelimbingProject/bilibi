@@ -788,7 +788,7 @@ impl BulkData {
     async fn build(
         &self,
         execution: &Execution,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         scope: &Scope,
         run: &ExportRun,
     ) -> Result<std::result::Result<(i32, Vec<u8>, String), Failed>> {
@@ -935,7 +935,7 @@ impl BulkData {
     pub(crate) async fn read_list(
         &self,
         execution: &Execution,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         registered: &Registered,
         list: &str,
         filter: &Value,

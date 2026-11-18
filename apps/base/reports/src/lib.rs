@@ -665,7 +665,7 @@ impl Reports {
                     bounds,
                 )
                 .await?;
-                bilibi_grid::page_keys_on(
+                bilibi_grid::validate_page_on(
                     tx,
                     scope,
                     &draft.record_type,
@@ -678,10 +678,10 @@ impl Reports {
                         limit: 1,
                     },
                 )
-                .await?;
+                .await
             }
             Kind::Summary | Kind::Matrix => {
-                bilibi_grid::summarize_on(
+                bilibi_grid::validate_summary_on(
                     tx,
                     scope,
                     &draft.record_type,
@@ -694,10 +694,9 @@ impl Reports {
                         max_groups: bilibi_grid::MAX_RESULT_GROUPS,
                     },
                 )
-                .await?;
+                .await
             }
         }
-        Ok(())
     }
 
     /// The record types the reader can report on, as `(id, label)`, by label.

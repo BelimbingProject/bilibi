@@ -32,10 +32,10 @@ pub use query::{
 };
 pub use shared_views::{Audience, SharedView, SHARE as SHARE_VIEWS};
 pub use summary::{
-    page_keys, page_keys_on, summarize, summarize_on, Bounds, Bucket, Filter, Grouping, KeyPage,
-    Line, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES, MAX_COST_BOUND,
-    MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS, MAX_SORTS,
-    MAX_STATEMENT_MS, MAX_TEXT,
+    page_keys, summarize, validate_page_on, validate_summary_on, Bounds, Bucket, Filter, Grouping,
+    KeyPage, Line, Measure, PageSpec, Period, Sort, Summary, SummarySpec, Test, MAX_CHOICES,
+    MAX_COST_BOUND, MAX_FILTERS, MAX_GROUPINGS, MAX_MEASURES, MAX_OFFSET, MAX_RESULT_GROUPS,
+    MAX_SORTS, MAX_STATEMENT_MS, MAX_TEXT,
 };
 pub use view::View;
 

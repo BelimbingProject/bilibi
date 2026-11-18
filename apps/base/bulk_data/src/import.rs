@@ -181,7 +181,11 @@ impl Work<'_> {
     }
 
     /// The row as the create contract's input, or why it cannot be.
-    async fn plan(&mut self, client: &tokio_postgres::Client, cells: &[String]) -> Result<Planned> {
+    async fn plan(
+        &mut self,
+        client: &mut tokio_postgres::Client,
+        cells: &[String],
+    ) -> Result<Planned> {
         let mut input = Map::new();
         let mut problems = Vec::new();
         for entry in self.mapping.fields.clone() {
@@ -356,7 +360,7 @@ impl Work<'_> {
     /// The one record a lookup read finds for the cell's value.
     async fn lookup(
         &mut self,
-        client: &tokio_postgres::Client,
+        client: &mut tokio_postgres::Client,
         field: &Field,
         text: &str,
     ) -> Result<std::result::Result<Option<Value>, String>> {
@@ -525,7 +529,7 @@ impl BulkData {
         while next < parsed.rows.len() && started.elapsed() < SLICE {
             let cells = &parsed.rows[next];
             let row = next as i32 + 1;
-            let planned = work.plan(&*client, cells).await?;
+            let planned = work.plan(client, cells).await?;
             let key = work.source_key(cells);
             match pass {
                 Pass::Preview => {

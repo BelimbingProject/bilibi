@@ -737,11 +737,11 @@ async fn agent(
         Ok::<_, Error>(count)
     };
     println!("-- reviewed writes (agent operations)");
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
     let lists = registry
-        .call(&**client, &admin, "base.picklists.lists", &json!({}))
+        .call(&mut **client, &admin, "base.picklists.lists", &json!({}))
         .await?;
     println!(
         "base.picklists.lists: {:?}",
@@ -754,7 +754,7 @@ async fn agent(
     );
     let values = registry
         .call(
-            &**client,
+            &mut **client,
             &admin,
             "base.picklists.values",
             &json!({"list": CATEGORY}),

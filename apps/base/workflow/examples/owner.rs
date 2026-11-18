@@ -379,12 +379,12 @@ async fn main() -> Result<()> {
         }
         "approval-agent-read" => {
             let registry = services.get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
-            let client = db.get().await?;
+            let mut client = db.get().await?;
             println!(
                 "{:?}",
                 registry
                     .call(
-                        &**client,
+                        &mut **client,
                         &scope,
                         "base.workflow.approvals.list",
                         &json!({"page_size":100})

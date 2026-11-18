@@ -188,6 +188,9 @@ pub enum Kind {
 /// identity fields. They must apply owner authorization and field restrictions.
 pub trait ReadHandler: Send + Sync {
     fn owner(&self) -> &'static str;
+    fn requires_transaction(&self) -> bool {
+        false
+    }
     fn call<'a>(
         &'a self,
         client: &'a dyn OperationClient,
@@ -791,7 +794,7 @@ impl Registry {
     /// handler runs.
     pub async fn call(
         &self,
-        client: &(impl GenericClient + Sync),
+        client: &mut (impl GenericClient + Sync),
         scope: &Scope,
         key: &str,
         input: &Value,
@@ -801,8 +804,33 @@ impl Registry {
         let Handler::Read(handler) = op.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        Ok(handler.call(client, scope, input).await?.envelope(key))
+        let output = if handler.requires_transaction() {
+            transactional_read(client, handler, scope, input).await?
+        } else {
+            handler.call(client, scope, input).await?
+        };
+        Ok(output.envelope(key))
     }
+
+    pub async fn call_in(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+        key: &str,
+        input: &Value,
+    ) -> Result<Value> {
+        let op = self.admitted(key, scope, input)?;
+        authorize_read(tx, scope, op.capability, input).await?;
+        let Handler::Read(handler) = op.handler else {
+            return Err(Error::WritesNotEnabled);
+        };
+        let reservations = PreviewReservations::default();
+        let output = handler
+            .call(&TransactionRead(tx, &reservations), scope, input)
+            .await?;
+        Ok(output.envelope(key))
+    }
+
     /// Runs read operation `key` for `scope` from the pool, as the `/api/v1`,
     /// MCP and page doors do. The capability check takes a pooled connection
     /// and returns it; the handler then runs with no connection held here, on
@@ -824,11 +852,17 @@ impl Registry {
         let Handler::Read(handler) = op.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        let client = Pooled {
-            db,
-            connection: tokio::sync::OnceCell::new(),
+        let output = if handler.requires_transaction() {
+            let mut client = db.get().await.map_err(bilibi_database::Error::from)?;
+            transactional_read(&mut **client, handler, scope, input).await?
+        } else {
+            let client = Pooled {
+                db,
+                connection: tokio::sync::OnceCell::new(),
+            };
+            handler.call(&client, scope, input).await?
         };
-        Ok(handler.call(&client, scope, input).await?.envelope(key))
+        Ok(output.envelope(key))
     }
     /// Operation `key` when `scope`'s channel may call it and `input` fits
     /// its schema.
@@ -841,6 +875,50 @@ impl Registry {
         schema::validate(&registered.input, input).map_err(Error::InvalidInput)?;
         Ok(op)
     }
+}
+async fn transactional_read(
+    client: &mut (impl GenericClient + Sync),
+    handler: &dyn ReadHandler,
+    scope: &Scope,
+    input: &Value,
+) -> Result<json::Output> {
+    let tx = client
+        .transaction()
+        .await
+        .map_err(bilibi_database::Error::from)?;
+    let reservations = PreviewReservations::default();
+    let output = handler
+        .call(&TransactionRead(&tx, &reservations), scope, input)
+        .await;
+    finish_read_transaction(tx, &output).await?;
+    output
+}
+
+async fn finish_read_transaction<T>(
+    tx: tokio_postgres::Transaction<'_>,
+    output: &Result<T>,
+) -> Result<()> {
+    if matches!(
+        output,
+        Ok(_)
+            | Err(Error::Forbidden
+                | Error::NotFound
+                | Error::InvalidInput(_)
+                | Error::Backend(
+                    bilibi_database::Error::Unauthorized
+                        | bilibi_database::Error::Forbidden
+                        | bilibi_database::Error::NotFound
+                        | bilibi_database::Error::Invalid
+                        | bilibi_database::Error::Refused(_)
+                        | bilibi_database::Error::Conflict
+                        | bilibi_database::Error::StepUpRequired { .. }
+                ))
+    ) {
+        tx.commit().await.map_err(bilibi_database::Error::from)?;
+    } else {
+        tx.rollback().await.map_err(bilibi_database::Error::from)?;
+    }
+    Ok(())
 }
 /// An operation's explicit company decides it, else the scope's workplace,
 /// leaving the browser's chosen desk unchanged. Reads, plan previews and

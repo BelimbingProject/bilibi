@@ -95,10 +95,10 @@ async fn main() -> Result<(), Failure> {
     let viewer = app.security.guard(&viewer_login.token).await?;
     let staff = app.security.guard(&staff_login.token).await?;
     let other = app.security.guard(&other_login.token).await?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
-    let client: &tokio_postgres::Client = &client;
+    let client: &mut tokio_postgres::Client = &mut client;
     let before: i64 = client
         .query_one("SELECT count(*) FROM users", &[])
         .await?
@@ -498,10 +498,11 @@ async fn main() -> Result<(), Failure> {
     let gated_id = gated.id.get().to_string();
     let audit_rows =
         "SELECT count(*) FROM base_audit_mutations WHERE auditable_type='person' AND auditable_id=$1";
+    let sql = &*client;
     let audited = |label: &'static str| {
         let gated_id = gated_id.clone();
         async move {
-            let rows: i64 = client.query_one(audit_rows, &[&gated_id]).await?.get(0);
+            let rows: i64 = sql.query_one(audit_rows, &[&gated_id]).await?.get(0);
             show(label, rows);
             Ok::<_, Failure>(())
         }

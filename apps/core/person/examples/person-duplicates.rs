@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn Failure>> {
         .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
     let value = tokio::time::timeout(
         Duration::from_secs(5),
-        registry.call(
+        registry.call_in(
             tx.sql(),
             &manager,
             "core.person.duplicates",
@@ -335,12 +335,12 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     );
     println!("ok: rollback removes Person and audit effects, publishes nothing, restores policy; pooled convenience retained");
     db.resize(2);
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
     let value = registry
         .call(
-            &**client,
+            &mut **client,
             &manager,
             "core.person.get",
             &json!({"person_id":retired.id}),
@@ -349,7 +349,7 @@ async fn main() -> Result<(), Box<dyn Failure>> {
     assert_eq!(value["result"]["id"], json!(retired.id));
     let value = registry
         .call(
-            &**client,
+            &mut **client,
             &manager,
             "core.person.list",
             &json!({"search":"Retired Candidate"}),

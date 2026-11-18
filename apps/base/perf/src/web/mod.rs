@@ -4,7 +4,7 @@ mod panel;
 mod view;
 
 use crate::{Filter, Kind, Outcome, Recorder, Store, Windows, VIEW};
-use bilibi_database::{Db, Error, Result};
+use bilibi_database::{Connection, Db, Error, Result};
 use bilibi_datetime::DisplayPolicy;
 use bilibi_locale::Locales;
 use bilibi_module_registry::{
@@ -67,6 +67,11 @@ impl Pages {
         let client = self.db.get().await?;
         bilibi_authz::authorize_operator(&**client, scope, VIEW).await?;
         Ok(())
+    }
+
+    async fn replace_connection(&self, client: Connection) -> Result<Connection> {
+        drop(Connection::take(client));
+        self.db.get().await.map_err(Error::from)
     }
 }
 
@@ -148,26 +153,26 @@ impl Index {
         let hour = Duration::from_secs(3600);
         let recorder = &self.pages.recorder;
         let mut client = self.pages.db.get().await?;
-        let sql = Some(&**client);
-        let diagnostics = recorder.diagnostics_on(sql).await;
-        let views = if diagnostics.store == Store::Unavailable {
-            if self.tab == TABS[1].0 {
-                view::Views::Samples(Err(Error::Internal))
-            } else {
-                view::Views::Slowdowns {
-                    regressions: Err(Error::Internal),
-                    slowest: Err(Error::Internal),
-                }
-            }
-        } else if self.tab == TABS[1].0 {
-            let mut samples = recorder.list_samples_on(sql, &self.filter()).await;
+        let diagnostics = recorder.diagnostics_on(Some(&**client)).await;
+        if diagnostics.store == Store::Unavailable {
+            client = self.pages.replace_connection(client).await?;
+        }
+        let views = if self.tab == TABS[1].0 {
+            let mut samples = recorder
+                .list_samples_on(Some(&**client), &self.filter())
+                .await;
             if let Ok(page) = &samples {
                 if self
                     .list
                     .clamp_to_last_page((page.total as u64).div_ceil(self.list.page_size), true)
                 {
-                    samples = recorder.list_samples_on(sql, &self.filter()).await;
+                    samples = recorder
+                        .list_samples_on(Some(&**client), &self.filter())
+                        .await;
                 }
+            }
+            if samples.is_err() {
+                client = self.pages.replace_connection(client).await?;
             }
             view::Views::Samples(samples)
         } else {
@@ -179,32 +184,21 @@ impl Index {
                 min_samples: 5,
                 limit: 10,
             };
-            let regressions = recorder.regressions_on(sql, &windows).await;
-            let slowest = if regressions.is_ok() {
-                recorder.slowest_on(sql, now - hour * 24, now, 10).await
-            } else {
-                Err(Error::Internal)
-            };
+            let regressions = recorder.regressions_on(Some(&**client), &windows).await;
+            if regressions.is_err() {
+                client = self.pages.replace_connection(client).await?;
+            }
+            let slowest = recorder
+                .slowest_on(Some(&**client), now - hour * 24, now, 10)
+                .await;
+            if slowest.is_err() {
+                client = self.pages.replace_connection(client).await?;
+            }
             view::Views::Slowdowns {
                 regressions,
                 slowest,
             }
         };
-        let failed = diagnostics.store == Store::Unavailable
-            || match &views {
-                view::Views::Samples(samples) => samples.is_err(),
-                view::Views::Slowdowns {
-                    regressions,
-                    slowest,
-                } => regressions.is_err() || slowest.is_err(),
-            };
-        if failed {
-            // A read deadline stops the future, not necessarily PostgreSQL.
-            // Close the uncertain connection instead of returning it to the
-            // pool or queueing display reads behind its outstanding query.
-            drop(bilibi_database::Connection::take(client));
-            client = self.pages.db.get().await?;
-        }
         let locale = self
             .pages
             .locales

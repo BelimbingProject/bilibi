@@ -219,7 +219,7 @@ reference rows on success. No unit tests or test runner are involved.
 
 ## Reads inside an existing transaction
 
-Use `validate_projection_on`, `page_keys_on` and `summarize_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
+Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
 
 ## Grouped summaries and row pages (G5)
 

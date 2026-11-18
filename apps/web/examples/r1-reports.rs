@@ -283,10 +283,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let boundary = app
         .services
         .get::<MutationBoundary>("base/database.mutations")?;
-    let client = db
+    let mut client = db
         .get_detached("the walkthrough's own checking connection")
         .await?;
-    let client: &tokio_postgres::Client = &client;
+    let client: &mut tokio_postgres::Client = &mut client;
     let manager = auth.authenticate(client, 1, 1, String::new()).await?;
     let viewer = auth.authenticate(client, 1, 2, String::new()).await?;
     let other = auth.authenticate(client, 2, 5, String::new()).await?;
@@ -353,8 +353,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("== Running as the author");
+    let sql = &*client;
     let expected = |active: bool| async move {
-        let rows = client.query("SELECT category, count(*)::float8, sum(quantity)::float8, max(unit_cost)::float8 FROM base_grid_ref_items WHERE tenant_id=1 AND active=$1 GROUP BY category", &[&active]).await?;
+        let rows = sql.query("SELECT category, count(*)::float8, sum(quantity)::float8, max(unit_cost)::float8 FROM base_grid_ref_items WHERE tenant_id=1 AND active=$1 GROUP BY category", &[&active]).await?;
         Ok::<_, tokio_postgres::Error>(
             rows.iter()
                 .map(|r| {

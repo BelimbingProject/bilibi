@@ -74,12 +74,12 @@ async fn main() -> Result<(), Failure> {
     let list = |text: &'static str| {
         let (registry, manager, db) = (registry.clone(), manager.clone(), db.clone());
         async move {
-            let client = db
+            let mut client = db
                 .get_detached("the walkthrough's own checking connection")
                 .await?;
             let value = registry
                 .call(
-                    &**client,
+                    &mut **client,
                     &manager,
                     "core.company.list",
                     &json!({"search": text, "page_size": 50}),

@@ -807,14 +807,21 @@ impl Privacy {
     /// for the operator to confirm when verifying.
     pub async fn locate(&self, scope: &Scope, id: i64) -> Result<Vec<(String, String, Located)>> {
         let mut client = self.db.get().await?;
-        bilibi_authz::authorize_key(&**client, scope, REQUEST_VIEW).await?;
-        let mut request = load(&**client, scope.tenant(), id, false).await?;
-        request.confirmed = confirmed(&**client, scope.tenant(), id).await?;
+        let request = locate_request(&**client, scope, id).await?;
         // Store reads may log authorization decisions; preserve those writes.
         let tx = client.transaction().await?;
         let found = self.locate_on(&tx, scope, &request).await?;
         tx.commit().await?;
         Ok(found)
+    }
+    pub(crate) async fn locate_request_on(
+        &self,
+        tx: &Transaction<'_>,
+        scope: &Scope,
+        id: i64,
+    ) -> Result<Vec<(String, String, Located)>> {
+        let request = locate_request(tx, scope, id).await?;
+        self.locate_on(tx, scope, &request).await
     }
     /// Bound candidate matching on the caller's held transaction. The savepoint
     /// restores local timeouts and recovers failed reads; cancellation rolls
@@ -1452,6 +1459,17 @@ impl Privacy {
 
 /// How long one statement of a store's locate may run.
 const LOCATE_TIMEOUT: &str = "SET LOCAL statement_timeout = '20s'";
+
+async fn locate_request(
+    client: &impl GenericClient,
+    scope: &Scope,
+    id: i64,
+) -> Result<RequestView> {
+    bilibi_authz::authorize_key(client, scope, REQUEST_VIEW).await?;
+    let mut request = load(client, scope.tenant(), id, false).await?;
+    request.confirmed = confirmed(client, scope.tenant(), id).await?;
+    Ok(request)
+}
 
 /// The person's erasure guard: approving an erasure takes it exclusively;
 /// access staging and publication take it shared, so they take turns.

@@ -76,9 +76,12 @@ impl ReadHandler for Read {
     fn owner(&self) -> &'static str {
         "base/privacy"
     }
+    fn requires_transaction(&self) -> bool {
+        matches!(self, Self::Locate)
+    }
     fn call<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
@@ -86,32 +89,35 @@ impl ReadHandler for Read {
             let privacy = privacy()?;
             let data = match self {
                 Self::Requests => {
-                    let client = privacy.db.get().await.map_err(Error::from)?;
+                    let client = client.sql_client().await?;
                     let open = input["open"].as_bool().unwrap_or(false);
                     let search = input["search"].as_str().unwrap_or("");
                     let offset = input["offset"].as_i64().unwrap_or(0);
                     let limit = input["limit"].as_i64().unwrap_or(100);
                     let (rows, total) = privacy
-                        .requests(&**client, scope, search, open, offset, limit)
+                        .requests(client, scope, search, open, offset, limit)
                         .await?;
                     json!({"requests": rows.iter().map(request_json).collect::<Vec<_>>(), "total": total})
                 }
                 Self::Request => {
-                    let client = privacy.db.get().await.map_err(Error::from)?;
-                    json!({"request": request_json(&privacy.request(&**client, scope, id(input, "id")?).await?)})
+                    let client = client.sql_client().await?;
+                    json!({"request": request_json(&privacy.request(client, scope, id(input, "id")?).await?)})
                 }
                 Self::Locate => {
-                    let found = privacy.locate(scope, id(input, "id")?).await?;
+                    let tx = client.transaction().ok_or(Error::Internal)?;
+                    let found = privacy
+                        .locate_request_on(tx, scope, id(input, "id")?)
+                        .await?;
                     json!({"stores": found.iter().map(|(store, label, located)| json!({
                         "store": store, "label": label, "kinds": located.kinds,
                         "candidates": located.candidates, "truncated": located.truncated,
                     })).collect::<Vec<_>>()})
                 }
                 Self::Holds => {
-                    let client = privacy.db.get().await.map_err(Error::from)?;
+                    let client = client.sql_client().await?;
                     let page = privacy
                         .holds(
-                            &**client,
+                            client,
                             scope,
                             input["search"].as_str().unwrap_or(""),
                             input["offset"].as_i64().unwrap_or(0),
@@ -129,9 +135,9 @@ impl ReadHandler for Read {
                         }
                         None => None,
                     };
-                    let client = privacy.db.get().await.map_err(Error::from)?;
+                    let client = client.sql_client().await?;
                     let (company, classes) =
-                        privacy.retention_classes(&client, scope, company).await?;
+                        privacy.retention_classes(client, scope, company).await?;
                     json!({"company_id": company.map(OrganisationId::get), "classes": classes})
                 }
             };
