@@ -25,6 +25,8 @@ pub struct SearchPage {
     pub href: String,
     /// A personal settings page, listed under Account.
     pub account: bool,
+    /// Section aliases. `None` identifies a page, whose menu path also matches.
+    pub section_keywords: Option<&'static [&'static str]>,
 }
 
 impl SearchPage {
@@ -32,12 +34,14 @@ impl SearchPage {
     pub fn path(&self) -> String {
         self.location.join(" › ")
     }
-    /// What a query is matched against, one label per line: the page's own
-    /// and each place it lives under, so a matching section finds its pages.
+    /// The searchable labels, one per line.
     pub fn labels(&self) -> String {
-        std::iter::once(&self.label)
-            .chain(&self.location)
-            .map(String::as_str)
+        let additional: Vec<&str> = match self.section_keywords {
+            Some(keywords) => keywords.to_vec(),
+            None => self.location.iter().map(String::as_str).collect(),
+        };
+        std::iter::once(self.label.as_str())
+            .chain(additional)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -45,7 +49,7 @@ impl SearchPage {
 
 /// The search dialog over `pages`: Pages first, then `records` (the rendered
 /// `shell.search.records` embed, empty when no module answers it), then
-/// Account.
+/// Account and a group for close page matches.
 pub fn page_search(pages: &[SearchPage], records: Html) -> askama::Result<Html> {
     let label = if records.is_empty() {
         "Search pages"
@@ -79,6 +83,7 @@ pub fn page_search(pages: &[SearchPage], records: Html) -> askama::Result<Html> 
         groups: [
             ("pages", "Pages", group(false)),
             ("account", "Account", group(true)),
+            ("close", "Close matches", Vec::new()),
         ],
         records,
     })
@@ -91,7 +96,7 @@ struct PageSearch<'a> {
     label: &'static str,
     dialog_class: String,
     option_class: &'static str,
-    groups: [(&'static str, &'static str, Vec<&'a SearchPage>); 2],
+    groups: [(&'static str, &'static str, Vec<&'a SearchPage>); 3],
     records: Html,
 }
 

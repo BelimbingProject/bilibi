@@ -154,6 +154,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - Keep rarely used parts out of the way: `Fold` folds a part under a one-line summary of what it holds and opens itself on an error; `AddMore` ("+ Add address line 2") reveals one more optional field.
 - A greyed field says why, in one line near the field that unlocks it.
 - **Coded choices are a searchable `Combobox`** showing code and name ("MYR · Malaysian ringgit"), never a plain select of codes. Typing also finds the common name people use (RMB for CNY, RM for MYR); the field stores the standard code.
+- **A field that picks another record uses the same combobox.** `RecordPicker` shows matches in the dropdown attached to the input, with the same keyboard controls; it needs no hint telling people to type. Show the record name alone when matches have one kind; add the singular kind name when matches span several kinds.
 - **Show results live.** A calculator or preview updates as the person types or chooses; no Convert or Calculate button.
 - **Familiar patterns win.** A currency converter is two rows of amount + currency, as on Google, with the rate's date and source in one small muted line above them.
 - This departs from the label-above layout on purpose; the shared macros own it, so no page styles its own label.
@@ -196,7 +197,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 
 *Read first, edit in place.* No Edit button and no separate edit route for the same facts.
 
-- A detail page is the header plus a stack of sections.
+- A detail page is the header plus a stack of sections. See the [live panel layout contract](docs/live-pages.md#server-declared-panels-and-background-updates).
 - A section is a card with a heading, optional count, description and actions, then its facts or table.
 - Facts wrap long identifiers without changing the copied text. They read like the filled-in form without its boxes: a small muted label (the floated label's size and ink) over the value, no dividers. They flow on a grid that follows the card's width: one column on a phone, two on a normal screen, three on a wide one. A long text or `pre` value takes the whole row. Split a card's facts into several `Facts` to start a new row, as Address Details does for its street lines.
 - An inline editor opens as the floating field in the fact's place and size, so nothing moves between reading and editing (`[data-fact]` in `assets/css/app.css`).
@@ -266,7 +267,8 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
   - Below `lg` the menu is an off-canvas drawer.
 - Pages never render chrome. The host wraps them (`apps/web/src/shell.rs`).
 - The bell has **To do** and **Notifications** tabs, with separate counts for actionable work and unread notifications. To do starts with approvals waiting for the signed-in person; each row links to its record and See all opens the full approvals page. There is no approvals sidebar entry. Opening the bell or marking notifications read never completes a to-do. Notifications continue to follow new deliveries live.
-- Search is the button before the bell, or `/` when not typing in a field. It opens a dialog that finds every page the person may open that has a name (its page title or menu row): menu pages, account pages and pages with no menu row. A query matches a page's name or any place it lives under, ignoring case, and each result shows where it lives (`Administration › Authorization › Roles`, `Account › My Settings › Password`). ↑/↓ and Enter open one; Esc or a click outside closes it. On a phone it fills the screen.
+- Search is the button before the bell, or `/` when not typing in a field. It opens a dialog that finds every page the person may open that has a name (its page title or menu row): menu pages, account pages and pages with no menu row. A query matches a page's name or any place it lives under, ignoring case, and each result shows where it lives (`Administration › Authorization › Roles`, `Account › My Settings › Password`). A section result shows its title and the page path. Opening it goes straight to that section, on the right tab when the page has tabs. Use ↑/↓ and Enter to open a result. Escape or a click outside closes the dialog. On a phone it fills the screen.
+- Complete names and parts of names appear in Pages or Account. Close spellings appear in Close matches, below the other results.
 - For a person who may search records, the same dialog lists records between Pages and Account once the query is two characters long: a group per kind (Contacts, Companies, a Domain's kinds), each row the record's name with its facts underneath, a record that is no longer current marked with its state, and "All results" for the `/search` page. Records come from the server (`apps/base/search/README.md`); "Nothing found" waits for them.
 - Theme, clock mode and pins belong to the account. They are not `localStorage`.
 - "Viewing as … · Stop" appears only while impersonating.
@@ -305,7 +307,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Add the first rate" is false once a rate exists.
 - **No product notes.** Notes for builders ("Draft, awaiting accountant review" on a template) never show to users.
 - **No internals in hints.** Do not explain how the system works behind the page (how filters relate to the top bar, how reports roll up, which rows are hidden). Say what the person can do.
-- **Help text** (subtitles, section descriptions, field hints, empty states) is one short sentence a business user would say, telling them what they can do here. Leave it out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
+- **Help text** (subtitles, section descriptions, field hints, empty states) uses plain sentences a business user would say. A page hint explains the concept the page manages as well as what the person can do. Leave help text out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
 
 | Before | After |
 | --- | --- |

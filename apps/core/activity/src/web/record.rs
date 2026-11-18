@@ -1053,7 +1053,7 @@ impl Detail {
         let assignee_name = name(a.assignee_user_id);
         let mut options = vec![(assignee_name.as_str(), assignee.as_str())];
         if a.assignee_user_id != scope.user() {
-            options.push(("Me", "me"));
+            options.push((scope.user_name.as_str(), "me"));
         }
         items.push((
             "Assigned to",
@@ -1808,6 +1808,7 @@ impl Detail {
         if let Some(dialog) = &self.dialog {
             body.push(&dialog.render(
                 &self.pages,
+                scope,
                 &clock,
                 &words,
                 "activity-new",

@@ -654,6 +654,7 @@ impl Dialog {
     pub fn render(
         &self,
         pages: &Pages,
+        scope: &Scope,
         clock: &Clock,
         words: &bilibi_grid::RecordWords,
         prefix: &str,
@@ -763,12 +764,10 @@ impl Dialog {
                     .options(choices(reminder_choices::EMAIL))
                     .hint("Emails the assignee, and guests without an account who were sent the invitation."),
             );
-        }
-        let mut assignees = vec![("Me".to_owned(), "me".to_owned())];
-        if let Some((user, name)) = &self.assignee {
-            assignees.insert(0, (name.clone(), user.to_string()));
-        }
-        if self.kind != Kind::Note {
+            let mut assignees = vec![(scope.user_name.as_str(), "me".to_owned())];
+            if let Some((user, name)) = &self.assignee {
+                assignees.insert(0, (name.as_str(), user.to_string()));
+            }
             fields.push(
                 Field::in_form(FORM, "assignee")
                     .id(format!("{prefix}-assignee"))
@@ -779,12 +778,7 @@ impl Dialog {
                             .as_ref()
                             .map_or("me".to_owned(), |(user, _)| user.to_string()),
                     )
-                    .options(bilibi_ui::choices(
-                        &assignees
-                            .iter()
-                            .map(|(l, v)| (l.as_str(), v.as_str()))
-                            .collect::<Vec<_>>(),
-                    ))
+                    .options(choices(&assignees))
                     .errors(self.sentences(words, "assignee")),
             );
         }

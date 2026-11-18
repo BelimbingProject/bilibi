@@ -448,7 +448,8 @@ impl Software {
         let client = self.db.get().await?;
         authorize_operator(&**client, scope, VIEW).await?;
         let url = self.catalogue_url(&**client).await?;
-        Ok(match self.catalogue.read(scope, &url).await {
+        drop(client);
+        let mut value = match self.catalogue.read(scope, &url).await {
             Ok(catalogue) => {
                 let mut value = discovery::catalogue(&catalogue, &self.composition);
                 value["available"] = json!(true);
@@ -456,7 +457,9 @@ impl Software {
                 value
             }
             Err(message) => json!({"available": false, "url": url, "message": message}),
-        })
+        };
+        value["uncatalogued"] = discovery::uncatalogued(&value, &self.composition);
+        Ok(value)
     }
 
     /// What installing the chosen GitHub release asset or uploaded release would do.

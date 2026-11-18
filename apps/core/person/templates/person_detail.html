@@ -1,8 +1,5 @@
-{% import "components.html" as ui %}
 {% import "workspace.html" as workspace %}
 {% call workspace::announce(kind="core/person", record_id=person.id.get().to_string()) %}{% endcall %}
 {{ header }}
-{{ identity }}
-{{ contacts }}
-{% for panel in panels %}<div id="{{ panel.id }}-slot" data-live-ignore><div id="{{ panel.id }}"></div></div>{% endfor %}
+{{ sections }}
 {{ dialog }}

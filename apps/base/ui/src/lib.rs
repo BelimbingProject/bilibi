@@ -90,9 +90,9 @@ pub use components::{
 pub use components::{
     ActionLink, AppFrame, BackLink, Badge, BadgeKind, Button, ButtonVariant, Card, Chrome,
     CreateButton, DayKind, DayMonth, DayTile, Fact, Facts, Fold, Header, Icon, IconButton,
-    IconContext, IconKind, IdentityImage, IdentityImageKind, IdentityImageSize, Page, PageVariant,
-    RecordFacts, SectionHeading, StatItem, StatKind, StatStrip, Toggle, DEMOTED_ACTION_CLASS,
-    NO_COUNT, WEEKDAYS,
+    IconContext, IconKind, IdentityImage, IdentityImageKind, IdentityImageSize, LivePanelAnchor,
+    LivePanelStack, Page, PageVariant, RecordFacts, SectionHeading, StatItem, StatKind, StatStrip,
+    Toggle, DEMOTED_ACTION_CLASS, NO_COUNT, WEEKDAYS,
 };
 pub use error_page::{
     copy_for, debug_document, error_document, portal_copy_for, portal_error_document, DebugFrame,

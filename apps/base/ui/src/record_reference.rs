@@ -3,7 +3,7 @@
 //! unavailable), and the `RecordPicker` live control finds one by name.
 //! `base/records` resolves names and hits with the reader's permissions; this
 //! module only draws them, so a page writes no markup of its own.
-use crate::{forms::InputKind, Button, Field, Html, Restricted};
+use crate::{forms::InputKind, Button, Choice, Combobox, Field, Html, Restricted};
 use askama::Template;
 
 /// How a reference reads for this viewer.
@@ -71,24 +71,14 @@ impl RelatedRecord {
     }
 }
 
-/// A picker hit's text: one line within the button, ending in "…" when long,
-/// with the whole text as its title (a button is one fixed height).
-#[derive(Template)]
-#[template(
-    source = r#"<span class="min-w-0 truncate" title="{{ text }}">{{ text }}</span>"#,
-    ext = "html"
-)]
-struct HitLabel {
-    text: String,
-}
-
 /// One record a picker offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerHit {
     /// `kind:id`, what choosing it raises.
     pub value: String,
     pub label: String,
-    /// The kind's name for people, such as "Contact" or "Company".
+    /// The singular kind name for a search across kinds ("Company").
+    /// Empty when the field searches only one kind.
     pub kind_label: String,
 }
 
@@ -126,10 +116,8 @@ impl NamedKind<'_> {
 {%- if let Some(pill) = selected -%}
 <div class="flex flex-wrap items-center gap-2"><span class="{% if in_fact %}sr-only{% else %}text-xs text-ink-muted{% endif %}">{{ label }}</span>{{ pill }}{{ self.clear() }}</div>{{ hidden }}{% call forms::errors(id=id, errors=errors) %}{% endcall %}
 {%- else -%}
-{{ self.search_html() }}
-{%- if !hits.is_empty() -%}<ul id="{{ id }}-hits" aria-label="{{ label }}" class="space-y-1">{% for hit in self.hit_buttons() %}<li>{{ hit }}</li>{% endfor %}</ul>
-{%- else if !query.is_empty() -%}<p id="{{ id }}-none" class="text-xs text-ink-muted">No matching record you may see.</p>
-{%- endif -%}
+{%- let combo = self.search_combobox() -%}
+{% call forms::combobox(combo=combo, server_search=true, query=query, pick_event=pick_event, key=key) %}{% endcall %}
 {%- endif -%}
 </div>"#,
     ext = "html"
@@ -139,7 +127,7 @@ pub struct RecordPicker {
     pub label: String,
     query: String,
     selected: Option<Html>,
-    search: Field,
+    search: Combobox,
     hidden: Html,
     clear_id: String,
     clear_event: String,
@@ -147,7 +135,7 @@ pub struct RecordPicker {
     in_fact: bool,
     pick_event: String,
     /// Each hit's `kind:id` and text.
-    hits: Vec<(String, String)>,
+    hits: Vec<(String, String, String)>,
     /// Sent with a pick or a clear as `key`: the field this picker serves.
     key: String,
     /// Shown under the chosen record; while searching, the search field shows them.
@@ -158,8 +146,16 @@ impl RecordPicker {
         self.search.name = name.into();
         self
     }
-    fn search_html(&self) -> Html {
-        Html::render(&self.search).unwrap_or(Html::EMPTY)
+    fn search_combobox(&self) -> Combobox {
+        self.search
+            .clone()
+            .options(
+                self.hits
+                    .iter()
+                    .map(|(value, text, detail)| Choice::new(text, value).detail(detail))
+                    .collect(),
+            )
+            .errors(self.errors.clone())
     }
 
     /// `form` and `key` name the posted fields: the typed text as
@@ -176,23 +172,12 @@ impl RecordPicker {
         errors: Vec<String>,
     ) -> Self {
         let (pick_event, clear_event) = events;
-        let search = Field::in_form(form, &format!("{key}_search"))
-            .id(format!("{id}-search"))
+        let search = Combobox::new(format!("{id}-search"), format!("{form}[{key}_search]"))
             .label(label)
-            .kind(InputKind::Search)
-            .value(query)
-            .attr("data-debounce", "300")
-            .autocomplete("off")
-            .hint("Type part of a name.")
             .errors(errors.clone());
         let hits = hits
             .iter()
-            .map(|hit| {
-                (
-                    hit.value.clone(),
-                    format!("{} · {}", hit.label, hit.kind_label),
-                )
-            })
+            .map(|hit| (hit.value.clone(), hit.label.clone(), hit.kind_label.clone()))
             .collect();
         let (selected, hidden) = match selected {
             Some((value, pill)) => (
@@ -251,27 +236,6 @@ impl RecordPicker {
         })
         .unwrap_or(Html::EMPTY)
     }
-    fn hit_buttons(&self) -> Vec<Html> {
-        self.hits
-            .iter()
-            .enumerate()
-            .map(|(index, (value, text))| {
-                let body = Html::render(&HitLabel { text: text.clone() }).unwrap_or(Html::EMPTY);
-                Html::render(&Button {
-                    id: &format!("{}-hit-{index}", self.id),
-                    button_type: "button",
-                    event: &self.pick_event,
-                    name: "record",
-                    value,
-                    data_key: &self.key,
-                    class: "w-full min-w-0 justify-start",
-                    body,
-                    ..Button::default()
-                })
-                .unwrap_or(Html::EMPTY)
-            })
-            .collect()
-    }
     /// A picker whose hits and choice the owner names itself, as `(id, name)`
     /// pairs of one `kind` (a directory search rather than Base Records): each
     /// hit raises `record=<prefix>:<id>` and the chosen record posts its bare
@@ -293,7 +257,7 @@ impl RecordPicker {
             .map(|(record, name)| PickerHit {
                 value: format!("{}:{record}", kind.prefix),
                 label: name.clone(),
-                kind_label: kind.label.to_owned(),
+                kind_label: String::new(),
             })
             .collect();
         let chosen = chosen.map(|(record, name)| {

@@ -8,7 +8,7 @@ use bilibi_agent_api::Error as ContractError;
 use bilibi_ui::{
     BackLink, Badge, BadgeKind, Button, ButtonVariant, Card, CommitStates, CommitStatus,
     ConfirmDialog, Fact, Facts, Field, Header, InlineChoice, InlineEdit, InlineField, InputKind,
-    PageVariant, Restricted, SectionHeading,
+    LivePanelStack, PageVariant, Restricted, SectionHeading,
 };
 use std::collections::BTreeMap;
 
@@ -24,9 +24,7 @@ struct Reveal {
 struct View<'a> {
     person: &'a Person,
     header: Html,
-    identity: Html,
-    contacts: Html,
-    panels: Vec<PanelSpec>,
+    sections: Html,
     dialog: Html,
 }
 #[derive(Template)]
@@ -158,7 +156,6 @@ impl Detail {
         })?);
         render(Card {
             id: &format!("{prefix}-card"),
-            class: "mt-6",
             role: "region",
             body,
             ..Card::default()
@@ -415,18 +412,22 @@ impl Detail {
         } else {
             Html::EMPTY
         };
+        let panels = self.panels();
+        let panel_ids: Vec<_> = panels
+            .iter()
+            .filter(|panel| panel.id != "person-record-history")
+            .map(|panel| panel.id.as_str())
+            .collect();
+        let contacts = self
+            .contacts(scope, &words, &person, "person-contact", true)
+            .await?;
         let body = render(View {
             person: &person,
             header,
-            identity,
-            contacts: self
-                .contacts(scope, &words, &person, "person-contact", true)
-                .await?,
-            panels: self
-                .panels()
-                .into_iter()
-                .filter(|p| p.id != "person-record-history")
-                .collect(),
+            sections: render(LivePanelStack {
+                parts: &[identity, contacts],
+                panel_ids: &panel_ids,
+            })?,
             dialog,
         })?;
         Ok(LiveBody {

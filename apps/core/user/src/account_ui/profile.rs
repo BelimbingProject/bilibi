@@ -222,12 +222,14 @@ impl Profile {
             heading: "Profile",
             subheading: "",
             image_card: render(&Card {
-                title: "Profile picture",
+                id: crate::contributions::PROFILE_PICTURE.anchor,
+                title: crate::contributions::PROFILE_PICTURE.title,
                 body: image_form,
                 ..Card::default()
             })?,
             profile_card: render(&Card {
-                title: "Profile details",
+                id: crate::contributions::PROFILE_DETAILS.anchor,
+                title: crate::contributions::PROFILE_DETAILS.title,
                 body: profile_form,
                 ..Card::default()
             })?,

@@ -69,7 +69,9 @@ async fn main() -> Result<(), Failure> {
             &[&manager.tenant()],
         )
         .await?;
-    client.batch_execute("ANALYZE companies").await?;
+    // Merge pending GIN entries from the bulk load and refresh planner
+    // statistics so the index proof does not depend on autovacuum timing.
+    client.batch_execute("VACUUM ANALYZE companies").await?;
     println!("  inserted {BULK} companies in {:?}", started.elapsed());
 
     let list = |search: &'static str| {

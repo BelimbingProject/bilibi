@@ -102,9 +102,9 @@ pub fn render(stored: &Stored, flash: FlashMap<'_>) -> Result<String, Error> {
             .into(),
         locale: fragment(Html::render(
             &Field::named("appearance[locale]")
-                .id("appearance-locale")
+                .id(crate::contributions::LANGUAGE.anchor)
                 .kind(InputKind::Select)
-                .label("Language and region")
+                .label(crate::contributions::LANGUAGE.title)
                 .value(presentation.own_locale)
                 .prompt(format!(
                     "Use installation default ({})",
@@ -119,9 +119,9 @@ pub fn render(stored: &Stored, flash: FlashMap<'_>) -> Result<String, Error> {
         ))?,
         timezone: fragment(Html::render(
             &Field::named("appearance[timezone_mode]")
-                .id("appearance-timezone-mode")
+                .id(crate::contributions::TIME_ZONE.anchor)
                 .kind(InputKind::Select)
-                .label("Time zone display")
+                .label(crate::contributions::TIME_ZONE.title)
                 .value(presentation.mode.as_str())
                 .options(
                     MODE_CHOICES

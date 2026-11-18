@@ -34,3 +34,38 @@ visibility against a disposable database.
 ## Workplace coverage
 
 `MenuItem::page` defaults to tenant-wide coverage for administration and shared directories. Add `.company_scoped()` when its route declares `CompanyScope::Company`; Web checks that they agree at boot. A company page uses `Scope::current_company()` for its records and keeps its owner authorization. The shell retains the chosen desk on tenant-wide pages as a plain label.
+
+## Make a page section searchable
+
+Type `combo` in the top bar to jump straight to the Combobox card in the Design Library. Add the same kind of link to a card, settings section or report on a page you own.
+
+Submit a `PageSection` through `bilibi_module_registry::contributions::PAGE_SECTIONS` from the module that contributes the route.
+
+```rust
+use bilibi_module_registry::{
+    contributions::{PageSection, PAGE_SECTIONS},
+    Contribution, Provenance,
+};
+
+const COMBOBOX: PageSection = PageSection {
+    route: "design_library.components",
+    title: "Combobox",
+    anchor: "component-combobox",
+    keywords: &["autocomplete", "combo box"],
+    query: None,
+};
+
+inventory::submit! {
+    Contribution::new(PAGE_SECTIONS, "design_library.component-combobox", Provenance {
+        module: "base/design_library", source: file!(), line: line!(),
+    }, &COMBOBOX)
+}
+```
+
+- `route` is the contribution ID of a named, framed staff GET page with a fixed path.
+- Use `anchor` as the ID of the heading or card. Use letters, digits, hyphens and underscores. Keep the title and ID in the same declaration the view uses, as the Design Library does.
+- Leave `keywords` empty or add other words a person uses for that section. Search matches part of the title or any keyword, ignoring case.
+- For a tab that is selected by a query, set `query: Some("tab=summary")`. The page opens that tab and the browser scrolls to the anchor. If tabs are separate routes, name the route of the tab.
+- Contribute sections every reader of the page can see. Search uses the page's access rules before showing any of its sections.
+
+The HTTP agent search (`GET /api/v1/search?q=combo`) and the MCP `search` tool use the same page search and return matches in `pages`. A section match has its own title, page breadcrumb and URL with the anchor. [Record search](../search/README.md) covers business records.

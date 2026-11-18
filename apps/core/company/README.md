@@ -501,8 +501,8 @@ UI (`core/company.relationship_pages`):
   `panel`, `admin.company.view`): the Relationships card of a record page
   (`ShowLive` section 6), mounted as a panel with path
   `{panel: <element id>, kind: organisation|person, id}`. The company
-  detail page mounts it for the company (`web.rs` `panels()`, slot
-  `#company-relationships` in `views::detail`) with a Manage link to the
+  detail page mounts it in the [record panel stack](../../../docs/live-pages.md#server-declared-panels-and-background-updates) at
+  `#company-relationships` with a Manage link to the
   administration page. The same panel is also registered as
   `company.person-relationships` for record kind `core/person`, which
   Person's detail page discovers and mounts with its own path (`person_id`,
@@ -595,9 +595,9 @@ without silently converting their business meaning. Parent
 changes serialize on the tenant and reject a cycle. Lifecycle buttons come
 only from `lifecycle_operations`, hold the record version in server state,
 and confirm with an optional reason; archive remains final. Record pins use
-the shell's existing account pin API, with a resolved record label and URL. The Audit history
-panel retains its mount through detail patches. Child-owned panels are attached
-by their later owner slices.
+the shell's existing account pin API, with a resolved record label and URL. The
+header holds Audit History. Child-owned panels appear below Departments and
+Relationships.
 
 Subsidiaries and Departments keep independent `ListColumns` arrangements, including column re-add suggestions and density controls. Subsidiaries show the Name, Status, Legal Entity Type and masked Jurisdiction columns and workspace-aware record links. The list is bounded to the first 300 direct children in ID order; a truncation notice points to the full Companies directory.
 

@@ -969,8 +969,9 @@ impl CompanyPage {
                     .display(&**client, scope, None, locale.locale)
                     .await?;
                 self.active_panels = self.allowed_panels(&**client, scope, id).await?;
-                let anchors: Vec<String> =
-                    self.active_panels.iter().map(|p| p.id.clone()).collect();
+                let anchors: Vec<_> = std::iter::once("company-relationships")
+                    .chain(self.active_panels.iter().map(|panel| panel.id.as_str()))
+                    .collect();
                 drop(client);
                 let facts = self
                     .facts

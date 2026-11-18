@@ -18,7 +18,7 @@ the route capability, Origin and CSRF checks, including when framed.
 
 The templates keep every family anchor and specimen ID, using the shared compact UI scale; `sample.json` and `controls.json` hold the sample form values and control declarations.
 The Components page lists one line per family (`A. Foundations`, `B. Page structure`, …). A card is a title, one short plain sentence, then the sample; gaps in a family go in one `Not shown yet:` line in its intro, and a sample or explanation that repeats is shown once.
-The page is split at family/card boundaries because Askama inlines macros;
+Each Components card uses the title and anchor declared in `src/sections.rs` so the top-bar search opens that card. The page is split at family/card boundaries because Askama inlines macros;
 large input templates otherwise exceed the compiler's memory limit. Every
 control declaration renders through its shared typed model in `controls.rs`.
 

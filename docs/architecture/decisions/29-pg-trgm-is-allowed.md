@@ -36,3 +36,4 @@ Used by:
 
 - Core Consent: the privacy locate's address match and the Suppressions search (`apps/core/consent/migrations/005-search-and-retention.sql`).
 - Core Person, Core Affiliation and Core Company: Contacts and Companies search (`apps/core/person/migrations/008-search-trigram.sql`, `apps/core/affiliation/migrations/004-search-trigram.sql`, `apps/core/company/migrations/013-search-trigram.sql`, PR #711).
+- Core Document: title matches in Base Search for typos and parts of words (`apps/core/document/migrations/015-title-trigrams.sql`; see [ADR 06](./06-query-time-record-search.md)).

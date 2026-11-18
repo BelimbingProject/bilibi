@@ -1344,7 +1344,8 @@ inventory::submit! { Module {
         ("core-document-012-erasure", include_str!("../migrations/012-erasure.sql")),
         ("core-document-013-search", include_str!("../migrations/013-search.sql")),
         ("core-document-014-custom-search", include_str!("../migrations/014-custom-search.sql")),
-        ("core-document-015-revision-protections", include_str!("../migrations/015-revision-protections.sql")),
+        ("core-document-015-title-trigrams", include_str!("../migrations/015-title-trigrams.sql")),
+        ("core-document-016-revision-protections", include_str!("../migrations/016-revision-protections.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         files::bind(s.get("base/tenancy.parties")?)?;

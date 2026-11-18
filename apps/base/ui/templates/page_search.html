@@ -2,7 +2,7 @@
     (assets/shell.js calls showModal), so it is not the server-owned `modal`;
     it shares that macro's surface through ModalWidth::dialog_class and fills
     the screen on a phone. Every page row is rendered hidden; shell.js shows
-    those whose data-page-search-labels contain the query. The records panel
+    those whose data-page-search-labels match the query. The records panel
     (page_search_records.html) sits between Pages and Account in a
     `data-live-ignore` slot: a page reply redraws the shell around it, and
     only the panel's own fragments change its rows. The hint and empty lines
@@ -16,11 +16,11 @@
 </div>
 <div class="min-h-0 flex-1 overflow-y-auto px-panel py-2">
 <div id="app-search-results" role="listbox" aria-label="{{ label }}">
-{%- for (id, heading, pages) in groups %}{% if !pages.is_empty() %}
+{%- for (id, heading, pages) in groups %}{% if !pages.is_empty() || loop.last %}
 <div id="app-search-group-{{ id }}" role="group" aria-labelledby="app-search-group-{{ id }}-label" data-page-search-group hidden>
 <p id="app-search-group-{{ id }}-label" role="presentation" class="px-2 pt-2 pb-1 text-xs font-semibold text-ink-subtle">{{ heading }}</p>
 {%- for page in pages %}
-<a id="app-search-{{ id }}-{{ loop.index }}" href="{{ page.href }}" role="option" aria-selected="false" data-page-search-option data-page-search-labels="{{ page.labels() }}" hidden class="{{ option_class }}"><span class="truncate text-sm">{{ page.label }}</span>{% if !page.location.is_empty() %}<span class="truncate text-xs text-ink-subtle">{{ page.path() }}</span>{% endif %}</a>
+<a id="app-search-{{ id }}-{{ loop.index }}" href="{{ page.href }}" role="option" aria-selected="false" data-page-search-option data-page-search-home="{{ id }}" data-page-search-position="{{ loop.index }}" data-page-search-labels="{{ page.labels() }}" hidden class="{{ option_class }}">{% if page.section_keywords.is_some() %}<span class="text-sm">{{ page.label }} <span class="text-xs text-ink-subtle">· {{ page.path() }}</span></span>{% else %}<span class="truncate text-sm">{{ page.label }}</span>{% if !page.location.is_empty() %}<span class="truncate text-xs text-ink-subtle">{{ page.path() }}</span>{% endif %}{% endif %}</a>
 {%- endfor %}
 </div>
 {%- endif %}
@@ -30,7 +30,7 @@
 </div>
 {%- let hint = "Search by page or section name." %}
 {%- let empty = "No pages found" %}
-<p id="app-search-hint"{% if !records.is_empty() %} data-pages-text="{{ hint }}" data-records-text="Type a page name, or the name or code of a record."{% endif %} class="px-2 py-3 text-xs text-ink-subtle">{{ hint }}</p>
+<p id="app-search-hint"{% if !records.is_empty() %} data-pages-text="{{ hint }}" data-records-text="Type a page or section name, or the name or code of a record."{% endif %} class="px-2 py-3 text-xs text-ink-subtle">{{ hint }}</p>
 <p id="app-search-empty" role="status"{% if !records.is_empty() %} data-pages-text="{{ empty }}" data-records-text="Nothing found"{% endif %} hidden class="px-2 py-3 text-xs text-ink-subtle">{{ empty }}</p>
 </div>
 </dialog>

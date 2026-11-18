@@ -141,3 +141,23 @@ fn local_steps(repository: &str, id: &str, kind: &str, commit: &str) -> Option<V
         "# Release files and installation: docs/server-install.md".into(),
     ])
 }
+
+/// Installed containers absent from the selected catalogue. An unavailable
+/// catalogue has no entries to match; composition still proves installation.
+pub fn uncatalogued(catalogue: &Value, made: &Composition) -> Value {
+    let installed = crate::review::installed_json(made);
+    let mut result = json!({});
+    for kind in ["domains", "extensions"] {
+        result[kind] = json!(installed[kind]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|container| !catalogue[kind]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|entry| entry["id"] == container["id"]))
+            .collect::<Vec<_>>());
+    }
+    result
+}

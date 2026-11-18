@@ -30,8 +30,6 @@
 
           {{ self.component_actions()? }}
 
-          {% call ui::card(id="component-code_input", title="Code input", inner_class="p-4") %}{{ self.card_component_code_input()? }}{% endcall %}
-          {% call ui::card(id="component-period_filter", title="Period filter", inner_class="p-4 space-y-3") %}{{ self.card_component_period_filter()? }}{% endcall %}
           {{ self.component_inputs()? }}
 
           {{ self.component_interaction_patterns()? }}

@@ -2093,6 +2093,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "http-body-util",
+ "icu_properties",
  "inventory",
  "jiff",
  "libc",

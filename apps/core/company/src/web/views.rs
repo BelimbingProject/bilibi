@@ -853,15 +853,19 @@ fn choice(
 }
 #[derive(Template)]
 #[template(path = "detail.html")]
-struct DetailBody<'a> {
+struct DetailBody {
     id: i64,
-    panels: &'a [String],
     header: Html,
-    facts: Html,
-    chain: Html,
-    notice: Html,
-    card: Html,
+    sections: Html,
     modal: Html,
+}
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::facts(container_id="company-parent-chain") %}{% call ui::fact(title="Parent chain", id="company-parent-chain-links") %}{{ links }}{% endcall %}{% endcall %}"#,
+    ext = "html"
+)]
+struct ParentChain {
+    links: Html,
 }
 #[derive(Template)]
 #[template(path = "company_status.html")]
@@ -892,7 +896,7 @@ pub(super) struct DetailState<'a> {
     pub workspace: bool,
     pub display: &'a bilibi_datetime::DisplayContext,
     /// Anchors of the contributed record panels the reader may mount.
-    pub panels: &'a [String],
+    pub panels: &'a [&'a str],
     pub parent: ParentPicker<'a>,
     pub custom: &'a CustomPickers,
 }
@@ -965,19 +969,14 @@ pub(super) async fn detail(
         })?);
     }
     if !hierarchy.ancestors.is_empty() {
-        chain = render(&Facts {
-            id: "company-parent-chain",
-            items: vec![Fact {
-                title: "Parent chain",
-                id: "company-parent-chain-links",
-                value: chain,
-            }],
-        })?;
+        chain = render(&ParentChain { links: chain })?;
     }
     let primary = crate::primary::is_primary(client, scope, id).await?;
     let opts = options(client, false).await?;
     let mut actions = badge(&company.status)?;
-    actions.push(&render(&History {})?);
+    actions.push(&render(&LivePanelAnchor {
+        id: "company-record-history",
+    })?);
     actions.push(&back("company-back")?);
     let header = render(&Header {
         title_actions: Html::EMPTY,
@@ -992,20 +991,32 @@ pub(super) async fn detail(
             body: actions,
         })?,
     })?;
-    let mut notices = Html::EMPTY;
-    for (show, kind, message) in [
+    let mut sections = vec![
+        render(&RecordFacts {
+            id: "company-key-facts",
+            items: key_facts
+                .iter()
+                .map(|fact| StatItem::text(&fact.label, &fact.value))
+                .collect(),
+        })?,
+        chain,
+    ];
+    for (show, id, kind, message) in [
         (
             primary,
+            "company-primary-notice",
             StatusKind::Info,
             "This is your organisation's primary company.",
         ),
         (
             company.archived(),
+            "company-archive-notice",
             StatusKind::Warning,
             "This company is archived and read-only. Archiving is final.",
         ),
         (
             !notice.is_empty(),
+            "company-action-notice",
             if notice == "Company status changed." {
                 StatusKind::Success
             } else {
@@ -1015,10 +1026,10 @@ pub(super) async fn detail(
         ),
     ] {
         if show {
-            notices.push(&render(&Alert {
+            sections.push(render(&Alert {
                 kind,
-                id: "",
-                class: "mt-4",
+                id,
+                class: "",
                 body: Html::text(message),
             })?);
         }
@@ -1507,14 +1518,14 @@ pub(super) async fn detail(
         id: "company-details",
         items: facts,
     })?);
-    let mut content = render(&Card {
+    sections.push(render(&Card {
         id: "company-details-card",
         inner_class: "p-5 sm:p-6",
         role: "region",
         labelledby: "company-details-heading",
         body: details,
         ..Card::default()
-    })?;
+    })?);
     // Child-owning slices contribute the remaining panels; subsidiaries are
     // Company-owned and can be shown immediately without an upward dependency.
     // Keep the platform's bounded read; the extra row makes truncation explicit.
@@ -1586,12 +1597,9 @@ pub(super) async fn detail(
         table.framed = false;
         table.caption = "Subsidiaries";
         children_body.push(&render(&table)?);
-        content.push(&card("company-subsidiaries-card", children_body, true)?);
+        sections.push(card("company-subsidiaries-card", children_body, true)?);
     }
-    content.push(&departments_section(client, scope, id, departments_columns).await?);
-    // The Relationships section arrives as the `company.relationships` panel
-    // (`web::relationships`); the slot keeps the mounted card through patches.
-    content.push(&render(&RelationshipsSlot {})?);
+    sections.push(departments_section(client, scope, id, departments_columns).await?);
     let modal = if let Some((activity, _)) = pending_activity {
         render(&ConfirmDialog {
             id: "company-remove-activity-dialog",
@@ -1686,34 +1694,15 @@ pub(super) async fn detail(
         PageVariant::Detail,
         render(&DetailBody {
             id,
-            panels,
             header,
-            facts: render(&bilibi_ui::RecordFacts {
-                id: "company-key-facts",
-                items: key_facts
-                    .iter()
-                    .map(|fact| bilibi_ui::StatItem::text(&fact.label, &fact.value))
-                    .collect(),
+            sections: render(&LivePanelStack {
+                parts: &sections,
+                panel_ids: panels,
             })?,
-            chain,
-            notice: notices,
-            card: content,
             modal,
         })?,
     )
 }
-#[derive(Template)]
-#[template(
-    source = "<div id=\"company-record-history-slot\" data-live-ignore><div id=\"company-record-history\"></div></div>",
-    ext = "html"
-)]
-struct History {}
-#[derive(Template)]
-#[template(
-    source = "<div id=\"company-relationships-slot\" data-live-ignore><div id=\"company-relationships\"></div></div>",
-    ext = "html"
-)]
-struct RelationshipsSlot {}
 #[derive(Template)]
 #[template(path = "company_lifecycle_form.html")]
 struct LifecycleForm {
@@ -2530,7 +2519,6 @@ async fn departments_section(
     }
     render(&Card {
         id: "company-departments-card",
-        class: "mt-6",
         inner_class: "p-0",
         role: "region",
         labelledby: "company-departments-heading",

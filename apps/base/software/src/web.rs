@@ -634,6 +634,7 @@ impl View {
         let can_manage = effective_capabilities(&**client, scope)
             .await?
             .contains(MANAGE);
+        drop(client);
         let status = read(&pages.contracts, scope, "base.software.status").await?;
         let releases = self.query.get("tab").is_some_and(|tab| tab == "releases");
         let catalogue = if releases {
@@ -1202,6 +1203,41 @@ impl View {
                         content.push(&item_body);
                         content
                     },
+                    ..Card::default()
+                })?);
+            }
+            for item in catalogue["uncatalogued"][kind]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let id = text(&item["id"]);
+                let mut facts = vec![
+                    Fact {
+                        title: "Status",
+                        value: Html::text("Installed, not in the catalogue"),
+                        ..Fact::default()
+                    },
+                    Fact {
+                        title: "Installed version",
+                        value: Html::text(item["version"].as_str().unwrap_or("Version unknown")),
+                        ..Fact::default()
+                    },
+                ];
+                if let Some(code) = item["extension_code"].as_str() {
+                    facts.push(Fact {
+                        title: "Code review kind",
+                        value: Html::text(code),
+                        ..Fact::default()
+                    });
+                }
+                body.push(&render(Card {
+                    id: &format!("software-installed-{kind}-{id}"),
+                    title: id,
+                    body: render(Facts {
+                        items: facts,
+                        ..Facts::default()
+                    })?,
                     ..Card::default()
                 })?);
             }
