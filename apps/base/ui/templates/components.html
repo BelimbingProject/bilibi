@@ -167,7 +167,7 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 {#- Fragments the shared models rendered (a notice, a chart, a table),
     stacked a compact step apart, or a section step apart when wide. -#}
 {% macro stack(parts, wide=false) %}
-<div class="{% if wide %}space-y-4{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part|safe }}{% endfor %}</div>
+<div class="{% if wide %}flex flex-col gap-4{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part|safe }}{% endfor %}{{ caller() }}</div>
 {% endmacro %}
 
 {#- The ignored wrapper preserves the mounted fragment across parent patches.
@@ -179,7 +179,7 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 {#- Keep the section gap between in-flow children, including mounted panels.
     Each panel provider renders its own surface. -#}
 {% macro live_panel_stack(parts, panel_ids) %}
-<div class="flex flex-col gap-4">{% for part in parts %}{{ part|safe }}{% endfor %}{% for id in panel_ids %}{% call live_panel_anchor(id=id) %}{% endcall %}{% endfor %}</div>
+{% call stack(parts=parts, wide=true) %}{% for id in panel_ids %}{% call live_panel_anchor(id=id) %}{% endcall %}{% endfor %}{% endcall %}
 {% endmacro %}
 
 {#- Fragments on one wrapping line (a page header's several actions). -#}
@@ -244,8 +244,8 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
     phone, two on a normal screen, three on a wide one. Facts that follow
     other facts continue their rhythm, so a card splits its facts into groups
     to start a new row. -#}
-{% macro facts(id="") %}
-<div data-facts class="@container [[data-facts]+&]:mt-1"><dl{% if !id.is_empty() %} id="{{ id }}"{% endif %} class="grid grid-cols-1 gap-x-4 gap-y-1 @lg:grid-cols-2 @5xl:grid-cols-3">{{ caller() }}</dl></div>
+{% macro facts(id="", container_id="") %}
+<div{% if !container_id.is_empty() %} id="{{ container_id }}"{% endif %} data-facts class="@container [[data-facts]+&]:mt-1"><dl{% if !id.is_empty() %} id="{{ id }}"{% endif %} class="grid grid-cols-1 gap-x-4 gap-y-1 @lg:grid-cols-2 @5xl:grid-cols-3">{{ caller() }}</dl></div>
 {% endmacro %}
 
 {#- One fact: the value cell (id lands on the dd) is a floating field's box

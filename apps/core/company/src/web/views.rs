@@ -860,6 +860,14 @@ struct DetailBody {
     modal: Html,
 }
 #[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% call ui::facts(container_id="company-parent-chain") %}{% call ui::fact(title="Parent chain", id="company-parent-chain-links") %}{{ links|safe }}{% endcall %}{% endcall %}"#,
+    ext = "html"
+)]
+struct ParentChain {
+    links: Html,
+}
+#[derive(Template)]
 #[template(path = "company_status.html")]
 struct StatusBody {
     badge: Html,
@@ -961,14 +969,7 @@ pub(super) async fn detail(
         })?);
     }
     if !hierarchy.ancestors.is_empty() {
-        chain = render(&Facts {
-            id: "company-parent-chain",
-            items: vec![Fact {
-                title: "Parent chain",
-                id: "company-parent-chain-links",
-                value: chain,
-            }],
-        })?;
+        chain = render(&ParentChain { links: chain })?;
     }
     let primary = crate::primary::is_primary(client, scope, id).await?;
     let opts = options(client, false).await?;
@@ -1000,19 +1001,22 @@ pub(super) async fn detail(
         })?,
         chain,
     ];
-    for (show, kind, message) in [
+    for (show, id, kind, message) in [
         (
             primary,
+            "company-primary-notice",
             StatusKind::Info,
             "This is your organisation's primary company.",
         ),
         (
             company.archived(),
+            "company-archive-notice",
             StatusKind::Warning,
             "This company is archived and read-only. Archiving is final.",
         ),
         (
             !notice.is_empty(),
+            "company-action-notice",
             if notice == "Company status changed." {
                 StatusKind::Success
             } else {
@@ -1024,7 +1028,7 @@ pub(super) async fn detail(
         if show {
             sections.push(render(&Alert {
                 kind,
-                id: "",
+                id,
                 class: "",
                 body: Html::text(message),
             })?);
