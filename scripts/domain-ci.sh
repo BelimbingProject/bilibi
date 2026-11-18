@@ -9,17 +9,19 @@
 # that binary. DOMAIN_CI_BUILD=check skips it and boots the debug binary.
 # Pull requests use check. main, tags and manual runs use release
 # (docs/domain-ci/README.md). DOMAIN_CI_PHASE defaults to all; the Platform
-# workflow runs lint and build phases in parallel and requires both.
+# workflow runs Finance lint and build phases in parallel and requires both.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$root"
-: "${DATABASE_URL:?DATABASE_URL must name an empty PostgreSQL 18 database}"
 build=${DOMAIN_CI_BUILD:-release}
 phase=${DOMAIN_CI_PHASE:-all}
 case "$phase" in
   all|lint|build) ;;
   *) echo "DOMAIN_CI_PHASE must be all, lint or build (got ${phase})" >&2; exit 1 ;;
 esac
+if [[ "$phase" != lint ]]; then
+  : "${DATABASE_URL:?DATABASE_URL must name an empty PostgreSQL 18 database}"
+fi
 case "$build" in
   check|release) ;;
   *) echo "DOMAIN_CI_BUILD must be check or release (got ${build})" >&2; exit 1 ;;
