@@ -281,8 +281,13 @@
     }
   }
 
-  // Client-side filtering and keyboard interaction for the combobox.
+  // Shared popup and keyboard interaction for both combobox modes.
+  // RecordPicker's server-search mode lets the named query bubble to the
+  // owner's debounced form and emits its existing pick event. Results carry
+  // the query that produced them, so an older reply cannot offer stale picks.
+  // It keeps the typed query on close; the owner renders the chosen pill.
   //
+  // The ordinary combobox filters its fixed vocabulary locally:
   // The server owns the hidden form value and the option vocabulary. This hook
   // owns only the transient query, open state and active option, so typing
   // does not cause a round trip or lose the caret: the filter input's own
@@ -295,6 +300,7 @@
   const Combobox = {
     mounted() {
       this.input = this.el.querySelector('[role="combobox"]')
+      this.serverSearch = this.el.hasAttribute("data-server-search")
       this.valueInput = document.getElementById(this.el.dataset.valueId)
       this.listbox = this.el.querySelector('[role="listbox"]')
       this.noMatches = this.el.querySelector('[id$="-no-matches"]')
@@ -310,6 +316,7 @@
       this.filteredOptions = () => this.options().filter(option => !option.hidden)
 
       this.setOpen = open => {
+        if (this.serverSearch && !this.input.value.trim()) open = false
         this.open = open
         this.input.setAttribute("aria-expanded", String(open))
         this.listbox.hidden = !open
@@ -327,13 +334,22 @@
         const options = this.options()
 
         options.forEach(option => {
+          if (this.serverSearch) {
+            option.hidden = this.input.value !== this.el.dataset.searchQuery
+            return
+          }
           const label = option.dataset.label.toLocaleLowerCase()
           const value = option.dataset.value.toLocaleLowerCase()
           option.hidden = query !== "" && !label.includes(query) && !value.includes(query)
         })
 
         const filtered = this.filteredOptions()
-        this.noMatches.hidden = options.length === 0 || filtered.length !== 0
+        this.noMatches.hidden = this.serverSearch || options.length === 0 || filtered.length !== 0
+        if (this.serverSearch) {
+          const empty = this.el.querySelector('[id$="-empty"]')
+          if (empty) empty.hidden = this.input.value !== this.el.dataset.searchQuery
+          if (this.open && this.activeIndex < 0 && filtered.length) this.activeIndex = 0
+        }
 
         if (this.activeIndex >= filtered.length) this.activeIndex = filtered.length - 1
         this.renderActive()
@@ -361,7 +377,7 @@
         if (!this.open) {
           this.setOpen(true)
           this.activeIndex = -1
-          if (selectQuery) this.input.select()
+          if (selectQuery && !this.serverSearch) this.input.select()
         }
 
         this.applyFilter()
@@ -392,6 +408,7 @@
       }
 
       this.restore = () => {
+        if (this.serverSearch) return
         this.selectedValue = this.valueInput?.value || ""
         const selected = this.options().find(option => option.dataset.value === this.selectedValue)
         this.selectedLabel = selected?.dataset.label || ""
@@ -407,6 +424,11 @@
       this.commit = option => {
         if (!option) return
 
+        if (this.serverSearch) {
+          this.setOpen(false)
+          this.emit(this.el.dataset.pickEvent, {record: option.dataset.value, key: this.el.dataset.key})
+          return
+        }
         this.selectedValue = option.dataset.value
         this.selectedLabel = option.dataset.label
         this.input.value = this.selectedLabel
@@ -427,13 +449,13 @@
       }
 
       this.onInput = event => {
-        event.stopPropagation()
+        if (!this.serverSearch) event.stopPropagation()
         this.setEditing(true)
         if (!this.open) this.setOpen(true)
         this.activeIndex = 0
         this.applyFilter()
       }
-      this.onChange = event => event.stopPropagation()
+      this.onChange = event => { if (!this.serverSearch) event.stopPropagation() }
       this.onFocus = () => this.openList(true)
       this.onKeyDown = event => {
         const filtered = this.filteredOptions()

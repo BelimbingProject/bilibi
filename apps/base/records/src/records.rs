@@ -212,11 +212,21 @@ impl Records {
     }
     /// Picker rows for `hits`, each raising `kind:id`.
     pub fn picker_hits(&self, hits: &[Hit]) -> Vec<bilibi_ui::PickerHit> {
+        let multiple_kinds = hits.iter().any(|hit| hit.kind != hits[0].kind);
         hits.iter()
             .map(|hit| bilibi_ui::PickerHit {
                 value: format!("{}:{}", hit.kind, hit.id),
                 label: hit.label.clone(),
-                kind_label: self.kind_label(&hit.kind).to_owned(),
+                kind_label: if multiple_kinds {
+                    let noun = self.kind_nouns(&hit.kind).0;
+                    let mut chars = noun.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                },
             })
             .collect()
     }

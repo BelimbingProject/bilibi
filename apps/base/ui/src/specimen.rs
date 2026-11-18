@@ -597,12 +597,12 @@ impl ComponentsSpecimen {
             crate::PickerHit {
                 value: "company:1".into(),
                 label: "Acme Holdings".into(),
-                kind_label: "Companies".into(),
+                kind_label: "Company".into(),
             },
             crate::PickerHit {
                 value: "person:7".into(),
                 label: "Ada Acme".into(),
-                kind_label: "Contacts".into(),
+                kind_label: "Contact".into(),
             },
         ];
         let named = |id: &str| {

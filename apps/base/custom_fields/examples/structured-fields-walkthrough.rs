@@ -395,7 +395,7 @@ async fn main() -> Result<(), Failure> {
         })
         .await?;
     for record in ["company:1", "company:2"] {
-        let hit = format!("name=\"record\" value=\"{record}\"");
+        let hit = format!("data-value=\"{record}\"");
         proof.check(
             &format!("picker {record} survives refresh with fresh access and one connection"),
             searched.html.contains(&hit) && refreshed.html.contains(&hit),

@@ -159,7 +159,7 @@ Customer accounts retain their separate portal identity ([ADR 16](../../../docs/
 - **`capability` is that registered key.** Core User decides it for the actor, logged, before it reads: not registered, not held or unknown is `Forbidden` (the same answer), so no `admin.user.*` grant is needed and a capability such as `companies.view` can never open the staff list. You still authorize your own target and re-prove the chosen id when you save; a choice is never proof.
 - **Result:** `StaffChoice { id, name }`, at most `STAFF_CHOICE_MAX` (20), in name order. `text` is empty (the first 20) or up to `STAFF_SEARCH_MAX` (255 bytes); it matches a word start in the name, ignoring case, with `%` and `_` literal. Email is not searched or returned.
 - **Who is offered:** staff of the scope's tenant only, with an active sign-in identity, an active account that is not deleted or SCIM-deactivated, and a linked Person that is not retired (the `standing` rule). Customer accounts, other tenants and anyone `standing` would freeze are never offered. A desk is not required, unlike `list_company_accounts`.
-- **Picker:** a Domain shows it with the shared search field and hit buttons, as `RecordPicker` does for records; no new component.
+- **Picker:** a Domain shows it with the shared `RecordPicker` combobox, as it does for records; no new component.
 - Proof: `examples/staff-choices-walkthrough.rs` (`BILIBI_STAFF_CHOICES_DEMO=disposable`, migrated disposable `DATABASE_URL`).
 
 `CompanyAccount` carries id, name, email, verification, Person, the requested organisation and timestamps. It contains no credential or employment affiliation. Staff without a desk are not listed. Business affiliations neither add nor remove workplace access.
