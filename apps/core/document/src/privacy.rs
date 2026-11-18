@@ -560,7 +560,7 @@ impl Handler for DocumentData {
                     }
                 }
                 tx.commit().await?;
-                progress.record(step).await?;
+                progress.record(client, step).await?;
             }
             Ok(())
         })

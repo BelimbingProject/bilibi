@@ -815,8 +815,10 @@ impl Detail {
                 names.join(" and ")
             }
         };
-        let can_create_roles = self.pages.allowed(scope, "admin.authz.role.create").await?;
-        let can_list_roles = self.pages.allowed(scope, "admin.authz.role.list").await?;
+        let can_create_roles =
+            bilibi_authz::holds_proof(&**client, scope, "admin.authz.role.create").await?;
+        let can_list_roles =
+            bilibi_authz::holds_proof(&**client, scope, "admin.authz.role.list").await?;
         let unavailable = match control {
             "forbidden" => render(&EmptyState::forbidden("assign roles to this user"))?,
             "grant_all" => render(&EmptyState::missing(

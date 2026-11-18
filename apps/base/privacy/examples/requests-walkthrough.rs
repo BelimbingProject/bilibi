@@ -721,7 +721,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     println!("received {} due {}", access.id, access.due_at);
-    for (store, label, located) in privacy.locate(&client, &admin, access.id).await? {
+    for (store, label, located) in privacy.locate(&admin, access.id).await? {
         if store == "core/portal.invitations"
             && (located.kinds.len() != 1
                 || located.kinds[0].by_person != 5
@@ -1074,7 +1074,7 @@ async fn main() -> Result<()> {
         )
         .await?
         .get(0);
-    for (store, _, located) in privacy.locate(&client, &admin, erasure.id).await? {
+    for (store, _, located) in privacy.locate(&admin, erasure.id).await? {
         if !located.candidates.is_empty() {
             println!(
                 "  candidates in {store}: {:?}",

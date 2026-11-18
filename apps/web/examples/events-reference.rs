@@ -475,6 +475,7 @@ async fn both(proof: &Proof) -> Result<()> {
                 "SELECT count(*) FROM base_events_deliveries WHERE subscriber=$1 AND last_error IS NOT NULL AND delivered_at IS NULL",
                 &[&SUBSCRIBER],
             ).await?.get(0);
+            drop(client);
             Ok(failed > 0 && Proof::pending(db).await? == 2)
         })
         .await?;

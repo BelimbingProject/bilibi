@@ -217,6 +217,15 @@ impl Geonames {
     /// One division by its stored code; blank or unknown is `None`. Prefer
     /// this to listing a country when the code is already known.
     pub async fn get_admin1(&self, code: &str) -> Result<Option<Admin1Summary>> {
+        self.get_admin1_on(&**self.db.get().await?, code).await
+    }
+
+    /// One division on the caller's held connection or transaction.
+    pub async fn get_admin1_on(
+        &self,
+        client: &(impl ProofClient + ?Sized),
+        code: &str,
+    ) -> Result<Option<Admin1Summary>> {
         let code = code.trim();
         if code.is_empty() || code.len() > 20 {
             return Ok(None);
@@ -225,7 +234,7 @@ impl Geonames {
             "SELECT {} FROM geonames_admin1 WHERE code=$1",
             Admin1Summary::COLUMNS
         );
-        let row = self.db.get().await?.query_opt(&sql, &[&code]).await?;
+        let row = client.query_opt(&sql, &[&code]).await?;
         Ok(row.as_ref().map(Admin1Summary::from_row))
     }
 

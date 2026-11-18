@@ -559,7 +559,7 @@ async fn main() -> Result<()> {
         )
         .await?;
     let mut confirm = Vec::new();
-    for (store, _, located) in privacy.locate(&client, &admin, access.id).await? {
+    for (store, _, located) in privacy.locate(&admin, access.id).await? {
         if store == STORE {
             println!("  located kinds: {:?}", located.kinds);
             for candidate in &located.candidates {

@@ -111,6 +111,7 @@ impl UserService {
             "Verify your Bilibi email address",
             format!("Verify your email address by opening this link:\n\n{link}\n\nThe link expires in one hour. If you did not request this, you can ignore this email.\n"),
         );
+        drop(client);
         self.mailer
             .deliver(&message)
             .await

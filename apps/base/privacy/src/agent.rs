@@ -100,7 +100,8 @@ impl ReadHandler for Read {
                     json!({"request": request_json(&privacy.request(&**client, scope, id(input, "id")?).await?)})
                 }
                 Self::Locate => {
-                    let found = privacy.locate(&client, scope, id(input, "id")?).await?;
+                    drop(client);
+                    let found = privacy.locate(scope, id(input, "id")?).await?;
                     json!({"stores": found.iter().map(|(store, label, located)| json!({
                         "store": store, "label": label, "kinds": located.kinds,
                         "candidates": located.candidates, "truncated": located.truncated,
@@ -371,7 +372,7 @@ impl WriteHandler for Write {
                     .await
                     .map_err(refusal)?),
                 Self::Reveal => json!({"value": privacy
-                    .reveal_field(scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
+                    .reveal_field_on(tx.sql(), scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
                     .await?}),
             };
             Ok(result.into())

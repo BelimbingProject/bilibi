@@ -22,27 +22,29 @@ bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
 type Failure = Box<dyn std::error::Error>;
-struct Browser<'a> {
-    app: &'a bilibi_web::App,
-    token: &'a str,
+#[derive(Clone)]
+struct Browser {
+    app: std::sync::Arc<bilibi_web::App>,
+    token: String,
 }
-impl PlanAuthority for Browser<'_> {
+impl PlanAuthority for Browser {
     fn verify<'a>(&'a self, tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
         Box::pin(async move {
             Ok(PlanIdentity {
-                scope: self.app.security.sessions.hold(tx, self.token).await?,
+                scope: self.app.security.sessions.hold(tx, &self.token).await?,
                 credential_binding: format!("browser:{}", self.token),
             })
         })
     }
 }
 
-struct Agent<'a> {
-    plans: &'a Plans,
-    registry: &'a Registry,
-    browser: Browser<'a>,
+#[derive(Clone)]
+struct Agent {
+    plans: std::sync::Arc<Plans>,
+    registry: std::sync::Arc<Registry>,
+    browser: Browser,
     scope: Scope,
-    db: &'a bilibi_database::Db,
+    db: bilibi_database::Db,
 }
 fn op(key: &str, input: Value) -> PlannedOperation {
     PlannedOperation {
@@ -50,7 +52,7 @@ fn op(key: &str, input: Value) -> PlannedOperation {
         input,
     }
 }
-impl Agent<'_> {
+impl Agent {
     /// Dry-run a write; return the first refusal when it is invalid.
     async fn plan(&self, ops: &[PlannedOperation]) -> Result<(), String> {
         let plan = self
@@ -98,13 +100,8 @@ impl Agent<'_> {
         Ok(self.commit(&ops).await?.remove(0))
     }
     async fn read(&self, key: &str, input: Value) -> Result<Value, String> {
-        let client = self
-            .db
-            .get_detached("the walkthrough's own checking connection")
-            .await
-            .map_err(|error| error.to_string())?;
         self.registry
-            .call(&**client, &self.scope, key, &input)
+            .read(&self.db, &self.scope, key, &input)
             .await
             .map(|out| out["result"].clone())
             .map_err(|error| error.to_string())
@@ -221,7 +218,7 @@ async fn main() -> Result<(), Failure> {
     let db = pool(&std::env::var("DATABASE_URL")?)?;
     bilibi_web::migrate(&db).await?;
     bilibi_walkthrough_fixture::install(&db).await?;
-    let app = bilibi_web::App::new(db.clone(), "http://localhost")?;
+    let app = std::sync::Arc::new(bilibi_web::App::new(db.clone(), "http://localhost")?);
     app.services
         .get::<bilibi_authz::grants::Grants>("base/authz.grants")?
         .reconcile()
@@ -243,14 +240,14 @@ async fn main() -> Result<(), Failure> {
         agents.push((login.token.clone(), app.security.guard(&login.token).await?));
     }
     let agent = |index: usize| Agent {
-        plans: &plans,
-        registry: &registry,
+        plans: plans.clone(),
+        registry: registry.clone(),
         browser: Browser {
-            app: &app,
-            token: &agents[index].0,
+            app: app.clone(),
+            token: agents[index].0.clone(),
         },
         scope: agents[index].1.clone(),
-        db: &db,
+        db: db.clone(),
     };
     let (admin, viewer, other, second) = (agent(0), agent(1), agent(2), agent(3));
     let manager = agent(4);
@@ -932,15 +929,24 @@ async fn main() -> Result<(), Failure> {
         .get_detached("the walkthrough's own checking connection")
         .await?;
     gate.execute("SELECT pg_advisory_lock(4242)", &[]).await?;
-    let (holiday, include, opened) =
-        tokio::join!(admin.commit(&first), second.commit(&second_ops), async {
+    let (holiday, include, opened) = tokio::join!(
+        tokio::spawn({
+            let admin = admin.clone();
+            async move { admin.commit(&first).await }
+        }),
+        tokio::spawn({
+            let second = second.clone();
+            async move { second.commit(&second_ops).await }
+        }),
+        async {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             gate.execute("SELECT pg_advisory_unlock(4242)", &[]).await
-        });
+        }
+    );
     opened?;
     client.batch_execute("DROP TRIGGER walkthrough_gate ON core_work_calendar_holidays; DROP TRIGGER walkthrough_gate ON core_work_calendar_includes; DROP FUNCTION walkthrough_gate()").await?;
-    show("first holiday", holiday.map(Value::from));
-    show("include", include.map(Value::from));
+    show("first holiday", holiday?.map(Value::from));
+    show("include", include?.map(Value::from));
     print_days(
         &admin
             .read(
@@ -1002,7 +1008,11 @@ async fn main() -> Result<(), Failure> {
     client.batch_execute("CREATE FUNCTION walkthrough_read_gate() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_lock_shared(4243); PERFORM pg_advisory_unlock_shared(4243); RETURN true; END $$; ALTER TABLE core_work_calendar_rules RENAME TO walkthrough_rules; CREATE VIEW core_work_calendar_rules AS SELECT * FROM walkthrough_rules WHERE walkthrough_read_gate()").await?;
     gate.execute("SELECT pg_advisory_lock(4243)", &[]).await?;
     let (held, (waited, committed, opened)) = tokio::join!(
-        admin.read("core.work_calendar.business_time", open.clone()),
+        tokio::spawn({
+            let admin = admin.clone();
+            let open = open.clone();
+            async move { admin.read("core.work_calendar.business_time", open).await }
+        }),
         async {
             // Commit once the read waits at the gate (10 s at most).
             let mut waited = false;
@@ -1027,7 +1037,7 @@ async fn main() -> Result<(), Failure> {
     show("the plan", committed.map(Value::from));
     show(
         "is_open Monday 10:00Z, read across the commit",
-        held.map(|answer| answer["result"].clone()),
+        held?.map(|answer| answer["result"].clone()),
     );
     admin
         .ask("is_open Monday 10:00Z after the plan", open)

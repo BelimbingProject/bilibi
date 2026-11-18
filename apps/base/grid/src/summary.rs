@@ -958,3 +958,30 @@ fn days(
     }
     parts.join(" AND ")
 }
+
+/// Aggregate using the caller's already held transaction.
+pub async fn summarize_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    spec: &SummarySpec,
+) -> Result<Summary, QueryError> {
+    crate::query::bounded(tx, spec.bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        summarize_catalog(tx, &catalog, root, spec).await
+    })
+    .await
+}
+/// Page keys using the caller's already held transaction.
+pub async fn page_keys_on(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    root: &str,
+    spec: &PageSpec,
+) -> Result<KeyPage, QueryError> {
+    crate::query::bounded(tx, spec.bounds, async {
+        let catalog = Catalog::for_scope(tx, scope).await?;
+        page_keys_catalog(tx, &catalog, root, spec).await
+    })
+    .await
+}

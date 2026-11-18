@@ -156,7 +156,7 @@ For `core.user.sign_in`, provider `start` and `spend` receive an internally prov
 
 ### Shared browser proof
 
-The identity owner binds `SessionProvider` once with `bind_session`, independently of factor registration. Core User supplies the existing session window and the neutral choice-page destination. A method opens browser proof with `Sessions::step_up` only after consuming its own valid challenge in an audited transaction. Factors do not implement session storage.
+The identity owner binds `SessionProvider` once with `bind_session`, independently of factor registration. Core User supplies the existing session window and the neutral choice-page destination. `SessionProvider::session` receives Step-up's independent connection: use it for session proof reads and consumption, so the provider does not take another pooled connection while an owner transaction is held. A method opens browser proof with `Sessions::step_up` only after consuming its own valid challenge in an audited transaction. Factors do not implement session storage.
 
 `SessionProof::Fresh { seconds, consume: false }` is a read only. `consume: true` spends the fresh check. `holds`, `required`, enrollment reads and destination rendering never send challenges or spend proof.
 

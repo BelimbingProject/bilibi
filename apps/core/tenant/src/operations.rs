@@ -50,11 +50,16 @@ impl WriteHandler for MoveWrite {
     }
     fn preview<'a>(
         &'a self,
-        _client: &'a dyn OperationClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
-        Box::pin(async move { Ok(facade()?.review_move(scope, input, self.0).await?.into()) })
+        Box::pin(async move {
+            Ok(facade()?
+                .review_move(client, scope, input, self.0)
+                .await?
+                .into())
+        })
     }
     fn commit<'a>(
         &'a self,

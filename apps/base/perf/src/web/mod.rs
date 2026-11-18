@@ -149,8 +149,13 @@ impl Index {
         let recorder = &self.pages.recorder;
         let (diagnostics, views) = if self.tab == TABS[1].0 {
             let filter = self.filter();
+            let diagnostics = tokio::spawn({
+                let recorder = recorder.clone();
+                async move { recorder.diagnostics().await }
+            });
             let (diagnostics, mut samples) =
-                tokio::join!(recorder.diagnostics(), recorder.list_samples(&filter));
+                tokio::join!(diagnostics, recorder.list_samples(&filter));
+            let diagnostics = diagnostics.map_err(|_| Error::Internal)?;
             if let Ok(page) = &samples {
                 if self
                     .list
@@ -169,11 +174,21 @@ impl Index {
                 min_samples: 5,
                 limit: 10,
             };
+            let diagnostics = tokio::spawn({
+                let recorder = recorder.clone();
+                async move { recorder.diagnostics().await }
+            });
+            let regressions = tokio::spawn({
+                let recorder = recorder.clone();
+                async move { recorder.regressions(&windows).await }
+            });
             let (diagnostics, regressions, slowest) = tokio::join!(
-                recorder.diagnostics(),
-                recorder.regressions(&windows),
-                recorder.slowest(now - hour * 24, now, 10),
+                diagnostics,
+                regressions,
+                recorder.slowest(now - hour * 24, now, 10)
             );
+            let diagnostics = diagnostics.map_err(|_| Error::Internal)?;
+            let regressions = regressions.map_err(|_| Error::Internal)?;
             (
                 diagnostics,
                 view::Views::Slowdowns {
