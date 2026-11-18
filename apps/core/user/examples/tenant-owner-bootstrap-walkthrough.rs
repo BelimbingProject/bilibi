@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Unauthorized)?;
     let revoked = app.security.guard(&retry_login.token).await?;
-    let client = db.get_detached("tenant owner walkthrough checks").await?;
+    let client = db.get().await?;
     let row = client
         .query_one(
             "SELECT t.id,c.id,u.status,i.email,p.kind,
