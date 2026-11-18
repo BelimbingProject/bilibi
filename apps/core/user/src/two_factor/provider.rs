@@ -29,11 +29,11 @@ fn pages(scope: &Scope) -> (&'static str, &'static str) {
 impl SessionProvider for Authenticator {
     fn session<'a>(
         &'a self,
-        client: &'a tokio_postgres::Client,
         scope: &'a Scope,
         proof: SessionProof,
     ) -> ProofFuture<'a, WindowState> {
         Box::pin(async move {
+            let client = self.0.db.get().await?;
             Ok(match proof {
                 SessionProof::Window {
                     window_seconds,
@@ -43,7 +43,7 @@ impl SessionProvider for Authenticator {
                     let window = self
                         .0
                         .sessions
-                        .step_up_window(client, scope, window_seconds, cap_seconds, extend)
+                        .step_up_window(&**client, scope, window_seconds, cap_seconds, extend)
                         .await?;
                     WindowState::from_flags(window.checked, window.within_cap, window.within_window)
                 }
@@ -54,7 +54,7 @@ impl SessionProvider for Authenticator {
                     if self
                         .0
                         .sessions
-                        .spend_fresh_step_up(client, scope, seconds)
+                        .spend_fresh_step_up(&**client, scope, seconds)
                         .await?
                     {
                         WindowState::Holds

@@ -146,6 +146,23 @@ impl Catalog {
         client: &(impl GenericClient + Sync),
         scope: &Scope,
     ) -> Result<Self, CatalogError> {
+        Self::build(client, scope, None).await
+    }
+    /// [`Catalog::for_scope`] with one masked field of one table unmasked, for
+    /// a reveal the caller has already authorized and recorded.
+    pub(crate) async fn revealing(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        table: &str,
+        field: &str,
+    ) -> Result<Self, CatalogError> {
+        Self::build(client, scope, Some((table, field))).await
+    }
+    async fn build(
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        reveal: Option<(&str, &str)>,
+    ) -> Result<Self, CatalogError> {
         let installed = crate::installed().map_err(|_| Error::Internal)?;
         // One read for what the reader holds and how far it reaches (#683).
         let grants = bilibi_authz::effective_grants(client, scope).await?;
@@ -210,6 +227,9 @@ impl Catalog {
                     .flatten()
                     .map(|(field, kind)| (field.clone(), *kind)),
             );
+            if let Some((_, field)) = reveal.filter(|(table, _)| table == id) {
+                own.remove(field);
+            }
             // Protected fields are never offered for restriction, so a stale row
             // naming one is inert here (record pages still mask by name). A
             // masked field stays, and its values are masked when projected.
@@ -443,13 +463,6 @@ impl Catalog {
     /// Whether this account sees `field` of `table` masked.
     pub fn masked(&self, table: &str, field: &str) -> bool {
         self.masks.get(table).is_some_and(|m| m.contains_key(field))
-    }
-
-    pub(crate) fn unmask(&mut self, table: &str, field: &str) -> bool {
-        self.masks
-            .get_mut(table)
-            .and_then(|fields| fields.remove(field))
-            .is_some()
     }
     pub fn tables(&self) -> impl Iterator<Item = &Table> {
         self.tables.values()

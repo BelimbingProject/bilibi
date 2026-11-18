@@ -92,8 +92,12 @@ impl AddressService {
     /// Normalize and check the location against Geonames: the only way to a
     /// `ValidAddress`, which every store write takes.
     pub async fn validate(&self, input: &AddressInput) -> WriteResult<ValidAddress> {
-        let client = self.db.get().await.map_err(Error::from)?;
-        self.validate_on(&**client, input).await
+        let input = model::normalize(input).map_err(WriteError::Invalid)?;
+        if input.country_iso.is_some() {
+            let client = self.db.get().await.map_err(Error::from)?;
+            location::check(&**client, &self.geonames, &input).await?;
+        }
+        Ok(ValidAddress(input))
     }
     async fn validate_on(
         &self,
@@ -114,6 +118,9 @@ impl AddressService {
         location::suggest(&self.geonames, incoming, previous, previous_auto).await
     }
     pub async fn options(&self, location: &Location) -> Result<Options> {
+        if bilibi_geonames::normalize_iso(&location.country_iso).is_none() {
+            return Ok(Options::default());
+        }
         let client = self.db.get().await?;
         location::options(&**client, &self.geonames, location).await
     }

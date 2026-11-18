@@ -198,12 +198,8 @@ pub trait Provider: Send + Sync {
 pub trait SessionProvider: Send + Sync {
     /// Neutral method choice destination supplied by the browser identity owner.
     fn prompt<'a>(&'a self, scope: &'a Scope, back: &'a str) -> ProofFuture<'a, String>;
-    fn session<'a>(
-        &'a self,
-        client: &'a tokio_postgres::Client,
-        scope: &'a Scope,
-        proof: SessionProof,
-    ) -> ProofFuture<'a, WindowState>;
+    fn session<'a>(&'a self, scope: &'a Scope, proof: SessionProof)
+        -> ProofFuture<'a, WindowState>;
 }
 
 /// One declared operation with its owner module.
@@ -816,7 +812,6 @@ impl StepUp {
             (None, Mode::EveryTime) => {
                 provider
                     .session(
-                        &**self.connection().await?,
                         scope,
                         SessionProof::Fresh {
                             seconds: policy::FRESH_SECONDS,
@@ -828,7 +823,6 @@ impl StepUp {
             (None, _) => {
                 provider
                     .session(
-                        &**self.connection().await?,
                         scope,
                         SessionProof::Window {
                             window_seconds,
