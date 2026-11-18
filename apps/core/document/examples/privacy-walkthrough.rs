@@ -134,6 +134,95 @@ async fn settle(privacy: &Privacy, client: &Client, scope: &Scope, id: i64) -> R
     }
     Ok(privacy.request(client, scope, id).await?)
 }
+/// Reproduces the lock-wait ordering: the first statement snapshot misses a
+/// pin that commits while it waits, but the protection query after the lock
+/// sees it. Run once for a person-owned pin and once for a company-owned pin.
+async fn prove_pin_commits_while_erasure_waits(
+    db: &bilibi_database::Db,
+    boundary: &MutationBoundary,
+    documents: &Documents,
+    scope: &Scope,
+    document_id: i64,
+    owner: &Reference,
+) -> Result<()> {
+    let mut pin_client = db.get_detached("privacy walkthrough pin race").await?;
+    let mut pin_tx = boundary
+        .begin(
+            &mut pin_client,
+            scope.mutation_context("core.document.protect_revision"),
+        )
+        .await?;
+    documents
+        .protect_revision(
+            &mut pin_tx,
+            scope,
+            document_id,
+            1,
+            owner,
+            "Concurrent privacy walkthrough evidence",
+        )
+        .await?;
+
+    let mut erase_client = db
+        .get_detached("privacy walkthrough erasure lock race")
+        .await?;
+    let application = format!("document-erasure-race-{document_id}");
+    let wait = tokio::spawn(async move {
+        let tx = erase_client.transaction().await?;
+        tx.query_one(
+            "SELECT set_config('application_name',$1,true)",
+            &[&application],
+        )
+        .await?;
+        let first = tx
+            .query_one(
+                "SELECT d.id,EXISTS (SELECT 1 FROM core_document_revision_protections p WHERE p.tenant_id=d.tenant_id AND p.document_id=d.id) FROM core_documents d WHERE d.tenant_id=1 AND d.id=$1 FOR UPDATE OF d",
+                &[&document_id],
+            )
+            .await?;
+        let snapshot_saw_pin: bool = first.get(1);
+        let fresh_saw_pin: bool = tx
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM core_document_revision_protections WHERE tenant_id=1 AND document_id=$1)",
+                &[&document_id],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok::<(bool, bool), tokio_postgres::Error>((snapshot_saw_pin, fresh_saw_pin))
+    });
+
+    let mut observed_wait = false;
+    for _ in 0..100 {
+        let monitor = db
+            .get_detached("observe privacy walkthrough lock wait")
+            .await?;
+        observed_wait = monitor
+            .query_opt(
+                "SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock'",
+                &[&format!("document-erasure-race-{document_id}")],
+            )
+            .await?
+            .is_some();
+        drop(monitor);
+        if observed_wait {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    ensure(observed_wait, "erasure waits on the document row lock")?;
+    pin_tx.commit().await?;
+    let (snapshot_saw_pin, fresh_saw_pin) = wait.await??;
+    ensure(
+        !snapshot_saw_pin,
+        "the locking statement retains its earlier snapshot",
+    )?;
+    ensure(
+        fresh_saw_pin,
+        "the fresh protection query sees the committed pin",
+    )?;
+    Ok(())
+}
 /// Rows of the document tables, the document audit trail and document
 /// notices holding `needle`.
 async fn holding(client: &Client, needle: &str) -> Result<i64> {
@@ -312,28 +401,16 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
-        if name == "Ada signed agreement" || name == "Ada shared signed agreement" {
-            let owner = if name == "Ada signed agreement" {
-                &person
-            } else {
-                &company
-            };
-            documents
-                .protect_revision(
-                    &mut tx,
-                    &admin,
-                    document.id,
-                    1,
-                    owner,
-                    "Privacy walkthrough evidence",
-                )
-                .await?;
-        }
         tx.commit().await?;
         filed.push((document.id, stored.artifact_id));
     }
     let [(a, a_file), (b, _), (c, c_file), (d, _), (e, e_file), (f, _), (g, _), (h, h_file), (i, i_file)] =
         <[_; 9]>::try_from(filed).map_err(|_| "nine documents")?;
+    println!("== concurrent pin and erasure lock ordering");
+    prove_pin_commits_while_erasure_waits(&db, &boundary, &documents, &admin, h, &person).await?;
+    println!("  ok: person-owned pin committed while erasure waited; fresh check sees it");
+    prove_pin_commits_while_erasure_waits(&db, &boundary, &documents, &admin, i, &company).await?;
+    println!("  ok: shared company-owned pin committed while erasure waited; fresh check sees it");
     let e_subject = e_file
         .strip_prefix("upload:")
         .ok_or("E's upload is held, not an Artifact")?

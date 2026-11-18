@@ -38,7 +38,7 @@ use bilibi_personal_data::{
 };
 use bilibi_tenancy::{ProofClient, Scope};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 use tokio_postgres::{Client, GenericClient};
 
@@ -187,6 +187,42 @@ async fn files_of(
         }
     }
     Ok(files)
+}
+/// Protected documents read in a statement after their rows were locked.
+/// Under Read Committed, this gets a fresh snapshot if a concurrent pin
+/// committed while the caller waited for one of those row locks.
+async fn protected_documents(
+    client: &(impl GenericClient + Sync),
+    tenant: i64,
+    ids: &[i64],
+) -> Result<BTreeSet<i64>> {
+    Ok(client
+        .query(
+            "SELECT DISTINCT document_id FROM core_document_revision_protections WHERE tenant_id=$1 AND document_id=ANY($2)",
+            &[&tenant, &ids],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect())
+}
+/// Documents shared with a record other than the erasure subject, read after
+/// the document locks so a concurrent link cannot be missed either.
+async fn shared_documents(
+    client: &(impl GenericClient + Sync),
+    tenant: i64,
+    person: i64,
+    ids: &[i64],
+) -> Result<BTreeSet<i64>> {
+    Ok(client
+        .query(
+            "SELECT DISTINCT document_id FROM core_document_links WHERE tenant_id=$1 AND document_id=ANY($2) AND NOT (record_kind='person' AND record_id=$3::bigint::text)",
+            &[&tenant, &ids, &person],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect())
 }
 /// The privacy hold that keeps each of `files`' documents: on the person,
 /// the document, or one of its revisions or file ledger rows (document →
@@ -387,22 +423,23 @@ impl Handler for DocumentData {
             let rows = tx
                 .sql()
                 .query(
-                    &format!("SELECT d.id,d.company_id,EXISTS (SELECT 1 FROM core_document_links o WHERE o.tenant_id=d.tenant_id AND o.document_id=d.id AND NOT (o.record_kind='person' AND o.record_id=$2::bigint::text)) AS shared, EXISTS (SELECT 1 FROM core_document_revision_protections p WHERE p.tenant_id=d.tenant_id AND p.document_id=d.id) AS has_protection FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id FOR UPDATE OF d"),
+                    &format!("SELECT d.id,d.company_id FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id FOR UPDATE OF d"),
                     &[&tenant, &person],
                 )
                 .await?;
             let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
+            let protected_ids = protected_documents(tx.sql(), tenant, &ids).await?;
+            let shared_ids = shared_documents(tx.sql(), tenant, person, &ids).await?;
             let files = files_of(tx.sql(), tenant, &ids).await?;
             let held = held(holds, grant, &files).await?;
             let mut erased = Erased::default();
             for row in rows {
-                let (id, company, shared, has_protection): (i64, i64, bool, bool) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3));
+                let (id, company): (i64, i64) = (row.get(0), row.get(1));
                 if let Some(hold) = held.get(&id) {
                     erased.kept.push(Kept::held(RECORD, id, *hold));
                     continue;
                 }
-                if has_protection {
+                if protected_ids.contains(&id) {
                     erased.kept.push(Kept {
                         kind: RECORD.into(),
                         id: id.to_string(),
@@ -412,7 +449,7 @@ impl Handler for DocumentData {
                     });
                     continue;
                 }
-                if shared {
+                if shared_ids.contains(&id) {
                     unlink(tx, tenant, id, person).await?;
                     erased.kept.push(Kept {
                         kind: RECORD.into(),
@@ -504,20 +541,22 @@ impl Handler for DocumentData {
         Box::pin(async move {
             grant.check_subject(scope, subject)?;
             let (tenant, person) = (scope.tenant(), subject.person.get());
-            let rows = client
+            let phase = client.transaction().await?;
+            let rows = phase
                 .query(
-                    &format!("SELECT d.id,d.company_id,d.erased_at IS NOT NULL, EXISTS (SELECT 1 FROM core_document_revision_protections p WHERE p.tenant_id=d.tenant_id AND p.document_id=d.id) AS has_protection FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id"),
+                    &format!("SELECT d.id,d.company_id,d.erased_at IS NOT NULL FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id FOR UPDATE OF d"),
                     &[&tenant, &person],
                 )
                 .await?;
             let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
-            let files = files_of(&*client, tenant, &ids).await?;
+            let protected_ids = protected_documents(&phase, tenant, &ids).await?;
+            let files = files_of(&phase, tenant, &ids).await?;
+            phase.commit().await?;
             // First, while the person link still vouches for them. Only
             // marked, unprotected documents can have their bytes removed.
             for row in &rows {
-                let (id, _, marked, has_protection): (i64, i64, bool, bool) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3));
-                if !marked || has_protection {
+                let (id, _, marked): (i64, i64, bool) = (row.get(0), row.get(1), row.get(2));
+                if !marked || protected_ids.contains(&id) {
                     continue;
                 }
                 let document = &files[&id];
@@ -528,12 +567,11 @@ impl Handler for DocumentData {
             let held = held(holds, grant, &files).await?;
             let bound = bound()?;
             for row in rows {
-                let (id, company, marked, has_protection): (i64, i64, bool, bool) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3));
+                let (id, company, marked): (i64, i64, bool) = (row.get(0), row.get(1), row.get(2));
                 if !marked {
                     continue;
                 }
-                if has_protection {
+                if protected_ids.contains(&id) {
                     let mut step = Erased::default();
                     step.kept.push(Kept {
                         kind: RECORD.into(),
