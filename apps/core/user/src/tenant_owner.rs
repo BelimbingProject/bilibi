@@ -27,7 +27,7 @@ pub enum FirstTenantOwnerError {
     TenantExists,
     #[error("more than one tenant matches the supplied tenant and primary company")]
     AmbiguousTenant,
-    #[error("the bootstrap owner has no pending invitation for this address")]
+    #[error("the bootstrap owner has no pending invitation")]
     OwnerNotPending,
     #[error("{DEDICATED_OWNER_SIGN_IN}")]
     DedicatedSignIn,
@@ -180,41 +180,56 @@ impl UserService {
                 Context::system(tenant, TENANT_OWNER_PRINCIPAL, TENANT_OWNER_ACTION),
             )?;
             let (invitation, event) = if let Some(id) = retry_invitation {
-                let user = tx
+                let pending = tx
                     .sql()
                     .query_opt(
-                        "SELECT i.user_id FROM user_tenant_owner_bootstraps b
+                        "SELECT i.user_id,i.email,u.name FROM user_tenant_owner_bootstraps b
                          JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.user_id=b.user_id AND i.id=b.invitation_id
                          JOIN users u ON u.tenant_id=b.tenant_id AND u.id=b.user_id
-                         WHERE b.tenant_id=$1 AND i.id=$2 AND i.email=$3
+                         WHERE b.tenant_id=$1 AND i.id=$2
                            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
                            AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL
-                         FOR UPDATE OF i",
-                        &[&tenant, &id, &email],
+                         FOR UPDATE OF i,u",
+                        &[&tenant, &id],
                     )
                     .await?
-                    .ok_or(FirstTenantOwnerError::OwnerNotPending)?
-                    .get(0);
+                    .ok_or(FirstTenantOwnerError::OwnerNotPending)?;
+                let (user, old_email, old_name): (i64, String, String) =
+                    (pending.get(0), pending.get(1), pending.get(2));
                 if email_taken(tx.sql(), &email, None).await? {
                     return Err(FirstTenantOwnerError::DedicatedSignIn);
                 }
-                tx.mutate(move |sql| {
+                let invitation = tx.mutate(move |sql| {
                     Box::pin(async move {
                         sql.execute(
-                            "UPDATE user_invitations SET token_hash=$3,expires_at=clock_timestamp()+make_interval(days=>$4::int) WHERE tenant_id=$1 AND id=$2",
-                            &[&tenant, &id, &token_hash, &days],
+                            "UPDATE user_invitations SET email=$3,token_hash=$4,expires_at=clock_timestamp()+make_interval(days=>$5::int) WHERE tenant_id=$1 AND id=$2",
+                            &[&tenant, &id, &email, &token_hash, &days],
                         )
                         .await?;
-                        Ok(((), vec![Change {
+                        let mut changes = vec![Change {
                             kind: "user.invitation".into(),
                             id,
-                            old: json!({"user_id": user, "status": "pending"}),
-                            new: json!({"user_id": user, "status": "pending", "reissued": true}),
-                        }]))
+                            old: json!({"user_id": user, "email": old_email, "status": "pending"}),
+                            new: json!({"user_id": user, "email": email, "status": "pending", "reissued": true}),
+                        }];
+                        if old_email != email && old_name != name {
+                            sql.execute(
+                                "UPDATE users SET name=$3,version=version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
+                                &[&tenant, &user, &name],
+                            )
+                            .await?;
+                            changes.push(Change {
+                                kind: "user".into(),
+                                id: user,
+                                old: json!({"name": old_name}),
+                                new: json!({"name": name}),
+                            });
+                        }
+                        Ok((Invitation { id, user, email }, changes))
                     })
                 })
                 .await?;
-                (Invitation { id, user, email }, TENANT_OWNER_REISSUED)
+                (invitation, TENANT_OWNER_REISSUED)
             } else {
                 (
                     self.invite_tenant_owner_in(&mut tx, company, name, email, token_hash, days)

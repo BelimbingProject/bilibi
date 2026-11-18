@@ -160,7 +160,7 @@ impl RetryState {
     }
 }
 
-async fn retry_state(client: &tokio_postgres::Client) -> Result<RetryState> {
+async fn retry_state(client: &tokio_postgres::Client, workspace: &str) -> Result<RetryState> {
     let row = client
         .query_one(
             "SELECT b.tenant_id,b.user_id,i.id,i.token_hash,i.expires_at>clock_timestamp(),
@@ -169,8 +169,8 @@ async fn retry_state(client: &tokio_postgres::Client) -> Result<RetryState> {
          FROM tenants t
          JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id
          JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.id=b.invitation_id
-         WHERE t.name='Delivery retry workspace'",
-            &[],
+         WHERE t.name=$1",
+            &[&workspace],
         )
         .await?;
     Ok(RetryState {
@@ -397,7 +397,7 @@ async fn main() -> Result<()> {
     let mail_before_retry = count(&mailbox)?;
     expect_output(
         provision(&workspace, Some(OWNER), None)?,
-        Some("the bootstrap owner has no pending invitation for this address"),
+        Some("the bootstrap owner has no pending invitation"),
     )?;
     if snapshot(&client).await? != before_retry || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
@@ -422,14 +422,14 @@ async fn main() -> Result<()> {
             "Owner invitation delivery failed after commit. Rerun the same command to reissue it.",
         ),
     )?;
-    let original = retry_state(&client).await?;
+    let original = retry_state(&client, retry_workspace).await?;
     if !original.unexpired || original.reissues != 0 || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
     }
     let before_wrong_address = snapshot(&client).await?;
     expect_output(
         provision(retry_workspace, Some(OWNER), None)?,
-        Some("the bootstrap owner has no pending invitation for this address"),
+        Some(DEDICATED),
     )?;
     if snapshot(&client).await? != before_wrong_address || count(&mailbox)? != mail_before_retry {
         return Err(Error::Internal);
@@ -442,7 +442,7 @@ async fn main() -> Result<()> {
         retry_email,
         &format!("You are invited to become the owner of {retry_workspace}."),
     )?;
-    let delivered = retry_state(&client).await?;
+    let delivered = retry_state(&client, retry_workspace).await?;
     if !delivered.same_invitation(&original)
         || delivered.digest == original.digest
         || !delivered.unexpired
@@ -462,7 +462,7 @@ async fn main() -> Result<()> {
         retry_email,
         &format!("You are invited to become the owner of {retry_workspace}."),
     )?;
-    let reissued = retry_state(&client).await?;
+    let reissued = retry_state(&client, retry_workspace).await?;
     expect_output(provision(retry_workspace, None, None)?, None)?;
     let ambiguous = snapshot(&client).await?;
     expect_output(
@@ -570,6 +570,7 @@ async fn main() -> Result<()> {
     let revoked = app.security.guard(&member_login.token).await?;
     let client = db.get().await?;
     let before_refusal = snapshot(&client).await?;
+    let pending = retry_state(&client, reserved_workspace).await?;
     drop(client);
     expect_output(
         provision(reserved_workspace, Some(member_email), None)?,
@@ -593,6 +594,88 @@ async fn main() -> Result<()> {
     ));
     let client = db.get().await?;
     if snapshot(&client).await? != before_refusal || count(&mailbox)? != before + 1 {
+        return Err(Error::Internal);
+    }
+    drop(client);
+    let replacement_email = "replacement@customer.example.test";
+    expect_output(
+        provision(reserved_workspace, Some(replacement_email), None)?,
+        None,
+    )?;
+    let replacement_token = invitation_token(
+        &mailbox,
+        before + 1,
+        &origin,
+        replacement_email,
+        &format!("You are invited to become the owner of {reserved_workspace}."),
+    )?;
+    assert!(matches!(
+        app.user.member_invitation(&owner_token).await,
+        Err(InvitationError::Link)
+    ));
+    assert!(matches!(
+        app.user
+            .accept_member_invitation(&revoked, &owner_token)
+            .await,
+        Err(InvitationError::Link)
+    ));
+    assert!(matches!(
+        app.user
+            .accept_new_member_invitation(&owner_token, PASSWORD)
+            .await,
+        Err(InvitationError::Link)
+    ));
+    let client = db.get().await?;
+    let replacement = retry_state(&client, reserved_workspace).await?;
+    let audited: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM base_audit_mutations WHERE tenant_id=$1
+             AND system_principal='tenant-provision' AND event='updated'
+             AND auditable_type='user.invitation' AND auditable_id=$2::bigint::text
+             AND old_values->>'email'=$3 AND new_values->>'email'=$4)
+             AND EXISTS(SELECT 1 FROM base_audit_mutations WHERE tenant_id=$1
+             AND system_principal='tenant-provision' AND event='updated'
+             AND auditable_type='user' AND auditable_id=$5::bigint::text
+             AND old_values->>'name'='member' AND new_values->>'name'='replacement')",
+            &[
+                &pending.tenant,
+                &pending.invitation,
+                &member_email,
+                &replacement_email,
+                &pending.user,
+            ],
+        )
+        .await?
+        .get(0);
+    if !pending.same_invitation(&replacement)
+        || pending.digest == replacement.digest
+        || replacement.reissues != 1
+        || !replacement.unexpired
+        || !audited
+    {
+        return Err(Error::Internal);
+    }
+    drop(client);
+    let accepted = app
+        .user
+        .accept_new_member_invitation(&replacement_token, PASSWORD)
+        .await
+        .map_err(|_| Error::Internal)?;
+    assert_eq!(accepted, pending.user);
+    let client = db.get().await?;
+    let (replacement_tenant, _) =
+        verify_owner(&client, accepted, reserved_workspace, replacement_email).await?;
+    assert_eq!(replacement_tenant, pending.tenant);
+    let accepted_state = snapshot(&client).await?;
+    expect_output(
+        provision(
+            reserved_workspace,
+            Some("unused@customer.example.test"),
+            None,
+        )?,
+        Some("the bootstrap owner has no pending invitation"),
+    )?;
+    if snapshot(&client).await? != accepted_state || count(&mailbox)? != before + 2 {
         return Err(Error::Internal);
     }
     let auth = app
@@ -695,6 +778,6 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Internal)?;
     assert!(invitation.existing_sign_in);
-    println!("Verified ordinary invitation protections and dedicated sign-ins for first owners.");
+    println!("Verified pending owner address recovery, dedicated sign-ins and ordinary invitation protections.");
     Ok(())
 }
