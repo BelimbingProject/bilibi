@@ -30,7 +30,7 @@ Creating a document gives its creator view, download, manage and share permissio
 - no end date, or a later one, when your own access ends (**Access until** must be no later than your own last day);
 - the creator's account, unless you are the creator; `unshare` likewise removes the creator's grant only for the creator, and nobody removes their own.
 
-Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant. Global search uses Base Search over the grant-filtered Grid source, matching name words and integration sync IDs through a generated, GIN-indexed vector; a view-only grant exposes metadata but never file bytes.
+Links, filing-company membership and access to a linked record do not expose a document. List results, record reads, related-record filters, search, CSV export, revision metadata and Artifact reads all apply the same explicit grant. Global search uses Base Search over the grant-filtered Grid source, matching name words and integration sync IDs through a generated, GIN-indexed vector, plus parts of the name and close spellings through a trigram index (migration 015); a view-only grant exposes metadata but never file bytes.
 
 ## Sharing by email, and when access ends
 
