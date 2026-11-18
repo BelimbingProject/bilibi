@@ -513,6 +513,48 @@ async fn main() -> Result<()> {
             "binding={}",
             engine.adopt(&scope, "ReferenceRecord", id).await?
         ),
+        // Opens the owner transaction under the other kind of actor (the
+        // person for a principal scope, the reference principal otherwise),
+        // so adoption must refuse the borrowed attribution.
+        "adopt-borrowed" => {
+            let mut client = db.get().await?;
+            let other = if scope.principal().is_some() {
+                authentication
+                    .authenticate_session(&**client, 1, 4, None, None, String::new())
+                    .await?
+            } else {
+                let system =
+                    SystemScope::rehydrate(&**client, 1, Some(reference::SYSTEM_PRINCIPAL)).await?;
+                authentication.for_system(&**client, &system).await?
+            };
+            let boundary = services.get::<MutationBoundary>("base/database.mutations")?;
+            let mut tx = boundary
+                .begin(
+                    &mut client,
+                    other.mutation_context("workflow.subject.adopted"),
+                )
+                .await?;
+            let binding = engine
+                .adopt_in(&mut tx, &scope, "ReferenceRecord", id)
+                .await?;
+            tx.commit().await?;
+            println!("binding={binding}");
+        }
+        "adopt-attribution" => {
+            let client = db.get().await?;
+            let row = client.query_one(
+                "SELECT b.id,m.actor_type,m.actor_id,m.system_principal,m.impersonator_id FROM base_workflow_bindings b JOIN base_audit_mutations m ON m.tenant_id=b.tenant_id AND m.auditable_type='workflow.binding' AND m.auditable_id=b.id::text WHERE b.tenant_id=$1 AND b.subject_type='reference.record' AND b.subject_id=$2 ORDER BY m.id DESC LIMIT 1",
+                &[&scope.tenant(), &id],
+            ).await?;
+            println!(
+                "binding={} audit actor_type={} actor_id={} system_principal={:?} impersonator={:?}",
+                row.get::<_, i64>(0),
+                row.get::<_, String>(1),
+                row.get::<_, i64>(2),
+                row.get::<_, Option<String>>(3),
+                row.get::<_, Option<i64>>(4),
+            );
+        }
         "available" => println!(
             "{}",
             serde_json::to_string(&engine.available(&scope, "reference.record", id).await?)

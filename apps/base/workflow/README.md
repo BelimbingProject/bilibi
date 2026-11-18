@@ -240,7 +240,7 @@ other business writes must commit with the transition. The engine runs inside
 the owner's audited `mutate`, so a guard denial after an earlier owner write
 poisons the whole transaction and the outer commit fails.
 
-A queued or scheduled job may transition a subject with the named system principal from its sealed `Scope`. The owner declares the principal and the capabilities it may use; an administrator grants those capabilities in the same tenant. Workflow rechecks the owner policy, the edge capability and every guard. The mutation context must name the same tenant and exact principal, with no impersonator or agent. History and audit then name `System · <principal>`. Other Workflow writes, including comments, adoption and human actions, still require a person.
+A queued or scheduled job, or an owner write made without a signed-in person (such as a public form creating a record), may transition or adopt a subject with the named system principal from its sealed `Scope`. The owner declares the principal and the capabilities it may use; an administrator grants those capabilities in the same tenant. Workflow rechecks the owner policy (`Transition` or `Adopt`) and, for a transition, the edge capability and every guard. The mutation context must name the same tenant and exact principal, with no impersonator or agent. Audit, and a transition's history fact, then name `System · <principal>`. Other Workflow writes, including comments, recorded facts, runs and human actions, still require a person.
 
 Lock order is owner row, then flow and status definitions (`FOR SHARE`), then the subject binding (`FOR UPDATE`).
 
@@ -256,7 +256,8 @@ not authorization. `record(scope, kind, id, Operation::RecordInitial, request)`
 refuses a subject that already has history; `RecordComment` appends a
 same-status fact and requires a non-empty comment. `adopt(scope, kind, id)` locks
 the subject under the owner's `Adopt` policy and binds it to its flow, inactive
-flows included, without rewriting history. Rebinding a subject to another tenant
+flows included, without rewriting history; `adopt_in` does the same inside the
+owner's create transaction. Rebinding a subject to another tenant
 or owner conflicts.
 
 History rows are append-only (a trigger refuses UPDATE and DELETE). A transition
@@ -303,6 +304,16 @@ cargo run -p bilibi-workflow --example owner -- attribution system/reference-wor
 ```
 
 The transition passes the same `companies.update` owner and edge checks as the person-driven command. `attribution` prints `system` and `reference-workflow` for Workflow history, and prints the same principal with actor ID `0` for the mutation audit. The fixture gives this reference-only principal standing grants for `companies.update` and `workflow.transition.deliver`; production owners declare their principal and an administrator grants it in each tenant.
+
+To prove an adoption without a person, as an owner's create transaction would make it:
+
+```sh
+cargo run -p bilibi-workflow --example owner -- adopt system/reference-workflow 5
+cargo run -p bilibi-workflow --example owner -- adopt-attribution system/reference-workflow 5
+cargo run -p bilibi-workflow --example owner -- adopt-borrowed system/reference-workflow 7
+```
+
+The adoption passes the owner's `Adopt` policy (`companies.update` in the reference) and writes no history. `adopt-attribution` prints the binding's audit actor as `system` with principal `reference-workflow`. `adopt-borrowed` opens the transaction as the person and adopts with the principal's scope, and is refused `Forbidden`, as is an adoption after an explicit deny of `companies.update` to the principal.
 
 To demonstrate versioned starts and reads in the same fresh disposable
 database, run the process commands in order:
@@ -432,7 +443,7 @@ signal name or reason; `complete` also takes an optional outcome.
 `init` first marks tenant 1 as the platform operator in that disposable
 database, because `Engine::initialize` requires the platform capability
 `admin.workflow.definition.manage`; production marks the operator through `bilibi-web platform-provision` or `seed`.
-Other commands: `show`, `initial`, `comment`, `adopt`, `guard-deny`,
+Other commands: `show`, `initial`, `comment`, `adopt`, `adopt-attribution`, `adopt-borrowed`, `guard-deny`,
 `action-fail`, `bad-persist` (persist wrote the wrong status), `stale`
 (expected version mismatch), `outer-fail` (owner facade write, then a failing
 transition in the same transaction; the outer commit is refused and the facade
