@@ -23,7 +23,12 @@ fn count(mailbox: &Mailbox) -> Result<usize> {
         .map_err(|_| Error::Internal)
 }
 
-fn invitation_token(mailbox: &Mailbox, before: usize, origin: &str) -> Result<String> {
+fn invitation_token(
+    mailbox: &Mailbox,
+    before: usize,
+    origin: &str,
+    recipient: &str,
+) -> Result<String> {
     if count(mailbox)? != before + 1 {
         return Err(Error::Internal);
     }
@@ -34,6 +39,13 @@ fn invitation_token(mailbox: &Mailbox, before: usize, origin: &str) -> Result<St
         .next()
         .ok_or(Error::Internal)?;
     let message = mailbox.read(&newest.id).map_err(|_| Error::Internal)?;
+    let recipient = format!("<{recipient}>");
+    if !message
+        .lines()
+        .any(|line| line.starts_with("To: ") && line.ends_with(&recipient))
+    {
+        return Err(Error::Internal);
+    }
     let prefix = format!("{origin}/accept/");
     message
         .lines()
@@ -178,7 +190,7 @@ async fn main() -> Result<()> {
     }
     drop(client);
     expect_output(provision("Customer workspace", Some(OWNER), None)?, None)?;
-    let token = invitation_token(&mailbox, before_mail, &origin)?;
+    let token = invitation_token(&mailbox, before_mail, &origin, OWNER)?;
     let app = bilibi_web::App::new(db.clone(), &origin)?;
     let invitation = app
         .user
@@ -198,7 +210,7 @@ async fn main() -> Result<()> {
                 AND (SELECT count(*) FROM principal_roles x WHERE x.tenant_id=t.id AND x.user_id=u.id)=1,
                 EXISTS(SELECT 1 FROM person_affiliations a WHERE a.tenant_id=t.id AND a.person_id=u.person_id AND a.organisation_id=c.id AND a.unlinked_at IS NULL),
                 EXISTS(SELECT 1 FROM user_desks d WHERE d.tenant_id=t.id AND d.person_id=u.person_id AND d.company_id=c.id),
-                b.affiliation_settled_at IS NOT NULL
+                b.invitation_id=(SELECT accepted.id FROM user_invitations accepted WHERE accepted.tenant_id=t.id AND accepted.id=b.invitation_id AND accepted.accepted_at IS NOT NULL)
              FROM tenants t
              JOIN tenant_primary_companies x ON x.tenant_id=t.id
              JOIN companies c ON c.tenant_id=t.id AND c.id=x.company_id
@@ -230,7 +242,7 @@ async fn main() -> Result<()> {
     let mutation_row = client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM base_audit_mutations WHERE tenant_id=$1 AND actor_type='system' AND system_principal='tenant-provision' AND event='updated' AND auditable_type='authz.principal_role'),
-                EXISTS(SELECT 1 FROM base_audit_mutations WHERE tenant_id=$1 AND actor_type='user' AND actor_id=$2 AND event='updated' AND auditable_type='user.tenant_owner_bootstrap')",
+                EXISTS(SELECT 1 FROM base_audit_mutations WHERE tenant_id=$1 AND actor_type='user' AND actor_id=$2 AND event='updated' AND auditable_type='user.invitation')",
             &[&tenant, &user],
         )
         .await?;
@@ -297,7 +309,7 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
     expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
-    let first_token = invitation_token(&mailbox, mail_before_retry, &origin)?;
+    let first_token = invitation_token(&mailbox, mail_before_retry, &origin, retry_email)?;
     let delivered = retry_state(&client).await?;
     if !delivered.same_invitation(&original)
         || delivered.digest == original.digest
@@ -311,7 +323,7 @@ async fn main() -> Result<()> {
         &[&original.tenant, &original.invitation],
     ).await?;
     expect_output(provision(retry_workspace, Some(retry_email), None)?, None)?;
-    let new_token = invitation_token(&mailbox, mail_before_retry + 1, &origin)?;
+    let new_token = invitation_token(&mailbox, mail_before_retry + 1, &origin, retry_email)?;
     let reissued = retry_state(&client).await?;
     drop(client);
     if !reissued.same_invitation(&original)

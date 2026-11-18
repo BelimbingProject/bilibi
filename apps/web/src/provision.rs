@@ -39,9 +39,13 @@ fn parse(command: &str, args: &[String]) -> Option<Options> {
             _ => return None,
         };
         let value = rest.next().map(|value| value.trim().to_owned())?;
-        if value.is_empty() || value.starts_with("--") || slot.replace(value).is_some() {
+        if value.is_empty() || value.starts_with("--") {
             return None;
         }
+        // The long-standing data-only commands accept repeated options and
+        // use the last value. Owner provisioning shares that parser so adding
+        // the credential path does not narrow either existing command.
+        slot.replace(value);
     }
     Some(options)
 }

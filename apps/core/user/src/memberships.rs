@@ -414,17 +414,21 @@ impl UserService {
                 Context::user(tenant, user, "user.invitation.accept"),
             )
             .await?;
-        if let Err(error) =
-            finish_new_acceptance(&mut tx, raw_token, tenant, user, email, hash).await
-        {
-            let refusal = match error {
-                Error::NotFound => Err(InvitationError::Link),
-                other => Err(other.into()),
+        self.lock_tenant_owner_in(&tx, tenant, user).await?;
+        let invitation =
+            match finish_new_acceptance(&mut tx, raw_token, tenant, user, email, hash).await {
+                Ok(invitation) => invitation,
+                Err(error) => {
+                    let refusal = match error {
+                        Error::NotFound => Err(InvitationError::Link),
+                        other => Err(other.into()),
+                    };
+                    tx.rollback().await?;
+                    return refusal;
+                }
             };
-            tx.rollback().await?;
-            return refusal;
-        }
-        self.settle_tenant_owner_in(&mut tx, tenant, user).await?;
+        self.settle_tenant_owner_in(&mut tx, tenant, user, invitation)
+            .await?;
         tx.commit().await?;
         Ok(user)
     }
@@ -450,15 +454,20 @@ impl UserService {
                 Context::user(tenant, user, "user.invitation.accept"),
             )
             .await?;
-        if let Err(error) = finish_acceptance(&mut tx, raw_token, tenant, user, identity).await {
-            let refusal = match error {
-                Error::NotFound => Err(InvitationError::Link),
-                other => Err(other.into()),
-            };
-            tx.rollback().await?;
-            return refusal;
-        }
-        self.settle_tenant_owner_in(&mut tx, tenant, user).await?;
+        self.lock_tenant_owner_in(&tx, tenant, user).await?;
+        let invitation = match finish_acceptance(&mut tx, raw_token, tenant, user, identity).await {
+            Ok(invitation) => invitation,
+            Err(error) => {
+                let refusal = match error {
+                    Error::NotFound => Err(InvitationError::Link),
+                    other => Err(other.into()),
+                };
+                tx.rollback().await?;
+                return refusal;
+            }
+        };
+        self.settle_tenant_owner_in(&mut tx, tenant, user, invitation)
+            .await?;
         tx.commit().await?;
         Ok(user)
     }
@@ -471,7 +480,7 @@ async fn finish_new_acceptance(
     user: i64,
     email: String,
     hash: String,
-) -> Result<()> {
+) -> Result<i64> {
     let token_hash = digest(raw_token);
     tx.mutate(move |sql| {
         Box::pin(async move {
@@ -500,7 +509,7 @@ async fn finish_new_acceptance(
                 return Err(Error::NotFound);
             }
             Ok((
-                (),
+                invitation,
                 vec![
                     Change {
                         kind: "user_identity".into(),
@@ -539,7 +548,7 @@ async fn finish_acceptance(
     tenant: i64,
     user: i64,
     identity: i64,
-) -> Result<()> {
+) -> Result<i64> {
     let token_hash = digest(raw_token);
     tx.mutate(move |sql| {
         Box::pin(async move {
@@ -561,7 +570,7 @@ async fn finish_acceptance(
                 return Err(Error::NotFound);
             }
             Ok((
-                (),
+                invitation,
                 vec![
                     Change {
                         kind: "user".into(),
