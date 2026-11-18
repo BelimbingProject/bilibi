@@ -122,7 +122,8 @@ Form authors follow [Shared UI's form-size rule](../apps/base/ui/README.md#form-
   document, including when keyed siblings before it leave (they are removed
   around it rather than it being moved, since a moved frame reloads). Focus and selection are restored by id when the focused element was
   replaced; scroll positions of `id`-bearing containers and the window are
-  restored except after a `navigate`/`mount`, which starts at the top. Hooks are
+  restored after ordinary patches. A new mount scrolls to the URL fragment
+  when it names an element on the page. Other navigations start at the top. Hooks are
   mounted and destroyed by the `ui.js` mutation observer; the patcher reports the
   hooks whose attributes it rewrote through `BilibiUI.patched`, so each receives
   one `updated` per patch.

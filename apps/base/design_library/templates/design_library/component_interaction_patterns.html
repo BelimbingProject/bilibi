@@ -7,7 +7,7 @@
               <h2 class="text-base font-semibold text-ink-strong">F. Interaction patterns</h2>
               <p class="text-sm text-ink-muted">Inline editing of text, long text and choices. Not shown yet: inline combobox, grouped facts, unsaved-change flows.</p>
             </div>
-            {% call ui::card(id="component-inline-edit", title="Inline edit", inner_class="space-y-3 p-3") %}{{ self.card_component_inline_edit()? }}{% endcall %}
-            {% call ui::card(id="component-inline-long-text", title="Inline long text", inner_class="space-y-3 p-3") %}{{ self.card_component_inline_long_text()? }}{% endcall %}
-            {% call ui::card(id="component-inline-choice", title="Inline choice fact", inner_class="space-y-3 p-3") %}{{ self.card_component_inline_choice()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_INLINE_EDIT.anchor, title=crate::sections::COMPONENT_INLINE_EDIT.title, inner_class="space-y-3 p-3") %}{{ self.card_component_inline_edit()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_INLINE_LONG_TEXT.anchor, title=crate::sections::COMPONENT_INLINE_LONG_TEXT.title, inner_class="space-y-3 p-3") %}{{ self.card_component_inline_long_text()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_INLINE_CHOICE.anchor, title=crate::sections::COMPONENT_INLINE_CHOICE.title, inner_class="space-y-3 p-3") %}{{ self.card_component_inline_choice()? }}{% endcall %}
           </section>

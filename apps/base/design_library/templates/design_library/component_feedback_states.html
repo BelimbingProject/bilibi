@@ -21,8 +21,8 @@
             <div id="component-commit-status" class="space-y-2">
               <p class="text-xs text-ink-muted">Commit status: where a saved or refused inline write reports, beside the fact itself.</p>
               <div class="grid gap-3 lg:grid-cols-2">
-                {% call ui::card(title="Stored", inner_class="p-3") %}{{ self.card_stored()? }}{% endcall %}
-                {% call ui::card(title="Refused", inner_class="p-3") %}{{ self.card_refused()? }}{% endcall %}
+                {% call ui::card(id=crate::sections::COMPONENT_STORED.anchor, title=crate::sections::COMPONENT_STORED.title, inner_class="p-3") %}{{ self.card_stored()? }}{% endcall %}
+                {% call ui::card(id=crate::sections::COMPONENT_REFUSED.anchor, title=crate::sections::COMPONENT_REFUSED.title, inner_class="p-3") %}{{ self.card_refused()? }}{% endcall %}
               </div>
             </div>
             <div id="component-alert" class="space-y-2">
@@ -52,9 +52,9 @@
             <div id="component-empty-state" class="space-y-2">
               <p class="text-xs text-ink-muted">An empty region says what is missing, why, and how to recover. A table uses the same pattern in its empty slot.</p>
               <div class="grid gap-3 lg:grid-cols-3">
-                {% call ui::card(title="Nothing yet", inner_class="p-3") %}{{ self.card_nothing_yet()? }}{% endcall %}
-                {% call ui::card(title="Nothing matched", inner_class="p-3") %}{{ self.card_nothing_matched()? }}{% endcall %}
-                {% call ui::card(title="Not permitted", inner_class="p-3") %}{{ self.card_not_permitted()? }}{% endcall %}
+                {% call ui::card(id=crate::sections::COMPONENT_NOTHING_YET.anchor, title=crate::sections::COMPONENT_NOTHING_YET.title, inner_class="p-3") %}{{ self.card_nothing_yet()? }}{% endcall %}
+                {% call ui::card(id=crate::sections::COMPONENT_NOTHING_MATCHED.anchor, title=crate::sections::COMPONENT_NOTHING_MATCHED.title, inner_class="p-3") %}{{ self.card_nothing_matched()? }}{% endcall %}
+                {% call ui::card(id=crate::sections::COMPONENT_NOT_PERMITTED.anchor, title=crate::sections::COMPONENT_NOT_PERMITTED.title, inner_class="p-3") %}{{ self.card_not_permitted()? }}{% endcall %}
               </div>
               {{ self.table("design-library-empty-table")? }}
             </div>

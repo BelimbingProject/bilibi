@@ -11,7 +11,10 @@ use axum::{
 };
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{
-    contributions::{Access, Download, Method, Moved, Route, DOWNLOADS, MOVED, ROUTES},
+    contributions::{
+        Access, Download, Method, Moved, PageSection, Route, DOWNLOADS, MOVED, PAGE_SECTIONS,
+        ROUTES,
+    },
     RegistryError, Services,
 };
 use bilibi_tenancy::PortalScope;
@@ -27,6 +30,7 @@ type PortalDownloadService = bilibi_ui::download::DownloadService<PortalScope, E
 pub struct BoundRoute {
     pub route: &'static Route,
     pub page: Arc<PageService>,
+    pub sections: Vec<&'static PageSection>,
 }
 /// A `Download` contribution with its owner service. Downloads share the page
 /// routes' path rules and may not intersect a page or a host path.
@@ -133,6 +137,7 @@ pub fn bind(services: &Services) -> Result<Pages> {
             bound.staff.push(BoundRoute {
                 route,
                 page: services.get(route.service)?,
+                sections: Vec::new(),
             });
         }
     }
@@ -159,7 +164,54 @@ pub fn bind(services: &Services) -> Result<Pages> {
             }
         }
     }
+    bind_page_sections(services, &mut bound.staff)?;
     Ok(bound)
+}
+
+fn bind_page_sections(services: &Services, staff: &mut [BoundRoute]) -> Result<()> {
+    let catalog = services.catalog()?;
+    let routes = catalog.entries::<Route>(ROUTES)?;
+    for entry in catalog.entries::<PageSection>(PAGE_SECTIONS)? {
+        let section = entry.get::<PageSection>()?;
+        let route = routes
+            .iter()
+            .find(|route| {
+                route.id == section.route && route.provenance.module == entry.provenance.module
+            })
+            .map(|route| route.get::<Route>())
+            .transpose()?;
+        let page = staff.iter_mut().find(|page| {
+            page.route.method == Method::Get
+                && route.is_some_and(|route| std::ptr::eq(route, page.route))
+        });
+        let Some(page) = page.filter(|page| {
+            page.route.framed
+                && !matches!(page.route.access.base(), Access::Public)
+                && !page.route.path.contains('{')
+                && page.page.0.redirect(page.route.operation).is_none()
+        }) else {
+            return Err(invalid(format!(
+                "page section {} at {}:{} must name an owned, framed staff GET page with a fixed path",
+                entry.id, entry.provenance.source, entry.provenance.line
+            )));
+        };
+        if let Some(query) = section.query {
+            if query.is_empty()
+                || query.starts_with('?')
+                || query.contains('#')
+                || format!("{}?{query}", page.route.path)
+                    .parse::<axum::http::uri::PathAndQuery>()
+                    .is_err()
+            {
+                return Err(invalid(format!(
+                    "page section {} at {}:{} has an invalid tab query",
+                    entry.id, entry.provenance.source, entry.provenance.line
+                )));
+            }
+        }
+        page.sections.push(section);
+    }
+    Ok(())
 }
 
 /// Downloads are bound after the pages and checked against them: a download

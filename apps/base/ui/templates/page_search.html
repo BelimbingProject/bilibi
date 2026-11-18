@@ -20,7 +20,7 @@
 <div id="app-search-group-{{ id }}" role="group" aria-labelledby="app-search-group-{{ id }}-label" data-page-search-group hidden>
 <p id="app-search-group-{{ id }}-label" role="presentation" class="px-2 pt-2 pb-1 text-xs font-semibold text-ink-subtle">{{ heading }}</p>
 {%- for page in pages %}
-<a id="app-search-{{ id }}-{{ loop.index }}" href="{{ page.href }}" role="option" aria-selected="false" data-page-search-option data-page-search-labels="{{ page.labels() }}" hidden class="{{ option_class }}"><span class="truncate text-sm">{{ page.label }}</span>{% if !page.location.is_empty() %}<span class="truncate text-xs text-ink-subtle">{{ page.path() }}</span>{% endif %}</a>
+<a id="app-search-{{ id }}-{{ loop.index }}" href="{{ page.href }}" role="option" aria-selected="false" data-page-search-option data-page-search-labels="{{ page.labels() }}" hidden class="{{ option_class }}">{% if page.section_keywords.is_some() %}<span class="text-sm">{{ page.label }} <span class="text-xs text-ink-subtle">· {{ page.path() }}</span></span>{% else %}<span class="truncate text-sm">{{ page.label }}</span>{% if !page.location.is_empty() %}<span class="truncate text-xs text-ink-subtle">{{ page.path() }}</span>{% endif %}{% endif %}</a>
 {%- endfor %}
 </div>
 {%- endif %}
@@ -30,7 +30,7 @@
 </div>
 {%- let hint = "Search by page or section name." %}
 {%- let empty = "No pages found" %}
-<p id="app-search-hint"{% if !records.is_empty() %} data-pages-text="{{ hint }}" data-records-text="Type a page name, or the name or code of a record."{% endif %} class="px-2 py-3 text-xs text-ink-subtle">{{ hint }}</p>
+<p id="app-search-hint"{% if !records.is_empty() %} data-pages-text="{{ hint }}" data-records-text="Type a page or section name, or the name or code of a record."{% endif %} class="px-2 py-3 text-xs text-ink-subtle">{{ hint }}</p>
 <p id="app-search-empty" role="status"{% if !records.is_empty() %} data-pages-text="{{ empty }}" data-records-text="Nothing found"{% endif %} hidden class="px-2 py-3 text-xs text-ink-subtle">{{ empty }}</p>
 </div>
 </dialog>

@@ -42,6 +42,8 @@ or cache reach across requests.
 
 **Doors hold no connection while a read runs.** The `/api/v1`, MCP and page doors call `Registry::read(db, scope, key, input)`: it checks the capability on a pooled connection and returns it before the read handler runs. The handler's `OperationClient` takes one connection on its first query and keeps it until the read ends; a handler that only calls its facade (Base Search, Base Records) takes none. So a facade that takes connections of its own, such as Grid's reads, never waits on a pool filled by its own callers. MCP's `Session` carries the pool (`db`), and `search`, `describe` and `guide` each take a connection for that call only. `Registry::call(client, scope, key, input)` runs the same checks and handler on a connection the caller already holds, for walkthroughs and fixtures; a door never uses it.
 
+Agent discovery returns operations and guides in `result`. The HTTP and MCP doors also return `pages`, with links to matching pages and their contributed sections. These links use the same page access rules as the top bar. [Page sections](../menu/README.md#make-a-page-section-searchable).
+
 Search uses one fresh capability snapshot without per-candidate decision logs.
 Direct deny wins over grants and `grant_all`; platform capabilities additionally
 need explicit operator identity. Tenancy reproofs read the actor and agent grant live; owner standing additionally re-reads the installation bootstrap receipt and refuses impersonation. An agent holds only its own person's standing, and an owner-only write still requires its declared step-up policy. An agent reaches every capability its person

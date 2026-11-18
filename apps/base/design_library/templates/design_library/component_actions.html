@@ -7,11 +7,11 @@
               <h2 id="component-button" class="text-base font-semibold text-ink-strong">D. Actions</h2>
               <p class="text-sm text-ink-muted">Buttons in every state, and compact icon actions. Typed acknowledgement is not shown yet.</p>
             </div>
-            {% call ui::card(id="component-buttons", title="Buttons", inner_class="space-y-2 p-3") %}
+            {% call ui::card(id=crate::sections::COMPONENT_BUTTONS.anchor, title=crate::sections::COMPONENT_BUTTONS.title, inner_class="space-y-2 p-3") %}
               <p class="text-xs text-ink-muted">Clicked waits for the server and shows "Working…". Busy is a wait the server already knows about. Disabled is not available.</p>
               <div class="flex flex-wrap items-center gap-3">
                 {% call ui::button() %}Secondary{% endcall %}{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary) %}Primary{% endcall %}{% call ui::button(variant=bilibi_ui::ButtonVariant::Danger) %}Danger{% endcall %}{% call ui::button(disabled=true) %}Disabled{% endcall %}{% call ui::button(href="/system/design-library") %}Navigation{% endcall %}{% call ui::button(event="test_click", variant=bilibi_ui::ButtonVariant::Primary, working="Working…") %}Clicked: {{ self.text("@click_count") }}{% endcall %}{% call ui::button(variant=bilibi_ui::ButtonVariant::Primary, busy=true) %}Saving…{% endcall %}
               </div>
             {% endcall %}
-            {% call ui::card(id="component-icon-button", title="Compact icon actions", inner_class="space-y-2 p-3") %}{{ self.card_component_icon_button()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_ICON_BUTTON.anchor, title=crate::sections::COMPONENT_ICON_BUTTON.title, inner_class="space-y-2 p-3") %}{{ self.card_component_icon_button()? }}{% endcall %}
           </section>

@@ -25,6 +25,8 @@ pub struct SearchPage {
     pub href: String,
     /// A personal settings page, listed under Account.
     pub account: bool,
+    /// Section aliases. `None` identifies a page, whose menu path also matches.
+    pub section_keywords: Option<&'static [&'static str]>,
 }
 
 impl SearchPage {
@@ -32,12 +34,14 @@ impl SearchPage {
     pub fn path(&self) -> String {
         self.location.join(" › ")
     }
-    /// What a query is matched against, one label per line: the page's own
-    /// and each place it lives under, so a matching section finds its pages.
+    /// The searchable labels, one per line.
     pub fn labels(&self) -> String {
-        std::iter::once(&self.label)
-            .chain(&self.location)
-            .map(String::as_str)
+        let additional: Vec<&str> = match self.section_keywords {
+            Some(keywords) => keywords.to_vec(),
+            None => self.location.iter().map(String::as_str).collect(),
+        };
+        std::iter::once(self.label.as_str())
+            .chain(additional)
             .collect::<Vec<_>>()
             .join("\n")
     }

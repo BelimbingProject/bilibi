@@ -283,6 +283,7 @@
       submitted: entry && entry.form && message.type !== 'error'
         && !preservedForms.has(entry.form) ? entry.form : null,
       navigation: !!(entry && entry.navigation),
+      anchor: entry?.navigation && entry.intent.type === 'mount' ? location.hash.slice(1) : '',
     };
     if (message.redirect && entry?.ownerForm && preservedForms.has(entry.ownerForm)) {
       // A previously sent save may redirect after a newer local refusal.
@@ -374,7 +375,8 @@
     }
     morph(root, next, context);
     if (context.submitted && context.submitted.isConnected) context.submitted.reset();
-    restoreScroll(scroll, options.navigation);
+    const anchor = options.anchor && document.getElementById(options.anchor);
+    restoreScroll(scroll, options.navigation, anchor && root.contains(anchor) ? anchor : null);
     restoreFocus(focus);
     if (window.BilibiUI) window.BilibiUI.patched(context.touched);
   }
@@ -580,9 +582,13 @@
     return {boxes, x: window.scrollX, y: window.scrollY};
   }
 
-  // A navigation starts at the top like a loaded page; every other patch keeps
-  // the person where they were, including inside a replaced scroll container.
-  function restoreScroll(saved, navigation) {
+  // An addressed section stays in view after the first live mount. Other
+  // navigations start at the top, and ordinary patches keep the scroll position.
+  function restoreScroll(saved, navigation, anchor) {
+    if (anchor) {
+      anchor.scrollIntoView();
+      return;
+    }
     if (navigation) {
       for (const box of saved.boxes) { const el = document.getElementById(box.id); if (el) el.scrollTop = el.scrollLeft = 0; }
       window.scrollTo(0, 0);

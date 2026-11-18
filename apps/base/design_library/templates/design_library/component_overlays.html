@@ -7,6 +7,6 @@
               <h2 class="text-base font-semibold text-ink-strong">H. Overlays</h2>
               <p class="text-sm text-ink-muted">The modal dialog and its confirmation. Not shown yet: inspector drawer, tooltip and popover.</p>
             </div>
-            {% call ui::card(id="component-modal", title="Modal dialog", inner_class="space-y-2 p-3") %}{{ self.card_component_modal()? }}{% endcall %}
-            {% call ui::card(id="component-confirm-dialog", title="Confirmation dialog", inner_class="space-y-2 p-3") %}{{ self.card_component_confirm_dialog()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_MODAL.anchor, title=crate::sections::COMPONENT_MODAL.title, inner_class="space-y-2 p-3") %}{{ self.card_component_modal()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_CONFIRM_DIALOG.anchor, title=crate::sections::COMPONENT_CONFIRM_DIALOG.title, inner_class="space-y-2 p-3") %}{{ self.card_component_confirm_dialog()? }}{% endcall %}
           </section>
