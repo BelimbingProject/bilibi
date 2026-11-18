@@ -904,13 +904,19 @@ tenant_provision() {
     local instance=${1:-}
     [[ -n $instance ]] || usage
     shift
-    local args=("$@") owner_email=
+    local args=("$@")
+    local -A options=()
     while (( $# )); do
         (( $# >= 2 )) || usage
-        [[ $1 != --owner-email ]] || owner_email=$2
+        case $1 in
+            --tenant-name|--company-name|--company-code|--owner-email) ;;
+            *) usage ;;
+        esac
+        [[ ! ${options[$1]+present} ]] || fail "Repeated option: $1"
+        options[$1]=$2
         shift 2
     done
-    [[ -n $owner_email ]] || usage
+    [[ -n ${options[--owner-email]:-} ]] || usage
     need_root tenant-provision "$instance" "${args[@]}"
     instance_exists "$instance" || fail "no instance named $instance"
     local dir; dir=$(instance_dir "$instance")

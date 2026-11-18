@@ -8,7 +8,7 @@ use bilibi_affiliation::{AffiliationInput, EffectiveDates, OrganisationId};
 use bilibi_audit::{record_action, Attribution};
 use bilibi_authz::grants::Grants;
 use bilibi_company::{NewCompany, ProvisionOutcome};
-use bilibi_database::{Change, Context, Error, MutationTransaction, Result};
+use bilibi_database::{Change, Connection, Context, Error, MutationTransaction, Result};
 use bilibi_mail::{Address, Message};
 use bilibi_person::{validate_person, PersonInput, PersonKind};
 use bilibi_settings::Setting;
@@ -107,7 +107,7 @@ impl UserService {
             ),
         );
         let rendered = self.mailer.render(&message).await?;
-        let mut client = self.db.get().await.map_err(Error::from)?;
+        let mut client = Connection::take(self.db.get().await.map_err(Error::from)?);
         client
             .execute(
                 "SELECT pg_advisory_lock(hashtextextended('tenant-owner:' || $1,0))",
@@ -117,7 +117,7 @@ impl UserService {
         // This installation command is the one authority for this tenant
         // name. Keep its session lock through delivery so overlapping runs
         // cannot rotate a link that an earlier run is still sending.
-        let outcome = async {
+        let invitation = {
             let sql = tokio_postgres::Client::transaction(&mut client).await?;
             let receipts = sql
                 .query(
@@ -223,24 +223,13 @@ impl UserService {
             )
             .await?;
             tx.commit().await?;
-            self.mailer
-                .deliver_rendered(rendered)
-                .await
-                .map_err(|_| FirstTenantOwnerError::Delivery)?;
-            Ok(invitation)
-        }
-        .await;
-        let unlocked: bool = client
-            .query_one(
-                "SELECT pg_advisory_unlock(hashtextextended('tenant-owner:' || $1,0))",
-                &[&tenant_name],
-            )
-            .await?
-            .get(0);
-        if !unlocked {
-            return Err(Error::Internal.into());
-        }
-        outcome
+            invitation
+        };
+        self.mailer
+            .deliver_rendered(rendered)
+            .await
+            .map_err(|_| FirstTenantOwnerError::Delivery)?;
+        Ok(invitation)
     }
 
     async fn invite_tenant_owner_in(

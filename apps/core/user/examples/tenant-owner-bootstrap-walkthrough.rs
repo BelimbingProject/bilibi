@@ -5,7 +5,7 @@ use bilibi_mail::Mailbox;
 use bilibi_user::InvitationError;
 use std::{
     path::{Path, PathBuf},
-    process::Output,
+    process::{Command, Output},
 };
 
 const OWNER: &str = "owner@customer.example.test";
@@ -85,14 +85,14 @@ async fn snapshot(client: &tokio_postgres::Client) -> Result<String> {
         .get(0))
 }
 
-fn provision(tenant: &str, email: Option<&str>, mailbox: Option<&Path>) -> Result<Output> {
+fn provisioning_command(tenant: &str) -> Result<Command> {
     let executable = std::env::current_exe().map_err(|_| Error::Internal)?;
     let web = executable
         .parent()
         .and_then(|examples| examples.parent())
         .map(|debug| debug.join("bilibi-web"))
         .ok_or(Error::Internal)?;
-    let mut command = std::process::Command::new(web);
+    let mut command = Command::new(web);
     command.args([
         "tenant-provision",
         "--tenant-name",
@@ -102,6 +102,11 @@ fn provision(tenant: &str, email: Option<&str>, mailbox: Option<&Path>) -> Resul
         "--company-code",
         "customer",
     ]);
+    Ok(command)
+}
+
+fn provision(tenant: &str, email: Option<&str>, mailbox: Option<&Path>) -> Result<Output> {
+    let mut command = provisioning_command(tenant)?;
     if let Some(email) = email {
         command.args(["--owner-email", email]);
     }
@@ -174,6 +179,7 @@ async fn main() -> Result<()> {
         return Err(Error::Invalid);
     }
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;
+    assert_eq!(db.status().max_size, 1, "run with DATABASE_POOL_SIZE=1");
     bilibi_walkthrough_fixture::set_instance_role(&db, "development").await?;
     let directory = mailbox_dir();
     let mailbox = Mailbox::new(directory.clone(), 100);
@@ -185,6 +191,18 @@ async fn main() -> Result<()> {
         provision("Invalid\nworkspace", Some(OWNER), None)?,
         Some("Cannot prepare the owner invitation: Invalid email message"),
     )?;
+    for (flag, value) in [
+        ("--tenant-name", "Different workspace"),
+        ("--company-name", "Different company"),
+        ("--company-code", "different"),
+        ("--owner-email", "different@customer.example.test"),
+    ] {
+        let output = provisioning_command("Duplicate options workspace")?
+            .args(["--owner-email", OWNER, flag, value])
+            .output()
+            .map_err(|_| Error::Internal)?;
+        expect_output(output, Some(&format!("Repeated option: {flag}")))?;
+    }
     if snapshot(&client).await? != before_preflight || count(&mailbox)? != before_mail {
         return Err(Error::Internal);
     }

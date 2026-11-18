@@ -27,8 +27,9 @@ fn usage(command: &str) -> Error {
     Error::Invalid
 }
 
-fn parse(command: &str, args: &[String]) -> Option<Options> {
+fn parse(command: &str, args: &[String]) -> Result<Options> {
     let mut options = Options::default();
+    let mut repeated = None;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         let slot = match flag.as_str() {
@@ -36,25 +37,28 @@ fn parse(command: &str, args: &[String]) -> Option<Options> {
             "--company-name" => &mut options.company_name,
             "--company-code" => &mut options.company_code,
             "--owner-email" if command == "tenant-provision" => &mut options.owner_email,
-            _ => return None,
+            _ => return Err(usage(command)),
         };
-        let value = rest.next().map(|value| value.trim().to_owned())?;
+        let value = rest.next().ok_or_else(|| usage(command))?.trim();
         if value.is_empty() || value.starts_with("--") {
-            return None;
+            return Err(usage(command));
         }
-        // The long-standing data-only commands accept repeated options and
-        // use the last value. Owner provisioning shares that parser so adding
-        // the credential path does not narrow either existing command.
-        slot.replace(value);
+        if slot.replace(value.to_owned()).is_some() {
+            repeated = Some(flag);
+        }
     }
-    Some(options)
+    if let Some(flag) = repeated.filter(|_| options.owner_email.is_some()) {
+        eprintln!("Repeated option: {flag}");
+        return Err(usage(command));
+    }
+    Ok(options)
 }
 
 /// `tenant-provision` creates a customer tenant and, when `--owner-email` is
 /// present, prepares its first owner through the ordinary invitation flow.
 /// `platform-provision` retains its existing company-only contract.
 pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
-    let options = parse(command, args).ok_or_else(|| usage(command))?;
+    let options = parse(command, args)?;
     let company = NewCompany {
         name: options.company_name.unwrap_or_default(),
         code: options.company_code,
