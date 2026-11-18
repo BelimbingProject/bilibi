@@ -185,7 +185,6 @@ impl CompanyUsers {
         })?;
         let card = render(&Card {
             id: "company-users-card",
-            class: "mt-6",
             inner_class: "p-0",
             body,
             ..Card::default()

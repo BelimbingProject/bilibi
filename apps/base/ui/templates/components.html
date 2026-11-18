@@ -165,10 +165,24 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
 {% endmacro %}
 
 {#- Fragments the shared models rendered (a notice, a chart, a table),
-    stacked a compact step apart, or a section step apart when wide. -#}
-{% macro stack(parts, wide=false) %}
-<div class="{% if wide %}space-y-4{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part|safe }}{% endfor %}</div>
-{% endmacro %}
+    stacked a compact step apart, or a section step apart when wide.
+    Trim fragment edges so interleaved whitespace cannot make the keyed
+    patcher move retained siblings when a section appears. -#}
+{% macro stack(parts, wide=false) -%}
+<div class="{% if wide %}ui-wide-stack{% else %}space-y-2{% endif %}">{% for part in parts %}{{ part.as_str().trim_ascii()|safe }}{% endfor %}{{ caller() }}</div>
+{%- endmacro %}
+
+{#- The ignored wrapper preserves the mounted fragment across parent patches.
+    A missing or refused mount leaves an empty target and takes no space. -#}
+{% macro live_panel_anchor(id) -%}
+<div id="{{ id }}-slot" data-live-ignore data-live-panel-slot><div id="{{ id }}"></div></div>
+{%- endmacro %}
+
+{#- Keep the section gap between in-flow children, including mounted panels.
+    Each panel provider renders its own surface. -#}
+{% macro live_panel_stack(parts, panel_ids) -%}
+{% call stack(parts=parts, wide=true) %}{% for id in panel_ids %}{% call live_panel_anchor(id=id) %}{% endcall %}{% endfor %}{% endcall %}
+{%- endmacro %}
 
 {#- Fragments on one wrapping line (a page header's several actions). -#}
 {% macro cluster(parts) %}
@@ -232,8 +246,8 @@ ui-icon-button grid shrink-0 place-items-center transition focus-visible:outline
     phone, two on a normal screen, three on a wide one. Facts that follow
     other facts continue their rhythm, so a card splits its facts into groups
     to start a new row. -#}
-{% macro facts(id="") %}
-<div data-facts class="@container [[data-facts]+&]:mt-1"><dl{% if !id.is_empty() %} id="{{ id }}"{% endif %} class="grid grid-cols-1 gap-x-4 gap-y-1 @lg:grid-cols-2 @5xl:grid-cols-3">{{ caller() }}</dl></div>
+{% macro facts(id="", container_id="") %}
+<div{% if !container_id.is_empty() %} id="{{ container_id }}"{% endif %} data-facts class="@container [[data-facts]+&]:mt-1"><dl{% if !id.is_empty() %} id="{{ id }}"{% endif %} class="grid grid-cols-1 gap-x-4 gap-y-1 @lg:grid-cols-2 @5xl:grid-cols-3">{{ caller() }}</dl></div>
 {% endmacro %}
 
 {#- One fact: the value cell (id lands on the dd) is a floating field's box

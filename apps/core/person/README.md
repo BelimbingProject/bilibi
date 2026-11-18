@@ -211,7 +211,7 @@ Creation opens a dialog on the Contacts list, the same shared modal that legal e
 editors and per-fact commit states. Enter/blur commits, Escape cancels, nullable
 contacts can clear, stale versions refuse, and lost write access keeps the page
 with readonly facts and an explanatory outcome. Retirement uses a held record
-version and shared confirmation dialog. History is the shared audit embed.
+version and shared confirmation dialog. The header holds the shared audit History embed.
 
 `person.contacts` is a reusable discovered embed. A company, affiliation or
 account owner first resolves its relation through its public owner API, then
@@ -222,7 +222,7 @@ list/editor and work contacts; no guessed company-to-person link exists here.
 
 Person detail automatically mounts contributed embeds whose context is
 `Record { kind: "core/person" }`, except its own `person.contacts`. The path
-carries `panel`, `id` and `person_id`; anchors are stable and browser-owned.
+carries `panel`, `id` and `person_id`. These panels follow Personal contacts in the [record panel stack](../../../docs/live-pages.md#server-declared-panels-and-background-updates).
 Affiliation, Address, User and relationship owners can contribute their panels
 without Person importing them or requiring People. Each panel is separately
 guarded by the host. HTTP rendering leaves child anchors for live mounting.

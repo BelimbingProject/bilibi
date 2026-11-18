@@ -42,6 +42,7 @@ pub struct ComponentsSpecimen {
     card_titled: Html,
     card_untitled: Html,
     card_flat: Html,
+    live_panels: Html,
     /// A record reference as a named pill and as unavailable, and the record
     /// picker with hits and with a choice (`record_reference.rs`).
     related: Html,
@@ -645,6 +646,19 @@ impl ComponentsSpecimen {
             Vec::new(),
         ))?);
         let markdown_source = "# Reading notes\n\nA **strong** point with *emphasis* and `literal <code>`.\n\n## Steps\n\n1. Open the record\n2. Read the [linked page](/assets/ui-components.html#specimen-markdown)\n\n- First item\n  - Nested item\n- Second item\n\n> Keep the original source.\n\n```text\n<script>alert(1)</script> & literal code\n```\n";
+        let live_panels = Html::render(&crate::LivePanelStack {
+            parts: &[
+                Html::render(&Card {
+                    body: Html::text("Company details"),
+                    ..Card::default()
+                })?,
+                Html::render(&Card {
+                    body: Html::text("Departments"),
+                    ..Card::default()
+                })?,
+            ],
+            panel_ids: &["specimen-empty-panel"],
+        })?;
         Ok(Self {
             markdown: Html::render(&crate::Markdown::new(markdown_source))?,
             markdown_source: Field::named("markdown_source")
@@ -660,6 +674,7 @@ impl ComponentsSpecimen {
             card_titled,
             card_untitled,
             card_flat,
+            live_panels,
             header_title_actions,
             section_title_actions,
             section_actions,

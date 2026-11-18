@@ -5,7 +5,7 @@ use bilibi_ui::lists::RecordLink;
 
 #[derive(Template)]
 #[template(
-    source = r#"<div id="{{ id }}" data-target="{{ id }}">{{ link }}{{ contacts }}</div>"#,
+    source = r#"<div id="{{ id }}" data-target="{{ id }}">{{ link }}<div class="mt-6">{{ contacts }}</div></div>"#,
     ext = "html"
 )]
 struct View<'a> {
