@@ -214,7 +214,7 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
     drop(client);
-    let workspace = "Customer workspace ".repeat(10) + "headquarters";
+    let workspace = "--Customer workspace ".repeat(10) + "headquarters";
     expect_output(provision(&workspace, Some(OWNER), None)?, None)?;
     let token = invitation_token(&mailbox, before_mail, &origin, OWNER, &workspace)?;
     let app = bilibi_web::App::new(db.clone(), &origin)?;

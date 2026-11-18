@@ -12,6 +12,7 @@ use bilibi_database::{Change, Connection, Context, Error, MutationTransaction, R
 use bilibi_mail::{Address, Message};
 use bilibi_person::{validate_person, PersonInput, PersonKind};
 use bilibi_settings::Setting;
+use bilibi_tenancy::tenant_name_lock;
 use serde_json::json;
 
 pub const TENANT_OWNER_PRINCIPAL: &str = "tenant-provision";
@@ -112,8 +113,8 @@ impl UserService {
         let mut client = Connection::take(self.db.get().await.map_err(Error::from)?);
         client
             .execute(
-                "SELECT pg_advisory_lock(hashtextextended('tenant-owner:' || $1,0))",
-                &[&tenant_name],
+                "SELECT pg_advisory_lock(hashtextextended($1,0))",
+                &[&tenant_name_lock(tenant_name)],
             )
             .await?;
         // This installation command is the one authority for this tenant
@@ -326,15 +327,24 @@ impl UserService {
         tenant: i64,
         user: i64,
     ) -> Result<()> {
-        tx.sql()
-            .execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended('tenant-owner:' || t.name,0))
+        let sql = tx.sql();
+        if let Some(row) = sql
+            .query_opt(
+                "SELECT t.name
                  FROM user_tenant_owner_bootstraps b
                  JOIN tenants t ON t.id=b.tenant_id
                  WHERE b.tenant_id=$1 AND b.user_id=$2",
                 &[&tenant, &user],
             )
+            .await?
+        {
+            let name: &str = row.get(0);
+            sql.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&tenant_name_lock(name)],
+            )
             .await?;
+        }
         Ok(())
     }
 

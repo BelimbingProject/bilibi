@@ -30,7 +30,6 @@ fn usage(command: &str) -> Error {
 fn parse(command: &str, args: &[String]) -> Result<Options> {
     let mut options = Options::default();
     let mut repeated = None;
-    let mut flag_like_value = false;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         let slot = match flag.as_str() {
@@ -44,19 +43,13 @@ fn parse(command: &str, args: &[String]) -> Result<Options> {
         if value.is_empty() {
             return Err(usage(command));
         }
-        flag_like_value |= value.starts_with("--");
         if slot.replace(value.to_owned()).is_some() {
             repeated = Some(flag);
         }
     }
-    if options.owner_email.is_some() {
-        if let Some(flag) = repeated {
-            eprintln!("Repeated option: {flag}");
-            return Err(usage(command));
-        }
-        if flag_like_value {
-            return Err(usage(command));
-        }
+    if let Some(flag) = repeated.filter(|_| options.owner_email.is_some()) {
+        eprintln!("Repeated option: {flag}");
+        return Err(usage(command));
     }
     Ok(options)
 }

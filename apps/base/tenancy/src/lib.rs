@@ -4,10 +4,10 @@ mod admin;
 mod oversight;
 mod party_identity;
 pub use admin::{
-    platform_operator, provision_platform_operator, provision_tenant, CreateOutcome, CreatedTenant,
-    Move, MovePlan, MoveRefusal, NewTenant, Suspension, TenantErrors, TenantIdentity, TenantPage,
-    TenantStatus, Tenants, CREATE, LIST, NAME_MAX, PRINCIPAL_PAGE_MAX, REACTIVATE, REASON_MAX,
-    SUSPEND,
+    platform_operator, provision_platform_operator, provision_tenant, tenant_name_lock,
+    CreateOutcome, CreatedTenant, Move, MovePlan, MoveRefusal, NewTenant, Suspension, TenantErrors,
+    TenantIdentity, TenantPage, TenantStatus, Tenants, CREATE, LIST, NAME_MAX, PRINCIPAL_PAGE_MAX,
+    REACTIVATE, REASON_MAX, SUSPEND,
 };
 use bilibi_database::{Context, Error, Result};
 use bilibi_party_ids::{AffiliationId, OrganisationId, PersonId};

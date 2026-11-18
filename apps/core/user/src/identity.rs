@@ -374,11 +374,11 @@ pub(crate) async fn read_account(
 async fn save_links(
     service: &UserService,
     tx: &mut MutationTransaction<'_>,
-    old: &Account,
+    id: i64,
+    before: AccountLinks,
     links: AccountLinks,
 ) -> Result<AccountLinks> {
     let tenant = tx.context().tenant;
-    let (id, before) = (old.id, old.links);
     tx
         .mutate(move |sql| {
             Box::pin(async move {
@@ -469,7 +469,7 @@ impl UserService {
         let links = AccountLinks {
             person: Some(person),
         };
-        let links = save_links(self, &mut tx, &account, links).await?;
+        let links = save_links(self, &mut tx, account.id, account.links, links).await?;
         tx.commit().await?;
         Ok(links)
     }
@@ -482,13 +482,20 @@ impl UserService {
         person: PersonId,
         company: OrganisationId,
     ) -> Result<AccountLinks> {
-        let account = read_account(tx.sql(), scope, user, true)
+        let row = tx
+            .sql()
+            .query_opt(
+                "SELECT person_id FROM users WHERE tenant_id=$1 AND id=$2 AND kind='staff'
+                 AND deleted_at IS NULL AND identity_id IS NOT NULL FOR UPDATE",
+                &[&scope.tenant(), &user],
+            )
             .await?
             .ok_or(Error::NotFound)?;
+        let before = AccountLinks::from_row(&row, 0)?;
         let links = AccountLinks {
             person: Some(person),
         };
-        save_links(self, tx, &account, links).await?;
+        save_links(self, tx, user, before, links).await?;
         crate::desks::write_in(tx, scope, company.get(), person.get()).await?;
         Ok(links)
     }
@@ -514,7 +521,14 @@ impl UserService {
             tx.rollback().await?;
             return Ok(account.links);
         }
-        let links = save_links(self, &mut tx, &account, AccountLinks::default()).await?;
+        let links = save_links(
+            self,
+            &mut tx,
+            account.id,
+            account.links,
+            AccountLinks::default(),
+        )
+        .await?;
         tx.commit().await?;
         Ok(links)
     }
