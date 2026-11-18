@@ -87,7 +87,7 @@ The **Software** page (`/system/software`) has one menu entry and two shared tab
 
 Installed Domains and Extensions missing from the selected catalogue also have a card, labelled **Installed, not in the catalogue**. Each card shows the installed version or **Version unknown**. Extensions also show the recorded code review kind. These cards remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
 
-The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` and `base.software.status` lists installed modules missing from the catalogue. `base.software.open` returns both the status and catalogue facts.
+The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` (and so in `base.software.open`) lists installed modules missing from the catalogue; `base.software.status` stays free of catalogue reads.
 
 **Releases** (`?tab=releases`) shows the installed version, the current or last install (its **Install steps** stay open while the job is active, failed or interrupted, and fold when it completes), a short backup table with folded backup details, and **Get an update**. Backup file locations are folded and only available to accounts that can manage software. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. The old `/system/software/releases` page redirects to the Releases tab.
 

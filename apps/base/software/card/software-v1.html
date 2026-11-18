@@ -674,7 +674,7 @@ async function refreshHome() {
     const opened = await tool('read', { key: 'base.software.status', input: {} });
     if (!opened.failed) {
       const status = unwrap(opened.body) || {};
-      Object.assign(state.data, { instance: status.instance || state.data.instance, installed: status.installed, installed_asset: status.installed_asset, plugins: status.plugins, catalogue: status.catalogue, uncatalogued: status.uncatalogued, job: status.job, undo: status.undo, jobs: status.jobs });
+      Object.assign(state.data, { instance: status.instance || state.data.instance, installed: status.installed, installed_asset: status.installed_asset, plugins: status.plugins, job: status.job, undo: status.undo, jobs: status.jobs });
       banner(state.data.instance);
     }
   } catch (_) {}
@@ -702,8 +702,6 @@ async function pollOnce() {
     state.data.job = status.job;
     state.data.installed = status.installed || state.data.installed;
     state.data.installed_asset = status.installed_asset;
-    state.data.catalogue = status.catalogue;
-    state.data.uncatalogued = status.uncatalogued;
     state.releases = null;
     renderJob();
     if (!(status.job.state === 'queued' || status.job.state === 'running')) stopPolling();

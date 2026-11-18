@@ -227,7 +227,7 @@ impl Software {
         {
             jobs::hide_backup_files(&mut job, &mut backups);
         }
-        let mut value = json!({
+        Ok(json!({
             "instance": review::instance_json(&instance),
             "installed": review::installed_json(&self.composition),
             "installed_asset": self.installed_asset(&**client, scope).await?,
@@ -241,18 +241,14 @@ impl Software {
             "undo": undo,
             "jobs": recent.iter().map(|job| json!({"id": job.id, "kind": job.kind, "state": job.state,
                 "summary": job.review["summary"], "worker": job.worker, "requested_at": job.requested_at, "finished_at": job.finished_at})).collect::<Vec<_>>(),
-        });
-        drop(client);
-        value["catalogue"] = self.catalogue(scope).await?;
-        value["uncatalogued"] = value["catalogue"]["uncatalogued"].clone();
-        Ok(value)
+        }))
     }
 
     /// Discovery and local build instructions on every instance. Proposals
     /// highlight catalogue entries; they never create a server job.
     pub async fn open(&self, scope: &Scope, input: &Value) -> Result<Value> {
         let mut value = self.status(scope).await?;
-        let catalogue = value["catalogue"].clone();
+        let catalogue = self.catalogue(scope).await?;
         let proposed = &input["propose"];
         let wanted = |kind: &str| -> Vec<String> {
             proposed[kind]
