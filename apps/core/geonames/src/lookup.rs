@@ -116,7 +116,10 @@ impl Geonames {
     }
 
     pub async fn get_country(&self, iso: &str) -> Result<Option<CountrySummary>> {
-        country_summary(&**self.db.get().await?, iso).await
+        let Some(iso) = normalize_iso(iso) else {
+            return Ok(None);
+        };
+        country_summary(&**self.db.get().await?, &iso).await
     }
 
     /// A bounded, searchable, sortable page of the Countries index. Invalid
@@ -217,7 +220,10 @@ impl Geonames {
     /// One division by its stored code; blank or unknown is `None`. Prefer
     /// this to listing a country when the code is already known.
     pub async fn get_admin1(&self, code: &str) -> Result<Option<Admin1Summary>> {
-        self.get_admin1_on(&**self.db.get().await?, code).await
+        let Some(code) = admin1_code(code) else {
+            return Ok(None);
+        };
+        Self::admin1_by_code(&**self.db.get().await?, code).await
     }
 
     /// One division on the caller's held connection or transaction.
@@ -226,10 +232,16 @@ impl Geonames {
         client: &(impl ProofClient + ?Sized),
         code: &str,
     ) -> Result<Option<Admin1Summary>> {
-        let code = code.trim();
-        if code.is_empty() || code.len() > 20 {
+        let Some(code) = admin1_code(code) else {
             return Ok(None);
-        }
+        };
+        Self::admin1_by_code(client, code).await
+    }
+
+    async fn admin1_by_code(
+        client: &(impl ProofClient + ?Sized),
+        code: &str,
+    ) -> Result<Option<Admin1Summary>> {
         let sql = format!(
             "SELECT {} FROM geonames_admin1 WHERE code=$1",
             Admin1Summary::COLUMNS
@@ -240,13 +252,12 @@ impl Geonames {
 
     /// A country's divisions by name; an invalid country is empty.
     pub async fn list_admin1(&self, country_iso: &str) -> Result<Vec<Admin1Summary>> {
-        self.list_admin1_on(&**self.db.get().await?, country_iso)
-            .await
+        self.list_admin1_using(None, country_iso).await
     }
 
-    async fn list_admin1_on(
+    async fn list_admin1_using(
         &self,
-        client: &(impl ReadClient + ?Sized),
+        client: Option<&dyn ReadClient>,
         country_iso: &str,
     ) -> Result<Vec<Admin1Summary>> {
         let Some(iso) = normalize_iso(country_iso) else {
@@ -256,7 +267,7 @@ impl Geonames {
             "SELECT {} FROM geonames_admin1 WHERE country_iso=$1 ORDER BY name, code LIMIT {MAX_LIST}",
             Admin1Summary::COLUMNS
         );
-        let rows = client.query(&sql, &[&iso]).await?;
+        let rows = self.lookup_rows(client, &sql, &[&iso]).await?;
         Ok(rows.iter().map(Admin1Summary::from_row).collect())
     }
 
@@ -267,29 +278,18 @@ impl Geonames {
         country_iso: &str,
         name_and_code: bool,
     ) -> Result<Vec<(String, String)>> {
-        self.admin1_options_on(&**self.db.get().await?, country_iso, name_and_code)
-            .await
+        let divisions = self.list_admin1(country_iso).await?;
+        Ok(admin1_choices(divisions, name_and_code))
     }
 
     pub async fn admin1_options_on(
         &self,
-        client: &(impl ReadClient + ?Sized),
+        client: &dyn ReadClient,
         country_iso: &str,
         name_and_code: bool,
     ) -> Result<Vec<(String, String)>> {
-        Ok(self
-            .list_admin1_on(client, country_iso)
-            .await?
-            .into_iter()
-            .map(|admin1| {
-                let label = if name_and_code {
-                    format!("{} ({})", admin1.name, admin1.code)
-                } else {
-                    admin1.name
-                };
-                (label, admin1.code)
-            })
-            .collect())
+        let divisions = self.list_admin1_using(Some(client), country_iso).await?;
+        Ok(admin1_choices(divisions, name_and_code))
     }
 
     /// A page of the Postcodes index (search over code, place, ISO and
@@ -352,13 +352,22 @@ impl Geonames {
     /// prefix within one country, ascending, at most ten. An empty prefix is
     /// the country's first ten; an invalid country is empty.
     pub async fn search_postcodes(&self, country_iso: &str, prefix: &str) -> Result<Vec<String>> {
-        self.search_postcodes_on(&**self.db.get().await?, country_iso, prefix)
-            .await
+        self.search_postcodes_using(None, country_iso, prefix).await
     }
 
     pub async fn search_postcodes_on(
         &self,
-        client: &(impl ReadClient + ?Sized),
+        client: &dyn ReadClient,
+        country_iso: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        self.search_postcodes_using(Some(client), country_iso, prefix)
+            .await
+    }
+
+    async fn search_postcodes_using(
+        &self,
+        client: Option<&dyn ReadClient>,
         country_iso: &str,
         prefix: &str,
     ) -> Result<Vec<String>> {
@@ -370,8 +379,9 @@ impl Geonames {
             return Ok(Vec::new());
         }
         let pattern = format!("{}%", escape_like(prefix));
-        let rows = client
-            .query(
+        let rows = self
+            .lookup_rows(
+                client,
                 &format!(
                     "SELECT DISTINCT postcode FROM geonames_postcodes \
                      WHERE country_iso=$1 AND upper(postcode) LIKE upper($2) \
@@ -394,13 +404,24 @@ impl Geonames {
         query: &str,
         admin1_code: Option<&str>,
     ) -> Result<Vec<String>> {
-        self.search_city_names_on(&**self.db.get().await?, country_iso, query, admin1_code)
+        self.search_city_names_using(None, country_iso, query, admin1_code)
             .await
     }
 
     pub async fn search_city_names_on(
         &self,
-        client: &(impl ReadClient + ?Sized),
+        client: &dyn ReadClient,
+        country_iso: &str,
+        query: &str,
+        admin1_code: Option<&str>,
+    ) -> Result<Vec<String>> {
+        self.search_city_names_using(Some(client), country_iso, query, admin1_code)
+            .await
+    }
+
+    async fn search_city_names_using(
+        &self,
+        client: Option<&dyn ReadClient>,
         country_iso: &str,
         query: &str,
         admin1_code: Option<&str>,
@@ -425,8 +446,7 @@ impl Geonames {
         } else {
             (Some(format!("{escaped}%")), Some(format!("%{escaped}%")))
         };
-        let rows = client
-            .query(
+        let rows = self.lookup_rows(client,
                 &format!(
                     "SELECT name FROM geonames_cities WHERE country_iso=$1 \
                      AND ($2::text IS NULL OR admin1_code=$2) \
@@ -453,13 +473,23 @@ impl Geonames {
         country_iso: &str,
         postcode: &str,
     ) -> Result<Vec<PostcodeSummary>> {
-        self.lookup_postcode_on(&**self.db.get().await?, country_iso, postcode)
+        self.lookup_postcode_using(None, country_iso, postcode)
             .await
     }
 
     pub async fn lookup_postcode_on(
         &self,
-        client: &(impl ReadClient + ?Sized),
+        client: &dyn ReadClient,
+        country_iso: &str,
+        postcode: &str,
+    ) -> Result<Vec<PostcodeSummary>> {
+        self.lookup_postcode_using(Some(client), country_iso, postcode)
+            .await
+    }
+
+    async fn lookup_postcode_using(
+        &self,
+        client: Option<&dyn ReadClient>,
         country_iso: &str,
         postcode: &str,
     ) -> Result<Vec<PostcodeSummary>> {
@@ -475,8 +505,20 @@ impl Geonames {
              ORDER BY place_name, id LIMIT {POSTCODE_LOOKUP_LIMIT}",
             PostcodeSummary::COLUMNS
         );
-        let rows = client.query(&sql, &[&iso, &postcode]).await?;
+        let rows = self.lookup_rows(client, &sql, &[&iso, &postcode]).await?;
         Ok(rows.iter().map(PostcodeSummary::from_row).collect())
+    }
+
+    async fn lookup_rows(
+        &self,
+        client: Option<&dyn ReadClient>,
+        statement: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> Result<Vec<tokio_postgres::Row>> {
+        match client {
+            Some(client) => client.query(statement, params).await,
+            None => Ok(self.db.get().await?.query(statement, params).await?),
+        }
     }
 
     pub async fn get_city_by_geoname_id(&self, geoname_id: i64) -> Result<Option<CitySummary>> {
@@ -498,6 +540,25 @@ impl Geonames {
 /// `LIMIT`/`OFFSET` for a normalised page; both fit i64 by the page bounds.
 fn window<S>(n: &Normal<S>) -> (i64, i64) {
     (n.page_size as i64, ((n.page - 1) * n.page_size) as i64)
+}
+
+fn admin1_code(code: &str) -> Option<&str> {
+    let code = code.trim();
+    (!code.is_empty() && code.len() <= 20).then_some(code)
+}
+
+fn admin1_choices(divisions: Vec<Admin1Summary>, name_and_code: bool) -> Vec<(String, String)> {
+    divisions
+        .into_iter()
+        .map(|division| {
+            let label = if name_and_code {
+                format!("{} ({})", division.name, division.code)
+            } else {
+                division.name
+            };
+            (label, division.code)
+        })
+        .collect()
 }
 
 fn city_admin1(code: &str, iso: &str) -> Option<String> {

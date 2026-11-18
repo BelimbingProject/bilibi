@@ -131,6 +131,41 @@ fn week(working: &[&str], saturday: Value, sunday: Value) -> Value {
     let day = json!({"type": "working", "periods": working});
     json!({"monday": day, "tuesday": day, "wednesday": day, "thursday": day, "friday": day, "saturday": saturday, "sunday": sunday})
 }
+async fn wait_for_gate(
+    client: &tokio_postgres::Client,
+    key: i32,
+    with_peer: bool,
+) -> Result<(), Failure> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = client
+                .query_one(
+                    "SELECT EXISTS (
+                       SELECT 1 FROM pg_locks w
+                       WHERE w.locktype='advisory' AND w.classid=0 AND w.objid=$1::integer::oid
+                         AND w.objsubid=1 AND NOT w.granted
+                         AND w.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                         AND (NOT $2 OR EXISTS (
+                           SELECT 1 FROM pg_stat_activity peer
+                           WHERE peer.datname=current_database() AND peer.wait_event_type='Lock'
+                             AND w.pid=ANY(pg_blocking_pids(peer.pid))
+                         ))
+                     )",
+                    &[&key, &with_peer],
+                )
+                .await?
+                .get(0);
+            if waiting {
+                return Ok::<(), tokio_postgres::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("calendar gate {key} did not reach the expected lock state"))??;
+    Ok(())
+}
+
 fn print_days(days: &Value) {
     for day in days["days"].as_array().into_iter().flatten() {
         let reason = &day["reason"];
@@ -929,7 +964,7 @@ async fn main() -> Result<(), Failure> {
         .get_detached("the walkthrough's own checking connection")
         .await?;
     gate.execute("SELECT pg_advisory_lock(4242)", &[]).await?;
-    let (holiday, include, opened) = tokio::join!(
+    let (holiday, include, (waited, opened)) = tokio::join!(
         tokio::spawn({
             let admin = admin.clone();
             async move { admin.commit(&first).await }
@@ -939,12 +974,16 @@ async fn main() -> Result<(), Failure> {
             async move { second.commit(&second_ops).await }
         }),
         async {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            gate.execute("SELECT pg_advisory_unlock(4242)", &[]).await
+            let waited = wait_for_gate(&client, 4242, true).await;
+            (
+                waited,
+                gate.execute("SELECT pg_advisory_unlock(4242)", &[]).await,
+            )
         }
     );
     opened?;
     client.batch_execute("DROP TRIGGER walkthrough_gate ON core_work_calendar_holidays; DROP TRIGGER walkthrough_gate ON core_work_calendar_includes; DROP FUNCTION walkthrough_gate()").await?;
+    waited?;
     let holiday = holiday??;
     let include = include??;
     assert_eq!(holiday[0]["added_or_renamed"], json!(1));
@@ -1001,11 +1040,12 @@ async fn main() -> Result<(), Failure> {
             .await
             .map(|r| r["included"].clone()),
     );
-    let open = json!({"code": "snap", "operation": "is_open", "at": "2026-11-02T10:00:00Z"});
+    let monday = json!({"code": "snap", "from": "2026-11-02", "to": "2026-11-02"});
+    let direct = json!({"kind": "holiday", "set": "snap-set", "name": "Founders' Day"});
     let before = admin
-        .read("core.work_calendar.business_time", open.clone())
+        .read("core.work_calendar.days", monday.clone())
         .await?;
-    assert_eq!(before["result"], json!(false));
+    assert_eq!(before["days"][0]["reason"], direct);
     let moved = [
         op(
             "core.work_calendar.update",
@@ -1022,25 +1062,19 @@ async fn main() -> Result<(), Failure> {
     // The plan reads no rule version, so it commits past the gate.
     client.batch_execute("CREATE FUNCTION walkthrough_read_gate() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_lock_shared(4243); PERFORM pg_advisory_unlock_shared(4243); RETURN true; END $$; ALTER TABLE core_work_calendar_rules RENAME TO walkthrough_rules; CREATE VIEW core_work_calendar_rules AS SELECT * FROM walkthrough_rules WHERE walkthrough_read_gate()").await?;
     gate.execute("SELECT pg_advisory_lock(4243)", &[]).await?;
-    let (held, (waited, committed, opened)) = tokio::join!(
+    let (held, (committed, opened)) = tokio::join!(
         tokio::spawn({
             let admin = admin.clone();
-            let open = open.clone();
-            async move { admin.read("core.work_calendar.business_time", open).await }
+            let monday = monday.clone();
+            async move { admin.read("core.work_calendar.days", monday).await }
         }),
         async {
-            // Commit once the read waits at the gate (10 s at most).
-            let mut waited = false;
-            for _ in 0..200 {
-                waited = client.query_one("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4243 AND NOT granted)", &[]).await.is_ok_and(|row| row.get::<_, bool>(0));
-                if waited {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let committed = async {
+                wait_for_gate(&client, 4243, false).await?;
+                Ok::<_, Failure>(admin.commit(&moved).await?)
             }
-            let committed = admin.commit(&moved).await;
+            .await;
             (
-                waited,
                 committed,
                 gate.execute("SELECT pg_advisory_unlock(4243)", &[]).await,
             )
@@ -1048,35 +1082,24 @@ async fn main() -> Result<(), Failure> {
     );
     opened?;
     client.batch_execute("DROP VIEW core_work_calendar_rules; ALTER TABLE walkthrough_rules RENAME TO core_work_calendar_rules; DROP FUNCTION walkthrough_read_gate()").await?;
-    assert!(
-        waited,
-        "the snapshot read must reach the gate before the plan commits"
-    );
     let committed = committed?;
     assert_eq!(committed.len(), 2);
     let held = held??;
+    let after = admin.read("core.work_calendar.days", monday).await?;
+    for answer in [&held, &after] {
+        assert_eq!(answer["days"][0]["date"], json!("2026-11-02"));
+        assert_eq!(answer["days"][0]["type"], json!("holiday"));
+    }
+    assert_eq!(held["days"][0]["reason"], direct);
     assert_eq!(
-        held["result"],
-        json!(false),
-        "the held read mixed calendar snapshots"
+        after["days"][0]["reason"],
+        json!({"kind": "substitute", "set": "snap-set", "name": "Founders' Day", "holiday": "2026-11-01"}),
     );
-    println!("the read waited at the gate while the plan committed: {waited}");
     show("the plan", Ok(Value::from(committed)));
-    show(
-        "is_open Monday 10:00Z, read across the commit",
-        Ok(held["result"].clone()),
-    );
-    let after = admin.read("core.work_calendar.business_time", open).await?;
-    assert_eq!(after["result"], json!(false));
-    let days = admin
-        .read(
-            "core.work_calendar.days",
-            json!({"code": "snap", "from": "2026-11-01", "to": "2026-11-02"}),
-        )
-        .await?;
-    assert_eq!(days["days"][1]["reason"]["kind"], json!("substitute"));
-    assert_eq!(days["days"][1]["reason"]["holiday"], json!("2026-11-01"));
-    print_days(&days);
+    println!("Monday held across the commit:");
+    print_days(&held);
+    println!("Monday after the commit:");
+    print_days(&after);
 
     println!("== replacing the first rule moves the dates before it too");
     show("create early (from 2026-01-01, 09:00-18:00)", admin.write("core.work_calendar.create", json!({"code": "early", "name": "Early", "timezone": "UTC", "effective_from": "2026-01-01", "week": week(&["09:00-18:00"], json!({"type": "off"}), json!({"type": "rest"}))})).await);

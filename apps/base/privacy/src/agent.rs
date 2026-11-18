@@ -374,7 +374,7 @@ impl WriteHandler for Write {
                     .await
                     .map_err(refusal)?),
                 Self::Reveal => json!({"value": privacy
-                    .reveal_field_on(tx.sql(), scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
+                    .reveal_field(scope, text(input, "table")?, text(input, "field")?, &reveal_record(input)?, text(input, "reason")?)
                     .await?}),
             };
             Ok(result.into())
