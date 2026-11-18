@@ -93,7 +93,7 @@ pub async fn provision(db: &Db, command: &str, args: &[String]) -> Result<()> {
         {
             Ok(invitation) => {
                 println!(
-                    "Owner invitation {} sent to {}. The owner must use the emailed link to set up sign-in.",
+                    "Owner invitation {} sent to {}. The owner must use the emailed link to create a new sign-in.",
                     invitation.id, invitation.email
                 );
                 Ok(())

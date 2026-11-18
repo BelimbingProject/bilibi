@@ -266,7 +266,7 @@ sudo scripts/install-server.sh tenant-provision production \
     --owner-email owner@acme.example
 ```
 
-The link works once and uses the [default invitation duration](../apps/core/user/README.md#membership-invitations). A recipient with a Bilibi sign-in uses it to accept the invitation. A recipient new to Bilibi chooses a password on the invitation page and enrols a second factor when the installation's sign-in policy requires one. Acceptance gives the owner a Person, business affiliation and first desk in the primary company.
+Use a separate email address for each first owner. The address must be unused by any staff sign-in on the installation when the invitation is sent and when it is accepted. The link works once and uses the [default invitation duration](../apps/core/user/README.md#membership-invitations). The recipient chooses a password for a new sign-in owned by this tenant and enrols a second factor when the installation's sign-in policy requires one. Acceptance gives the owner a Person, business affiliation and first desk in the primary company.
 
 The audit log records `user.tenant_owner.invited` as **System · tenant-provision**. The part of the email address before `@` supplies the initial Person name.
 

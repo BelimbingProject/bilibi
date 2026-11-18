@@ -1,6 +1,6 @@
 //! Deployment bootstrap and invitation settlement for a customer tenant.
 use crate::{
-    accounts::{field_error, validate_email, FieldError},
+    accounts::{email_taken, field_error, validate_email, FieldError},
     memberships::{digest, token},
     Invitation, UserService,
 };
@@ -18,6 +18,8 @@ pub const TENANT_OWNER_PRINCIPAL: &str = "tenant-provision";
 const TENANT_OWNER_ACTION: &str = "user.tenant_owner.bootstrap";
 const TENANT_OWNER_INVITED: &str = "user.tenant_owner.invited";
 const TENANT_OWNER_REISSUED: &str = "user.tenant_owner.reissued";
+pub(crate) const DEDICATED_OWNER_SIGN_IN: &str =
+    "A tenant owner needs a new sign-in. Use a separate email address.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum FirstTenantOwnerError {
@@ -27,6 +29,8 @@ pub enum FirstTenantOwnerError {
     AmbiguousTenant,
     #[error("the bootstrap owner has no pending invitation for this address")]
     OwnerNotPending,
+    #[error("{DEDICATED_OWNER_SIGN_IN}")]
+    DedicatedSignIn,
     #[error("Invalid owner fields")]
     Validation(Vec<FieldError>),
     #[error("Invalid company fields")]
@@ -157,6 +161,9 @@ impl UserService {
                     if exists {
                         return Err(FirstTenantOwnerError::TenantExists);
                     }
+                    if email_taken(&sql, &email, None).await? {
+                        return Err(FirstTenantOwnerError::DedicatedSignIn);
+                    }
                     match bilibi_company::provision_tenant_in(&sql, tenant_name, company).await? {
                         ProvisionOutcome::Provisioned(ready) => {
                             (ready.tenant.id, ready.company.id, None)
@@ -188,6 +195,9 @@ impl UserService {
                     .await?
                     .ok_or(FirstTenantOwnerError::OwnerNotPending)?
                     .get(0);
+                if email_taken(tx.sql(), &email, None).await? {
+                    return Err(FirstTenantOwnerError::DedicatedSignIn);
+                }
                 tx.mutate(move |sql| {
                     Box::pin(async move {
                         sql.execute(

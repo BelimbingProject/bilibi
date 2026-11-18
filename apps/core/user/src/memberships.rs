@@ -2,9 +2,10 @@
 //! invitation boundary while keeping the invited account tenant-owned and the
 //! accepted sign-in installation-wide.
 use crate::{
-    accounts::{field_error, validate_email, validate_name, FieldError},
+    accounts::{email_taken, field_error, validate_email, validate_name, FieldError},
     contributions::INVITE,
     password::{self, check_policy},
+    tenant_owner::DEDICATED_OWNER_SIGN_IN,
     UserService,
 };
 use bilibi_audit::{record_action, Attribution};
@@ -54,6 +55,8 @@ pub enum InvitationError {
     Validation(Vec<FieldError>),
     #[error("This invitation is invalid or has expired")]
     Link,
+    #[error("{DEDICATED_OWNER_SIGN_IN}")]
+    DedicatedSignIn,
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -112,14 +115,28 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT t.name,EXISTS(SELECT 1 FROM user_identities d WHERE lower(d.email)=v.email AND d.kind='staff' AND d.status='active' AND d.deleted_at IS NULL) FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN tenants t ON t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL",
+                "SELECT t.name,b.invitation_id IS NOT NULL,EXISTS(SELECT 1 FROM user_identities d
+                     WHERE lower(d.email)=v.email AND d.kind='staff' AND d.deleted_at IS NULL
+                       AND (d.status='active' OR b.invitation_id IS NOT NULL))
+                 FROM user_invitations v
+                 JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id
+                 JOIN tenants t ON t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL
+                 LEFT JOIN user_tenant_owner_bootstraps b
+                     ON b.tenant_id=v.tenant_id AND b.user_id=v.user_id AND b.invitation_id=v.id
+                 WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL
+                   AND v.expires_at>clock_timestamp() AND u.status='invited'
+                   AND u.identity_id IS NULL AND u.deleted_at IS NULL",
                 &[&digest(raw_token)],
             )
             .await?
             .ok_or(InvitationError::Link)?;
+        let existing_sign_in = row.get(2);
+        if row.get::<_, bool>(1) && existing_sign_in {
+            return Err(InvitationError::DedicatedSignIn);
+        }
         Ok(InvitationAcceptance {
             tenant_name: row.get(0),
-            existing_sign_in: row.get(1),
+            existing_sign_in,
         })
     }
 
@@ -405,21 +422,26 @@ impl UserService {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT i.tenant_id,i.user_id,i.email FROM user_invitations i JOIN users u ON u.tenant_id=i.tenant_id AND u.id=i.user_id WHERE i.token_hash=$1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL",
+                "SELECT i.tenant_id,i.user_id,i.email,b.invitation_id IS NOT NULL
+                 FROM user_invitations i
+                 JOIN users u ON u.tenant_id=i.tenant_id AND u.id=i.user_id
+                 LEFT JOIN user_tenant_owner_bootstraps b
+                     ON b.tenant_id=i.tenant_id AND b.user_id=i.user_id AND b.invitation_id=i.id
+                 WHERE i.token_hash=$1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+                   AND i.expires_at>clock_timestamp() AND u.status='invited'
+                   AND u.identity_id IS NULL AND u.deleted_at IS NULL",
                 &[&digest(raw_token)],
             )
             .await?
             .ok_or(InvitationError::Link)?;
         let (tenant, user, email): (i64, i64, String) = (row.get(0), row.get(1), row.get(2));
-        if client
-            .query_opt(
-                "SELECT 1 FROM user_identities WHERE lower(email)=$1 AND kind='staff' AND deleted_at IS NULL",
-                &[&email],
-            )
-            .await?
-            .is_some()
-        {
-            return Err(InvitationError::Link);
+        let owner: bool = row.get(3);
+        if email_taken(&**client, &email, None).await? {
+            return Err(if owner {
+                InvitationError::DedicatedSignIn
+            } else {
+                InvitationError::Link
+            });
         }
         let mut tx = self
             .mutations
@@ -434,7 +456,8 @@ impl UserService {
                 Ok(invitation) => invitation,
                 Err(error) => {
                     let refusal = match error {
-                        Error::NotFound => Err(InvitationError::Link),
+                        Error::Conflict if owner => Err(InvitationError::DedicatedSignIn),
+                        Error::NotFound | Error::Conflict => Err(InvitationError::Link),
                         other => Err(other.into()),
                     };
                     tx.rollback().await?;
@@ -468,7 +491,6 @@ impl UserService {
                 Context::user(tenant, user, "user.invitation.accept"),
             )
             .await?;
-        self.lock_tenant_owner_in(&tx, tenant, user).await?;
         let identity = match self.hold_invitation_sign_in(tx.sql(), signed_in).await {
             Ok(identity) => identity,
             Err(error @ (Error::Unauthorized | Error::Forbidden | Error::NotFound)) => {
@@ -478,19 +500,28 @@ impl UserService {
             }
             Err(error) => return Err(error.into()),
         };
-        let invitation = match finish_acceptance(&mut tx, raw_token, tenant, user, identity).await {
-            Ok(invitation) => invitation,
-            Err(error) => {
-                let refusal = match error {
-                    Error::NotFound => Err(InvitationError::Link),
-                    other => Err(other.into()),
-                };
-                tx.rollback().await?;
-                return refusal;
-            }
-        };
-        self.settle_tenant_owner_in(&mut tx, tenant, user, invitation)
-            .await?;
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM user_tenant_owner_bootstraps b
+                 JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.id=b.invitation_id
+                 WHERE b.tenant_id=$1 AND b.user_id=$2 AND i.user_id=b.user_id AND i.token_hash=$3",
+                &[&tenant, &user, &digest(raw_token)],
+            )
+            .await?
+            .is_some()
+        {
+            tx.rollback().await?;
+            return Err(InvitationError::DedicatedSignIn);
+        }
+        if let Err(error) = finish_acceptance(&mut tx, raw_token, tenant, user, identity).await {
+            let refusal = match error {
+                Error::NotFound => Err(InvitationError::Link),
+                other => Err(other.into()),
+            };
+            tx.rollback().await?;
+            return refusal;
+        }
         tx.commit().await?;
         Ok(user)
     }
@@ -541,11 +572,15 @@ async fn finish_new_acceptance(
                 .ok_or(Error::NotFound)?
                 .get(0);
             let identity: i64 = sql
-                .query_one(
-                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id) VALUES('staff',$1,$2,now(),$3,$4,$3) RETURNING id",
+                .query_opt(
+                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id)
+                     VALUES('staff',$1,$2,now(),$3,$4,$3)
+                     ON CONFLICT (lower(email)) WHERE deleted_at IS NULL AND kind='staff' DO NOTHING
+                     RETURNING id",
                     &[&email, &hash, &tenant, &user],
                 )
                 .await?
+                .ok_or(Error::Conflict)?
                 .get(0);
             let changed = sql
                 .execute(
@@ -596,7 +631,7 @@ async fn finish_acceptance(
     tenant: i64,
     user: i64,
     identity: i64,
-) -> Result<i64> {
+) -> Result<()> {
     let token_hash = digest(raw_token);
     tx.mutate(move |sql| {
         Box::pin(async move {
@@ -626,7 +661,7 @@ async fn finish_acceptance(
                 return Err(Error::NotFound);
             }
             Ok((
-                invitation,
+                (),
                 vec![
                     Change {
                         kind: "user".into(),

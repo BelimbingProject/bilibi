@@ -3,7 +3,7 @@
 use bilibi_database::{pool, Error, Result};
 use bilibi_mail::Mailbox;
 use bilibi_tenancy::Scope;
-use bilibi_user::{AccountInput, InvitationError};
+use bilibi_user::{AccountInput, InvitationError, InvitationInput};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -11,6 +11,7 @@ use std::{
 };
 
 const OWNER: &str = "owner@customer.example.test";
+const DEDICATED: &str = "A tenant owner needs a new sign-in. Use a separate email address.";
 const PASSWORD: &str = "owner-proof-password";
 
 fn mailbox_dir() -> PathBuf {
@@ -31,7 +32,7 @@ fn invitation_token(
     before: usize,
     origin: &str,
     recipient: &str,
-    tenant: &str,
+    invitation_text: &str,
 ) -> Result<String> {
     if count(mailbox)? != before + 1 {
         return Err(Error::Internal);
@@ -47,7 +48,7 @@ fn invitation_token(
     if !message
         .lines()
         .any(|line| line.starts_with("To: ") && line.ends_with(&recipient))
-        || !message.contains(&format!("You are invited to become the owner of {tenant}."))
+        || !message.contains(invitation_text)
     {
         return Err(Error::Internal);
     }
@@ -200,7 +201,7 @@ async fn verify_owner(
              JOIN tenant_primary_companies x ON x.tenant_id=t.id
              JOIN companies c ON c.tenant_id=t.id AND c.id=x.company_id
              JOIN users u ON u.tenant_id=t.id AND u.id=$1
-             JOIN user_identities i ON i.id=u.identity_id
+             JOIN user_identities i ON i.id=u.identity_id AND i.home_tenant_id=t.id AND i.home_user_id=u.id
              JOIN persons p ON p.tenant_id=t.id AND p.id=u.person_id
              JOIN user_tenant_owner_bootstraps b ON b.tenant_id=t.id AND b.user_id=u.id AND b.company_id=c.id
              WHERE t.name=$2 AND c.name='Customer Company Sdn. Bhd.' AND c.code='customer'",
@@ -334,7 +335,13 @@ async fn main() -> Result<()> {
     drop(client);
     let workspace = "--Customer workspace ".repeat(10) + "headquarters";
     expect_output(provision(&workspace, Some(OWNER), None)?, None)?;
-    let token = invitation_token(&mailbox, before_mail, &origin, OWNER, &workspace)?;
+    let token = invitation_token(
+        &mailbox,
+        before_mail,
+        &origin,
+        OWNER,
+        &format!("You are invited to become the owner of {workspace}."),
+    )?;
     let app = bilibi_web::App::new(db.clone(), &origin)?;
     let invitation = app
         .user
@@ -353,25 +360,6 @@ async fn main() -> Result<()> {
         .map_err(|_| Error::Unauthorized)?;
     let owner = app.security.guard(&login.token).await?;
     let retry_email = "retry@customer.example.test";
-    let retry_account = app
-        .user
-        .create_account(
-            &owner,
-            &AccountInput {
-                name: "Second workspace invitee".into(),
-                email: retry_email.into(),
-                password: PASSWORD.into(),
-                ..AccountInput::default()
-            },
-        )
-        .await
-        .map_err(|_| Error::Internal)?;
-    let retry_login = app
-        .user
-        .login(retry_email, PASSWORD)
-        .await
-        .map_err(|_| Error::Unauthorized)?;
-    let revoked = app.security.guard(&retry_login.token).await?;
     let client = db.get().await?;
     let (tenant, company) = verify_owner(&client, user, &workspace, OWNER).await?;
     let action_row = client
@@ -452,7 +440,7 @@ async fn main() -> Result<()> {
         mail_before_retry,
         &origin,
         retry_email,
-        retry_workspace,
+        &format!("You are invited to become the owner of {retry_workspace}."),
     )?;
     let delivered = retry_state(&client).await?;
     if !delivered.same_invitation(&original)
@@ -472,7 +460,7 @@ async fn main() -> Result<()> {
         mail_before_retry + 1,
         &origin,
         retry_email,
-        retry_workspace,
+        &format!("You are invited to become the owner of {retry_workspace}."),
     )?;
     let reissued = retry_state(&client).await?;
     expect_output(provision(retry_workspace, None, None)?, None)?;
@@ -509,6 +497,104 @@ async fn main() -> Result<()> {
         }
         expect_output(output, None)?;
     }
+    drop(client);
+    assert!(matches!(
+        app.user.accept_member_invitation(&owner, &new_token).await,
+        Err(InvitationError::DedicatedSignIn)
+    ));
+    if !reissued.same_invitation(&original)
+        || reissued.digest == delivered.digest
+        || !reissued.unexpired
+        || reissued.reissues != 2
+        || !matches!(
+            app.user.member_invitation(&first_token).await,
+            Err(InvitationError::Link)
+        )
+        || app
+            .user
+            .accept_new_member_invitation(&new_token, PASSWORD)
+            .await
+            .map_err(|_| Error::Internal)?
+            != original.user
+    {
+        return Err(Error::Internal);
+    }
+    let client = db.get().await?;
+    let (retry_tenant, _) =
+        verify_owner(&client, original.user, retry_workspace, retry_email).await?;
+    if retry_tenant != original.tenant {
+        return Err(Error::Internal);
+    }
+    let before = count(&mailbox)?;
+    let state = snapshot(&client).await?;
+    expect_output(
+        provision("Address already used", Some(OWNER), None)?,
+        Some(DEDICATED),
+    )?;
+    if snapshot(&client).await? != state || count(&mailbox)? != before {
+        return Err(Error::Internal);
+    }
+    drop(client);
+
+    let member_email = "member@customer.example.test";
+    let reserved_workspace = "Reserved address workspace";
+    expect_output(
+        provision(reserved_workspace, Some(member_email), None)?,
+        None,
+    )?;
+    let owner_token = invitation_token(
+        &mailbox,
+        before,
+        &origin,
+        member_email,
+        &format!("You are invited to become the owner of {reserved_workspace}."),
+    )?;
+    let member_account = app
+        .user
+        .create_account(
+            &owner,
+            &AccountInput {
+                name: "Second workspace invitee".into(),
+                email: member_email.into(),
+                password: PASSWORD.into(),
+                ..AccountInput::default()
+            },
+        )
+        .await
+        .map_err(|_| Error::Internal)?;
+    let member_login = app
+        .user
+        .login(member_email, PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let revoked = app.security.guard(&member_login.token).await?;
+    let client = db.get().await?;
+    let before_refusal = snapshot(&client).await?;
+    drop(client);
+    expect_output(
+        provision(reserved_workspace, Some(member_email), None)?,
+        Some(DEDICATED),
+    )?;
+    assert!(matches!(
+        app.user.member_invitation(&owner_token).await,
+        Err(InvitationError::DedicatedSignIn)
+    ));
+    assert!(matches!(
+        app.user
+            .accept_member_invitation(&revoked, &owner_token)
+            .await,
+        Err(InvitationError::DedicatedSignIn)
+    ));
+    assert!(matches!(
+        app.user
+            .accept_new_member_invitation(&owner_token, PASSWORD)
+            .await,
+        Err(InvitationError::DedicatedSignIn)
+    ));
+    let client = db.get().await?;
+    if snapshot(&client).await? != before_refusal || count(&mailbox)? != before + 1 {
+        return Err(Error::Internal);
+    }
     let auth = app
         .services
         .get::<bilibi_tenancy::Authentication>("base/tenancy.authentication")?;
@@ -516,15 +602,48 @@ async fn main() -> Result<()> {
         .authenticate_session(
             &**client,
             tenant,
-            retry_account.id,
+            member_account.id,
             Some(user),
             None,
             String::new(),
         )
         .await?;
     drop(client);
+    let second_login = app
+        .user
+        .login(retry_email, PASSWORD)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
+    let second_owner = app.security.guard(&second_login.token).await?;
+    let before = count(&mailbox)?;
     app.user
-        .logout(&retry_login.token, &retry_login.csrf)
+        .invite_member(
+            &second_owner,
+            &InvitationInput {
+                name: "Member".into(),
+                email: member_email.into(),
+                roles: Vec::new(),
+            },
+        )
+        .await
+        .map_err(|_| Error::Internal)?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while count(&mailbox)? == before {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok::<(), Error>(())
+    })
+    .await
+    .map_err(|_| Error::Internal)??;
+    let ordinary_token = invitation_token(
+        &mailbox,
+        before,
+        &origin,
+        member_email,
+        &format!("You are invited to join {retry_workspace}."),
+    )?;
+    app.user
+        .logout(&member_login.token, &member_login.csrf)
         .await?;
     let client = db.get().await?;
     let mut expected: serde_json::Value =
@@ -534,13 +653,13 @@ async fn main() -> Result<()> {
     drop(client);
     assert!(matches!(
         app.user
-            .accept_member_invitation(&viewing, &new_token)
+            .accept_member_invitation(&viewing, &ordinary_token)
             .await,
         Err(InvitationError::Access(Error::Forbidden))
     ));
     assert!(matches!(
         app.user
-            .accept_member_invitation(&revoked, &new_token)
+            .accept_member_invitation(&revoked, &ordinary_token)
             .await,
         Err(InvitationError::Access(Error::Unauthorized))
     ));
@@ -555,7 +674,7 @@ async fn main() -> Result<()> {
          AND EXISTS(SELECT 1 FROM base_audit_actions WHERE tenant_id=$1 AND actor_id=$2
          AND impersonator_id IS NULL AND event='user.invitation.accept.refused'
          AND payload->>'reason'='source_session_unavailable')",
-            &[&tenant, &retry_account.id, &user],
+            &[&tenant, &member_account.id, &user],
         )
         .await?
         .get(0);
@@ -563,42 +682,19 @@ async fn main() -> Result<()> {
         return Err(Error::Internal);
     }
     drop(client);
-    let retry_login = app
+    let member_login = app
         .user
-        .login(retry_email, PASSWORD)
+        .login(member_email, PASSWORD)
         .await
         .map_err(|_| Error::Unauthorized)?;
-    let signed_in = app.security.guard(&retry_login.token).await?;
-    if !reissued.same_invitation(&original)
-        || reissued.digest == delivered.digest
-        || !reissued.unexpired
-        || reissued.reissues != 2
-        || !matches!(
-            app.user.member_invitation(&first_token).await,
-            Err(InvitationError::Link)
-        )
-        || app
-            .user
-            .accept_member_invitation(&signed_in, &new_token)
-            .await
-            .map_err(|_| Error::Internal)?
-            != original.user
-    {
-        return Err(Error::Internal);
-    }
-    let client = db.get().await?;
-    let (retry_tenant, _) =
-        verify_owner(&client, original.user, retry_workspace, retry_email).await?;
-    if retry_tenant != original.tenant {
-        return Err(Error::Internal);
-    }
-    drop(client);
-    let before = count(&mailbox)?;
-    let workspace = "Retired source workspace";
-    expect_output(provision(workspace, Some(retry_email), None)?, None)?;
-    let token = invitation_token(&mailbox, before, &origin, retry_email, workspace)?;
-    verify_retirement_refusal(&app, &pool(&database_url)?, &signed_in, &token).await?;
-    println!("Verified acceptance refused and audited after concurrent source Person retirement.");
-    println!("Verified owner setup with an existing sign-in, delivery recovery, expired link replacement and refusal to change or adopt an existing owner.");
+    let signed_in = app.security.guard(&member_login.token).await?;
+    verify_retirement_refusal(&app, &pool(&database_url)?, &signed_in, &ordinary_token).await?;
+    let invitation = app
+        .user
+        .member_invitation(&ordinary_token)
+        .await
+        .map_err(|_| Error::Internal)?;
+    assert!(invitation.existing_sign_in);
+    println!("Verified ordinary invitation protections and dedicated sign-ins for first owners.");
     Ok(())
 }
