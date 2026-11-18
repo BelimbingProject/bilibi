@@ -409,31 +409,26 @@ impl Reports {
                 };
             }
         };
-        let days = {
-            let Ok(client) = self.db.get().await else {
-                return self
-                    .give_up(execution, scope, export, "database_unavailable", quiet)
-                    .await;
-            };
-            self.setting(&**client, scope, contributions::EXPORT_DAYS_KEY)
-                .await
+        let Ok(mut client) = self.db.get().await else {
+            return self
+                .give_up(execution, scope, export, "database_unavailable", quiet)
+                .await;
         };
-        let days = match days {
+        let days = match self
+            .setting(&**client, scope, contributions::EXPORT_DAYS_KEY)
+            .await
+        {
             Ok(days) => days as i64,
             Err(_) => {
+                drop(client);
                 return self
                     .give_up(execution, scope, export, "settings_unavailable", quiet)
-                    .await
+                    .await;
             }
         };
         let reference = Reference {
             subject: subject(export),
             kind: "report-export".into(),
-        };
-        let Ok(mut client) = self.db.get().await else {
-            return self
-                .give_up(execution, scope, export, "database_unavailable", quiet)
-                .await;
         };
         let stored = owned
             .put_expiring(&mut client, reference, &file.bytes, file.content_type, days)

@@ -1664,10 +1664,16 @@ impl LinksPage {
                 if !self.guard(&**client, scope).await? {
                     return Ok(());
                 }
-                let today: String = client
-                    .query_one("SELECT CURRENT_DATE::text", &[])
-                    .await?
-                    .get(0);
+                let end_date = if kind == "end" {
+                    Some(
+                        client
+                            .query_one("SELECT CURRENT_DATE::text", &[])
+                            .await?
+                            .get::<_, String>(0),
+                    )
+                } else {
+                    None
+                };
                 drop(client);
                 match self.find(scope, link_id(value)?).await? {
                     Some(entry) => {
@@ -1684,8 +1690,8 @@ impl LinksPage {
                                 dates.to().map_or(String::new(), |d| d.as_str().to_owned()),
                             ),
                         ]);
-                        if kind == "end" {
-                            values.insert("effective_to".into(), today);
+                        if let Some(date) = end_date {
+                            values.insert("effective_to".into(), date);
                         }
                         self.modal = Some(LinkModal {
                             editing: Some(entry),

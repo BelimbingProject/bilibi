@@ -133,17 +133,8 @@ impl OversightQueries {
     /// A bounded intersection for builders; no results or child identities.
     pub async fn builder_catalog(&self, scope: &Scope, rows: bool) -> Result<Catalog, QueryError> {
         timeout(Duration::from_secs(60), async {
-            let proof = self.prove(scope).await?;
-            if proof.children().len() > self.setting("max_children").await? as usize {
-                return Err(QueryError::Limit("too many consenting children"));
-            }
-            let millis = self.setting("total_timeout_ms").await?;
-            timeout(Duration::from_millis(u64::from(millis)), async {
-                let client = self.db.get().await.map_err(Error::from)?;
-                Ok(Catalog::oversight_builder(&**client, &proof, rows).await?)
-            })
-            .await
-            .map_err(|_| QueryError::TooHeavy("oversight catalog timed out"))?
+            let client = self.db.get().await.map_err(Error::from)?;
+            self.builder_catalog_on(&**client, scope, rows).await
         })
         .await
         .map_err(|_| QueryError::TooHeavy("oversight policy lookup timed out"))?
@@ -210,7 +201,7 @@ impl OversightQueries {
                     let (outcome, data) = match result {
                         Ok(Ok(data)) => ("ok", Some(data)),
                         Err(_) => ("timed_out", None),
-                        Ok(Err(QueryError::Database(Error::Forbidden))) => ("revoked", None),
+                        Ok(Err(ref error)) if revoked(error) => ("revoked", None),
                         Ok(Err(QueryError::TooHeavy(why))) if why.contains("time") => {
                             ("timed_out", None)
                         }
@@ -260,9 +251,22 @@ impl OversightQueries {
             result.total = Some(self.combine(&result.children, spec).await?);
         }
         let client = self.db.get().await.map_err(Error::from)?;
-        let mut who = Attribution::from_scope(scope.parent());
-        who.trace_id = scope.parent().agent().map(|agent| agent.trace().to_owned());
-        record_action(&**client, &who, None, "tenancy.oversight.query", json!({"table":root,"reader_name":scope.parent().user_name,"agent_connection":scope.parent().agent().map(|agent|agent.connection()),"row_count":result.children.iter().filter_map(|c|c.data.as_ref()).map(|d|match d { OversightData::Summary(s)=>s.total.rows, OversightData::Rows {projection,..}=>projection.rows.len() as i64 }).sum::<i64>(),"children":result.children.iter().map(|c| json!({"tenant_id":c.tenant,"outcome":c.outcome})).collect::<Vec<_>>(),"excluded":result.excluded()}), false).await?;
+        record_query(
+            &**client,
+            &scope,
+            root,
+            result
+                .children
+                .iter()
+                .filter_map(|child| child.data.as_ref())
+                .map(OversightData::count)
+                .sum(),
+            result
+                .children
+                .iter()
+                .map(|child| (child.tenant, child.outcome)),
+        )
+        .await?;
         Ok(result)
     }
     async fn child(
@@ -310,37 +314,7 @@ impl OversightQueries {
             tx.commit().await?;
             data
         };
-        // A restriction or owning-capability change while SQL ran invalidates
-        // the result too, including a cached result. Never expose stale masks.
-        let fresh = Catalog::for_oversight(&**client, scope, grant, spec.rows()).await?;
-        if format!("{fresh:?}") != policy {
-            return Err(Error::Forbidden.into());
-        }
-        let count = match &data {
-            OversightData::Summary(s) => s.total.rows,
-            OversightData::Rows { projection, .. } => projection.rows.len() as i64,
-        };
-        let (mut columns, filters) = spec.evidence();
-        if let OversightSpec::Rows { pages, .. } = spec {
-            if !pages.contains_key(&grant.tenant()) {
-                columns.clear();
-            }
-        }
-        // The recheck happens after the read and before the durable action.
-        // A failed audit or revoke discards this entire child's answer.
-        record_oversight_read(
-            &**client,
-            scope,
-            grant,
-            OversightRead {
-                table: root,
-                level: if spec.rows() { "rows" } else { "aggregates" },
-                columns: &columns,
-                filters: &filters,
-                rows: count,
-            },
-        )
-        .await?;
+        audit_child(&**client, scope, grant, root, spec, &policy, &data).await?;
         if cache_seconds > 0 && !cache_hit {
             let mut cache = self.cache.lock().map_err(|_| Error::Internal)?;
             cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(u64::from(cache_seconds)));
@@ -418,12 +392,7 @@ impl OversightQueries {
     }
     async fn setting(&self, suffix: &str) -> Result<u32, QueryError> {
         let client = self.db.get().await.map_err(Error::from)?;
-        Ok(self
-            .settings
-            .get_global(&**client, &format!("tenancy.oversight.{suffix}"))
-            .await?
-            .as_u64()
-            .ok_or(Error::Internal)? as u32)
+        self.setting_on(&**client, suffix).await
     }
 }
 
@@ -526,14 +495,6 @@ async fn read_catalog(
 }
 
 impl OversightQueries {
-    /// Reprove oversight on the caller's held connection.
-    pub async fn prove_on(
-        &self,
-        client: &(impl tokio_postgres::GenericClient + Sync),
-        scope: &Scope,
-    ) -> Result<OversightScope, QueryError> {
-        Ok(self.tenancy.prove(client, scope).await?)
-    }
     /// The same bounded builder intersection on the caller's connection.
     pub async fn builder_catalog_on(
         &self,
@@ -541,77 +502,140 @@ impl OversightQueries {
         scope: &Scope,
         rows: bool,
     ) -> Result<Catalog, QueryError> {
-        let proof = self.prove_on(client, scope).await?;
-        if proof.children().len() > self.setting_on(client, "max_children").await? as usize {
-            return Err(QueryError::Limit("too many consenting children"));
-        }
-        timeout(
-            Duration::from_millis(u64::from(
-                self.setting_on(client, "total_timeout_ms").await?,
-            )),
-            async { Ok(Catalog::oversight_builder(client, &proof, rows).await?) },
-        )
+        let deadline = self.deadline_on(client).await?;
+        timeout_at(deadline, async {
+            let proof = self.tenancy.prove(client, scope).await?;
+            if proof.children().len() > self.setting_on(client, "max_children").await? as usize {
+                return Err(QueryError::Limit("too many consenting children"));
+            }
+            Ok(Catalog::oversight_builder(client, &proof, rows).await?)
+        })
         .await
         .map_err(|_| QueryError::TooHeavy("oversight catalog timed out"))?
     }
-    /// Validate a saved question on the caller's transaction without taking
-    /// pool slots for child tasks. No child data leaves this probe. Each child
-    /// read is bounded and audited, and SQL refusals recover at a savepoint.
+    /// Validate a saved question on the caller's transaction. Each child read
+    /// is bounded, audited, and SQL refusals recover at a savepoint. No child
+    /// data leaves this probe. For rows, sample the given page from each child.
     pub async fn probe_on(
         &self,
         tx: &tokio_postgres::Transaction<'_>,
-        scope: &OversightScope,
+        scope: &Scope,
         root: &str,
         spec: &OversightSpec,
     ) -> Result<bool, QueryError> {
-        let scope = self.prove_on(tx, scope.parent()).await?;
-        if scope.children().len() > self.setting_on(tx, "max_children").await? as usize {
-            return Err(QueryError::Limit("too many consenting children"));
-        }
-        let spec = spec.bounded(self.setting_on(tx, "child_timeout_ms").await?);
-        let deadline = Instant::now()
-            + Duration::from_millis(u64::from(self.setting_on(tx, "total_timeout_ms").await?));
-        let mut supported = scope.children().is_empty();
-        for grant in scope.children() {
-            if Instant::now() >= deadline {
-                return Err(QueryError::TooHeavy("oversight total time bound exceeded"));
+        let deadline = self.deadline_on(tx).await?;
+        let over_time = || QueryError::TooHeavy("oversight total time bound exceeded");
+        let (scope, child_ms, audit) = timeout_at(deadline, async {
+            let scope = self.tenancy.prove(tx, scope).await?;
+            if scope.children().len() > self.setting_on(tx, "max_children").await? as usize {
+                return Err(QueryError::Limit("too many consenting children"));
             }
-            let result = crate::query::bounded(tx, spec.bounds(), async {
-                let catalog = Catalog::for_oversight(tx, &scope, grant, spec.rows()).await?;
-                read_catalog(tx, &catalog, grant, root, &spec).await
+            let child_ms = self.setting_on(tx, "child_timeout_ms").await?;
+            let audit = self
+                .db
+                .get_detached("oversight audit")
+                .await
+                .map_err(Error::from)?;
+            Ok::<_, QueryError>((scope, child_ms, audit))
+        })
+        .await
+        .map_err(|_| over_time())??;
+        let mut spec = spec.bounded(child_ms);
+        if let OversightSpec::Rows { page, pages, .. } = &mut spec {
+            *pages = scope
+                .children()
+                .iter()
+                .map(|child| (child.tenant(), (page.offset, page.limit)))
+                .collect();
+        }
+        let mut supported = scope.children().is_empty();
+        let mut children = Vec::new();
+        let mut rows = 0;
+        for grant in scope.children() {
+            let start = Instant::now();
+            if start >= deadline {
+                return Err(over_time());
+            }
+            let child_deadline = deadline.min(start + Duration::from_millis(u64::from(child_ms)));
+            let mut bounds = spec.bounds();
+            bounds.statement_ms = bounds
+                .statement_ms
+                .min(child_deadline.duration_since(start).as_millis().max(100) as u32);
+            let result = crate::query::bounded(tx, bounds, async {
+                timeout_at(child_deadline, async {
+                    let catalog = Catalog::for_oversight(tx, &scope, grant, spec.rows()).await?;
+                    let data = read_catalog(tx, &catalog, grant, root, &spec).await?;
+                    Ok((format!("{catalog:?}"), data))
+                })
+                .await
+                .map_err(|_| QueryError::TooHeavy("oversight child read timed out"))?
             })
             .await;
-            match result {
-                Ok(data) => {
-                    let count = match data {
-                        OversightData::Summary(s) => s.total.rows,
-                        OversightData::Rows { projection, .. } => projection.rows.len() as i64,
-                    };
-                    let (columns, filters) = spec.evidence();
-                    record_oversight_read(
-                        tx,
-                        &scope,
-                        grant,
-                        OversightRead {
-                            table: root,
-                            level: if spec.rows() { "rows" } else { "aggregates" },
-                            columns: &columns,
-                            filters: &filters,
-                            rows: count,
-                        },
-                    )
-                    .await?;
-                    supported = true;
-                }
-                Err(QueryError::Limit(_) | QueryError::TooHeavy(_)) => supported = true,
-                Err(QueryError::Database(error)) if !matches!(error, Error::Forbidden) => {
-                    return Err(error.into())
-                }
-                Err(_) => {}
+            if Instant::now() >= deadline {
+                return Err(over_time());
             }
+            let result = match result {
+                Ok((policy, data)) => timeout_at(child_deadline, async {
+                    audit_child(&**audit, &scope, grant, root, &spec, &policy, &data).await?;
+                    Ok(data.count())
+                })
+                .await
+                .unwrap_or(Err(QueryError::TooHeavy("oversight child audit timed out"))),
+                Err(error) => Err(error),
+            };
+            let outcome = match result {
+                Ok(count) => {
+                    rows += count;
+                    supported = true;
+                    "ok"
+                }
+                Err(ref error) if revoked(error) => "revoked",
+                Err(QueryError::TooHeavy(why)) if why.contains("time") => {
+                    supported = true;
+                    "timed_out"
+                }
+                Err(QueryError::Limit(_) | QueryError::TooHeavy(_)) => {
+                    supported = true;
+                    "over_cost"
+                }
+                Err(QueryError::Database(error)) => return Err(error.into()),
+                Err(_) => "refused",
+            };
+            children.push((grant.tenant(), outcome));
+        }
+        if Instant::now() >= deadline {
+            return Err(over_time());
+        }
+        timeout_at(
+            deadline,
+            record_query(&**audit, &scope, root, rows, children.into_iter()),
+        )
+        .await
+        .map_err(|_| over_time())??;
+        if Instant::now() >= deadline {
+            return Err(over_time());
         }
         Ok(supported)
     }
+
+    async fn deadline_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+    ) -> Result<Instant, QueryError> {
+        let start = Instant::now();
+        let millis = timeout(
+            Duration::from_secs(60),
+            self.setting_on(client, "total_timeout_ms"),
+        )
+        .await
+        .map_err(|_| QueryError::TooHeavy("oversight policy lookup timed out"))??;
+        let deadline = start + Duration::from_millis(u64::from(millis));
+        if Instant::now() >= deadline {
+            return Err(QueryError::TooHeavy("oversight total time bound exceeded"));
+        }
+        Ok(deadline)
+    }
+
     async fn setting_on(
         &self,
         client: &(impl tokio_postgres::GenericClient + Sync),
@@ -624,4 +648,89 @@ impl OversightQueries {
             .as_u64()
             .ok_or(Error::Internal)? as u32)
     }
+}
+
+impl OversightData {
+    fn count(&self) -> i64 {
+        match self {
+            Self::Summary(summary) => summary.total.rows,
+            Self::Rows { projection, .. } => projection.rows.len() as i64,
+        }
+    }
+}
+
+fn revoked(error: &QueryError) -> bool {
+    matches!(
+        error,
+        QueryError::Database(Error::Forbidden)
+            | QueryError::Catalog(crate::CatalogError::Database(Error::Forbidden))
+    )
+}
+
+async fn audit_child(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    scope: &OversightScope,
+    grant: &ChildGrant,
+    root: &str,
+    spec: &OversightSpec,
+    policy: &str,
+    data: &OversightData,
+) -> Result<(), QueryError> {
+    let fresh = Catalog::for_oversight(client, scope, grant, spec.rows()).await?;
+    if format!("{fresh:?}") != policy {
+        return Err(Error::Forbidden.into());
+    }
+    let (mut columns, filters) = spec.evidence();
+    if matches!(spec, OversightSpec::Rows { pages, .. } if !pages.contains_key(&grant.tenant())) {
+        columns.clear();
+    }
+    record_oversight_read(
+        client,
+        scope,
+        grant,
+        OversightRead {
+            table: root,
+            level: if spec.rows() { "rows" } else { "aggregates" },
+            columns: &columns,
+            filters: &filters,
+            rows: data.count(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn record_query(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    scope: &OversightScope,
+    root: &str,
+    rows: i64,
+    children: impl Iterator<Item = (i64, &'static str)> + Send,
+) -> Result<(), QueryError> {
+    let mut who = Attribution::from_scope(scope.parent());
+    who.trace_id = scope.parent().agent().map(|agent| agent.trace().to_owned());
+    let mut excluded = 0;
+    let children: Vec<_> = children
+        .map(|(tenant, outcome)| {
+            excluded += usize::from(outcome != "ok");
+            json!({"tenant_id": tenant, "outcome": outcome})
+        })
+        .collect();
+    record_action(
+        client,
+        &who,
+        None,
+        "tenancy.oversight.query",
+        json!({
+            "table": root,
+            "reader_name": scope.parent().user_name,
+            "agent_connection": scope.parent().agent().map(|agent| agent.connection()),
+            "row_count": rows,
+            "children": children,
+            "excluded": excluded,
+        }),
+        false,
+    )
+    .await?;
+    Ok(())
 }

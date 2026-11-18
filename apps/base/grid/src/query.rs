@@ -171,17 +171,7 @@ pub async fn project_within<S: AsRef<str>>(
     specs: &[S],
     bounds: Bounds,
 ) -> Result<Projection, QueryError> {
-    read(
-        db,
-        scope,
-        root,
-        ids,
-        specs,
-        &Lenses::default(),
-        bounds,
-        None,
-    )
-    .await
+    read(db, scope, root, ids, specs, &Lenses::default(), bounds).await
 }
 
 /// [`project`] plus each trend column's monthly series and each delta column's
@@ -195,7 +185,7 @@ pub async fn project_lenses<S: AsRef<str>>(
     specs: &[S],
     lenses: &Lenses,
 ) -> Result<Projection, QueryError> {
-    read(db, scope, root, ids, specs, lenses, Bounds::default(), None).await
+    read(db, scope, root, ids, specs, lenses, Bounds::default()).await
 }
 
 /// The full value of one masked field of one record (ADR 05): the same read
@@ -213,32 +203,16 @@ pub async fn reveal(
     field: &str,
     key: &Value,
 ) -> Result<Option<Value>, QueryError> {
-    grant
-        .check(scope, table, field)
-        .map_err(QueryError::Database)?;
-    {
-        let client = db.get().await.map_err(Error::from)?;
-        let catalog = Catalog::for_scope(&**client, scope).await?;
-        if !catalog.masked(table, field) {
-            return Err(QueryError::Database(Error::Forbidden));
-        }
-    }
-    let projection = read(
-        db,
-        scope,
-        table,
-        std::slice::from_ref(key),
-        &[field],
-        &Lenses::default(),
-        Bounds::default(),
-        Some((table, field)),
-    )
-    .await?;
-    Ok(projection
-        .rows
-        .into_iter()
-        .next()
-        .and_then(|mut row| row.cells.remove(field)))
+    let mut client = db.get().await.map_err(Error::from)?;
+    let tx = client
+        .build_transaction()
+        .read_only(true)
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await?;
+    let value = reveal_on(&tx, scope, grant, table, field, key).await?;
+    tx.commit().await?;
+    Ok(value)
 }
 
 async fn read<S: AsRef<str>>(
@@ -249,7 +223,6 @@ async fn read<S: AsRef<str>>(
     specs: &[S],
     lenses: &Lenses,
     bounds: Bounds,
-    reveal: Option<(&str, &str)>,
 ) -> Result<Projection, QueryError> {
     bounds.check()?;
     let mut client = db.get().await.map_err(Error::from)?;
@@ -260,10 +233,7 @@ async fn read<S: AsRef<str>>(
         .start()
         .await?;
     tx.batch_execute(&bounds.sql()).await?;
-    let catalog = match reveal {
-        Some((table, field)) => Catalog::revealing(&*tx, scope, table, field).await?,
-        None => Catalog::for_scope(&*tx, scope).await?,
-    };
+    let catalog = Catalog::for_scope(&*tx, scope).await?;
     let result = project_catalog(&tx, &catalog, root, ids, specs, lenses, bounds).await?;
     tx.commit().await?;
     Ok(result)
@@ -987,11 +957,11 @@ pub async fn reveal_on(
         .check(scope, table, field)
         .map_err(QueryError::Database)?;
     bounded(tx, Bounds::default(), async {
-        let catalog = Catalog::for_scope(tx, scope).await?;
-        if !catalog.masked(table, field) {
+        let mut catalog = Catalog::for_scope(tx, scope).await?;
+        let policy = format!("{catalog:?}");
+        if !catalog.unmask(table, field) {
             return Err(QueryError::Database(Error::Forbidden));
         }
-        let catalog = Catalog::revealing(tx, scope, table, field).await?;
         let projection = project_catalog(
             tx,
             &catalog,
@@ -1002,6 +972,10 @@ pub async fn reveal_on(
             Bounds::default(),
         )
         .await?;
+        let fresh = Catalog::for_scope(tx, scope).await?;
+        if format!("{fresh:?}") != policy {
+            return Err(QueryError::Database(Error::Forbidden));
+        }
         Ok(projection
             .rows
             .into_iter()
