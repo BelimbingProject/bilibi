@@ -271,12 +271,11 @@ other request (subresources, frames, redirects, `file:`, other hosts) is refused
 by a DevTools Fetch policy, name resolution is disabled except for the origin and
 all other traffic is sent to a dead proxy, so not even a speculative connection
 leaves. A template that navigates its own page away (meta refresh, redirect) fails
-the render instead of printing a blank page. Profiles and requests live in random
-0700 directories; the browser's process group is killed and the directory removed
-on success, failure, timeout and cancellation. Tool output is discarded and callers
-see only fixed errors (`PdfEngineUnavailable`, `PdfFailed`, `PdfTimeout`,
-`RenderOrigin`, `RenderTokensFull`). Crashes can leave `bilibi-pdf-*` temporary
-directories: include them in the host's private temp cleanup.
+the render instead of printing a blank page.
+
+Each render creates a random `0700` directory under `/tmp` for Chromium's profile and sets the browser's `TMPDIR` to that directory to keep Unix socket paths short. Bilibi kills the browser's process group and removes the directory it created on success, failure, timeout and cancellation. Crashes can leave `bilibi-pdf-*` temporary directories under `/tmp`. Include them in the host's private temp cleanup.
+
+Tool output is discarded and callers see only fixed errors (`PdfEngineUnavailable`, `PdfFailed`, `PdfTimeout`, `RenderOrigin`, `RenderTokensFull`).
 
 Operator Settings (same capability as the artifact settings): `pdf.chromium.binary`
 (bare name searched on `PATH`, or absolute; default `chromium`), `pdf.render_origin`
