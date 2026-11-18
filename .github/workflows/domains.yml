@@ -1,17 +1,5 @@
-# Mount every official Domain and Extension from catalogue.json and run the
-# shared mounted gates. Companion branches are selected only on pull requests
-# (docs/versions.md); main pushes always check main HEADs. Manual runs retain
-# the existing Domain tested-set recording and catalogue publishing.
-# The Release workflow calls this with domains at their latest release, and
-# records the sets in its publish job after the reviewed tag passes.
-#
-# A pull request is checked as the change on top of its live base branch, not
-# on GitHub's merge ref, which can be older than the Domains it is mounted with.
-#
-# A pull request whose files cannot affect a mount passes Official compatibility
-# without mounting. Other pull requests lint and boot a debug build. main and
-# manual runs still do the locked release build. A push to main also runs
-# the debug build, to save the cache a pull request restores.
+# See docs/domain-ci/README.md for the mounted gates and Finance phase inputs.
+# See docs/versions.md for companion branches and tested-set publishing.
 name: Domains on this change
 
 on:
@@ -60,6 +48,7 @@ jobs:
       matrix: ${{ steps.select.outputs.matrix || steps.decide.outputs.matrix }}
       has_containers: ${{ steps.select.outputs.has_containers || steps.decide.outputs.has_containers }}
       affected: ${{ steps.decide.outputs.affected }}
+      platform_base: ${{ steps.select.outputs.platform_base }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -70,36 +59,40 @@ jobs:
       - name: Decide whether this change can affect a mount
         id: decide
         run: python3 scripts/compatibility.py affected domains
-      - name: Read the catalogue and companion branches
+      - name: Select mounts and pin Finance revisions
         id: select
         if: steps.decide.outputs.affected == 'true'
+        env:
+          DOMAINS_AT: ${{ inputs.domains_at }}
         run: python3 scripts/compatibility.py
 
   domain:
-    name: ${{ matrix.role }}/${{ matrix.id }}${{ matrix.build == 'check' && github.event_name == 'push' && ' (debug cache)' || '' }}
+    name: ${{ matrix.role }}/${{ matrix.id }}${{ matrix.phase == 'lint' && ' (lint)' || matrix.build == 'check' && github.event_name == 'push' && ' (debug cache)' || '' }}
     needs: catalogue
     if: needs.catalogue.outputs.has_containers == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      finance_lint: ${{ matrix.phase == 'lint' && steps.composition.outputs.identity || '' }}
+      finance_debug: ${{ matrix.phase == 'build' && matrix.build == 'check' && steps.composition.outputs.identity || '' }}
+      finance_release: ${{ matrix.phase == 'build' && matrix.build == 'release' && steps.composition.outputs.identity || '' }}
+      finance_tested: ${{ steps.tested.outputs.finance }}
 
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.catalogue.outputs.matrix) }}
 
     env:
-      DATABASE_URL: postgres://bilibi:bilibi@localhost:5432/bilibi
       CONTAINER_ROLE: ${{ matrix.role }}
       CONTAINER_ID: ${{ matrix.id }}
       CONTAINER_REPOSITORY: ${{ matrix.repository }}
       CONTAINER_REF: ${{ matrix.ref }}
-      # Pull requests lint and boot a debug build. main, tags and manual runs
-      # do the locked release build that a tested set records. main also runs
-      # the debug build so pull requests restore a warm cache.
       DOMAIN_CI_BUILD: ${{ matrix.build }}
+      DOMAIN_CI_PHASE: ${{ matrix.phase }}
 
     services:
       postgres:
-        image: postgres:18-alpine
+        image: ${{ matrix.phase != 'lint' && 'postgres:18-alpine' || '' }}
         env:
           POSTGRES_DB: bilibi
           POSTGRES_PASSWORD: bilibi
@@ -117,6 +110,18 @@ jobs:
         working-directory: bilibi
 
     steps:
+      - name: Require the selected mounted revision
+        if: matrix.error != ''
+        working-directory: .
+        env:
+          RESOLUTION_ERROR: ${{ matrix.error }}
+        run: |
+          echo "$RESOLUTION_ERROR" >&2
+          message='Choose Re-run all jobs to refresh the selected Finance revision.'
+          echo "::error::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       # Tags are fetched so the pin can name the release each side is at.
       - name: Check out this change
         uses: actions/checkout@v7
@@ -125,28 +130,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The merge ref is frozen when the PR is pushed, but each Domain is
-      # checked out at its live main. Test a consistent pair: the PR on top of
-      # the live base. A conflict here is real and says to update the branch.
-      - name: Bring this change up to the live base branch
+      - name: Bring this change up to its base
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: ./scripts/merge-live-base.sh "$BASE_REF"
+          BASE_COMMIT: ${{ needs.catalogue.outputs.platform_base }}
+        run: |
+          args=("$BASE_REF")
+          if [ "$DOMAIN_CI_PHASE" != all ]; then
+            args+=("${BASE_COMMIT:?Finance requires a selected base commit}")
+          fi
+          ./scripts/merge-live-base.sh "${args[@]}"
 
       - name: Check out the Domain or Extension
         uses: actions/checkout@v7
         with:
           repository: ${{ matrix.repository }}
-          ref: ${{ matrix.ref }}
+          ref: ${{ matrix.commit || matrix.ref }}
           path: container
           fetch-depth: 0
           persist-credentials: false
 
       - name: Move the Domain or Extension to its latest release
-        if: >-
-          startsWith(github.ref, 'refs/tags/v') ||
-          (github.event_name == 'workflow_dispatch' && inputs.domains_at == 'latest-release')
+        if: matrix.latest_release
         working-directory: container
         run: |
           latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)
@@ -179,7 +185,7 @@ jobs:
         with:
           workspaces: bilibi
           prefix-key: v1-workspace
-          key: ${{ matrix.role }}-${{ matrix.id }}-${{ env.DOMAIN_CI_BUILD }}
+          key: ${{ matrix.role }}-${{ matrix.id }}-${{ env.DOMAIN_CI_BUILD }}${{ matrix.phase == 'lint' && '-lint' || '' }}
           cache-workspace-crates: true
           cache-on-failure: true
       - uses: actions/setup-node@v6
@@ -190,15 +196,32 @@ jobs:
       - run: npm ci --prefix apps/base/ui/assets --no-audit --no-fund
 
       - name: Run the mounted gates
+        env:
+          DATABASE_URL: ${{ matrix.phase != 'lint' && 'postgres://bilibi:bilibi@localhost:5432/bilibi' || '' }}
         run: ./scripts/domain-ci.sh
 
       - name: Verify the gates left the Domain or Extension clean
         run: git -C "apps/$CONTAINER_ROLE/$CONTAINER_ID" diff --exit-code
 
+      - name: Report the Finance composition
+        id: composition
+        if: matrix.phase != 'all'
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          from pathlib import Path
+
+          pin = tomllib.loads(Path('.local/composition/manifest.txt').read_text())
+          platform = pin['platform']
+          finance = pin['containers']['domains/finance']['head']
+          lockfile = pin['cargo_lock_sha256']
+          print(f'identity={platform} {finance} {lockfile}')
+          PY
 
       # The existing tested-set format records Domain pairs only. Extension
       # gates are equally required, without changing catalogue publishing.
       - name: Describe the tested set
+        id: tested
         if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release'
         env:
           # The Release workflow passes the version from its reviewed tag.
@@ -208,17 +231,26 @@ jobs:
           if [ -n "$PLATFORM_VERSION" ]; then
             args+=(--platform-version "$PLATFORM_VERSION")
           fi
-          python3 scripts/catalogue.py tested "${args[@]}" | tee "$RUNNER_TEMP/tested-set.json"
+          python3 scripts/catalogue.py tested "${args[@]}" > "$RUNNER_TEMP/tested-set.json"
+          cat "$RUNNER_TEMP/tested-set.json"
+          if [ "$DOMAIN_CI_PHASE" = build ]; then
+            tested=$(jq -c . "$RUNNER_TEMP/tested-set.json")
+            printf 'finance=%s\n' "$tested" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/upload-artifact@v7
-        if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release'
+        if: matrix.role == 'domains' && env.DOMAIN_CI_BUILD == 'release' && matrix.phase == 'all'
         with:
           name: tested-${{ matrix.role }}-${{ matrix.id }}
           path: ${{ runner.temp }}/tested-set.json
 
       - name: Explain a compatibility failure
-        if: failure()
+        if: failure() && matrix.error == ''
+        working-directory: .
         run: |
           message="$CONTAINER_ROLE/$CONTAINER_ID ($CONTAINER_REPOSITORY at $CONTAINER_REF) broke on this Platform change. Fix it in the same task with a companion PR linked from the Platform PR; see docs/versions.md#platform-changes-and-companion-prs."
+          if [ "$DOMAIN_CI_PHASE" != all ]; then
+            message="$message If you update the Finance ref, choose Re-run all jobs to test the new revision."
+          fi
           echo "::error::$message"
           echo "$message" >> "$GITHUB_STEP_SUMMARY"
 
@@ -233,6 +265,33 @@ jobs:
     outputs:
       compatible: ${{ steps.require.outputs.compatible }}
     steps:
+      - name: Join the Finance lint and release build results
+        id: finance
+        if: >-
+          always() && needs.domain.outputs.finance_lint != '' &&
+          needs.domain.outputs.finance_release != '' &&
+          needs.domain.outputs.finance_tested != ''
+        env:
+          LINTED: ${{ needs.domain.outputs.finance_lint }}
+          BUILT: ${{ needs.domain.outputs.finance_release }}
+          TESTED: ${{ needs.domain.outputs.finance_tested }}
+        run: |
+          if [ "$BUILT" != "$LINTED" ]; then
+            message='Finance tested set skipped because the release build and lint used different compositions. Choose Re-run all jobs to resolve Cargo.lock again in both phases.'
+            echo "::warning::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -e --arg linted "$LINTED" \
+            '.[0] | [.platform.commit, .domain.commit] == ($linted | split(" ") | .[:2])' <<< "$TESTED" >/dev/null
+          printf '%s\n' "$TESTED" > "$RUNNER_TEMP/tested-set.json"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.finance.outputs.ready == 'true'
+        with:
+          name: tested-domains-finance
+          path: ${{ runner.temp }}/tested-set.json
+
       - name: Require every official Domain and Extension to pass
         id: require
         env:
@@ -240,6 +299,10 @@ jobs:
           MOUNTED: ${{ needs.domain.result }}
           HAS_CONTAINERS: ${{ needs.catalogue.outputs.has_containers }}
           AFFECTED: ${{ needs.catalogue.outputs.affected }}
+          MATRIX: ${{ needs.catalogue.outputs.matrix }}
+          FINANCE_LINT: ${{ needs.domain.outputs.finance_lint }}
+          FINANCE_DEBUG: ${{ needs.domain.outputs.finance_debug }}
+          FINANCE_RELEASE: ${{ needs.domain.outputs.finance_release }}
         run: |
           pass() {
             echo "compatible=true" >> "$GITHUB_OUTPUT"
@@ -256,9 +319,19 @@ jobs:
             exit 0
           fi
           if [ "$SELECTION" = success ] && { [ "$MOUNTED" = success ] || { [ "$HAS_CONTAINERS" = false ] && [ "$MOUNTED" = skipped ]; }; }; then
+            mismatches=$(jq -r --arg lint "$FINANCE_LINT" --arg debug "$FINANCE_DEBUG" --arg release "$FINANCE_RELEASE" '
+              [.include[] | select(.phase == "build")
+               | if .build == "check" then {name: "debug", identity: $debug}
+                 else {name: "release", identity: $release} end
+               | select($lint == "" or .identity != $lint) | .name]
+              | join(" and ")
+            ' <<< "$MATRIX") || fail 'Could not read the official compatibility matrix.'
+            if [ -n "$mismatches" ]; then
+              fail "Finance build composition mismatch ($mismatches). Lint and builds must use the same Platform commit, Finance commit and Cargo.lock hash. Choose Re-run all jobs to resolve Cargo.lock again in every Finance job."
+            fi
             pass 'Every official Domain and Extension passed.'
           else
-            fail 'Official compatibility failed. Read the failing domains/<id> or extensions/<id> job. A break requires a companion PR in the same task, linked from the Platform PR (docs/versions.md#platform-changes-and-companion-prs).'
+            fail 'Official compatibility failed. Read the failing domains/<id> or extensions/<id> job. A break requires a companion PR in the same task, linked from the Platform PR (docs/versions.md#platform-changes-and-companion-prs). If you create or update a Finance companion branch, choose Re-run all jobs to refresh its selected revision.'
           fi
 
   # Publishes catalogue.json from this change plus every tested set so far to
