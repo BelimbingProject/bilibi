@@ -907,11 +907,19 @@ impl Detail {
         series: Option<&crate::Series>,
         editable: bool,
     ) -> Result<Html> {
-        let names = self
-            .pages
-            .names(scope, &[a.assignee_user_id, a.created_by, scope.user()])
-            .await?;
-        let name = |id: i64| names.get(&id).cloned().unwrap_or_default();
+        let me = scope.user();
+        let other_users: Vec<_> = [a.assignee_user_id, a.created_by]
+            .into_iter()
+            .filter(|id| *id != me)
+            .collect();
+        let names = self.pages.names(scope, &other_users).await?;
+        let name = |id| {
+            if id == me {
+                scope.user_name.as_str()
+            } else {
+                names.get(&id).map_or("", String::as_str)
+            }
+        };
         let soon = self.pages.activities.imminent_window(scope).await?;
         let mut items: Vec<(&str, String, Html)> = Vec::new();
         items.push((
@@ -1051,10 +1059,9 @@ impl Detail {
         }
         let assignee = a.assignee_user_id.to_string();
         let assignee_name = name(a.assignee_user_id);
-        let mut options = vec![(assignee_name.as_str(), assignee.as_str())];
-        let own_name = name(scope.user());
-        if a.assignee_user_id != scope.user() {
-            options.push((own_name.as_str(), "me"));
+        let mut options = vec![(assignee_name, assignee.as_str())];
+        if a.assignee_user_id != me {
+            options.push((scope.user_name.as_str(), "me"));
         }
         items.push((
             "Assigned to",
@@ -1063,7 +1070,7 @@ impl Detail {
                 words,
                 a,
                 "assignee",
-                (&assignee, &assignee_name),
+                (&assignee, assignee_name),
                 &options,
                 editable,
             )?,
@@ -1807,19 +1814,15 @@ impl Detail {
             })?);
         }
         if let Some(dialog) = &self.dialog {
-            body.push(
-                &dialog
-                    .render(
-                        &self.pages,
-                        scope,
-                        &clock,
-                        &words,
-                        "activity-new",
-                        "close_modal",
-                        self.framed,
-                    )
-                    .await?,
-            );
+            body.push(&dialog.render(
+                &self.pages,
+                scope,
+                &clock,
+                &words,
+                "activity-new",
+                "close_modal",
+                self.framed,
+            )?);
         }
         if let (Some(form), true) = (&self.series_form, editable) {
             body.push(&series_dialog(&a, form)?);

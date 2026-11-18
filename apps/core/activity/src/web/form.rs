@@ -651,7 +651,7 @@ impl Dialog {
 
     /// The dialog: its fields for the kind, the related-record picker, and
     /// Cancel and Save.
-    pub async fn render(
+    pub fn render(
         &self,
         pages: &Pages,
         scope: &Scope,
@@ -764,11 +764,9 @@ impl Dialog {
                     .options(choices(reminder_choices::EMAIL))
                     .hint("Emails the assignee, and guests without an account who were sent the invitation."),
             );
-            let names = pages.names(scope, &[scope.user()]).await?;
-            let own_name = names.get(&scope.user()).cloned().unwrap_or_default();
-            let mut assignees = vec![(own_name, "me".to_owned())];
+            let mut assignees = vec![(scope.user_name.as_str(), "me".to_owned())];
             if let Some((user, name)) = &self.assignee {
-                assignees.insert(0, (name.clone(), user.to_string()));
+                assignees.insert(0, (name.as_str(), user.to_string()));
             }
             fields.push(
                 Field::in_form(FORM, "assignee")
@@ -780,12 +778,7 @@ impl Dialog {
                             .as_ref()
                             .map_or("me".to_owned(), |(user, _)| user.to_string()),
                     )
-                    .options(bilibi_ui::choices(
-                        &assignees
-                            .iter()
-                            .map(|(l, v)| (l.as_str(), v.as_str()))
-                            .collect::<Vec<_>>(),
-                    ))
+                    .options(choices(&assignees))
                     .errors(self.sentences(words, "assignee")),
             );
         }
