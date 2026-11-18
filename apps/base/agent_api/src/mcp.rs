@@ -572,7 +572,7 @@ pub fn tools() -> Vec<Value> {
     vec![
         tool(
             "search",
-            "Find available Bilibi operations and guides for a task.",
+            "Find available Bilibi operations, guides, pages and page sections for a task.",
             json!({"query": {"type": "string"}}),
             true,
         ),

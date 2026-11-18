@@ -5,8 +5,8 @@
 use bilibi_authz::{CapabilityDefinition as C, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
     contributions::{
-        Access, CredentialPath, Embed, EmbedContext, Method, Route, CREDENTIAL_PATHS, EMBEDS,
-        ROUTES,
+        Access, CredentialPath, Embed, EmbedContext, Method, PageSection, Route, CREDENTIAL_PATHS,
+        EMBEDS, PAGE_SECTIONS, ROUTES,
     },
     Contribution, Provenance,
 };
@@ -284,4 +284,52 @@ embed!(
     },
     "person_desks",
     Access::Capability(bilibi_company::VIEW)
+);
+
+macro_rules! settings_section {
+    ($name:ident, $tab:literal, $anchor:literal, $title:literal $(, $keyword:literal)*) => {
+        pub(crate) const $name: PageSection = PageSection {
+            route: concat!("core/user.settings.", $tab),
+            title: $title,
+            anchor: $anchor,
+            keywords: &[$($keyword),*],
+            query: None,
+        };
+        inventory::submit! {
+            Contribution::new(PAGE_SECTIONS, concat!("core/user.", $anchor), Provenance {
+                module: "core/user", source: file!(), line: line!()
+            }, &$name)
+        }
+    };
+}
+
+settings_section!(
+    PROFILE_PICTURE,
+    "profile",
+    "profile-picture",
+    "Profile picture",
+    "avatar",
+    "photo"
+);
+settings_section!(
+    PROFILE_DETAILS,
+    "profile",
+    "profile-details",
+    "Profile details",
+    "name",
+    "email"
+);
+settings_section!(
+    LANGUAGE,
+    "appearance",
+    "appearance-locale",
+    "Language and region",
+    "locale"
+);
+settings_section!(
+    TIME_ZONE,
+    "appearance",
+    "appearance-timezone-mode",
+    "Time zone display",
+    "timezone"
 );

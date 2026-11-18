@@ -181,7 +181,11 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
         step_up: &app.step_up,
         reviews: &edge.reviews,
     };
-    let outcome = protocol::dispatch(&edge.registry, &edge.plans, Some(session), &message).await;
+    let mut outcome =
+        protocol::dispatch(&edge.registry, &edge.plans, Some(session), &message).await;
+    if operation == "mcp.search" {
+        outcome = page_hits(&app, &scope, &message, outcome).await;
+    }
     let targets = targets(&app, &message, &outcome);
     answer(
         &app,
@@ -191,6 +195,28 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
         &trace.reported,
         targets,
     )
+}
+
+async fn page_hits(app: &App, scope: &Scope, message: &Value, mut outcome: Outcome) -> Outcome {
+    if let Outcome::Reply(reply) = &mut outcome {
+        if let (Some(query), Some(content)) = (
+            message
+                .pointer("/params/arguments/query")
+                .and_then(Value::as_str),
+            reply.pointer_mut("/result/structuredContent"),
+        ) {
+            if content.get("result").is_some() {
+                match crate::page_search::hits(app, scope, query, 50).await {
+                    Ok(pages) => {
+                        content["pages"] = json!(pages);
+                        reply["result"] = protocol::tool_result(content.clone(), false);
+                    }
+                    Err(error) => return Outcome::Unavailable(error),
+                }
+            }
+        }
+    }
+    outcome
 }
 
 async fn allowed(app: &App, address: Option<std::net::IpAddr>) -> Result<bool, Error> {

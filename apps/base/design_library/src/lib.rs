@@ -1,6 +1,7 @@
 //! The Design Library, composed from the production UI primitives.
 //! This adapter is separate from UI to keep UI's identity-free dependency graph.
 mod controls;
+mod sections;
 mod state;
 mod view;
 use bilibi_database::Error;

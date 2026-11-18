@@ -308,6 +308,41 @@ pub const DOWNLOADS: &str = "base/module_registry.downloads";
 pub const SEEDS: &str = "base/module_registry.seeds";
 pub const MOVED: &str = "base/module_registry.moved";
 pub const PAGE_WRITES: &str = "base/module_registry.page_writes";
+pub const PAGE_SECTIONS: &str = "base/module_registry.page_sections";
+
+/// A part of a named staff page that the top-bar search can open directly.
+/// The declaring module owns the GET route and shows this section to every
+/// reader who may open it.
+pub struct PageSection {
+    pub route: &'static str,
+    pub title: &'static str,
+    pub anchor: &'static str,
+    pub keywords: &'static [&'static str],
+    /// A URL query without the leading `?`, when needed to open a tab.
+    pub query: Option<&'static str>,
+}
+
+fn validate_page_sections(entries: &[Entry]) -> Result<()> {
+    let mut destinations = BTreeSet::new();
+    for entry in entries {
+        let section = entry.get::<PageSection>()?;
+        if section.title.trim().is_empty()
+            || section.anchor.is_empty()
+            || !section
+                .anchor
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !destinations.insert((section.route, section.query, section.anchor))
+        {
+            return Err(invalid(format!(
+                "page section {} at {}:{} needs a title and a unique anchor for its destination",
+                entry.id, entry.provenance.source, entry.provenance.line
+            )));
+        }
+    }
+    Ok(())
+}
+inventory::submit! { Consumer::new::<PageSection>(PAGE_SECTIONS, "base/module_registry", validate_page_sections) }
 pub const CREDENTIAL_PATHS: &str = "base/module_registry.credential_paths";
 pub const PUBLIC_ENDPOINTS: &str = "base/module_registry.public_endpoints";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

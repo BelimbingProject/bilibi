@@ -1006,12 +1006,17 @@ async fn search(State(app): State<App>, uri: Uri, request: Request) -> Response 
             limit,
             include_unavailable,
         };
-        app.api
+        let found = app
+            .api
             .registry
             .search(&**client, &agent.scope, words, options)
             .await
-            .map(|found| json!({"result": found}))
-            .map_err(api_error)
+            .map_err(api_error)?;
+        drop(client);
+        let pages = crate::page_search::hits(&app, &agent.scope, words, limit)
+            .await
+            .map_err(|error| unavailable(&error))?;
+        Ok(json!({"result": found, "pages": pages}))
     }
     .await;
     agent.answer(None, Vec::new(), result)

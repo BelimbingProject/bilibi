@@ -13,6 +13,7 @@ mod landing;
 mod live;
 mod mcp;
 mod media;
+mod page_search;
 mod pdf;
 mod perf;
 mod portal;

@@ -8,40 +8,40 @@
               <p class="text-sm text-ink-muted">Pick the simplest control that fits the value. Not shown yet: country and currency lookup, segmented control.</p>
             </div>
 
-            {% call ui::card(id="component-code_input", title="Code input", inner_class="space-y-2 p-3") %}{{ self.card_component_code_input()? }}{% endcall %}
-            {% call ui::card(id="component-period_filter", title="Period filter", inner_class="space-y-2 p-3") %}{{ self.card_component_period_filter()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_CODE_INPUT.anchor, title=crate::sections::COMPONENT_CODE_INPUT.title, inner_class="space-y-2 p-3") %}{{ self.card_component_code_input()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_PERIOD_FILTER.anchor, title=crate::sections::COMPONENT_PERIOD_FILTER.title, inner_class="space-y-2 p-3") %}{{ self.card_component_period_filter()? }}{% endcall %}
 
-            {% call ui::card(id="design-library-input-guidance", title="Choice guidance", inner_class="p-3") %}{{ self.card_design_library_input_guidance()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::DESIGN_LIBRARY_INPUT_GUIDANCE.anchor, title=crate::sections::DESIGN_LIBRARY_INPUT_GUIDANCE.title, inner_class="p-3") %}{{ self.card_design_library_input_guidance()? }}{% endcall %}
 
-            <form id="design-library-fields" data-event="sample_change" data-change class="grid items-start gap-3 lg:grid-cols-2">
-              {% call ui::card(title="Text and long-form inputs", inner_class="p-3") %}{{ self.card_text_and_long_form_inputs()? }}{% endcall %}
+            <form id="design-library-fields" data-event="sample_change" data-change class="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
+              {% call ui::card(id=crate::sections::COMPONENT_TEXT_AND_LONG_FORM_INPUTS.anchor, title=crate::sections::COMPONENT_TEXT_AND_LONG_FORM_INPUTS.title, inner_class="p-3") %}{{ self.card_text_and_long_form_inputs()? }}{% endcall %}
 
-              {% call ui::card(id="component-choice-controls", title="Choice controls", inner_class="p-3") %}{{ self.card_choice_controls()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_CHOICE_CONTROLS.anchor, title=crate::sections::COMPONENT_CHOICE_CONTROLS.title, inner_class="p-3") %}{{ self.card_choice_controls()? }}{% endcall %}
 
-              {% call ui::card(id="component-multi-select", title="Multi-select", inner_class="p-3") %}{{ self.card_component_multi_select()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_MULTI_SELECT.anchor, title=crate::sections::COMPONENT_MULTI_SELECT.title, inner_class="p-3") %}{{ self.card_component_multi_select()? }}{% endcall %}
 
-              {% call ui::card(id="component-radio-group-states", title="Data region", inner_class="p-3") %}{{ self.card_component_radio_group_states()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_RADIO_GROUP_STATES.anchor, title=crate::sections::COMPONENT_RADIO_GROUP_STATES.title, inner_class="p-3") %}{{ self.card_component_radio_group_states()? }}{% endcall %}
 
-              {% call ui::card(title="Date, time, and secret inputs", inner_class="p-3") %}{{ self.card_date_time_and_secret_inputs()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_DATE_TIME_AND_SECRET_INPUTS.anchor, title=crate::sections::COMPONENT_DATE_TIME_AND_SECRET_INPUTS.title, inner_class="p-3") %}{{ self.card_date_time_and_secret_inputs()? }}{% endcall %}
 
-              {% call ui::card(id="component-secret_input", title="Stored secret", inner_class="p-3") %}{{ self.card_component_secret_input()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_SECRET_INPUT.anchor, title=crate::sections::COMPONENT_SECRET_INPUT.title, inner_class="p-3") %}{{ self.card_component_secret_input()? }}{% endcall %}
 
-              {% call ui::card(id="design-library-input-live-state", title="Live state", inner_class="px-3") %}{{ self.card_design_library_input_live_state()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::DESIGN_LIBRARY_INPUT_LIVE_STATE.anchor, title=crate::sections::DESIGN_LIBRARY_INPUT_LIVE_STATE.title, inner_class="px-3") %}{{ self.card_design_library_input_live_state()? }}{% endcall %}
 
-              {% call ui::card(id="component-input-states", title="Help, error, and locked states", inner_class="p-3 lg:col-span-2", class="lg:col-span-2") %}{{ self.card_component_input_states()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_INPUT_STATES.anchor, title=crate::sections::COMPONENT_INPUT_STATES.title, inner_class="p-3 lg:col-span-2", class="lg:col-span-2") %}{{ self.card_component_input_states()? }}{% endcall %}
 
-              {% call ui::card(id="component-input-variants", title="Select, multi-value, and search inputs", inner_class="p-3 lg:col-span-2", class="lg:col-span-2") %}{{ self.card_component_input_variants()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_INPUT_VARIANTS.anchor, title=crate::sections::COMPONENT_INPUT_VARIANTS.title, inner_class="p-3 lg:col-span-2", class="lg:col-span-2") %}{{ self.card_component_input_variants()? }}{% endcall %}
 
-              {% call ui::card(id="component-combobox", title="Combobox", inner_class="p-3 lg:col-span-2", class="lg:col-span-2") %}{{ self.card_component_combobox()? }}{% endcall %}
+              {% call ui::card(id=crate::sections::COMPONENT_COMBOBOX.anchor, title=crate::sections::COMPONENT_COMBOBOX.title, inner_class="p-3 lg:col-span-2", class="lg:col-span-2") %}{{ self.card_component_combobox()? }}{% endcall %}
             </form>
 
-            {% call ui::card(id="component-search-multi", title="Searchable multi-select", inner_class="p-3") %}
+            {% call ui::card(id=crate::sections::COMPONENT_SEARCH_MULTI.anchor, title=crate::sections::COMPONENT_SEARCH_MULTI.title, inner_class="p-3") %}
               <p class="mb-2 text-xs text-ink-muted">Search the example companies, select several, or request a new one.</p>
               {{ self.search_multi()? }}
               <p role="status" class="text-xs text-ink-muted">{{ state.picker_notice }}</p>
             {% endcall %}
 
-            {% call ui::card(id="component-file-input", title="File input", inner_class="p-3") %}{{ self.card_component_file_input()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_FILE_INPUT.anchor, title=crate::sections::COMPONENT_FILE_INPUT.title, inner_class="p-3") %}{{ self.card_component_file_input()? }}{% endcall %}
 
-            {% call ui::card(id="component-location-action", title="Browser location", inner_class="p-3") %}{{ self.card_component_location_action()? }}{% endcall %}
+            {% call ui::card(id=crate::sections::COMPONENT_LOCATION_ACTION.anchor, title=crate::sections::COMPONENT_LOCATION_ACTION.title, inner_class="p-3") %}{{ self.card_component_location_action()? }}{% endcall %}
           </section>
