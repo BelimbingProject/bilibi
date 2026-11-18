@@ -66,6 +66,8 @@ without a valid session redirect to login. Authenticated refusals return 403.
 
 The top-bar search (`src/page_search.rs`) lists a GET page whose path has no parameter when the person may open it, judged as the menu judges (display only; the route checks again when opened), and only when it has a name: `Page::title` for its operation, else its menu row. A page with neither is not found. A route that only redirects is listed under its title when the person may also open where it leads, so an old address kept working by a redirect returns no title. A page can also [declare searchable sections](../base/menu/README.md#make-a-page-section-searchable). The dialog's records are the `shell.search.records` shell embed (Base Search), which the shell renders into the dialog and the live socket mounts as the panel `#app-search-records`, as it does the bell (`shell.notifications`) and the status bar's AI tag (`shell.ai`, Core Agent Access, mounted as `#app-ai`).
 
+The agent search uses the same visible pages and sections as the top bar. Both match parts of names and close spellings such as `combbox` for Combobox. Direct matches appear before close spellings.
+
 Step-up (`apps/base/step_up/README.md`) is the same on every surface:
 
 - `StepUp { operation, inner }` checks `inner`, then `StepUp::require` for the declared `operation`. A GET that owes a check is redirected to the 2FA prompt (the method choice when several are enrolled) with `return=<address>`; any other method, an embed or a panel is refused with 403. Boot refuses a step-up of `Public`, of another step-up, or of an undeclared operation. Menus and tile pickers check only `inner`.

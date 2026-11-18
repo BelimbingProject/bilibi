@@ -1,7 +1,7 @@
 //! Proof for #654: names and codes that PostgreSQL's text-search parser keeps
 //! as one token with their dots, dashes or slashes are found by their own
 //! text, in Base Search and in `core.company.list`, in a disposable database.
-//! Each check prints PASS or stops the walkthrough with FAIL.
+//! Also proves the title fallback ranks and trims hits in that same search.
 //!
 //! ```sh
 //! BILIBI_SEARCH_PUNCTUATION=disposable cargo run -p bilibi-company --example search-punctuation --locked
@@ -40,6 +40,89 @@ const COMPANIES: [(&str, &str); 5] = [
     ("acme/west", "pw_four"),
     ("Plainword Holdings", "pw_five"),
 ];
+
+async fn title_matching(
+    search: &Search,
+    manager: &Scope,
+    viewer: &Scope,
+    client: &tokio_postgres::Client,
+) -> Result<(), Failure> {
+    client.batch_execute(
+        "INSERT INTO companies (id,tenant_id,name,code,status,deleted_at) VALUES
+         (3000020,1,'Zephyr','typo_exact','active',NULL),
+         (3000021,1,'Zephyr Dental','typo_prefix','active',NULL),
+         (3000022,1,'Azephyron','typo_substring','active',NULL),
+         (3000023,1,'Zephir','typo_near','active',NULL),
+         (3000024,1,'Zephir Deleted','typo_deleted','active',now()),
+         (3000025,2,'Zephir Other Tenant','typo_other','active',NULL);
+         INSERT INTO persons (id,tenant_id,name,code,kind,email) VALUES
+         (3000020,1,'River Allen','typo_email','human','searchsecret@example.test');
+         INSERT INTO role_capabilities (tenant_id,role_id,capability)
+         SELECT 1,2,key FROM unnest(ARRAY['base.search.records.list','admin.person.list','admin.person.view']) key
+         ON CONFLICT DO NOTHING;
+         INSERT INTO field_restrictions (tenant_id,role_id,table_id,field_id,mode)
+         VALUES (1,2,'persons','email','mask') ON CONFLICT DO NOTHING;",
+    ).await?;
+    let page = search
+        .find(manager, "zephyr", Some("companies"), 1, 20)
+        .await?;
+    let box_ = search.suggest(manager, "zephyr").await?;
+    let expected = ["Zephyr", "Zephyr Dental", "Azephyron", "Zephir"];
+    for result in [&page, &box_] {
+        let titles: Vec<_> = result
+            .hits
+            .iter()
+            .filter(|hit| hit.kind.id == "companies")
+            .map(|hit| hit.title.as_str())
+            .collect();
+        prove(
+            "company search ranks exact, prefix, substring, typo and trims hidden rows",
+            titles == expected,
+        )?;
+    }
+    prove(
+        "the count excludes the deleted and other-tenant company",
+        page.total(Some("companies")) == 4,
+    )?;
+
+    let find_person = |text: &'static str, scope: &'_ Scope| {
+        let scope = scope.clone();
+        async move {
+            let result = search.find(&scope, text, Some("persons"), 1, 20).await?;
+            Ok::<_, Failure>(result.hits.into_iter().find(|hit| hit.id == "3000020"))
+        }
+    };
+    prove(
+        "ordinary prefix finds a contact by email for an administrator",
+        find_person("searchsecret", manager).await?.is_some(),
+    )?;
+    prove(
+        "the viewer can find the contact by a close title",
+        find_person("river alen", viewer).await?.is_some(),
+    )?;
+    prove(
+        "a masked email does not match the viewer's prefix or a close spelling",
+        find_person("searchsecret", viewer).await?.is_none()
+            && find_person("searchsecrt", viewer).await?.is_none()
+            && find_person("searchsecrt", manager).await?.is_none(),
+    )?;
+
+    client
+        .execute(
+            "INSERT INTO principal_capabilities (tenant_id,user_id,capability,is_allowed)
+         VALUES ($1,$2,'admin.company.view',false)",
+            &[&viewer.tenant(), &viewer.user()],
+        )
+        .await?;
+    let denied = search
+        .find(viewer, "zephyr", Some("companies"), 1, 20)
+        .await?;
+    prove(
+        "a direct record-page denial removes the hits and count on the next search",
+        denied.hits.is_empty() && denied.total(Some("companies")) == 0,
+    )?;
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Failure> {
@@ -158,6 +241,8 @@ async fn main() -> Result<(), Failure> {
             && !listed.contains(&"Purchase Desk".to_owned())
             && found("desk").await?.0.contains(&"Purchase Desk".to_owned()),
     )?;
+    let viewer = login(&app, "viewer@example.test").await?;
+    title_matching(&search, &manager, &viewer, &client).await?;
     println!("search-punctuation: all checks passed");
     Ok(())
 }

@@ -4,7 +4,7 @@
 **Status:** Proposed
 **Agents:** claude-code/opus-5.5 (author)
 **Scope:** How Bilibi finds records across mounted modules: the search box, the results page and the agent operation
-**Last Updated:** 2026-10-22
+**Last Updated:** 2026-11-18
 
 > Source: [issue 130](https://github.com/BelimbingProject/bilibi/issues/130). There is no prior art to cite.
 
@@ -44,9 +44,9 @@ Bilibi is PostgreSQL-only. An external engine would hold a second copy of every 
 - A Domain makes a table searchable with one contribution and one migration; no host, Menu or template change.
 - Each searchable table carries a generated column and a GIN index; writes pay for keeping them.
 - The GIN index does not include the tenant, so a very common prefix is matched across tenants before the tenant predicate filters it. The cost check refuses a search too broad to rank and asks for another word.
-- Typo tolerance, matching inside a word and scripts written without spaces need `pg_trgm` or another extension. [ADR 29](./29-pg-trgm-is-allowed.md) allows `pg_trgm`; record search does not use it yet, and any other extension needs its own decision.
+- **2026-11-18 amendment.** A `Searchable` can opt its protected title into substring and close-spelling matches. The owning module indexes `lower(title)` with GIN and `gin_trgm_ops`, as allowed by [ADR 29](./29-pg-trgm-is-allowed.md). Exact titles and full-text or prefix matches rank ahead of substring and close-spelling matches. The fallback runs inside the same scoped Grid source and uses the same timeouts and cost check. A common title fragment can increase query cost and trigger that check.
 - If an adopter outgrows PostgreSQL search, a later port can let an Extension provide another engine behind the same contribution.
 
 ## Status
 
-Built in `apps/base/search` (`README.md` is the contract), with Core Person and Core Company contributing.
+Built in `apps/base/search` (`README.md` is the contract), with Core Person, Core Company and Core Document contributing.
