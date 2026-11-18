@@ -305,7 +305,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Add the first rate" is false once a rate exists.
 - **No product notes.** Notes for builders ("Draft, awaiting accountant review" on a template) never show to users.
 - **No internals in hints.** Do not explain how the system works behind the page (how filters relate to the top bar, how reports roll up, which rows are hidden). Say what the person can do.
-- **Help text** (subtitles, section descriptions, field hints, empty states) is one short sentence a business user would say, telling them what they can do here. Leave it out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
+- **Help text** (subtitles, section descriptions, field hints, empty states) uses plain sentences a business user would say. A page hint explains the concept the page manages as well as what the person can do. Leave help text out when the title already says it or no short plain sentence helps; no text beats text that leaves the reader wondering. No internal terms (actor, tenant, scope, principal, capability, operation, contributed, registered). Keep a rule the reader needs, such as "This cannot be undone." Say "2FA", not "two-factor" or "MFA".
 
 | Before | After |
 | --- | --- |

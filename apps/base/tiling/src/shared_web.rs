@@ -241,10 +241,11 @@ impl SharedPage {
         table.add_query = &self.columns.add_query;
         table.caption = "Shared workspaces";
         table.actions = true;
+        table.framed = false;
         if self.entries.is_empty() {
             table.empty = Some(TableEmpty::State(EmptyState::missing(
                 "No shared workspaces",
-                "Publish a workspace to make it available to this company.",
+                "Arrange pages in a workspace, then share it here.",
             )));
         }
         SharedView {
