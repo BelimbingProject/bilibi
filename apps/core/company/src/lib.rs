@@ -67,8 +67,8 @@ pub use organisation::{
 };
 pub use primary::{
     assign, is_primary, platform_operator_company, primary_company, provision_platform_operator,
-    provision_platform_operator_in, provision_tenant, AssignmentError, AssignmentStatus,
-    ProvisionOutcome, Provisioned,
+    provision_platform_operator_in, provision_tenant, provision_tenant_in, AssignmentError,
+    AssignmentStatus, ProvisionOutcome, Provisioned,
 };
 pub use reference_types::{
     list_legal_entity_types, DepartmentType, Direction as SortDirection, LegalEntityType, NewType,

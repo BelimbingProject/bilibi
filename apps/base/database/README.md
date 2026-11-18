@@ -35,6 +35,8 @@ attempted/refused action semantics are owned by `base/audit`
 carried their rows over once in `006-audit-evidence`. `begin_with` also supports
 explicit deployment adapters.
 
+`adopt_deployment` attaches the bound capture to an open deployment transaction once the caller knows the tenant ID. It requires a system-attributed context and runs the page-write check. Use it when provisioning must allocate the tenant before the caller can supply that context, with the deployment and its captured mutations committing together.
+
 `Context` carries tenant, actor `{kind,id}`, optional impersonator, action and one
 trace ID shared by all nested changes. `agent_connection` records the durable agent grant without replacing the person as actor. Database validates its shape; it does not
 prove authorization. F3's session/worker adapters supply trusted attribution.

@@ -233,24 +233,33 @@ pub async fn provision_tenant(
     tenant_name: &str,
     company: &NewCompany,
 ) -> Result<ProvisionOutcome> {
+    let mut client = db.get().await?;
+    let tx = client.transaction().await?;
+    let outcome = provision_tenant_in(&tx, tenant_name, company).await?;
+    match outcome {
+        ProvisionOutcome::Provisioned(_) => tx.commit().await?,
+        ProvisionOutcome::Refused(_) => tx.rollback().await?,
+    }
+    Ok(outcome)
+}
+
+pub async fn provision_tenant_in(
+    sql: &Transaction<'_>,
+    tenant_name: &str,
+    company: &NewCompany,
+) -> Result<ProvisionOutcome> {
     if tenant_name.trim().is_empty() {
         return Ok(ProvisionOutcome::Refused(vec![FieldError::new(
             "tenant_name",
             "can't be blank",
         )]));
     }
-    let mut client = db.get().await?;
-    let tx = client.transaction().await?;
-    let sql: &Transaction<'_> = &tx;
     let tenant = bilibi_tenancy::provision_tenant(sql, tenant_name).await?;
     crate::relationship_roles::ensure_defaults(sql, tenant.id).await?;
     bilibi_picklists::provision_deployment(sql, tenant.id).await?;
     let created = match provisioned_company(sql, tenant.id, company).await? {
         Ok(created) => created,
-        Err(errors) => {
-            tx.rollback().await?;
-            return Ok(ProvisionOutcome::Refused(errors));
-        }
+        Err(errors) => return Ok(ProvisionOutcome::Refused(errors)),
     };
     insert_assignment(sql, tenant.id, created.id, None).await?;
     record(
@@ -260,7 +269,6 @@ pub async fn provision_tenant(
         json!({"summary":format!("Provisioned tenant “{}” on company “{}”",tenant.name,created.name),"subject":{"kind":"company","id":created.id,"name":created.name},"context":{"tenant_id":tenant.id,"tenant_name":tenant.name,"code":created.code}}),
     )
     .await?;
-    tx.commit().await?;
     Ok(ProvisionOutcome::Provisioned(Box::new(Provisioned {
         tenant,
         tenant_created: true,

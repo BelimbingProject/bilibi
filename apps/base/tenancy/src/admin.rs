@@ -260,21 +260,30 @@ pub async fn provision_tenant(client: &impl GenericClient, name: &str) -> Result
     if !errors.is_empty() {
         return Err(bilibi_database::Error::Invalid);
     }
-    let row = client
-        .query_one(
-            "INSERT INTO tenants(name, parent_id, status, created_at, updated_at) \
-             VALUES($1, NULL, 'active', now(), now()) RETURNING id",
-            &[&new.name],
-        )
-        .await?;
     Ok(TenantIdentity {
-        id: row.get(0),
+        id: insert_tenant(client, &new).await?,
         parent_id: None,
         name: new.name,
         status: TenantStatus::Active,
         is_platform_operator: false,
         suspension: None,
     })
+}
+
+pub fn tenant_name_lock(name: &str) -> String {
+    format!("tenant-owner:{}", name.trim())
+}
+
+async fn insert_tenant(client: &impl GenericClient, new: &NewTenant) -> Result<i64> {
+    Ok(client
+        .query_one(
+            "INSERT INTO tenants(name,parent_id,status,created_at,updated_at)
+             SELECT $1,$2,'active',now(),now()
+             FROM pg_advisory_xact_lock(hashtextextended($3,0)) RETURNING id",
+            &[&new.name, &new.parent_id, &tenant_name_lock(&new.name)],
+        )
+        .await?
+        .get(0))
 }
 
 /// The explicitly marked platform-operator tenant, or `None` until
@@ -441,11 +450,7 @@ impl Tenants {
             Err(errors) => return Ok(CreateOutcome::Refused(errors)),
         };
         let created = tx.mutate(move |sql| Box::pin(async move {
-            let row = sql.query_one(
-                "INSERT INTO tenants(name,parent_id,status,created_at,updated_at) VALUES($1,$2,'active',now(),now()) RETURNING id",
-                &[&new.name, &new.parent_id],
-            ).await?;
-            let id = row.get(0);
+            let id = insert_tenant(sql, &new).await?;
             let identity = TenantIdentity { id, parent_id:new.parent_id, name:new.name.clone(), status:TenantStatus::Active, is_platform_operator:false, suspension:None };
             Ok((identity, vec![Change { kind:"tenancy.tenant".into(), id, old:serde_json::Value::Null,
                 new:json!({"name":new.name,"parent_id":new.parent_id,"status":TenantStatus::Active.as_str()}) }]))

@@ -29,6 +29,8 @@ a row lock while deciding whether renewal is due; a revocation between lookup
 and renewal is refused. Expiry is enforced during authentication and never
 depends on the cleanup job.
 
+`hold_current(tx, scope)` rechecks the non-impersonated staff browser session sealed in the scope, including its holder, CSRF, and idle and absolute expiry. It holds the session row against revocation and identity switches until the transaction ends. The caller rechecks account standing separately.
+
 The idle lifetime and the renewal throttle are the operator settings
 `session.lifetime_minutes` (default 120) and
 `session.last_activity_touch_minutes` (default 5), declared in

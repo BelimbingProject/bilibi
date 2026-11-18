@@ -955,6 +955,18 @@ async fn invitation_scope(app: &App, headers: &HeaderMap) -> Option<bilibi_secur
     app.security.guard(&credential).await.ok()
 }
 
+async fn dedicated_owner_sign_in(app: &App) -> std::result::Result<Response, HttpError> {
+    invitation_result(
+        app,
+        "Use a separate email address",
+        &InvitationError::DedicatedSignIn.to_string(),
+        "/",
+        "Go to sign in",
+        StatusCode::CONFLICT,
+    )
+    .await
+}
+
 /// `GET /accept/{token}`: opens the emailed tenant invitation without
 /// revealing the invited address. An existing account signs in first and
 /// returns to this exact link.
@@ -976,6 +988,7 @@ pub async fn invitation_page(
             )
             .await;
         }
+        Err(InvitationError::DedicatedSignIn) => return dedicated_owner_sign_in(&app).await,
         Err(InvitationError::Access(error)) => return Err(error.into()),
         Err(InvitationError::Validation(_)) => return Err(Error::Internal.into()),
     };
@@ -1031,6 +1044,7 @@ pub async fn accept_invitation(
             )
             .await;
         }
+        Err(InvitationError::DedicatedSignIn) => return dedicated_owner_sign_in(&app).await,
         Err(InvitationError::Access(error)) => return Err(error.into()),
         Err(InvitationError::Validation(_)) => return Err(Error::Internal.into()),
     };
@@ -1113,6 +1127,7 @@ pub async fn accept_invitation(
             )
             .await
         }
+        Err(InvitationError::DedicatedSignIn) => dedicated_owner_sign_in(&app).await,
         Err(InvitationError::Access(error)) => Err(error.into()),
     }
 }

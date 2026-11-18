@@ -257,6 +257,25 @@ async fn main() -> Result<()> {
         .await
         .map_err(|_| Error::Invalid)?;
     let existing_token = invitation_token(&mailbox, before).await?;
+    let auth = app
+        .services
+        .get::<bilibi_tenancy::Authentication>("base/tenancy.authentication")?;
+    let viewing = auth
+        .authenticate_session(
+            &**client,
+            existing.tenant(),
+            existing.user(),
+            Some(4),
+            None,
+            String::new(),
+        )
+        .await?;
+    assert!(matches!(
+        users
+            .accept_member_invitation(&viewing, &existing_token)
+            .await,
+        Err(InvitationError::Access(Error::Forbidden))
+    ));
     let joined = users
         .accept_member_invitation(&existing, &existing_token)
         .await

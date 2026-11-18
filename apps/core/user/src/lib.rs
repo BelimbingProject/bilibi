@@ -40,6 +40,7 @@ mod sign_in_identity;
 mod sso;
 mod staff_choices;
 mod tenant_context;
+mod tenant_owner;
 pub use scim::{ScimError, ScimRequest, ScimResponse, ScimResult};
 pub use sso::{
     ConfigurationError, ExternalIdentity, ExternalLogout, IdentityConfiguration, IdentityFuture,
@@ -76,6 +77,7 @@ pub use preferences::{
     list_pins, normalize_label, normalize_url, presentation, Pin, PreferenceError, Presentation,
     MAX_PINS, THEMES, THEME_KEY,
 };
+pub use tenant_owner::FirstTenantOwnerError;
 pub use two_factor::{
     safe_return, Enrollment, TwoFactorEmailError, TwoFactorEmailReset, TwoFactorError,
     TwoFactorStatus, CONFIRM_PATH, PORTAL_CONFIRM_PATH,
@@ -159,6 +161,10 @@ pub const MEMBERSHIP_INVITATIONS_MIGRATION: (&str, &str) = (
 const TWO_FACTOR_IDENTITY_SEAL_MIGRATION: (&str, &str) = (
     "core-user-031-two-factor-identity-seal",
     include_str!("../migrations/031-two-factor-identity-seal.sql"),
+);
+const TENANT_OWNER_BOOTSTRAP_MIGRATION: (&str, &str) = (
+    "core-user-032-tenant-owner-bootstrap",
+    include_str!("../migrations/032-tenant-owner-bootstrap.sql"),
 );
 pub const PROFILE_IMAGE_KEY: &str = "ui.profile_image_asset_id";
 pub const PROFILE_IMAGE_MAX_BYTES: u64 = 1024 * 1024;
@@ -282,7 +288,7 @@ pub struct UserService {
 inventory::submit! {
     bilibi_module_registry::Module {
         id:"core/user",layer:bilibi_module_registry::Layer::Core,
-        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION],
+        dependencies:&["base/authz_agent","base/integration","base/agent_api","base/database","base/security","base/step_up","base/system","base/notifications","base/tenancy","base/session","base/events","base/principal_directory","base/mail","base/media","base/settings","base/datetime","base/locale","base/ui","base/audit","base/authz","base/menu","base/grid","base/dashboard","base/party_ids","base/records","base/personal_data","base/privacy","core/company","core/person","core/affiliation"],migrations:&[MIGRATION,CREDENTIALS_MIGRATION,PINS_MIGRATION,NOTIFICATIONS_MIGRATION,database_queries::MIGRATION,database_queries::DROP_PROMPT,BOOTSTRAP_MIGRATION,IDENTITY_MIGRATION,ACCOUNTS_MIGRATION,IMPERSONATION_MIGRATION,BOOTSTRAP_AFFILIATION_MIGRATION,MOVED_PINS_MIGRATION,TWO_FACTOR_MIGRATION,TWO_FACTOR_RECOVERY_DROP,sign_in::MIGRATION,sso::MIGRATION,sso::RUNTIME_MIGRATION,CREDENTIAL_ATTEMPTS_MIGRATION,BARE_ICON_NAMES_MIGRATION,scim::MIGRATION,DATABASE_TABLE_PIN_ICONS_MIGRATION,ACCOUNT_KIND_MIGRATION,PIN_WORKSPACE_ADDRESSES,("core-user-024-desks",include_str!("../migrations/024-desks.sql")),("core-user-025-tenant-accounts",include_str!("../migrations/025-tenant-accounts.sql")),("core-user-026-provider-step-up-proof",include_str!("../migrations/026-provider-step-up-proof.sql")),ANONYMISED_MIGRATION,SIGN_IN_IDENTITIES_MIGRATION,ICON_RENAMES_MIGRATION,MEMBERSHIP_INVITATIONS_MIGRATION,TWO_FACTOR_IDENTITY_SEAL_MIGRATION,TENANT_OWNER_BOOTSTRAP_MIGRATION],
         services:&[bilibi_module_registry::Service {id:"core/user.database_queries",factory:|services| {
             Ok(std::sync::Arc::new(database_queries::QueryService::new(services.get::<Db>("base/database.pool")?.as_ref().clone(), services.get("base/database.mutations")?, services.get("base/tenancy.authentication")?)))
         }},bilibi_module_registry::Service {id:"core/user.query-pages",factory:|services| {

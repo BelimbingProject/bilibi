@@ -184,7 +184,7 @@ Terminate TLS at a reverse proxy, and keep the database on a private network: Bi
 
 ## Run it on a server
 
-`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. `bilibi-web create-owner` then creates the first account, the server owner, on the empty database. The install seed saves the initial `BILIBI_ENV` role in settings; later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. See [`docs/server-install.md`](docs/server-install.md).
+`scripts/install-server.sh` sets up Dev, Staging and Production instances under `/opt/bilibi`, each with its own database, service and address, and puts releases into service. The install seed saves the initial `BILIBI_ENV` role in settings. Later changes use the protected Instance settings page. Build software on your own machine, then install the tested release on any of them. Follow the [server installation guide](docs/server-install.md) to set up an instance, its server owner and first owners of customer tenants.
 
 ## Add a business area
 

@@ -55,9 +55,9 @@ An administrator with `admin.user.invite` can prepare an account for an email ad
 
 `invite_member(scope, input)` always follows the same path whether the email address already has a sign-in or is new. It stores only a SHA-256 token digest, replaces any open invitation to the same address in that tenant, preassigns selected roles through Authz's normal escalation and step-up checks, and emails `/accept/{token}` after the transaction commits. The tenant setting `user.invitation_days` controls expiry from 1 to 60 days and defaults to 7. `/users/invite` is the administrator page; `/users` marks pending invitations and can revoke one through `revoke_member_invitation`.
 
-`member_invitation(token)` returns only the tenant name and whether the bearer must use an existing sign-in. It never returns the invited address. `accept_member_invitation(scope, token)` links the invited account to the signed-in identity only when its email matches. `accept_new_member_invitation(token, password)` creates the sign-in and makes this account its home. Expired, reused, revoked, wrong-email and already-used membership links all return `InvitationError::Link`.
+`member_invitation(token)` returns only the tenant name and whether the bearer must use an existing sign-in. It never returns the invited address. For ordinary invitations, `accept_member_invitation(scope, token)` rechecks and holds the source tenant, staff account, linked [Person](../person/README.md), sign-in and [browser session](../../base/session/README.md#guard-boundary) in the acceptance transaction. It links the invited account only if the current sign-in email still matches the invitation. Refusals for impersonation or unavailable source authority record `user.invitation.accept.refused` in the source tenant. `accept_new_member_invitation(token, password)` creates the sign-in and makes this account its home. Expired, reused, revoked, wrong-email and already-used membership links all return `InvitationError::Link`.
 
-The Web host serves `/accept/{token}`. An address with a sign-in authenticates first and returns to the one-time link; a new address chooses its password there.
+The Web host serves `/accept/{token}`. For an ordinary invitation, an address with a sign-in authenticates first and returns to the one-time link, while a new address chooses its password there. [Customer tenant owner invitations](#customer-tenant-owner) use the same route and require a new sign-in.
 
 ## Company sign-in
 
@@ -288,8 +288,13 @@ receipt (replacing one whose account was deleted, the only way one can
 remain). The transaction's changes are `user`, `authz.principal_role` and
 `user.bootstrap`; it also records the retained `user.bootstrap.completed`
 action with the account, email and role, as the seed does. The host then
-calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and names that owner. Use this, not an
-`INSERT INTO users`, for any setup path that needs a first account.
+calls `settle_bootstrap_affiliation` for the Person, business affiliation and first desk. `operator_accounts(tenant)` reads the same account count and first email without writing, so the host decides whether an owner exists before it asks any question; where one does, `create-owner` only settles an unfinished bootstrap and names that owner. Use this service to bootstrap the platform operator's first account.
+
+### Customer tenant owner
+
+`provision_tenant_owner` backs [server first-owner setup and reissue](../../../docs/server-install.md#the-first-owner-of-a-customer-tenant). It validates the Person name and origin, checks mail readiness and renders the invitation before writing. The initial tenant, primary company, pending account, invitation, Authz role assignment and bootstrap receipt commit together before delivery. The invitation uses the default of `user.invitation_days` and stores no inviter account.
+
+The `user_tenant_owner_bootstraps` receipt identifies the exact invitation that requires a new sign-in. An attempt to reuse an existing sign-in returns `InvitationError::DedicatedSignIn`. The new account becomes the sign-in's home membership. Acceptance consumes the invitation and settles the Person, affiliation and desk in the same transaction.
 
 ## Two-factor authentication (the step-up provider)
 

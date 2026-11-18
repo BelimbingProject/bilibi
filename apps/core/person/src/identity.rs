@@ -779,6 +779,9 @@ impl BindingIdentity<'_> {
     }
 }
 
+const LIVE_ACCOUNT_PERSON: &str =
+    "SELECT id FROM persons WHERE tenant_id=$1 AND id=$2 AND retired_at IS NULL AND system_key IS NULL";
+
 /// Authentication-edge read for the account binder (K9): whether a linked
 /// Person still stands, on the caller's connection and before any Scope
 /// exists. A retired identity, a cross-tenant or missing id and the protected
@@ -789,12 +792,24 @@ pub async fn account_standing(client: &dyn ProofClient, tenant: i64, id: PersonI
         return Err(Error::Unauthorized);
     }
     Ok(client
-        .query_opt(
-            "SELECT id FROM persons WHERE tenant_id=$1 AND id=$2 AND retired_at IS NULL AND system_key IS NULL",
-            &[&tenant, &id.get()],
-        )
+        .query_opt(LIVE_ACCOUNT_PERSON, &[&tenant, &id.get()])
         .await?
         .is_some())
+}
+
+pub async fn hold_account_standing(
+    tx: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+) -> Result<()> {
+    if let Some(person) = scope.actor().person() {
+        tx.query_opt(
+            &format!("{LIVE_ACCOUNT_PERSON} FOR SHARE"),
+            &[&scope.tenant(), &person.get()],
+        )
+        .await?
+        .ok_or(Error::Unauthorized)?;
+    }
+    Ok(())
 }
 
 /// Base's sealed proof service calls the owner on its current connection.

@@ -207,7 +207,7 @@ The installer unit is skipped quietly while `/opt/bilibi/build/bin/bilibi-instal
 
 ## The first account
 
-A fresh database has no accounts, so nobody can sign in. `create-owner` creates the first one: the server owner, a Core Administrator of the organisation that runs this server (the platform operator). Run it once, after the first release is in service:
+A fresh database has no accounts, so nobody can sign in. `create-owner` creates the platform operator's first account. This server owner is a Core Administrator of the organisation that runs the server. Run it once, after the first release is in service:
 
 ```sh
 sudo scripts/install-server.sh create-owner production
@@ -238,6 +238,8 @@ Sign in as one of them at https://erp.example.com/login. To add people, use User
 If nobody can sign in any more, that is account recovery, which this command does not do. If an owner only lost their phone, see [Lost phone](#lost-phone).
 ```
 
+If the earlier run left the existing owner's Person, business affiliation and first desk unfinished, rerunning completes that setup.
+
 The command is the same `bilibi-web create-owner` the script runs for you, in the instance's environment. From a script with no terminal, give every answer as a flag and the password on standard input:
 
 ```sh
@@ -252,6 +254,29 @@ printf '%s\n' "$PASSWORD" | sudo scripts/install-server.sh create-owner producti
 Everything the command creates is written the way the app writes it, so it shows in the audit log under Administration → Audit Log → Actions as **System · create-owner**: the retained `user.bootstrap.completed` action with the account, email and role, and the data changes for the account, its Core Administrator role and the bootstrap receipt that marks the account as the server owner. The command works with any `BILIBI_ENV`; on Dev, the development seed's `ai@agent.my` already exists and the command refuses, which is the point.
 
 Behind the scenes this is the development seed's bootstrap with your details instead of the seed's, through the same owners: Company provisions the operator company, User creates the account and receipt, Authz grants the role, and User gives the owner a Person, business affiliation and first desk ([`apps/core/user/README.md`](../apps/core/user/README.md), Bootstrap administrator).
+
+### The first owner of a customer tenant
+
+After putting a release in service, run this command once for each customer tenant. It creates the tenant and its primary company and invites its first Tenant Owner. Set up [mail delivery](../apps/base/mail/README.md#choosing-the-transport) first. The invitation uses the installation's HTTPS `APP_ORIGIN`. Dev instances also accept loopback HTTP.
+
+```sh
+sudo scripts/install-server.sh tenant-provision production \
+    --tenant-name "Acme workspace" \
+    --company-name "Acme Sdn. Bhd." --company-code acme \
+    --owner-email owner@acme.example
+```
+
+Use a separate email address for each first owner. The address must be unused by any staff sign-in on the installation when the invitation is sent and when it is accepted. The link works once and uses the [default invitation duration](../apps/core/user/README.md#membership-invitations). The recipient chooses a password on the invitation page, then signs in with the new credentials and enrols a second factor if required. Acceptance gives the owner a Person, business affiliation and first desk in the primary company.
+
+The audit log records `user.tenant_owner.invited` as **System · tenant-provision**. The part of the email address before `@` supplies the initial Person name.
+
+The command exits unsuccessfully if delivery fails after commit. To recover from failed delivery or an expired link, rerun it with the same tenant name, company name and code. Use the same owner email to resend, or supply a different unused address in `--owner-email` to change the recipient. Reissue invalidates the previous link and records `user.tenant_owner.reissued` before sending. It requires a unique matching bootstrap receipt and an invitation that has yet to be accepted or revoked. For a fresh bootstrap, choose a tenant name that is unused on the installation.
+
+Use the signed-in Users page to invite later administrators.
+
+Ordinary membership invitations can link the owner’s sign-in to another tenant. Cross-tenant access through shared sign-ins, including SSO, remains a [known limitation](https://github.com/BelimbingProject/bilibi/issues/787).
+
+When running the binary directly, use the same flags with `bilibi-web tenant-provision` and load the instance's database and mail settings and `APP_ORIGIN` into its environment. The installer wrapper loads these settings and runs the command as the Bilibi service account.
 
 ## Lost phone
 
@@ -330,7 +355,8 @@ Script commands:
 | --- | --- |
 | `create <instance> --role dev\|staging\|production --site <host> [--port <n>] [--tls internal\|cloudflare] [--cloudflare-token-stdin]` | Packages, users, folders, database, protected environment files, service and Caddy site. Rerun to change the site; the saved role is preserved and the port stays fixed. Change the role in Instance settings with 2FA |
 | `release <instance> <setup archive> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance and checksums, copy into `releases/<n>`, migrate, switch, check |
-| `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | The first account, the server owner; asks for anything not given, refuses once an owner exists (it then only finishes an unfinished Person, business affiliation and first desk) |
+| `create-owner <instance> [--email <address>] [--name <name>] [--password-stdin] [--company-name <name> --company-code <code>]` | [Server owner setup](#the-first-account) |
+| `tenant-provision <instance> --tenant-name <name> --company-name <name> --company-code <code> --owner-email <address>` | [Customer tenant and first-owner setup](#the-first-owner-of-a-customer-tenant) |
 | `two-factor-reset <instance> --email <address>` | Turn off one account's authenticator after a lost phone, sign the account out and notify it ([Lost phone](#lost-phone)) |
 | `installer <bilibi-installer> --repo <owner/name> [--repo-id <n>] --tag <setup-vX.Y.Z>` | Verify GitHub provenance, copy the installer to `/opt/bilibi/build/bin` and start `bilibi-installer@<instance>` for every instance; rerun to update it |
 | `switch <instance> <n>` | Put a kept release in service |

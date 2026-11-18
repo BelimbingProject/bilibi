@@ -2,11 +2,13 @@
 //! invitation boundary while keeping the invited account tenant-owned and the
 //! accepted sign-in installation-wide.
 use crate::{
-    accounts::{field_error, validate_email, validate_name, FieldError},
+    accounts::{email_taken, field_error, validate_email, validate_name, FieldError},
     contributions::INVITE,
     password::{self, check_policy},
+    tenant_owner::DEDICATED_OWNER_SIGN_IN,
     UserService,
 };
+use bilibi_audit::{record_action, Attribution};
 use bilibi_database::{Change, Context, Error, Result};
 use bilibi_mail::{Address, Message};
 use bilibi_security::Scope;
@@ -53,6 +55,8 @@ pub enum InvitationError {
     Validation(Vec<FieldError>),
     #[error("This invitation is invalid or has expired")]
     Link,
+    #[error("{DEDICATED_OWNER_SIGN_IN}")]
+    DedicatedSignIn,
     #[error(transparent)]
     Access(#[from] Error),
 }
@@ -67,11 +71,11 @@ impl From<tokio_postgres::Error> for InvitationError {
 /// account administration, which is never done while viewing as someone else.
 const IMPERSONATING_INVITE: &str = "Invitations cannot be sent while viewing as someone else.";
 
-fn digest(token: &str) -> Vec<u8> {
+pub(crate) fn digest(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
-fn token() -> Result<String> {
+pub(crate) fn token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| Error::Internal)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -79,6 +83,23 @@ fn token() -> Result<String> {
 
 fn token_shaped(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+async fn record_acceptance_refusal(
+    client: &tokio_postgres::Client,
+    scope: &Scope,
+    reason: &str,
+) -> Result<()> {
+    record_action(
+        client,
+        &Attribution::from_scope(scope),
+        None,
+        "user.invitation.accept.refused",
+        json!({"result": "refused", "reason": reason}),
+        false,
+    )
+    .await?;
+    Ok(())
 }
 
 impl UserService {
@@ -94,14 +115,28 @@ impl UserService {
         let client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT t.name,EXISTS(SELECT 1 FROM user_identities d WHERE lower(d.email)=v.email AND d.kind='staff' AND d.status='active' AND d.deleted_at IS NULL) FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN tenants t ON t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL",
+                "SELECT t.name,b.invitation_id IS NOT NULL,EXISTS(SELECT 1 FROM user_identities d
+                     WHERE lower(d.email)=v.email AND d.kind='staff' AND d.deleted_at IS NULL
+                       AND (d.status='active' OR b.invitation_id IS NOT NULL))
+                 FROM user_invitations v
+                 JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id
+                 JOIN tenants t ON t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL
+                 LEFT JOIN user_tenant_owner_bootstraps b
+                     ON b.tenant_id=v.tenant_id AND b.user_id=v.user_id AND b.invitation_id=v.id
+                 WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL
+                   AND v.expires_at>clock_timestamp() AND u.status='invited'
+                   AND u.identity_id IS NULL AND u.deleted_at IS NULL",
                 &[&digest(raw_token)],
             )
             .await?
             .ok_or(InvitationError::Link)?;
+        let existing_sign_in = row.get(2);
+        if row.get::<_, bool>(1) && existing_sign_in {
+            return Err(InvitationError::DedicatedSignIn);
+        }
         Ok(InvitationAcceptance {
             tenant_name: row.get(0),
-            existing_sign_in: row.get(1),
+            existing_sign_in,
         })
     }
 
@@ -355,20 +390,16 @@ impl UserService {
         signed_in: &Scope,
         raw_token: &str,
     ) -> std::result::Result<i64, InvitationError> {
+        if signed_in.impersonator().is_some() {
+            let client = self.db.get().await.map_err(Error::from)?;
+            record_acceptance_refusal(&client, signed_in, "impersonating").await?;
+            return Err(Error::Forbidden.into());
+        }
         if !token_shaped(raw_token) {
             return Err(InvitationError::Link);
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let signed_in = self.fresh(&**client, signed_in).await?;
-        let identity: i64 = client
-            .query_opt(
-                "SELECT identity_id FROM users WHERE tenant_id=$1 AND id=$2 AND status='active' AND deleted_at IS NULL",
-                &[&signed_in.tenant(), &signed_in.user()],
-            )
-            .await?
-            .and_then(|row| row.get(0))
-            .ok_or(InvitationError::Link)?;
-        self.accept_with_identity(&mut client, raw_token, identity)
+        self.accept_with_identity(&mut client, raw_token, signed_in)
             .await
     }
 
@@ -391,21 +422,26 @@ impl UserService {
         let mut client = self.db.get().await.map_err(Error::from)?;
         let row = client
             .query_opt(
-                "SELECT i.tenant_id,i.user_id,i.email FROM user_invitations i JOIN users u ON u.tenant_id=i.tenant_id AND u.id=i.user_id WHERE i.token_hash=$1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL",
+                "SELECT i.tenant_id,i.user_id,i.email,b.invitation_id IS NOT NULL
+                 FROM user_invitations i
+                 JOIN users u ON u.tenant_id=i.tenant_id AND u.id=i.user_id
+                 LEFT JOIN user_tenant_owner_bootstraps b
+                     ON b.tenant_id=i.tenant_id AND b.user_id=i.user_id AND b.invitation_id=i.id
+                 WHERE i.token_hash=$1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+                   AND i.expires_at>clock_timestamp() AND u.status='invited'
+                   AND u.identity_id IS NULL AND u.deleted_at IS NULL",
                 &[&digest(raw_token)],
             )
             .await?
             .ok_or(InvitationError::Link)?;
         let (tenant, user, email): (i64, i64, String) = (row.get(0), row.get(1), row.get(2));
-        if client
-            .query_opt(
-                "SELECT 1 FROM user_identities WHERE lower(email)=$1 AND kind='staff' AND deleted_at IS NULL",
-                &[&email],
-            )
-            .await?
-            .is_some()
-        {
-            return Err(InvitationError::Link);
+        let owner: bool = row.get(3);
+        if email_taken(&**client, &email, None).await? {
+            return Err(if owner {
+                InvitationError::DedicatedSignIn
+            } else {
+                InvitationError::Link
+            });
         }
         let mut tx = self
             .mutations
@@ -414,16 +450,22 @@ impl UserService {
                 Context::user(tenant, user, "user.invitation.accept"),
             )
             .await?;
-        if let Err(error) =
-            finish_new_acceptance(&mut tx, raw_token, tenant, user, email, hash).await
-        {
-            let refusal = match error {
-                Error::NotFound => Err(InvitationError::Link),
-                other => Err(other.into()),
+        self.lock_tenant_owner_in(&tx, tenant, user).await?;
+        let invitation =
+            match finish_new_acceptance(&mut tx, raw_token, tenant, user, email, hash).await {
+                Ok(invitation) => invitation,
+                Err(error) => {
+                    let refusal = match error {
+                        Error::Conflict if owner => Err(InvitationError::DedicatedSignIn),
+                        Error::NotFound | Error::Conflict => Err(InvitationError::Link),
+                        other => Err(other.into()),
+                    };
+                    tx.rollback().await?;
+                    return refusal;
+                }
             };
-            tx.rollback().await?;
-            return refusal;
-        }
+        self.settle_tenant_owner_in(&mut tx, tenant, user, invitation)
+            .await?;
         tx.commit().await?;
         Ok(user)
     }
@@ -432,12 +474,12 @@ impl UserService {
         &self,
         client: &mut tokio_postgres::Client,
         raw_token: &str,
-        identity: i64,
+        signed_in: &Scope,
     ) -> std::result::Result<i64, InvitationError> {
         let row = client
             .query_opt(
-                "SELECT v.tenant_id,v.user_id FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN user_identities i ON i.id=$2 AND lower(i.email)=v.email AND i.kind='staff' AND i.status='active' AND i.deleted_at IS NULL WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM users m WHERE m.tenant_id=v.tenant_id AND m.identity_id=i.id AND m.deleted_at IS NULL)",
-                &[&digest(raw_token), &identity],
+                "SELECT v.tenant_id,v.user_id FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL",
+                &[&digest(raw_token)],
             )
             .await?
             .ok_or(InvitationError::Link)?;
@@ -449,6 +491,29 @@ impl UserService {
                 Context::user(tenant, user, "user.invitation.accept"),
             )
             .await?;
+        let identity = match self.hold_invitation_sign_in(tx.sql(), signed_in).await {
+            Ok(identity) => identity,
+            Err(error @ (Error::Unauthorized | Error::Forbidden | Error::NotFound)) => {
+                tx.rollback().await?;
+                record_acceptance_refusal(client, signed_in, "source_session_unavailable").await?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if tx
+            .sql()
+            .query_opt(
+                "SELECT 1 FROM user_tenant_owner_bootstraps b
+                 JOIN user_invitations i ON i.tenant_id=b.tenant_id AND i.id=b.invitation_id
+                 WHERE b.tenant_id=$1 AND b.user_id=$2 AND i.user_id=b.user_id AND i.token_hash=$3",
+                &[&tenant, &user, &digest(raw_token)],
+            )
+            .await?
+            .is_some()
+        {
+            tx.rollback().await?;
+            return Err(InvitationError::DedicatedSignIn);
+        }
         if let Err(error) = finish_acceptance(&mut tx, raw_token, tenant, user, identity).await {
             let refusal = match error {
                 Error::NotFound => Err(InvitationError::Link),
@@ -460,6 +525,31 @@ impl UserService {
         tx.commit().await?;
         Ok(user)
     }
+
+    async fn hold_invitation_sign_in(
+        &self,
+        tx: &tokio_postgres::Transaction<'_>,
+        scope: &Scope,
+    ) -> Result<i64> {
+        bilibi_person::hold_account_standing(tx, scope).await?;
+        let person = scope.actor().person().map(|person| person.get());
+        let row = tx
+            .query_opt(
+                "SELECT i.id FROM tenants t JOIN users u ON u.tenant_id=t.id
+             JOIN user_identities i ON i.id=u.identity_id
+             WHERE t.id=$1 AND u.id=$2 AND t.status='active' AND t.deleted_at IS NULL
+               AND u.kind='staff' AND u.status='active' AND u.deleted_at IS NULL
+               AND u.person_id IS NOT DISTINCT FROM $3
+               AND i.kind='staff' AND i.status='active' AND i.deleted_at IS NULL
+             FOR SHARE OF t,u,i",
+                &[&scope.tenant(), &scope.user(), &person],
+            )
+            .await?
+            .ok_or(Error::Unauthorized)?;
+        self.fresh(tx, scope).await?;
+        self.sessions.hold_current(tx, scope).await?;
+        Ok(row.get(0))
+    }
 }
 
 async fn finish_new_acceptance(
@@ -469,7 +559,7 @@ async fn finish_new_acceptance(
     user: i64,
     email: String,
     hash: String,
-) -> Result<()> {
+) -> Result<i64> {
     let token_hash = digest(raw_token);
     tx.mutate(move |sql| {
         Box::pin(async move {
@@ -482,11 +572,15 @@ async fn finish_new_acceptance(
                 .ok_or(Error::NotFound)?
                 .get(0);
             let identity: i64 = sql
-                .query_one(
-                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id) VALUES('staff',$1,$2,now(),$3,$4,$3) RETURNING id",
+                .query_opt(
+                    "INSERT INTO user_identities(kind,email,password_hash,email_verified_at,home_tenant_id,home_user_id,last_tenant_id)
+                     VALUES('staff',$1,$2,now(),$3,$4,$3)
+                     ON CONFLICT (lower(email)) WHERE deleted_at IS NULL AND kind='staff' DO NOTHING
+                     RETURNING id",
                     &[&email, &hash, &tenant, &user],
                 )
                 .await?
+                .ok_or(Error::Conflict)?
                 .get(0);
             let changed = sql
                 .execute(
@@ -498,7 +592,7 @@ async fn finish_new_acceptance(
                 return Err(Error::NotFound);
             }
             Ok((
-                (),
+                invitation,
                 vec![
                     Change {
                         kind: "user_identity".into(),
@@ -543,8 +637,16 @@ async fn finish_acceptance(
         Box::pin(async move {
             let invitation: i64 = sql
                 .query_opt(
-                    "UPDATE user_invitations SET accepted_at=now() WHERE tenant_id=$1 AND user_id=$2 AND token_hash=$3 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>clock_timestamp() RETURNING id",
-                    &[&tenant, &user, &token_hash],
+                    "UPDATE user_invitations v SET accepted_at=now()
+                     WHERE v.tenant_id=$1 AND v.user_id=$2 AND v.token_hash=$3
+                       AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at>clock_timestamp()
+                       AND EXISTS (SELECT 1 FROM user_identities i
+                           WHERE i.id=$4 AND lower(i.email)=v.email AND i.kind='staff'
+                             AND i.status='active' AND i.deleted_at IS NULL FOR SHARE OF i)
+                       AND NOT EXISTS (SELECT 1 FROM users m WHERE m.tenant_id=v.tenant_id
+                           AND m.identity_id=$4 AND m.deleted_at IS NULL)
+                     RETURNING v.id",
+                    &[&tenant, &user, &token_hash, &identity],
                 )
                 .await?
                 .ok_or(Error::NotFound)?
