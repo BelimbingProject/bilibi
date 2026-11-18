@@ -1,18 +1,21 @@
 //! Documents related to a person reach privacy requests (ADR 05, #583), on a
 //! disposable database, through `base/privacy` as an operator runs them.
 //!
-//! Files seven documents: A related only to person 1, B related to person 1
+//! Files nine documents: A related only to person 1, B related to person 1
 //! and company 1, C related only to person 1 with its file under legal hold,
 //! D related only to company 1, E related to person 1 whose upload failed
 //! its malware check (held: its bytes stay a Media file, never an Artifact),
 //! F related to person 1 and already being deleted, and G related to person
-//! 1 with a privacy hold on its revision. An access request for person 1 must
-//! export A, B, C, E and G with their revisions and their clean files,
+//! 1 with a privacy hold on its revision, H related only to person 1 with an
+//! evidence-pinned revision, and I related to person 1 and company 1 with an
+//! evidence-pinned revision. An access request for person 1 must export A,
+//! B, C, E, G, H and I with their revisions and their clean files,
 //! never D or F. An approved erasure must then delete A, E and F (their names
 //! and file names gone from the tables and the audit trail, A's Artifact and
 //! E's Media bytes gone from disk) and count them deleted, keep B as shared
 //! with only its person link removed, keep C under its file's hold and G
-//! under its revision's hold, and leave D alone (#583, #659). Exits non-zero
+//! under their holds and H/I as evidence with all links, bytes and exact pins
+//! intact, and leave D alone (#583, #659). Exits non-zero
 //! when a check fails.
 use bilibi_authz::grants::Grants;
 use bilibi_database::{pool, MutationBoundary};
@@ -244,7 +247,9 @@ async fn main() -> Result<()> {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let workers = tokio::spawn(executor.run(stopped));
 
-    println!("== seven documents: A, B (also company 1), C (file held), D (company 1 only), E (upload held), F (deleting), G (revision held)");
+    println!(
+        "== nine documents: A-G plus H (person-only evidence pin) and I (shared evidence pin)"
+    );
     let person = Reference::new("person", "1");
     let company = Reference::new("company", "1");
     let mut filed = Vec::new();
@@ -272,6 +277,16 @@ async fn main() -> Result<()> {
         ("Ada medical note", "ada-medical.txt", vec![person.clone()]),
         ("Ada old payslip", "ada-payslip.txt", vec![person.clone()]),
         ("Ada bank letter", "ada-bank.txt", vec![person.clone()]),
+        (
+            "Ada signed agreement",
+            "ada-signed.txt",
+            vec![person.clone()],
+        ),
+        (
+            "Ada shared signed agreement",
+            "ada-shared-signed.txt",
+            vec![person.clone(), company.clone()],
+        ),
     ] {
         let stored = documents
             .store_file(
@@ -297,11 +312,28 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
+        if name == "Ada signed agreement" || name == "Ada shared signed agreement" {
+            let owner = if name == "Ada signed agreement" {
+                &person
+            } else {
+                &company
+            };
+            documents
+                .protect_revision(
+                    &mut tx,
+                    &admin,
+                    document.id,
+                    1,
+                    owner,
+                    "Privacy walkthrough evidence",
+                )
+                .await?;
+        }
         tx.commit().await?;
         filed.push((document.id, stored.artifact_id));
     }
-    let [(a, a_file), (b, _), (c, c_file), (d, _), (e, e_file), (f, _), (g, _)] =
-        <[_; 7]>::try_from(filed).map_err(|_| "seven documents")?;
+    let [(a, a_file), (b, _), (c, c_file), (d, _), (e, e_file), (f, _), (g, _), (h, h_file), (i, i_file)] =
+        <[_; 9]>::try_from(filed).map_err(|_| "nine documents")?;
     let e_subject = e_file
         .strip_prefix("upload:")
         .ok_or("E's upload is held, not an Artifact")?
@@ -386,8 +418,8 @@ async fn main() -> Result<()> {
         }
     }
     ensure(
-        located == Some(6),
-        "locate counts the six documents related to person 1, F too",
+        located == Some(8),
+        "locate counts the eight documents related to person 1, F too",
     )?;
     let access = privacy
         .verify(
@@ -429,8 +461,8 @@ async fn main() -> Result<()> {
         .collect();
     println!("  exported documents: {exported:?}");
     ensure(
-        exported == vec![a, b, c, e, g],
-        "A, B, C, E and G are exported, D and F (deleting) are not",
+        exported == vec![a, b, c, e, g, h, i],
+        "A, B, C, E, G, H and I are exported, D and F (deleting) are not",
     )?;
     ensure(
         records["documents"][0]["revisions"][0]["file_name"] == "ada-passport.txt",
@@ -448,16 +480,18 @@ async fn main() -> Result<()> {
     }
     println!("  exported files: {files:?}");
     ensure(
-        files.len() == 5
+        files.len() == 7
             && [
                 "Ada passport scan",
                 "Ada supplier contract",
                 "Ada disputed invoice",
                 "Ada bank letter",
+                "Ada signed agreement",
+                "Ada shared signed agreement",
             ]
             .iter()
             .all(|name| files.iter().any(|f| f.contains(name))),
-        "the five clean files (two of A) are in the export, read through the owner",
+        "the seven clean files (two of A) are in the export, read through the owner",
     )?;
 
     let g_revision: i64 = client
@@ -632,6 +666,43 @@ async fn main() -> Result<()> {
             && links(g).await? == vec!["person".to_owned()],
         "G is kept under its revision's privacy hold",
     )?;
+    for (id, expected_name, expected_links, artifact) in [
+        (h, "Ada signed agreement", vec!["person".to_owned()], h_file),
+        (
+            i,
+            "Ada shared signed agreement",
+            vec!["company".to_owned(), "person".to_owned()],
+            i_file,
+        ),
+    ] {
+        ensure(
+            documents.get(&admin, id).await?.name == expected_name,
+            "protected document terms remain unchanged",
+        )?;
+        ensure(
+            links(id).await? == expected_links,
+            "protected document links remain intact",
+        )?;
+        let pin = client
+            .query_one(
+                "SELECT p.revision,r.id FROM core_document_revision_protections p JOIN core_document_revisions r ON r.tenant_id=p.tenant_id AND r.document_id=p.document_id AND r.revision=p.revision WHERE p.tenant_id=1 AND p.document_id=$1",
+                &[&id],
+            )
+            .await?;
+        let (revision, revision_id): (i32, i64) = (pin.get(0), pin.get(1));
+        ensure(
+            revision == 1 && revision_id > 0,
+            "protected exact revision remains resolvable",
+        )?;
+        let retained: bool = client
+            .query_one(
+                "SELECT deleted_at IS NULL FROM base_artifacts WHERE public_id=$1",
+                &[&artifact],
+            )
+            .await?
+            .get(0);
+        ensure(retained, "protected document file bytes remain available")?;
+    }
 
     stop.send(true)?;
     let _ = workers.await;

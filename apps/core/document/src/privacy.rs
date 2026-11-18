@@ -10,7 +10,9 @@
 //!   document, one of its revisions or file ledger rows, or a held upload's
 //!   Media file) or whose file Base still retains or holds, with its reason. A
 //!   document also related to another record is that record's too: only its
-//!   link to the person is removed, and it is kept as shared. Every other
+//!   link to the person is removed, and it is kept as shared. A document
+//!   with a protected revision is kept as evidence before links, values or
+//!   file bytes are changed. Every other
 //!   document is anonymised in the erasing transaction (its name, link,
 //!   custom fields, its revisions' names, file names, change logs and labels,
 //!   and its ledger rows' file names), the Media files of its held uploads
@@ -19,7 +21,8 @@
 //!   then deletes each erasing document's Artifacts under the erasure grant
 //!   and its rows, and counts it deleted. A hold or retention placed since
 //!   the erasure keeps the document, anonymised, and the certificate says
-//!   kept with that reason. The person link stays until the bytes are gone,
+//!   kept with that reason. Revision protection is rechecked before bytes
+//!   are removed and before rows are finalized. The person link stays until the bytes are gone,
 //!   so Media and Artifacts can still ask whose files they are.
 use crate::files::{FILES, MEDIA_SUBJECT};
 use crate::{FILE_RECORD, LINK_RECORD, RECORD, REVISION_RECORD};
@@ -384,7 +387,7 @@ impl Handler for DocumentData {
             let rows = tx
                 .sql()
                 .query(
-                    &format!("SELECT d.id,d.company_id,EXISTS (SELECT 1 FROM core_document_links o WHERE o.tenant_id=d.tenant_id AND o.document_id=d.id AND NOT (o.record_kind='person' AND o.record_id=$2::bigint::text)) AS shared FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id FOR UPDATE OF d"),
+                    &format!("SELECT d.id,d.company_id,EXISTS (SELECT 1 FROM core_document_links o WHERE o.tenant_id=d.tenant_id AND o.document_id=d.id AND NOT (o.record_kind='person' AND o.record_id=$2::bigint::text)) AS shared, EXISTS (SELECT 1 FROM core_document_revision_protections p WHERE p.tenant_id=d.tenant_id AND p.document_id=d.id) AS has_protection FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id FOR UPDATE OF d"),
                     &[&tenant, &person],
                 )
                 .await?;
@@ -393,9 +396,20 @@ impl Handler for DocumentData {
             let held = held(holds, grant, &files).await?;
             let mut erased = Erased::default();
             for row in rows {
-                let (id, company, shared): (i64, i64, bool) = (row.get(0), row.get(1), row.get(2));
+                let (id, company, shared, has_protection): (i64, i64, bool, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3));
                 if let Some(hold) = held.get(&id) {
                     erased.kept.push(Kept::held(RECORD, id, *hold));
+                    continue;
+                }
+                if has_protection {
+                    erased.kept.push(Kept {
+                        kind: RECORD.into(),
+                        id: id.to_string(),
+                        reason: KeptReason::Evidence,
+                        until: None,
+                        hold: None,
+                    });
                     continue;
                 }
                 if shared {
@@ -492,14 +506,21 @@ impl Handler for DocumentData {
             let (tenant, person) = (scope.tenant(), subject.person.get());
             let rows = client
                 .query(
-                    &format!("SELECT d.id,d.company_id,d.erased_at IS NOT NULL FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id"),
+                    &format!("SELECT d.id,d.company_id,d.erased_at IS NOT NULL, EXISTS (SELECT 1 FROM core_document_revision_protections p WHERE p.tenant_id=d.tenant_id AND p.document_id=d.id) AS has_protection FROM core_documents d WHERE d.tenant_id=$1 AND d.id IN ({LINKED}) ORDER BY d.id"),
                     &[&tenant, &person],
                 )
                 .await?;
             let ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
             let files = files_of(&*client, tenant, &ids).await?;
-            // First, while the person link still vouches for them.
-            for document in files.values() {
+            // First, while the person link still vouches for them. Only
+            // marked, unprotected documents can have their bytes removed.
+            for row in &rows {
+                let (id, _, marked, has_protection): (i64, i64, bool, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3));
+                if !marked || has_protection {
+                    continue;
+                }
+                let document = &files[&id];
                 for file in &document.subjects {
                     remove_bytes(client, scope, grant, file).await?;
                 }
@@ -507,8 +528,27 @@ impl Handler for DocumentData {
             let held = held(holds, grant, &files).await?;
             let bound = bound()?;
             for row in rows {
-                let (id, company, marked): (i64, i64, bool) = (row.get(0), row.get(1), row.get(2));
+                let (id, company, marked, has_protection): (i64, i64, bool, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3));
                 if !marked {
+                    continue;
+                }
+                if has_protection {
+                    let mut step = Erased::default();
+                    step.kept.push(Kept {
+                        kind: RECORD.into(),
+                        id: id.to_string(),
+                        reason: KeptReason::Evidence,
+                        until: None,
+                        hold: None,
+                    });
+                    let mut tx = bound
+                        .boundary
+                        .begin(client, scope.mutation_context("core.document.erase_finish"))
+                        .await?;
+                    crate::deletion::restore(&mut tx, tenant, id).await?;
+                    tx.commit().await?;
+                    progress.record(step).await?;
                     continue;
                 }
                 let company = OrganisationId::new(company).map_err(|_| Error::Internal)?;
