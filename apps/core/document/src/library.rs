@@ -152,6 +152,16 @@ impl Store<'_> {
         ).await?.is_some() {
             return Err(WriteError::ScanPending);
         }
+        if client
+            .query_opt(
+                "SELECT 1 FROM core_document_revision_protections WHERE tenant_id=$1 AND document_id=$2 LIMIT 1",
+                &[&scope.tenant(), &document.id],
+            )
+            .await?
+            .is_some()
+        {
+            return Err(WriteError::Protected);
+        }
         let artifact_ids: Vec<String> = client
             .query(
                 "SELECT artifact_id FROM core_document_revisions WHERE tenant_id=$1 AND document_id=$2 AND artifact_id IS NOT NULL ORDER BY artifact_id",
@@ -534,6 +544,20 @@ impl Store<'_> {
         let merge_ids: Vec<i64> = std::iter::once(survivor.id)
             .chain(source_ids.iter().copied())
             .collect();
+        // A source's pinned revision would be moved and renumbered. A pinned
+        // survivor stays at the same document ID and revision number.
+        if client
+            .query_opt(
+                "SELECT 1 FROM core_document_revision_protections WHERE tenant_id=$1 AND document_id = ANY($2) LIMIT 1",
+                &[&scope.tenant(), &source_ids],
+            )
+            .await?
+            .is_some()
+        {
+            return Err(WriteError::MergeRefused(
+                "a protected revision cannot be moved or renumbered",
+            ));
+        }
         if client
             .query_opt(
                 "SELECT 1 FROM core_document_revisions WHERE tenant_id=$1 AND document_id = ANY($2) AND scan_status='pending' LIMIT 1",

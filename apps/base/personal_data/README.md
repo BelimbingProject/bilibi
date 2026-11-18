@@ -2,6 +2,8 @@
 
 **Use it for:** declaring each store of a person's data, so privacy requests, holds and retention reach it.
 
+Stores can report `KeptReason::Evidence` when immutable evidence is still referenced by its owning record. The privacy certificate reports it as kept; no cleanup is scheduled by the personal-data store.
+
 **Not for:** running those requests (use `base/privacy`) or a personal-data registry of your own.
 
 **The contract every store of a person's data implements, below Grid, Authz and Audit, so any module can answer for its data without a dependency cycle.** `base/privacy` runs it. Decision: [ADR 05](../../../docs/architecture/decisions/05-personal-data-registry.md).

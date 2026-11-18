@@ -309,7 +309,7 @@ pub enum KeptReason {
     LegalMinimum,
     /// The record also belongs to another party (a company's address).
     Shared,
-    /// Audit evidence that its own retention and removal policies govern,
+    /// Immutable related-record evidence that the owning store must retain,
     /// with no end the store can promise; no cleanup is owed for it.
     Evidence,
 }
