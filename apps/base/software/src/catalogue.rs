@@ -197,10 +197,15 @@ impl Catalogue {
     }
 }
 
-/// Fetches the catalogue and keeps it for [`KEEP`].
+/// Fetches the catalogue and keeps its answer, including failures, for [`KEEP`].
 pub struct Reader {
     integration: Arc<Integration>,
-    kept: Mutex<Option<(String, Instant, Arc<Catalogue>)>>,
+    kept: Mutex<Option<Kept>>,
+}
+struct Kept {
+    url: String,
+    at: Instant,
+    answer: std::result::Result<Arc<Catalogue>, String>,
 }
 impl Reader {
     pub fn new(integration: Arc<Integration>) -> Self {
@@ -217,12 +222,24 @@ impl Reader {
         url: &str,
     ) -> std::result::Result<Arc<Catalogue>, String> {
         if let Ok(kept) = self.kept.lock() {
-            if let Some((kept_url, at, catalogue)) = kept.as_ref() {
-                if kept_url == url && at.elapsed() < KEEP {
-                    return Ok(catalogue.clone());
+            if let Some(kept) = kept.as_ref() {
+                if kept.url == url && kept.at.elapsed() < KEEP {
+                    return kept.answer.clone();
                 }
             }
         }
+        let result = self.fetch(scope, url).await;
+        if let Ok(mut kept) = self.kept.lock() {
+            *kept = Some(Kept {
+                url: url.to_owned(),
+                at: Instant::now(),
+                answer: result.clone(),
+            });
+        }
+        result
+    }
+
+    async fn fetch(&self, scope: &Scope, url: &str) -> std::result::Result<Arc<Catalogue>, String> {
         let reply = self
             .integration
             .send(
@@ -246,9 +263,6 @@ impl Reader {
         let catalogue = Catalogue::parse(&reply.body)
             .map(Arc::new)
             .map_err(|_| format!("{url} is not a catalogue in format 1"))?;
-        if let Ok(mut kept) = self.kept.lock() {
-            *kept = Some((url.to_owned(), Instant::now(), catalogue.clone()));
-        }
         Ok(catalogue)
     }
 }
