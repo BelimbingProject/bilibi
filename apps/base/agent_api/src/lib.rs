@@ -252,6 +252,10 @@ pub trait WriteHandler: Send + Sync {
     /// commit makes, on the scope that commit uses, and only for an operation
     /// whose input names no earlier step's new record. Stage only private
     /// work that expires on its own; reprove and authorize as a facade does.
+    /// A prepare can run with no commit after it (the commit refuses, the
+    /// caller retries, the connection drops), or twice for one write: make it
+    /// idempotent by the caller's request key, audit what it writes through
+    /// `MutationBoundary` as any write does, and clean up what nothing bound.
     /// Doors that already hold a transaction (queued jobs) do not call it:
     /// `commit_prepared` then gets `None` and must do without.
     fn prepare<'a>(&'a self, _scope: &'a Scope, _input: &'a Value) -> PrepareFuture<'a> {
