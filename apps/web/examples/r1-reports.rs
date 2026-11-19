@@ -2010,19 +2010,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let after = audit_watermark().await?;
     commits_until_delay.store(2, Ordering::Relaxed);
-    let uncertain = tokio::time::timeout(
-        Duration::from_secs(4),
-        write(&boundary, &db, &manager, "reports.create", async |tx| {
-            reports.create(tx, &manager, &oversight_rows).await
-        }),
-    )
+    let pool_size = app.db.status().max_size;
+    app.db.resize(1);
+    let (uncertain, contender) = tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::join!(
+            write(&boundary, &db, &manager, "reports.create", async |tx| {
+                reports.create(tx, &manager, &oversight_rows).await
+            }),
+            async {
+                while commits_until_delay.load(Ordering::Relaxed) != 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                let connection = app.db.get().await?;
+                let summary_pending = oversight_events(after).await?.len() == 2;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                drop(connection);
+                Ok::<_, bilibi_database::Error>(summary_pending)
+            },
+        )
+    })
     .await?;
+    app.db.resize(pool_size);
+    let summary_pending = contender?;
     let events = oversight_events(after).await?;
     let unknown_message =
         "The oversight audit commit could not be confirmed. Check the audit trail before retrying.";
     checks.check(
-        "a child COMMIT with a withheld reply survives rollback and is marked outcome unknown",
-        matches!(uncertain, Err(ReportError::Refused(ref why)) if why == unknown_message)
+        "a child COMMIT with a withheld reply is summarized after a waiting checkout gets the slot",
+        summary_pending
+            && matches!(uncertain, Err(ReportError::Refused(ref why)) if why == unknown_message)
             && matches!(&events[..], [(2, first_event, first), (3, second_event, second), (1, parent_event, parent)]
                 if first_event == "tenancy.oversight.read" && first["row_count"] == 1
                 && second_event == "tenancy.oversight.read" && second["row_count"] == 1

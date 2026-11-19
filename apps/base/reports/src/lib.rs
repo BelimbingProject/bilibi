@@ -513,10 +513,24 @@ impl Reports {
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
         Self::check_draft_shape(draft)?;
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let tx = client.transaction().await.map_err(Error::from)?;
-        self.check_draft_catalog(Some(&tx), scope, draft).await?;
-        tx.commit().await.map_err(Error::from)?;
-        Ok(())
+        let transaction_timeout = std::time::Duration::from_secs(60);
+        let result = async {
+            let tx = tokio::time::timeout(transaction_timeout, client.transaction())
+                .await
+                .map_err(|_| Error::Internal)?
+                .map_err(Error::from)?;
+            self.check_draft_catalog(Some(&tx), scope, draft).await?;
+            tokio::time::timeout(transaction_timeout, tx.commit())
+                .await
+                .map_err(|_| Error::Internal)?
+                .map_err(Error::from)?;
+            Ok(())
+        }
+        .await;
+        if matches!(result, Err(ReportError::Database(_))) {
+            drop(bilibi_database::Connection::take(client));
+        }
+        result
     }
     async fn check_draft(
         &self,
@@ -526,6 +540,19 @@ impl Reports {
     ) -> Outcome<()> {
         Self::check_draft_shape(draft)?;
         self.check_draft_catalog(tx, scope, draft).await
+    }
+
+    async fn check_mutation_draft(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        let result = self.check_draft(Some(tx.sql()), scope, draft).await;
+        if draft.definition.oversight && matches!(result, Err(ReportError::Database(_))) {
+            tx.poison();
+        }
+        result
     }
 
     fn check_draft_shape(draft: &Draft) -> Outcome<()> {
@@ -1359,7 +1386,7 @@ impl Reports {
         bilibi_authz::authorize_key(tx.sql(), scope, AUTHOR)
             .await
             .map_err(denied)?;
-        self.check_draft(Some(tx.sql()), scope, draft).await?;
+        self.check_mutation_draft(tx, scope, draft).await?;
         let (tenant, owner) = (scope.tenant(), scope.user());
         let draft = draft.clone();
         Ok(tx
@@ -1405,7 +1432,7 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let before = self.owned(tx, scope, id, version, AUTHOR).await?;
-        self.check_draft(Some(tx.sql()), scope, draft).await?;
+        self.check_mutation_draft(tx, scope, draft).await?;
         let (tenant, draft) = (scope.tenant(), draft.clone());
         let updated = tx
             .mutate(move |sql| {
