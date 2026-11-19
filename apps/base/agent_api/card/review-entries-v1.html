@@ -333,10 +333,6 @@ function outcomeOperations(rows) {
     return operation;
   });
 }
-function discardPlans() {
-  for(const batch of state.plans)delete batch.plan.operations;
-  state.plans=[];
-}
 function clearedFields(row) {
   const names=[];
   function collect(schema,value,path) {
@@ -692,7 +688,7 @@ async function update() {
         for(const [path,messages]of Object.entries(row.fields))if(messages.some(m=>/restricted/i.test(m))){row.restricted??=new Set();row.restricted.add(path);}
         if(!result.valid)refused++;
       }
-      if(plan.valid)plans.push({plan:clone(plan),rows:group});
+      if(plan.valid)plans.push({operations,rows:group});
       checked=Math.min(offset+limit,rows.length);$('progress').value=checked;$('progress-label').textContent='Checked '+checked+' / '+rows.length;
     }
     if(stopped) {
@@ -737,13 +733,13 @@ async function approve(stepUpCode) {
     for(;state.next<state.plans.length;state.next++) {
       const batch=state.plans[state.next];
       status('Saving batch '+(state.next+1)+' / '+state.plans.length+' on '+state.data.instance.label+'…');
-      const args={operations:batch.plan.operations};
+      const args={operations:batch.operations};
       if(stepUpCode)args.step_up_code=stepUpCode;stepUpCode=undefined;
       let answer;
       if(!await waitUntilRequest(state.nextToolAt,0,0))return;
       reserveRequest();
       try {answer=await tool('commit',args);}catch(error){
-        state.uncertain=true;for(const row of batch.rows)row.state='uncertain';scrubRows(state.rows);discardPlans();
+        state.uncertain=true;for(const row of batch.rows)row.state='uncertain';scrubRows(state.rows);state.plans=[];
         status('The host did not confirm whether this batch was saved. Ask your assistant to read the records before trying again.','warning');
         context('Commit outcome uncertain on '+state.data.instance.label+'. Read records before proposing another write.',{rows:contextRows(batch.rows,positions),summary:reviewSummary()});
         await outcome('uncertain',{final_operations:finalOperations,reason:'The host did not confirm the commit outcome.'});
@@ -752,26 +748,26 @@ async function approve(stepUpCode) {
       if(answer.failed) {
         if(answer.body.error==='step_up_required') {showStepup(answer.body);status('Your current 2FA code is needed to continue.','warning');return;}
         for(const result of answer.body.results||[])if(result.valid===false){const row=batch.rows[result.index];if(row)row.error=result.error;}
-        scrubRows(state.rows);discardPlans();status('Stopped: '+errorText(answer.body)+'. Update the remaining review before approving again.','danger');
+        scrubRows(state.rows);state.plans=[];status('Stopped: '+errorText(answer.body)+'. Update the remaining review before approving again.','danger');
         context('Review stopped on '+state.data.instance.label+'. Earlier saved batches remain saved.',{rows:contextRows(batch.rows,positions),summary:reviewSummary()});
         await outcome('refused',{final_operations:finalOperations,reason:errorText(answer.body),refusal:answer.body});return;
       }
       if(answer.body.instance)banner(answer.body.instance);
       for(const [index,row]of batch.rows.entries()) {row.state='done';row.result=unwrap(answer.body.results?.[index]?.result)||answer.body.results?.[index];row.preview=null;}
-      scrubRows(batch.rows);delete batch.plan.operations;
+      scrubRows(batch.rows);batch.operations=[];
       savedThisRun+=batch.rows.length;$('progress').value=savedThisRun;
       $('progress-label').textContent=savedThisRun+' / '+total+' saved';
       context('Saved '+batch.rows.length+' entries on '+state.data.instance.label+'. Batch '+(state.next+1)+' of '+state.plans.length+'.',{rows:contextRows(batch.rows,positions)});
       renderEditor();renderReviews();
     }
-    discardPlans();const saved=state.rows.filter(row=>row.state==='done').length;status(saved+' '+(saved===1?'entry':'entries')+' saved on '+state.data.instance.label+'.','success');
+    state.plans=[];const saved=state.rows.filter(row=>row.state==='done').length;status(saved+' '+(saved===1?'entry':'entries')+' saved on '+state.data.instance.label+'.','success');
     context('Review complete on '+state.data.instance.label+'.',{summary:reviewSummary()});
     await outcome('saved',{final_operations:finalOperations,results:state.rows.map(row=>row.result)});
   }finally{busy(false);renderEditor();renderReviews();}
 }
 async function cancel() {
   if(state.busy)return;
-  state.cancelled=true;state.revision++;scrubRows(state.rows);discardPlans();$('stepup').hidden=true;$('stepup').replaceChildren();
+  state.cancelled=true;state.revision++;scrubRows(state.rows);state.plans=[];$('stepup').hidden=true;$('stepup').replaceChildren();
   for(const row of state.rows)if(row.state==='draft')row.state='cancelled';
   status('Review cancelled. '+state.rows.filter(r=>r.state==='done').length+' entries were already saved.');
   context('Review cancelled on '+(state.data?.instance.label||'Bilibi')+'. No further entries will be committed.',{summary:reviewSummary()});renderEditor();

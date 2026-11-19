@@ -252,7 +252,7 @@ Check the review door against a running instance with a disposable database and 
 
 ### Field controls from schemas
 
-The shared editor reads the operation's own input schema, including nested objects and arrays. String, boolean, enum, date, email, integer and number fields get typed controls. Untouched optional blank fields are omitted; directly cleared plain strings retain their explicit empty value, typed controls are omitted when cleared, and nullable fields can explicitly send null. Exact decimal money stays text so its scale is preserved. String fields marked `writeOnly: true` use masked password controls and are removed from persisted browser reviews and direct dry-run response inputs; owners still redact their previews and results.
+The shared editor reads the operation's own input schema, including nested objects and arrays. String, boolean, enum, date, email, integer and number fields get typed controls. Untouched optional blank fields are omitted; directly cleared plain strings retain their explicit empty value, typed controls are omitted when cleared, and nullable fields can explicitly send null. Exact decimal money stays text so its scale is preserved. The person enters strings marked `writeOnly: true` in masked controls. Review openers, persisted browser reviews and dry-run response inputs omit those fields. Approval uses the exact input submitted from the card for the dry run, including on a 2FA retry. Owners still redact their previews and results.
 
 Owners may add these annotations to scalar schemas; boot validates their shape and they confer no authority:
 

@@ -358,9 +358,7 @@ impl bilibi_notifications::TodoSource for Reviews {
     }
 }
 
-fn persisted_review(card: &Value, operations: &Value) -> (Value, Value) {
-    let mut card = card.clone();
-    let mut operations = operations.clone();
+fn redact_review(card: &mut Value, operations: &mut Value) {
     let descriptions = card["descriptions"].clone();
     let default_description = card["operation"].clone();
     if let Some(items) = operations.as_array_mut() {
@@ -381,7 +379,6 @@ fn persisted_review(card: &Value, operations: &Value) -> (Value, Value) {
             crate::schema::scrub_write_only(&description["input"], &mut operation["input"]);
         }
     }
-    (card, operations)
 }
 
 pub(crate) fn input_schema() -> Value {
@@ -549,13 +546,19 @@ pub(crate) async fn open(
     }
     let mut descriptions = Vec::new();
     {
-        let client = session
-            .db
-            .get()
-            .await
-            .map_err(bilibi_database::Error::from)?;
+        let client = crate::Pooled {
+            db: session.db,
+            connection: tokio::sync::OnceCell::new(),
+        };
         for op in &operations {
-            let description = match registry.describe(&**client, session.scope, &op.key).await {
+            let description = match registry
+                .describe(
+                    crate::OperationClient::sql_client(&client).await?,
+                    session.scope,
+                    &op.key,
+                )
+                .await
+            {
                 Err(Error::UnknownOperation) => {
                     return Err(crate::invalid(
                         &format!("operations[{}].key", descriptions.len() + 1),
@@ -579,7 +582,9 @@ pub(crate) async fn open(
                     ),
                 ));
             }
-            if description["safe_write"] != true {
+            let crate::Handler::SafeWrite(owner) =
+                registry.operations[op.key.as_str()].definition.handler
+            else {
                 return Err(crate::invalid(
                     &format!("operations[{}].key", descriptions.len() + 1),
                     format!(
@@ -587,7 +592,10 @@ pub(crate) async fn open(
                         op.key
                     ),
                 ));
-            }
+            };
+            owner
+                .check_review_draft(&client, session.scope, &op.input)
+                .await?;
             descriptions.push(description);
         }
     }
@@ -595,7 +603,7 @@ pub(crate) async fn open(
         .iter().map(|method| json!({"id":method.id,"label":method.label,"length":method.code_length,"numeric":method.numeric})).collect();
     // Drafts may be invalid: editing and the ordinary plan tool supply field
     // validation. Never echo drafts or 2FA codes in model context or write here.
-    let operations_json = serde_json::to_value(&operations)
+    let mut operations_json = serde_json::to_value(&operations)
         .map_err(|_| Error::Backend(bilibi_database::Error::Internal))?;
     let mut card = json!({"key":operations[0].key,"entries":operations.iter().map(|op|&op.input).collect::<Vec<_>>(),"operation":descriptions[0],
         "operations":if linked {Some(&operations)} else {None},"descriptions":descriptions,"linked":linked,
@@ -612,10 +620,10 @@ pub(crate) async fn open(
         "{origin}/ai/reviews/{}",
         card["review_id"].as_str().unwrap_or_default()
     ));
-    let (stored_card, stored_operations) = persisted_review(&card, &operations_json);
+    redact_review(&mut card, &mut operations_json);
     session
         .reviews
-        .create(session.scope, &review_id, &stored_card, &stored_operations)
+        .create(session.scope, &review_id, &card, &operations_json)
         .await?;
     Ok(card)
 }

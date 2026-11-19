@@ -13,7 +13,11 @@ use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, Target};
 use bilibi_step_up::StepUp;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
-use std::sync::{Arc, OnceLock};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+};
 
 struct Core {
     settings: Arc<Settings>,
@@ -172,14 +176,25 @@ enum Change {
 }
 
 impl Change {
+    fn check_supported(&self, field: &Field) -> bilibi_agent_api::Result<()> {
+        if matches!(self, Self::Set) && field.definition.encrypted {
+            return Err(bilibi_agent_api::invalid(
+                "key",
+                "Ask an operator to set this encrypted value in System Settings (/system/settings).",
+            ));
+        }
+        Ok(())
+    }
+
     async fn review(
         &self,
         client: &dyn bilibi_tenancy::ReadClient,
         scope: &Scope,
+        field: &Field,
         input: &Value,
-    ) -> bilibi_agent_api::Result<Value> {
-        let field = field(input["key"].as_str().unwrap_or_default())?;
-        authorize_field(client, scope, &field).await?;
+    ) -> bilibi_agent_api::Result<(Value, Option<Value>)> {
+        authorize_field(client, scope, field).await?;
+        self.check_supported(field)?;
         let core = core()?;
         let mut current = core
             .settings
@@ -193,7 +208,7 @@ impl Change {
                     field.definition,
                 )
                 .map_err(|message| bilibi_agent_api::invalid("value", message))?;
-                let changes = field.definition.encrypted || current.value != value;
+                let changes = !current.overridden || current.value != value;
                 ("set", value, "tenant", changes)
             }
             Self::Restore => {
@@ -217,7 +232,7 @@ impl Change {
         } else {
             format!("No change to {}", field.editor.label)
         };
-        Ok(json!({
+        let review = json!({
             "action": action,
             "key": field.key,
             "module": field.module,
@@ -229,7 +244,9 @@ impl Change {
             "source_after": next_source,
             "will_change": changes,
             "summary": summary,
-        }))
+        });
+        let value_to_set = (matches!(self, Self::Set) && changes).then_some(next);
+        Ok((review, value_to_set))
     }
 
     async fn protect(&self, scope: &Scope, field: &Field) -> bilibi_agent_api::Result<()> {
@@ -257,6 +274,27 @@ impl Change {
 }
 
 impl WriteHandler for Change {
+    fn check_review_draft<'a>(
+        &'a self,
+        client: &'a dyn bilibi_tenancy::ProofClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> Pin<Box<dyn Future<Output = bilibi_agent_api::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            if matches!(self, Self::Restore) {
+                return Ok(());
+            }
+            match field(input["key"].as_str().unwrap_or_default()) {
+                Ok(field) if field.definition.encrypted => {
+                    authorize_field(client, scope, &field).await?;
+                    self.check_supported(&field)
+                }
+                Ok(_) | Err(AgentError::NotFound) => Ok(()),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
     fn owner(&self) -> &'static str {
         "base/settings_editor"
     }
@@ -267,7 +305,11 @@ impl WriteHandler for Change {
         scope: &'a Scope,
         input: &'a Value,
     ) -> OperationFuture<'a> {
-        Box::pin(async move { Ok(Output::from(self.review(client, scope, input).await?)) })
+        Box::pin(async move {
+            let field = field(input["key"].as_str().unwrap_or_default())?;
+            let (review, _) = self.review(client, scope, &field, input).await?;
+            Ok(Output::from(review))
+        })
     }
 
     fn commit<'a>(
@@ -277,22 +319,14 @@ impl WriteHandler for Change {
         input: &'a Value,
     ) -> OperationFuture<'a> {
         Box::pin(async move {
+            authorize_proof(tx.sql(), scope, TENANT_MANAGE).await?;
             let field = field(input["key"].as_str().unwrap_or_default())?;
-            let result = self.review(tx.sql(), scope, input).await?;
+            let (review, value_to_set) = self.review(tx.sql(), scope, &field, input).await?;
             self.protect(scope, &field).await?;
             let core = core()?;
             match self {
                 Self::Set => {
-                    let value = form::cast(
-                        input["value"].as_str().unwrap_or_default(),
-                        field.definition,
-                    )
-                    .map_err(|message| bilibi_agent_api::invalid("value", message))?;
-                    let current = core
-                        .settings
-                        .get(tx.sql(), scope, Target::Tenant, field.key)
-                        .await?;
-                    if field.definition.encrypted || current.value != value {
+                    if let Some(value) = value_to_set {
                         core.settings
                             .put(tx, scope, Target::Tenant, field.key, value)
                             .await?;
@@ -304,7 +338,7 @@ impl WriteHandler for Change {
                         .await?;
                 }
             }
-            Ok(Output::from(result))
+            Ok(Output::from(review))
         })
     }
 }
@@ -341,9 +375,9 @@ static RESTORE: Change = Change::Restore;
 inventory::submit! { Contribution::new(DEFINITIONS, "base/settings_editor", Provenance { module: "base/settings_editor", source: file!(), line: line!() }, &Definitions {
     operations: &[
         Operation { key:"base.settings_editor.tenant.list", title:"List tenant settings", summary:"List settings their modules let tenant administrators manage, with the effective value and whether it comes from this tenant, the installation or the declared default. Secret values are never returned.", keywords:&["settings","configuration","customisation","tenant","inherited","default"], capability:TENANT_VIEW, input:empty_input, output:list_output, handler:Handler::Read(&LIST), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.settings_editor.tenant.set", title:"Set a tenant setting", summary:"Review and set one explicitly delegated setting for this tenant. The definition validates its type and bounds; a secret is redacted and always asks for 2FA.", keywords:&["settings","configuration","customisation","tenant","set","secret"], capability:TENANT_MANAGE, input:set_input, output:change_output, handler:Handler::SafeWrite(&SET), channels:Channels::Every, step_up:&[TENANT_SECRET_CHANGE] },
+        Operation { key:"base.settings_editor.tenant.set", title:"Set a tenant setting", summary:"Review and set one explicitly delegated non-secret setting for this tenant. Ask an operator to enter encrypted values in System Settings.", keywords:&["settings","configuration","customisation","tenant","set","secret"], capability:TENANT_MANAGE, input:set_input, output:change_output, handler:Handler::SafeWrite(&SET), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.settings_editor.tenant.restore", title:"Restore an inherited tenant setting", summary:"Review and remove this tenant's override of one explicitly delegated setting, so it follows the installation value or declared default again. Secret values are never returned.", keywords:&["settings","configuration","customisation","tenant","restore","inherit","default"], capability:TENANT_MANAGE, input:key_input, output:change_output, handler:Handler::SafeWrite(&RESTORE), channels:Channels::Every, step_up:&[TENANT_SECRET_CHANGE] },
     ],
     guides: &[Guide { key:"base.settings_editor", title:"Tenant settings", summary:"Read, set and restore settings their modules delegate to tenant administrators.", keywords:&["settings","configuration","customisation","tenant","inherit","restore","secret"], capability:TENANT_VIEW,
-        body:"Use base.settings_editor.tenant.list first. It returns only settings their owning modules explicitly delegated and this person may manage. `source` is tenant, global or default; `set_for_tenant` says whether restoring will remove a tenant override. Secret values are always null and only `secret_is_set` is shown. To change a setting, plan base.settings_editor.tenant.set with its exact key and a string value: true or false for yes/no, a decimal for a number, JSON for an object or list, and plain text for text. Show the returned before/after source and value, then wait for approval. Secret values remain redacted and the commit asks the account holder for a fresh 2FA code. To follow later installation changes again, plan base.settings_editor.tenant.restore; it removes only this tenant's override. Never invent a key or a tenant ID: the credential supplies the tenant and the list supplies the keys." }],
+        body:"Use base.settings_editor.tenant.list first. It returns only settings their owning modules explicitly delegated and this person may manage. `source` is tenant, global or default; `set_for_tenant` says whether restoring will remove a tenant override. Secret values are always null and only `secret_is_set` is shown. Ask an operator to set encrypted values in System Settings (/system/settings). For other settings, plan base.settings_editor.tenant.set with its exact key and a string value: true or false for yes/no, a decimal for a number, JSON for an object or list, and plain text for text. Show the returned before/after source and value, then wait for approval. In the review card the person enters the value before running the dry run. To follow later installation changes again, plan base.settings_editor.tenant.restore; it removes only this tenant's override and asks for 2FA for encrypted settings. Never invent a key or a tenant ID: the credential supplies the tenant and the list supplies the keys." }],
 }) }

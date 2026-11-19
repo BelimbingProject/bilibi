@@ -2,8 +2,9 @@
 //! It proves explicit delegation, source reporting, reviewed set/restore,
 //! secret redaction, mutation audit and isolation from a second tenant.
 use bilibi_agent_api::{
+    mcp::{self, Outcome, Session},
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
-    Registry,
+    Registry, Reviews,
 };
 use bilibi_authz::{grants::Grants, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_base::settings::{
@@ -110,8 +111,33 @@ fn prove_masked(value: &Value) -> Result<(), Box<dyn std::error::Error>> {
         .as_array()
         .and_then(|settings| settings.iter().find(|setting| setting["key"] == SECRET))
         .ok_or("delegated secret missing from list")?;
-    if secret["value"] != Value::Null || secret["secret"] != true {
+    if secret.get("value") != Some(&Value::Null)
+        || secret["secret"] != true
+        || secret["secret_is_set"] != true
+    {
         return Err("delegated secret was not masked".into());
+    }
+    Ok(())
+}
+
+fn prove_secret_refusal(
+    response: &Value,
+    fields: &Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let text = response.to_string();
+    if text.contains(SUBMITTED_SECRET)
+        || text.contains(SECRET_TEXT)
+        || !fields["key"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .as_str()
+                    .is_some_and(|message| message.contains("/system/settings"))
+            })
+        })
+    {
+        return Err(
+            "encrypted Set must refuse the value and direct the person to System Settings".into(),
+        );
     }
     Ok(())
 }
@@ -154,10 +180,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let secret_operations = [setting(SECRET, SUBMITTED_SECRET)];
     let secret_preview = plans.preview(&admin_browser, &secret_operations).await?;
-    if secret_preview.to_string().contains(SUBMITTED_SECRET) {
-        return Err("dry-run response reflected a write-only secret".into());
+    if secret_preview["valid"] != false {
+        return Err("dry run accepted an encrypted Set".into());
     }
-    println!("secret set review is redacted: {secret_preview}");
+    prove_secret_refusal(
+        &secret_preview,
+        &secret_preview["results"][0]["error"]["fields"],
+    )?;
+    match plans
+        .commit(&admin, &admin_browser, &secret_operations)
+        .await
+    {
+        Err(bilibi_agent_api::Error::PlanRejected(results)) => {
+            prove_secret_refusal(&results, &results[0]["error"]["fields"])?;
+        }
+        _ => return Err("commit did not refuse the encrypted Set during validation".into()),
+    }
+    let reviews = app.services.get::<Reviews>("base/agent_api.reviews")?;
+    let step_up = app
+        .services
+        .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
+    for arguments in [
+        json!({"key":secret_operations[0].key,"entries":[secret_operations[0].input]}),
+        json!({"operations":secret_operations}),
+    ] {
+        let message = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"review_entries","arguments":arguments}});
+        let Outcome::Reply(reply) = mcp::dispatch(
+            &registry,
+            &plans,
+            Some(Session {
+                db: &db,
+                scope: &admin,
+                authority: &admin_browser,
+                step_up: &step_up,
+                reviews: &reviews,
+            }),
+            &message,
+        )
+        .await
+        else {
+            return Err("review opener returned no tool reply".into());
+        };
+        if reply["result"]["isError"] != true {
+            return Err("review opener accepted an encrypted Set".into());
+        }
+        prove_secret_refusal(&reply, &reply["result"]["structuredContent"]["fields"])?;
+    }
+    println!("encrypted Set is refused without reflecting its value");
+
+    let matching_default = [setting(PLAIN, "inherited")];
+    let preview = plans.preview(&admin_browser, &matching_default).await?;
+    let change = &preview["results"][0]["preview"]["result"];
+    if preview["valid"] != true
+        || change["source_before"] != "default"
+        || change["source_after"] != "tenant"
+        || change["will_change"] != true
+    {
+        return Err("setting the inherited value must preview a new override".into());
+    }
+    plans
+        .commit(&admin, &admin_browser, &matching_default)
+        .await?;
+    {
+        let mut client = db.get().await?;
+        let listed = list(&registry, &mut client, &admin).await?;
+        let plain = listed["result"]["settings"]
+            .as_array()
+            .and_then(|settings| settings.iter().find(|setting| setting["key"] == PLAIN))
+            .ok_or("delegated plain setting missing from list")?;
+        if plain["value"] != "inherited"
+            || plain["source"] != "tenant"
+            || plain["set_for_tenant"] != true
+        {
+            return Err("setting the inherited value must persist a tenant override".into());
+        }
+    }
 
     let operations = [setting(PLAIN, "tenant-one")];
     let preview = plans.preview(&admin_browser, &operations).await?;

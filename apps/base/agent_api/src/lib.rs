@@ -206,6 +206,15 @@ pub trait ReadHandler: Send + Sync {
 /// them, enforce owner field policy, and record every mutation through the
 /// supplied transaction. Never open or commit a separate transaction.
 pub trait WriteHandler: Send + Sync {
+    fn check_review_draft<'a>(
+        &'a self,
+        _client: &'a dyn bilibi_tenancy::ProofClient,
+        _scope: &'a Scope,
+        _input: &'a Value,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Declare only an actual newly inserted record, never an update or lookup.
     fn creates(&self) -> Option<CreatedRecord> {
         None
