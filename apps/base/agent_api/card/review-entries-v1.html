@@ -125,6 +125,7 @@ const internalFields=new Set(['id','version','address_version','create_anyway','
 const hasValue=value=>value!==undefined&&value!==null&&value!==''&&(!Array.isArray(value)||value.length>0)&&(typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>0);
 function shownFields(schema,value={},row,path=[]) {
   return fields(schema).filter(([key])=>{
+    if(!path.length&&!choiceAvailable(schema,value,key))return false;
     const childPath=[...path,key],error=row.fields[childPath.join('.')];
     if(error?.length)return true;
     if(internalFields.has(key))return false;
@@ -253,7 +254,30 @@ function invalidate() {
   status('Draft changed. Update the review before approving.');buttons();
 }
 function schemaFor(row) {return row.operation?.input||state.data.operation.input;}
-function newRow(input={}) {return {input:clone(input),edited:new Set(),unresolved:new Map(),state:'draft',fields:{},preview:null,error:null};}
+function choiceAvailable(schema,input,field) {
+  const key=schema.properties[field]?.['x-bilibi-review-requires-choice'];
+  return !key||schema.properties[key]?.enum?.includes(input[key])===true;
+}
+function editedInput(schema,input,changes) {
+  const next={...input,...changes};
+  for(const [field,definition] of Object.entries(schema.properties||{})) {
+    const key=definition['x-bilibi-review-requires-choice'];
+    if(!key)continue;
+    if(!choiceAvailable(schema,next,field)) {
+      if(hasValue(next[key])||changes[field]!==undefined)throw new Error('Choose an available '+label(key)+' before entering '+label(field)+'.');
+      delete next[field];
+    } else if(next[key]!==input[key]&&!Object.hasOwn(changes,field))delete next[field];
+  }
+  return next;
+}
+function newRow(input={},operation=state.data.operation) {
+  if(operation.key==='base.settings_editor.tenant.set'&&
+      (!Array.isArray(operation.input.properties.key.enum)||
+       operation.input.properties.value['x-bilibi-review-requires-choice']!=='key')) {
+    throw new Error('Reopen this review to load the available setting keys.');
+  }
+  return {input:clone(editedInput(operation.input,{},input)),edited:new Set(),unresolved:new Map(),state:'draft',fields:{},preview:null,error:null};
+}
 function banner(instance) {
   state.data.instance=clone(instance);
   $('instance').textContent=instance.label;$('role').textContent=instance.role;$('origin').textContent=instance.origin;$('notice').textContent=instance.notice;
@@ -264,7 +288,8 @@ async function opened(answer) {
   let data=answer?.structuredContent;
   if(data===undefined) {const text=answer?.content?.find(c=>c.type==='text');data=text?JSON.parse(text.text):{};}
   if(answer?.isError||!data.operation)throw new Error(data.error||'Bilibi could not open this review.');
-  state.data=data;state.rows=data.operations?data.operations.map((op,index)=>({...newRow(op.input),key:op.key,operation:data.descriptions[index]})):data.entries.map(newRow);delete state.data.entries;delete state.data.operations;state.renderedRows=Math.min(RENDER_STEP,state.rows.length);applyHost({});state.fields=fields(data.operation.input);
+  const rows=data.operations?data.operations.map((op,index)=>({...newRow(op.input,data.descriptions[index]),key:op.key,operation:data.descriptions[index]})):data.entries.map(input=>newRow(input,data.operation));
+  delete data.entries;delete data.operations;state.data=data;state.rows=rows;state.renderedRows=Math.min(RENDER_STEP,state.rows.length);applyHost({});state.fields=fields(data.operation.input);
   banner(data.instance);
   $('title').textContent=data.linked?'Review linked steps':data.operation.title;
   $('row-actions').hidden=!!data.linked;
@@ -309,7 +334,8 @@ function plannedInput(row) {
       if(!Object.hasOwn(value,key))continue;
       const childPath=[...path,key];
       const optional=!required.includes(key);
-      if(optional&&(restricted(value[key])||row.restricted?.has(childPath.join('.'))))delete value[key];
+      if(!choiceAvailable(schema,value,key))delete value[key];
+      else if(optional&&(restricted(value[key])||row.restricted?.has(childPath.join('.'))))delete value[key];
       else if(value[key]===''&&optional&&(!clearableString(child)||!edited(row,childPath)))delete value[key];
       else prune(child,value[key],childPath);
     }
@@ -350,6 +376,8 @@ function clearedFields(row) {
 }
 function control(row,schema,path,required=false,position={}) {
   const key=path.join('.');
+  const root=schemaFor(row);
+  if(path.length===1&&!choiceAvailable(root,row.input,key))return null;
   const stored=getValue(row.input,path);
   const value=stored===undefined&&path.length===1&&path[0]==='code'?previewFor(row).changes?.find(change=>change.field==='code')?.to:stored;
   const linkedKind=value?.$ref?state.rows[Number(value.$ref.split('.')[0])-1]?.operation?.creates?.kind:null;
@@ -358,7 +386,15 @@ function control(row,schema,path,required=false,position={}) {
   const box=el('div',{class:'field'});
   const locked=restricted(value)||row.state==='done'||row.state==='excluded'||row.restricted?.has(key);
   const errors=el('span',{class:'error',id:id+'-error',text:(row.fields[key]||[]).join(' ')});
-  function change(value) {setValue(row.input,path,value);row.edited.add(pathKey(path));invalidate();}
+  function change(value) {
+    if(path.length===1) {
+      try{row.input=editedInput(root,row.input,{[key]:value});}
+      catch(error){renderEditor();status(error.message,'warning');return;}
+      if(value===undefined)delete row.input[key];
+    } else setValue(row.input,path,value);
+    row.edited.add(pathKey(path));invalidate();
+    if(path.length===1&&Object.values(root.properties).some(field=>field['x-bilibi-review-requires-choice']===key))renderEditor();
+  }
   box.append(el('label',{for:id,text:name+(required?' *':'')}));
   if(locked&&row.state!=='done'&&row.state!=='excluded') {box.append(el('span',{text:'Restricted'}));return box;}
   if(value && typeof value==='object' && Object.hasOwn(value,'$ref')) {
@@ -397,7 +433,12 @@ function control(row,schema,path,required=false,position={}) {
     input=el('select',{},[el('option',{value:'',text:'Choose…'}),...(schema.nullable?[el('option',{value:'null',text:'No value (null)'})]:[]),...values.map((v,index)=>el('option',{value:String(index),text:v.label}))]);
     input.value=value===null?'null':String(values.findIndex(v=>v.value===value));
     if(!values.some(v=>v.value===value)&&value!==undefined&&value!==null)input.append(el('option',{value:'current',text:'Current: '+String(value)})),input.value='current';
-    input.addEventListener('change',()=>{if(input.value!=='current')change(input.value==='null'?null:input.value===''?(required?'':undefined):values[Number(input.value)].value);});
+    input.addEventListener('change',()=>{
+      if(input.value==='current')return;
+      if(input.value==='null')change(null);
+      else if(input.value==='')change(required?'':undefined);
+      else if(values[Number(input.value)])change(values[Number(input.value)].value);
+    });
   } else {
     let type=schema.writeOnly?'password':schema.type==='integer'||schema.type==='number'?'number':schema.format==='date'?'date':schema.format==='email'?'email':'text';
     input=el('input',{type,value:value===undefined||value===null?'':String(value),min:schema.minimum,max:schema.maximum,step:schema.type==='integer'?'1':'any',maxlength:schema.maxLength,inputmode:schema['x-bilibi-money']?'decimal':undefined,placeholder:schema.format==='date-time'?'YYYY-MM-DDThh:mm:ss+00:00':undefined});
@@ -479,7 +520,7 @@ function renderEditor() {
     shownFields(schemaFor(row),row.input,row).forEach(([key,schema],col)=>form.append(control(row,schema,[key],state.data.operation.input.required?.includes(key),{row:0,col})));
     $('editor').replaceChildren(form);
   } else {
-    state.fields=fields(state.data.operation.input).filter(([key])=>state.rows.some(row=>shownFields(schemaFor(row),row.input,row).some(([shown])=>shown===key)));
+    state.fields=fields(state.data.operation.input).filter(([key,schema])=>schema['x-bilibi-review-requires-choice']||state.rows.some(row=>shownFields(schemaFor(row),row.input,row).some(([shown])=>shown===key)));
     const table=el('table',{'aria-label':'Draft entries'});
     table.append(el('thead',{},[el('tr',{},[el('th',{scope:'col',text:'Entry'}),...state.fields.map(([key,schema])=>el('th',{scope:'col',text:schema.title||label(key)})),el('th',{scope:'col',text:'Review'})])]));
     const body=el('tbody');
@@ -537,18 +578,24 @@ function paste(event,startRow,startCol) {
       if(row&&(row.state!=='draft'||restricted(row.input[key])||row.restricted?.has(key)))throw new Error('The pasted block includes an entry or field that cannot be edited.');
       if(['object','array'].includes(schema.type))throw new Error('Paste into simple columns; edit grouped fields in their controls.');
     }
-    matrix.forEach((cells,r)=>{
-      while(state.rows.length<=startRow+r)state.rows.push(newRow());
-      cells.forEach((value,c)=>{
+    const drafts=matrix.map((cells,r)=>{
+      const changes=Object.fromEntries(cells.map((value,c)=>{
         const [key,schema]=state.fields[startCol+c];
         let parsed=value;
         if(value==='')parsed=undefined;
         else if(['integer','number'].includes(schema.type)&&Number.isFinite(Number(value)))parsed=Number(value);
         else if(schema.type==='boolean')parsed=/^(true|yes|1)$/i.test(value)?true:/^(false|no|0)$/i.test(value)?false:value;
-        const row=state.rows[startRow+r],path=[key];
-        setValue(row.input,path,parsed);
-        if(value==='')row.edited.delete(pathKey(path));else row.edited.add(pathKey(path));
-      });
+        return [key,parsed];
+      }));
+      return {changes,input:editedInput(state.data.operation.input,state.rows[startRow+r]?.input||{},changes)};
+    });
+    drafts.forEach(({changes,input},r)=>{
+      while(state.rows.length<=startRow+r)state.rows.push(newRow());
+      const row=state.rows[startRow+r];row.input=input;
+      for(const [key,value] of Object.entries(changes)) {
+        const path=pathKey([key]);
+        if(value===undefined){delete row.input[key];row.edited.delete(path);}else row.edited.add(path);
+      }
     });invalidate();renderEditor();focusCell(startRow,startCol);status('Pasted '+matrix.length+' '+(matrix.length===1?'entry':'entries')+'. Update the review to check them.');
   }catch(error){status(error.message,'danger');}
 }

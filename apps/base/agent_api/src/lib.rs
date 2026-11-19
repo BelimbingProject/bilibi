@@ -208,9 +208,10 @@ pub trait ReadHandler: Send + Sync {
 pub trait WriteHandler: Send + Sync {
     fn check_review_draft<'a>(
         &'a self,
-        _client: &'a dyn bilibi_tenancy::ProofClient,
+        _client: &'a dyn OperationClient,
         _scope: &'a Scope,
         _input: &'a Value,
+        _review_schema: &'a mut Value,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }

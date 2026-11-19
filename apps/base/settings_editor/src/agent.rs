@@ -276,9 +276,10 @@ impl Change {
 impl WriteHandler for Change {
     fn check_review_draft<'a>(
         &'a self,
-        client: &'a dyn bilibi_tenancy::ProofClient,
+        client: &'a dyn OperationClient,
         scope: &'a Scope,
         input: &'a Value,
+        review_schema: &'a mut Value,
     ) -> Pin<Box<dyn Future<Output = bilibi_agent_api::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let mut schema = match self {
@@ -295,15 +296,38 @@ impl WriteHandler for Change {
             if matches!(self, Self::Restore) {
                 return Ok(());
             }
-            match field(input["key"].as_str().unwrap_or_default()) {
-                Ok(field) if field.definition.encrypted => {
-                    authorize_field(client, scope, &field).await?;
-                    self.check_supported(&field)
-                }
-                Ok(_) => Ok(()),
-                Err(AgentError::NotFound) if input.get("value").is_none() => Ok(()),
-                Err(error) => Err(error),
+            let key = input["key"].as_str().unwrap_or_default();
+            if !key.is_empty() || input.get("value").is_some() {
+                let field = field(key)?;
+                authorize_field(client, scope, &field).await?;
+                self.check_supported(&field)?;
             }
+            if review_schema["properties"]["key"]["enum"].is_null() {
+                let capabilities =
+                    effective_capabilities(client.sql_client().await?, scope).await?;
+                let keys: Vec<_> = core()?
+                    .settings
+                    .definitions()
+                    .tenant_admin()
+                    .filter(|owned| {
+                        matches!(owned.setting, Setting::Definition(definition)
+                            if !definition.encrypted && definition.editor.as_ref().is_some_and(|editor|
+                                editor.capability.is_none_or(|capability| capabilities.contains(capability))))
+                    })
+                    .map(|owned| owned.pattern)
+                    .collect();
+                review_schema["properties"]["key"]["enum"] = json!(keys);
+                review_schema["properties"]["value"]["x-bilibi-review-requires-choice"] =
+                    json!("key");
+            }
+            if !key.is_empty()
+                && !review_schema["properties"]["key"]["enum"]
+                    .as_array()
+                    .is_some_and(|keys| keys.iter().any(|choice| choice == key))
+            {
+                return Err(AgentError::NotFound);
+            }
+            Ok(())
         })
     }
 

@@ -545,13 +545,14 @@ pub(crate) async fn open(
         return Err(crate::invalid("operations", format!("Linked steps must fit one plan, at most {} operations. Cross-plan references are refused.", review_settings.max_operations)));
     }
     let mut descriptions = Vec::new();
+    let mut review_schemas = std::collections::BTreeMap::<&str, Value>::new();
     {
         let client = crate::Pooled {
             db: session.db,
             connection: tokio::sync::OnceCell::new(),
         };
         for op in &operations {
-            let description = match registry
+            let mut description = match registry
                 .describe(
                     crate::OperationClient::sql_client(&client).await?,
                     session.scope,
@@ -593,9 +594,13 @@ pub(crate) async fn open(
                     ),
                 ));
             };
+            let review_schema = review_schemas
+                .entry(&op.key)
+                .or_insert_with(|| description["input"].clone());
             owner
-                .check_review_draft(&client, session.scope, &op.input)
+                .check_review_draft(&client, session.scope, &op.input, review_schema)
                 .await?;
+            description["input"] = review_schema.clone();
             descriptions.push(description);
         }
     }

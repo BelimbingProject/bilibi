@@ -1,6 +1,7 @@
 //! Real tenant-setting operation walkthrough on a disposable migrated database.
 //! It proves explicit delegation, source reporting, reviewed set/restore,
 //! secret redaction, mutation audit and isolation from a second tenant.
+use bilibi_agent::{AgentAccess, Decision, CLIENT_ID};
 use bilibi_agent_api::{
     mcp::{self, Outcome, Session},
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
@@ -15,6 +16,10 @@ use bilibi_database::{pool, Error};
 use bilibi_module_registry::{Contribution, Layer, Module, Provenance};
 use bilibi_tenancy::ProofFuture;
 use serde_json::{json, Value};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 use tokio_postgres::Transaction;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
@@ -200,6 +205,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let step_up = app
         .services
         .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
+    let access = app.services.get::<AgentAccess>("core/agent.grants")?;
+    let device = access
+        .start_device(CLIENT_ID, "Tenant settings walkthrough")
+        .await?;
+    access
+        .decide(&admin, &device.user_code, Decision::Approve)
+        .await?;
+    let connection = access
+        .list_connections(&admin)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("device approval did not create a connection")?;
+    let claims = access.review_claims(&admin, connection.id).await?;
+    let agent = access
+        .seal(&claims, "tenant-settings-walkthrough", None)
+        .await?;
+    let plain_draft = setting(PLAIN, "tenant-one");
+    let message = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"review_entries","arguments":{"key":plain_draft.key,"entries":[plain_draft.input]}
+    }});
+    let Outcome::Reply(reply) = mcp::dispatch(
+        &registry,
+        &plans,
+        Some(Session {
+            db: &db,
+            scope: &agent,
+            authority: &admin_browser,
+            step_up: &step_up,
+            reviews: &reviews,
+        }),
+        &message,
+    )
+    .await
+    else {
+        return Err("plain settings draft did not return a tool reply".into());
+    };
+    if reply["result"]["isError"] != false {
+        return Err("plain settings draft did not open".into());
+    }
+    let card = &reply["result"]["structuredContent"];
+    let keys = card["operation"]["input"]["properties"]["key"]["enum"]
+        .as_array()
+        .ok_or("review did not provide verified Set choices")?;
+    if !keys.iter().any(|key| key == PLAIN) || keys.iter().any(|key| key == SECRET) {
+        return Err(
+            "Set choices must include the plain fixture setting and exclude the encrypted one"
+                .into(),
+        );
+    }
+    let mut browser_probe = Command::new("node")
+        .args([
+            "--input-type=module",
+            "-e",
+            include_str!("tenant-settings-review-probe.mjs"),
+        ])
+        .stdin(Stdio::piped())
+        .spawn()?;
+    browser_probe
+        .stdin
+        .take()
+        .ok_or("missing review probe input")?
+        .write_all(&serde_json::to_vec(&json!({
+            "card":card, "html":registry.apps["review_entries"].definition.html,
+            "plain":PLAIN, "secret":SECRET, "value":SUBMITTED_SECRET
+        }))?)?;
+    if !browser_probe.wait()?.success() {
+        return Err("the review card admitted an encrypted settings edit".into());
+    }
     let mut carried_value = restore(SECRET);
     carried_value.input["value"] = json!(SUBMITTED_SECRET);
     let mut unknown_set_field = setting(PLAIN, "tenant-one");
