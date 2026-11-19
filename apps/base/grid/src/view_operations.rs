@@ -78,6 +78,8 @@ async fn authorized_page(
     let metadata = metadata(page).map_err(|_| Error::Internal)?;
     if let Some(metadata) = metadata {
         bilibi_authz::authorize_proof(client, scope, metadata.capability).await?;
+        let views = BOUND.get().cloned().ok_or(Error::Internal)?;
+        (metadata.columns)(client.sql_client().await?, scope, views).await?;
     }
     Ok(metadata)
 }
@@ -214,7 +216,7 @@ impl WriteHandler for Write {
                     bilibi_authz::authorize_proof(client, scope, SHARE_VIEWS).await?;
                     let audience = audience(&input["audience"])?;
                     let view = view(input)?;
-                    let params = params(input)?;
+                    params(input)?;
                     let metadata = save_page(client, scope, &view.table).await?;
                     let summary = format!(
                         "Share list view “{}” on {}",
@@ -247,7 +249,6 @@ impl WriteHandler for Write {
                     return Ok(json!({
                         "summary": summary,
                         "audience_preview": audience.review(json!(columns)),
-                        "params": params,
                         "input": input,
                     })
                     .into());
