@@ -297,7 +297,15 @@
     if (message.type === 'page') {
       // Consent replies can hand the browser back to an OAuth client.
       if (message.redirect) { location.assign(message.redirect); return; }
-      if (message.html !== lastHTML) {
+      const saved = document.getElementById('app-shell')?.bilibiSavedPreferences;
+      let released = false;
+      if (entry && saved) for (const [name, beforeSave] of saved) {
+        if (entry.id > beforeSave) {
+          saved.delete(name);
+          released = true;
+        }
+      }
+      if (released || message.html !== lastHTML) {
         patch(document.getElementById('app'), message.html, options);
         lastHTML = message.html;
       }
@@ -408,12 +416,7 @@
       attributes(from, to, context, (name) => name.startsWith('data-'));
       return from;
     }
-    // A shell preference saved after this snapshot was rendered wins until a
-    // later snapshot acknowledges it; then subsequent server changes follow.
     const saved = from.bilibiSavedPreferences;
-    if (saved) for (const [name, value] of saved) {
-      if (to.getAttribute(name) === value) saved.delete(name);
-    }
     attributes(from, to, context, (name) => !saved?.has(name) && !pinned(from, name, context));
     // An iframe's document belongs to the frame; its fallback children never render.
     if (from.tagName !== 'IFRAME') children(from, to, context);
@@ -809,6 +812,10 @@
   // named. A frame cannot wait for a remount, since the remounted state holds
   // no entries; sendBytes reports whether it went.
   window.BilibiLive = {
+    preferenceSaved(shell, name) {
+      (shell.bilibiSavedPreferences ||= new Map()).set(name, sequence);
+      if (!document.hidden) reportVisibility();
+    },
     send(intent, meta = {}) {
       if (!['upload', 'upload_cancel'].includes(intent.type)) return;
       enqueue(intent, {source: meta.source, onReply: typeof meta.onReply === 'function' ? meta.onReply : null});
