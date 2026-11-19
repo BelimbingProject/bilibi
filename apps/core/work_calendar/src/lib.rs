@@ -144,9 +144,19 @@ impl WorkCalendars {
         company: OrganisationId,
     ) -> Result<Option<String>> {
         let client = self.db.get().await?;
+        self.default_for_on(&**client, scope, company).await
+    }
+    /// [`WorkCalendars::default_for`] on the caller's connection or
+    /// transaction, for a caller that already holds one.
+    pub async fn default_for_on(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        company: OrganisationId,
+    ) -> Result<Option<String>> {
         let value = self
             .settings
-            .get(&**client, scope, Target::Company(company), DEFAULT)
+            .get(client, scope, Target::Company(company), DEFAULT)
             .await?
             .value;
         let Some(code) = value.as_str() else {

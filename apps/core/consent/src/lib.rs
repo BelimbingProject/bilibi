@@ -377,17 +377,28 @@ impl Consent {
     /// `core.consent.view`.
     pub async fn preview(&self, scope: &Scope, question: &Question) -> WriteResult<Answer> {
         let client = self.db.get().await.map_err(Error::from)?;
-        let scope = self.fresh(&**client, scope).await?;
-        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
+        self.preview_on(&**client, scope, question).await
+    }
+    /// [`Consent::preview`] on the caller's connection or transaction, for a
+    /// caller that already holds one (a queue job deciding whether to send):
+    /// the same access rule and answer, logging nothing.
+    pub async fn preview_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        question: &Question,
+    ) -> WriteResult<Answer> {
+        let scope = self.fresh(client, scope).await?;
+        bilibi_authz::authorize_proof(client, &scope, VIEW).await?;
         let mut errors = Vec::new();
         let question = Self::question(question, &mut errors);
-        self.purpose(&**client, &scope, &question.purpose, &mut errors)
+        self.purpose(client, &scope, &question.purpose, &mut errors)
             .await?;
         invalid(errors)?;
-        bilibi_company::authorize_work_target(&**client, &scope, question.company_id, VIEW).await?;
-        let default = self.default(&**client, &scope).await?;
+        bilibi_company::authorize_work_target(client, &scope, question.company_id, VIEW).await?;
+        let default = self.default(client, &scope).await?;
         let hashes = self
-            .address_hashes(&**client, &scope, &[&question.contact])
+            .address_hashes(client, &scope, &[&question.contact])
             .await?;
         // The answer reads no key.
         let batch = Batch {
@@ -399,7 +410,7 @@ impl Consent {
                 key: String::new(),
             }],
         };
-        let answers = store::answers(&**client, &scope, &batch, default, &hashes).await?;
+        let answers = store::answers(client, &scope, &batch, default, &hashes).await?;
         Ok(answers.into_iter().next().ok_or(Error::Internal)?)
     }
 
@@ -630,10 +641,23 @@ impl Consent {
         filter: &SuppressionFilter,
     ) -> Result<SuppressionPage> {
         let client = self.db.get().await?;
-        let scope = self.fresh(&**client, scope).await?;
-        bilibi_authz::authorize_proof(&**client, &scope, VIEW).await?;
-        bilibi_company::authorize_work_target(&**client, &scope, company_id, VIEW).await?;
-        store::suppressions(&**client, &scope, company_id, filter).await
+        self.suppressions_on(&**client, scope, company_id, filter)
+            .await
+    }
+    /// [`Consent::suppressions`] on the caller's connection or transaction,
+    /// for a sender that checks them inside its dispatch transaction: the
+    /// same access rule (`core.consent.view`) and answer.
+    pub async fn suppressions_on(
+        &self,
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        scope: &Scope,
+        company_id: i64,
+        filter: &SuppressionFilter,
+    ) -> Result<SuppressionPage> {
+        let scope = self.fresh(client, scope).await?;
+        bilibi_authz::authorize_proof(client, &scope, VIEW).await?;
+        bilibi_company::authorize_work_target(client, &scope, company_id, VIEW).await?;
+        store::suppressions(client, &scope, company_id, filter).await
     }
 }
 
