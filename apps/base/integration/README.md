@@ -1,8 +1,8 @@
 # Integration exchange log and outgoing transport
 
-**Use it for:** every outgoing HTTP call, and the log of incoming and outgoing exchanges.
+**Use it for:** every outgoing HTTP call, the log of incoming and outgoing exchanges, and checking where a connector's own socket (a mail server, a phone system) may connect.
 
-**Not for:** an HTTP client crate (`reqwest`, `hyper`, `ureq`) of your own.
+**Not for:** an HTTP client crate (`reqwest`, `hyper`, `ureq`) of your own, or a connector socket opened to a configured host without `ConnectorPolicy`.
 
 `base/integration` records incoming and outgoing HTTP exchanges in one log,
 `base_integration_exchanges`, and is the only outgoing HTTP client. Domain
@@ -59,6 +59,34 @@ removed when the host changes, and the exchange row keeps the original URL.
 The `Location` target, including a signed download query, is not stored.
 
 For URLs supplied by an untrusted caller, use `Outgoing::public_https()`. It accepts HTTPS only, resolves the host once, refuses non-public addresses, pins the accepted addresses for the TLS connection and disables proxies and redirects. Public certificate roots still verify the original host. Set a short timeout and body limit for metadata documents; never fetch an untrusted URL with the ordinary redirecting client.
+
+## Connector sockets: `ConnectorPolicy`
+
+A connector that speaks its own protocol to a server a tenant configures (IMAP, SMTP, a phone system's manager interface) opens a TCP socket, not an HTTP call, so `public_https` cannot guard it. Without a check, a tenant administrator could point it at the loopback, the installation's private network or a cloud metadata address, and read from its health codes which internal addresses answer. `ConnectorPolicy` is the installation's check, applied when connecting, not only when saving, so a name cannot be re-pointed after it was accepted.
+
+```rust
+// On the connection you already hold (no second pooled connection).
+let policy = ConnectorPolicy::load(&settings, client).await?;
+// On the blocking thread that connects, right before connecting.
+let destination = policy.resolve(&host, port).map_err(|unusable| match unusable {
+    Unusable::Refused => Failure::DestinationRefused, // report DESTINATION_REFUSED
+    Unusable::Unresolved => Failure::Unreachable,
+})?;
+let tcp = destination.connect(timeout)?; // only the checked addresses
+```
+
+- `resolve` asks the system resolver once and checks **every** address the name gives; one refused address refuses the destination. `Destination` holds only checked addresses and has no name: `connect` tries them in order, and a library that dials by itself (an SMTP client) is given a checked address from `addresses()` as its server while TLS still verifies the configured name.
+- An address is admitted when it is public (the conservative global-unicast test `public_https` uses), when it is private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) and the operator turned on `integration.connector_private_networks`, or when an entry of `integration.connector_allowed_destinations` covers it.
+- Never admitted, whatever the operator lists: unspecified (`0.0.0.0/8`, `::`), multicast, broadcast, link-local (`169.254.0.0/16`, `fe80::/10`) and the cloud metadata addresses outside them (`fd00:ec2::254`, `100.100.100.200`, `192.0.0.192`). Loopback, shared (`100.64.0.0/10`), documentation, benchmarking and reserved ranges are refused unless an entry names them. An IPv4-mapped IPv6 address is judged as its IPv4 form; NAT64 and 6to4 forms are not public.
+- A connection kept open between uses (a phone system's event stream) asks `policy.admits(host, peer)` with a freshly loaded policy before each use, so a policy the operator tightened ends it.
+- A refusal is `Unusable::Refused`, which a connector reports as the one code `DESTINATION_REFUSED` (`destination_refused`) for every reason, before anything is sent, so it says nothing about whether something answers there. `Unusable::Unresolved` is a name with no address; nothing was checked or contacted.
+
+| Global operator setting (System Settings, group Connectors) | Default | Meaning |
+| --- | --- | --- |
+| `integration.connector_private_networks` | `false` | `true` admits the private ranges above. |
+| `integration.connector_allowed_destinations` | `[]` | At most 200 entries: `host` or `host:port` (a name: every address it resolves to is admitted), `a.b.c.d[/len][:port]` or `[v6[/len]][:port]` (an address or block). No port means any port. Anything else is refused when saved. |
+
+Proof: `examples/connector-destinations-walkthrough.rs` (in `scripts/run-walkthroughs.sh`) sets both settings as the operator on a disposable database and checks each class above, IPv4-mapped forms, names that resolve to local addresses, a public address admitted, an allowed name, address and block connecting to a local server on the checked address only, ports, a kept connection re-checked with `admits`, and the refused setting values.
 
 ## Incoming calls
 
