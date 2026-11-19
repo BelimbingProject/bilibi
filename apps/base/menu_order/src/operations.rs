@@ -80,7 +80,7 @@ async fn preview_tree(
         .labels
         .labels(client.sql_client().await?, scope)
         .await?;
-    Ok(AudiencePreview::everyone().review(nodes(&tree, &labels)))
+    Ok(nodes(&tree, &labels))
 }
 
 enum Read {
@@ -171,7 +171,8 @@ impl WriteHandler for Write {
                 .map_err(found)?;
             let mut orders = service.orders(client, scope).await?;
             plan.propose(&mut orders);
-            let audience_preview = preview_tree(service, client, scope, tree, orders).await?;
+            let menu = preview_tree(service, client, scope, tree, orders).await?;
+            let audience_preview = AudiencePreview::everyone().review(menu);
             Ok(json!({"summary": if ids.is_some() { "Set the order of menu siblings" } else { "Restore the product order of menu siblings" }, "plan":plan.review(), "audience_preview":audience_preview}).into())
         })
     }
@@ -207,14 +208,7 @@ fn restore_schema() -> Value {
     json!({"type":"object","required":["parent","version"],"properties":{"parent":{"type":"string"},"version":{"type":"string","description":"Version token for this group from list."}}})
 }
 fn list_output() -> Value {
-    json!({"type":"array","description":"Visible sibling groups and their saved order."})
-}
-fn preview_output() -> Value {
-    json!({"type":"object","properties":{
-        "audience":{"type":"object","properties":{"everyone":{"type":"boolean"},"name":{"type":"string"}}},
-        "visible_to_current_reader":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"children":{"type":"array"}}}},
-        "notice":{"type":"string"},
-    }})
+    json!({"type":"array","description":"Sibling groups or the reader’s visible menu tree."})
 }
 fn output() -> Value {
     json!({"type":"object","description":"The before and after order."})
@@ -222,7 +216,7 @@ fn output() -> Value {
 inventory::submit! { Contribution::new(DEFINITIONS, "base/menu_order.agent", Provenance { module:"base/menu_order", source:file!(), line:line!() }, &Definitions {
     operations: &[
         Operation { key:"base.menu_order.list", title:"List menu sibling groups", summary:"Read product and saved order with version tokens.", keywords:&["menu","order"], capability:VIEW, input:empty_schema, output:list_output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.menu_order.preview", title:"Preview my menu", summary:"Preview the menu visible to the current reader in the tenant's order.", keywords:&["menu","preview"], capability:VIEW, input:preview_schema, output:preview_output, handler:Handler::Read(&Read::Preview), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.menu_order.preview", title:"Preview my menu", summary:"Preview the menu visible to the current reader in the tenant's order.", keywords:&["menu","preview"], capability:VIEW, input:preview_schema, output:list_output, handler:Handler::Read(&Read::Preview), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.set", title:"Order menu siblings", summary:"Set a tenant's order for siblings by stable menu item ID.", keywords:&["menu","order"], capability:MANAGE, input:set_schema, output, handler:Handler::SafeWrite(&Write::Set), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.restore", title:"Restore product menu order", summary:"Restore product order for the visible siblings in one group.", keywords:&["menu","restore"], capability:MANAGE, input:restore_schema, output, handler:Handler::SafeWrite(&Write::Restore), channels:Channels::Every, step_up:&[] },
     ],

@@ -1088,11 +1088,13 @@ bilibi_grid::contribute_page_metadata!(
 );
 
 fn agent_price_columns<'a>(
-    _client: &'a tokio_postgres::Client,
-    _scope: &'a Scope,
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
     views: Arc<bilibi_grid::PageViews>,
 ) -> bilibi_grid::PageColumnsFuture<'a> {
     Box::pin(async move {
+        let company = scope.current_company().ok_or(Error::Forbidden)?;
+        bilibi_company::authorize_work_target(client, scope, company.get(), crate::VIEW).await?;
         PageColumns::mount(views, "product-prices", cols(true)).map_err(|_| Error::Internal)
     })
 }

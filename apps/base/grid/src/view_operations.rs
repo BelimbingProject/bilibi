@@ -9,7 +9,7 @@ use bilibi_agent_api::{
 };
 use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance, RegistryError};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{Channel, Scope};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -78,6 +78,21 @@ async fn authorized_page(
     let metadata = metadata(page).map_err(|_| Error::Internal)?;
     if let Some(metadata) = metadata {
         bilibi_authz::authorize_proof(client, scope, metadata.capability).await?;
+    }
+    Ok(metadata)
+}
+
+async fn save_page(
+    client: &dyn OperationClient,
+    scope: &Scope,
+    page: &str,
+) -> bilibi_agent_api::Result<Option<&'static PageMetadata>> {
+    let metadata = authorized_page(client, scope, page).await?;
+    if metadata.is_none() && scope.channel() != Channel::Web {
+        return Err(bilibi_agent_api::invalid(
+            "page",
+            "choose a registered list page",
+        ));
     }
     Ok(metadata)
 }
@@ -200,7 +215,7 @@ impl WriteHandler for Write {
                     let audience = audience(&input["audience"])?;
                     let view = view(input)?;
                     let params = params(input)?;
-                    let metadata = authorized_page(client, scope, &view.table).await?;
+                    let metadata = save_page(client, scope, &view.table).await?;
                     let summary = format!(
                         "Share list view “{}” on {}",
                         input["name"].as_str().unwrap_or_default(),
@@ -259,7 +274,7 @@ impl WriteHandler for Write {
             let output = match self {
                 Self::Save => {
                     let arrangement = view(input)?;
-                    let metadata = authorized_page(tx.sql(), scope, &arrangement.table).await?;
+                    let metadata = save_page(tx.sql(), scope, &arrangement.table).await?;
                     let id = views
                         .save_shared(
                             tx,
@@ -330,5 +345,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/grid.views", Provenanc
         Operation { key: "base.grid.view.fields", title: "List view fields and filters", summary: "Find permitted Grid columns and the page's query filters.", keywords: &["list", "view", "fields", "filters"], capability: bilibi_agent_api::SIGNED_IN, input: fields_schema, output: fields_output, handler: Handler::Read(&Read::Fields), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.grid.view.save", title: "Share a list view", summary: "Save columns, filters and sort for everyone or roles. Readers retain their own access checks.", keywords: &["list", "view", "share"], capability: SHARE_VIEWS, input: save_schema, output: save_output, handler: Handler::SafeWrite(&Write::Save), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.grid.view.delete", title: "Delete a shared list view", summary: "Delete your own view, or another owner’s with sharing permission.", keywords: &["list", "view", "delete"], capability: bilibi_agent_api::SIGNED_IN, input: delete_schema, output, handler: Handler::SafeWrite(&Write::Delete), channels: Channels::Every, step_up: &[] },
-    ], guides: &[Guide { key:"base.grid.views", title:"Shared list views", summary:"Discover list fields and filters, share a view, and read it back.", keywords:&["grid","list","view","share"], capability:SHARE_VIEWS, body:"Use base.grid.view.fields with a page key to discover the page's columns and filter keys. Search and follow next_offset for walked columns. Use base.grid.view.list and base.grid.view.get to read views you can open. Save with base.grid.view.save: view and params are JSON strings, audience is everyone or role IDs. Review the named audience and columns as you see them; each recipient retains their own access, so their result can differ. For a registered page, the save result includes the saved view. Delete your own view with base.grid.view.delete, or another owner's if you have sharing permission." }],
+    ], guides: &[Guide { key:"base.grid.views", title:"Shared list views", summary:"Discover list fields and filters, share a view, and read it back.", keywords:&["grid","list","view","share"], capability:SHARE_VIEWS, body:"Use base.grid.view.fields with a page key to discover the page's columns and filter keys. Search and follow next_offset for walked columns. Use base.grid.view.list and base.grid.view.get to read views you can open. Save with base.grid.view.save using a registered page key. View and params are JSON strings, and audience is everyone or role IDs. Review the named audience and columns as you see them; each recipient retains their own access, so their result can differ. The save result includes the saved view. Delete your own view with base.grid.view.delete, or another owner's if you have sharing permission." }],
 }) }
