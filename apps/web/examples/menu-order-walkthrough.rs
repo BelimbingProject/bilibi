@@ -2,6 +2,7 @@
 use bilibi_agent_api::{
     page::PageContracts,
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
+    Error,
 };
 use bilibi_base::menu_order::{MenuOrder, MANAGE, SERVICE, VIEW};
 use bilibi_database::pool;
@@ -110,7 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_str()
         .ok_or("last id")?
         .to_owned();
-    assert_eq!(group(&list, "admin")["version"], "0:0");
+    assert!(group(&list, "admin")["item_ids"].is_null());
+    let version = &group(&list, "admin")["version"];
     let proposed = contracts
         .read(
             &admin,
@@ -130,16 +132,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let set = [op(
         "base.menu_order.set",
-        json!({"parent":"admin","item_ids":[last],"version":"0:0"}),
+        json!({"parent":"admin","item_ids":[last],"version":version}),
     )];
     let duplicate = [op(
         "base.menu_order.set",
-        json!({"parent":"admin","item_ids":[last,last],"version":"0:0"}),
+        json!({"parent":"admin","item_ids":[last,last],"version":version}),
     )];
     assert_eq!(plans.preview(&browser, &duplicate).await?["valid"], false);
     let wrong_parent = [op(
         "base.menu_order.set",
-        json!({"parent":"core","item_ids":[last],"version":"0:0"}),
+        json!({"parent":"core","item_ids":[last],"version":group(&list, "core")["version"]}),
     )];
     assert_eq!(
         plans.preview(&browser, &wrong_parent).await?["valid"],
@@ -222,20 +224,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hidden = "admin.system.installation";
     let visible = "admin.system.info";
     let replacement = "admin.system.localization";
+    let localization = "admin.system.localization.manage";
     let sql = db.get().await?;
     sql.execute(
         "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach)
          SELECT 1,2,capability,true,'all' FROM unnest($1::text[]) AS capability",
-        &[&&[
-            MANAGE,
-            "admin.system.info.view",
-            "admin.system.localization.manage",
-        ][..]],
+        &[&&[MANAGE, "admin.system.info.view"][..]],
     )
     .await?;
     sql.execute(
-        "INSERT INTO base_menu_order(tenant_id,parent,item_ids) VALUES(1,$1,ARRAY[$2,$3])",
-        &[&parent, &hidden, &visible],
+        "INSERT INTO base_menu_order(tenant_id,parent,item_ids) VALUES(1,$1,ARRAY[$2,$3,$4])",
+        &[&parent, &hidden, &visible, &replacement],
     )
     .await?;
     drop(sql);
@@ -262,6 +261,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plans.preview(&reader_browser, &invalid_set).await?["valid"],
         false
     );
+    let reviewed_writes = [
+        [op(
+            "base.menu_order.set",
+            json!({"parent":parent,"item_ids":[visible],"version":version}),
+        )],
+        [op(
+            "base.menu_order.restore",
+            json!({"parent":parent,"version":version}),
+        )],
+    ];
+    for write in &reviewed_writes {
+        assert_eq!(plans.preview(&reader_browser, write).await?["valid"], true);
+    }
+    db.get().await?.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,2,$1,true,'all')",
+        &[&localization],
+    ).await?;
+    for write in &reviewed_writes {
+        let review = plans.preview(&reader_browser, write).await?;
+        assert_eq!(review["results"][0]["error"]["reason"], "record_changed");
+        match plans.commit(&reader, &reader_browser, write).await {
+            Err(Error::PlanRejected(results)) => {
+                assert_eq!(results[0]["error"]["reason"], "record_changed");
+            }
+            result => panic!("visibility change must invalidate the approved write: {result:?}"),
+        }
+    }
+    let list = contracts
+        .read(&reader, "base.menu_order.list", &json!({}))
+        .await?;
+    assert_eq!(
+        group(&list, parent)["item_ids"],
+        json!([visible, replacement])
+    );
+    let version = group(&list, parent)["version"].as_str().ok_or("version")?;
     let set = [op(
         "base.menu_order.set",
         json!({"parent":parent,"item_ids":[replacement],"version":version}),
@@ -307,13 +341,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for unsupported in ["portal", visible, hidden] {
         let restore = [op(
             "base.menu_order.restore",
-            json!({"parent":unsupported,"version":"0:0"}),
+            json!({"parent":unsupported,"version":version}),
         )];
+        let review = plans.preview(&reader_browser, &restore).await?;
         assert_eq!(
-            plans.preview(&reader_browser, &restore).await?["valid"],
-            false
+            review["results"][0]["error"]["fields"]["item_ids"],
+            json!(["Unknown staff menu parent."])
         );
     }
+    println!("PASS: permission changes invalidate reviewed menu writes");
     println!("PASS: visible sibling validation, hidden override preservation and unsupported restore parents");
     println!("PASS: reviewed set and restore, product fallback, removed ID, stale write, audit, reader permissions and second-tenant isolation");
     Ok(())

@@ -197,7 +197,7 @@ async fn context<'a>(
         Err(Error::Forbidden) => false,
         Err(error) => return Err(error),
     };
-    let mut tree = crate::page_search::visible_menu(app, &capabilities, owner);
+    let mut tree = app.menu.visible_staff_tree(&capabilities, owner);
     app.services
         .get::<bilibi_base::menu_order::MenuOrder>(bilibi_base::menu_order::SERVICE)?
         .orders(&**client, scope)

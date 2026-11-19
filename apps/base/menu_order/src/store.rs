@@ -3,6 +3,7 @@ use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_menu::{Menu, Node};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Orders, keyed by parent ID; the empty string names the staff root.
@@ -38,8 +39,8 @@ impl Orders {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Stored {
-    pub id: i64,
-    pub version: i64,
+    id: i64,
+    version: i64,
     items: Vec<String>,
 }
 impl Stored {
@@ -58,6 +59,25 @@ fn visible_items<'a>(items: &'a [String], siblings: &BTreeSet<&str>) -> Vec<&'a 
 
 pub(crate) fn sibling_ids(nodes: &[Node]) -> BTreeSet<&'static str> {
     nodes.iter().map(|node| node.item.item.id).collect()
+}
+
+pub(crate) fn version_token(
+    parent: &str,
+    siblings: &BTreeSet<&str>,
+    saved: Option<&Stored>,
+) -> String {
+    let (id, version) = saved.map_or((0, 0), |row| (row.id, row.version));
+    let mut hash = Sha256::new();
+    hash.update(id.to_be_bytes());
+    hash.update(version.to_be_bytes());
+    for part in std::iter::once(parent).chain(siblings.iter().copied()) {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) fn sibling_groups(tree: &[Node]) -> BTreeMap<&'static str, &[Node]> {
@@ -151,13 +171,7 @@ impl MenuOrder {
             Err(Error::Forbidden) => false,
             Err(error) => return Err(error),
         };
-        Ok(self.menu.visible_tree(&|key| {
-            if key == bilibi_menu::OWNER_STANDING {
-                owner
-            } else {
-                capabilities.contains(key)
-            }
-        }))
+        Ok(self.menu.visible_staff_tree(&capabilities, owner))
     }
     pub(crate) fn validate(
         tree: &[Node],
@@ -186,7 +200,7 @@ impl MenuOrder {
         scope: &Scope,
         parent: &str,
         items: Option<&[String]>,
-        version: (i64, i64),
+        version: &str,
         lock: bool,
     ) -> Result<Plan> {
         bilibi_authz::authorize_proof(sql, scope, crate::MANAGE).await?;
@@ -210,7 +224,7 @@ impl MenuOrder {
                 version: row.get(1),
                 items: row.get(2),
             });
-        if before.as_ref().map_or((0, 0), |s| (s.id, s.version)) != version {
+        if version_token(parent, &siblings, before.as_ref()) != version {
             return Err(Error::Conflict);
         }
         let mut proposed = items.unwrap_or_default().iter().cloned();
@@ -243,7 +257,7 @@ impl MenuOrder {
         scope: &Scope,
         parent: &str,
         items: Option<&[String]>,
-        version: (i64, i64),
+        version: &str,
     ) -> Result<Plan> {
         let plan = self
             .plan(tx.sql(), scope, parent, items, version, true)

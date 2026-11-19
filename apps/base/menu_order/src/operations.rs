@@ -1,5 +1,5 @@
 use crate::{
-    store::{sibling_groups, sibling_ids, MenuOrder},
+    store::{sibling_groups, sibling_ids, version_token, MenuOrder},
     MANAGE, VIEW,
 };
 use bilibi_agent_api::{
@@ -33,20 +33,11 @@ fn parent(input: &Value) -> bilibi_agent_api::Result<&str> {
         bilibi_agent_api::invalid("parent", "is required; use an empty string for the root")
     })
 }
-fn version(input: &Value) -> bilibi_agent_api::Result<(i64, i64)> {
-    let (id, revision) = input
+fn version(input: &Value) -> bilibi_agent_api::Result<&str> {
+    input
         .get("version")
         .and_then(Value::as_str)
-        .and_then(|s| s.split_once(':'))
-        .ok_or_else(|| {
-            bilibi_agent_api::invalid("version", "must be the identity:version token you read")
-        })?;
-    let id = id.parse::<i64>().map_err(|_| Error::Invalid)?;
-    let revision = revision.parse::<i64>().map_err(|_| Error::Invalid)?;
-    if !((id == 0 && revision == 0) || (id > 0 && revision > 0)) {
-        return Err(Error::Invalid.into());
-    }
-    Ok((id, revision))
+        .ok_or_else(|| bilibi_agent_api::invalid("version", "must be the version token you read"))
 }
 fn items(input: &Value) -> bilibi_agent_api::Result<Vec<String>> {
     let array = input
@@ -101,6 +92,7 @@ impl ReadHandler for Read {
                         .into_iter()
                         .map(|(parent, nodes)| {
                             let saved = stored.get(parent);
+                            let siblings = sibling_ids(nodes);
                             let product: Vec<_> = nodes
                                 .iter()
                                 .map(|n| json!({"id":n.item.item.id,"label":n.item.item.label}))
@@ -108,8 +100,8 @@ impl ReadHandler for Read {
                             json!({
                                 "parent": parent,
                                 "product": product,
-                                "item_ids": saved.map(|s| s.visible_items(&sibling_ids(nodes))),
-                                "version": saved.map_or_else(|| "0:0".to_owned(), |s| format!("{}:{}", s.id, s.version)),
+                                "item_ids": saved.map(|s| s.visible_items(&siblings)),
+                                "version": version_token(parent, &siblings, saved),
                             })
                         })
                         .collect();
@@ -191,10 +183,10 @@ fn preview_schema() -> Value {
     json!({"type":"object","properties":{"parent":{"type":"string","description":"Optional sibling parent; empty string means root. Supply with item_ids."},"item_ids":{"type":"array","items":{"type":"string"},"description":"Optional proposed order for this reader; supply with parent. An empty array previews product order."}}})
 }
 fn set_schema() -> Value {
-    json!({"type":"object","required":["parent","item_ids","version"],"properties":{"parent":{"type":"string","description":"Parent ID; empty string means the root."},"item_ids":{"type":"array","items":{"type":"string"},"description":"Sibling IDs in desired order. Unlisted items follow in product order."},"version":{"type":"string","description":"Identity:version from list."}}})
+    json!({"type":"object","required":["parent","item_ids","version"],"properties":{"parent":{"type":"string","description":"Parent ID; empty string means the root."},"item_ids":{"type":"array","items":{"type":"string"},"description":"Sibling IDs in desired order. Unlisted items follow in product order."},"version":{"type":"string","description":"Version token for this group from list."}}})
 }
 fn restore_schema() -> Value {
-    json!({"type":"object","required":["parent","version"],"properties":{"parent":{"type":"string"},"version":{"type":"string"}}})
+    json!({"type":"object","required":["parent","version"],"properties":{"parent":{"type":"string"},"version":{"type":"string","description":"Version token for this group from list."}}})
 }
 fn list_output() -> Value {
     json!({"type":"array","description":"Sibling groups or the reader’s visible menu tree."})
