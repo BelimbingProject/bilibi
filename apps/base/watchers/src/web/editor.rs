@@ -1184,7 +1184,7 @@ impl Editor {
             )?,
         )?);
         parts.push(Self::section(
-            "Then",
+            "Do",
             "watcher-draft-then",
             if trigger_chosen {
                 "What the watcher does to that record, in order."

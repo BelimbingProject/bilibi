@@ -129,10 +129,13 @@ pub(crate) type Problems = Vec<(String, String)>;
 
 impl Definition {
     pub(crate) fn to_json(&self) -> Value {
-        json!({
-            "if": if self.conditions.is_empty() { Value::Null } else { json!({"match": self.matching.key(), "conditions": self.conditions.iter().map(|c| json!({"field": c.field, "op": c.op.key(), "value": c.value})).collect::<Vec<_>>()}) },
+        let mut value = json!({
             "do": self.actions.iter().map(|a| json!({"operation": a.operation, "input": a.input})).collect::<Vec<_>>(),
-        })
+        });
+        if !self.conditions.is_empty() {
+            value["if"] = json!({"match": self.matching.key(), "conditions": self.conditions.iter().map(|c| json!({"field": c.field, "op": c.op.key(), "value": c.value})).collect::<Vec<_>>()});
+        }
+        value
     }
     /// Reads a stored or submitted definition; shape problems are listed by path.
     pub(crate) fn parse(value: &Value, problems: &mut Problems) -> Option<Self> {

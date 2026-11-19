@@ -1004,15 +1004,26 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
             "saving refuses supplied invalid action parameters",
         );
     }
-    let omitted = json!({"name": "Default action parameters", "watch": OPENED,
-        "do": [{"operation": "watcher_cases.cases.flag"}], "examples": [{"facts": "{}", "expect": "match"}]});
+    let omitted = json!({"name": "Every opened case", "watch": OPENED,
+        "do": [{"operation": "watcher_cases.cases.flag"}]});
+    let (every_watcher, every_version) = proof.draft(&one, omitted).await?;
     check(
         proof
-            .write(&agent, "base.watchers.draft", omitted)
+            .approve(&one, every_watcher, every_version)
             .await
             .is_ok(),
-        "omitted action parameters default to an empty object",
+        "a watcher with no if or examples is approved",
     );
+    let ordinary = proof.open(&one, 1, "Every event", "low", "1.00").await?;
+    proof.settled().await?;
+    check(
+        proof.case(ordinary).await?.2 == 1,
+        "a watcher without if acts on an ordinary event",
+    );
+    proof
+        .switch(&one, every_watcher, false)
+        .await
+        .map_err(|_| Error::Internal)?;
     let wrong = json!({"name": "Wrong example", "watch": OPENED, "if": {"conditions": [{"field": "amount", "op": "ge", "value": "10000"}]},
         "do": [{"operation": "watcher_cases.cases.flag", "input": json!({})}],
         "examples": [{"facts": json!({"amount": "5"}).to_string(), "expect": "match"}]});
@@ -1107,7 +1118,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     let (page_watcher, page_v1) = proof.draft(&one, from_page.clone()).await?;
     let mut next = from_page;
     next["watcher_id"] = json!(page_watcher);
-    next["conditions"] = json!([{"field": "priority", "op": "eq", "value": "urgent"}]);
+    next["if"]["conditions"] = json!([{"field": "priority", "op": "eq", "value": "urgent"}]);
     next["examples"] = json!([
         {"facts": json!({"priority": "urgent"}).to_string(), "expect": "match"},
         {"facts": json!({"priority": "normal"}).to_string(), "expect": "no_match"}

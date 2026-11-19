@@ -1,6 +1,6 @@
 //! This is the deliberately small
 //! input-schema dialect. Unknown keywords fail
-//! discovery; unknown input fields fail dispatch, including nested objects.
+//! discovery; unknown input fields fail dispatch unless explicitly permitted.
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
