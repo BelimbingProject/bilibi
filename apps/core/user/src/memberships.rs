@@ -91,7 +91,7 @@ async fn renewable_invitation(
     hash: &[u8],
 ) -> Result<Option<tokio_postgres::Row>> {
     Ok(client.query_opt(
-        "SELECT v.tenant_id,v.created_at,v.expires_at FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN tenants t ON t.id=v.tenant_id WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND v.created_at<=clock_timestamp()-interval '60 seconds' AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.status='active' AND t.deleted_at IS NULL",
+        "SELECT v.tenant_id,v.created_at,v.expires_at FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN tenants t ON t.id=v.tenant_id WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.status='active' AND t.deleted_at IS NULL",
         &[&hash],
     ).await?)
 }
@@ -189,7 +189,7 @@ impl UserService {
             .await?;
         let issued = tx.mutate(move |sql| Box::pin(async move {
             let row = sql.query_opt(
-                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND v.created_at<=clock_timestamp()-interval '60 seconds' AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name",
+                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name",
                 &[&tenant, &old_hash, &new_hash],
             ).await?;
             let Some(row) = row else { return Err(Error::Conflict) };

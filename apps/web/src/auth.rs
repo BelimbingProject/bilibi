@@ -987,7 +987,7 @@ async fn invitation_unavailable(
             "This invitation link is no longer available. Contact the person who invited you.",
             "/",
             "Go to sign in",
-            StatusCode::OK,
+            StatusCode::NOT_FOUND,
         )
         .await;
     }
