@@ -26,7 +26,7 @@ Authoritative contracts (point to them, do not copy them): `apps/base/module_reg
 - **Deep modules.** One small facade per module; the crate root exports the facade, its service ID and its public types, everything else is private (`mod`, not `pub mod`). Do not widen a surface to reach a helper. Narrow existing extra `pub mod`s when you touch them.
 - **Clean breaks, no shims.** When you rename, move or narrow something, move every caller in the same change (with companion PRs) instead of leaving aliases, re-exports, wrappers or deprecated copies of the old form. Record the old -> new mapping in the PR's upgrade notes for code outside the catalogue. This holds while breaking changes are cheap (Bilibi pre-1.0, few consumers); revisit when they become too costly.
 - **No production users yet (until 2027-01-01).** Never build data imports, backfills, conversion of existing rows, or compatibility tables, columns or code paths; replace or drop them in a new migration. Development and walkthrough databases are disposable. After 2027-01-01 this rule no longer applies: ask the owner whether to extend it before relying on it.
-- **Configurable.** A value an operator could reasonably set is a setting with an operator UI (`base/settings`, `base/settings_editor`), not a constant or an environment-only value. Secrets are encrypted, never shown back, never logged.
+- **Configurable.** A value an operator could reasonably set is a setting, not a constant or an environment-only value; its human interface follows [ADR 33](docs/architecture/decisions/33-pages-for-business-actions-and-customisations.md). Secrets are encrypted, never shown back, never logged.
 
 ## Modules and dependencies
 
