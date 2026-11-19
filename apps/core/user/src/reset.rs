@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use subtle::ConstantTimeEq;
 
 const RESET_LIFETIME: &str = "user.password_reset_minutes";
-pub(crate) const MANAGE_LIFETIME: &str = "admin.user.password_reset_lifetime.manage";
+pub(crate) const MANAGE_LIFETIME: &str = "admin.user.password-reset-lifetime.manage";
 const MIN_MINUTES: i64 = 15;
 const MAX_MINUTES: i64 = 10080;
 inventory::submit! { Contribution::new(DEFINITIONS, RESET_LIFETIME, Provenance { module: "core/user", source: file!(), line: line!() }, &Setting::Definition(Definition {
