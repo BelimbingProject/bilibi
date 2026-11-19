@@ -14,9 +14,9 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    params, Alert, BuiltinColumn, Card, Cell, ConfirmDialog, FlashMap, FlexRow, FlexTable, Header,
-    Html, IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind,
-    TableEmpty, NO_FLASH,
+    params, Alert, BuiltinColumn, Card, Cell, FlashMap, FlexRow, FlexTable, Header, Html,
+    IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind, TableEmpty,
+    NO_FLASH,
 };
 use serde_json::Value;
 use std::{
@@ -58,6 +58,16 @@ impl Item {
     fn action_key(&self) -> String {
         format!("{}@{}", self.key(), self.row.revision)
     }
+}
+#[derive(Template)]
+#[template(
+    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=item.section.detail, confirm=item.section.action, working="Working…", confirm_event=item.section.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
+    ext = "html"
+)]
+struct UndoDialog<'a> {
+    title: String,
+    item: &'a Item,
+    key: String,
 }
 #[derive(Template)]
 #[template(
@@ -126,12 +136,12 @@ impl Index {
             }
             "cancel_confirm" => self.confirm = None,
             event if event.starts_with("customisation.") => {
-                let Some(item) = self.confirm.take() else {
+                let Some(item) = self.confirm.take_if(|item| {
+                    event == item.section.event
+                        && value["key"].as_str() == Some(item.action_key().as_str())
+                }) else {
                     return Ok(());
                 };
-                if event != item.section.event {
-                    return Err(Error::Invalid);
-                }
                 let call = Call {
                     scope,
                     credential,
@@ -338,14 +348,10 @@ impl Index {
             ..Card::default()
         })?;
         let dialog = if let Some(item) = &self.confirm {
-            render(ConfirmDialog {
-                id: "customisations-confirm",
-                consequence: &format!("{}: {}?", item.section.action, item.row.description),
-                detail: item.section.detail,
-                confirm: item.section.action,
-                working: "Working…",
-                confirm_event: item.section.event,
-                cancel_event: "cancel_confirm",
+            render(UndoDialog {
+                title: format!("{}: {}?", item.section.action, item.row.description),
+                item,
+                key: item.action_key(),
             })?
         } else {
             Html::EMPTY

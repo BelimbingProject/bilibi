@@ -5,7 +5,7 @@ use bilibi_base::session::session_id;
 use bilibi_database::pool;
 use bilibi_tenancy::{Authentication, Scope};
 use bilibi_ui::page::{LiveInput, LiveRequest, PageRequest, PageService};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
@@ -21,6 +21,31 @@ fn request<'a>(
         credential,
         input,
     }
+}
+
+fn row_for<'a>(html: &'a str, label: &str) -> &'a str {
+    html.split("</tr>")
+        .filter_map(|part| part.rsplit_once("<tr"))
+        .map(|(_, row)| row)
+        .find(|row| row.contains(label))
+        .expect("rendered inventory row")
+}
+
+fn confirmation_event(html: &str, event: &str) -> Value {
+    let button = html
+        .split("<button")
+        .find(|button| button.starts_with(" id=\"customisations-confirm-confirm\""))
+        .and_then(|button| button.split_once('>').map(|(attrs, _)| attrs))
+        .expect("rendered confirm button");
+    assert!(button.contains(&format!("data-event=\"{event}\"")));
+    let key = button
+        .split_once("data-value-key=\"")
+        .expect("versioned confirmation key")
+        .1
+        .split('"')
+        .next()
+        .expect("confirmation key");
+    json!({"type":event, "key":key})
 }
 
 #[tokio::main]
@@ -84,6 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
     }
+    contracts.submit(
+        &label_call(&one, &token1, "base.labels.set"),
+        json!({"kind":"menu", "subject":"admin.labels", "label":"Second override", "version":"0:0"}),
+    ).await?;
     contracts.submit(&Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "create", contract: "base.custom_fields.define" }, json!({"record_type":"company", "key":"walkthrough_field", "label":"Tenant one field", "kind":"text"})).await?;
     let path = HashMap::new();
     let query = HashMap::new();
@@ -102,7 +131,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && a.contains("Tenant one field")
             && !a.contains("Tenant two word")
     );
-    assert!(a.contains("<time") && !a.contains("Unavailable"));
+    let attributed = row_for(&a, "Tenant one word");
+    assert!(attributed.contains("Alex Admin") && attributed.contains("<time"));
+    {
+        db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,4,'admin.audit.log.list',false)", &[]).await?;
+        let denied = pages.0.render(show(&one)).await?.html;
+        let restricted = row_for(&denied, "Tenant one word");
+        assert!(
+            restricted.contains("Restricted")
+                && !restricted.contains("Alex Admin")
+                && restricted.contains("<time")
+        );
+        db.get().await?.execute("DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=4 AND capability='admin.audit.log.list'", &[]).await?;
+    }
     assert!(b.contains("<time") && b.contains("Restricted"));
     assert!(
         b.contains("Tenant two word")
@@ -145,24 +186,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .html;
     assert!(refreshed.contains("customisations-table-suggest-actor"));
     let labels = contracts.read(&one, "base.labels.list", &json!({})).await?;
-    let label = labels["result"]
-        .as_array()
-        .ok_or("missing labels")?
-        .iter()
-        .find(|row| row["subject"] == "companies" && row["kind"] == "record")
-        .ok_or("missing company label")?;
-    contracts
-        .submit(
-            &Call {
-                scope: &one,
-                credential: &token1,
-                service: "base/labels.customisations",
-                event: "customisation.labels",
-                contract: "base.labels.clear",
-            },
-            json!({"kind":"record", "subject":"companies", "version":label["version"]}),
-        )
-        .await?;
+    let label_rows = labels["result"].as_array().ok_or("missing labels")?;
+    let mut shown = Vec::new();
+    for (subject, word) in [
+        ("companies", "Tenant one word"),
+        ("admin.labels", "Second override"),
+    ] {
+        let label = label_rows
+            .iter()
+            .find(|row| row["subject"] == subject)
+            .ok_or("missing label")?;
+        let token = label["version"].as_str().ok_or("missing label version")?;
+        let (id, revision) = token.split_once(':').ok_or("invalid label version")?;
+        let open = json!({"type":"request_undo","key":format!("label:{id}@{revision}")});
+        let dialog = live
+            .update(request(&one, &token1, LiveInput::Event(&open)))
+            .await?
+            .html;
+        assert!(dialog.contains(&format!("→ {word}?")));
+        shown.push(confirmation_event(&dialog, "customisation.labels"));
+    }
+    let stale = live
+        .update(request(&one, &token1, LiveInput::Event(&shown[0])))
+        .await?
+        .html;
+    assert!(stale.contains("Tenant one word") && stale.contains("Second override"));
+    let cleared = live
+        .update(request(&one, &token1, LiveInput::Event(&shown[1])))
+        .await?
+        .html;
+    assert!(!cleared.contains("Second override") && cleared.contains("Tenant one word"));
     let fields = contracts
         .read(&one, "base.custom_fields.list", &json!({}))
         .await?;
@@ -178,19 +231,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .html;
     assert!(confirmation.contains("Approved rules that use this field may stop running"));
-    let after = live
-        .update(request(
-            &one,
-            &token1,
-            LiveInput::Event(&json!({"type":"customisation.fields"})),
-        ))
+    let commit = confirmation_event(&confirmation, "customisation.fields");
+    contracts.submit(
+        &Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "save_field", contract: "base.custom_fields.update" },
+        json!({"record_type":"company","key":"walkthrough_field","label":"Renamed field","version":field["version"]}),
+    ).await?;
+    let rejected = live
+        .update(request(&one, &token1, LiveInput::Event(&commit)))
         .await?
         .html;
-    assert!(
-        !after.contains("Tenant one word")
-            && after.contains("Archived custom fields")
-            && after.contains("Tenant one field")
-    );
+    assert!(rejected.contains("the field changed; reload before saving"));
+    assert!(!rejected.contains("Archived custom fields") && rejected.contains("Renamed field"));
+    let fields = contracts
+        .read(&one, "base.custom_fields.list", &json!({}))
+        .await?;
+    let field = fields["result"]
+        .as_array()
+        .ok_or("missing fields")?
+        .iter()
+        .find(|row| row["key"] == "walkthrough_field")
+        .ok_or("missing field")?;
+    let archive = json!({"type":"request_undo","key":format!("custom_field:{}@{}", field["id"], field["version"])});
+    let confirmation = live
+        .update(request(&one, &token1, LiveInput::Event(&archive)))
+        .await?
+        .html;
+    let commit = confirmation_event(&confirmation, "customisation.fields");
+    let after = live
+        .update(request(&one, &token1, LiveInput::Event(&commit)))
+        .await?
+        .html;
+    assert!(after.contains("Archived custom fields") && after.contains("Renamed field"));
     let other = pages.0.render(show(&two)).await?.html;
     assert!(other.contains("Tenant two word"));
     {
@@ -223,7 +294,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .update(request(
             &one,
             &token1,
-            LiveInput::Event(&json!({"type":"customisation.fields_restore"})),
+            LiveInput::Event(&confirmation_event(
+                &confirmation,
+                "customisation.fields_restore",
+            )),
         ))
         .await?
         .html;
@@ -231,7 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         refused.contains("archive one first") && !refused.contains("customisations-confirm-title")
     );
     println!(
-        "PASS: tenant isolation, owner undo operations, section denials, picker refresh, rule consequences and owner refusals"
+        "PASS: tenant isolation, owner undo operations, section denials, picker refresh, revision-bound confirmations, actor disclosure and owner refusals"
     );
     Ok(())
 }
