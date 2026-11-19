@@ -200,32 +200,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let step_up = app
         .services
         .get::<bilibi_step_up::StepUp>(bilibi_step_up::SERVICE)?;
-    for arguments in [
-        json!({"key":secret_operations[0].key,"entries":[secret_operations[0].input]}),
-        json!({"operations":secret_operations}),
+    let mut carried_value = restore(SECRET);
+    carried_value.input["value"] = json!(SUBMITTED_SECRET);
+    let mut unknown_set_field = setting(PLAIN, "tenant-one");
+    unknown_set_field.input["extra"] = json!(SUBMITTED_SECRET);
+    for (operation, error_field) in [
+        (&secret_operations[0], "key"),
+        (&carried_value, "input"),
+        (&unknown_set_field, "input"),
     ] {
-        let message = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        for arguments in [
+            json!({"key":operation.key,"entries":[operation.input]}),
+            json!({"operations":[operation]}),
+        ] {
+            let message = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"review_entries","arguments":arguments}});
-        let Outcome::Reply(reply) = mcp::dispatch(
-            &registry,
-            &plans,
-            Some(Session {
-                db: &db,
-                scope: &admin,
-                authority: &admin_browser,
-                step_up: &step_up,
-                reviews: &reviews,
-            }),
-            &message,
-        )
-        .await
-        else {
-            return Err("review opener returned no tool reply".into());
-        };
-        if reply["result"]["isError"] != true {
-            return Err("review opener accepted an encrypted Set".into());
+            let Outcome::Reply(reply) = mcp::dispatch(
+                &registry,
+                &plans,
+                Some(Session {
+                    db: &db,
+                    scope: &admin,
+                    authority: &admin_browser,
+                    step_up: &step_up,
+                    reviews: &reviews,
+                }),
+                &message,
+            )
+            .await
+            else {
+                return Err("review opener returned no tool reply".into());
+            };
+            if reply["result"]["isError"] != true {
+                return Err("review opener accepted an unsafe settings draft".into());
+            }
+            let body = &reply["result"]["structuredContent"];
+            if error_field == "key" {
+                prove_secret_refusal(&reply, &body["fields"])?;
+            } else if body["error"] != "invalid_input"
+                || !body["fields"][error_field].is_array()
+                || reply.to_string().contains(SUBMITTED_SECRET)
+            {
+                return Err(
+                    "review opener must reject undeclared fields without reflecting their values"
+                        .into(),
+                );
+            }
         }
-        prove_secret_refusal(&reply, &reply["result"]["structuredContent"]["fields"])?;
     }
     println!("encrypted Set is refused without reflecting its value");
 

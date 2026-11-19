@@ -281,6 +281,17 @@ impl WriteHandler for Change {
         input: &'a Value,
     ) -> Pin<Box<dyn Future<Output = bilibi_agent_api::Result<()>> + Send + 'a>> {
         Box::pin(async move {
+            let mut schema = match self {
+                Self::Set => set_input(),
+                Self::Restore => key_input(),
+            };
+            schema["required"] = json!([]);
+            bilibi_agent_api::schema::validate(&schema, input).map_err(|_| {
+                bilibi_agent_api::invalid(
+                    "input",
+                    "Use only the declared fields and types for this operation.",
+                )
+            })?;
             if matches!(self, Self::Restore) {
                 return Ok(());
             }

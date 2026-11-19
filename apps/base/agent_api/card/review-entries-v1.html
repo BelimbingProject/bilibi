@@ -228,6 +228,7 @@ window.addEventListener('message',event=>{
   else if(message.method==='ui/notifications/tool-cancelled') cancel();
   else if(message.method==='ui/resource-teardown') {
     state.cancelled=true;state.revision++;scrubRows(state.rows);discardPlans();
+    $('editor').replaceChildren();$('stepup').hidden=true;$('stepup').replaceChildren();
     for(const waiter of pending.values()){clearTimeout(waiter.timer);waiter.reject(new Error('The card closed.'));}pending.clear();
     post({jsonrpc:'2.0',id:message.id,result:{}});
   } else if(message.method==='ping') post({jsonrpc:'2.0',id:message.id,result:{}});
@@ -246,7 +247,7 @@ function buttons() {
 }
 setInterval(buttons,1000);
 function invalidate() {
-  state.revision++;state.plans=[];state.next=0;state.stepup=false;$('stepup').hidden=true;$('stepup').replaceChildren();
+  state.revision++;discardPlans();state.next=0;state.stepup=false;$('stepup').hidden=true;$('stepup').replaceChildren();
   for(const row of state.rows)if(row.state==='draft'){row.preview=null;row.error=null;row.fields={};}
   state.renderedReviews=RENDER_STEP;$('reviews').hidden=true;$('progress').hidden=true;$('progress').value=0;$('progress-label').textContent='';
   status('Draft changed. Update the review before approving.');buttons();
@@ -259,7 +260,7 @@ function banner(instance) {
   $('banner').className=instance.production||instance.environment==='production'?'production':instance.environment==='staging'?'staging':'';
 }
 async function opened(answer) {
-  if(state.data)return; // A host replay must never reset a completed or cancelled review.
+  if(state.data||state.cancelled)return; // A host replay must never reset a completed or cancelled review.
   let data=answer?.structuredContent;
   if(data===undefined) {const text=answer?.content?.find(c=>c.type==='text');data=text?JSON.parse(text.text):{};}
   if(answer?.isError||!data.operation)throw new Error(data.error||'Bilibi could not open this review.');
@@ -325,6 +326,10 @@ function scrubWriteOnly(schema,value) {
 function scrubRows(rows) {
   if(!state.data)return;
   for(const row of rows)scrubWriteOnly(schemaFor(row),row.input);
+}
+function discardPlans(plans=state.plans) {
+  for(const batch of plans)batch.operations.length=0;
+  plans.length=0;
 }
 function outcomeOperations(rows) {
   return rows.map(row=>{
@@ -693,14 +698,14 @@ async function update() {
     }
     if(stopped) {
       for(const row of rows){row.preview=null;row.error=null;row.fields={};}
-      state.plans=[];$('reviews').hidden=true;
+      $('reviews').hidden=true;
       status('Stopped after checking '+checked+' of '+rows.length+' entries. Update the review to start checking again.','warning');return;
     }
     if(!refused)state.plans=plans;
     else context('Review entries were refused on '+state.data.instance.label+(state.data.linked?'. Correct the linked steps before planning again.':'. Correct or exclude them before planning again.'),{rows:contextRows(state.rows)});
     status(refused?refused+' '+(refused===1?'entry was':'entries were')+(state.data.linked?' refused. Correct the linked steps, then update the complete review.':' refused. Correct or untick them, then update the review.'):rows.length+' '+(rows.length===1?'entry is':'entries are')+' ready on '+state.data.instance.label+'. Review every change below.',refused?'warning':'info');
-  }catch(error){state.plans=[];status(error.message+' Update the review to try again.','danger');}
-  finally{state.planning=false;state.stopRequested=false;busy(false);renderEditor();if(!stopped)renderReviews();}
+  }catch(error){discardPlans();status(error.message+' Update the review to try again.','danger');}
+  finally{if(state.plans!==plans)discardPlans(plans);state.planning=false;state.stopRequested=false;busy(false);renderEditor();if(!stopped)renderReviews();}
 }
 function collectMethods(value,found=new Map()) {
   if(value&&typeof value==='object') {
@@ -739,7 +744,8 @@ async function approve(stepUpCode) {
       if(!await waitUntilRequest(state.nextToolAt,0,0))return;
       reserveRequest();
       try {answer=await tool('commit',args);}catch(error){
-        state.uncertain=true;for(const row of batch.rows)row.state='uncertain';scrubRows(state.rows);state.plans=[];
+        if(state.cancelled)return;
+        state.uncertain=true;for(const row of batch.rows)row.state='uncertain';scrubRows(state.rows);discardPlans();
         status('The host did not confirm whether this batch was saved. Ask your assistant to read the records before trying again.','warning');
         context('Commit outcome uncertain on '+state.data.instance.label+'. Read records before proposing another write.',{rows:contextRows(batch.rows,positions),summary:reviewSummary()});
         await outcome('uncertain',{final_operations:finalOperations,reason:'The host did not confirm the commit outcome.'});
@@ -748,26 +754,26 @@ async function approve(stepUpCode) {
       if(answer.failed) {
         if(answer.body.error==='step_up_required') {showStepup(answer.body);status('Your current 2FA code is needed to continue.','warning');return;}
         for(const result of answer.body.results||[])if(result.valid===false){const row=batch.rows[result.index];if(row)row.error=result.error;}
-        scrubRows(state.rows);state.plans=[];status('Stopped: '+errorText(answer.body)+'. Update the remaining review before approving again.','danger');
+        scrubRows(state.rows);discardPlans();status('Stopped: '+errorText(answer.body)+'. Update the remaining review before approving again.','danger');
         context('Review stopped on '+state.data.instance.label+'. Earlier saved batches remain saved.',{rows:contextRows(batch.rows,positions),summary:reviewSummary()});
         await outcome('refused',{final_operations:finalOperations,reason:errorText(answer.body),refusal:answer.body});return;
       }
       if(answer.body.instance)banner(answer.body.instance);
       for(const [index,row]of batch.rows.entries()) {row.state='done';row.result=unwrap(answer.body.results?.[index]?.result)||answer.body.results?.[index];row.preview=null;}
-      scrubRows(batch.rows);batch.operations=[];
+      scrubRows(batch.rows);batch.operations.length=0;
       savedThisRun+=batch.rows.length;$('progress').value=savedThisRun;
       $('progress-label').textContent=savedThisRun+' / '+total+' saved';
       context('Saved '+batch.rows.length+' entries on '+state.data.instance.label+'. Batch '+(state.next+1)+' of '+state.plans.length+'.',{rows:contextRows(batch.rows,positions)});
       renderEditor();renderReviews();
     }
-    state.plans=[];const saved=state.rows.filter(row=>row.state==='done').length;status(saved+' '+(saved===1?'entry':'entries')+' saved on '+state.data.instance.label+'.','success');
+    discardPlans();const saved=state.rows.filter(row=>row.state==='done').length;status(saved+' '+(saved===1?'entry':'entries')+' saved on '+state.data.instance.label+'.','success');
     context('Review complete on '+state.data.instance.label+'.',{summary:reviewSummary()});
     await outcome('saved',{final_operations:finalOperations,results:state.rows.map(row=>row.result)});
   }finally{busy(false);renderEditor();renderReviews();}
 }
 async function cancel() {
   if(state.busy)return;
-  state.cancelled=true;state.revision++;scrubRows(state.rows);state.plans=[];$('stepup').hidden=true;$('stepup').replaceChildren();
+  state.cancelled=true;state.revision++;scrubRows(state.rows);discardPlans();$('stepup').hidden=true;$('stepup').replaceChildren();
   for(const row of state.rows)if(row.state==='draft')row.state='cancelled';
   status('Review cancelled. '+state.rows.filter(r=>r.state==='done').length+' entries were already saved.');
   context('Review cancelled on '+(state.data?.instance.label||'Bilibi')+'. No further entries will be committed.',{summary:reviewSummary()});renderEditor();
