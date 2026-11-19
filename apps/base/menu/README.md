@@ -17,14 +17,11 @@ navigation in a template.
   shared missing-icon glyph, without blocking boot.
   A missing parent drops that item and its descendants, listed by `dropped()` and
   logged once, so one bad contributor cannot remove everyone's navigation.
-- Render `visible_tree(&decide)`, never `tree()` (diagnostics). `decide` answers
-  one capability; Menu does not depend on Authz. Decide every key in
-  `capability_keys()` in one authorization pass for the actor, then filter. A
-  container with no visible child is hidden, so unported sections never render.
+- Use `visible_staff_tree(&capabilities, owner)` for the staff tree. Pass the actor's effective capabilities and verified installation-owner standing. For a custom `visible_tree(&decide)` call, resolve the actor's `capability_keys()` in one authorization pass before filtering. `tree()` is for diagnostics. A container with no visible child is hidden, so unported sections never render.
 - `Requirement::AnyOf` opens a combined page only. Hiding a link is presentation:
   the route and each operation must enforce their own capability.
-- Tenant sibling order is owned by [`base/menu_order`](../menu_order/README.md). Apply it to the permission-filtered staff tree when rendering; do not change the catalog's product order.
-- A tenant's own words for items are not Menu's: `base/labels` keeps them against the item ID and the shell applies them to the label it draws (`LabelSet::menu`). Menu itself still holds only the module's word; a caller that shows an item's label for a reader (not diagnostics) asks the set too.
+- The staff tree's product order is by contributed label, ignoring case, with ties broken by `(order, id)`. See [`base/menu_order`](../menu_order/README.md) for sidebar overrides.
+- The catalog retains the contributed labels. For display overrides, see [`base/labels`](../labels/README.md).
 - `base/menu` contributes the structural roots (`core`, `admin`, `admin.system.*`, and the
   Domain roots). Attach to them; do not redefine them.
 - `portal` (`PORTAL_ROOT`) is the customer portal's menu ([ADR 16](../../../docs/architecture/decisions/16-customer-accounts-and-portal.md)). Items under it route only to `/portal` pages and ask for a portal capability; boot refuses one that routes elsewhere or asks for nothing, a staff item routing into `/portal`, and (Authz) a key of the wrong audience. `visible_tree` never includes it and `visible_portal_tree` returns only it, for the portal layout.

@@ -273,7 +273,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - Theme, clock mode and pins belong to the account. They are not `localStorage`.
 - "Viewing as … · Stop" appears only while impersonating.
 - A platform-operator row appears in the account menu. Operator-only screens carry their own caution where reach is unfiltered.
-- Navigation: shared records (Addresses, Companies, Contacts, Documents, Products, Reports, Teams) sit together in the Core group; sorted alphabetically, chevron toggles, the active route in lime text, ancestors accented. A page joins the menu when it ships.
+- Navigation groups shared records (Addresses, Companies, Contacts, Documents, Products, Reports, Teams) under Core. Chevrons toggle groups, the active route is lime, and its ancestors are accented. A page joins the menu when it ships. See [tenant menu order](apps/base/menu_order/README.md) for how the sidebar orders staff items.
 - An empty menu says no destinations are available and names the recovery.
 
 ## Tiled workspace

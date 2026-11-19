@@ -27,7 +27,7 @@ The owner identified these five proposals as candidates for AI-led setup, with i
 - **Customise this list:** AI changes labels, fields and views, so a separate entry point on each list is unnecessary.
 - **Setup packs:** AI exports or imports packs of labels, fields, views and rules; imported changes appear on Customisations.
 - **Rule trial runs:** AI runs a draft against past records and presents the results; approval and other business actions keep their pages.
-- **Company menu order:** AI changes the order; Customisations can restore the default.
+- **[Tenant menu order](../../../apps/base/menu_order/README.md):** AI changes the order. Customisations will offer a restore-default action.
 
 ## Consequences
 

@@ -8,7 +8,7 @@ A label override is data (ADR 28): a short plain text kept per tenant against a 
 
 | Kind | Subject ID | Shown by |
 | --- | --- | --- |
-| `menu` | A staff menu item ID (`base/menu`); portal items are excluded | The sidebar, in place of the item's own label. The workspace page picker and the Menu Inspector still show the module's word. |
+| `menu` | A staff menu item ID (`base/menu`); portal items are excluded | The sidebar and the [menu-order reader preview](../menu_order/README.md). The workspace page picker, Menu Inspector and menu-order list show the contributed labels. |
 | `record` | A Grid table ID (`base/grid`) | The record types Reports offers, in place of the table's own label. |
 | `field` | `<table>.<field>`: a Grid table ID, a dot and a Grid field ID. Hidden fields are excluded | Every Grid column the tenant's readers see: list column heads, the add-a-column picker, filters, saved and shared views, Reports and exports. Record pages, forms and inline editors resolve the same words through `RecordWords`. |
 
