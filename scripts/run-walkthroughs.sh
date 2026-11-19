@@ -251,7 +251,7 @@ WALKTHROUGHS=(
 
 # Examples no line above runs, each with the reason. `module folder|example|reason`.
 NOT_RUN=(
-  'apps/web|rules-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
+  'apps/web|watchers-domains-walkthrough|needs official Domain mounts; run each Domain source walkthrough first'
   # They only serve the app, with a reference page, for a person to use in a browser.
   'apps/core/document|upload-resume-proof|serves the New document dialog for a browser upload'
   'apps/core/person|person-contact-panel|serves a reference page only'

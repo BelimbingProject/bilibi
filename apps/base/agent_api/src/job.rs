@@ -13,7 +13,7 @@
 //!
 //! A named system principal's job calls a contract only where the contract's
 //! owner admits that principal by name (`PRINCIPAL_WRITES`): Base Watchers runs
-//! an approved rule's action as `watchers`. The same schema, live capability
+//! an approved watcher's action as `watchers`. The same schema, live capability
 //! (the principal's own tenant grants), preview and commit apply; system
 //! scopes still cannot enter the other doors.
 use crate::{Error, Handler, RegisteredOperation, Registry, Result};
@@ -143,7 +143,7 @@ impl JobContracts {
     }
 
     /// Whether `input` passes the contract's input schema, for a caller that
-    /// stores an input to commit later (an approved rule's action).
+    /// stores an input to commit later (an approved watcher's action).
     pub fn validate(&self, key: &str, input: &Value) -> Result<()> {
         let registered = self.writable(key)?;
         crate::schema::validate(&registered.input, input).map_err(Error::InvalidInput)
