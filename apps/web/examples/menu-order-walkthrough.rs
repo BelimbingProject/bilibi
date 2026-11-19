@@ -3,7 +3,7 @@ use bilibi_agent_api::{
     page::PageContracts,
     plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
 };
-use bilibi_base::menu_order::{MenuOrder, SERVICE, VIEW};
+use bilibi_base::menu_order::{MenuOrder, MANAGE, SERVICE, VIEW};
 use bilibi_database::pool;
 use bilibi_tenancy::ProofFuture;
 use serde_json::{json, Value};
@@ -217,6 +217,104 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .read(&admin, "base.menu_order.preview", &json!({}))
         .await?;
     assert_eq!(children(&after["result"], "admin")[0]["id"], first);
+
+    let parent = "admin.system";
+    let hidden = "admin.system.installation";
+    let visible = "admin.system.info";
+    let replacement = "admin.system.localization";
+    let sql = db.get().await?;
+    sql.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach)
+         SELECT 1,2,capability,true,'all' FROM unnest($1::text[]) AS capability",
+        &[&&[
+            MANAGE,
+            "admin.system.info.view",
+            "admin.system.localization.manage",
+        ][..]],
+    )
+    .await?;
+    sql.execute(
+        "INSERT INTO base_menu_order(tenant_id,parent,item_ids) VALUES(1,$1,ARRAY[$2,$3])",
+        &[&parent, &hidden, &visible],
+    )
+    .await?;
+    drop(sql);
+    let list = contracts
+        .read(&reader, "base.menu_order.list", &json!({}))
+        .await?;
+    assert_eq!(group(&list, parent)["item_ids"], json!([visible]));
+    assert!(!list.to_string().contains(hidden));
+    assert!(!list.to_string().contains("admin.system.database-table"));
+    let version = group(&list, parent)["version"].as_str().ok_or("version")?;
+    assert!(contracts
+        .read(
+            &reader,
+            "base.menu_order.preview",
+            &json!({"parent":parent,"item_ids":[hidden]}),
+        )
+        .await
+        .is_err());
+    let invalid_set = [op(
+        "base.menu_order.set",
+        json!({"parent":parent,"item_ids":[hidden],"version":version}),
+    )];
+    assert_eq!(
+        plans.preview(&reader_browser, &invalid_set).await?["valid"],
+        false
+    );
+    let set = [op(
+        "base.menu_order.set",
+        json!({"parent":parent,"item_ids":[replacement],"version":version}),
+    )];
+    let review = plans.preview(&reader_browser, &set).await?;
+    assert_eq!(review["valid"], true);
+    assert!(!review.to_string().contains(hidden));
+    let result = plans.commit(&reader, &reader_browser, &set).await?;
+    assert!(!result.to_string().contains(hidden));
+    let sql = db.get().await?;
+    let saved: Vec<String> = sql
+        .query_one(
+            "SELECT item_ids FROM base_menu_order WHERE tenant_id=1 AND parent=$1",
+            &[&parent],
+        )
+        .await?
+        .get(0);
+    assert_eq!(saved, [hidden, replacement]);
+    drop(sql);
+    let list = contracts
+        .read(&reader, "base.menu_order.list", &json!({}))
+        .await?;
+    let version = group(&list, parent)["version"].as_str().ok_or("version")?;
+    let restore = [op(
+        "base.menu_order.restore",
+        json!({"parent":parent,"version":version}),
+    )];
+    let review = plans.preview(&reader_browser, &restore).await?;
+    assert_eq!(review["valid"], true);
+    assert!(!review.to_string().contains(hidden));
+    let result = plans.commit(&reader, &reader_browser, &restore).await?;
+    assert!(!result.to_string().contains(hidden));
+    let saved: Vec<String> = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT item_ids FROM base_menu_order WHERE tenant_id=1 AND parent=$1",
+            &[&parent],
+        )
+        .await?
+        .get(0);
+    assert_eq!(saved, [hidden]);
+    for unsupported in ["portal", visible, hidden] {
+        let restore = [op(
+            "base.menu_order.restore",
+            json!({"parent":unsupported,"version":"0:0"}),
+        )];
+        assert_eq!(
+            plans.preview(&reader_browser, &restore).await?["valid"],
+            false
+        );
+    }
+    println!("PASS: visible sibling validation, hidden override preservation and unsupported restore parents");
     println!("PASS: reviewed set and restore, product fallback, removed ID, stale write, audit, reader permissions and second-tenant isolation");
     Ok(())
 }

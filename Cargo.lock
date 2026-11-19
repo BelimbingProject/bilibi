@@ -1248,7 +1248,6 @@ dependencies = [
  "bilibi-tenancy",
  "inventory",
  "serde_json",
- "tokio-postgres",
 ]
 
 [[package]]

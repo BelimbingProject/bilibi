@@ -1,5 +1,5 @@
 use crate::{
-    store::{MenuOrder, Plan},
+    store::{sibling_groups, sibling_ids, MenuOrder},
     MANAGE, VIEW,
 };
 use bilibi_agent_api::{
@@ -12,7 +12,7 @@ use bilibi_module_registry::{Contribution, Provenance, RegistryError};
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     sync::{Arc, OnceLock},
 };
 
@@ -68,9 +68,6 @@ fn items(input: &Value) -> bilibi_agent_api::Result<Vec<String>> {
         })
         .collect()
 }
-fn plan_json(plan: &Plan) -> Value {
-    json!({"parent":plan.parent,"before":plan.before.as_ref().map(|s| &s.items),"after":plan.after})
-}
 fn found(error: Error) -> bilibi_agent_api::Error {
     match error {
         Error::Refused(message) => bilibi_agent_api::invalid("item_ids", &message),
@@ -79,24 +76,6 @@ fn found(error: Error) -> bilibi_agent_api::Error {
 }
 fn nodes(tree: &[bilibi_menu::Node], labels: &bilibi_labels::LabelSet) -> Value {
     Value::Array(tree.iter().map(|n| json!({"id": n.item.item.id, "label": labels.menu(n.item.item.id, n.item.item.label), "children": nodes(&n.children, labels)})).collect())
-}
-fn groups(nodes: &[bilibi_menu::Node], parent: &str, result: &mut BTreeMap<String, Vec<Value>>) {
-    result.insert(
-        parent.to_owned(),
-        nodes
-            .iter()
-            .filter(|n| n.item.item.id != bilibi_menu::PORTAL_ROOT)
-            .map(|n| json!({"id":n.item.item.id,"label":n.item.item.label}))
-            .collect(),
-    );
-    for node in nodes
-        .iter()
-        .filter(|n| n.item.item.id != bilibi_menu::PORTAL_ROOT)
-    {
-        if !node.children.is_empty() {
-            groups(&node.children, node.item.item.id, result);
-        }
-    }
 }
 enum Read {
     List,
@@ -114,40 +93,35 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let service = bound()?;
+            let mut tree = service.visible_tree(client, scope).await?;
             match self {
                 Self::List => {
                     let stored = service.stored(client, scope).await?;
-                    let mut all = BTreeMap::new();
-                    groups(&service.menu.tree(), "", &mut all);
-                    for parent in stored.keys() {
-                        all.entry(parent.clone()).or_default();
-                    }
-                    let rows: Vec<_> = all.into_iter().map(|(parent, product)| {
-                        let saved = stored.get(&parent);
-                        json!({"parent":parent,"product":product,"item_ids":saved.map(|s| &s.items),"version":saved.map_or_else(|| "0:0".to_owned(), |s| format!("{}:{}",s.id,s.version))})
-                    }).collect();
+                    let rows: Vec<_> = sibling_groups(&tree)
+                        .into_iter()
+                        .map(|(parent, nodes)| {
+                            let saved = stored.get(parent);
+                            let product: Vec<_> = nodes
+                                .iter()
+                                .map(|n| json!({"id":n.item.item.id,"label":n.item.item.label}))
+                                .collect();
+                            json!({
+                                "parent": parent,
+                                "product": product,
+                                "item_ids": saved.map(|s| s.visible_items(&sibling_ids(nodes))),
+                                "version": saved.map_or_else(|| "0:0".to_owned(), |s| format!("{}:{}", s.id, s.version)),
+                            })
+                        })
+                        .collect();
                     Ok(data(json!(rows)))
                 }
                 Self::Preview => {
                     let sql = client.sql_client().await?;
-                    let capabilities = bilibi_authz::effective_capabilities(sql, scope).await?;
-                    let owner = match bilibi_tenancy::prove_owner(sql, scope).await {
-                        Ok(_) => true,
-                        Err(Error::Forbidden) => false,
-                        Err(e) => return Err(e.into()),
-                    };
-                    let mut tree = service.menu.visible_tree(&|key| {
-                        if key == bilibi_menu::OWNER_STANDING {
-                            owner
-                        } else {
-                            capabilities.contains(key)
-                        }
-                    });
                     let mut orders = service.orders(client, scope).await?;
                     if input.get("parent").is_some() || input.get("item_ids").is_some() {
                         let parent = parent(input)?;
                         let proposed = items(input)?;
-                        service.validate(parent, &proposed).map_err(found)?;
+                        MenuOrder::validate(&tree, parent, &proposed).map_err(found)?;
                         orders.propose(parent, proposed);
                     }
                     orders.apply(&mut tree);
@@ -188,7 +162,7 @@ impl WriteHandler for Write {
                 )
                 .await
                 .map_err(found)?;
-            Ok(json!({"summary": if ids.is_some() { "Set the order of menu siblings" } else { "Restore the product order of menu siblings" }, "plan":plan_json(&plan)}).into())
+            Ok(json!({"summary": if ids.is_some() { "Set the order of menu siblings" } else { "Restore the product order of menu siblings" }, "plan":plan.review()}).into())
         })
     }
     fn commit<'a>(
@@ -206,7 +180,7 @@ impl WriteHandler for Write {
                 .apply(tx, scope, parent(input)?, ids.as_deref(), version(input)?)
                 .await
                 .map_err(found)?;
-            Ok(data(plan_json(&plan)))
+            Ok(data(plan.review()))
         })
     }
 }
@@ -233,7 +207,7 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/menu_order.agent", Pro
         Operation { key:"base.menu_order.list", title:"List menu sibling groups", summary:"Read product and saved order with version tokens.", keywords:&["menu","order"], capability:VIEW, input:empty_schema, output:list_output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.preview", title:"Preview my menu", summary:"Preview the menu visible to the current reader in the tenant's order.", keywords:&["menu","preview"], capability:VIEW, input:preview_schema, output:list_output, handler:Handler::Read(&Read::Preview), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.set", title:"Order menu siblings", summary:"Set a tenant's order for siblings by stable menu item ID.", keywords:&["menu","order"], capability:MANAGE, input:set_schema, output, handler:Handler::SafeWrite(&Write::Set), channels:Channels::Every, step_up:&[] },
-        Operation { key:"base.menu_order.restore", title:"Restore product menu order", summary:"Remove one sibling group's override.", keywords:&["menu","restore"], capability:MANAGE, input:restore_schema, output, handler:Handler::SafeWrite(&Write::Restore), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.menu_order.restore", title:"Restore product menu order", summary:"Restore product order for the visible siblings in one group.", keywords:&["menu","restore"], capability:MANAGE, input:restore_schema, output, handler:Handler::SafeWrite(&Write::Restore), channels:Channels::Every, step_up:&[] },
     ],
-    guides:&[Guide { key:"base.menu_order", title:"Menu order", summary:"Arrange a tenant's menu siblings and restore product order.", keywords:&["menu","order","navigation"], capability:VIEW, body:"Use base.menu_order.list to find sibling IDs, the parent ID and version token. The empty parent is the staff menu root. Set an ordered list of sibling IDs with base.menu_order.set; unlisted and newly contributed siblings follow in product order, and removed items disappear. Use base.menu_order.preview to see the current reader's permitted menu; optionally pass parent and item_ids to preview a proposed order without saving. It never grants access. Use base.menu_order.restore with the parent and current version to return that group to product order. Each write requires a dry run, a complete preview and explicit approval before committing the unchanged operation." }],
+    guides:&[Guide { key:"base.menu_order", title:"Menu order", summary:"Arrange a tenant's menu siblings and restore product order.", keywords:&["menu","order","navigation"], capability:VIEW, body:"Use base.menu_order.list to find visible sibling IDs, the parent ID and version token. The empty parent is the staff menu root. Set an ordered list of visible sibling IDs with base.menu_order.set. Unlisted and newly contributed visible siblings follow in product order, and removed items disappear. Use base.menu_order.preview to see the current reader's permitted menu. Optionally pass parent and item_ids to preview a proposed order without saving. Use base.menu_order.restore with the parent and current version to return visible siblings to product order. Both writes preserve saved IDs for siblings outside your view. Each write requires a dry run, a complete preview and explicit approval before committing the unchanged operation." }],
 }) }

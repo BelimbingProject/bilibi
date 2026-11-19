@@ -1,6 +1,7 @@
+use bilibi_agent_api::OperationClient;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_menu::{Menu, Node};
-use bilibi_tenancy::{ProofClient, ReadClient, Scope};
+use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,17 +40,61 @@ impl Orders {
 pub(crate) struct Stored {
     pub id: i64,
     pub version: i64,
-    pub items: Vec<String>,
+    items: Vec<String>,
 }
+impl Stored {
+    pub(crate) fn visible_items(&self, siblings: &BTreeSet<&str>) -> Vec<&str> {
+        visible_items(&self.items, siblings)
+    }
+}
+
+fn visible_items<'a>(items: &'a [String], siblings: &BTreeSet<&str>) -> Vec<&'a str> {
+    items
+        .iter()
+        .map(String::as_str)
+        .filter(|id| siblings.contains(id))
+        .collect()
+}
+
+pub(crate) fn sibling_ids(nodes: &[Node]) -> BTreeSet<&'static str> {
+    nodes.iter().map(|node| node.item.item.id).collect()
+}
+
+pub(crate) fn sibling_groups(tree: &[Node]) -> BTreeMap<&'static str, &[Node]> {
+    fn collect<'a>(
+        nodes: &'a [Node],
+        parent: &'static str,
+        groups: &mut BTreeMap<&'static str, &'a [Node]>,
+    ) {
+        groups.insert(parent, nodes);
+        for node in nodes.iter().filter(|node| !node.children.is_empty()) {
+            collect(&node.children, node.item.item.id, groups);
+        }
+    }
+    let mut groups = BTreeMap::new();
+    collect(tree, "", &mut groups);
+    groups
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
-    pub parent: String,
-    pub before: Option<Stored>,
-    pub after: Option<Vec<String>>,
+    parent: String,
+    before: Option<Stored>,
+    after: Option<Vec<String>>,
+    siblings: BTreeSet<&'static str>,
+}
+impl Plan {
+    pub(crate) fn review(&self) -> Value {
+        json!({
+            "parent": self.parent,
+            "before": self.before.as_ref().map(|saved| saved.visible_items(&self.siblings)),
+            "after": self.after.as_ref().map(|ids| visible_items(ids, &self.siblings)),
+        })
+    }
 }
 
 pub struct MenuOrder {
-    pub(crate) menu: Menu,
+    menu: Menu,
     pub(crate) labels: std::sync::Arc<bilibi_labels::Labels>,
 }
 impl MenuOrder {
@@ -94,36 +139,50 @@ impl MenuOrder {
             })
             .collect())
     }
-    pub(crate) fn validate(&self, parent: &str, items: &[String]) -> Result<()> {
-        if !parent.is_empty() && (self.menu.fetch(parent).is_none() || self.menu.in_portal(parent))
-        {
-            return Err(Error::Refused("Unknown staff menu parent.".into()));
-        }
-        let known: BTreeMap<_, _> = self
-            .menu
-            .items()
-            .iter()
-            .map(|item| (item.item.id, item.item))
-            .collect();
-        let mut seen = BTreeSet::new();
-        for id in items {
-            let item = known
-                .get(id.as_str())
-                .ok_or_else(|| Error::Refused(format!("Unknown menu item {id}.")))?;
-            if id.as_str() == bilibi_menu::PORTAL_ROOT
-                || item.parent.unwrap_or("") != parent
-                || !seen.insert(id)
-            {
-                return Err(Error::Refused(format!(
-                    "Menu item {id} is repeated or is not a child of this parent."
-                )));
+    pub(crate) async fn visible_tree(
+        &self,
+        client: &dyn OperationClient,
+        scope: &Scope,
+    ) -> Result<Vec<Node>> {
+        let sql = client.sql_client().await?;
+        let capabilities = bilibi_authz::effective_capabilities(sql, scope).await?;
+        let owner = match bilibi_tenancy::prove_owner(sql, scope).await {
+            Ok(_) => true,
+            Err(Error::Forbidden) => false,
+            Err(error) => return Err(error),
+        };
+        Ok(self.menu.visible_tree(&|key| {
+            if key == bilibi_menu::OWNER_STANDING {
+                owner
+            } else {
+                capabilities.contains(key)
             }
+        }))
+    }
+    pub(crate) fn validate(
+        tree: &[Node],
+        parent: &str,
+        items: &[String],
+    ) -> Result<BTreeSet<&'static str>> {
+        let groups = sibling_groups(tree);
+        let nodes = groups
+            .get(parent)
+            .ok_or_else(|| Error::Refused("Unknown staff menu parent.".into()))?;
+        let siblings = sibling_ids(nodes);
+        let mut seen = BTreeSet::new();
+        if items
+            .iter()
+            .any(|id| !siblings.contains(id.as_str()) || !seen.insert(id))
+        {
+            return Err(Error::Refused(
+                "Item IDs must be unique visible children of this parent.".into(),
+            ));
         }
-        Ok(())
+        Ok(siblings)
     }
     pub(crate) async fn plan(
         &self,
-        sql: &dyn ProofClient,
+        sql: &dyn OperationClient,
         scope: &Scope,
         parent: &str,
         items: Option<&[String]>,
@@ -131,9 +190,8 @@ impl MenuOrder {
         lock: bool,
     ) -> Result<Plan> {
         bilibi_authz::authorize_proof(sql, scope, crate::MANAGE).await?;
-        if let Some(items) = items {
-            self.validate(parent, items)?;
-        }
+        let tree = self.visible_tree(sql, scope).await?;
+        let siblings = Self::validate(&tree, parent, items.unwrap_or_default())?;
         if items.is_some_and(|items| items.is_empty()) {
             return Err(Error::Refused(
                 "Provide at least one item, or restore product order.".into(),
@@ -155,10 +213,28 @@ impl MenuOrder {
         if before.as_ref().map_or((0, 0), |s| (s.id, s.version)) != version {
             return Err(Error::Conflict);
         }
+        let mut proposed = items.unwrap_or_default().iter().cloned();
+        let mut after = Vec::new();
+        if let Some(saved) = &before {
+            for id in &saved.items {
+                if siblings.contains(id.as_str()) {
+                    after.extend(proposed.next());
+                } else if id != bilibi_menu::PORTAL_ROOT
+                    && self
+                        .menu
+                        .fetch(id)
+                        .is_some_and(|item| item.item.parent.unwrap_or("") == parent)
+                {
+                    after.push(id.clone());
+                }
+            }
+        }
+        after.extend(proposed);
         Ok(Plan {
             parent: parent.to_owned(),
             before,
-            after: items.map(<[String]>::to_vec),
+            after: (!after.is_empty()).then_some(after),
+            siblings,
         })
     }
     pub(crate) async fn apply(
