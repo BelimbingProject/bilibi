@@ -556,7 +556,7 @@ impl CustomFields {
         if input.watcher_condition && kind.is_some_and(|kind| !kind.watcher_condition_kind()) {
             errors.push(FieldError::new(
                 "watcher_condition",
-                "only a text, number, date, pick-list or yes/no field can be a rule condition",
+                "only a text, number, date, pick-list or yes/no field can be a watcher condition",
             ));
         }
         if write {
@@ -691,7 +691,7 @@ impl CustomFields {
         if watcher_condition && !before.kind.watcher_condition_kind() {
             errors.push(FieldError::new(
                 "watcher_condition",
-                "only a text, number, date, pick-list or yes/no field can be a rule condition",
+                "only a text, number, date, pick-list or yes/no field can be a watcher condition",
             ));
         }
         if !errors.is_empty() {
