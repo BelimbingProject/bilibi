@@ -84,6 +84,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .await?;
+    // Agent discovery and review use the same page contracts and reader scope.
+    let input = json!({"page":"companies", "view":json!({"columns":["name","revenue"],"lenses":{},"zoom":18,"since":null}).to_string(), "params":json!({"status":"active"}).to_string(), "name":"Reviewed companies", "audience":{"roles":[role]}});
+    let review = contracts
+        .preview(&call("base.grid.view.save"), input.clone())
+        .await?;
+    assert_eq!(review["valid"], true, "{review}");
+    let preview = &review["results"][0]["preview"]["result"];
+    assert_eq!(
+        preview["audience"]["roles"][0]["name"],
+        "Shared view readers"
+    );
+    assert!(preview["columns_for_current_reader"]
+        .as_array()
+        .ok_or("missing column preview")?
+        .iter()
+        .any(|c| c["spec"] == "revenue"));
+    let saved = contracts
+        .submit(&call("base.grid.view.save"), input)
+        .await?;
+    let company_id = saved["result"]["id"].as_i64().ok_or("missing saved id")?;
+    assert_eq!(saved["result"]["view"]["name"], "Reviewed companies");
+    let list = contracts
+        .read(&admin, "base.grid.view.list", &json!({"page":"companies"}))
+        .await?;
+    assert!(list["result"]["views"]
+        .as_array()
+        .ok_or("missing view list")?
+        .iter()
+        .any(|v| v["id"] == company_id));
+    let saved = contracts
+        .read(
+            &admin,
+            "base.grid.view.get",
+            &json!({"page":"companies","id":company_id}),
+        )
+        .await?;
+    assert_eq!(saved["result"]["params"]["status"], "active");
+    let fields = contracts
+        .read(
+            &admin,
+            "base.grid.view.fields",
+            &json!({"page":"companies"}),
+        )
+        .await?;
+    assert!(fields["result"]["filters"]
+        .as_array()
+        .ok_or("missing filters")?
+        .iter()
+        .any(|f| f["key"] == "status"));
+    db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,'admin.company.list',true,'all') ON CONFLICT DO NOTHING", &[]).await?;
+    db.get().await?.execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES(1,$1,'companies','revenue') ON CONFLICT DO NOTHING", &[&role]).await?;
+    let restricted = contracts
+        .read(
+            &reader,
+            "base.grid.view.fields",
+            &json!({"page":"companies", "search":"revenue"}),
+        )
+        .await?;
+    assert!(!restricted["result"]["columns"]
+        .as_array()
+        .ok_or("missing restricted columns")?
+        .iter()
+        .any(|c| c["spec"] == "revenue"));
+    let reader_view = contracts
+        .read(
+            &reader,
+            "base.grid.view.get",
+            &json!({"page":"companies", "id":company_id}),
+        )
+        .await?;
+    assert_eq!(reader_view["result"]["name"], "Reviewed companies");
+    let other = {
+        let client = db.get().await?;
+        auth.authenticate(&**client, 2, 5, String::new()).await?
+    };
+    assert!(contracts
+        .read(
+            &other,
+            "base.grid.view.get",
+            &json!({"page":"companies", "id":company_id})
+        )
+        .await
+        .is_err());
+    db.get().await?.execute("DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=$1 AND table_id='companies' AND field_id='revenue'", &[&role]).await?;
+    contracts
+        .submit(&call("base.grid.view.delete"), json!({"id":company_id}))
+        .await?;
+    println!("PASS: scoped view discovery, named audience review, saved readback, restricted reader and second tenant.");
     let owned = views.shared(&admin, "reference_items").await?;
     assert_eq!(owned.len(), 1);
     assert!(owned[0].owned);

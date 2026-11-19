@@ -391,6 +391,10 @@ A person saves the list they see as a named view (columns, lenses, row height, c
 
 Call `PageColumns::refresh_views(scope)` on every render, independently of row projection, and use `PageColumns::event_values` for the Grid event payload. A secondary table without query restoration has no named-view controls.
 
+Agents discover `base.grid.view.fields` for a page's actual `ListSpec` filters, additional page-owned filters and permitted columns. Walked columns are bounded pages, with `next_offset`; page-owned columns appear on the first page. `base.grid.view.list` and `base.grid.view.get` return only views the caller may open. A save review names the audience and previews the caller's visible columns using the page's own `PageColumns` and fresh scope; other readers retain their own grants and restrictions. The save result includes the saved view read back in the same transaction. A page without discovery metadata continues to save views, but its review cannot preview columns.
+
+Lists contribute `PageMetadata` through `contribute_page_metadata!`, reusing their actual `ListSpec` and `PageColumns` construction. Supply dynamic filter details on the same client and scope when the page has tenant-specific filters; add query keys that live outside `ListState` as extra filters. Keep the contribution beside the page's own construction so discovery and page parsing change together. `base.menu_order.preview` remains its separate current-reader menu preview; sharing an audience simulator would require a scope-safe cross-module design, beyond this change.
+
 The `g6-shared-views` walkthrough (`scripts/run-walkthroughs.sh grid-shared-views`) proves role visibility when switching companies, tenant-wide and owner visibility, Grid and Labels operation writes with a one-connection pool, concurrent saves at the view limit, owner deletion without sharing permission, and saving filters after queued changes.
 
 ## Scalar access predicates

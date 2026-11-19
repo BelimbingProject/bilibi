@@ -12,6 +12,7 @@ mod model;
 pub use field::{Field, FieldType, PersonalKind};
 mod oversight;
 pub mod page_columns;
+mod page_metadata;
 pub mod page_views;
 pub mod query;
 pub mod reference;
@@ -24,6 +25,7 @@ pub use oversight::{
     ChildResult, OversightData, OversightQueries, OversightResult, OversightSpec, OVERSIGHT_QUERIES,
 };
 pub use page_columns::{Outcome, PageColumns, ViewCaller};
+pub use page_metadata::{PageColumnsFuture, PageDetailsFuture, PageMetadata, PAGE_METADATA};
 pub use page_views::{PageViews, PAGE_VIEWS};
 pub use query::{
     project, project_lenses, project_within, scalar_access, scalar_expression, scalar_join, stats,

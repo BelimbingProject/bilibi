@@ -1001,3 +1001,27 @@ fn builtins() -> Vec<BuiltinColumn> {
         created,
     ]
 }
+
+fn agent_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(
+        async move { PageColumns::mount(views, "users", builtins()).map_err(|_| Error::Internal) },
+    )
+}
+
+bilibi_grid::contribute_page_metadata!(
+    "core/user",
+    "core/user.grid-page",
+    "users",
+    crate::contributions::LIST,
+    || SPEC.clone(),
+    &[(
+        "roleIds",
+        "Comma-separated role IDs; any selected role matches"
+    )],
+    None,
+    agent_columns
+);

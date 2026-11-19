@@ -20,7 +20,7 @@ use crate::view::View;
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -155,12 +155,21 @@ impl PageViews {
     /// everyone and those shared with a role they hold, by name.
     pub async fn shared(&self, scope: &Scope, page: &str) -> Result<Vec<SharedView>> {
         let client = self.db().get().await?;
-        let rows = client
-            .query(
-                &format!("SELECT v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{{}}') FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
-                &[&scope.tenant(), &scope.user(), &page, &scope.current_company().map(|company| company.get())],
-            )
-            .await?;
+        self.shared_on(&**client, scope, page, None).await
+    }
+
+    /// The same visibility rule on the caller's connection, including inside a write.
+    pub(crate) async fn shared_on(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        page: &str,
+        id: Option<i64>,
+    ) -> Result<Vec<SharedView>> {
+        let rows = client.query(
+            &format!("SELECT v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{{}}') FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 AND ($5::bigint IS NULL OR v.id=$5) ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
+            &[&scope.tenant(), &scope.user(), &page, &scope.current_company().map(|company| company.get()), &id],
+        ).await?;
         Ok(rows
             .iter()
             .map(|row| as_view(row, page, scope.user()))

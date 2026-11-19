@@ -1698,3 +1698,41 @@ bilibi_ui::record_fields! { "core/company", pub(crate) mod link_fields {
     EFFECTIVE_FROM: bilibi_ui::RecordField::new("effective_from", "Effective From", bilibi_ui::RecordFieldType::Date),
     EFFECTIVE_TO: bilibi_ui::RecordField::new("effective_to", "Effective To", bilibi_ui::RecordFieldType::Date),
 } }
+
+fn agent_filter_details<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+) -> bilibi_grid::PageDetailsFuture<'a> {
+    Box::pin(async move {
+        let masked = crate::field_contributions::effective_restrictions(client, scope).await?;
+        let catalog = bilibi_grid::Catalog::for_scope(client, scope).await?;
+        let fields = crate::list_fields::available(client, scope, &catalog, &masked).await?;
+        Ok(fields.iter().filter(|field| field.kind.filterable()).map(|field| serde_json::json!({
+            "key":"field_filters", "type":"field_condition", "field":field.id, "label":field.label,
+            "operators":crate::list_fields::operators(&field.kind).iter().map(|(key, _)| *key).collect::<Vec<_>>()
+        })).collect())
+    })
+}
+
+fn agent_columns<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        let masked = crate::field_contributions::effective_restrictions(client, scope).await?;
+        let custom = crate::field_contributions::custom_fields()?
+            .active(
+                client,
+                scope,
+                crate::field_contributions::CUSTOM_RECORD_TYPE,
+            )
+            .await?;
+        views::columns(views, &masked, &custom)
+    })
+}
+
+bilibi_grid::contribute_page_metadata!("core/company", "core/company.grid-page", "companies", crate::contributions::LIST, || LIST_SPEC.clone(), &[("field_filters", "JSON array of field, operator and value conditions; use fields offered by the company list")],
+    Some(agent_filter_details),
+    agent_columns
+);
