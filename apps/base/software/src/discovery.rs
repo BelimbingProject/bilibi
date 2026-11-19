@@ -124,6 +124,7 @@ fn local_steps(repository: &str, id: &str, kind: &str, commit: &str) -> Option<V
         return None;
     }
     Some(vec![
+        "(set -e".into(),
         format!("./bilibi add {id} --kind {kind} --source {repository} --commit {commit}"),
         "python3 scripts/discover-modules.py".into(),
         "./scripts/build-assets.sh --check".into(),
@@ -131,6 +132,7 @@ fn local_steps(repository: &str, id: &str, kind: &str, commit: &str) -> Option<V
         "python3 scripts/discover-modules.py --pin".into(),
         "cargo build --release --locked -p bilibi-web".into(),
         "./target/release/bilibi-web status".into(),
+        ")".into(),
     ])
 }
 

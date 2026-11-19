@@ -61,20 +61,6 @@ fn parse(query: &HashMap<String, String>) -> Result<ListState> {
     ListState::parse(query, spec).map_err(|_| Error::Internal)
 }
 
-/// The newest published version of a catalogue entry, by number.
-fn newest(item: &Value) -> Option<&str> {
-    item["versions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|release| {
-            let version = release["version"].as_str()?;
-            Some((crate::catalogue::Version::parse(version)?, version))
-        })
-        .max_by_key(|(parsed, _)| *parsed)
-        .map(|(_, version)| version)
-}
-
 fn entries(status: &Value, catalogue: &Value, requested: &[String]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for (kind, kind_word) in KINDS {
@@ -85,16 +71,6 @@ fn entries(status: &Value, catalogue: &Value, requested: &[String]) -> Vec<Entry
                 .into_iter()
                 .flatten()
                 .find(|module| module["id"] == id);
-            let recommended = item["recommended_version"].as_str();
-            let update = match (installed.and_then(|m| m["version"].as_str()), recommended) {
-                (Some(have), Some(offered)) => {
-                    let parse = crate::catalogue::Version::parse;
-                    parse(have)
-                        .zip(parse(offered))
-                        .is_some_and(|(have, offered)| have < offered)
-                }
-                _ => false,
-            };
             entries.push(Entry {
                 kind,
                 kind_word,
@@ -102,11 +78,12 @@ fn entries(status: &Value, catalogue: &Value, requested: &[String]) -> Vec<Entry
                 name: item["name"].as_str().unwrap_or(id).to_owned(),
                 description: text(&item["description"]).to_owned(),
                 installed: installed.map(|m| m["version"].as_str().unwrap_or("Unknown").to_owned()),
-                latest: recommended
-                    .or_else(|| newest(item))
+                latest: item["latest_version"]
+                    .as_str()
+                    .or_else(|| item["recommended_version"].as_str())
                     .unwrap_or("—")
                     .to_owned(),
-                update,
+                update: item["status"] == "update_available",
                 compatibility: text(&item["compatibility"]).to_owned(),
                 requested: requested.iter().any(|wanted| wanted == id),
                 commands: item["local_steps"]
@@ -257,9 +234,9 @@ impl Modules {
                     "Status",
                     &form["status"],
                     choices(&[
-                        ("Installed and available", ""),
+                        ("All", ""),
                         ("Installed", "installed"),
-                        ("Available", "available"),
+                        ("Not installed", "available"),
                     ]),
                 ),
                 ToolbarControl::select(
@@ -268,7 +245,7 @@ impl Modules {
                     "Kind",
                     &form["kind"],
                     choices(&[
-                        ("Domains and extensions", ""),
+                        ("All kinds", ""),
                         ("Domains", "domains"),
                         ("Extensions", "extensions"),
                     ]),

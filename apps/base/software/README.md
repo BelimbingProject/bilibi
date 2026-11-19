@@ -18,6 +18,7 @@ The answer includes Finance’s description, official repository, a release that
 **Run the installation commands in a Bilibi code folder, test the build, then install its release here.** Follow the entry’s repository and commit, keeping any other mounted Domains and Extensions:
 
 ```sh
+(set -e
 ./bilibi add finance --kind domains --source <repository> --commit <recommended-commit>
 python3 scripts/discover-modules.py
 ./scripts/build-assets.sh --check
@@ -25,6 +26,7 @@ cargo metadata --format-version 1 > /dev/null
 python3 scripts/discover-modules.py --pin
 cargo build --release --locked -p bilibi-web
 ./target/release/bilibi-web status
+)
 ```
 
 `add` clones that repository at that commit, whether or not this checkout’s `catalogue.json` lists it. If the folder already exists at another commit, `add` changes nothing and prints the commit and fetch steps to run after you have saved your work. Extensions mount under `apps/extensions/<id>`. Run the composition locally with its own database and check its pages in the browser. Then save it in an application workspace and publish its protected setup tag. The application workflow creates the installable archive, checksums and GitHub build provenance; a local source build is not a server release.
@@ -83,7 +85,7 @@ Install takes an exact GitHub asset or an uploaded bundle from the accepted appl
 
 ## Page and ChatGPT card
 
-The **Software** page (`/system/software`) has one menu entry and two shared tabs: **Domains and extensions** and **Releases**. The first tab is one grid of installed and available modules, installed first, with search and **Status** and **Kind** filters kept in the address. Each row shows the name, kind, installed version, latest version (the one the commands install, marked **Update available** when it is newer than the installed one), the one-line compatibility fact and the description. A row with commands has an **Installation commands** icon that opens them in a dialog with a copy icon.
+The **Software** page (`/system/software`) has two tabs named **Domains and extensions** and **Releases**. The first tab lists installed modules first, with search and **Status** and **Kind** filters kept in the address. **Not installed** includes catalogue entries without a compatible release. Each row shows the name, kind, installed version, latest version, compatibility and description. **Latest version** shows the catalogue’s latest compatible version when supplied, otherwise its recommended version or **—**. The **Update available** badge follows the catalogue status. The **Installation commands** icon opens a dialog that names the recommended version and includes a copy icon.
 
 Installed Domains and Extensions missing from the selected catalogue also have a row, with **Not in the catalogue** as their compatibility and the installed version or **Unknown**. Extensions also show the recorded code review kind. These rows remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
 
