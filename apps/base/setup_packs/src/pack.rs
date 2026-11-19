@@ -494,28 +494,36 @@ impl SetupPacks {
                 field.picklist = Some((*to).into());
             }
 
-            let missing = if self.fields.record_type(&field.record_type).is_err() {
-                Some(format!(
-                    "Record type “{}” is unavailable.",
-                    field.record_type
-                ))
-            } else if let Some(list) = field
+            let previous_missing = diff.missing.len();
+            if self.fields.record_type(&field.record_type).is_err() {
+                diff.missing.push(Issue {
+                    entry: entry.clone(),
+                    reason: format!("Record type “{}” is unavailable.", field.record_type),
+                });
+            }
+            if let Some(list) = field
                 .picklist
                 .as_deref()
                 .filter(|key| !picklists.contains(key))
             {
-                Some(format!(
-                    "Pick-list “{list}” is unavailable. Choose a destination pick-list mapping."
-                ))
-            } else {
-                field
-                    .target
-                    .as_deref()
-                    .filter(|key| self.fields.records().kind(key).is_none())
-                    .map(|key| format!("Reference kind “{key}” is unavailable."))
-            };
-            if let Some(reason) = missing {
-                diff.missing.push(Issue { entry, reason });
+                diff.missing.push(Issue {
+                    entry: entry.clone(),
+                    reason: format!(
+                        "Pick-list “{list}” is unavailable. Choose a destination pick-list mapping."
+                    ),
+                });
+            }
+            if let Some(key) = field
+                .target
+                .as_deref()
+                .filter(|key| self.fields.records().kind(key).is_none())
+            {
+                diff.missing.push(Issue {
+                    entry: entry.clone(),
+                    reason: format!("Reference kind “{key}” is unavailable."),
+                });
+            }
+            if diff.missing.len() != previous_missing {
                 continue;
             }
 

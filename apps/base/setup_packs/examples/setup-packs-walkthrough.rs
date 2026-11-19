@@ -209,15 +209,34 @@ async fn refusals(target: &Person<'_>, mut request: Value) -> Result<(), Failure
 
     request["pack"]["labels"][0] =
         json!({"kind":"menu","subject":OTHER_LABEL,"label":"Extra facts"});
-    request["pack"]["custom_fields"][0]["record_type"] = json!("unmounted");
-    let missing = target.read(PREVIEW, &request).await?;
+    let mut unavailable = request.clone();
+    unavailable["pack"]["custom_fields"][0]["record_type"] = json!("unmounted");
+    unavailable["pack"]["custom_fields"] = json!([
+        unavailable["pack"]["custom_fields"][0],
+        {
+            "record_type":"unmounted", "key":"related_item", "label":"Related item",
+            "kind":"reference", "target":"unmounted_item", "rule_condition":false
+        }
+    ]);
+    unavailable["picklist_map"][0]["to"] = json!("unmounted.status");
+    let missing = target.read(PREVIEW, &unavailable).await?;
     check(
-        "The preview names the missing record type",
+        "The preview reports all missing dependencies for both fields",
         missing["ready"] == false
-            && missing["missing"][0]["reason"] == "Record type “unmounted” is unavailable.",
+            && missing["missing"]
+                == json!([
+                    {"entry":"custom field unmounted.new_stage",
+                     "reason":"Record type “unmounted” is unavailable."},
+                    {"entry":"custom field unmounted.new_stage",
+                     "reason":"Pick-list “unmounted.status” is unavailable. Choose a destination pick-list mapping."},
+                    {"entry":"custom field unmounted.related_item",
+                     "reason":"Record type “unmounted” is unavailable."},
+                    {"entry":"custom field unmounted.related_item",
+                     "reason":"Reference kind “unmounted_item” is unavailable."}
+                ])
+            && missing["additions"]["custom_fields"] == json!([]),
     )?;
 
-    request["pack"]["custom_fields"][0]["record_type"] = json!("company");
     let ready = target.read(PREVIEW, &request).await?;
     let late_collision = [
         apply(&request, &ready),
