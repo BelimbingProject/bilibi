@@ -125,7 +125,7 @@ Every authentication proves the selected desk again. An invalid or absent select
 
 ## Token storage
 
-`password_reset_tokens` has one row per sign-in identity, so it can never grow past the identity count. Only the SHA-256 of the 256-bit random token is stored; the plaintext exists in the emailed link alone. A request is throttled to one per 60 seconds, a link lives one hour, and each request deletes expired rows. Consuming a token deletes its row inside the audited transaction, so a racing second use loses. If delivery fails the row is removed so the person can ask again.
+`password_reset_tokens` has one row per sign-in identity, so it can never grow past the identity count. Only the SHA-256 of the 256-bit random token is stored; the plaintext exists in the emailed link alone. A request is throttled to one per 60 seconds, a link lives three days by default (the installation setting `user.password_reset_minutes` allows 15 minutes to seven days), and each request deletes expired rows. Consuming a token deletes its row inside the audited transaction, so a racing second use loses. If delivery fails the row is removed so the person can ask again.
 
 Verification links are stateless: `v1.{tenant}.{user}.{issued}.{hmac}` signed
 with `BILIBI_USER_SIGNING_KEY` (64 hex characters; separate from the Settings

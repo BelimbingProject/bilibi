@@ -10,13 +10,22 @@ use crate::{
 };
 use bilibi_database::{Change, Context, Db, Error, MutationBoundary};
 use bilibi_mail::{Address, Mailer, Message};
+use bilibi_module_registry::{Contribution, Provenance};
+use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-/// A reset link stays valid this long and a new one may be requested this often.
-const RESET_LIFETIME_SECONDS: f64 = 3600.0;
+const RESET_LIFETIME: &str = "user.password_reset_minutes";
+inventory::submit! { Contribution::new(DEFINITIONS, RESET_LIFETIME, Provenance { module: "core/user", source: file!(), line: line!() }, &Setting::Definition(Definition {
+    value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(4320),
+    nullable: false, encrypted: false, minimum: Some(15.0), maximum: Some(10080.0), validator: None,
+    editor: Some(Editor { group: "Session", label: "Password reset link lifetime (minutes)",
+        help: "How long a password reset link can be used.",
+        capability: Some(crate::contributions::UPDATE), reveal_duration_ms: 5_000 }),
+})) }
+/// A new link may be requested once a minute.
 const RESET_THROTTLE_SECONDS: f64 = 60.0;
 
 pub(crate) fn normalize_email(email: &str) -> Result<String, Error> {
@@ -42,6 +51,7 @@ pub(crate) struct ResetMail {
     pub(crate) db: Db,
     pub(crate) mutations: Arc<MutationBoundary>,
     mailer: Arc<Mailer>,
+    settings: Arc<bilibi_settings::Settings>,
     origin: String,
 }
 
@@ -63,13 +73,20 @@ impl ResetMail {
                 Context::system(tenant, PRINCIPAL, "user.reset_requested"),
             )
             .await?;
+        let lifetime = self
+            .settings
+            .get_global(tx.sql(), RESET_LIFETIME)
+            .await?
+            .as_i64()
+            .ok_or(Error::Internal)? as f64
+            * 60.0;
         let issued = tx
             .mutate(move |sql| {
                 Box::pin(async move {
                     let identity: i64 = sql
                         .query_opt(
                             "INSERT INTO password_reset_tokens(identity_id,token_hash,created_at,expires_at) SELECT identity_id,$3,now(),now()+make_interval(secs => $4::double precision) FROM users WHERE tenant_id=$1 AND id=$2 ON CONFLICT (identity_id) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,expires_at=excluded.expires_at WHERE password_reset_tokens.created_at<=now()-make_interval(secs => $5::double precision) RETURNING identity_id",
-                            &[&tenant, &user, &hash, &RESET_LIFETIME_SECONDS, &RESET_THROTTLE_SECONDS],
+                            &[&tenant, &user, &hash, &lifetime, &RESET_THROTTLE_SECONDS],
                         )
                         .await?
                         .ok_or(Error::Conflict)?
@@ -393,6 +410,7 @@ impl UserService {
             db: self.db.clone(),
             mutations: self.mutations.clone(),
             mailer: self.mailer.clone(),
+            settings: self.settings.clone(),
             origin: self.origin.clone(),
         }
     }
@@ -409,6 +427,38 @@ impl UserService {
             "{}/portal/reset/{site}/{token}?email={}",
             self.origin,
             encode_component(email)
+        )
+    }
+
+    /// Check a staff reset link before asking for a new password. Redemption
+    /// repeats this check inside its mutation, so concurrent use still loses.
+    pub async fn reset_link_valid(&self, email: &str, token: &str) -> Result<bool, Error> {
+        self.reset_link_valid_for(Audience::Staff, email, token)
+            .await
+    }
+
+    pub(crate) async fn reset_link_valid_for(
+        &self,
+        audience: Audience,
+        email: &str,
+        token: &str,
+    ) -> Result<bool, Error> {
+        let Ok(email) = normalize_email(email) else {
+            return Ok(false);
+        };
+        if token.is_empty() || token.len() > 128 {
+            return Ok(false);
+        }
+        let client = self.db.get().await?;
+        let rows = client
+            .query(
+                RESET_ACCOUNT,
+                &[&email, &audience.kind().as_str(), &audience.tenant()],
+            )
+            .await?;
+        let presented = digest(token);
+        Ok(
+            matches!(&rows[..], [row] if row.get::<_, Option<Vec<u8>>>(5).is_some_and(|stored| bool::from(stored.ct_eq(&presented)))),
         )
     }
 

@@ -824,7 +824,7 @@ pub async fn forgot(
 pub async fn reset_page(
     State(app): State<App>,
     headers: HeaderMap,
-    Path(_token): Path<String>,
+    Path(token): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> std::result::Result<Response, HttpError> {
     if signed_in(&app, &headers).await {
@@ -834,6 +834,18 @@ pub async fn reset_page(
         email: bounded(query.get("email").map(String::as_str).unwrap_or("")),
         ..ResetForm::default()
     };
+    if !app.user.reset_link_valid(&form.email, &token).await? {
+        return forgot_card(
+            &app,
+            &ForgotForm {
+                email: form.email,
+                email_errors: vec![RESET_LINK_INVALID.into()],
+                ..ForgotForm::default()
+            },
+            StatusCode::OK,
+        )
+        .await;
+    }
     reset_card(&app, &form, StatusCode::OK).await
 }
 async fn reset_card(
@@ -896,8 +908,16 @@ pub async fn reset(
             Ok(response)
         }
         Err(CredentialError::InvalidOrExpiredToken) => {
-            form.email_errors = vec![RESET_LINK_INVALID.into()];
-            reset_card(&app, &form, StatusCode::UNPROCESSABLE_ENTITY).await
+            forgot_card(
+                &app,
+                &ForgotForm {
+                    email: form.email,
+                    email_errors: vec![RESET_LINK_INVALID.into()],
+                    ..ForgotForm::default()
+                },
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await
         }
         Err(CredentialError::Policy(violation)) => {
             form.password_errors = vec![violation.to_string()];

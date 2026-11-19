@@ -800,13 +800,26 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
 /// `GET /portal/reset/{site}/{token}`: the address comes from the emailed link.
 pub async fn reset_page(
     State(app): State<App>,
-    Path((address, _token)): Path<(String, String)>,
+    Path((address, token)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, HttpError> {
     let Some(site) = site(&app, &address).await? else {
         return unknown_site();
     };
     let email = bounded(query.get("email").map(String::as_str).unwrap_or(""));
+    if !app
+        .user
+        .portal_reset_link_valid(site.tenant, &email, &token)
+        .await?
+    {
+        return forgot_card(
+            &site,
+            &email,
+            vec![RESET_LINK_INVALID.into()],
+            "",
+            StatusCode::OK,
+        );
+    }
     reset_card(
         &site,
         ResetCard {
@@ -868,10 +881,13 @@ pub async fn reset(
         Ok(()) => Ok(
             Redirect::to(&format!("/portal/sign-in/{}?done=reset", site.address)).into_response(),
         ),
-        Err(CredentialError::InvalidOrExpiredToken) => {
-            form.email_errors = vec![RESET_LINK_INVALID.into()];
-            reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY)
-        }
+        Err(CredentialError::InvalidOrExpiredToken) => forgot_card(
+            &site,
+            &email,
+            vec![RESET_LINK_INVALID.into()],
+            "",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         Err(CredentialError::Policy(violation)) => {
             form.password_errors = vec![violation.to_string()];
             reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY)
