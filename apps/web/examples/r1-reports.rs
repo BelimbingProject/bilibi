@@ -1801,6 +1801,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("{refused:?}, report saved: {saved}, audit counts: {checked:?} to {audited:?}"),
     );
 
+    let audit_watermark = async || -> Result<i64, tokio_postgres::Error> {
+        Ok(client
+            .query_one("SELECT coalesce(max(id),0) FROM base_audit_actions", &[])
+            .await?
+            .get(0))
+    };
+    let oversight_events =
+        async |after: i64| -> Result<Vec<(i64, String, Value)>, tokio_postgres::Error> {
+            Ok(client
+            .query(
+                "SELECT tenant_id,event,payload FROM base_audit_actions WHERE id>$1
+                 AND tenant_id IN (1,2,3) AND event IN ('tenancy.oversight.query','tenancy.oversight.read')
+                 AND payload->>'table'='reference_items' ORDER BY id",
+                &[&after],
+            )
+            .await?
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
+            .collect())
+        };
+    let after = audit_watermark().await?;
+    let mut blocker = db.get_detached("the walkthrough's source lock").await?;
+    let lock = blocker.transaction().await?;
+    lock.batch_execute("LOCK TABLE base_grid_ref_items IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let refused = write(&boundary, &db, &manager, "reports.create", async |tx| {
+        reports.create(tx, &manager, &oversight_rows).await
+    })
+    .await;
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a source lock timeout refuses the child and the parent evidence survives rollback",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition"))
+            && matches!(&events[..], [(1, event, parent)]
+                if event == "tenancy.oversight.query"
+                && parent["row_count"] == 0
+                && parent["children"] == json!([{"tenant_id": 2, "outcome": "refused"}])),
+        format!("{refused:?}, oversight evidence: {events:?}"),
+    );
+
     let budget_key = "tenancy.oversight.total_timeout_ms";
     client
         .execute(
@@ -1824,12 +1866,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await;
     lock.rollback().await?;
     drop(blocker);
-    client
-        .execute(
-            "DELETE FROM base_settings WHERE key=$1 AND tenant_id=0 AND scope_type='global' AND scope_id=0",
-            &[&budget_key],
-        )
-        .await?;
     reports.check(&manager, &oversight_rows).await?;
     let after_retry = audit_counts().await?;
     checks.check(
@@ -1838,6 +1874,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && after_retry == (audited.0 + 1, audited.1 + 1),
         format!("{timed:?}, parent and child audit counts: {audited:?} to {after_retry:?}"),
     );
+
+    client
+        .execute(
+            "INSERT INTO tenants(id,name,parent_id) VALUES($1,'Deadline child',$2)",
+            &[&3_i64, &1_i64],
+        )
+        .await?;
+    client
+        .execute(
+            "INSERT INTO base_tenancy_oversight(tenant_id,parent_id,active,tables) VALUES($1,$2,true,$3)",
+            &[&3_i64, &1_i64, &consent],
+        )
+        .await?;
+    reports.check(&manager, &oversight_rows).await?;
+    let after = audit_watermark().await?;
+    let mut blocker = db
+        .get_detached("the walkthrough's second child audit lock")
+        .await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&3_i64],
+    )
+    .await?;
+    let timed = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        write(&boundary, &db, &manager, "reports.create", async |tx| {
+            reports.create(tx, &manager, &oversight_rows).await
+        }),
+    )
+    .await;
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "the total deadline preserves the first child audit and the partial parent summary on rollback",
+        matches!(timed, Ok(Err(ReportError::TooHeavy("oversight total time bound exceeded"))))
+            && matches!(&events[..], [(2, child_event, child), (1, parent_event, parent)]
+                if child_event == "tenancy.oversight.read" && child["row_count"] == 1
+                && parent_event == "tenancy.oversight.query" && parent["row_count"] == 1
+                && parent["children"] == json!([
+                    {"tenant_id": 2, "outcome": "ok"},
+                    {"tenant_id": 3, "outcome": "timed_out"}
+                ])),
+        format!("{timed:?}, oversight evidence: {events:?}"),
+    );
+    client
+        .execute(
+            "DELETE FROM base_tenancy_oversight WHERE tenant_id=$1",
+            &[&3_i64],
+        )
+        .await?;
+    client
+        .execute(
+            "DELETE FROM base_settings WHERE key=$1 AND tenant_id=0 AND scope_type='global' AND scope_id=0",
+            &[&budget_key],
+        )
+        .await?;
 
     client
         .batch_execute(

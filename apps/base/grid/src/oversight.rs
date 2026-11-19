@@ -511,7 +511,7 @@ impl OversightQueries {
             }
             Ok(Catalog::oversight_builder(tx, &proof, rows).await?)
         })
-        .await
+        .await?
     }
     /// Validate a saved question on the caller's transaction. Each child read
     /// is bounded, audited, and SQL refusals recover at a savepoint. No child
@@ -531,7 +531,7 @@ impl OversightQueries {
             }
             Ok((scope, self.setting_on(tx, "child_timeout_ms").await?))
         })
-        .await?;
+        .await??;
         let mut audit = timeout_at(deadline, self.db.try_get_detached("oversight audit"))
             .await
             .map_err(|_| QueryError::TooHeavy(TOTAL_TIMEOUT))?
@@ -547,9 +547,13 @@ impl OversightQueries {
         let mut supported = scope.children().is_empty();
         let mut children = Vec::new();
         let mut rows = 0;
+        let child_budget = Duration::from_millis(u64::from(child_ms));
         for grant in scope.children() {
-            let child_deadline =
-                deadline.min(Instant::now() + Duration::from_millis(u64::from(child_ms)));
+            let start = Instant::now();
+            if start >= deadline {
+                break;
+            }
+            let child_deadline = deadline.min(start + child_budget);
             let result = budgeted(
                 tx,
                 child_deadline,
@@ -562,38 +566,45 @@ impl OversightQueries {
                     Ok(data)
                 },
             )
-            .await;
-            if Instant::now() >= deadline {
-                return Err(QueryError::TooHeavy(TOTAL_TIMEOUT));
-            }
-            let result = match result {
-                Ok(data) => {
-                    audit_before(&mut audit, child_deadline, CHILD_TIMEOUT, async |client| {
-                        record_child(client, &scope, grant, root, &spec, &data).await?;
-                        Ok(data.count())
-                    })
-                    .await
-                }
-                Err(error) => Err(error),
-            };
+            .await?;
             let outcome = match result {
-                Ok(count) => {
-                    rows += count;
-                    "ok"
-                }
-                Err(QueryError::Database(error)) if !matches!(error, Error::Forbidden) => {
-                    return Err(error.into())
+                Ok(data) => {
+                    let audited =
+                        audit_before(&mut audit, child_deadline, CHILD_TIMEOUT, async |client| {
+                            record_child(client, &scope, grant, root, &spec, &data).await
+                        })
+                        .await;
+                    match audited {
+                        Ok(()) => {
+                            rows += data.count();
+                            "ok"
+                        }
+                        Err(
+                            error @ (QueryError::TooHeavy(_)
+                            | QueryError::Database(Error::Forbidden)),
+                        ) => child_refusal(&error),
+                        Err(error) => return Err(error),
+                    }
                 }
                 Err(error) => child_refusal(&error),
             };
             supported |= matches!(outcome, "ok" | "timed_out" | "over_cost");
             children.push((grant.tenant(), outcome));
         }
-        audit_before(&mut audit, deadline, TOTAL_TIMEOUT, async |client| {
-            record_query(client, &scope, root, rows, children.into_iter()).await
-        })
+        let now = Instant::now();
+        let expired = now >= deadline;
+        audit_before(
+            &mut audit,
+            deadline.max(now + child_budget),
+            "oversight summary audit timed out",
+            async |client| record_query(client, &scope, root, rows, children.into_iter()).await,
+        )
         .await?;
-        Ok(supported)
+        if expired {
+            Err(QueryError::TooHeavy(TOTAL_TIMEOUT))
+        } else {
+            Ok(supported)
+        }
     }
 
     async fn deadline_on(
@@ -608,7 +619,7 @@ impl OversightQueries {
             None,
             self.setting_on(tx, "total_timeout_ms"),
         )
-        .await?;
+        .await??;
         let deadline = start + Duration::from_millis(u64::from(millis));
         if Instant::now() >= deadline {
             return Err(QueryError::TooHeavy(TOTAL_TIMEOUT));
@@ -655,12 +666,12 @@ async fn budgeted<T>(
     time_error: &'static str,
     bounds: Option<Bounds>,
     work: impl std::future::Future<Output = Result<T, QueryError>>,
-) -> Result<T, QueryError> {
+) -> Result<Result<T, QueryError>, Error> {
     if Instant::now() >= deadline {
-        return Err(QueryError::TooHeavy(time_error));
+        return Ok(Err(QueryError::TooHeavy(time_error)));
     }
-    if let Some(bounds) = bounds {
-        bounds.check()?;
+    if let Some(Err(error)) = bounds.map(|bounds| bounds.check()) {
+        return Ok(Err(error));
     }
     at_probe_savepoint(tx, bounds.is_none(), async {
         match timeout_at(deadline, async {
@@ -721,7 +732,7 @@ async fn at_probe_savepoint<T>(
     tx: &tokio_postgres::Transaction<'_>,
     keep_success: bool,
     work: impl std::future::Future<Output = Result<T, QueryError>>,
-) -> Result<T, QueryError> {
+) -> Result<Result<T, QueryError>, Error> {
     tx.batch_execute("SAVEPOINT grid_oversight_probe")
         .await
         .map_err(Error::from)?;
@@ -734,7 +745,7 @@ async fn at_probe_savepoint<T>(
     tx.batch_execute("RELEASE SAVEPOINT grid_oversight_probe")
         .await
         .map_err(Error::from)?;
-    result
+    Ok(result)
 }
 
 fn sql_cancelled(error: &QueryError) -> bool {
@@ -748,47 +759,42 @@ fn sql_cancelled(error: &QueryError) -> bool {
         .is_some_and(|error| error.code() == &tokio_postgres::error::SqlState::QUERY_CANCELED)
 }
 
-async fn audit_before<T>(
+async fn audit_before(
     client: &mut tokio_postgres::Client,
     deadline: Instant,
     time_error: &'static str,
-    work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<T, QueryError>,
-) -> Result<T, QueryError> {
+    work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
     if Instant::now() >= deadline {
         return Err(QueryError::TooHeavy(time_error));
     }
     let tx = client.transaction().await?;
-    match budgeted(&tx, deadline, time_error, None, work(&tx)).await {
-        Ok(value) => {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+    let result = budgeted(&tx, deadline, time_error, None, async {
+        work(&tx).await?;
+        tx.batch_execute("SET CONSTRAINTS ALL IMMEDIATE").await?;
+        Ok(())
+    })
+    .await?;
+    match result {
+        Ok(()) => {
+            if Instant::now() >= deadline {
                 tx.rollback().await.map_err(Error::from)?;
                 return Err(QueryError::TooHeavy(time_error));
             }
-            let cancel = tx.cancel_token();
-            let millis = remaining.as_millis() + 1;
-            match timeout_at(deadline, async {
-                tx.batch_execute(&format!("SET LOCAL statement_timeout = '{millis}ms'"))
-                    .await?;
-                tx.commit().await
-            })
-            .await
-            {
-                Ok(result) => {
-                    result?;
-                    if Instant::now() >= deadline {
-                        return Err(QueryError::TooHeavy(time_error));
-                    }
-                    Ok(value)
+            match timeout_at(deadline, tx.commit()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) if error.as_db_error().is_some_and(|db| {
+                    use tokio_postgres::error::{Severity, SqlState};
+                    db.parsed_severity() == Some(Severity::Error)
+                        && !db.code().code().starts_with("08")
+                        && db.code() != &SqlState::T_R_STATEMENT_COMPLETION_UNKNOWN
+                }) =>
+                {
+                    Err(error.into())
                 }
-                Err(_) => {
-                    cancel.cancel_query(tokio_postgres::NoTls).await?;
-                    client
-                        .batch_execute("ROLLBACK")
-                        .await
-                        .map_err(Error::from)?;
-                    Err(QueryError::TooHeavy(time_error))
-                }
+                _ => Err(Error::refused(
+                    "The oversight audit commit could not be confirmed. Check the audit trail before retrying.",
+                ).into()),
             }
         }
         Err(error) => {
