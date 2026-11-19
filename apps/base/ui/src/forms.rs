@@ -340,6 +340,8 @@ pub struct Choice {
     /// italic by a combobox in the box and in the list, and searched like
     /// the name. A native select ignores it.
     pub detail: String,
+    /// An instant displayed alongside a combobox option.
+    pub(crate) instant: Option<crate::flex_table::Instant>,
 }
 
 impl Choice {
@@ -348,7 +350,18 @@ impl Choice {
             label: label.into(),
             value: value.into(),
             detail: String::new(),
+            instant: None,
         }
+    }
+
+    pub(crate) fn with_instant(mut self, instant: Option<crate::flex_table::Instant>) -> Self {
+        self.instant = instant;
+        self
+    }
+
+    /// The instant carried by a picker option, if any.
+    pub fn instant(&self) -> Option<&crate::flex_table::Instant> {
+        self.instant.as_ref()
     }
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {

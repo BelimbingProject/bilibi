@@ -80,6 +80,8 @@ pub struct PickerHit {
     /// The singular kind name for a search across kinds ("Company").
     /// Empty when the field searches only one kind.
     pub kind_label: String,
+    /// An instant that distinguishes this hit in the reader's time display.
+    pub instant: Option<crate::flex_table::Instant>,
 }
 
 /// One kind of record a [`RecordPicker::named`] offers: its Base Records kind,
@@ -135,7 +137,7 @@ pub struct RecordPicker {
     in_fact: bool,
     pick_event: String,
     /// Each hit's `kind:id` and text.
-    hits: Vec<(String, String, String)>,
+    hits: Vec<PickerHit>,
     /// Sent with a pick or a clear as `key`: the field this picker serves.
     key: String,
     /// Shown under the chosen record; while searching, the search field shows them.
@@ -152,7 +154,11 @@ impl RecordPicker {
             .options(
                 self.hits
                     .iter()
-                    .map(|(value, text, detail)| Choice::new(text, value).detail(detail))
+                    .map(|hit| {
+                        Choice::new(&hit.label, &hit.value)
+                            .detail(&hit.kind_label)
+                            .with_instant(hit.instant.clone())
+                    })
                     .collect(),
             )
             .errors(self.errors.clone())
@@ -175,10 +181,7 @@ impl RecordPicker {
         let search = Combobox::new(format!("{id}-search"), format!("{form}[{key}_search]"))
             .label(label)
             .errors(errors.clone());
-        let hits = hits
-            .iter()
-            .map(|hit| (hit.value.clone(), hit.label.clone(), hit.kind_label.clone()))
-            .collect();
+        let hits = hits.to_vec();
         let (selected, hidden) = match selected {
             Some((value, pill)) => (
                 Some(Html::render(&pill).unwrap_or(Html::EMPTY)),
@@ -258,6 +261,7 @@ impl RecordPicker {
                 value: format!("{}:{record}", kind.prefix),
                 label: name.clone(),
                 kind_label: String::new(),
+                instant: None,
             })
             .collect();
         let chosen = chosen.map(|(record, name)| {

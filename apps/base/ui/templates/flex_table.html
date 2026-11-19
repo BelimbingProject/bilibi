@@ -12,7 +12,7 @@
 
 {#- A timestamp, typed through every lens: both server texts ride along so the
     browser follows the reader's clock . -#}
-{% macro instant(id, i) %}<time id="{{ id }}" datetime="{{ i.iso }}" data-format="{{ i.format }}" data-precision="{{ i.precision }}" data-mode="{{ i.mode }}" data-text-company="{{ i.company }}" data-text-utc="{{ i.utc }}" data-follow-shell="true" data-hook="DateTime" class="tabular-nums">{{ i.text }}</time>{% endmacro %}
+{% macro instant(id, i) %}<time{% if !id.is_empty() %} id="{{ id }}"{% endif %} datetime="{{ i.iso }}" data-format="{{ i.format }}" data-precision="{{ i.precision }}" data-mode="{{ i.mode }}" data-text-company="{{ i.company }}" data-text-utc="{{ i.utc }}" data-follow-shell="true" data-hook="DateTime" class="tabular-nums">{{ i.text }}</time>{% endmacro %}
 
 {#- A cell's text: a typed instant or date through the timestamp markup,
     anything else as text, an empty text as a dash. -#}
