@@ -53,10 +53,17 @@
       };
       window.addEventListener('message', this.message);
       window.addEventListener('bilibi:app-frame', this.reply);
+      // The frame sends its first message as soon as its document loads.
+      this.load = () => {
+        if (this.frame && !this.frame.hasAttribute('src')) this.frame.src = this.frame.dataset.src;
+      };
+      if (window.BilibiLive) this.load();
+      else window.addEventListener('bilibi:connected', this.load, {once: true});
     },
     destroyed() {
       window.removeEventListener('message', this.message);
       window.removeEventListener('bilibi:app-frame', this.reply);
+      window.removeEventListener('bilibi:connected', this.load);
     },
   };
   window.BilibiUI.registerHook('AppFrame', AppFrame);

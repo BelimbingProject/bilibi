@@ -6,6 +6,20 @@
 
 `/system/settings`, titled **System Settings**, is the operator page for contributed settings. It is its own module because it needs Authz, and Authz depends on `base/settings`: storage stays below Authz, the screen sits above it.
 
+## Tenant agent operations
+
+The agent uses the caller's tenant and the [settings their owners delegate](../settings/README.md). The guide `base.settings_editor` walks through discovery, review and restore.
+
+- `base.settings_editor.tenant.list` requires `base.settings.tenant.view`. It returns the delegated settings allowed by the caller's live field capabilities, their effective source (`tenant`, `global` or `default`), and whether the tenant has an override (`set_for_tenant`).
+- `base.settings_editor.tenant.set` takes an exact key and a string value. The editor trims surrounding whitespace before parsing the string for the declared type. In the review card, choose an available non-secret setting before entering a value. Set creates an override even when the value equals the inherited value.
+- `base.settings_editor.tenant.restore` takes an exact key and removes the tenant override so inheritance resumes. Both writes recheck `base.settings.tenant.manage` and the definition's field capability in the mutation transaction, and apply any owner-specific guard. Settings supplies validation and audit.
+
+Encrypted values are always `null` in list, preview and result data. The list reports whether a secret is set. Agent Set refuses encrypted settings and directs the person to the operator's **System Settings** page with its existing checks. Agent Restore of an encrypted setting requires `base.settings_editor.tenant.secret.change` step-up.
+
+The read-only Customisations page is owned by its shared page contract (issue #797). This module contributes its tenant-overrides section there once that contract is available; it does not add a tenant settings screen.
+
+Run the `tenant-settings` [walkthrough](../../../docs/runtime-parity.md) to exercise list, Set and Restore against two fixture tenants. It checks source reporting, mutation audit, secret masking and refusal of encrypted Set in the shared review card.
+
 ## Table
 
 Settings appear in the shared `FlexTable`, with Setting, Value and Area columns. The company picker uses the same table; per-person settings do not use this module.
@@ -42,7 +56,7 @@ The scope picker offers **This tenant** after Global, for everyone on the page: 
 
 - It lists the definitions with the tenant scope (Search's settings, Datetime's `localization.timezone`), notes "Inherited from global" or "the default", and labels the restore button "Clear overrides".
 - Writes go under `Target::Tenant` as `settings.tenant.save`/`restore`, authorized by the route capability that every write already re-asks (`authorize_operator`); Settings binds the tenant from the scope, so no other tenant changes.
-- The page is the operator's, so this sets the operator tenant's defaults. Another tenant's administrators have no page for their own tenant's defaults yet.
+- The page sets the operator tenant's defaults. For delegated customer tenant settings, see [Tenant agent operations](#tenant-agent-operations).
 
 ## Company scope (K15)
 

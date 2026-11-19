@@ -12,19 +12,6 @@ const MAX_REVIEW_ENTRIES: usize = 1_000;
 const DIGEST_ENTRIES: usize = 20;
 const DIGEST_FIELDS: usize = 4;
 
-/// The review fingerprint of a stored session id: the id is the cookie
-/// token's SHA-256 in hex, the same bytes Tenancy seals as the browser
-/// session. Anything else matches no review.
-fn fingerprint(session: &str) -> Vec<u8> {
-    if session.len() != 64 || !session.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Vec::new();
-    }
-    (0..64)
-        .step_by(2)
-        .filter_map(|at| u8::from_str_radix(&session[at..at + 2], 16).ok())
-        .collect()
-}
-
 fn digest_line(index: usize, key: Option<&str>, input: &Value) -> String {
     let fields: Vec<String> = input.as_object().map_or_else(Vec::new, |object| {
         object
@@ -105,7 +92,8 @@ pub(crate) fn text_summary(value: &Value) -> String {
 
 /// Durable hand-off between an MCP review opener, the same card in a browser,
 /// and the agent waiting for its outcome. The browser session fingerprint is
-/// one-way evidence only; no session credential enters a URL or card payload.
+/// the SHA-256 of the stored session ID's text, as sealed by Tenancy on the
+/// agent facet. No session credential enters a URL or card payload.
 pub struct Reviews {
     db: Db,
     changed: broadcast::Sender<String>,
@@ -225,8 +213,7 @@ impl Reviews {
 
     /// End reviews when the connection switch moves away from the session
     /// that created them. `session` is the stored session id
-    /// (`bilibi_session::session_id`, the token's SHA-256 in hex), so its
-    /// bytes are the fingerprint a review keeps.
+    /// (`bilibi_session::session_id`, the token's SHA-256 in hex).
     pub async fn cancel_connection_session(
         &self,
         tenant: i64,
@@ -235,11 +222,10 @@ impl Reviews {
         session: &str,
         reason: &str,
     ) -> Result<()> {
-        let fingerprint = fingerprint(session);
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let rows = client.query(
-            "UPDATE base_agent_api_reviews SET status='cancelled',outcome=jsonb_build_object('reason',$5::text),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE tenant_id=$1 AND user_id=$2 AND connection_id=$3 AND browser_session_hash=$4 AND status IN ('open','refused') RETURNING id",
-            &[&tenant, &user, &connection, &fingerprint, &reason],
+            "UPDATE base_agent_api_reviews SET status='cancelled',outcome=jsonb_build_object('reason',$5::text),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE tenant_id=$1 AND user_id=$2 AND connection_id=$3 AND browser_session_hash=sha256(convert_to($4,'UTF8')) AND status IN ('open','refused') RETURNING id",
+            &[&tenant, &user, &connection, &session, &reason],
         ).await.map_err(bilibi_database::Error::from)?;
         for row in rows {
             let _ = self.changed.send(row.get(0));
@@ -248,14 +234,12 @@ impl Reviews {
     }
 
     /// Session termination may arrive without an account scope. `session` is
-    /// the ended stored id (`bilibi_session::Terminated::id`), whose bytes are
-    /// the review's fingerprint.
+    /// the ended stored id (`bilibi_session::Terminated::id`).
     pub async fn cancel_session(&self, session: &str) -> Result<()> {
-        let fingerprint = fingerprint(session);
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let rows = client.query(
-            "UPDATE base_agent_api_reviews SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE browser_session_hash=$1 AND status IN ('open','refused') RETURNING id",
-            &[&fingerprint],
+            "UPDATE base_agent_api_reviews SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE browser_session_hash=sha256(convert_to($1,'UTF8')) AND status IN ('open','refused') RETURNING id",
+            &[&session],
         ).await.map_err(bilibi_database::Error::from)?;
         for row in rows {
             let _ = self.changed.send(row.get(0));
@@ -271,7 +255,7 @@ impl Reviews {
     async fn end_orphaned(&self, tenant: i64, user: i64) -> Result<()> {
         let client = self.db.get().await.map_err(bilibi_database::Error::from)?;
         let rows = client.query(
-            "UPDATE base_agent_api_reviews r SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.status IN ('open','refused') AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.tenant_id=r.tenant_id AND s.user_id=r.user_id AND s.expires_at>now() AND decode(s.id,'hex')=r.browser_session_hash) RETURNING r.id",
+            "UPDATE base_agent_api_reviews r SET status='cancelled',outcome=jsonb_build_object('reason','The browser session ended.'),ended_at=clock_timestamp(),card='{}'::jsonb,original_operations='[]'::jsonb WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.status IN ('open','refused') AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.tenant_id=r.tenant_id AND s.user_id=r.user_id AND s.expires_at>now() AND sha256(convert_to(s.id,'UTF8'))=r.browser_session_hash) RETURNING r.id",
             &[&tenant, &user],
         ).await.map_err(bilibi_database::Error::from)?;
         for row in rows {
@@ -358,54 +342,27 @@ impl bilibi_notifications::TodoSource for Reviews {
     }
 }
 
-fn scrub_write_only(schema: &Value, value: &mut Value) {
-    if schema["type"] == "array" {
-        if let Some(items) = value.as_array_mut() {
-            for item in items {
-                scrub_write_only(&schema["items"], item);
-            }
-        }
-        return;
-    }
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    let Some(properties) = schema["properties"].as_object() else {
-        return;
-    };
-    for (key, child) in properties {
-        if child["writeOnly"] == true {
-            object.remove(key);
-        } else if let Some(value) = object.get_mut(key) {
-            scrub_write_only(child, value);
-        }
-    }
-}
-
-fn persisted_review(card: &Value, operations: &Value) -> (Value, Value) {
-    let mut card = card.clone();
-    let mut operations = operations.clone();
+fn redact_review(card: &mut Value, operations: &mut Value) {
     let descriptions = card["descriptions"].clone();
     let default_description = card["operation"].clone();
     if let Some(items) = operations.as_array_mut() {
         for (index, operation) in items.iter_mut().enumerate() {
             let description = descriptions.get(index).unwrap_or(&default_description);
-            scrub_write_only(&description["input"], &mut operation["input"]);
+            crate::schema::scrub_write_only(&description["input"], &mut operation["input"]);
         }
     }
     if let Some(entries) = card["entries"].as_array_mut() {
         for (index, entry) in entries.iter_mut().enumerate() {
             let description = descriptions.get(index).unwrap_or(&default_description);
-            scrub_write_only(&description["input"], entry);
+            crate::schema::scrub_write_only(&description["input"], entry);
         }
     }
     if let Some(items) = card["operations"].as_array_mut() {
         for (index, operation) in items.iter_mut().enumerate() {
             let description = descriptions.get(index).unwrap_or(&default_description);
-            scrub_write_only(&description["input"], &mut operation["input"]);
+            crate::schema::scrub_write_only(&description["input"], &mut operation["input"]);
         }
     }
-    (card, operations)
 }
 
 pub(crate) fn input_schema() -> Value {
@@ -572,14 +529,21 @@ pub(crate) async fn open(
         return Err(crate::invalid("operations", format!("Linked steps must fit one plan, at most {} operations. Cross-plan references are refused.", review_settings.max_operations)));
     }
     let mut descriptions = Vec::new();
+    let mut review_schemas = std::collections::BTreeMap::<&str, Value>::new();
     {
-        let client = session
-            .db
-            .get()
-            .await
-            .map_err(bilibi_database::Error::from)?;
+        let client = crate::Pooled {
+            db: session.db,
+            connection: tokio::sync::OnceCell::new(),
+        };
         for op in &operations {
-            let description = match registry.describe(&**client, session.scope, &op.key).await {
+            let mut description = match registry
+                .describe(
+                    crate::OperationClient::sql_client(&client).await?,
+                    session.scope,
+                    &op.key,
+                )
+                .await
+            {
                 Err(Error::UnknownOperation) => {
                     return Err(crate::invalid(
                         &format!("operations[{}].key", descriptions.len() + 1),
@@ -603,7 +567,9 @@ pub(crate) async fn open(
                     ),
                 ));
             }
-            if description["safe_write"] != true {
+            let crate::Handler::SafeWrite(owner) =
+                registry.operations[op.key.as_str()].definition.handler
+            else {
                 return Err(crate::invalid(
                     &format!("operations[{}].key", descriptions.len() + 1),
                     format!(
@@ -611,7 +577,14 @@ pub(crate) async fn open(
                         op.key
                     ),
                 ));
-            }
+            };
+            let review_schema = review_schemas
+                .entry(&op.key)
+                .or_insert_with(|| description["input"].clone());
+            owner
+                .check_review_draft(&client, session.scope, &op.input, review_schema)
+                .await?;
+            description["input"] = review_schema.clone();
             descriptions.push(description);
         }
     }
@@ -619,7 +592,7 @@ pub(crate) async fn open(
         .iter().map(|method| json!({"id":method.id,"label":method.label,"length":method.code_length,"numeric":method.numeric})).collect();
     // Drafts may be invalid: editing and the ordinary plan tool supply field
     // validation. Never echo drafts or 2FA codes in model context or write here.
-    let operations_json = serde_json::to_value(&operations)
+    let mut operations_json = serde_json::to_value(&operations)
         .map_err(|_| Error::Backend(bilibi_database::Error::Internal))?;
     let mut card = json!({"key":operations[0].key,"entries":operations.iter().map(|op|&op.input).collect::<Vec<_>>(),"operation":descriptions[0],
         "operations":if linked {Some(&operations)} else {None},"descriptions":descriptions,"linked":linked,
@@ -636,10 +609,10 @@ pub(crate) async fn open(
         "{origin}/ai/reviews/{}",
         card["review_id"].as_str().unwrap_or_default()
     ));
-    let (stored_card, stored_operations) = persisted_review(&card, &operations_json);
+    redact_review(&mut card, &mut operations_json);
     session
         .reviews
-        .create(session.scope, &review_id, &stored_card, &stored_operations)
+        .create(session.scope, &review_id, &card, &operations_json)
         .await?;
     Ok(card)
 }

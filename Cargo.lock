@@ -1785,6 +1785,7 @@ name = "bilibi-settings-editor"
 version = "0.2.1"
 dependencies = [
  "askama",
+ "bilibi-agent-api",
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-database",

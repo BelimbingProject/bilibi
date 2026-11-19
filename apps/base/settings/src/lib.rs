@@ -6,8 +6,8 @@
 mod definition;
 mod encryption;
 pub use definition::{
-    Constraint, Definition, Definitions, Editor, OwnedSetting, ScopeKind, Setting, Validator,
-    ValueType, CONSTRAINTS, DEFINITIONS,
+    Constraint, Definition, Definitions, Editor, OwnedSetting, ScopeKind, Setting, TenantAdmin,
+    Validator, ValueType, CONSTRAINTS, DEFINITIONS, TENANT_ADMIN,
 };
 pub use encryption::Encryption;
 
