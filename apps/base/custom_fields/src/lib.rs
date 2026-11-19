@@ -25,7 +25,7 @@ pub use {
     inventory,
 };
 
-use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
     contributions::{Access, Method, PageWrites, Pending, Route, PAGE_WRITES, ROUTES},
     Catalog, Module, Service,
@@ -66,7 +66,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/custom_fields", provena
     domains: &["base"],
     verbs: &[],
     capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(MANAGE)],
-    roles: &[],
+    roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: &[VIEW, MANAGE] }],
     system_principals: &[],
 }) }
 
@@ -130,7 +130,7 @@ fn build(
 inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/grid", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
+        dependencies: &["base/module_registry", "base/database", "base/grid", "base/labels", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
         migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql")), ("base-custom_fields-004-rule-conditions", include_str!("../migrations/004-rule-conditions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
@@ -174,3 +174,35 @@ bilibi_menu::contribute!(
         .requires(bilibi_menu::Requirement::Capability(VIEW))
         .order(62)
 );
+
+fn customisation_input() -> serde_json::Value {
+    serde_json::json!({"include_archived": true})
+}
+fn customisation_rows_for(
+    value: &serde_json::Value,
+    archived: bool,
+) -> Vec<bilibi_labels::CustomisationRow> {
+    value.as_array().into_iter().flatten().filter(|row| row["archived_on"].is_null() != archived).filter_map(|row| {
+        Some(bilibi_labels::CustomisationRow {
+            description: format!("{}: {} ({})", row["record_type"].as_str()?, row["label"].as_str()?, row["key"].as_str()?),
+            audit_kind: "custom_field",
+            audit_id: row["id"].as_i64()?,
+            revision: row["version"].as_i64()?,
+            input: serde_json::json!({"record_type": row["record_type"], "key": row["key"], "version": row["version"]}),
+        })
+    }).collect()
+}
+fn customisation_rows(value: &serde_json::Value) -> Vec<bilibi_labels::CustomisationRow> {
+    customisation_rows_for(value, false)
+}
+fn archived_customisation_rows(value: &serde_json::Value) -> Vec<bilibi_labels::CustomisationRow> {
+    customisation_rows_for(value, true)
+}
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.customisations", provenance!(), &bilibi_labels::CustomisationSection {
+    title: "Custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved rules that use this field may stop running and require review and reapproval.", rows: customisation_rows,
+}) }
+
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.archive", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields", contract: "base.custom_fields.archive" }) }
+
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection { title: "Archived custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Rules already marked for review still need reapproval.", rows: archived_customisation_rows }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }

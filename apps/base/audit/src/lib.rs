@@ -3,9 +3,11 @@
 mod account_actions;
 pub mod console;
 mod erasure;
+mod latest_changes;
 mod partitions;
 mod privacy;
 pub use account_actions::{count_account_actions, export_account_actions};
+pub use latest_changes::{latest_changes, LatestChange};
 pub use partitions::{partition_preview, remove_partition, AuditLedger, PartitionRemoval};
 mod read;
 mod verification;

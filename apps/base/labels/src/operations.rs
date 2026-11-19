@@ -44,7 +44,7 @@ fn subject(input: &Value) -> bilibi_agent_api::Result<&str> {
         .filter(|subject| !subject.is_empty())
         .ok_or_else(|| bilibi_agent_api::invalid("subject", "is required"))
 }
-fn version(input: &Value) -> bilibi_agent_api::Result<(i64, i64)> {
+pub(crate) fn version(input: &Value) -> bilibi_agent_api::Result<(i64, i64)> {
     let token = input
         .get("version")
         .ok_or_else(|| bilibi_agent_api::invalid("version", "is required"))?;

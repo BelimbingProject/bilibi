@@ -30,3 +30,13 @@ For column and record-field rendering, follow [Grid's label integration](../grid
 A label is 1 to 60 characters of plain text; Askama escapes it wherever it is shown. A subject that no module declares is refused, and every change is audited as kind `label`.
 
 Editors carry the `identity:version` token returned by `base.labels.list` (`0:0` for an unset override). Changed or replaced overrides and concurrent first writes are refused rather than overwritten.
+
+The Tenant Owner system role includes `base.labels.view`, `base.labels.manage` and `base.labels.customisations.view`.
+
+## Customisations page
+
+Open **Administration › Customisations** (`/admin/customisations`, `base.labels.customisations.view`) to see tenant label overrides and active and archived custom fields. Use **Restore default** on a label override, **Archive** on an active field or **Restore** on an archived field. Each action requires the owning module's write permission. A notice names any sections you lack permission to read.
+
+The page shows the recorded change time when [Audit can match the current revision](../audit/README.md#record-revision-attribution). The **Changed by** column requires `admin.audit.log.list` and otherwise displays **Restricted**. Use the owner’s editor or agent operations to create or edit a customisation.
+
+A module contributes `CustomisationSection` under `SECTIONS` with its read operation, input, row projection, reviewed write operation and page event. Each row supplies a stable audit kind, record ID and revision plus the versioned input for the write. The page retains that input server-side and accepts confirmation only for the displayed action, record and revision. The confirmed action calls `PageContracts::submit`, then the page reads the sections again. Register the event and write contract with a [contributed page binding](../agent_api/README.md#shared-pages-with-contributed-owner-contracts) for `base/labels.customisations`. Project rows through the owner's read operation so its access checks apply.

@@ -342,17 +342,18 @@ impl Labels {
         if before == after {
             return Ok(plan);
         }
+        let (_, revision) = edit.version;
         tx.mutate(move |sql| {
             Box::pin(async move {
                 let (id, new) = match &after {
                     Some(label) => {
                         let query = if before.is_some() {
-                            "UPDATE base_labels SET label=$4, version=version+1, updated_at=now() WHERE tenant_id=$1 AND kind=$2 AND subject=$3 RETURNING id"
+                            "UPDATE base_labels SET label=$4, version=version+1, updated_at=now() WHERE tenant_id=$1 AND kind=$2 AND subject=$3 RETURNING id, version"
                         } else {
-                            "INSERT INTO base_labels(tenant_id,kind,subject,label) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,kind,subject) DO NOTHING RETURNING id"
+                            "INSERT INTO base_labels(tenant_id,kind,subject,label) VALUES($1,$2,$3,$4) ON CONFLICT (tenant_id,kind,subject) DO NOTHING RETURNING id, version"
                         };
                         let row = sql.query_opt(query, &[&tenant, &kind_key, &subject_id, label]).await?.ok_or(Error::Conflict)?;
-                        (row.get::<_, i64>(0), json!({"label": label}))
+                        (row.get::<_, i64>(0), json!({"label": label, "version": row.get::<_, i64>(1)}))
                     }
                     None => {
                         let row = sql
@@ -364,7 +365,7 @@ impl Labels {
                         (row.get(0), Value::Null)
                     }
                 };
-                let old = before.map_or(Value::Null, |label| json!({"label": label}));
+                let old = before.map_or(Value::Null, |label| json!({"label": label, "version": revision}));
                 let subject = json!({"kind": kind_key, "subject": subject_id});
                 let (old, new) = (merge(old, &subject), merge(new, &subject));
                 Ok(((), vec![Change { kind: KIND.into(), id, old, new }]))

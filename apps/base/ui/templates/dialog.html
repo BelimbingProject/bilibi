@@ -26,13 +26,15 @@
 {#- A confirmation that leads with the consequence. Two actions only: Cancel
     first (it takes focus; Enter, Escape and Cancel all keep the data), then a
     calm danger confirm named by the verb alone. working is the confirm's label
-    while the round trip is in flight. An optional body holds a shared reason form. -#}
-{% macro confirm_dialog(id, consequence, detail, confirm, working, confirm_event, cancel_event, body=bilibi_ui::Html::EMPTY) %}
+    while the round trip is in flight. An optional body holds a shared reason form.
+    A nonempty confirm_key is sent as key with confirm_event. Use it to bind the
+    click to the action the person saw and compare it with the server-held action. -#}
+{% macro confirm_dialog(id, consequence, detail, confirm, working, confirm_event, cancel_event, body=bilibi_ui::Html::EMPTY, confirm_key="") %}
 {% call modal(id=id, title=consequence, cancel_event=cancel_event, width=bilibi_ui::ModalWidth::Compact, description=detail, role="alertdialog") %}
 {{ body|safe }}
 <div class="mt-3 flex flex-wrap justify-end gap-2">
 {% call c::button(id="{}-cancel"|format(id), button_type="button", event=cancel_event) %}Cancel{% endcall %}
-{% call c::button(id="{}-confirm"|format(id), button_type="button", variant=bilibi_ui::ButtonVariant::Danger, event=confirm_event, working=working) %}{{ confirm }}{% endcall %}
+{% call c::button(id="{}-confirm"|format(id), button_type="button", variant=bilibi_ui::ButtonVariant::Danger, event=confirm_event, working=working, data_key=confirm_key) %}{{ confirm }}{% endcall %}
 </div>
 {% endcall %}
 {% endmacro %}
