@@ -593,13 +593,18 @@ impl OversightQueries {
                     match audited {
                         Ok(()) => {
                             rows += data.count();
+                            supported = true;
                             Ok("ok")
                         }
                         Err(error) if audit.is_some() => Ok(child_refusal(&error)),
                         Err(error) => Err(error),
                     }
                 }
-                Ok(Err(error)) => Ok(child_refusal(&error)),
+                Ok(Err(error)) => {
+                    let outcome = child_refusal(&error);
+                    supported |= matches!(outcome, "timed_out" | "over_cost");
+                    Ok(outcome)
+                }
                 Err(error) => Err(error.into()),
             };
             let outcome = match outcome {
@@ -615,7 +620,6 @@ impl OversightQueries {
                     break;
                 }
             };
-            supported |= matches!(outcome, "ok" | "timed_out" | "over_cost");
             children.push((grant.tenant(), outcome));
         }
         let now = Instant::now();

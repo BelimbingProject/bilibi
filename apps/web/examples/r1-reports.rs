@@ -1975,6 +1975,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("{refused:?}, oversight evidence: {events:?}"),
     );
 
+    let after = audit_watermark().await?;
+    let mut blocker = db.get_detached("the walkthrough's audit lock").await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&2_i64],
+    )
+    .await?;
+    let refused = reports.check(&manager, &oversight_rows).await;
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a child audit timeout alone cannot validate an oversight draft",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition"))
+            && matches!(&events[..], [(1, event, parent)]
+                if event == "tenancy.oversight.query"
+                && parent["row_count"] == 0
+                && parent["children"] == json!([{"tenant_id": 2, "outcome": "timed_out"}])),
+        format!("{refused:?}, oversight evidence: {events:?}"),
+    );
+
     let budget_key = "tenancy.oversight.total_timeout_ms";
     client
         .execute(
@@ -1984,13 +2004,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[&budget_key],
         )
         .await?;
-    let mut blocker = db.get_detached("the walkthrough's audit lock").await?;
-    let lock = blocker.transaction().await?;
-    lock.query_one(
-        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
-        &[&2_i64],
-    )
-    .await?;
     let timed = tokio::time::timeout(
         std::time::Duration::from_secs(4),
         reports.check(&manager, &oversight_rows),
