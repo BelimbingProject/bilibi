@@ -408,7 +408,13 @@
       attributes(from, to, context, (name) => name.startsWith('data-'));
       return from;
     }
-    attributes(from, to, context, (name) => !pinned(from, name, context));
+    // A shell preference saved after this snapshot was rendered wins until a
+    // later snapshot acknowledges it; then subsequent server changes follow.
+    const saved = from.bilibiSavedPreferences;
+    if (saved) for (const [name, value] of saved) {
+      if (to.getAttribute(name) === value) saved.delete(name);
+    }
+    attributes(from, to, context, (name) => !saved?.has(name) && !pinned(from, name, context));
     // An iframe's document belongs to the frame; its fallback children never render.
     if (from.tagName !== 'IFRAME') children(from, to, context);
     if (following(from) && dirty(from)) follow(from);

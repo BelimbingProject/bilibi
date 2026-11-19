@@ -190,8 +190,12 @@
       accountRequest('/preferences', {method: 'POST', signal: this.abort.signal, body: JSON.stringify({kind, value})})
         .then((response) => (response.ok ? response.json() : Promise.reject(response.status)))
         .then((reply) => {
-          this.root.dataset.themeChoice = reply.theme;
-          this.root.dataset.displayMode = reply.mode;
+          // Keep a confirmed choice until a live snapshot has observed it.
+          // A response already rendered before this save may arrive afterward.
+          const name = kind === 'theme' ? 'data-theme-choice' : 'data-display-mode';
+          const saved = kind === 'theme' ? reply.theme : reply.mode;
+          (this.root.bilibiSavedPreferences ||= new Map()).set(name, saved);
+          this.root.setAttribute(name, saved);
           if (kind === 'timezone') window.dispatchEvent(new CustomEvent('bilibi:display-mode', {detail: {mode: reply.mode}}));
           this.feedback(kind === 'theme' ? 'Theme saved.' : 'Time display saved.');
           this.closeAll();
