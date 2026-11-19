@@ -85,6 +85,7 @@ pub struct PortalCardLink<'a> {
 #[derive(Template)]
 #[template(path = "portal_form.html")]
 pub struct PortalForm<'a> {
+    pub action: &'a str,
     pub id: &'a str,
     pub heading: &'a str,
     pub intro: &'a str,

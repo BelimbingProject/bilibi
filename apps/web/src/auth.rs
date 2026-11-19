@@ -840,6 +840,7 @@ pub async fn reset_page(
             &ForgotForm {
                 email: form.email,
                 email_errors: vec![RESET_LINK_INVALID.into()],
+                resend: true,
                 ..ForgotForm::default()
             },
             StatusCode::OK,
@@ -913,6 +914,7 @@ pub async fn reset(
                 &ForgotForm {
                     email: form.email,
                     email_errors: vec![RESET_LINK_INVALID.into()],
+                    resend: true,
                     ..ForgotForm::default()
                 },
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -929,8 +931,6 @@ pub async fn reset(
 }
 
 // ---- tenant invitation -------------------------------------------------------------
-
-const INVITATION_LINK_INVALID: &str = "This invitation link is invalid or has expired.";
 
 async fn invitation_card(
     app: &App,
@@ -963,11 +963,39 @@ async fn invitation_result(
             message,
             href,
             action,
+            resend: false,
         },
         FlashMap::default(),
         status,
     )
     .await
+}
+
+async fn invitation_unavailable(
+    app: &App,
+    raw_token: &str,
+) -> std::result::Result<Response, HttpError> {
+    let href = format!("/accept/{raw_token}/resend");
+    card(app, "Invitation unavailable", InvitationResultPage {
+        heading: "Invitation unavailable",
+        message: "This invitation link is invalid or has expired. Request a new link, or contact the person who invited you.",
+        href: &href,
+        action: "Send me a new link",
+        resend: true,
+    }, FlashMap::default(), StatusCode::OK).await
+}
+
+pub async fn resend_invitation(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(raw_token): Path<String>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> std::result::Result<Response, HttpError> {
+    origin(&app, &headers)?;
+    if recovery_allowed(&app, &headers, peer.as_ref()).await? {
+        app.user.resend_member_invitation(&raw_token).await?;
+    }
+    invitation_result(&app, "Check your email", "If this invitation can be renewed, a new link has been sent. Otherwise, contact the person who invited you.", "/", "Go to sign in", StatusCode::OK).await
 }
 
 async fn invitation_scope(app: &App, headers: &HeaderMap) -> Option<bilibi_security::Scope> {
@@ -998,15 +1026,7 @@ pub async fn invitation_page(
     let invitation = match app.user.member_invitation(&raw_token).await {
         Ok(invitation) => invitation,
         Err(InvitationError::Link) => {
-            return invitation_result(
-                &app,
-                "Invitation unavailable",
-                INVITATION_LINK_INVALID,
-                "/",
-                "Go to sign in",
-                StatusCode::NOT_FOUND,
-            )
-            .await;
+            return invitation_unavailable(&app, &raw_token).await;
         }
         Err(InvitationError::DedicatedSignIn) => return dedicated_owner_sign_in(&app).await,
         Err(InvitationError::Access(error)) => return Err(error.into()),
@@ -1054,15 +1074,7 @@ pub async fn accept_invitation(
     let invitation = match app.user.member_invitation(&raw_token).await {
         Ok(invitation) => invitation,
         Err(InvitationError::Link) => {
-            return invitation_result(
-                &app,
-                "Invitation unavailable",
-                INVITATION_LINK_INVALID,
-                "/",
-                "Go to sign in",
-                StatusCode::NOT_FOUND,
-            )
-            .await;
+            return invitation_unavailable(&app, &raw_token).await;
         }
         Err(InvitationError::DedicatedSignIn) => return dedicated_owner_sign_in(&app).await,
         Err(InvitationError::Access(error)) => return Err(error.into()),
@@ -1136,17 +1148,7 @@ pub async fn accept_invitation(
                 .collect();
             invitation_card(&app, &form, StatusCode::UNPROCESSABLE_ENTITY).await
         }
-        Err(InvitationError::Link) => {
-            invitation_result(
-                &app,
-                "Invitation unavailable",
-                INVITATION_LINK_INVALID,
-                "/",
-                "Go to sign in",
-                StatusCode::NOT_FOUND,
-            )
-            .await
-        }
+        Err(InvitationError::Link) => invitation_unavailable(&app, &raw_token).await,
         Err(InvitationError::DedicatedSignIn) => dedicated_owner_sign_in(&app).await,
         Err(InvitationError::Access(error)) => Err(error.into()),
     }

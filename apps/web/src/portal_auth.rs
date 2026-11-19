@@ -104,6 +104,7 @@ fn unknown_site() -> Result<Response, HttpError> {
         None,
         "Portal not found",
         &PortalForm {
+            action: "",
             id: "portal-unknown",
             heading: "Portal not found",
             intro: "This portal address is not in use. Check the link from the company that invited you.",
@@ -191,6 +192,7 @@ pub async fn sign_in_root(
         None,
         "Sign in",
         &PortalForm {
+            action: "",
             id: "portal-sign-in-unknown",
             heading: "Sign in to your customer portal",
             intro: "Open the sign-in link from the company that invited you. Each company's portal has its own address.",
@@ -235,6 +237,7 @@ fn sign_in_card(
         Some(site),
         "Sign in",
         &PortalForm {
+            action: "",
             id: "portal-sign-in",
             heading: "Sign in",
             intro: "",
@@ -674,6 +677,8 @@ fn forgot_card(
     status: StatusCode,
 ) -> Result<Response, HttpError> {
     let back = format!("/portal/sign-in/{}", site.address);
+    let action = format!("/portal/forgot/{}", site.address);
+    let resend = errors.iter().any(|error| error == RESET_LINK_INVALID);
     let links = [PortalCardLink {
         id: "portal-forgot-back",
         href: &back,
@@ -683,13 +688,18 @@ fn forgot_card(
         Some(site),
         "Forgot password",
         &PortalForm {
+            action: &action,
             id: "portal-forgot",
             heading: "Forgot your password?",
             intro: "Enter your email address to request a reset link.",
             success,
             error: "",
             fields: vec![rendered(&email_field("forgot", email, errors, true))?],
-            submit: "Send reset link",
+            submit: if resend {
+                "Send me a new link"
+            } else {
+                "Send reset link"
+            },
             working: "Sending…",
             links: &links,
         },
@@ -770,6 +780,7 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
         Some(site),
         "Reset password",
         &PortalForm {
+            action: "",
             id: "portal-reset",
             heading: "Reset your password",
             intro: "Choose a new password for your account.",
@@ -920,6 +931,7 @@ fn accept_card(
         Some(site),
         "Accept invitation",
         &PortalForm {
+            action: "",
             id: "portal-accept",
             heading: "Set up your account",
             intro: &intro,
@@ -966,6 +978,7 @@ fn invitation_invalid(site: &Site, address_taken: bool) -> Result<Response, Http
         Some(site),
         "Accept invitation",
         &PortalForm {
+            action: "",
             id: "portal-accept-invalid",
             heading: "Set up your account",
             intro: "",
@@ -1165,6 +1178,7 @@ fn register_card(
         Some(site),
         "Request an account",
         &PortalForm {
+            action: "",
             id: "portal-register",
             heading: "Request an account",
             intro: if form.success.is_empty() {
@@ -1299,6 +1313,7 @@ fn verify_card(site: &Site, open: bool, done: bool) -> Result<Response, HttpErro
         Some(site),
         "Confirm your request",
         &PortalForm {
+            action: "",
             id: "portal-verify",
             heading: "Confirm your request",
             intro: if open && !done {

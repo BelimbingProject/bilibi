@@ -53,10 +53,10 @@ fn show_mail(label: &str, message: &str) {
             .to_owned()
     };
     println!(
-        "{label}: To={} Subject={} Link={}",
+        "{label}: To={} Subject={} Link received={}",
         header("To:"),
         header("Subject:"),
-        link(message).unwrap_or_default()
+        link(message).is_some()
     );
 }
 
@@ -280,6 +280,7 @@ async fn main() -> Result<()> {
                 .await
         )
     );
+    assert!(!users.reset_link_valid(email, &fresh).await?);
     let before = count(&mailbox);
     users
         .request_password_reset(email)
@@ -300,6 +301,10 @@ async fn main() -> Result<()> {
         .await?
         .get(0);
     println!("the next request replaced the expired token: {}", rows == 0);
+    assert!(rows == 0 && users.reset_link_valid(email, &racing).await?);
+    let seconds: f64 = client.query_one("SELECT extract(epoch FROM expires_at-created_at)::float8 FROM password_reset_tokens WHERE identity_id=(SELECT identity_id FROM users WHERE tenant_id=1 AND id=3)", &[]).await?.get(0);
+    assert_eq!(seconds, 3.0 * 24.0 * 60.0 * 60.0);
+
     let (a, b) = tokio::join!(
         tokio::spawn({
             let users = users.clone();
