@@ -511,9 +511,6 @@ impl Reports {
     /// by size or cost still saves: the bound applies to each run.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
         Self::check_draft_shape(draft)?;
-        if draft.definition.oversight {
-            return self.check_draft_catalog(None, scope, draft).await;
-        }
         let mut client = self.db.get().await.map_err(Error::from)?;
         let tx = client.transaction().await.map_err(Error::from)?;
         self.check_draft_catalog(Some(&tx), scope, draft).await?;
@@ -558,7 +555,11 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let catalog = if draft.definition.oversight {
-            self.catalog(scope, true, draft.kind == Kind::Rows).await?
+            let tx = tx.ok_or(Error::Internal)?;
+            self.oversight
+                .builder_catalog_on(tx, scope, draft.kind == Kind::Rows)
+                .await
+                .map_err(grid)?
         } else {
             let tx = tx.ok_or(Error::Internal)?;
             Catalog::for_scope(tx, scope)
@@ -599,11 +600,11 @@ impl Reports {
         if draft.definition.oversight {
             // Every spec has resolved against live consent; execution uses
             // the same bounded audited path as a reader, never a child Scope.
-            let proof = self.oversight.prove(scope).await.map_err(grid)?;
+            let tx = tx.ok_or(Error::Internal)?;
             let spec = if draft.kind == Kind::Rows {
                 bilibi_grid::OversightSpec::Rows {
                     page: PageSpec {
-                        bounds: self.bounds(scope, false).await?,
+                        bounds: self.bounds_on(tx, scope, false).await?,
                         filters,
                         sorts: draft.definition.sorts(),
                         timezone: "UTC".into(),
@@ -611,15 +612,11 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    pages: proof
-                        .children()
-                        .iter()
-                        .map(|child| (child.tenant(), (0, 1)))
-                        .collect(),
+                    pages: BTreeMap::new(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {
-                    bounds: self.bounds(scope, false).await?,
+                    bounds: self.bounds_on(tx, scope, false).await?,
                     filters,
                     groupings: draft.definition.groupings(),
                     measures: draft.definition.measures(),
@@ -629,10 +626,10 @@ impl Reports {
             };
             let probe = self
                 .oversight
-                .read(&proof, &draft.record_type, &spec)
+                .probe_on(tx, scope, &draft.record_type, &spec)
                 .await
                 .map_err(grid)?;
-            if !probe.children.is_empty() && probe.children.iter().all(|c| c.outcome == "refused") {
+            if !probe {
                 return Err(ReportError::Invalid(field_errors(
                     "definition",
                     "This question is not supported by any consenting child's catalog.",

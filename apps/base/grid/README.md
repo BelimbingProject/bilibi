@@ -221,6 +221,8 @@ reference rows on success. No unit tests or test runner are involved.
 
 Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
 
+`OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on that same transaction. Probes run bounded child reads serially and return whether the question is supported. One named, non-waiting detached checkout writes child evidence and the parent summary so both survive a plan rollback. The probe deadline bounds that checkout and its audit work.
+
 ## Grouped summaries and row pages (G5)
 
 The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant and user bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.
