@@ -56,6 +56,7 @@ Every record carries these header lines: Document Type, Status, Agents, Scope, L
 | [01 Agent-first operations: one contract, four doors](./01-agent-first-operations.md) | Accepted |
 | [33 Pages for business actions and customisations](./33-pages-for-business-actions-and-customisations.md) | Accepted |
 | [21 AI connections need a live browser-session switch](./21-ai-connections-need-live-session-switch.md) | Accepted; implemented |
+| [34 One-shot model calls through configured providers](./34-one-shot-model-calls-through-configured-providers.md) | Proposed |
 | [10 Queued jobs call operation contracts, and modules opt in to CSV import, export and bulk updates](./10-queued-jobs-call-contracts.md) | Proposed |
 
 ### Scheduled work

@@ -94,6 +94,7 @@ bilibi-menu = { path = "apps/base/menu" }
 bilibi-menu-order = { path = "apps/base/menu_order" }
 bilibi-principal-directory = { path = "apps/base/principal_directory" }
 bilibi-agent-api = { path = "apps/base/agent_api" }
+bilibi-ai = { path = "apps/base/ai" }
 bilibi-artifacts = { path = "apps/base/artifacts" }
 bilibi-bulk-data = { path = "apps/base/bulk_data" }
 bilibi-audit-views = { path = "apps/base/audit_views" }

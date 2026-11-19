@@ -1,0 +1,11 @@
+{#- AI Interactions list. The toolbar, table and pager are rendered by
+    src/web.rs through the shared models; this file lays them out. -#}
+{%- import "components.html" as ui -%}
+{% call ui::page(id="ai-interactions-index") %}
+{% call ui::header(subtitle="Review each AI call a module made. No text is kept here.") %}AI Interactions{% endcall %}
+<div id="interaction-filter-region" class="mb-2 flex flex-wrap items-start gap-3">
+{{ toolbar }}
+</div>
+{% if operator %}<p class="mb-2 text-xs text-warning-ink">{% call ui::icon(name="warning", class="size-3.5") %}{% endcall %} Includes every organisation.</p>{% endif %}
+{% call ui::card(id="interactions-card", inner_class="p-0") %}{{ table }}{{ pagination }}{% endcall %}
+{% endcall %}
