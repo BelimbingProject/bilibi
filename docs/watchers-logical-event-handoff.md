@@ -26,14 +26,19 @@ Every processing stage waits for all expected deliveries, successful terminal ru
 
 These checks are implemented; this review does not claim they have run. The Test phase executes the mounted walkthroughs and records their results.
 
-## Required action adaptation
+## Required companion changes
 
-All three companion follow-up `Action` initializers must add `approval_capabilities: &[bilibi_activity::MANAGE]`: Commerce `sales/src/follow_up.rs`, Supply Chain `purchasing/src/follow_up.rs`, and People `claims/src/follow_up.rs`. The executor owns these companion edits. Follow the [Activities registration contract](../apps/core/activity/README.md#follow-up-operations-offered-by-record-owners) and the [Watchers action contract](../apps/base/watchers/README.md#offering-a-trigger-and-an-action). The Platform reference actions have been updated.
+Commerce Sales, Supply Chain Purchasing and People Claims each need a companion PR linked from the Platform PR. For each module:
+
+- Replace the `bilibi_rules` Cargo dependency and Rust imports with `bilibi_watchers`, and change the descriptor dependency from `base/rules` to `base/watchers`.
+- Register triggers and actions through `bilibi_watchers::{TRIGGERS, ACTIONS}`. Offer capabilities and admit job writes for the `watchers` principal in `OFFERED_CAPABILITIES` and `PRINCIPAL_WRITES`.
+- Set `approval_capabilities: &[bilibi_activity::MANAGE]` in the follow-up `Action` initializer. Follow the [Activities registration contract](../apps/core/activity/README.md#follow-up-operations-offered-by-record-owners) and the [Watchers action contract](../apps/base/watchers/README.md#offering-a-trigger-and-an-action).
+- Update the walkthrough script to `fixtures/walkthrough/watchers-followup.sh` and invoke the `watchers-domains-walkthrough` Platform example. Update the Supply Chain source hook and environment variable to `watchers-source-hook.sh` and `BILIBI_WATCHERS_SOURCE_HELPER`. Keep the existing Domain revision columns and Grid `revision` fields.
 
 The mounted walkthrough denies `core.activity.manage` directly on its otherwise authorized human approver. It requires approval to fail without activating the draft, then removes the deny and approves normally. It switches the watcher off, reinstates the deny, requires re-enabling to fail without changing the switch, removes the deny, and re-enables normally. It changes no role permissions. Test must execute this proof after adapting the companions; review compilation alone is not runtime evidence.
 
 ## Upgrade notes for agents
 
-Add `Trigger::logical_event` and `Action::approval_capabilities` to existing initializers using the contracts linked above. The new `FollowUp` handler and `Watchers::action_identity` API are documented by their owning modules. Changed trigger and action declarations invalidate approval fingerprints; draft and approve a new version before running the watcher.
+Use the Watchers dependency, principal and registrations listed above. Add `Trigger::logical_event` and `Action::approval_capabilities` to existing initializers using the linked contracts. The owning modules document the `FollowUp` handler and `Watchers::action_identity` API. Draft and approve watchers on the new schema.
 
 `bilibi_company::require_writable`, `require_writable_in` and `UserService::company_account_on` now take `&dyn bilibi_tenancy::ProofClient` instead of generic PostgreSQL clients. Concrete clients and transactions can still be passed directly; generic wrappers must satisfy `ProofClient` (PostgreSQL `GenericClient + Sync` supplies its blanket implementation).

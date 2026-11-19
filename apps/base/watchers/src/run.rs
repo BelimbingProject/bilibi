@@ -340,7 +340,7 @@ impl Worker {
             )
             .await?;
         if !limits.is_empty() {
-            let code = if limits.iter().any(|(field, _)| field == "actions") {
+            let code = if limits.iter().any(|(field, _)| field == "do") {
                 "action_limit"
             } else {
                 "watcher_limit"
@@ -575,7 +575,7 @@ impl Worker {
             )
             .await?;
         if !limits.is_empty() {
-            let code = if limits.iter().any(|(field, _)| field == "actions") {
+            let code = if limits.iter().any(|(field, _)| field == "do") {
                 "action_limit"
             } else {
                 "watcher_limit"

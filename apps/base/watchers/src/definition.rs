@@ -139,29 +139,31 @@ impl Definition {
     }
     /// Reads a stored or submitted definition; shape problems are listed by path.
     pub(crate) fn parse(value: &Value, problems: &mut Problems) -> Option<Self> {
-        let filter = value
-            .get("if")
-            .filter(|v| !v.is_null())
-            .unwrap_or(&Value::Null);
-        if !filter.is_null() && !filter.is_object() {
+        let filter = value.get("if");
+        if filter.is_some_and(|filter| !filter.is_object()) {
             problems.push(("if".into(), "must be an object".into()));
+            return None;
         }
-        let matching = match filter.get("match").and_then(Value::as_str).unwrap_or("all") {
-            "all" => Match::All,
-            "any" => Match::Any,
+        let matching = match filter.and_then(|filter| filter.get("match")) {
+            None => Match::All,
+            Some(mode) if mode == "all" => Match::All,
+            Some(mode) if mode == "any" => Match::Any,
             _ => {
                 problems.push(("if.match".into(), "must be all or any".into()));
                 Match::All
             }
         };
-        if !filter.is_null() && !filter.get("conditions").is_some_and(Value::is_array) {
-            problems.push(("if.conditions".into(), "must be an array".into()));
-        }
         let mut conditions = Vec::new();
-        let listed = filter
-            .get("conditions")
-            .and_then(Value::as_array)
-            .map_or(&[][..], Vec::as_slice);
+        let listed = match filter {
+            None => &[][..],
+            Some(filter) => match filter.get("conditions").and_then(Value::as_array) {
+                Some(items) if !items.is_empty() => items.as_slice(),
+                _ => {
+                    problems.push(("if.conditions".into(), "give at least one condition".into()));
+                    return None;
+                }
+            },
+        };
         if listed.len() > MAX_CONDITIONS {
             problems.push((
                 "if.conditions".into(),
@@ -191,7 +193,7 @@ impl Definition {
                         if (1..=MAX_CHOICES).contains(&items.len()) && items.iter().all(scalar) => {
                     }
                     _ => problems.push((
-                        at("value"),
+                        at("values"),
                         format!("must be a list of 1 to {MAX_CHOICES} values"),
                     )),
                 },
@@ -269,14 +271,14 @@ impl Definition {
             {
                 problems.push((at("op"), "true/false fields take is or is not".into()));
             }
-            let values: Vec<&Value> = match &condition.value {
-                Value::Array(items) => items.iter().collect(),
-                Value::Null => Vec::new(),
-                value => vec![value],
+            let (part, values) = match &condition.value {
+                Value::Array(items) => ("values", items.as_slice()),
+                Value::Null => ("value", &[][..]),
+                value => ("value", std::slice::from_ref(value)),
             };
             for value in values {
                 if let Err(why) = typed(ty, choices, value) {
-                    problems.push((at("value"), why));
+                    problems.push((at(part), why));
                 }
             }
         }
@@ -302,7 +304,7 @@ impl Definition {
             .collect();
         let matched = match self.matching {
             Match::All => outcomes.iter().all(|o| *o),
-            Match::Any => outcomes.is_empty() || outcomes.iter().any(|o| *o),
+            Match::Any => outcomes.iter().any(|o| *o),
         };
         (matched, outcomes)
     }

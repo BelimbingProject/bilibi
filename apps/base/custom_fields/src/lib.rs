@@ -131,7 +131,7 @@ inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/grid", "base/labels", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
-        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql")), ("base-custom_fields-004-watcher-conditions", include_str!("../migrations/004-watcher-conditions.sql"))],
+        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql")), ("base-custom_fields-004-rule-conditions", include_str!("../migrations/004-rule-conditions.sql")), ("base-custom_fields-005-watcher-conditions", include_str!("../migrations/005-watcher-conditions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let fields = Arc::new(build(services)?);

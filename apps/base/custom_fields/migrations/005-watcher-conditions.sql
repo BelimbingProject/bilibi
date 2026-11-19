@@ -1,0 +1,2 @@
+ALTER TABLE base_custom_fields RENAME COLUMN rule_condition TO watcher_condition;
+ALTER TABLE base_custom_fields RENAME CONSTRAINT base_custom_fields_rule_condition TO base_custom_fields_watcher_condition;

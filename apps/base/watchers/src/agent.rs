@@ -359,8 +359,8 @@ fn draft_schema() -> Value {
         "watcher_id":{"type":"integer","minimum":1,"description":"The watcher this is the next version of; leave out for a new watcher"},
         "name":{"type":"string","maxLength":120},
         "watch":{"type":"string","maxLength":200,"description":"An installed trigger, from base.watchers.vocabulary"},
-        "if":{"type":"object","required":["conditions"],"properties":{"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough"},
-        "conditions":{"type":"array","items":{"type":"object","required":["field","op"],"properties":{
+        "if":{"type":"object","description":"Omit to act on every event of the watched kind.","required":["conditions"],"properties":{"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough"},
+        "conditions":{"type":"array","description":"At least one condition.","items":{"type":"object","required":["field","op"],"properties":{
             "field":{"type":"string","maxLength":160,"description":"A field of the trigger's record, from base.watchers.vocabulary"},
             "op":{"type":"string","enum":crate::definition::Op::ALL},
             "value":{"type":"string","maxLength":500,"nullable":true,"description":"One value for eq, ne, lt, le, gt, ge; leave out for empty and not_empty"},
@@ -387,10 +387,8 @@ fn output() -> Value {
     json!({"type":"object","description":"Watchers, their versions and receipts; reviews list conditions, actions, example results, warnings and problems."})
 }
 
-/// The agent schema carries nested JSON (action inputs, example facts) as
-/// text, which the schema dialect can bound; the contract reads it back
-/// into the stored shape before any check.
-pub(crate) fn normalise(input: &Value) -> bilibi_agent_api::Result<Value> {
+/// Read example facts from JSON text and fold list values into the stored shape.
+fn normalise(input: &Value) -> bilibi_agent_api::Result<Value> {
     let mut input = input.clone();
     let decode = |value: &Value, field: &str| match value {
         Value::String(text) => serde_json::from_str::<Value>(text)
@@ -406,13 +404,6 @@ pub(crate) fn normalise(input: &Value) -> bilibi_agent_api::Result<Value> {
             if let Some(values) = condition.get("values").cloned() {
                 condition["value"] = values;
                 condition.as_object_mut().map(|o| o.remove("values"));
-            }
-        }
-    }
-    if let Some(actions) = input["do"].as_array_mut() {
-        for (i, action) in actions.iter_mut().enumerate() {
-            if let Some(value) = action.get("input") {
-                action["input"] = decode(value, &format!("do.{i}.input"))?;
             }
         }
     }

@@ -977,15 +977,16 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
         via == "agent",
         "the version records that an agent drafted it",
     );
-    for parameters in [
-        r#"{"note":"big""#,
-        "null",
-        "[]",
-        "true",
-        "42",
-        r#""scalar""#,
+    for (parameters, path) in [
+        (json!(r#"{"note":"big"}"#), "do.0.input"),
+        (Value::Null, "do.0.input"),
+        (json!([]), "do.0.input"),
+        (json!(true), "do.0.input"),
+        (json!(42), "do.0.input"),
+        (json!("scalar"), "do.0.input"),
+        (json!({"note": 42}), "do.0.input.note"),
     ] {
-        let malformed = json!({"name": "Invalid action parameters", "watch": OPENED, "if": {"conditions": []},
+        let malformed = json!({"name": "Invalid action parameters", "watch": OPENED,
             "do": [{"operation": "watcher_cases.cases.flag", "input": parameters}],
             "examples": [{"facts": "{}", "expect": "match"}]});
         check(
@@ -993,19 +994,36 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
                 .review(&agent, "base.watchers.draft", malformed.clone())
                 .await
                 .to_string()
-                .contains("do.0.input"),
-            "preview rejects malformed or non-object action parameters at their field",
+                .contains(path),
+            "preview rejects invalid action parameters at their field",
         );
         check(
             proof
                 .write(&agent, "base.watchers.draft", malformed)
                 .await
-                .is_err_and(|why| why.contains("do.0.input")),
-            "saving refuses supplied invalid action parameters",
+                .is_err_and(|why| why.contains(path)),
+            "saving rejects invalid action parameters at their field",
         );
     }
     let omitted = json!({"name": "Every opened case", "watch": OPENED,
         "do": [{"operation": "watcher_cases.cases.flag"}]});
+    let mut empty_filter = omitted.clone();
+    empty_filter["if"] = json!({"match": "any", "conditions": []});
+    check(
+        proof
+            .review(&agent, "base.watchers.draft", empty_filter.clone())
+            .await
+            .to_string()
+            .contains("if.conditions"),
+        "preview rejects a supplied empty filter at its field",
+    );
+    check(
+        proof
+            .write(&agent, "base.watchers.draft", empty_filter)
+            .await
+            .is_err_and(|why| why.contains("if.conditions")),
+        "saving rejects a supplied empty filter",
+    );
     let (every_watcher, every_version) = proof.draft(&one, omitted).await?;
     check(
         proof
@@ -1228,7 +1246,7 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
     custom_field_proof(proof, &restrictions).await?;
 
     println!("\n== Cycles are refused at approval; a chain stops at the depth budget");
-    let selfish = json!({"name": "Reroute forever", "watch": ROUTED, "if": {"conditions": []},
+    let selfish = json!({"name": "Reroute forever", "watch": ROUTED,
         "do": [{"operation": "watcher_cases.cases.route", "input": json!({"queue": "again"})}],
         "examples": [{"facts": "{}", "expect": "match"}]});
     let (rs, vs) = proof.draft(&one, selfish).await?;

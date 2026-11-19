@@ -309,7 +309,7 @@ impl Watchers {
             })
             .collect();
         for (i, call) in definition.actions.iter().enumerate() {
-            let at = |part: &str| format!("actions.{i}.{part}");
+            let at = |part: &str| format!("do.{i}.{part}");
             let Some(action) = self.action(&call.operation) else {
                 problems.push((
                     at("operation"),
@@ -347,7 +347,7 @@ impl Watchers {
                 self.jobs.validate(action.key, &Value::Object(input))
             {
                 for (field, why) in fields {
-                    problems.push((format!("actions.{i}.input.{field}"), why.join("; ")));
+                    problems.push((format!("do.{i}.input.{field}"), why.join("; ")));
                 }
             }
             let parameters: Vec<String> = call

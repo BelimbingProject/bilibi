@@ -919,8 +919,9 @@ inventory::submit! { Module {
         ("core-activity-004-reminders", include_str!("../migrations/004-reminders.sql")),
         ("core-activity-005-calendar-feeds", include_str!("../migrations/005-calendar-feeds.sql")),
         ("core-activity-006-followups", include_str!("../migrations/006-followups.sql")),
-        ("core-activity-007-watcher-followups", include_str!("../migrations/007-watcher-followups.sql")),
+        ("core-activity-007-rule-followups", include_str!("../migrations/007-rule-followups.sql")),
         ("core-activity-008-logical-followups", include_str!("../migrations/008-logical-followups.sql")),
+        ("core-activity-009-watcher-followups", include_str!("../migrations/009-watcher-followups.sql")),
     ],
     services: &[Service { id: SERVICE, factory: |s| {
         let records: Arc<Records> = s.get(bilibi_records::SERVICE)?;

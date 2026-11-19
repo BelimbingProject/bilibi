@@ -174,8 +174,8 @@ async fn main() -> Result<()> {
     let domain = std::env::args().nth(1).unwrap_or_else(|| "commerce".into());
     let (event, action, read, manage, kind, source_query) = match domain.as_str() {
         "commerce" => ("commerce/sales.order_confirmed", "commerce.sales.order.follow_up", "commerce.sales.view", "commerce.sales.followup.manage", "commerce.sales.order", "SELECT id,revision,company_id FROM commerce_sales_documents WHERE tenant_id=1 AND kind='order' AND status='confirmed' ORDER BY id DESC LIMIT 1"),
-        "supply_chain" => ("supply_chain/purchasing.order_approved", "supply_chain.purchasing.order.follow_up", "supply-chain.purchasing.view", "supply-chain.purchasing.followup.manage", "supply_chain.purchasing.order", "SELECT id,watcher_revision,company_id FROM supply_chain_purchasing_orders WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1"),
-        "people" => ("people/claims.request_approved", "people.claims.request.follow_up", "people.claims.followup.view", "people.claims.followup.manage", "people.claims.request", "SELECT id,watcher_revision,company_id FROM people_claim_submissions WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1"),
+        "supply_chain" => ("supply_chain/purchasing.order_approved", "supply_chain.purchasing.order.follow_up", "supply-chain.purchasing.view", "supply-chain.purchasing.followup.manage", "supply_chain.purchasing.order", "SELECT id,rule_revision,company_id FROM supply_chain_purchasing_orders WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1"),
+        "people" => ("people/claims.request_approved", "people.claims.request.follow_up", "people.claims.followup.view", "people.claims.followup.manage", "people.claims.request", "SELECT id,rule_revision,company_id FROM people_claim_submissions WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1"),
         _ => return Err(Error::Invalid),
     };
     let db = pool(&std::env::var("DATABASE_URL").map_err(|_| Error::Invalid)?)?;

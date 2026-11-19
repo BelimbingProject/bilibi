@@ -1,3 +1,5 @@
+DROP TABLE base_rule_effects, base_rule_runs, base_rule_versions, base_rules;
+
 -- Tenant watchers as data (ADR 28, #682). A watcher names a trigger (an event an
 -- owner offers) and points at the one approved version that runs; versions
 -- are never changed once written. Runs and effects are the receipts.
@@ -22,7 +24,7 @@ CREATE TABLE base_watcher_versions (
  tenant_id bigint NOT NULL,
  watcher_id bigint NOT NULL,
  number integer NOT NULL CHECK (number > 0),
- -- {"match": "all"|"any", "conditions": [...], "actions": [...]}.
+ -- {"if": {"match": "all"|"any", "conditions": [...]}, "do": [...]}.
  definition jsonb NOT NULL,
  examples jsonb NOT NULL,
  explanation varchar(2000),
@@ -87,3 +89,8 @@ CREATE TABLE base_watcher_effects (
  UNIQUE (tenant_id, version_id, event_id, position),
  FOREIGN KEY (tenant_id, run_id) REFERENCES base_watcher_runs (tenant_id, id)
 );
+
+ALTER TABLE base_watcher_versions ADD COLUMN catalog_digest varchar(64);
+ALTER TABLE base_watcher_runs ADD COLUMN subject_version bigint;
+ALTER TABLE base_watchers ADD COLUMN needs_review boolean NOT NULL DEFAULT false;
+ALTER TABLE base_watcher_runs ADD COLUMN logical_event text;

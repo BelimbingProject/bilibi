@@ -189,12 +189,12 @@ impl Watchers {
     ) -> Result<definition::Problems> {
         let mut problems = Vec::new();
         for (field, count, key) in [
-            ("conditions", definition.conditions.len(), CONDITIONS),
-            ("actions", definition.actions.len(), WATCHER_ACTIONS),
-            ("actions", definition.actions.len(), ACTIONS_PER_RUN),
+            ("if.conditions", definition.conditions.len(), CONDITIONS),
+            ("do", definition.actions.len(), WATCHER_ACTIONS),
+            ("do", definition.actions.len(), ACTIONS_PER_RUN),
             ("examples", examples, EXAMPLES),
             (
-                "conditions",
+                "if.conditions",
                 definition.fact_fields(version_field).len(),
                 FACTS_READ,
             ),
@@ -212,7 +212,7 @@ impl Watchers {
                 .is_some_and(|values| values.len() as i64 > most)
             {
                 problems.push((
-                    format!("conditions.{i}.value"),
+                    format!("if.conditions.{i}.values"),
                     format!("at most {most} values per list are allowed"),
                 ));
             }

@@ -13,7 +13,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | Part | What it holds | Who supplies it |
 | --- | --- | --- |
 | Trigger | An event an owner records in its own transaction (`watcher_cases/cases.opened`) | An owner's `Trigger` contribution |
-| Conditions | `all` or `any` of: a field of the trigger's record, an operator, a value | The watcher |
+| Conditions | When `if` is present, `all` or `any` of one or more conditions, each with a field, operator and any required value | The watcher |
 | Actions | 1 to 10 owner write contracts, each with approved parameters | Owners' `Action` contributions; the watcher selects actions and supplies their parameters |
 | Examples | Up to 10 fact sets with expected `match` or `no_match` outcomes | The watcher's author |
 
