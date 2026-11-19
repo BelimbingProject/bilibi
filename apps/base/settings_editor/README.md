@@ -50,6 +50,8 @@ A setting that a Base Step-up operation guards (`Operation::guards_setting`, dec
 
 "Show stored value" appears only for an actor holding `base.settings.secret.view` by name (`authz::explicitly_granted`; `grant_all` does not count) when the key is configured. Showing it is the Base Step-up operation `base.settings_editor.secret.reveal` ("Show a stored secret setting"), on the installation floor; it replaced the password prompt. When the session owes a check, the Value cell asks for the code inline and the person submits again; the authenticator locks repeated failures. Every attempt, including a forged request, records a retained `settings.secret.reveal` audit action without the value, and a reveal whose audit row cannot be written shows nothing. The value reaches the browser only as a `LiveBody.events` push to the `SecretStored` hook (`bilibi:secret:reveal`), which re-masks it after the definition's `reveal_duration_ms`.
 
+A definition whose editor sets `NEVER_REVEALED` (`base/settings`) has no "Show stored value", and a request to reveal it is refused and recorded like a forged one.
+
 ## Tenant scope
 
 The scope picker offers **This tenant** after Global, for everyone on the page: the defaults the actor's own tenant gives its companies, over the global ones. Issue 130 asks for tenant defaults (Search's `search.kinds` and `search.boost`).

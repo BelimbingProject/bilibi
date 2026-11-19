@@ -35,10 +35,7 @@ use bilibi_module_registry::{
 };
 use bilibi_settings::Settings;
 use bilibi_tenancy::Scope;
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::Duration};
 use tokio_postgres::GenericClient;
 
 pub const MODULE: &str = "base/ai";
@@ -134,17 +131,6 @@ impl Ai {
         id: &str,
     ) -> Result<Interaction> {
         store::get(client, scope, id).await
-    }
-
-    /// Deletes interactions older than `days` before `now`; the retention
-    /// schedule's work, which answers how many went.
-    pub async fn prune(
-        &self,
-        client: &(impl GenericClient + Sync),
-        days: i64,
-        now: SystemTime,
-    ) -> Result<u64> {
-        store::prune(client, days, now).await
     }
 }
 

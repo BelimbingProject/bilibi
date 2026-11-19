@@ -5,12 +5,16 @@
 //!
 //! It starts a local fake OpenAI-compatible server (no network, no real
 //! provider) and proves: providers and keys in settings, with bad shapes
-//! refused and the key never shown back; `disabled` and `not_configured`
+//! refused and the key never shown back, not even to a holder of the
+//! stored-secret reveal; hosted providers kept to public HTTPS, so a
+//! loopback address or name is refused before any connection, while a
+//! provider marked `local` reaches it; `disabled` and `not_configured`
 //! with no model call; the installation and company switches; invalid
 //! requests; a generated answer and each unavailable outcome (timeout, HTTP
 //! error, malformed or empty reply, redirect, unreachable); that no pooled
 //! connection is held while the provider works; one text-free row per call;
-//! tenant isolation of the rows; the operator pages; and retention.
+//! tenant isolation of the rows; the operator pages; and retention through
+//! the reviewed schedule only.
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -23,16 +27,18 @@ use bilibi_ai::{
     PROVIDER_KEYS, RETENTION_WORKER, SERVICE, TEXT_CHARACTERS_MAX, TIMEOUT_SECONDS,
 };
 use bilibi_database::{pool, Db, Error, MutationBoundary};
-use bilibi_module_registry::{Contribution, Services};
-use bilibi_settings::{Setting, Settings, Target, DEFINITIONS};
+use bilibi_module_registry::{Contribution, Layer, Module, Provenance, Services};
+use bilibi_settings::{
+    Definition, Editor, ScopeKind, Setting, Settings, Target, ValueType, DEFINITIONS,
+};
 use bilibi_tenancy::{Authentication, Scope};
-use bilibi_ui::page::{PageRequest, PageService};
+use bilibi_ui::page::{LiveInput, LiveRequest, PageRequest, PageService};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     process::ExitCode,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 const MODULE: &str = "base/records";
@@ -40,6 +46,23 @@ const INSTRUCTIONS: &str = "Summarise the note for a colleague in one sentence. 
 const TEXT: &str = "Delivery to the north site is late; the customer asked for a new date.";
 const REPLY: &str = "The north-site delivery is late and the customer wants a new date.";
 const KEY: &str = "sk-walkthrough-0123456789abcdef";
+/// A walkthrough-only encrypted setting that may be revealed, so the page
+/// check below shows the reveal is withheld from the provider keys alone.
+const REVEALABLE: &str = "ai_walkthrough.revealable_secret";
+const REVEALABLE_VALUE: &str = "walkthrough-revealable-value";
+const SECRET_VIEW: &str = "base.settings.secret.view";
+const WALKTHROUGH: &str = "extensions/ai_walkthrough";
+
+inventory::submit! { Module { id: WALKTHROUGH, layer: Layer::Extensions,
+dependencies: &["base/settings"], migrations: &[], services: &[] } }
+inventory::submit! { Contribution::new(DEFINITIONS, REVEALABLE,
+Provenance { module: WALKTHROUGH, source: file!(), line: line!() },
+&Setting::Definition(Definition {
+    value_type: ValueType::String, scopes: &[ScopeKind::Global], default: || Value::Null, nullable: true, encrypted: true,
+    minimum: None, maximum: None, validator: None,
+    editor: Some(Editor { group: "AI", label: "Walkthrough revealable secret",
+        help: "A walkthrough-only secret that may be revealed.", capability: None, reveal_duration_ms: 5_000 }),
+})) }
 
 /// What the fake server last received, and how many calls it answered.
 #[derive(Default)]
@@ -90,6 +113,22 @@ async fn completions(
             .into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// A port that counts every TCP connection and drops it at once: a hosted
+/// provider pointed at it must never connect.
+async fn tripwire() -> std::io::Result<(u16, Arc<Mutex<u32>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let accepted = Arc::new(Mutex::new(0_u32));
+    let counter = accepted.clone();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            *counter.lock().expect("tripwire") += 1;
+            drop(socket);
+        }
+    });
+    Ok((port, accepted))
 }
 
 async fn fake_server(seen: Shared) -> std::io::Result<u16> {
@@ -240,6 +279,8 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let port = fake_server(seen.clone()).await?;
     let calls = || seen.lock().expect("fake server state").calls;
     let url = |mode: &str| format!("http://127.0.0.1:{port}/{mode}/v1");
+    let (trip, tripped) = tripwire().await?;
+    let connections = || *tripped.lock().expect("tripwire");
     let second = Duration::from_secs(1);
     let five = Duration::from_secs(5);
 
@@ -260,8 +301,8 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             && defaults[PROVIDER_KEYS].value.is_null(),
         "ai.enabled false, ai.company_enabled false, ai.providers []",
     );
-    let provider = |name: &str, mode: &str| json!({"name": name, "base_url": url(mode), "model": "walkthrough-model"});
-    let bad: [(&str, Value); 7] = [
+    let provider = |name: &str, mode: &str| json!({"name": name, "base_url": url(mode), "model": "walkthrough-model", "local": true});
+    let bad: [(&str, Value); 9] = [
         (
             "missing model",
             json!([{"name": "local", "base_url": url("ok")}]),
@@ -278,6 +319,14 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         (
             "URL with a query",
             json!([{"name": "local", "base_url": format!("{}?key=1", url("ok")), "model": "m"}]),
+        ),
+        (
+            "hosted provider with an http URL",
+            json!([{"name": "hosted", "base_url": "http://ai.example.com/v1", "model": "m"}]),
+        ),
+        (
+            "local that is not a boolean",
+            json!([{"name": "local", "base_url": url("ok"), "model": "m", "local": "yes"}]),
         ),
         (
             "repeated name",
@@ -316,7 +365,10 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let listed = json!([
         provider("local", "ok"), provider("keyed", "ok"), provider("slow", "slow"), provider("broken", "error"),
         provider("garbled", "malformed"), provider("silent", "empty"), provider("moved", "redirect"),
-        {"name": "gone", "base_url": "http://127.0.0.1:9/v1", "model": "walkthrough-model"},
+        {"name": "gone", "base_url": "http://127.0.0.1:9/v1", "model": "walkthrough-model", "local": true},
+        {"name": "hosted-ip", "base_url": format!("https://127.0.0.1:{trip}/v1"), "model": "walkthrough-model"},
+        {"name": "hosted-name", "base_url": format!("https://localhost:{trip}/v1"), "model": "walkthrough-model", "local": false},
+        {"name": "local-tls", "base_url": format!("https://127.0.0.1:{trip}/v1"), "model": "walkthrough-model", "local": true},
     ]);
     set(Target::Global, PROVIDERS, listed.clone()).await?;
     set(Target::Global, PROVIDER_KEYS, json!({"keyed": KEY})).await?;
@@ -324,7 +376,7 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .get(&**client, &admin, Target::Global, PROVIDERS)
         .await?;
     checks.check(
-        "eight providers stored and read back",
+        "eleven providers stored and read back",
         read.value == listed,
         "local first, so it is the default",
     );
@@ -381,6 +433,77 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 && !body.html.contains(KEY)
         }),
         format!("{} bytes", page.as_ref().map_or(0, |body| body.html.len())),
+    );
+    // The admin holds the stored-secret reveal by name; the walkthrough's
+    // own revealable secret offers it, the provider keys never do.
+    client.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,4,$1,true) ON CONFLICT DO NOTHING", &[&SECRET_VIEW]).await?;
+    set(Target::Global, REVEALABLE, json!(REVEALABLE_VALUE)).await?;
+    let area: HashMap<String, String> = HashMap::from([("area".to_owned(), "AI".to_owned())]);
+    let mut live = editor
+        .0
+        .mount(PageRequest {
+            operation: "global",
+            scope: Some(&admin),
+            path: &empty,
+            query: &area,
+            body: &[],
+            framed: false,
+        })
+        .await?
+        .ok_or("System Settings did not mount")?;
+    let offers = |html: &str, key: &str| {
+        html.contains(&format!(
+            r#"data-event="request_secret_reveal" data-key="{key}""#
+        ))
+    };
+    let mut edited = Vec::new();
+    for key in [REVEALABLE, PROVIDER_KEYS] {
+        let event = json!({"type": "edit_setting", "key": key});
+        let body = live
+            .update(LiveRequest {
+                scope: &admin,
+                credential: "walkthrough",
+                input: LiveInput::Event(&event),
+            })
+            .await?;
+        edited.push((
+            offers(&body.html, key),
+            body.html
+                .contains(&format!("input-{}-clear", key.replace('.', "-"))),
+            body.html.contains(KEY) || body.html.contains(REVEALABLE_VALUE),
+        ));
+    }
+    checks.check(
+        "System Settings offers \"Show stored value\" for a revealable secret, never for the provider keys",
+        edited == [(true, true, false), (false, true, false)],
+        format!("(offered, stored, plaintext) per row: {edited:?}"),
+    );
+    let refused_before: i64 = client
+        .query_one("SELECT count(*) FROM base_audit_actions WHERE event='settings.secret.reveal' AND payload->>'setting_key'=$1 AND payload->>'result'='refused'", &[&PROVIDER_KEYS])
+        .await?.get(0);
+    let forged = json!({"type": "request_secret_reveal", "key": PROVIDER_KEYS, "code": ""});
+    let body = live
+        .update(LiveRequest {
+            scope: &admin,
+            credential: "walkthrough",
+            input: LiveInput::Event(&forged),
+        })
+        .await?;
+    let refused_after: i64 = client
+        .query_one("SELECT count(*) FROM base_audit_actions WHERE event='settings.secret.reveal' AND payload->>'setting_key'=$1 AND payload->>'result'='refused'", &[&PROVIDER_KEYS])
+        .await?.get(0);
+    checks.check(
+        "a forged reveal of the provider keys is refused, recorded and shows nothing",
+        body.events.is_empty()
+            && !body.html.contains(KEY)
+            && body.notice.contains("cannot be shown")
+            && refused_after == refused_before + 1,
+        format!(
+            "{} events, notice {:?}, {} refused reveal rows",
+            body.events.len(),
+            body.notice,
+            refused_after - refused_before
+        ),
     );
     let editors: Vec<&str> = inventory::iter::<Contribution>
         .into_iter()
@@ -563,6 +686,39 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         reason(&answer) == Some(Reason::ProviderError) && calls() == before + 1,
         format!("{answer:?}, {} server calls", calls() - before),
     );
+    for (name, label) in [
+        ("hosted-ip", "hosted provider at a loopback address"),
+        (
+            "hosted-name",
+            "hosted provider whose name resolves to loopback",
+        ),
+    ] {
+        let before = connections();
+        let answer = ai.generate(&manager, request(Some(name), five)).await;
+        let exchange: Option<String> = client
+            .query_one("SELECT exchange_id FROM base_ai_interactions WHERE provider=$1 ORDER BY id DESC LIMIT 1", &[&name])
+            .await?
+            .get(0);
+        checks.check(
+            &format!("{label}: refused before any connection"),
+            reason(&answer) == Some(Reason::ProviderError)
+                && connections() == before
+                && exchange.is_none(),
+            format!(
+                "{answer:?}, {} connections, exchange {exchange:?}",
+                connections() - before
+            ),
+        );
+    }
+    let before = connections();
+    let answer = ai
+        .generate(&manager, request(Some("local-tls"), five))
+        .await;
+    checks.check(
+        "the same address marked local is reached",
+        reason(&answer) == Some(Reason::ProviderError) && connections() == before + 1,
+        format!("{answer:?}, {} connections", connections() - before),
+    );
     let started = Instant::now();
     let answer = ai.generate(&manager, request(Some("slow"), second)).await;
     let elapsed = started.elapsed();
@@ -619,12 +775,13 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             .any(|column| texty.iter().any(|word| column.contains(word))),
         columns.join(","),
     );
-    // 6 refused before a call, 2 generated, 4 provider errors, 1 redirect, 2 timeouts.
+    // 6 refused before a call, 2 generated, 4 provider errors, 1 redirect,
+    // 3 hosted or local refusals, 2 timeouts.
     let total = rows(&client).await?;
     checks.check(
         "one row per valid call",
-        total == 15,
-        format!("{total} rows for 15 calls"),
+        total == 18,
+        format!("{total} rows for 18 calls"),
     );
     let dumped: Vec<String> = client
         .query(
@@ -815,15 +972,71 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         scheduled,
         RETENTION_WORKER,
     );
+    // The facade has no delete: pruning runs only as the reviewed schedule's
+    // job, under the scheduler principal's execute grant.
     client.execute("UPDATE base_ai_interactions SET created_at=now()-interval '400 days' WHERE public_id=$1", &[&generated_id]).await?;
     let total = rows(&client).await?;
-    let pruned = ai.prune(&**client, 180, SystemTime::now()).await?;
+    let schedule = services.get::<bilibi_base::schedule::Schedule>("base/schedule.store")?;
+    let grants = services.get::<bilibi_base::authz::grants::Grants>("base/authz.grants")?;
+    grants.reconcile().await?;
+    let mut client = client;
+    let unreviewed = schedule
+        .run_now(
+            &mut client,
+            &admin,
+            RETENTION_WORKER,
+            jiff::Timestamp::now(),
+        )
+        .await;
+    checks.check(
+        "retention runs nothing until an operator reviews it",
+        !matches!(unreviewed, Ok(Ok(_))) && rows(&client).await? == total,
+        format!("run now: {:?}", unreviewed.map(|claim| claim.is_ok())),
+    );
+    let executor = bilibi_base::queue::Executor::from_services(
+        &services,
+        bilibi_base::queue::Config::default(),
+    )?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let workers = tokio::spawn(executor.run(stopped));
+    schedule
+        .review(&mut client, &admin, RETENTION_WORKER, true)
+        .await?;
+    // The scheduler principal's execute grant, as an operator gives it on
+    // the access page (that page asks for a second factor this fixture
+    // account has not enrolled).
+    client.execute("INSERT INTO authz_system_grants(tenant_id,principal,capability,is_allowed) VALUES(1,$1,$2,true) ON CONFLICT(tenant_id,principal,capability) DO UPDATE SET is_allowed=true", &[&bilibi_base::schedule::PRINCIPAL, &bilibi_base::schedule::EXECUTE]).await?;
+    let queued = schedule
+        .run_now(
+            &mut client,
+            &admin,
+            RETENTION_WORKER,
+            jiff::Timestamp::now(),
+        )
+        .await?;
+    let mut state = String::new();
+    for _ in 0..60 {
+        state = client
+            .query_opt("SELECT state::text FROM base_queue_jobs WHERE worker_id=$1 ORDER BY id DESC LIMIT 1", &[&RETENTION_WORKER])
+            .await?
+            .map(|row| row.get(0))
+            .unwrap_or_default();
+        if matches!(state.as_str(), "completed" | "cancelled" | "discarded") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let _ = stop.send(true);
+    let _ = workers.await;
     let gone = ai.interaction(&**client, &admin, &generated_id).await;
     let left = rows(&client).await?;
     checks.check(
-        "retention prunes only rows past the period",
-        pruned == 1 && matches!(gone, Err(Error::NotFound)) && left == total - 1,
-        format!("{pruned} pruned, {left} of {total} left"),
+        "the reviewed schedule's job prunes only rows past the period",
+        queued.is_ok()
+            && state == "completed"
+            && matches!(gone, Err(Error::NotFound))
+            && left == total - 1,
+        format!("job {state}, {left} of {total} left"),
     );
     Ok(finish(&checks))
 }

@@ -214,15 +214,22 @@ impl Ai {
             ],
             "stream": false,
         });
-        // An operator-chosen address: local servers are allowed, the
-        // server's own trust store is honoured, and a redirect is returned
-        // rather than followed so the key never goes elsewhere.
-        let mut outgoing = Outgoing::post(provider.endpoint())
+        // A redirect is returned rather than followed, so the key never
+        // goes elsewhere. A hosted provider is public HTTPS: its name is
+        // resolved once, a non-public address is refused and the checked
+        // addresses are pinned, so a hostname cannot resolve or rebind to an
+        // internal service. Only a provider the operator marked `local` may
+        // reach a private address, with the server's own trust store.
+        let outgoing = Outgoing::post(provider.endpoint())
             .json(body)
             .timeout(deadline)
             .max_body_bytes(REPLY_BYTES_MAX)
-            .no_redirects()
-            .trust_system_roots();
+            .no_redirects();
+        let mut outgoing = if provider.local {
+            outgoing.trust_system_roots()
+        } else {
+            outgoing.public_https()
+        };
         if let Some(key) = &key {
             outgoing = outgoing.header("Authorization", format!("Bearer {key}"));
         }

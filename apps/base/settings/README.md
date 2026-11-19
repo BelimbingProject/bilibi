@@ -20,6 +20,8 @@ Writes are bounded to 1 MiB of JSON.
 
 An owning module explicitly delegates one exact, tenant-scoped editable definition to tenant administrators by contributing `TenantAdmin` under `base/settings.tenant-admin` with the setting key as the contribution ID. The owner must be the setting's owner; wildcard, runtime, non-tenant and non-editable settings refuse at boot. Delegation makes the setting reachable through Settings Editor's tenant agent operations; merely allowing `ScopeKind::Tenant` or adding editor metadata does not. The definition remains the one source of its label, validation, field capability and encryption policy.
 
+An encrypted definition whose editor sets `reveal_duration_ms: NEVER_REVEALED` (0) is never shown back, not even through System Settings' stored-secret reveal; its holder re-enters it instead. Every other editor reveals for 1,000 to 60,000 ms, and boot refuses `NEVER_REVEALED` on an unencrypted definition. `base/ai` uses it for provider API keys.
+
 Resolve using `Settings::get` or `resolve_many` from `base/settings.store`. Reads accept `&dyn bilibi_tenancy::ReadClient`, including PostgreSQL clients and transactions and the operation handler's `&dyn OperationClient`. Pass the handed client so a plan sees its earlier writes and rollback keeps every change together.
 Resolution is user → selected company → tenant → global → declared default,
 filtering to the definition's allowed scopes. A stored JSON null is a real

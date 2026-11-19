@@ -7,12 +7,15 @@ use std::collections::BTreeMap;
 pub(crate) const PROVIDERS_MAX: usize = 20;
 const KEY_MAX: usize = 4096;
 
-/// One configured OpenAI-compatible provider.
+/// One configured OpenAI-compatible provider. A hosted provider (the
+/// default) is public HTTPS only; `local` is the operator's explicit choice
+/// of a server on this machine or a private network.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Provider {
     pub name: String,
     pub base_url: String,
     pub model: String,
+    pub local: bool,
 }
 impl Provider {
     /// The chat-completions endpoint under the base URL.
@@ -36,10 +39,12 @@ pub(crate) fn name(value: &str) -> bool {
         })
 }
 
-fn base_url(value: &str) -> bool {
+/// An http or https URL with a host and no credentials, query or fragment;
+/// https only for a hosted provider.
+fn base_url(value: &str, local: bool) -> bool {
     value.len() <= 2048
         && url::Url::parse(value).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
+            (url.scheme() == "https" || local && url.scheme() == "http")
                 && url.host_str().is_some_and(|host| !host.is_empty())
                 && url.username().is_empty()
                 && url.password().is_none()
@@ -56,7 +61,8 @@ fn model(value: &str) -> bool {
 
 /// The providers in order, or `None` for a value of the wrong shape: not a
 /// list, more than [`PROVIDERS_MAX`], an unknown or missing field, a bad
-/// name, URL or model, or a repeated name.
+/// name, URL or model, a `local` that is not a boolean, an http URL on a
+/// hosted provider, or a repeated name.
 pub(crate) fn parse(value: &Value) -> Option<Vec<Provider>> {
     let items = value.as_array()?;
     if items.len() > PROVIDERS_MAX {
@@ -65,16 +71,24 @@ pub(crate) fn parse(value: &Value) -> Option<Vec<Provider>> {
     let mut providers: Vec<Provider> = Vec::with_capacity(items.len());
     for item in items {
         let object = item.as_object()?;
-        if object.len() != 3 {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "name" | "base_url" | "model" | "local"))
+        {
             return None;
         }
         let field = |key: &str| object.get(key)?.as_str();
+        let local = match object.get("local") {
+            None => false,
+            Some(flag) => flag.as_bool()?,
+        };
         let provider = Provider {
             name: field("name").filter(|value| name(value))?.to_owned(),
             base_url: field("base_url")
-                .filter(|value| base_url(value))?
+                .filter(|value| base_url(value, local))?
                 .to_owned(),
             model: field("model").filter(|value| model(value))?.to_owned(),
+            local,
         };
         if providers.iter().any(|seen| seen.name == provider.name) {
             return None;
