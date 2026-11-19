@@ -423,6 +423,32 @@ impl CustomFields {
             .transpose()
     }
 
+    /// Read one definition, including an archived key. The caller authorizes
+    /// its operation before reading. A mutation may hold the definition and
+    /// the record type's creation lock while applying a group of changes.
+    pub async fn stored_definition(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        record_type: &str,
+        key: &str,
+        write: bool,
+    ) -> Result<Option<Definition>> {
+        self.record_type(record_type)?;
+        let tenant = scope.tenant();
+        if write {
+            lock(client, tenant, record_type).await?;
+        }
+        self.one(
+            client,
+            tenant,
+            record_type,
+            key,
+            if write { " FOR UPDATE" } else { "" },
+        )
+        .await
+    }
+
     /// The definition as it stands, locked `FOR UPDATE` by a write; a stale
     /// `version` is a refusal.
     async fn current(
@@ -460,6 +486,7 @@ impl CustomFields {
         scope: &Scope,
         input: &NewField,
         write: bool,
+        pending: i64,
     ) -> Result<Checked<NewField>> {
         authorize_key(client, scope, MANAGE).await?;
         let tenant = scope.tenant();
@@ -554,10 +581,14 @@ impl CustomFields {
                 .await?
                 .get(0);
             let limit = self.limit(client, scope).await?;
-            if active >= limit {
+            if active + pending >= limit {
                 errors.push(FieldError::new(
                     "key",
-                    format!("this record type already has {limit} active fields, the most this organisation allows; archive one first"),
+                    if pending == 0 {
+                        format!("this record type already has {limit} active fields, the most this organisation allows; archive one first")
+                    } else {
+                        format!("the proposed fields exceed this record type's limit of {limit} active fields")
+                    },
                 ));
             }
         }
@@ -584,7 +615,19 @@ impl CustomFields {
         scope: &Scope,
         input: &NewField,
     ) -> Result<Checked<NewField>> {
-        self.check_define(client, scope, input, false).await
+        self.preview_define_after(client, scope, input, 0).await
+    }
+    /// Preview a definition with the number of earlier, still unsaved
+    /// additions for the same record type included in the capacity check.
+    pub async fn preview_define_after(
+        &self,
+        client: &(impl GenericClient + Sync),
+        scope: &Scope,
+        input: &NewField,
+        pending: u32,
+    ) -> Result<Checked<NewField>> {
+        self.check_define(client, scope, input, false, pending.into())
+            .await
     }
     /// Adds a field under `base.custom-fields.manage`, after the record type's
     /// other fields.
@@ -594,7 +637,7 @@ impl CustomFields {
         scope: &Scope,
         input: &NewField,
     ) -> Result<Checked<Definition>> {
-        let field = match self.check_define(tx.sql(), scope, input, true).await? {
+        let field = match self.check_define(tx.sql(), scope, input, true, 0).await? {
             Ok(field) => field,
             Err(errors) => return Ok(Err(errors)),
         };

@@ -267,6 +267,26 @@ impl Labels {
             .ok_or_else(|| Error::Refused(format!("{} “{id}” cannot be renamed.", kind.noun())))
     }
 
+    /// Read a single tenant override without the display list's limit.
+    /// The caller authorizes its operation before reading. A mutation can keep
+    /// an existing override unchanged by locking it until its transaction ends.
+    pub async fn stored_override(
+        sql: &dyn bilibi_tenancy::ProofClient,
+        scope: &Scope,
+        kind: Kind,
+        subject: &str,
+        lock: bool,
+    ) -> Result<Option<Stored>> {
+        let suffix = if lock { " FOR UPDATE" } else { "" };
+        Ok(sql
+            .query_opt(
+                &format!("SELECT label, version, id FROM base_labels WHERE tenant_id=$1 AND kind=$2 AND subject=$3{suffix}"),
+                &[&scope.tenant(), &kind.key(), &subject],
+            )
+            .await?
+            .map(|row| Stored { label: row.get(0), version: row.get(1), id: row.get(2) }))
+    }
+
     /// Decides what setting `text` (blank clears) would do, or why not. Needs
     /// `base.labels.manage`. The identity and version must still match the
     /// override the writer read (`(0, 0)` when there was none).
@@ -291,17 +311,11 @@ impl Labels {
                 "A label is plain text of up to {MAX_LABEL} characters."
             )));
         }
-        let lock = if lock { " FOR UPDATE" } else { "" };
-        let current = sql
-            .query_opt(
-                &format!("SELECT label, version, id FROM base_labels WHERE tenant_id=$1 AND kind=$2 AND subject=$3{lock}"),
-                &[&scope.tenant(), &kind.key(), &subject],
-            )
-            .await?;
+        let current = Self::stored_override(sql, scope, kind, subject, lock).await?;
         if version
             != current
                 .as_ref()
-                .map_or((0, 0), |row| (row.get::<_, i64>(2), row.get::<_, i64>(1)))
+                .map_or((0, 0), |stored| (stored.id, stored.version))
         {
             return Err(Error::Conflict);
         }
@@ -309,7 +323,7 @@ impl Labels {
             kind,
             subject: known.id,
             default: known.default,
-            before: current.map(|row| row.get(0)),
+            before: current.map(|stored| stored.label),
             after: Some(text.to_owned()).filter(|text| !text.is_empty()),
         })
     }

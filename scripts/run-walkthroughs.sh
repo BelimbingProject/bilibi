@@ -94,6 +94,7 @@ WALKTHROUGHS=(
   'base|bulk-export|apps/base/bulk_data|export-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|bulk-update|apps/base/bulk_data|update-walkthrough|none|BILIBI_BULK_DATA_DEMO=disposable|-'
   'base|custom-fields-structured|apps/base/custom_fields|structured-fields-walkthrough|migrate|BILIBI_CUSTOM_FIELDS_DEMO=disposable BILIBI_CUSTOM_FIELDS_ROOT=@/artifacts|-'
+  'base|setup-packs|apps/base/setup_packs|setup-packs-walkthrough|migrate|BILIBI_SETUP_PACKS_DEMO=disposable|-'
   'base|database-pool|apps/base/database|pool-walkthrough|none||-'
   'base|integration|apps/base/integration|integration-walkthrough|migrate|BILIBI_DISPOSABLE_INTEGRATION_DEMO=yes|-'
   'base|language-detection|apps/base/language_detection|language-detection-walkthrough|none|BILIBI_DISPOSABLE_LANGUAGE_WALKTHROUGH=yes|@model'
