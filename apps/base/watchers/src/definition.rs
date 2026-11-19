@@ -151,6 +151,9 @@ impl Definition {
                 Match::All
             }
         };
+        if !filter.is_null() && !filter.get("conditions").is_some_and(Value::is_array) {
+            problems.push(("if.conditions".into(), "must be an array".into()));
+        }
         let mut conditions = Vec::new();
         let listed = filter
             .get("conditions")
@@ -323,11 +326,14 @@ impl Definition {
 
 pub(crate) fn parse_examples(value: &Value, problems: &mut Problems) -> Vec<Example> {
     let listed = value.as_array().map_or(&[][..], Vec::as_slice);
-    if listed.is_empty() || listed.len() > MAX_EXAMPLES {
+    if !value.is_null() && !value.is_array() {
+        problems.push(("examples".into(), "must be an array".into()));
+    }
+    if listed.len() > MAX_EXAMPLES {
         problems.push((
             "examples".into(),
             format!(
-                "give 1 to {MAX_EXAMPLES} examples of records that should and should not match"
+                "give at most {MAX_EXAMPLES} examples of records that should and should not match"
             ),
         ));
     }

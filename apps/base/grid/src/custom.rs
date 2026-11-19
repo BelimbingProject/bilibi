@@ -36,7 +36,7 @@ pub struct CustomColumn {
     /// Whether people find a record by this field's text in global search
     /// (free text, links, phone numbers and email addresses).
     pub searchable: bool,
-    /// Whether the tenant offered it to Base Watchers conditions; Rules reads
+    /// Whether the tenant offered it to Base Watchers conditions; Watchers reads
     /// no other custom field (#730).
     pub watcher_condition: bool,
 }

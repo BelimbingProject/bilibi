@@ -72,7 +72,7 @@ The [schema dialect](src/schema.rs) accepts object/properties/required,
 string/enum/maxLength/format, integer/number/enum/minimum/maximum, boolean and
 array/items, plus title/description and the editor annotations below. Scalar nodes may declare
 `nullable: true` to accept JSON `null`; null remains invalid everywhere else. Every node needs a type and
-root input must be an object. Input objects refuse unknown fields. Validation
+root input must be an object. Input objects refuse unknown fields unless their schema explicitly sets `additionalProperties: true`; the receiving contract must validate those fields before use. Validation
 returns dotted field paths, including array indexes. Null is never implicit.
 String formats are date, date-time with offset, and email. Nesting is bounded
 at discovery. Output schemas describe data without runtime enforcement.

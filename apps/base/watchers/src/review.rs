@@ -271,7 +271,7 @@ impl Watchers {
             } else {
                 continue;
             };
-            problems.push((format!("conditions.{i}.field"), why));
+            problems.push((format!("if.conditions.{i}.field"), why));
         }
         let field = |path: &str| -> Option<(FieldType, &'static [&'static str], String)> {
             let table = table?;
@@ -604,7 +604,7 @@ impl Watchers {
                                 column.field.is_some_and(|f| !theirs.masked(column.table, f.id))
                             });
                             if readable.is_none() {
-                                problems.push((format!("conditions.{i}.field"), format!(
+                                problems.push((format!("if.conditions.{i}.field"), format!(
                                     "{} is hidden from automation, and a watcher never reads a hidden field",
                                     condition.field
                                 )));

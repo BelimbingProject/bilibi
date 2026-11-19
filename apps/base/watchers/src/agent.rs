@@ -31,7 +31,7 @@ fn watchers() -> bilibi_agent_api::Result<&'static Arc<Watchers>> {
 
 pub(crate) fn summary_json(watcher: &WatcherSummary) -> Value {
     json!({
-        "watcher_id": watcher.id, "name": watcher.name, "trigger": watcher.trigger, "trigger_title": watcher.trigger_title,
+        "watcher_id": watcher.id, "name": watcher.name, "watch": watcher.trigger, "watch_title": watcher.trigger_title,
         "state": watcher.state.key(), "running_version": watcher.running, "latest_version": watcher.latest,
         "awaiting_approval": watcher.pending, "last_run": watcher.last_run.map(|at| at.to_string()),
         "path": format!("{}/{}", crate::web::INDEX, watcher.id),
@@ -355,11 +355,11 @@ fn scalar() -> Value {
     json!({"type":"string","maxLength":500,"description":"Text, a number written as text (\"1000.50\") or true/false written as text"})
 }
 fn draft_schema() -> Value {
-    json!({"type":"object","required":["name","watch","do","examples"],"properties":{
+    json!({"type":"object","required":["name","watch","do"],"properties":{
         "watcher_id":{"type":"integer","minimum":1,"description":"The watcher this is the next version of; leave out for a new watcher"},
         "name":{"type":"string","maxLength":120},
         "watch":{"type":"string","maxLength":200,"description":"An installed trigger, from base.watchers.vocabulary"},
-        "if":{"type":"object","properties":{"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough"},
+        "if":{"type":"object","required":["conditions"],"properties":{"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough"},
         "conditions":{"type":"array","items":{"type":"object","required":["field","op"],"properties":{
             "field":{"type":"string","maxLength":160,"description":"A field of the trigger's record, from base.watchers.vocabulary"},
             "op":{"type":"string","enum":crate::definition::Op::ALL},
@@ -368,7 +368,7 @@ fn draft_schema() -> Value {
         }}}}},
         "do":{"type":"array","items":{"type":"object","required":["operation"],"properties":{
             "operation":{"type":"string","maxLength":200,"description":"An installed action, from base.watchers.vocabulary"},
-            "input":{"type":"object","description":"The action's parameters as a JSON object, without its subject field (the runner binds the trigger's record)"}
+            "input":{"type":"object","additionalProperties":true,"description":"The action's parameters as a JSON object, without its subject field (the runner binds the trigger's record)"}
         }}},
         "examples":{"type":"array","items":{"type":"object","required":["facts","expect"],"properties":{
             "facts":{"type":"string","maxLength":4000,"description":"A record's field values as a JSON object (field → value)"},
@@ -448,7 +448,7 @@ impl WriteHandler for Normalised {
 }
 static DRAFT: Normalised = Normalised(&DraftWatcher);
 
-const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, the trigger, match (all or any), conditions (field, op, value; values for in and not_in), actions (operation and its input as a JSON object, leaving out the record field the runner binds) and 1 to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event without AI. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
+const GUIDE: &str = "A watcher is data: when a trigger event happens to a record, if its conditions hold, run its actions. Read base.watchers.vocabulary first: it lists the installed triggers with the fields their record offers, the actions with their parameters, the operators and the tenant's limits. Turn the person's plain words into one draft: a name, watch (the event), optional if (match all or any, conditions with field, op, value; values for in and not_in), do (operation and its input as a JSON object, leaving out the record field the runner binds) and up to 10 examples of records that should and should not match (facts as a JSON object of the fields the conditions read, expect match or no_match). Plan base.watchers.draft and show the person its review: the conditions in words, the actions, how each example comes out and any warnings. Without if, every event of the watched kind matches. A draft never runs. Tell the person an administrator approves the version on the Watchers page (or with base.watchers.approve after reviewing it there); the approved version then runs on every new event without AI. To change a running watcher, draft its next version with watcher_id; it runs only once approved. Read base.watchers.runs to explain what a watcher did: each receipt says which conditions held, the facts read and each action's outcome.";
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/watchers", Provenance { module: "base/watchers", source: file!(), line: line!() }, &Definitions {
     operations: &[

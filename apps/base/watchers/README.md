@@ -4,16 +4,18 @@
 
 **Not for:** a check that must stop a save (keep it in your operation), tenant scripts or per-tenant code branches, or a workflow or approval engine of your own.
 
-A watcher is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customisation-is-data-on-shared-servers.md), [ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md), #682). It says: when a trigger event happens to a record, if these conditions over the record's fields hold, run these actions. A person drafts it on the Watchers page or through an AI agent; an administrator approves one fixed version; that version runs on every new event, without AI.
+A watcher is data ([ADR 28](../../../docs/architecture/decisions/28-tenant-customisation-is-data-on-shared-servers.md), [ADR 31](../../../docs/architecture/decisions/31-tenant-watchers-run-after-commit-as-one-bounded-principal.md), #682). It says: when a trigger event happens to a record, if these conditions over the record's fields hold, run these actions. Omit `if` to act on every event of the watched kind. A person drafts it on the Watchers page or through an AI agent; an administrator approves one fixed version; that version runs on every new event, without AI.
 
 ## What a watcher is
+
+A draft uses `watch` for the event, optional `if` for its filter, and `do` for operation steps, for example `{"watch":"cx.cases.opened","if":{"match":"all","conditions":[...]},"do":[{"operation":"cx.cases.route","input":{"queue":"vip"}}]}`. Draft metadata and examples accompany this definition.
 
 | Part | What it holds | Who supplies it |
 | --- | --- | --- |
 | Trigger | An event an owner records in its own transaction (`watcher_cases/cases.opened`) | An owner's `Trigger` contribution |
 | Conditions | `all` or `any` of: a field of the trigger's record, an operator, a value | The watcher |
 | Actions | 1 to 10 owner write contracts, each with approved parameters | Owners' `Action` contributions; the watcher selects actions and supplies their parameters |
-| Examples | 1 to 10 fact sets with expected `match` or `no_match` outcomes | The watcher's author |
+| Examples | Up to 10 fact sets with expected `match` or `no_match` outcomes | The watcher's author |
 
 - **Fields** are Grid column paths on the trigger's table (`priority`, or `company.name` through a one-link), read as the `watchers` principal. No aggregates.
 - **Tenant custom fields** (`cf_<key>`, [Custom Fields](../custom_fields/README.md#watcher-conditions)) are fields only when the tenant offered them to watcher conditions, and only on the trigger's own record, not through a link. A draft on one that is not offered is refused with that reason; the vocabulary lists only offered ones, under the tenant's label.
@@ -108,7 +110,7 @@ inventory::submit! { Contribution::new(bilibi_authz::OFFERED_CAPABILITIES, "watc
 }) }
 ```
 
-Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `watchers`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record watchers in its commit; a company's write also holds `require_writable`.
+Boot refuses a trigger that is not the contributor's own declared event or names no Grid table the principal may be offered; an action that is not the contributor's reviewed write, does not admit `watchers`, lacks the subject or expected-version input, records an undeclared event, or would grant access or decide an approval. The owner's contract must accept a principal scope (`scope.user()` is `0`) and recheck its capability, expected record version and record rules in its commit; a company's write also holds `require_writable`.
 
 `Action::approval_capabilities` declares additional capabilities a human needs to perform the action, including nested writes that use a different permission for the principal. Approval and re-enabling require the operation's own capability and every prerequisite with All reach; direct denies win. Boot checks the keys against the Authz vocabulary, and the approval fingerprint includes the declaration. This adds no principal bounds or consent: the executor and owner still check the principal's own permissions live. Use `&[]` when the operation capability suffices. Shared follow-up registration requirements belong to [Activities](../../core/activity/README.md#follow-up-operations-offered-by-record-owners).
 

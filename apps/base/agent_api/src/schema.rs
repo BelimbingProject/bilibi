@@ -50,7 +50,7 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         .and_then(Value::as_str)
         .ok_or("schema needs type")?;
     let keywords: &[&str] = match kind {
-        "object" => &["properties", "required"],
+        "object" => &["properties", "required", "additionalProperties"],
         "string" => &["enum", "maxLength", "format", "nullable"],
         "integer" | "number" => &["enum", "minimum", "maximum", "nullable"],
         "boolean" => &["nullable"],
@@ -148,6 +148,12 @@ fn check_node(node: &Value, depth: usize) -> Result<(), String> {
         return Err("nullable must be boolean".into());
     }
     if kind == "object" {
+        if node
+            .get("additionalProperties")
+            .is_some_and(|v| !v.is_boolean())
+        {
+            return Err("additionalProperties must be boolean".into());
+        }
         let properties = match node.get("properties") {
             Some(v) => v.as_object().ok_or("properties must be an object")?.clone(),
             None => Default::default(),
@@ -292,6 +298,9 @@ fn errors_at(
         for (key, value) in object {
             let child = &schema["properties"][key];
             let child_path = join(path, key);
+            if child.is_null() && schema["additionalProperties"] == true {
+                continue;
+            }
             if child.is_null() {
                 add(
                     errors,

@@ -993,18 +993,18 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
                 .review(&agent, "base.watchers.draft", malformed.clone())
                 .await
                 .to_string()
-                .contains("actions.0.input"),
+                .contains("do.0.input"),
             "preview rejects malformed or non-object action parameters at their field",
         );
         check(
             proof
                 .write(&agent, "base.watchers.draft", malformed)
                 .await
-                .is_err_and(|why| why.contains("actions.0.input")),
+                .is_err_and(|why| why.contains("do.0.input")),
             "saving refuses supplied invalid action parameters",
         );
     }
-    let omitted = json!({"name": "Default action parameters", "watch": OPENED, "if": {"conditions": []},
+    let omitted = json!({"name": "Default action parameters", "watch": OPENED,
         "do": [{"operation": "watcher_cases.cases.flag"}], "examples": [{"facts": "{}", "expect": "match"}]});
     check(
         proof
@@ -1228,9 +1228,9 @@ async fn mounted_proof(proof: &mut Proof) -> Result<()> {
             .is_err_and(|w| w.contains("would start itself")),
         "a watcher whose action records its own trigger is refused at approval",
     );
-    let (ra, va) = proof.draft(&one, json!({"name": "Flag routed cases", "watch": ROUTED, "if": {"conditions": []},
+    let (ra, va) = proof.draft(&one, json!({"name": "Flag routed cases", "watch": ROUTED,
         "do": [{"operation": "watcher_cases.cases.flag", "input": json!({})}], "examples": [{"facts": "{}", "expect": "match"}]})).await?;
-    let (rb, vb) = proof.draft(&one, json!({"name": "Route flagged cases", "watch": FLAGGED, "if": {"conditions": []},
+    let (rb, vb) = proof.draft(&one, json!({"name": "Route flagged cases", "watch": FLAGGED,
         "do": [{"operation": "watcher_cases.cases.route", "input": json!({"queue": "loop"})}], "examples": [{"facts": "{}", "expect": "match"}]})).await?;
     check(
         proof.approve(&one, ra, va).await.is_ok(),

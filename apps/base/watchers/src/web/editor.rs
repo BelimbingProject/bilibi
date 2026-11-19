@@ -254,6 +254,7 @@ fn shown(value: &Value) -> String {
 
 /// Where a problem's input path points, in words.
 fn place(path: &str) -> String {
+    let path = path.strip_prefix("if.").unwrap_or(path);
     let parts: Vec<&str> = path.split('.').collect();
     let number = |i: usize| {
         parts
@@ -264,12 +265,12 @@ fn place(path: &str) -> String {
     match (parts.first().copied(), number(1), parts.get(2)) {
         (Some("conditions"), Some(n), Some(part)) => format!("Condition {n}, {part}"),
         (Some("conditions"), Some(n), None) => format!("Condition {n}"),
-        (Some("actions"), Some(n), Some(part)) => format!("Action {n}, {}", part.replace('_', " ")),
-        (Some("actions"), Some(n), None) => format!("Action {n}"),
+        (Some("do"), Some(n), Some(part)) => format!("Action {n}, {}", part.replace('_', " ")),
+        (Some("do"), Some(n), None) => format!("Action {n}"),
         (Some("examples"), Some(n), Some(part)) => format!("Example {n}, {part}"),
         (Some("examples"), Some(n), None) => format!("Example {n}"),
         (Some("name"), ..) => "Name".into(),
-        (Some("trigger"), ..) => "Trigger".into(),
+        (Some("watch"), ..) => "Watch".into(),
         (Some("match"), ..) => "Match".into(),
         (Some("explanation"), ..) => "Asked for".into(),
         (Some(other), ..) => humanise(other),
