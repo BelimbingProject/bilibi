@@ -302,7 +302,18 @@ impl Plans {
             .await?;
         let (results, valid) = self.previews(&tx, &plan_scope, operations).await?;
         let instance = Instance::resolve(&self.settings, &tx).await?;
-        let response = json!({"valid":valid,"instance":instance.agent_json(),"work_company_id":plan_scope.current_company().map(OrganisationId::get),"operations":operations,"results":results,"meta":{"content_notice":CONTENT_NOTICE}});
+        let mut shown_operations = json!(operations);
+        if let Some(items) = shown_operations.as_array_mut() {
+            for operation in items {
+                if let Some(registered) = operation["key"]
+                    .as_str()
+                    .and_then(|key| self.registry.operations.get(key))
+                {
+                    crate::schema::scrub_write_only(&registered.input, &mut operation["input"]);
+                }
+            }
+        }
+        let response = json!({"valid":valid,"instance":instance.agent_json(),"work_company_id":plan_scope.current_company().map(OrganisationId::get),"operations":shown_operations,"results":results,"meta":{"content_notice":CONTENT_NOTICE}});
         tx.commit().await.map_err(bilibi_database::Error::from)?;
         Ok(response)
     }

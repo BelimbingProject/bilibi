@@ -6,6 +6,16 @@
 
 `/system/settings`, titled **System Settings**, is the operator page for contributed settings. It is its own module because it needs Authz, and Authz depends on `base/settings`: storage stays below Authz, the screen sits above it.
 
+## Tenant agent operations
+
+Tenant administrators use operation contracts, not another settings editor. An owning module opts one exact definition in with `bilibi_settings::TenantAdmin`; `base.settings_editor.tenant.list` returns only delegated settings the caller's live field capabilities allow, with the effective source (`tenant`, `global` or `default`). `base.settings_editor.tenant.set` writes a tenant override and `base.settings_editor.tenant.restore` deletes only that override so inheritance resumes. Both writes recheck the definition's capability inside their mutation transaction and Settings supplies tenant binding, validation and audit.
+
+Encrypted values are always `null` in list, preview and result data; only whether one is set is reported. Setting or restoring one is the always-on Base Step-up operation `base.settings_editor.tenant.secret.change`, and an owner-specific setting guard still runs when declared. The guide `base.settings_editor` teaches discovery, value syntax, review and restore to connected agents.
+
+The read-only Customisations page is owned by its shared page contract (issue #797). This module contributes its tenant-overrides section there once that contract is available; it does not add a tenant settings screen.
+
+Run `apps/web/examples/tenant-settings-walkthrough.rs` against a fresh disposable migrated database with `BILIBI_TENANT_SETTINGS_DEMO=disposable cargo run -p bilibi-web --example tenant-settings-walkthrough --locked`. It links two fixture-only delegated definitions, calls the discovered list and reviewed write contracts, and proves source reporting, set/restore audit, secret redaction and isolation from the walkthrough's second tenant. It prints no credential or secret value.
+
 ## Table
 
 Settings appear in the shared `FlexTable`, with Setting, Value and Area columns. The company picker uses the same table; per-person settings do not use this module.

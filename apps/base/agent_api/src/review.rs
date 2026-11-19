@@ -358,30 +358,6 @@ impl bilibi_notifications::TodoSource for Reviews {
     }
 }
 
-fn scrub_write_only(schema: &Value, value: &mut Value) {
-    if schema["type"] == "array" {
-        if let Some(items) = value.as_array_mut() {
-            for item in items {
-                scrub_write_only(&schema["items"], item);
-            }
-        }
-        return;
-    }
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    let Some(properties) = schema["properties"].as_object() else {
-        return;
-    };
-    for (key, child) in properties {
-        if child["writeOnly"] == true {
-            object.remove(key);
-        } else if let Some(value) = object.get_mut(key) {
-            scrub_write_only(child, value);
-        }
-    }
-}
-
 fn persisted_review(card: &Value, operations: &Value) -> (Value, Value) {
     let mut card = card.clone();
     let mut operations = operations.clone();
@@ -390,19 +366,19 @@ fn persisted_review(card: &Value, operations: &Value) -> (Value, Value) {
     if let Some(items) = operations.as_array_mut() {
         for (index, operation) in items.iter_mut().enumerate() {
             let description = descriptions.get(index).unwrap_or(&default_description);
-            scrub_write_only(&description["input"], &mut operation["input"]);
+            crate::schema::scrub_write_only(&description["input"], &mut operation["input"]);
         }
     }
     if let Some(entries) = card["entries"].as_array_mut() {
         for (index, entry) in entries.iter_mut().enumerate() {
             let description = descriptions.get(index).unwrap_or(&default_description);
-            scrub_write_only(&description["input"], entry);
+            crate::schema::scrub_write_only(&description["input"], entry);
         }
     }
     if let Some(items) = card["operations"].as_array_mut() {
         for (index, operation) in items.iter_mut().enumerate() {
             let description = descriptions.get(index).unwrap_or(&default_description);
-            scrub_write_only(&description["input"], &mut operation["input"]);
+            crate::schema::scrub_write_only(&description["input"], &mut operation["input"]);
         }
     }
     (card, operations)

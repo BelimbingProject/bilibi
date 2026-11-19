@@ -8,6 +8,32 @@ use std::collections::BTreeMap;
 pub type FieldErrors = BTreeMap<String, Vec<String>>;
 const MAX_DEPTH: usize = 32;
 
+/// Removes schema-marked write-only fields before an input is persisted or
+/// returned. The owner still receives the original input for preview/commit.
+pub(crate) fn scrub_write_only(schema: &Value, value: &mut Value) {
+    if schema["type"] == "array" {
+        if let Some(items) = value.as_array_mut() {
+            for item in items {
+                scrub_write_only(&schema["items"], item);
+            }
+        }
+        return;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let Some(properties) = schema["properties"].as_object() else {
+        return;
+    };
+    for (key, child) in properties {
+        if child["writeOnly"] == true {
+            object.remove(key);
+        } else if let Some(value) = object.get_mut(key) {
+            scrub_write_only(child, value);
+        }
+    }
+}
+
 pub fn check(schema: &Value) -> Result<(), String> {
     if schema.get("type").and_then(Value::as_str) != Some("object") {
         return Err("input must be an object schema".into());
