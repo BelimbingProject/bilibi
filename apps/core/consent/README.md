@@ -95,11 +95,13 @@ The crate root exports `Consent`, its inputs and its result types. Every method 
 | `check` | Read and log a fresh eligibility answer at dispatch time |
 | `check_many` | `check` for up to 1,000 recipients of one message, in one pass |
 | `preview` | Show the answer now without logging it |
+| `preview_on` | `preview` on the caller's connection or transaction, for a caller that holds one (a queue job deciding whether to send); same access rule and answer, nothing logged |
 | `record` | Add a grant or withdrawal with evidence |
 | `suppress` | Add an active suppression; repeating the same suppression is idempotent |
 | `lift` | Lift a suppression with a reason |
 | `for_person`, `history` | Read current standing and evidence for one company and person |
 | `suppressions` | Read the company suppression list |
+| `suppressions_on` | `suppressions` on the caller's connection or transaction, for a sender checking them in its dispatch transaction; same access rule and answer |
 
 The public capability keys are `core.consent.view`, `core.consent.record`, `core.consent.check` and `core.consent.manage`.
 

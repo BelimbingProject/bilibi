@@ -13,6 +13,7 @@ Declare a dependency on `core/work_calendar` and resolve `WorkCalendars` from se
 | `choices(scope, search)` | Active calendars whose code or name contains `search` (empty: any), by name, at most 50 |
 | `check(client, scope, code)` | Whether a record may be assigned `code` now: an active calendar, locked `FOR SHARE` in the caller's transaction. Retired or unknown is `Invalid` |
 | `default_for(scope, company)` | The company's default code (`work_calendar.default`, company over tenant), or `None` when unset, retired or missing |
+| `default_for_on(client, scope, company)` | `default_for` on the caller's connection or transaction, for a caller that holds one |
 | `day(scope, code, date)`, `days(scope, code, from, to)` | Resolved dates |
 | `timetable(scope, code, from, to)` or `Timetable::load(client, scope, code, from, to)` | Business-time arithmetic for a window of at most 731 days |
 
