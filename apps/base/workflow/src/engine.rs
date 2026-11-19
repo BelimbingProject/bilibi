@@ -179,6 +179,8 @@ impl Engine {
     }
     /// Bind an existing subject to its flow without rewriting history. The
     /// flow may be inactive; the owner authorizes `Operation::Adopt` itself.
+    /// Like a transition, it may be driven by an account or by the named
+    /// system principal sealed on the scope.
     pub async fn adopt(&self, scope: &Scope, kind: &str, id: i64) -> Result<i64> {
         let mut client = self.db.get().await?;
         let mut tx = self
@@ -205,7 +207,7 @@ impl Engine {
         let kind = kind.to_owned();
         tx.mutate(move |sql| {
             Box::pin(async move {
-                engine.writer(&context, &scope, id)?;
+                engine.writer_or_principal(&context, &scope, id)?;
                 let scope = engine.live(sql, &scope).await?;
                 let (owner, flow) = engine.registry.subject(&kind)?;
                 engine
@@ -247,10 +249,10 @@ impl Engine {
         }
         Ok(())
     }
-    /// A transition may be driven by an account or by a named system
-    /// principal. The latter must be the exact principal sealed on the scope:
-    /// it cannot borrow user, agent or impersonator attribution.
-    fn transition_writer(
+    /// A transition or an adoption may be driven by an account or by a named
+    /// system principal. The latter must be the exact principal sealed on the
+    /// scope: it cannot borrow user, agent or impersonator attribution.
+    fn writer_or_principal(
         &self,
         context: &bilibi_database::Context,
         scope: &Scope,
@@ -290,7 +292,7 @@ impl Engine {
         let fact = tx.mutate(move |sql|Box::pin(async move {
             request.validate()?;
             if matches!(operation, Operation::Transition) {
-                engine.transition_writer(&context,&scope,id)?;
+                engine.writer_or_principal(&context,&scope,id)?;
             } else {
                 engine.writer(&context,&scope,id)?;
             }
