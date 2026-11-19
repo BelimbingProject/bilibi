@@ -5,7 +5,7 @@ use bilibi_module_registry::Composition;
 use serde_json::{json, Value};
 
 pub const NEXT_STEP: &str =
-    "Ask your developer to add the modules you need, build Bilibi on their computer, and test it before installing it here.";
+    "Run the installation commands in a Bilibi code folder, test the build, then install its release here.";
 
 /// Official modules live under this organisation. Releases of these are
 /// checked against every Platform release, so they only need a plain status.
@@ -58,14 +58,19 @@ pub fn catalogue(catalogue: &Catalogue, made: &Composition) -> Value {
             choices.sort();
             let chosen = choices.pop();
             item["recommended_version"] = json!(chosen.as_ref().map(|c| &c.2));
+            // Why nothing fits, when nothing does: the newest release's own
+            // requirement, or that no release names this Bilibi.
+            let unfit = match &newest_any {
+                Some((_, needs)) if !needs.is_empty() => format!("Needs Bilibi {needs}"),
+                _ => format!("No published version supports Bilibi {}", made.version),
+            };
             item["compatibility"] = json!(match &chosen {
-                Some((true, _, version, _)) => format!("Version {version} passed checks with the exact Bilibi code running here ({}). Test your chosen modules together before installing.", made.version),
-                Some((false, _, version, _)) => format!("Version {version} supports Bilibi {}. There is no test record for the exact code running here. Ask your developer to test it first.", made.version),
-                None => format!("No published version is listed as supporting Bilibi {}. Ask your developer to check the requirements before adding it.", made.version),
+                Some((true, ..)) => format!("Tested with Bilibi {}", made.version),
+                Some((false, ..)) => format!("Works with Bilibi {}", made.version),
+                None => unfit.clone(),
             });
             // Official modules are kept in step with every Platform release,
-            // so they also get one plain status. The sentence above stays for
-            // every module as the version-check evidence.
+            // so they also get one plain status.
             if repository.starts_with(OFFICIAL) {
                 let now = installed[kind]
                     .as_array()
@@ -84,16 +89,7 @@ pub fn catalogue(catalogue: &Catalogue, made: &Composition) -> Value {
                     }
                     _ => "installed",
                 };
-                let warning = match (&newest_fit, &newest_any) {
-                    (Some(_), _) => None,
-                    (None, Some((_, needs))) if !needs.is_empty() => {
-                        Some(format!("Needs Bilibi {needs}"))
-                    }
-                    _ => Some(format!(
-                        "No published version supports Bilibi {}",
-                        made.version
-                    )),
-                };
+                let warning = newest_fit.is_none().then_some(unfit);
                 item["status"] = json!(status);
                 item["latest_version"] = json!(newest_fit.map(|(_, name)| name));
                 item["warning"] = json!(warning);
@@ -128,7 +124,7 @@ fn local_steps(repository: &str, id: &str, kind: &str, commit: &str) -> Option<V
         return None;
     }
     Some(vec![
-        "# For your developer: run in the Bilibi code folder on your computer. Keep existing modules.".into(),
+        "(set -e".into(),
         format!("./bilibi add {id} --kind {kind} --source {repository} --commit {commit}"),
         "python3 scripts/discover-modules.py".into(),
         "./scripts/build-assets.sh --check".into(),
@@ -136,9 +132,7 @@ fn local_steps(repository: &str, id: &str, kind: &str, commit: &str) -> Option<V
         "python3 scripts/discover-modules.py --pin".into(),
         "cargo build --release --locked -p bilibi-web".into(),
         "./target/release/bilibi-web status".into(),
-        "# Run Bilibi with these modules on your computer and test it in the browser before installing."
-            .into(),
-        "# Release files and installation: docs/server-install.md".into(),
+        ")".into(),
     ])
 }
 

@@ -31,12 +31,11 @@ Much industry practice supports independently evolving plugins through version r
 
 ### Server tools
 
-**MCP and the Software page discover software, install releases and report status.** They show official Domains and Extensions as Installed, Not installed or Update available, and give instructions for the local checkout.
+**MCP and the Software page discover software, install releases and report status.** See the [Software contract](../../../apps/base/software/README.md#page-and-chatgpt-card) for the catalogue views and installation commands.
 
 - Installation takes a tested release, with a review and a fresh 2FA code. It backs up the database before changing it, switches programs and checks the result.
 - A failed switch or health check triggers automatic switch-back. When the database changed, returning also needs its backup restored.
 - Undo returns to the previous release and restores the backup when needed. Its review must explain which later data will be lost.
-- The agreed catalogue states are **Installed / Not installed / Update available**. The complete three-state presentation is part of the work still to be built below.
 
 These tools do not install source modules into the running program. They install the whole prepared release. The first release uses the terminal bootstrap path because there is no running Software page yet.
 
@@ -66,7 +65,7 @@ This table describes the checkout on 2026-10-20. Accepted direction does not mea
 | Versions, pins and tested pairs | **Built.** The exact commits are compiled into the program. [`versions.md`](../../versions.md) defines the records; [`domains.yml`](../../../.github/workflows/domains.yml) checks three named Domains individually and publishes tested pairs through [`catalogue.py`](../../../scripts/catalogue.py). Separate pairs do not prove a combined composition. |
 | Every official Domain and Extension checked on every Platform change | **Built.** [`.github/workflows/domains.yml`](../../../.github/workflows/domains.yml) mounts every `catalogue.json` entry. A pull request that cannot affect a mount passes **Official compatibility** without mounting. See [`docs/versions.md`](../../versions.md) and [`docs/domain-ci/README.md`](../../domain-ci/README.md). |
 | Coordinated releases and automatic catalogue updates | **Built.** The [Release](../../../.github/workflows/release.yml) workflow tags `vX.Y.Z` only after Official compatibility passes for that commit. The daily [Catalogue](../../../.github/workflows/catalogue.yml) workflow lists a Domain or Extension tag whose CI from [`docs/domain-ci/ci.yml`](../../domain-ci/ci.yml) passed, with no token. Each Platform release carries [`docs/upgrade-notes/vX.Y.Z.md`](../../upgrade-notes/README.md). |
-| Installed / Not installed / Update available | **Built.** Official modules show one status; modules from an operator's own catalogue keep the compatibility wording. See [`base/software`](../../../apps/base/software/README.md#page-and-chatgpt-card) and [`discovery.rs`](../../../apps/base/software/src/discovery.rs). |
+| Installed / Not installed / Update available | **Built.** See [catalogue status and compatibility](../../../apps/base/software/README.md#compatibility). |
 
 ## Consequences
 
@@ -87,5 +86,5 @@ This table describes the checkout on 2026-10-20. Accepted direction does not mea
 | Item | State |
 | --- | --- |
 | Catalogue-wide CI cross-check | Built. Every official Domain and Extension is checked, and a breaking change still needs a companion pull request. |
-| Coordinated release train | Release gating, automatic catalogue entries and upgrade notes for agents are built. The Software page's Update available state is still open. |
+| Coordinated release train | Release gating, automatic catalogue entries and upgrade notes for agents are built. |
 | GitHub Actions builds and GitHub release assets | Built through the public [application starting point](https://github.com/BelimbingProject/bilibi-app-maker). Servers install an exact asset or upload; [Software](../../../apps/base/software/README.md) owns the identity, Staging report and install contract. |

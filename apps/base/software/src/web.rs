@@ -43,6 +43,8 @@ use std::{
     time::Duration,
 };
 
+mod modules;
+
 pub const PATH: &str = "/system/software";
 pub(crate) const PAGES: &str = "base/software.pages";
 const DENIED: &str = "You do not have permission to change the software.";
@@ -190,7 +192,15 @@ struct Review {
 }
 enum Dialog {
     Review(Review),
-    Cancel { job: i64, running: bool },
+    Cancel {
+        job: i64,
+        running: bool,
+    },
+    /// The installation commands of one catalogue entry.
+    Commands {
+        kind: String,
+        id: String,
+    },
 }
 
 struct View {
@@ -199,6 +209,7 @@ struct View {
     releases: crate::release_files::ReleaseFiles,
     backups: ListColumns,
     backup_list: ListState,
+    modules: modules::Modules,
     propose: Vec<String>,
     bundle: String,
     dialog: Option<Dialog>,
@@ -282,6 +293,7 @@ impl View {
             )
             .map_err(|_| Error::Internal)?,
             backup_list: ListState::parse(query, backup_spec).map_err(|_| Error::Internal)?,
+            modules: modules::Modules::new(query)?,
             pages,
             query: query.clone(),
             propose,
@@ -331,7 +343,16 @@ impl View {
         let values =
             params::string_values_checked(value, params::FIELD_LIMIT).map_err(Error::refused)?;
         let get = |key: &str| value.get(key).and_then(Value::as_str);
-        match get("type").ok_or(Error::Invalid)? {
+        let kind = get("type").ok_or(Error::Invalid)?;
+        if self.modules.event(kind, value)? {
+            self.modules.write_query(&mut self.query);
+            return Ok(());
+        }
+        match kind {
+            "commands" => {
+                self.dialog = modules::commands_target(get("module").unwrap_or_default())
+                    .map(|(kind, id)| Dialog::Commands { kind, id });
+            }
             "request_install" => {
                 self.bundle = values.get("bundle").cloned().unwrap_or_default();
                 if value.get("asset").is_some() {
@@ -691,7 +712,7 @@ impl View {
                 ..Fold::default()
             })?);
         } else {
-            content.push(&self.discovery_card(&status, &catalogue)?);
+            content.push(&self.modules.body(&status, &catalogue, &self.propose)?);
         }
         let methods = pages
             .software
@@ -735,7 +756,7 @@ impl View {
             tabs: vec![
                 Tab {
                     id: "software-tab-domains",
-                    ..Tab::patch(&domains_url, "Domains and Extensions", !releases)
+                    ..Tab::patch(&domains_url, "Domains and extensions", !releases)
                 },
                 Tab {
                     id: "software-tab-releases",
@@ -766,6 +787,10 @@ impl View {
                     cancel_event: "cancel_dialog",
                 })?
             }
+            Some(Dialog::Commands { kind, id }) => match &self.catalogue {
+                Some((_, catalogue)) => modules::commands_dialog(catalogue, kind, id)?,
+                None => Html::EMPTY,
+            },
             None => Html::EMPTY,
         };
         let mut flash = NO_FLASH;
@@ -782,6 +807,7 @@ impl View {
             header,
             banner,
             tabs,
+            list: !releases,
             content,
             dialog,
         }
@@ -803,8 +829,8 @@ impl View {
         }
         let pin = match text(&platform["pin"]) {
             "pinned" => "The program records the exact versions it contains.".to_owned(),
-            "stale" => "The saved version list does not match this build. Ask your developer to rebuild with an up-to-date version list.".to_owned(),
-            _ => "This build has no exact version list. Ask your developer to record module versions when building the next update.".to_owned(),
+            "stale" => "The saved version list does not match this build. Rebuild with an up-to-date version list.".to_owned(),
+            _ => "This build has no exact version list. Record module versions when building the next update.".to_owned(),
         };
         let domains: Vec<String> = installed["domains"]
             .as_array()
@@ -1098,152 +1124,6 @@ impl View {
             body,
             ..Card::default()
         })
-    }
-
-    /// Catalogue descriptions, compatibility and local build steps.
-    fn discovery_card(&self, status: &Value, catalogue: &Value) -> Result<Html> {
-        let mut cards = Html::EMPTY;
-        for kind in ["domains", "extensions"] {
-            let description = if kind == "domains" {
-                "Domains add business features, such as Finance."
-            } else {
-                "Extensions adapt Bilibi or connect it to other software."
-            };
-            cards.push(&render(SectionHeading {
-                title: if kind == "domains" {
-                    "Available domains"
-                } else {
-                    "Available extensions"
-                },
-                description,
-                ..SectionHeading::default()
-            })?);
-            let mut body = Html::EMPTY;
-            if catalogue["available"] != true {
-                body.push(&render(Alert {
-                    kind: StatusKind::Warning,
-                    body: Html::text(text(&catalogue["message"])),
-                    ..Alert::default()
-                })?);
-            } else if catalogue[kind].as_array().is_none_or(Vec::is_empty) {
-                body.push(&Html::text(&format!(
-                    " No {kind} are listed in the catalogue."
-                )));
-            }
-            for item in catalogue[kind].as_array().into_iter().flatten() {
-                let id = text(&item["id"]);
-                let installed = status["installed"][kind]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|d| d["id"] == id);
-                let proposed = self.propose.iter().any(|p| p == id);
-                let mut facts = Vec::new();
-                if let Some(d) = installed {
-                    facts.push(Fact {
-                        title: "Installed version",
-                        value: Html::text(d["version"].as_str().unwrap_or("Version unknown")),
-                        ..Fact::default()
-                    });
-                }
-                facts.push(status_fact(
-                    item,
-                    text(&catalogue["running_platform"]["version"]),
-                ));
-                let mut item_body = render(Facts {
-                    items: facts,
-                    ..Facts::default()
-                })?;
-                let mut developer = render(Facts {
-                    items: vec![
-                        Fact {
-                            title: "Code for your developer",
-                            value: Html::text(text(&item["repository"])),
-                            ..Fact::default()
-                        },
-                        Fact {
-                            title: "Version checks",
-                            value: Html::text(text(&item["compatibility"])),
-                            ..Fact::default()
-                        },
-                    ],
-                    ..Facts::default()
-                })?;
-                if let Some(steps) = item["local_steps"].as_array() {
-                    developer.push(&render(
-                        Field::named("local_steps")
-                            .id(format!("software-local-{kind}-{id}"))
-                            .label("Commands")
-                            .hint("Run these in your local Bilibi code folder, then test it in the browser.")
-                            .kind(InputKind::Textarea)
-                            .value(steps.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"))
-                            .readonly()
-                            .attr("rows", "12"),
-                    )?);
-                }
-                item_body.push(&render(Fold {
-                    id: &format!("software-developer-{kind}-{id}"),
-                    title: "Developer commands",
-                    body: developer,
-                    ..Fold::default()
-                })?);
-                let title = format!(
-                    "{}{}",
-                    text(&item["name"]),
-                    if proposed { " · requested" } else { "" }
-                );
-                body.push(&render(Card {
-                    id: &format!("software-discovery-{kind}-{id}"),
-                    title: &title,
-                    body: {
-                        let mut content = render(SectionHeading {
-                            description: text(&item["description"]),
-                            ..SectionHeading::default()
-                        })?;
-                        content.push(&item_body);
-                        content
-                    },
-                    ..Card::default()
-                })?);
-            }
-            for item in catalogue["uncatalogued"][kind]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                let id = text(&item["id"]);
-                let mut facts = vec![
-                    Fact {
-                        title: "Status",
-                        value: Html::text("Installed, not in the catalogue"),
-                        ..Fact::default()
-                    },
-                    Fact {
-                        title: "Installed version",
-                        value: Html::text(item["version"].as_str().unwrap_or("Version unknown")),
-                        ..Fact::default()
-                    },
-                ];
-                if let Some(code) = item["extension_code"].as_str() {
-                    facts.push(Fact {
-                        title: "Code review kind",
-                        value: Html::text(code),
-                        ..Fact::default()
-                    });
-                }
-                body.push(&render(Card {
-                    id: &format!("software-installed-{kind}-{id}"),
-                    title: id,
-                    body: render(Facts {
-                        items: facts,
-                        ..Facts::default()
-                    })?,
-                    ..Card::default()
-                })?);
-            }
-            cards.push(&body);
-        }
-        Ok(cards)
     }
 
     /// Recorded backups remain visible after another job becomes the latest.
@@ -1765,6 +1645,7 @@ struct PageView<'a> {
     header: Html,
     banner: Html,
     tabs: Html,
+    list: bool,
     content: Html,
     dialog: Html,
 }
@@ -1832,6 +1713,7 @@ impl LiveState<Scope, Error> for View {
             match request.input {
                 LiveInput::Params(query) => {
                     self.query = query.clone();
+                    self.modules.params(query)?;
                     self.backup_list = ListState::parse(
                         query,
                         self.backup_list
@@ -1915,68 +1797,5 @@ impl Page<Scope, Error> for Pages {
                 Box::new(View::new(self.clone(), request.query)?);
             Ok(Some(state))
         })
-    }
-}
-
-/// Official modules show one status; the operator's own catalogue keeps the
-/// compatibility wording because nothing checks it against this Platform.
-fn status_fact<'a>(item: &'a Value, platform: &'a str) -> Fact<'a> {
-    if item["official"] != true {
-        return Fact {
-            title: "Compatibility",
-            value: Html::text(&compatibility(item, platform)),
-            ..Fact::default()
-        };
-    }
-    let status = match item["status"].as_str() {
-        Some("installed") => "Installed".to_owned(),
-        Some("update_available") => format!(
-            "Update available: {}",
-            item["latest_version"].as_str().unwrap_or_default()
-        ),
-        _ => "Not installed".to_owned(),
-    };
-    Fact {
-        title: "Status",
-        value: Html::text(&match item["warning"].as_str() {
-            Some(warning) => format!("{status} · {warning}"),
-            None => status,
-        }),
-        ..Fact::default()
-    }
-}
-
-/// Plain-words compatibility of the recommended version with the running platform.
-fn compatibility(item: &Value, platform: &str) -> String {
-    let versions = item["versions"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    match item["recommended_version"].as_str() {
-        Some(version) => {
-            let tested = versions
-                .iter()
-                .any(|v| v["version"] == version && v["tested_with_running"] == true);
-            if tested {
-                format!("Yes · tested with Bilibi {platform}")
-            } else {
-                format!(
-                    "Yes, not tested yet · supports Bilibi {platform}; test it before installing"
-                )
-            }
-        }
-        None => {
-            let newest = versions
-                .iter()
-                .filter_map(|v| {
-                    let parsed = crate::catalogue::Version::parse(v["version"].as_str()?)?;
-                    Some((parsed, v["platform"].as_str()?))
-                })
-                .max_by_key(|(parsed, _)| *parsed);
-            match newest {
-                Some((_, requirement)) => format!("No · needs Bilibi {requirement}"),
-                None => format!("No · no published version supports Bilibi {platform}"),
-            }
-        }
     }
 }

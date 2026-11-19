@@ -15,30 +15,21 @@ read base.software.open {"propose":{"domains":["finance"]}}
 
 The answer includes Finance’s description, official repository, a release that accepts this server’s Bilibi version, whether the exact commits were recorded as tested together, and `local_steps`. A proposal highlights entries; it creates no job.
 
-**Ask your developer to add the modules you need, build Bilibi on their computer, and test it before installing it here.** Follow the entry’s repository and commit, keeping any other mounted Domains and Extensions:
+Copy **Installation commands** from the Software grid, or use the `local_steps` returned by the agent operation. The catalogue generates the commands for a recommended release from a BelimbingProject repository with a safe module ID and a full commit ID. Run the whole block in your Bilibi checkout, keeping any other mounted Domains and Extensions. The block stops at the first failed command, including a refused `add`.
 
-```sh
-./bilibi add finance --kind domains --source <repository> --commit <recommended-commit>
-python3 scripts/discover-modules.py
-./scripts/build-assets.sh --check
-cargo metadata --format-version 1 > /dev/null
-python3 scripts/discover-modules.py --pin
-cargo build --release --locked -p bilibi-web
-./target/release/bilibi-web status
-```
+The block starts with `./bilibi add` using `--kind`, `--source` and `--commit` to mount the exact release, even when the local checkout’s catalogue does not list it. If the folder already exists at another commit, `add` leaves it in place and prints the steps for moving it after you have saved your work. Extensions mount under `apps/extensions/<id>`.
 
-`add` clones that repository at that commit, whether or not this checkout’s `catalogue.json` lists it. If the folder already exists at another commit, `add` changes nothing and prints the commit and fetch steps to run after you have saved your work. Extensions mount under `apps/extensions/<id>`. Run the composition locally with its own database and check its pages in the browser. Then save it in an application workspace and publish its protected setup tag. The application workflow creates the installable archive, checksums and GitHub build provenance; a local source build is not a server release.
+Run the composition locally with its own database and check its pages in the browser. Then publish it through your application’s release workflow, which creates the installable archive, checksums and GitHub build provenance. See [Application releases](../../../docs/server-install.md#application-releases).
 
 ## Compatibility
 
-Official modules (repositories under BelimbingProject) are checked against every Platform release before it ships, so they carry a plain `status` (`installed`, `not_installed`, `update_available`), `latest_version` and, only when no version fits, a `warning`. For modules from any other catalogue, **Compatibility** states whether a version supports the running Bilibi version and whether automated checks covered the exact code running on this server. The catalogue’s Platform requirement supplies version support; its CI record supplies the exact Platform and Domain commits checked.
+The catalogue recommends the newest compatible release tested with this exact Platform commit, or the newest compatible release when there is no such record. Every entry has a `compatibility` line. **Tested with Bilibi X** means the recommended release and the running Platform were checked together at their exact commits. **Works with Bilibi X** means the release accepts the running version and the catalogue has no matching test record. When no release fits, the line shows the newest release’s requirement as **Needs Bilibi X** when available, or **No published version supports Bilibi X**.
 
-- Prefer the newest release recorded as tested with this running commit, then the newest release whose requirements accept this version.
-- Each entry includes `recommended_version`, a plain `compatibility` sentence, `official`, `local_steps`, and `next_step`. Each release includes `fits_running` and `tested_with_running`.
-- No compatible release, no published release, or no exact tested pair is stated plainly. A development build or an unreleased commit does not inherit a released commit’s evidence.
+- Official modules also carry `status` (`installed`, `not_installed`, `update_available`) and `latest_version` (the newest release compatible with the running version, when one exists). `update_available` means that release is newer than the installed version. `warning` is present as text only when no release fits.
+- Each entry includes `recommended_version`, `official`, `local_steps` and `next_step`. Each release includes `fits_running` and `tested_with_running`. A development build or an unreleased commit does not inherit a released commit’s evidence.
 - Domains were tested individually; separate pairs do not prove a combined composition. Check your composition locally.
 - The published catalogue is read over HTTPS through `base/integration` as the requesting person and cached for five minutes, including an unavailable answer. **Software › Catalogue address** can point to an operator’s catalogue. An unavailable catalogue returns `available: false` and a reason; installed status and installation remain available.
-- `domains` and optional `extensions` hold repository and release information; extensions without CI evidence are labelled as not recorded as tested. `plugins` retains the existing release add-on information.
+- `domains` and optional `extensions` hold repository and release information. The exact-commit test records apply to Domains. `plugins` holds release add-on information.
 
 ## Data sources
 
@@ -83,15 +74,15 @@ Install takes an exact GitHub asset or an uploaded bundle from the accepted appl
 
 ## Page and ChatGPT card
 
-The **Software** page (`/system/software`) has one menu entry and two shared tabs: **Domains and Extensions** and **Releases**. Each catalogue item is one compact card with its description, installed version (when installed) and one **Status** line. Official modules show **Installed**, **Not installed** or **Update available: X**, plus a short warning such as **Needs Bilibi X** only when no listed version fits this server. Modules from an operator’s own catalogue are not kept in step with the Platform, so they keep a **Compatibility** line: **Yes · tested with Bilibi X**, **Yes, not tested yet** or **No · needs Bilibi X**. **Developer commands** folds away the repository, exact test evidence and local build commands.
+The **Software** page (`/system/software`) has two tabs named **Domains and extensions** and **Releases**. The first tab is a paginated grid with installed modules first. Search covers name, ID and description. Search and the **Status** and **Kind** filters are kept in the address. **Not installed** includes catalogue entries without a compatible release. **Latest version** shows `latest_version` when supplied, otherwise `recommended_version` or **—**. The **Update available** badge follows the catalogue status. When commands are available, the **Installation commands** icon opens a dialog that names the recommended version and includes a copy icon. See [Compatibility](#compatibility) for how these versions are selected.
 
-Installed Domains and Extensions missing from the selected catalogue also have a card, labelled **Installed, not in the catalogue**. Each card shows the installed version or **Version unknown**. Extensions also show the recorded code review kind. These cards remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
+Installed Domains and Extensions missing from the selected catalogue also have a row, with **Not in the catalogue** as their compatibility and the installed version or **Unknown**. Extensions also show the recorded code review kind. These rows remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
 
 The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` (and so in `base.software.open`) lists installed modules missing from the catalogue; `base.software.status` stays free of catalogue reads.
 
 **Releases** (`?tab=releases`) shows the installed version, the current or last install (its **Install steps** stay open while the job is active, failed or interrupted, and fold when it completes), a short backup table with folded backup details, and **Get an update**. Backup file locations are folded and only available to accounts that can manage software. GitHub releases and their identities appear above a folded **Upload a release file** section, with queued files and their review on the same mounted page; switching tabs preserves pending uploads and reviews. The old `/system/software/releases` page redirects to the Releases tab.
 
-The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) keeps its **Manage domains and extensions** title and uses the same software contracts.
+The MCP App (`ui://bilibi/software-v1.html`, `card/software-v1.html`) is titled **Manage domains and extensions** and uses the same software contracts. Its catalogue cards show the repository under **Source** and the generated **Installation commands** when available.
 
 - `?propose=finance,factory` highlights requested page entries; `open_software` accepts catalogue IDs in `propose` for the card.
 - A view-only account sees discovery and status. The facade refuses writes without manage permission.

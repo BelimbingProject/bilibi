@@ -303,7 +303,9 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - **Consistency.** Same thing, same look, same place.
 - **Sentence case.** Titles, buttons, labels, options and badges raise only the first word and names: "Set up", "Past due", "Debits equal credits", never "Set Up". The shared badge raises the first letter of a stored lower-case value ("draft" reads "Draft") and nothing else.
 - **Calm.** No urgency, no badge spam, no dark patterns.
-- **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator".
+- **Plain language.** Write for the person doing the work. Show the idea, not its internal code. Name a thing for what it is: a calculator is a "calculator", commands to install something are "Installation commands".
+- **Never "your developer".** A label or sentence never sends the reader to another person ("Code for your developer", "Ask your developer to test it first"): the reader may be that person, and the others learn nothing. Say what the thing is and let the reader decide who acts.
+- **Facts, not advice.** State what is true in one short line ("Works with Bilibi 0.2.1") and stop. No paragraph of cautions, and no instruction for a step the control already makes plain ("Run these in your local code folder, then test it in the browser").
 - **True words.** Fact-check every word against what this page does for this reader: "Manage" on a read-only page is false; "Add the first rate" is false once a rate exists.
 - **No product notes.** Notes for builders ("Draft, awaiting accountant review" on a template) never show to users.
 - **No internals in hints.** Do not explain how the system works behind the page (how filters relate to the top bar, how reports roll up, which rows are hidden). Say what the person can do.
@@ -324,6 +326,9 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 | Not set. Conversions to the base currency are refused until you choose one. | Required for currency conversions. |
 | No exchange rates yet. Enable the currencies you trade in, then add a rate. | No exchange rates yet. *(with an "Add a rate" button; no step before it)* |
 | Check a conversion / Try the conversion other modules use… | Currency conversion calculator *(no hint)* |
+| Code for your developer | Installation commands *(a row icon that opens them with a copy icon)* |
+| Version 0.2.0 supports Bilibi 0.2.1. There is no test record for the exact code running here. Ask your developer to test it first. | Works with Bilibi 0.2.1 |
+| Run these in your local Bilibi code folder, then test it in the browser. | *(removed: the commands say it)* |
 
 ## Page review checklist
 
@@ -332,7 +337,7 @@ Run this on every page you changed, in the browser at `APP_ORIGIN`, once with a 
 1. Does every subtitle, hint and empty state say something the title and labels do not?
 2. Is every word true for this page and this reader (no "manage" on read-only, no "first" once done)?
 3. Is every hint free of internals and product notes, and short enough to read at a glance?
-4. Is each thing named for what it is, in the words a business user would say?
+4. Is each thing named for what it is, in the words a business user would say, with no "your developer" and no advice paragraph where one fact does?
 5. Does every page lead forward, with no loop between two pages and no dead end?
 6. Does every "Go to X" land on the exact place to act, and does a finished step land on the next one?
 7. Does every empty state and every list row offer its next step?
