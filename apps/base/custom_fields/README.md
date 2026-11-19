@@ -69,11 +69,11 @@ Four steps in the owning module.
 | Rule condition | Off by default. `rule_condition` on define or update offers a text, number, date, pick-list or yes/no field to Base Rules conditions; other kinds are refused. See [Rule conditions](#rule-conditions). |
 | Restriction | An operator withholds a field from roles on Field Restrictions as `cf_<key>` of the record type's Grid table (withhold only: none is personal). `active` then leaves it out for that reader, so pages hide it and writes refuse it, and Grid leaves it out of lists, reports and search. Audit views take it out of the `custom_fields` object an owner audits its values under, showing a change as a withheld `custom_fields.<key>`, so audit custom values under that one key. |
 | Audit | Each definition write is one `custom_field` change with before and after. |
-| Capabilities | `base.custom-fields.view` reads definitions; `base.custom-fields.manage` defines, renames, archives and restores. |
+| Capabilities | `base.custom-fields.view` reads definitions and `base.custom-fields.manage` defines, edits, archives and restores them. The Tenant Owner system role includes both. |
 
 ## Administration page
 
-**Administration › Custom fields** (`/admin/custom-fields`, `base.custom-fields.view`) is the one list of the tenant's fields. The record type and the status are a filter and a column. Label and help text edit in place; archive and restore confirm first; **+ Field** opens the create dialog. Every change goes through the `base.custom_fields.*` contracts below, so the page and agents share one check and one audit trail.
+Use **Administration › Custom fields** (`/admin/custom-fields`, `base.custom-fields.view`) to manage the tenant's fields. The record type and the status are a filter and a column. Label and help text edit in place; archive and restore confirm first; **+ Field** opens the create dialog. Every change goes through the `base.custom_fields.*` contracts below, so the page and agents share one check and one audit trail. For the shared inventory, see [Customisations](../labels/README.md#customisations-page).
 
 ## Agent operations
 

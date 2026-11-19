@@ -246,4 +246,6 @@ console outcome recorded, and an HTTP/browser smoke of the running app.
 
 `client_identity` (migration `base-audit-008-client-identity`) records the transport client separately on actions and mutations, via the sealed scope or trusted `Context`. It is shown as "Client identity", never authorization or a replacement for "Model (as reported)".
 
-`latest_changes` returns the actor, impersonator and instant for up to 100 caller-authorized record revisions in the sealed tenant, in one bounded query. It is for pages that already authorize their records and attribution; it does not grant access to audit history.
+## Record revision attribution
+
+`latest_changes` queries at most 100 record revisions at a time on the caller's connection and within the sealed tenant scope. It selects the latest audit mutation for each kind and record ID whose numeric `new_values.version` equals the requested revision and returns the actor, optional impersonator or system principal, and change time. Revisions with no matching evidence are omitted. Callers must authorize the records and the attribution they display.

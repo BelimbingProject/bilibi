@@ -16,7 +16,7 @@ The owner decided on 2026-11-19 to replace the 2026-10-20 rule that every MCP ac
 - **Setup and customisation may be AI-only to create or edit.** Examples include labels, custom fields, list views, rules, settings, menu order and setup packs. They do not each need a human editor.
 - **Weigh UI complexity.** A rarely used feature that adds screens, controls or settings counts against building a page. Eligible customisation instead uses AI and the read-only Customisations page. This does not override the business-action requirement.
 - **Classify by effect, not name.** A setting that changes money or security behaviour is a business action and keeps a page. Calling an action setup or a rule does not exempt it when its effect belongs to daily business, money or security.
-- **One Customisations page shows every change.** This future read-only page lets a person inspect customisations and use a restore-default or undo action for each change without AI. It supports adopters without AI, recovery from mistakes and audit. Secrets never show their value on the page.
+- **One Customisations page shows every change.** The design calls for a shared page where people can inspect customisations and use a restore-default or undo action for each change without AI. It supports adopters without AI, recovery from mistakes and audit. Secrets never show their value on the page.
 - **Every action remains an operation contract.** Pages, agents and the undo or restore action call the same contracts and retain their authorization, validation and audit as in [ADR 01](./01-agent-first-operations.md). This decision changes the required human interface, not the operation boundary. Tenant customisation remains data on shared servers under [ADR 28](./28-tenant-customisation-is-data-on-shared-servers.md).
 
 ## First examples
@@ -32,7 +32,7 @@ The owner identified these five proposals as candidates for AI-led setup, with i
 ## Consequences
 
 - A business action without a page is missing its human route. An eligible setup editor may be AI-only, but its changes must be visible and reversible on Customisations.
-- The Customisations page is future work; this decision does not claim it is built. Until it exists, the visibility and reversal requirement remains outstanding.
+- See the [Customisations page contract](../../../apps/base/labels/README.md#customisations-page) for current coverage.
 - One shared inspection and recovery page avoids a full editor for each infrequent customisation, while preserving a route to understand and undo changes without AI.
 
 ## Alternatives rejected
