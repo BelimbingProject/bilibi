@@ -792,14 +792,10 @@ async fn budgeted<T>(
         })
         .await
         {
-            Ok(result) if Instant::now() < deadline => result.map_err(|error| {
-                if sql_cancelled(&error) {
-                    QueryError::TooHeavy(time_error)
-                } else {
-                    error
-                }
-            }),
-            Ok(_) | Err(_) => Err(QueryError::TooHeavy(time_error)),
+            Ok(Err(error)) if sql_cancelled(&error) => Err(QueryError::TooHeavy(time_error)),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(value)) if Instant::now() < deadline => Ok(value),
+            Ok(Ok(_)) | Err(_) => Err(QueryError::TooHeavy(time_error)),
         }
     })
     .await
