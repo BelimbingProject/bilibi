@@ -21,6 +21,7 @@ pub enum QueryError {
     Limit(&'static str),
     /// A read exceeded its execution time or planner cost bound.
     TooHeavy(&'static str),
+    AuditCommitUnknown,
     ForbiddenRoot,
     Column(String, ColumnError),
     /// A filter, grouping, measure or sort the column's type does not take.
@@ -32,6 +33,9 @@ impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Limit(why) | Self::TooHeavy(why) => write!(f, "grid projection limit: {why}"),
+            Self::AuditCommitUnknown => f.write_str(
+                "The oversight audit commit could not be confirmed. Check the audit trail before retrying.",
+            ),
             Self::ForbiddenRoot => write!(f, "grid table unavailable"),
             Self::Column(spec, why) => write!(f, "grid column {spec}: {why}"),
             Self::Unsupported(spec, why) => write!(f, "grid column {spec}: {why}"),
@@ -69,6 +73,7 @@ impl From<QueryError> for Error {
             | QueryError::Column(_, _)
             | QueryError::Unsupported(_, _) => Self::Invalid,
             QueryError::ForbiddenRoot => Self::Forbidden,
+            QueryError::AuditCommitUnknown => Self::refused(error),
             QueryError::Catalog(error) => error.into(),
             QueryError::Database(error) => error,
         }

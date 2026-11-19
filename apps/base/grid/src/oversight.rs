@@ -3,7 +3,7 @@ use crate::{
     Agg, Bounds, Catalog, Lenses, Line, PageSpec, Projection, QueryError, Summary, SummarySpec,
 };
 use bilibi_audit::{record_action, record_oversight_read, Attribution, OversightRead};
-use bilibi_database::{Db, Error};
+use bilibi_database::{Connection, Db, Error};
 use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, ValueType, DEFINITIONS};
 use bilibi_tenancy::{ChildGrant, Oversight, OversightScope, Scope};
 use serde_json::{json, Value};
@@ -22,6 +22,7 @@ pub const OVERSIGHT_QUERIES: &str = "base/grid.oversight";
 const POLICY_TIMEOUT: Duration = Duration::from_secs(60);
 const TOTAL_TIMEOUT: &str = "oversight total time bound exceeded";
 const CHILD_TIMEOUT: &str = "oversight child read timed out";
+const SUMMARY_TIMEOUT: &str = "oversight summary audit timed out";
 
 #[derive(Clone, Debug)]
 pub enum OversightSpec {
@@ -532,10 +533,7 @@ impl OversightQueries {
             Ok((scope, self.setting_on(tx, "child_timeout_ms").await?))
         })
         .await??;
-        let mut audit = timeout_at(deadline, self.db.try_get_detached("oversight audit"))
-            .await
-            .map_err(|_| QueryError::TooHeavy(TOTAL_TIMEOUT))?
-            .map_err(Error::from)?;
+        let mut audit = self.audit_connection(deadline, TOTAL_TIMEOUT).await?;
         let mut spec = spec.bounded(child_ms);
         if let OversightSpec::Rows { page, pages, .. } = &mut spec {
             *pages = scope
@@ -547,6 +545,7 @@ impl OversightQueries {
         let mut supported = scope.children().is_empty();
         let mut children = Vec::new();
         let mut rows = 0;
+        let mut failure = None;
         let child_budget = Duration::from_millis(u64::from(child_ms));
         for grant in scope.children() {
             let start = Instant::now();
@@ -566,9 +565,9 @@ impl OversightQueries {
                     Ok(data)
                 },
             )
-            .await?;
+            .await;
             let outcome = match result {
-                Ok(data) => {
+                Ok(Ok(data)) => {
                     let audited =
                         audit_before(&mut audit, child_deadline, CHILD_TIMEOUT, async |client| {
                             record_child(client, &scope, grant, root, &spec, &data).await
@@ -577,34 +576,76 @@ impl OversightQueries {
                     match audited {
                         Ok(()) => {
                             rows += data.count();
-                            "ok"
+                            Ok("ok")
                         }
                         Err(
                             error @ (QueryError::TooHeavy(_)
                             | QueryError::Database(Error::Forbidden)),
-                        ) => child_refusal(&error),
-                        Err(error) => return Err(error),
+                        ) => Ok(child_refusal(&error)),
+                        Err(error) => Err(error),
                     }
                 }
-                Err(error) => child_refusal(&error),
+                Ok(Err(error)) => Ok(child_refusal(&error)),
+                Err(error) => Err(error.into()),
+            };
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let outcome = if matches!(error, QueryError::AuditCommitUnknown) {
+                        "outcome unknown"
+                    } else {
+                        "refused"
+                    };
+                    children.push((grant.tenant(), outcome));
+                    failure = Some(error);
+                    break;
+                }
             };
             supported |= matches!(outcome, "ok" | "timed_out" | "over_cost");
             children.push((grant.tenant(), outcome));
         }
         let now = Instant::now();
         let expired = now >= deadline;
-        audit_before(
-            &mut audit,
-            deadline.max(now + child_budget),
-            "oversight summary audit timed out",
-            async |client| record_query(client, &scope, root, rows, children.into_iter()).await,
-        )
-        .await?;
-        if expired {
-            Err(QueryError::TooHeavy(TOTAL_TIMEOUT))
-        } else {
-            Ok(supported)
+        let summary_deadline = deadline.max(now + child_budget);
+        let summary = async {
+            let mut audit =
+                if matches!(failure, Some(QueryError::AuditCommitUnknown)) || audit.is_closed() {
+                    drop(Connection::take(audit));
+                    self.audit_connection(summary_deadline, SUMMARY_TIMEOUT)
+                        .await?
+                } else {
+                    audit
+                };
+            let result = audit_before(
+                &mut audit,
+                summary_deadline,
+                SUMMARY_TIMEOUT,
+                async |client| record_query(client, &scope, root, rows, children.into_iter()).await,
+            )
+            .await;
+            if matches!(result, Err(QueryError::AuditCommitUnknown)) {
+                drop(Connection::take(audit));
+            }
+            result
         }
+        .await;
+        match (failure, summary) {
+            (Some(QueryError::AuditCommitUnknown), _) => Err(QueryError::AuditCommitUnknown),
+            (_, Err(error)) | (Some(error), Ok(())) => Err(error),
+            (None, Ok(())) if expired => Err(QueryError::TooHeavy(TOTAL_TIMEOUT)),
+            (None, Ok(())) => Ok(supported),
+        }
+    }
+
+    async fn audit_connection(
+        &self,
+        deadline: Instant,
+        time_error: &'static str,
+    ) -> Result<Connection, QueryError> {
+        timeout_at(deadline, self.db.try_get_detached("oversight audit"))
+            .await
+            .map_err(|_| QueryError::TooHeavy(time_error))?
+            .map_err(|error| Error::from(error).into())
     }
 
     async fn deadline_on(
@@ -783,18 +824,17 @@ async fn audit_before(
             }
             match timeout_at(deadline, tx.commit()).await {
                 Ok(Ok(())) => Ok(()),
-                Ok(Err(error)) if error.as_db_error().is_some_and(|db| {
-                    use tokio_postgres::error::{Severity, SqlState};
-                    db.parsed_severity() == Some(Severity::Error)
-                        && !db.code().code().starts_with("08")
-                        && db.code() != &SqlState::T_R_STATEMENT_COMPLETION_UNKNOWN
-                }) =>
+                Ok(Err(error))
+                    if error.as_db_error().is_some_and(|db| {
+                        use tokio_postgres::error::{Severity, SqlState};
+                        db.parsed_severity() == Some(Severity::Error)
+                            && !db.code().code().starts_with("08")
+                            && db.code() != &SqlState::T_R_STATEMENT_COMPLETION_UNKNOWN
+                    }) =>
                 {
                     Err(error.into())
                 }
-                _ => Err(Error::refused(
-                    "The oversight audit commit could not be confirmed. Check the audit trail before retrying.",
-                ).into()),
+                _ => Err(QueryError::AuditCommitUnknown),
             }
         }
         Err(error) => {

@@ -20,7 +20,19 @@ use bilibi_queue::{
     Execution, Handler, HandlerBinding, HandlerFuture, HandlerService, Outcome, Queue, Worker,
 };
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
 
@@ -269,16 +281,84 @@ async fn write<T>(
     Ok(value)
 }
 
+async fn delay_commit_reply(
+    mut client: TcpStream,
+    mut server: TcpStream,
+    commits_until_delay: &AtomicUsize,
+) -> io::Result<()> {
+    client.set_nodelay(true)?;
+    server.set_nodelay(true)?;
+    let (mut requests, mut replies) = client.split();
+    let (mut database_replies, mut database_requests) = server.split();
+    let forward_replies = async {
+        let mut payload = Vec::new();
+        loop {
+            let tag = database_replies.read_u8().await?;
+            let len = database_replies.read_u32().await?;
+            let size = len.checked_sub(4).ok_or(io::ErrorKind::InvalidData)?;
+            payload.resize(size as usize, 0);
+            database_replies.read_exact(&mut payload).await?;
+            if tag == b'C'
+                && payload == b"COMMIT\0"
+                && commits_until_delay.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    count.checked_sub(1)
+                }) == Ok(1)
+            {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            replies.write_u8(tag).await?;
+            replies.write_u32(len).await?;
+            replies.write_all(&payload).await?;
+        }
+    };
+    tokio::select! {
+        result = tokio::io::copy(&mut requests, &mut database_requests) => result.map(|_| ()),
+        result = forward_replies => result,
+    }
+}
+
+async fn delayed_commit_url(
+    database_url: &str,
+    commits_until_delay: Arc<AtomicUsize>,
+) -> io::Result<url::Url> {
+    let mut url = url::Url::parse(database_url).map_err(io::Error::other)?;
+    let host = url
+        .host_str()
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .to_owned();
+    let port = url.port().unwrap_or(5432);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    url.set_host(Some("127.0.0.1")).map_err(io::Error::other)?;
+    url.set_port(Some(listener.local_addr()?.port()))
+        .map_err(|()| io::ErrorKind::InvalidInput)?;
+    url.query_pairs_mut().append_pair("sslmode", "disable");
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let host = host.clone();
+            let commits_until_delay = commits_until_delay.clone();
+            tokio::spawn(async move {
+                if let Ok(server) = TcpStream::connect((host.as_str(), port)).await {
+                    let _ = delay_commit_reply(client, server, &commits_until_delay).await;
+                }
+            });
+        }
+    });
+    Ok(url)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_GRID_DEMO").as_deref() != Ok("disposable") {
         return Err("set BILIBI_GRID_DEMO=disposable on a disposable migrated database".into());
     }
-    let db = pool(&std::env::var("DATABASE_URL")?)?;
+    let database_url = std::env::var("DATABASE_URL")?;
+    let db = pool(&database_url)?;
     bilibi_walkthrough_fixture::install(&db).await?;
     // Before the first catalog read, which describes each source once.
     db.get().await?.batch_execute("CREATE OR REPLACE FUNCTION r1_heavy() RETURNS SETOF int LANGUAGE plpgsql STABLE ROWS 20000000 AS 'BEGIN RETURN NEXT 1; END'; CREATE OR REPLACE FUNCTION r1_slow() RETURNS int LANGUAGE plpgsql STABLE AS 'BEGIN PERFORM pg_sleep(2.5); RETURN 1; END'").await?;
-    let app = bilibi_web::App::new(db.clone(), "http://localhost:35567")?;
+    let commits_until_delay = Arc::new(AtomicUsize::new(0));
+    let reports_url = delayed_commit_url(&database_url, commits_until_delay.clone()).await?;
+    let app = bilibi_web::App::new(pool(reports_url.as_str())?, "http://localhost:35567")?;
     let auth = app
         .services
         .get::<Authentication>("base/tenancy.authentication")?;
@@ -1887,6 +1967,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[&3_i64, &1_i64, &consent],
         )
         .await?;
+    client
+        .batch_execute(
+            "INSERT INTO base_grid_ref_groups(id,tenant_id,name,region) VALUES (9305,3,'Deadline group','west');
+             INSERT INTO base_grid_ref_items(id,tenant_id,group_id,name,category,quantity,unit_cost)
+             VALUES (9324,3,9305,'Deadline item','parts',1,1)",
+        )
+        .await?;
     reports.check(&manager, &oversight_rows).await?;
     let after = audit_watermark().await?;
     let mut blocker = db
@@ -1919,6 +2006,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {"tenant_id": 3, "outcome": "timed_out"}
                 ])),
         format!("{timed:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    commits_until_delay.store(2, Ordering::Relaxed);
+    let uncertain = tokio::time::timeout(
+        Duration::from_secs(4),
+        write(&boundary, &db, &manager, "reports.create", async |tx| {
+            reports.create(tx, &manager, &oversight_rows).await
+        }),
+    )
+    .await?;
+    let events = oversight_events(after).await?;
+    let unknown_message =
+        "The oversight audit commit could not be confirmed. Check the audit trail before retrying.";
+    checks.check(
+        "a child COMMIT with a withheld reply survives rollback and is marked outcome unknown",
+        matches!(uncertain, Err(ReportError::Refused(ref why)) if why == unknown_message)
+            && matches!(&events[..], [(2, first_event, first), (3, second_event, second), (1, parent_event, parent)]
+                if first_event == "tenancy.oversight.read" && first["row_count"] == 1
+                && second_event == "tenancy.oversight.read" && second["row_count"] == 1
+                && parent_event == "tenancy.oversight.query" && parent["row_count"] == 1
+                && parent["children"] == json!([
+                    {"tenant_id": 2, "outcome": "ok"},
+                    {"tenant_id": 3, "outcome": "outcome unknown"}
+                ])),
+        format!("{uncertain:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    commits_until_delay.store(3, Ordering::Relaxed);
+    let uncertain = tokio::time::timeout(
+        Duration::from_secs(4),
+        reports.check(&manager, &oversight_rows),
+    )
+    .await?
+    .map_err(bilibi_agent_api::Error::from);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a parent COMMIT with a withheld reply gives agent callers the uncertainty message",
+        matches!(uncertain, Err(bilibi_agent_api::Error::InvalidInput(ref fields))
+            if fields.get("report").is_some_and(|messages| messages.as_slice() == [unknown_message]))
+            && matches!(&events[..], [(2, first_event, _), (3, second_event, _), (1, parent_event, parent)]
+                if first_event == "tenancy.oversight.read" && second_event == "tenancy.oversight.read"
+                && parent_event == "tenancy.oversight.query" && parent["row_count"] == 2
+                && parent["children"] == json!([
+                    {"tenant_id": 2, "outcome": "ok"},
+                    {"tenant_id": 3, "outcome": "ok"}
+                ])),
+        format!("{uncertain:?}, oversight evidence: {events:?}"),
     );
     client
         .execute(

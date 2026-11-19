@@ -367,6 +367,7 @@ fn typed_filter(
 fn grid(error: QueryError) -> ReportError {
     match error {
         QueryError::ForbiddenRoot => ReportError::Unreadable,
+        QueryError::AuditCommitUnknown => ReportError::Refused(error.to_string()),
         QueryError::Database(error) => ReportError::Database(error),
         QueryError::Catalog(error) => ReportError::Database(error.into()),
         QueryError::TooHeavy(why) => ReportError::TooHeavy(why),
