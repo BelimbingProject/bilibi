@@ -85,26 +85,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     // Agent discovery and review use the same page contracts and reader scope.
-    let input = json!({"page":"companies", "view":json!({"columns":["name","revenue"],"lenses":{},"zoom":18,"since":null}).to_string(), "params":json!({"status":"active"}).to_string(), "name":"Reviewed companies", "audience":{"roles":[role]}});
+    let input = json!({"page":"companies", "view":json!({"columns":["name,revenue"],"lenses":{},"zoom":18,"since":null}).to_string(), "params":json!({"status":"active"}).to_string(), "name":"Reviewed companies", "audience":{"roles":[role]}});
     let review = contracts
         .preview(&call("base.grid.view.save"), input.clone())
         .await?;
     assert_eq!(review["valid"], true, "{review}");
-    let preview = &review["results"][0]["preview"]["result"];
+    let preview = &review["results"][0]["preview"]["result"]["audience_preview"];
     assert_eq!(
         preview["audience"]["roles"][0]["name"],
         "Shared view readers"
     );
-    assert!(preview["columns_for_current_reader"]
+    let columns: Vec<_> = preview["visible_to_current_reader"]
         .as_array()
         .ok_or("missing column preview")?
         .iter()
-        .any(|c| c["spec"] == "revenue"));
+        .map(|column| &column["spec"])
+        .collect();
+    assert_eq!(columns, [&json!("name"), &json!("revenue")]);
     let saved = contracts
         .submit(&call("base.grid.view.save"), input)
         .await?;
     let company_id = saved["result"]["id"].as_i64().ok_or("missing saved id")?;
     assert_eq!(saved["result"]["view"]["name"], "Reviewed companies");
+    assert_eq!(
+        saved["result"]["view"]["view"]["columns"],
+        json!(["name", "revenue"])
+    );
+    assert!(saved["result"]["view"].get("query").is_none());
     let list = contracts
         .read(&admin, "base.grid.view.list", &json!({"page":"companies"}))
         .await?;
@@ -121,6 +128,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     assert_eq!(saved["result"]["params"]["status"], "active");
+    assert_eq!(
+        saved["result"]["view"]["columns"],
+        json!(["name", "revenue"])
+    );
+    assert!(saved["result"].get("query").is_none());
+    let shared = views.shared(&admin, "companies").await?;
+    let link = shared
+        .iter()
+        .find(|v| v.id == company_id)
+        .ok_or("missing Companies link")?;
+    let query = link.query();
+    let params: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    assert_eq!(params["cols"], "name,revenue");
+    let users = contracts
+        .submit(
+            &call("base.grid.view.save"),
+            json!({"page":"users", "view":"{}", "params":json!({"search":"staff@example.test"}).to_string(), "name":"Employee lookup", "audience":{"everyone":true}}),
+        )
+        .await?;
+    let users_id = users["result"]["id"]
+        .as_i64()
+        .ok_or("missing Users view ID")?;
+    db.get().await?.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,'admin.user.list',false,'all')",
+        &[],
+    ).await?;
+    for (operation, input) in [
+        ("base.grid.view.list", json!({"page":"users"})),
+        ("base.grid.view.get", json!({"page":"users","id":users_id})),
+    ] {
+        assert!(
+            matches!(
+                contracts.read(&reader, operation, &input).await,
+                Err(bilibi_agent_api::Error::Backend(
+                    bilibi_database::Error::Forbidden
+                ))
+            ),
+            "a staff reader without the Users page grant must be refused by {operation}"
+        );
+    }
+    assert_eq!(
+        users["result"]["view"]["params"]["search"],
+        "staff@example.test"
+    );
+    db.get().await?.execute(
+        "DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=1 AND capability='admin.user.list' AND NOT is_allowed",
+        &[],
+    ).await?;
+    let users_view = contracts
+        .read(
+            &reader,
+            "base.grid.view.get",
+            &json!({"page":"users","id":users_id}),
+        )
+        .await?;
+    assert_eq!(
+        users_view["result"]["params"]["search"],
+        "staff@example.test"
+    );
     let fields = contracts
         .read(
             &admin,
@@ -133,6 +201,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("missing filters")?
         .iter()
         .any(|f| f["key"] == "status"));
+    assert_eq!(fields["result"]["search_key"], "search");
+    for removed in ["sorts", "sort_key", "direction_key"] {
+        assert!(fields["result"].get(removed).is_none());
+    }
+    for page in ["product-prices", "team-members"] {
+        let fields = contracts
+            .read(&admin, "base.grid.view.fields", &json!({"page":page}))
+            .await?;
+        assert_eq!(fields["result"]["filters"], json!([]));
+        assert!(fields["result"].get("search_key").is_none());
+    }
     db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,'admin.company.list',true,'all') ON CONFLICT DO NOTHING", &[]).await?;
     db.get().await?.execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES(1,$1,'companies','revenue') ON CONFLICT DO NOTHING", &[&role]).await?;
     let restricted = contracts
@@ -155,6 +234,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     assert_eq!(reader_view["result"]["name"], "Reviewed companies");
+    let hidden_audience = json!({"name":"People with a role it is shared with"});
+    assert_eq!(reader_view["result"]["audience"], hidden_audience);
+    let reader_list = contracts
+        .read(&reader, "base.grid.view.list", &json!({"page":"companies"}))
+        .await?;
+    assert_eq!(
+        reader_list["result"]["views"][0]["audience"],
+        hidden_audience
+    );
     let other = {
         let client = db.get().await?;
         auth.authenticate(&**client, 2, 5, String::new()).await?

@@ -3,7 +3,7 @@
 //! A view is a link to the page's own address ([`SharedView::query`]); the
 //! store and its rules are [`crate::shared_views`].
 use super::{Outcome, PageColumns, ViewCaller};
-use crate::shared_views::{Audience, SharedView};
+use crate::shared_views::{Audience, SharedView, ROLE_AUDIENCE_LABEL};
 use bilibi_agent_api::page::Call;
 use bilibi_database::{Error, Result};
 use bilibi_tenancy::Scope;
@@ -163,7 +163,7 @@ fn audience_text(view: &SharedView, roles: &[(i64, String)]) -> String {
                 .map(|(_, name)| name.as_str())
                 .collect();
             if names.is_empty() {
-                "People with a role it is shared with".into()
+                ROLE_AUDIENCE_LABEL.into()
             } else {
                 format!("Role: {}", names.join(", "))
             }

@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let before = contracts
         .read(&admin, "base.menu_order.preview", &json!({}))
         .await?;
-    let product = children(&before["result"], "admin");
+    let product = children(&before["result"]["visible_to_current_reader"], "admin");
     assert!(product.len() >= 2);
     let first = product[0]["id"].as_str().ok_or("first")?.to_owned();
     let last = product.last().ok_or("last")?["id"]
@@ -120,7 +120,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &json!({"parent":"admin","item_ids":[last]}),
         )
         .await?;
-    assert_eq!(children(&proposed["result"], "admin")[0]["id"], last);
+    assert_eq!(
+        children(&proposed["result"]["visible_to_current_reader"], "admin")[0]["id"],
+        last
+    );
     assert_eq!(
         contracts
             .read(&admin, "base.menu_order.preview", &json!({}))
@@ -147,7 +150,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plans.preview(&browser, &wrong_parent).await?["valid"],
         false
     );
-    assert_eq!(plans.preview(&browser, &set).await?["valid"], true);
+    let set_review = plans.preview(&browser, &set).await?;
+    assert_eq!(set_review["valid"], true);
+    let menu = &set_review["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(menu["audience"]["name"], "Everyone");
+    assert_eq!(menu, &proposed["result"]);
     plans.commit(&admin, &browser, &set).await?;
     assert!(
         plans.commit(&admin, &browser, &set).await.is_err(),
@@ -156,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let preview = contracts
         .read(&admin, "base.menu_order.preview", &json!({}))
         .await?;
-    let visible = children(&preview["result"], "admin");
+    let visible = children(&preview["result"]["visible_to_current_reader"], "admin");
     assert_eq!(visible[0]["id"], last);
     let remaining: Vec<_> = product
         .iter()
@@ -209,7 +216,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "base.menu_order.restore",
         json!({"parent":"admin","version":version}),
     )];
-    assert_eq!(plans.preview(&browser, &restore).await?["valid"], true);
+    let restore_review = plans.preview(&browser, &restore).await?;
+    assert_eq!(restore_review["valid"], true);
+    let menu = &restore_review["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(menu, &before["result"]);
     plans.commit(&admin, &browser, &restore).await?;
     let list = contracts
         .read(&admin, "base.menu_order.list", &json!({}))
@@ -218,7 +228,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let after = contracts
         .read(&admin, "base.menu_order.preview", &json!({}))
         .await?;
-    assert_eq!(children(&after["result"], "admin")[0]["id"], first);
+    assert_eq!(
+        children(&after["result"]["visible_to_current_reader"], "admin")[0]["id"],
+        first
+    );
 
     let parent = "admin.system";
     let hidden = "admin.system.installation";

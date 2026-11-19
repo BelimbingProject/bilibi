@@ -211,6 +211,10 @@ It prints dry-run reviews and outcomes for a successful write, a second-operatio
 mocked identities or assertions. Sessions and temporary grants are removed on
 successful completion; reference/audit evidence remains for inspection.
 
+## Audience previews
+
+Use `AudiencePreview` for a shared customisation review. It names the tenant audience or selected roles and shows the result as the current reader can see it. The owner checks access to the page or menu and permission to inspect role names. Each recipient's own permissions apply when they open the result.
+
 ## MCP Apps: a module's card in the chat
 
 One answer: a module that wants a small page inside a chat host registers one `App` under `APPS`; `/mcp` does the rest, and the card itself works through the generic tools.

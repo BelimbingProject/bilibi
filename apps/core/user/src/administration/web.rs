@@ -1017,7 +1017,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/user.grid-page",
     "users",
     crate::contributions::LIST,
-    || SPEC.clone(),
+    Some(|| SPEC.clone()),
     &[(
         "roleIds",
         "Comma-separated role IDs; any selected role matches"

@@ -1732,7 +1732,7 @@ fn agent_columns<'a>(
     })
 }
 
-bilibi_grid::contribute_page_metadata!("core/company", "core/company.grid-page", "companies", crate::contributions::LIST, || LIST_SPEC.clone(), &[("field_filters", "JSON array of field, operator and value conditions; use fields offered by the company list")],
+bilibi_grid::contribute_page_metadata!("core/company", "core/company.grid-page", "companies", crate::contributions::LIST, Some(|| LIST_SPEC.clone()), &[("field_filters", "JSON array of field, operator and value conditions; use fields offered by the company list")],
     Some(agent_filter_details),
     agent_columns
 );

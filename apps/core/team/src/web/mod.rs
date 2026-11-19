@@ -695,7 +695,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/team.grid-page",
     "teams",
     crate::VIEW,
-    || LIST_SPEC.clone(),
+    Some(|| LIST_SPEC.clone()),
     &[],
     None,
     agent_columns
@@ -716,7 +716,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/team.grid-member-page",
     "team-members",
     crate::VIEW,
-    || MEMBER_SPEC.clone(),
+    None,
     &[],
     None,
     agent_member_columns

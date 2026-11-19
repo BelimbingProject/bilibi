@@ -930,7 +930,7 @@ bilibi_grid::contribute_page_metadata!(
     "base/integration.grid-page",
     "integration-exchanges",
     crate::LIST,
-    || SPEC.clone(),
+    Some(|| SPEC.clone()),
     &[
         ("period", "Period selection"),
         ("from", "Start date"),

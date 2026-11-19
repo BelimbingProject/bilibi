@@ -1081,7 +1081,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/product.grid-page",
     "products",
     crate::VIEW,
-    || SPEC.clone(),
+    Some(|| SPEC.clone()),
     &[],
     None,
     agent_columns
@@ -1101,7 +1101,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/product.grid-price-page",
     "product-prices",
     crate::VIEW,
-    || SPEC.clone(),
+    None,
     &[],
     None,
     agent_price_columns

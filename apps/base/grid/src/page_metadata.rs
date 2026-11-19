@@ -24,7 +24,7 @@ pub type PageDetails = for<'a> fn(&'a Client, &'a Scope) -> PageDetailsFuture<'a
 pub struct PageMetadata {
     pub page: &'static str,
     pub capability: &'static str,
-    pub spec: fn() -> Arc<ListSpec>,
+    pub spec: Option<fn() -> Arc<ListSpec>>,
     /// Additional query keys owned outside ListState, with an explanation.
     pub extra_filters: &'static [(&'static str, &'static str)],
     pub details: Option<PageDetails>,
@@ -41,9 +41,11 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
                 page.page
             )));
         }
-        (page.spec)()
-            .validate()
-            .map_err(|e| RegistryError::Contribution(e.to_string()))?;
+        if let Some(spec) = page.spec {
+            spec()
+                .validate()
+                .map_err(|e| RegistryError::Contribution(e.to_string()))?;
+        }
     }
     Ok(())
 }
