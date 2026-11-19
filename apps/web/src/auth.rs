@@ -835,20 +835,28 @@ pub async fn reset_page(
         ..ResetForm::default()
     };
     if !app.user.reset_link_valid(&form.email, &token).await? {
-        return forgot_card(
-            &app,
-            &ForgotForm {
-                email: form.email,
-                email_errors: vec![RESET_LINK_INVALID.into()],
-                resend: true,
-                ..ForgotForm::default()
-            },
-            StatusCode::OK,
-        )
-        .await;
+        return reset_unavailable(&app, form.email, StatusCode::OK).await;
     }
     reset_card(&app, &form, StatusCode::OK).await
 }
+async fn reset_unavailable(
+    app: &App,
+    email: String,
+    status: StatusCode,
+) -> Result<Response, HttpError> {
+    forgot_card(
+        app,
+        &ForgotForm {
+            email,
+            email_errors: vec![RESET_LINK_INVALID.into()],
+            resend: true,
+            ..ForgotForm::default()
+        },
+        status,
+    )
+    .await
+}
+
 async fn reset_card(
     app: &App,
     form: &ResetForm,
@@ -888,15 +896,22 @@ pub async fn reset(
     form.password_errors = validate_new_password(&submission.password);
     form.confirmation_errors =
         validate_confirmation(&submission.password_confirmation, &submission.password);
-    if !(form.email_errors.is_empty()
+    let redisplay = if !(form.email_errors.is_empty()
         && form.password_errors.is_empty()
         && form.confirmation_errors.is_empty())
     {
-        return reset_card(&app, &form, StatusCode::UNPROCESSABLE_ENTITY).await;
-    }
-    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
+        Some(StatusCode::UNPROCESSABLE_ENTITY)
+    } else if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
         form.email_errors = vec![RECOVERY_THROTTLED.into()];
-        return reset_card(&app, &form, StatusCode::TOO_MANY_REQUESTS).await;
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    } else {
+        None
+    };
+    if let Some(status) = redisplay {
+        if !app.user.reset_link_valid(&form.email, &token).await? {
+            return reset_unavailable(&app, form.email, status).await;
+        }
+        return reset_card(&app, &form, status).await;
     }
     let outcome = app
         .user
@@ -909,17 +924,7 @@ pub async fn reset(
             Ok(response)
         }
         Err(CredentialError::InvalidOrExpiredToken) => {
-            forgot_card(
-                &app,
-                &ForgotForm {
-                    email: form.email,
-                    email_errors: vec![RESET_LINK_INVALID.into()],
-                    resend: true,
-                    ..ForgotForm::default()
-                },
-                StatusCode::UNPROCESSABLE_ENTITY,
-            )
-            .await
+            reset_unavailable(&app, form.email, StatusCode::UNPROCESSABLE_ENTITY).await
         }
         Err(CredentialError::Policy(violation)) => {
             form.password_errors = vec![violation.to_string()];
@@ -975,14 +980,32 @@ async fn invitation_unavailable(
     app: &App,
     raw_token: &str,
 ) -> std::result::Result<Response, HttpError> {
+    if !app.user.member_invitation_can_be_renewed(raw_token).await? {
+        return invitation_result(
+            app,
+            "Invitation unavailable",
+            "This invitation link is no longer available. Contact the person who invited you.",
+            "/",
+            "Go to sign in",
+            StatusCode::OK,
+        )
+        .await;
+    }
     let href = format!("/accept/{raw_token}/resend");
-    card(app, "Invitation unavailable", InvitationResultPage {
-        heading: "Invitation unavailable",
-        message: "This invitation link is invalid or has expired. Request a new link, or contact the person who invited you.",
-        href: &href,
-        action: "Send me a new link",
-        resend: true,
-    }, FlashMap::default(), StatusCode::OK).await
+    card(
+        app,
+        "Invitation unavailable",
+        InvitationResultPage {
+            heading: "Invitation unavailable",
+            message: "This invitation link has expired. You can request a new link.",
+            href: &href,
+            action: "Send me a new link",
+            resend: true,
+        },
+        FlashMap::default(),
+        StatusCode::OK,
+    )
+    .await
 }
 
 pub async fn resend_invitation(
@@ -992,9 +1015,18 @@ pub async fn resend_invitation(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> std::result::Result<Response, HttpError> {
     origin(&app, &headers)?;
-    if recovery_allowed(&app, &headers, peer.as_ref()).await? {
-        app.user.resend_member_invitation(&raw_token).await?;
+    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
+        return invitation_result(
+            &app,
+            "Try again later",
+            RECOVERY_THROTTLED,
+            "/",
+            "Go to sign in",
+            StatusCode::TOO_MANY_REQUESTS,
+        )
+        .await;
     }
+    app.user.resend_member_invitation(&raw_token).await?;
     invitation_result(&app, "Check your email", "If this invitation can be renewed, a new link has been sent. Otherwise, contact the person who invited you.", "/", "Go to sign in", StatusCode::OK).await
 }
 

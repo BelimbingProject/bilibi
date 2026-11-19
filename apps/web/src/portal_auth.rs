@@ -808,6 +808,10 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
         status,
     )
 }
+fn reset_unavailable(site: &Site, email: &str, status: StatusCode) -> Result<Response, HttpError> {
+    forgot_card(site, email, vec![RESET_LINK_INVALID.into()], "", status)
+}
+
 /// `GET /portal/reset/{site}/{token}`: the address comes from the emailed link.
 pub async fn reset_page(
     State(app): State<App>,
@@ -823,13 +827,7 @@ pub async fn reset_page(
         .portal_reset_link_valid(site.tenant, &email, &token)
         .await?
     {
-        return forgot_card(
-            &site,
-            &email,
-            vec![RESET_LINK_INVALID.into()],
-            "",
-            StatusCode::OK,
-        );
+        return reset_unavailable(&site, &email, StatusCode::OK);
     }
     reset_card(
         &site,
@@ -874,15 +872,26 @@ pub async fn reset(
             &submission.password,
         ),
     };
-    if !(form.email_errors.is_empty()
+    let redisplay = if !(form.email_errors.is_empty()
         && form.password_errors.is_empty()
         && form.confirmation_errors.is_empty())
     {
-        return reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
+        Some(StatusCode::UNPROCESSABLE_ENTITY)
+    } else if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
         form.email_errors = vec![RECOVERY_THROTTLED.into()];
-        return reset_card(&site, form, StatusCode::TOO_MANY_REQUESTS);
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    } else {
+        None
+    };
+    if let Some(status) = redisplay {
+        if !app
+            .user
+            .portal_reset_link_valid(site.tenant, &email, &token)
+            .await?
+        {
+            return reset_unavailable(&site, &email, status);
+        }
+        return reset_card(&site, form, status);
     }
     match app
         .user
@@ -892,13 +901,9 @@ pub async fn reset(
         Ok(()) => Ok(
             Redirect::to(&format!("/portal/sign-in/{}?done=reset", site.address)).into_response(),
         ),
-        Err(CredentialError::InvalidOrExpiredToken) => forgot_card(
-            &site,
-            &email,
-            vec![RESET_LINK_INVALID.into()],
-            "",
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
+        Err(CredentialError::InvalidOrExpiredToken) => {
+            reset_unavailable(&site, &email, StatusCode::UNPROCESSABLE_ENTITY)
+        }
         Err(CredentialError::Policy(violation)) => {
             form.password_errors = vec![violation.to_string()];
             reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY)

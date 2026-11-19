@@ -8,23 +8,102 @@ use crate::{
     sign_in::PRINCIPAL,
     CredentialError, UserService,
 };
-use bilibi_database::{Change, Context, Db, Error, MutationBoundary};
+use bilibi_agent_api::{
+    Channels, Handler, Operation, OperationClient, OperationFuture, WriteHandler,
+};
+use bilibi_database::{Change, Context, Db, Error, MutationBoundary, MutationTransaction};
 use bilibi_mail::{Address, Mailer, Message};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, ValueType, DEFINITIONS};
-use serde_json::json;
+use bilibi_settings::{Definition, ScopeKind, Setting, Settings, Target, ValueType, DEFINITIONS};
+use bilibi_tenancy::{ReadClient, Scope};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use subtle::ConstantTimeEq;
 
 const RESET_LIFETIME: &str = "user.password_reset_minutes";
+pub(crate) const MANAGE_LIFETIME: &str = "admin.user.password_reset_lifetime.manage";
+const MIN_MINUTES: i64 = 15;
+const MAX_MINUTES: i64 = 10080;
 inventory::submit! { Contribution::new(DEFINITIONS, RESET_LIFETIME, Provenance { module: "core/user", source: file!(), line: line!() }, &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: &[ScopeKind::Global], default: || json!(4320),
-    nullable: false, encrypted: false, minimum: Some(15.0), maximum: Some(10080.0), validator: None,
-    editor: Some(Editor { group: "Session", label: "Password reset link lifetime (minutes)",
-        help: "How long a password reset link can be used.",
-        capability: Some(crate::contributions::UPDATE), reveal_duration_ms: 5_000 }),
+    nullable: false, encrypted: false, minimum: Some(MIN_MINUTES as f64), maximum: Some(MAX_MINUTES as f64), validator: None,
+    editor: None,
 })) }
+
+static SETTINGS: OnceLock<Arc<Settings>> = OnceLock::new();
+
+pub(crate) fn bind(settings: Arc<Settings>) -> bilibi_module_registry::Result<()> {
+    SETTINGS.set(settings).map_err(|_| {
+        bilibi_module_registry::RegistryError::Service("duplicate reset settings binding".into())
+    })
+}
+
+struct SetLifetime;
+
+fn lifetime_minutes(input: &Value) -> Result<i64, Error> {
+    input["minutes"]
+        .as_i64()
+        .filter(|minutes| (MIN_MINUTES..=MAX_MINUTES).contains(minutes))
+        .ok_or(Error::Invalid)
+}
+
+impl WriteHandler for SetLifetime {
+    fn owner(&self) -> &'static str {
+        "core/user"
+    }
+
+    fn preview<'a>(
+        &'a self,
+        client: &'a dyn OperationClient,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            bilibi_authz::authorize_proof(client, scope, MANAGE_LIFETIME).await?;
+            let minutes = lifetime_minutes(input)?;
+            Ok(json!({
+                "summary": "Set how long newly issued password reset links can be used",
+                "minutes": minutes
+            })
+            .into())
+        })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        tx: &'a mut MutationTransaction<'_>,
+        scope: &'a Scope,
+        input: &'a Value,
+    ) -> OperationFuture<'a> {
+        Box::pin(async move {
+            bilibi_authz::authorize_operator(tx.sql(), scope, MANAGE_LIFETIME).await?;
+            let minutes = lifetime_minutes(input)?;
+            SETTINGS
+                .get()
+                .ok_or(Error::Internal)?
+                .put(tx, scope, Target::Global, RESET_LIFETIME, json!(minutes))
+                .await?;
+            Ok(json!({"minutes": minutes}).into())
+        })
+    }
+}
+
+inventory::submit! { Contribution::new(bilibi_agent_api::DEFINITIONS, "core/user.reset-settings", Provenance { module: "core/user", source: file!(), line: line!() }, &bilibi_agent_api::Definitions {
+    operations: &[Operation {
+        key: "core.user.password_reset_lifetime.set",
+        title: "Set the password reset link lifetime",
+        summary: "Set how long newly issued staff and portal password reset links can be used across the installation.",
+        keywords: &["password", "reset", "recovery", "expiry"],
+        capability: MANAGE_LIFETIME,
+        input: || json!({"type":"object","required":["minutes"],"properties":{"minutes":{"type":"integer","minimum":MIN_MINUTES,"maximum":MAX_MINUTES}}}),
+        output: || json!({"type":"object","properties":{"minutes":{"type":"integer"}}}),
+        handler: Handler::SafeWrite(&SetLifetime),
+        channels: Channels::Every,
+        step_up: &[],
+    }],
+    guides: &[],
+}) }
 /// A new link may be requested once a minute.
 const RESET_THROTTLE_SECONDS: f64 = 60.0;
 
@@ -450,16 +529,9 @@ impl UserService {
             return Ok(false);
         }
         let client = self.db.get().await?;
-        let rows = client
-            .query(
-                RESET_ACCOUNT,
-                &[&email, &audience.kind().as_str(), &audience.tenant()],
-            )
-            .await?;
-        let presented = digest(token);
-        Ok(
-            matches!(&rows[..], [row] if row.get::<_, Option<Vec<u8>>>(5).is_some_and(|stored| bool::from(stored.ct_eq(&presented)))),
-        )
+        Ok(reset_account(&**client, audience, &email, &digest(token))
+            .await?
+            .is_some())
     }
 
     /// Consumes the one-time token, replaces the password and ends every
@@ -486,38 +558,13 @@ impl UserService {
             return Err(CredentialError::InvalidOrExpiredToken);
         }
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let account = client
-            .query(
-                RESET_ACCOUNT,
-                &[&email, &audience.kind().as_str(), &audience.tenant()],
-            )
-            .await
-            .map_err(Error::from)?;
         let presented = digest(token);
-        let user = match &account[..] {
-            [row] => row
-                .get::<_, Option<Vec<u8>>>(5)
-                .filter(|stored| bool::from(stored.ct_eq(&presented)))
-                .map(|_| {
-                    (
-                        row.get::<_, i64>(0),
-                        row.get::<_, i64>(1),
-                        row.get::<_, i64>(4),
-                    )
-                }),
-            _ => None,
-        };
-        let Some((user, tenant, identity)) = user else {
+        let Some((user, tenant, identity)) =
+            reset_account(&**client, audience, &email, &presented).await?
+        else {
             password::verify("", None).await?;
             return Err(CredentialError::InvalidOrExpiredToken);
         };
-        // A frozen account cannot redeem a link either; same answer as unknown.
-        if !matches!(
-            crate::identity::standing(&**client, tenant, user).await?,
-            crate::identity::Standing::Live(_)
-        ) {
-            return Err(CredentialError::InvalidOrExpiredToken);
-        }
         check_policy(new).map_err(CredentialError::Policy)?;
         let replacement = password::hash(new).await?;
         let mut tx = self
@@ -583,4 +630,33 @@ impl UserService {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+async fn reset_account(
+    client: &dyn ReadClient,
+    audience: Audience,
+    email: &str,
+    presented: &[u8],
+) -> Result<Option<(i64, i64, i64)>, Error> {
+    let accounts = client
+        .query(
+            RESET_ACCOUNT,
+            &[&email, &audience.kind().as_str(), &audience.tenant()],
+        )
+        .await?;
+    let [account] = &accounts[..] else {
+        return Ok(None);
+    };
+    let stored: Option<Vec<u8>> = account.get(5);
+    if !stored.is_some_and(|stored| bool::from(stored.ct_eq(presented))) {
+        return Ok(None);
+    }
+    let (user, tenant) = (account.get(0), account.get(1));
+    if !matches!(
+        crate::identity::standing(client, tenant, user).await?,
+        crate::identity::Standing::Live(_)
+    ) {
+        return Ok(None);
+    }
+    Ok(Some((user, tenant, account.get(4))))
 }
