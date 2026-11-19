@@ -595,11 +595,19 @@ impl ComponentsSpecimen {
         )?;
         let hits = [
             crate::PickerHit {
+                instant: Some(crate::flex_table::Instant::new(
+                    "2026-11-06T01:13:00Z",
+                    "6 Nov 2026, 09:13 MYT",
+                    "6 Nov 2026, 09:13 MYT",
+                    "6 Nov 2026, 01:13 UTC",
+                    "company",
+                )),
                 value: "company:1".into(),
                 label: "Acme Holdings".into(),
                 kind_label: "Company".into(),
             },
             crate::PickerHit {
+                instant: None,
                 value: "person:7".into(),
                 label: "Ada Acme".into(),
                 kind_label: "Contact".into(),

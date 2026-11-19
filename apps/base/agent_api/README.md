@@ -142,6 +142,15 @@ Credential and workplace reproofs use a 150 ms transaction-local lock timeout. L
 
 The caller shows the dry-run result and waits for the person's explicit approval. Commit takes the unchanged ordered operations directly; Bilibi does not attest that the caller showed the review or obtained consent. Commit starts a fresh `MutationTransaction`, rechecks the credential, workplace, schemas, capabilities and every owner preview, then calls each owner on that same transaction. Every owner error, audit capture error or final identity failure rolls back all business writes and their transaction's audit rows together. [Grid's oversight probe](../grid/README.md#reads-inside-an-existing-transaction) owns its read audit boundary. Owner version fences recognize changed records and repeated writes. No dry-run state or review content is stored.
 
+### Work staged before the write
+
+**An owner that must stage work outside the write's transaction prepares it first, with no connection held.** Copying files through a store that commits on its own connections cannot run inside commit's transaction: it would take more pooled connections while commit holds one (#758 refuses that), and a slow store would keep the transaction open (BelimbingProject/bilibi#790).
+
+- **Declare it.** The owner's `WriteHandler` answers `prepares() == true` and implements `prepare(scope, input)`, which answers what it staged (`Option<Value>`), and `commit_prepared(tx, scope, input, prepared)`, which revalidates and binds it in the transaction. Both default to "nothing staged" and plain `commit`.
+- **When it runs.** `Plans::commit` and `Plans::submit` first run their own checks (credential, shape, workplace, every owner preview) in a transaction they roll back, release its connection, then call each staging owner's `prepare` on the scope commit will use. A plan those checks refuse stages nothing. Then commit runs as above and hands each owner what it staged. A step whose input names an earlier step's new record (`$ref`) is not prepared.
+- **What to stage.** Only private work that expires on its own, reproved and authorized as a facade call is. Commit's checks run again in its transaction and may still refuse, so staged work must be safe to leave behind.
+- **Doors that hold a transaction** (queued jobs, `job::JobContracts::commit`) do not prepare: `commit_prepared` gets `None` and the owner does without, as it did before.
+
 ### New records in later steps
 
 **Create a company, its customer role, a person, their affiliation and an office address in one plan and one approval.** Put the creation first. Replace a later ID with `{"$ref":"1.id"}` to use the record created by step 1:
