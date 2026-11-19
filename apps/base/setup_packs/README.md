@@ -40,16 +40,17 @@ Choose entries with `base.labels.list` and `base.custom_fields.list`. Export req
 
 The labels use the [label owner's stable subject IDs](../labels/README.md). Field definitions use the [custom field owner's field kinds and stable keys](../custom_fields/README.md#behaviour). `help` is optional. `picklist` is required for choice and several-choices fields. `target` is required for reference fields and names a stable record kind. `rule_condition` carries whether the field is offered to rules. No rule or condition using it travels. Tenant and row IDs, edit versions, archived definitions and absolute positions stay with the source; exported field order becomes append order within each destination record type.
 
-Preview takes `{pack, picklist_map?}`. Each optional mapping is `{from, to}` and names a source key used in the pack and an eligible destination key. An unmapped list uses the same stable key. Mapping refers to the destination list; its values are managed separately by Pick-lists.
+Preview takes `{pack, picklist_map?}`. Version 1 maps pick-lists only. Each mapping is `{from, to}` and names a source key used in the pack and an eligible destination key. An unmapped list uses the same stable key. Maintain the destination list's values in [Pick-lists](../picklists/README.md).
 
 ## Review and apply
 
 - `additions` holds the overrides and definitions that would be added, including destination pick-list keys. Identical entries leave no difference.
 - `collisions` lists a different override at the same subject, or a different or archived definition at the same record type and key. A collision must be resolved before any changes can apply.
-- `missing` lists unavailable label subjects, record types, pick-lists and reference kinds. `invalid` lists owner validation failures, including the destination's active-field limit.
+- `missing` identifies unavailable label subjects, record types, destination pick-lists and reference kinds by their keys. Preview reports each unavailable dependency of a field separately. Resolve those dependencies before preview can compare the field with a destination definition or validate the proposed addition.
+- `invalid` lists owner validation failures, including the destination's active-field limit across the proposed additions for each record type.
 - When `ready` is true, copy `expected_additions` from preview into the apply input with the same pack and mapping. Dry-run the apply operation, show the additions and wait for approval before committing the unchanged plan. A new addition discovered after review requires a new preview. An addition another writer already made identically can become a no-op.
 - Apply rechecks the destination and uses the ordinary label set and custom field define paths on the agent plan's transaction. Owner writes and their audit rows commit together. An empty difference writes zero changes, including when retrying an already-applied pack.
 
 The two-tenant proof is registered as `scripts/run-walkthroughs.sh setup-packs`.
 
-Part of [#800](https://github.com/BelimbingProject/bilibi/issues/800). Shared views, rule drafts, role mapping and the Customisations page remain outside this slice.
+Part of [#800](https://github.com/BelimbingProject/bilibi/issues/800). See [ADR 33](../../../docs/architecture/decisions/33-pages-for-business-actions-and-customisations.md) for the planned Customisations page.
