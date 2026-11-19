@@ -230,7 +230,12 @@ impl JobContracts {
                 input,
             )
             .await?;
-        Ok(owner.commit(tx, &scope, input).await?.envelope(key))
+        // A job's door already holds its transaction, so nothing was staged
+        // before it (`WriteHandler::prepare`).
+        Ok(owner
+            .commit_prepared(tx, &scope, input, None)
+            .await?
+            .envelope(key))
     }
 
     /// A read contract as the job's person: the same validation and logged

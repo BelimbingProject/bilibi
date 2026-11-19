@@ -147,7 +147,11 @@ The caller shows the dry-run result and waits for the person's explicit approval
 - **Declare it.** The owner's `WriteHandler` answers `prepares() == true` and implements `prepare(scope, input)`, which answers what it staged (`Option<Value>`), and `commit_prepared(tx, scope, input, prepared)`, which revalidates and binds it in the transaction. Both default to "nothing staged" and plain `commit`.
 - **When it runs.** `Plans::commit` and `Plans::submit` first run their own checks (credential, shape, workplace, every owner preview) in a transaction they roll back, release its connection, then call each staging owner's `prepare` on the scope commit will use. A plan those checks refuse stages nothing. Then commit runs as above and hands each owner what it staged. A step whose input names an earlier step's new record (`$ref`) is not prepared.
 - **What to stage.** Only private work that expires on its own, reproved and authorized as a facade call is. Commit's checks run again in its transaction and may still refuse, so staged work must be safe to leave behind.
-- **Doors that hold a transaction** (queued jobs, `job::JobContracts::commit`) do not prepare: `commit_prepared` gets `None` and the owner does without, as it did before.
+- **Retries and abandoned commits.** A prepare can run with no commit after it (commit refuses, the caller gives up or retries, the connection drops), and a retried write prepares again. So the owner:
+  - makes prepare idempotent by the caller's request key, reusing what an earlier prepare or committed write already made rather than staging it twice;
+  - audits what prepare writes through `MutationBoundary`, as any write;
+  - cleans up staged work no commit bound, on its own schedule (an expiry and a job), never relying on commit to do it.
+- **Doors that hold a transaction** (queued jobs, `job::JobContracts::commit`) do not prepare: they call `commit_prepared` with `None`, and the owner does without, as it did before.
 
 ### New records in later steps
 
