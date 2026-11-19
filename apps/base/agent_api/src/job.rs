@@ -223,13 +223,22 @@ impl JobContracts {
             return Err(Error::WritesNotEnabled);
         };
         let reservations = crate::PreviewReservations::default();
-        owner
+        let preview = owner
             .preview(
                 &crate::TransactionRead(tx.sql(), &reservations),
                 &scope,
                 input,
             )
-            .await?;
+            .await;
+        if matches!(
+            preview,
+            Err(Error::Backend(
+                bilibi_database::Error::UnrecoveredTransaction(_)
+            ))
+        ) {
+            tx.poison();
+        }
+        preview?;
         // A job's door already holds its transaction, so nothing was staged
         // before it (`WriteHandler::prepare`).
         Ok(owner

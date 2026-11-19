@@ -367,6 +367,11 @@ fn typed_filter(
 fn grid(error: QueryError) -> ReportError {
     match error {
         QueryError::ForbiddenRoot => ReportError::Unreadable,
+        QueryError::AuditCommitUnknown => ReportError::Refused(error.to_string()),
+        error @ QueryError::AuditSummaryFailed { .. } => match Error::from(error) {
+            Error::Refused(message) => ReportError::Refused(message),
+            error => ReportError::Database(error),
+        },
         QueryError::Database(error) => ReportError::Database(error),
         QueryError::Catalog(error) => ReportError::Database(error.into()),
         QueryError::TooHeavy(why) => ReportError::TooHeavy(why),
@@ -505,20 +510,30 @@ impl Reports {
         }
     }
 
-    /// Checks a draft for its author: the shape, then every column against
-    /// the author's own catalog, then a bounded dry run that proves each
-    /// filter, grouping and measure suits its column. A dry run refused only
-    /// by size or cost still saves: the bound applies to each run.
+    /// Checks the draft's shape, catalog and query for its author.
+    /// A same-tenant probe may hit a size or cost bound without blocking
+    /// the save. Oversight checks follow Grid's audited probe rules.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
         Self::check_draft_shape(draft)?;
-        if draft.definition.oversight {
-            return self.check_draft_catalog(None, scope, draft).await;
-        }
         let mut client = self.db.get().await.map_err(Error::from)?;
-        let tx = client.transaction().await.map_err(Error::from)?;
-        self.check_draft_catalog(Some(&tx), scope, draft).await?;
-        tx.commit().await.map_err(Error::from)?;
-        Ok(())
+        let transaction_timeout = std::time::Duration::from_secs(60);
+        let result = async {
+            let tx = tokio::time::timeout(transaction_timeout, client.transaction())
+                .await
+                .map_err(|_| Error::Internal)?
+                .map_err(Error::from)?;
+            self.check_draft_catalog(Some(&tx), scope, draft).await?;
+            tokio::time::timeout(transaction_timeout, tx.commit())
+                .await
+                .map_err(|_| Error::Internal)?
+                .map_err(Error::from)?;
+            Ok(())
+        }
+        .await;
+        if matches!(result, Err(ReportError::Database(_))) {
+            drop(bilibi_database::Connection::take(client));
+        }
+        result
     }
     async fn check_draft(
         &self,
@@ -528,6 +543,19 @@ impl Reports {
     ) -> Outcome<()> {
         Self::check_draft_shape(draft)?;
         self.check_draft_catalog(tx, scope, draft).await
+    }
+
+    async fn check_mutation_draft(
+        &self,
+        tx: &mut MutationTransaction<'_>,
+        scope: &Scope,
+        draft: &Draft,
+    ) -> Outcome<()> {
+        let result = self.check_draft(Some(tx.sql()), scope, draft).await;
+        if draft.definition.oversight && matches!(result, Err(ReportError::Database(_))) {
+            tx.poison();
+        }
+        result
     }
 
     fn check_draft_shape(draft: &Draft) -> Outcome<()> {
@@ -558,7 +586,11 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let catalog = if draft.definition.oversight {
-            self.catalog(scope, true, draft.kind == Kind::Rows).await?
+            let tx = tx.ok_or(Error::Internal)?;
+            self.oversight
+                .builder_catalog_on(tx, scope, draft.kind == Kind::Rows)
+                .await
+                .map_err(grid)?
         } else {
             let tx = tx.ok_or(Error::Internal)?;
             Catalog::for_scope(tx, scope)
@@ -599,11 +631,11 @@ impl Reports {
         if draft.definition.oversight {
             // Every spec has resolved against live consent; execution uses
             // the same bounded audited path as a reader, never a child Scope.
-            let proof = self.oversight.prove(scope).await.map_err(grid)?;
+            let tx = tx.ok_or(Error::Internal)?;
             let spec = if draft.kind == Kind::Rows {
                 bilibi_grid::OversightSpec::Rows {
                     page: PageSpec {
-                        bounds: self.bounds(scope, false).await?,
+                        bounds: self.bounds_on(tx, scope, false).await?,
                         filters,
                         sorts: draft.definition.sorts(),
                         timezone: "UTC".into(),
@@ -611,15 +643,11 @@ impl Reports {
                         limit: 1,
                     },
                     columns: draft.definition.columns.clone(),
-                    pages: proof
-                        .children()
-                        .iter()
-                        .map(|child| (child.tenant(), (0, 1)))
-                        .collect(),
+                    pages: BTreeMap::new(),
                 }
             } else {
                 bilibi_grid::OversightSpec::Summary(SummarySpec {
-                    bounds: self.bounds(scope, false).await?,
+                    bounds: self.bounds_on(tx, scope, false).await?,
                     filters,
                     groupings: draft.definition.groupings(),
                     measures: draft.definition.measures(),
@@ -629,10 +657,10 @@ impl Reports {
             };
             let probe = self
                 .oversight
-                .read(&proof, &draft.record_type, &spec)
+                .probe_on(tx, scope, &draft.record_type, &spec)
                 .await
                 .map_err(grid)?;
-            if !probe.children.is_empty() && probe.children.iter().all(|c| c.outcome == "refused") {
+            if !probe {
                 return Err(ReportError::Invalid(field_errors(
                     "definition",
                     "This question is not supported by any consenting child's catalog.",
@@ -1361,7 +1389,7 @@ impl Reports {
         bilibi_authz::authorize_key(tx.sql(), scope, AUTHOR)
             .await
             .map_err(denied)?;
-        self.check_draft(Some(tx.sql()), scope, draft).await?;
+        self.check_mutation_draft(tx, scope, draft).await?;
         let (tenant, owner) = (scope.tenant(), scope.user());
         let draft = draft.clone();
         Ok(tx
@@ -1407,7 +1435,7 @@ impl Reports {
         draft: &Draft,
     ) -> Outcome<()> {
         let before = self.owned(tx, scope, id, version, AUTHOR).await?;
-        self.check_draft(Some(tx.sql()), scope, draft).await?;
+        self.check_mutation_draft(tx, scope, draft).await?;
         let (tenant, draft) = (scope.tenant(), draft.clone());
         let updated = tx
             .mutate(move |sql| {

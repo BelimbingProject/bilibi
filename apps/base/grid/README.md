@@ -221,6 +221,14 @@ reference rows on success. No unit tests or test runner are involved.
 
 Use `validate_projection_on`, `validate_page_on` and `validate_summary_on` when a plan or owner already holds a transaction. They retain the caller's connection, use the same catalog and bounds, and restore local limits at a read savepoint; a refused SQL probe does not abort the surrounding plan. Standalone projections, page keys and summaries keep their own read-only repeatable-read transaction.
 
+`OversightQueries::builder_catalog_on` and `probe_on` validate saved oversight questions on the caller's transaction. The probe runs bounded child reads serially and returns whether the question is supported, with no child data in the result. Abort the caller's transaction if savepoint setup or recovery cannot be confirmed.
+
+The probe requires a second pool connection, even for a standalone check. It refuses immediately if the pool has no slot for the named `oversight audit` checkout. That connection writes only audit evidence. Committed child actions and the parent `tenancy.oversight.query` summary survive the caller's rollback.
+
+- The parent summary records each attempted child. Its deadline is the later of the total probe deadline and one child timeout from the start of the summary attempt. If the fan-out exhausts the total deadline, the probe reports the timeout after a successful summary.
+- If a child audit commit cannot be confirmed, the probe stops the fan-out, marks that child `outcome unknown` in the parent summary and counts only confirmed rows. The caller receives the uncertainty even when the summary commits.
+- If the audit connection is discarded before sending the parent summary's commit, one replacement checkout gives the summary another chance. The checkout is bounded by the configured pool wait, or the child timeout if the pool has no wait limit. If checkout fails, the probe logs the complete parent summary at error level and reports the checkout failure. If the parent commit itself is uncertain, the probe reports that uncertainty and does not attempt the summary again. A summary failure is reported alongside any earlier probe failure.
+
 ## Grouped summaries and row pages (G5)
 
 The report builder's reads, in `src/summary.rs`, with `project`'s rules: a fresh scoped catalog, a read-only repeatable-read transaction, owner sources with tenant and user bindings, the `EXPLAIN` bound of 100,000 and the 2 s and 500 ms timeouts.

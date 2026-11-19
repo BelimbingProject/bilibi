@@ -950,6 +950,10 @@ fn api_error(error: bilibi_base::agent_api::Error) -> Refusal {
             json!({"error":"rejected","reason":"record_changed"}),
         ),
         E::Backend(Error::Invalid) => self::error(StatusCode::UNPROCESSABLE_ENTITY, "rejected"),
+        E::Backend(Error::UnrecoveredTransaction(message)) => refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"transaction_unrecovered","message":message}),
+        ),
         E::Backend(other) => unavailable(&other),
     }
 }

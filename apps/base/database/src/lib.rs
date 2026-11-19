@@ -52,6 +52,8 @@ pub enum Error {
     },
     #[error("Internal error")]
     Internal,
+    #[error("{0}")]
+    UnrecoveredTransaction(String),
     /// The operation needs a fresh check of the human account holder
     /// (`base/step_up`): every channel maps it to its own answer (a browser
     /// to the confirm prompt, an agent to `step_up_required`).

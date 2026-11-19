@@ -448,6 +448,9 @@ fn failure(error: Error) -> Value {
             json!({"error": "rejected", "reason": "record_changed"})
         }
         Error::Backend(Backend::Invalid) => json!({"error": "rejected"}),
+        Error::Backend(Backend::UnrecoveredTransaction(message)) => {
+            json!({"error": "transaction_unrecovered", "message": message})
+        }
         Error::Backend(_) => json!({"error": "not_found"}),
         other => json!({"error": other.to_string()}),
     }
