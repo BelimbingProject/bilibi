@@ -44,6 +44,8 @@ or cache reach across requests.
 
 `Registry::call(&mut client, scope, key, input)` and `JobContracts::read(&mut client, execution, key, input)` reuse the caller's connection and open a transaction only when the handler requires one. `Registry::call_in(tx, scope, key, input)` runs the same checks and handler on an existing transaction, with the caller responsible for completion.
 
+Callers supplying a connection must discard it before reuse if a contract returns `Backend(UnrecoveredTransaction)`. Job preview bounds its rollback attempt before returning that error. The plan service discards its own connection on the same error.
+
 Agent discovery returns operations and guides in `result`. The HTTP and MCP doors also return `pages`, with links to matching pages and their contributed sections. These links use the same page access rules as the top bar. [Page sections](../menu/README.md#make-a-page-section-searchable).
 
 Search uses one fresh capability snapshot without per-candidate decision logs.

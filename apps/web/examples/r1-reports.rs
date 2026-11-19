@@ -89,6 +89,15 @@ impl Handler for PreviewWorker {
                         &json!({"id": 1, "version": 1}),
                     )
                     .await;
+                if matches!(
+                    refusal,
+                    Err(bilibi_agent_api::Error::Backend(
+                        bilibi_database::Error::UnrecoveredTransaction(_)
+                    ))
+                ) {
+                    drop(bilibi_database::Connection::take(connection));
+                    return Outcome::Cancel("unrecovered_transaction");
+                }
                 let after = count(client).await;
                 return if matches!(refusal, Err(bilibi_agent_api::Error::Forbidden))
                     && matches!(after, Ok(after) if after == before + 1)
@@ -111,8 +120,26 @@ impl Handler for PreviewWorker {
                     &json!({"subscription": args["subscription"], "version": 1, "paused": true}),
                 )
                 .await;
+            if matches!(
+                pause,
+                Err(bilibi_agent_api::Error::Backend(
+                    bilibi_database::Error::UnrecoveredTransaction(_)
+                ))
+            ) {
+                drop(bilibi_database::Connection::take(connection));
+                return Outcome::Cancel("unrecovered_transaction");
+            }
             let create = self.contracts.preview(client, execution, "base.reports.create",
                 &json!({"name": PREVIEW_NAME, "record_type": "reference_items", "kind": "rows", "definition": {"columns": ["name"]}})).await;
+            if matches!(
+                create,
+                Err(bilibi_agent_api::Error::Backend(
+                    bilibi_database::Error::UnrecoveredTransaction(_)
+                ))
+            ) {
+                drop(bilibi_database::Connection::take(connection));
+                return Outcome::Cancel("unrecovered_transaction");
+            }
             match (&pause, &create) {
                 (Ok(pause), Ok(create))
                     if pause["result"]["summary"]
@@ -2071,6 +2098,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {"tenant_id": 3, "outcome": "ok"}
                 ])),
         format!("{uncertain:?}, oversight evidence: {events:?}"),
+    );
+    let after = audit_watermark().await?;
+    let mut blocker = db
+        .get_detached("the walkthrough's blocked parent audit")
+        .await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&1_i64],
+    )
+    .await?;
+    commits_until_delay.store(2, Ordering::Relaxed);
+    let failed = tokio::time::timeout(
+        Duration::from_secs(5),
+        write(&boundary, &db, &manager, "reports.create", async |tx| {
+            reports.create(tx, &manager, &oversight_rows).await
+        }),
+    )
+    .await?;
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a blocked parent summary reports its failure alongside the uncertain child commit",
+        matches!(failed, Err(ReportError::Refused(ref message))
+            if message.contains(unknown_message) && message.contains("oversight summary audit timed out"))
+            && matches!(&events[..], [(2, first, _), (3, second, _)]
+                if first == "tenancy.oversight.read" && second == "tenancy.oversight.read"),
+        format!("{failed:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
+    let mut blocker = db
+        .get_detached("the walkthrough's refused first audit")
+        .await?;
+    let lock = blocker.transaction().await?;
+    lock.query_one(
+        "SELECT 1 FROM base_audit_chain_heads WHERE chain='actions' AND tenant_id=$1 FOR UPDATE",
+        &[&2_i64],
+    )
+    .await?;
+    app.db.resize(1);
+    app.db
+        .get()
+        .await?
+        .batch_execute("SET lock_timeout = '100ms'")
+        .await?;
+    let recovered = write(&boundary, &db, &manager, "reports.create", async |tx| {
+        reports.create(tx, &manager, &oversight_rows).await?;
+        Err::<(), _>(ReportError::NotFound)
+    })
+    .await;
+    app.db
+        .get()
+        .await?
+        .batch_execute("RESET lock_timeout")
+        .await?;
+    app.db.resize(pool_size);
+    lock.rollback().await?;
+    drop(blocker);
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a recovered audit lock refusal leaves later children eligible",
+        matches!(recovered, Err(ReportError::NotFound))
+            && matches!(&events[..], [(3, child, _), (1, event, parent)]
+            if child == "tenancy.oversight.read" && event == "tenancy.oversight.query"
+            && parent["row_count"] == 1 && parent["children"] == json!([
+                {"tenant_id": 2, "outcome": "refused"},
+                {"tenant_id": 3, "outcome": "ok"}
+            ])),
+        format!("{recovered:?}, oversight evidence: {events:?}"),
     );
     client
         .execute(

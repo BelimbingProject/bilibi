@@ -325,7 +325,23 @@ impl<'a> MutationTransaction<'a> {
             .push(Box::new(callback));
     }
     pub async fn rollback(self) -> Result<()> {
-        self.tx.rollback().await?;
+        if self.poisoned
+            || self
+                .continuation_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(250), self.tx.rollback())
+                    .await,
+                Ok(Ok(()))
+            ) {
+                return Err(Error::UnrecoveredTransaction(
+                    "Transaction rollback could not be confirmed.".into(),
+                ));
+            }
+        } else {
+            self.tx.rollback().await?;
+        }
         Ok(())
     }
     pub async fn commit(self) -> Result<()> {
@@ -334,7 +350,7 @@ impl<'a> MutationTransaction<'a> {
                 .continuation_failed
                 .load(std::sync::atomic::Ordering::Acquire)
         {
-            self.tx.rollback().await?;
+            self.rollback().await?;
             return Err(Error::Internal);
         }
         crate::timing::timed(self.capture.action(&self.tx, &self.context)).await?;

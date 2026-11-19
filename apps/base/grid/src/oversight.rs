@@ -595,11 +595,10 @@ impl OversightQueries {
                             rows += data.count();
                             Ok("ok")
                         }
-                        Err(
-                            error @ (QueryError::TooHeavy(_)
-                            | QueryError::Database(Error::Forbidden)),
-                        ) if audit.is_some() => Ok(child_refusal(&error)),
-                        Err(error) => Err(error),
+                        Err(AuditFailure::Query(error)) if audit.is_some() => {
+                            Ok(child_refusal(&error))
+                        }
+                        Err(error) => Err(error.into()),
                     }
                 }
                 Ok(Err(error)) => Ok(child_refusal(&error)),
@@ -624,43 +623,63 @@ impl OversightQueries {
         let now = Instant::now();
         let expired = now >= deadline;
         let payload = query_payload(&scope, root, rows, children.into_iter());
-        if audit.is_none() {
-            let wait = self.db.timeouts().wait.unwrap_or(child_budget);
-            let replacement = timeout(wait, self.db.get_detached("oversight audit"))
-                .await
-                .map_err(|_| QueryError::TooHeavy("oversight summary audit checkout timed out"))
-                .and_then(|result| result.map_err(|error| Error::from(error).into()));
-            match replacement {
-                Ok(client) => audit = Some(client),
-                Err(error) => {
-                    eprintln!(
-                        "{}",
-                        json!({
-                            "level": "error",
-                            "event": "tenancy.oversight.query",
-                            "failure": "replacement_checkout",
-                            "tenant_id": scope.parent().tenant(),
-                            "actor_id": scope.parent().user(),
-                            "trace_id": scope.parent().agent().map(|agent| agent.trace()),
-                            "error": error.to_string(),
-                            "payload": payload,
-                        })
-                    );
-                    return Err(error);
+        let summary = if audit.is_some() {
+            Some(
+                audit_before(
+                    &mut audit,
+                    deadline.max(Instant::now() + child_budget),
+                    SUMMARY_TIMEOUT,
+                    async |client| record_query(client, &scope, payload.clone()).await,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let summary = match summary {
+            None | Some(Err(AuditFailure::ClosedBeforeWrite)) => {
+                let wait = self.db.timeouts().wait.unwrap_or(child_budget);
+                let replacement = timeout(wait, self.db.get_detached("oversight audit"))
+                    .await
+                    .map_err(|_| QueryError::TooHeavy("oversight summary audit checkout timed out"))
+                    .and_then(|result| result.map_err(|error| Error::from(error).into()));
+                match replacement {
+                    Ok(client) => {
+                        audit = Some(client);
+                        audit_before(
+                            &mut audit,
+                            deadline.max(Instant::now() + child_budget),
+                            SUMMARY_TIMEOUT,
+                            async |client| record_query(client, &scope, payload).await,
+                        )
+                        .await
+                        .map_err(QueryError::from)
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            json!({
+                                "level": "error",
+                                "event": "tenancy.oversight.query",
+                                "failure": "replacement_checkout",
+                                "tenant_id": scope.parent().tenant(),
+                                "actor_id": scope.parent().user(),
+                                "trace_id": scope.parent().agent().map(|agent| agent.trace()),
+                                "error": error.to_string(),
+                                "payload": payload,
+                            })
+                        );
+                        Err(error)
+                    }
                 }
             }
-        }
-        let summary = audit_before(
-            &mut audit,
-            deadline.max(Instant::now() + child_budget),
-            SUMMARY_TIMEOUT,
-            async |client| record_query(client, &scope, payload).await,
-        )
-        .await;
+            Some(result) => result.map_err(QueryError::from),
+        };
         match (failure, summary) {
-            (Some(error @ (QueryError::AuditCommitUnknown | QueryError::Database(_))), _) => {
-                Err(error)
-            }
+            (Some(prior), Err(summary)) => Err(QueryError::AuditSummaryFailed {
+                prior: Box::new(prior),
+                summary: Box::new(summary),
+            }),
             (_, Err(error)) | (Some(error), Ok(())) => Err(error),
             (None, Ok(())) if expired => Err(QueryError::TooHeavy(TOTAL_TIMEOUT)),
             (None, Ok(())) => Ok(supported),
@@ -788,11 +807,16 @@ async fn at_probe_savepoint<T>(
     keep_success: bool,
     work: impl std::future::Future<Output = Result<T, QueryError>>,
 ) -> Result<Result<T, QueryError>, Error> {
-    timeout_at(deadline, tx.batch_execute("SAVEPOINT grid_oversight_probe"))
-        .await
-        .map_err(|_| Error::Internal)??;
+    if !matches!(
+        timeout_at(deadline, tx.batch_execute("SAVEPOINT grid_oversight_probe")).await,
+        Ok(Ok(()))
+    ) {
+        return Err(Error::UnrecoveredTransaction(
+            "Oversight savepoint setup could not be confirmed.".into(),
+        ));
+    }
     let result = work.await;
-    timeout_at(deadline.max(Instant::now() + CLEANUP_TIMEOUT), async {
+    let cleanup = timeout_at(deadline.max(Instant::now() + CLEANUP_TIMEOUT), async {
         if !keep_success || result.is_err() {
             tx.batch_execute("ROLLBACK TO SAVEPOINT grid_oversight_probe")
                 .await?;
@@ -800,8 +824,12 @@ async fn at_probe_savepoint<T>(
         tx.batch_execute("RELEASE SAVEPOINT grid_oversight_probe")
             .await
     })
-    .await
-    .map_err(|_| Error::Internal)??;
+    .await;
+    if !matches!(cleanup, Ok(Ok(()))) {
+        return Err(Error::UnrecoveredTransaction(
+            "Oversight savepoint recovery could not be confirmed.".into(),
+        ));
+    }
     Ok(result)
 }
 
@@ -816,20 +844,40 @@ fn sql_cancelled(error: &QueryError) -> bool {
         .is_some_and(|error| error.code() == &tokio_postgres::error::SqlState::QUERY_CANCELED)
 }
 
+enum AuditFailure {
+    ClosedBeforeWrite,
+    Query(QueryError),
+}
+
+impl From<AuditFailure> for QueryError {
+    fn from(error: AuditFailure) -> Self {
+        match error {
+            AuditFailure::ClosedBeforeWrite => {
+                Error::refused("The oversight audit connection closed before the write.").into()
+            }
+            AuditFailure::Query(error) => error,
+        }
+    }
+}
+
 async fn audit_before(
     audit: &mut Option<Connection>,
     deadline: Instant,
     time_error: &'static str,
     work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<(), QueryError>,
-) -> Result<(), QueryError> {
+) -> Result<(), AuditFailure> {
     if Instant::now() >= deadline {
-        return Err(QueryError::TooHeavy(time_error));
+        return Err(AuditFailure::Query(QueryError::TooHeavy(time_error)));
     }
-    let mut client = audit.take().ok_or(Error::Internal)?;
+    let mut client = audit.take().ok_or(AuditFailure::ClosedBeforeWrite)?;
+    if client.is_closed() {
+        drop(Connection::take(client));
+        return Err(AuditFailure::ClosedBeforeWrite);
+    }
     match audit_transaction(&mut client, deadline, time_error, work).await {
         Ok(result) => {
             *audit = Some(client);
-            result
+            result.map_err(AuditFailure::Query)
         }
         Err(error) => {
             drop(Connection::take(client));
@@ -843,16 +891,20 @@ async fn audit_transaction(
     deadline: Instant,
     time_error: &'static str,
     work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<(), QueryError>,
-) -> Result<Result<(), QueryError>, QueryError> {
-    let tx = timeout_at(deadline, client.transaction())
-        .await
-        .map_err(|_| QueryError::TooHeavy(time_error))??;
+) -> Result<Result<(), QueryError>, AuditFailure> {
+    let tx = match timeout_at(deadline, client.transaction()).await {
+        Ok(Ok(tx)) => tx,
+        Ok(Err(error)) if error.is_closed() => return Err(AuditFailure::ClosedBeforeWrite),
+        Ok(Err(error)) => return Err(AuditFailure::Query(error.into())),
+        Err(_) => return Err(AuditFailure::Query(QueryError::TooHeavy(time_error))),
+    };
     let result = budgeted(&tx, deadline, time_error, None, async {
         work(&tx).await?;
         tx.batch_execute("SET CONSTRAINTS ALL IMMEDIATE").await?;
         Ok(())
     })
-    .await?;
+    .await
+    .map_err(|error| AuditFailure::Query(Error::refused(error).into()))?;
     if result.is_ok() && Instant::now() < deadline {
         return match timeout_at(deadline, tx.commit()).await {
             Ok(Ok(())) => Ok(Ok(())),
@@ -866,7 +918,7 @@ async fn audit_transaction(
             {
                 Ok(Err(error.into()))
             }
-            _ => Err(QueryError::AuditCommitUnknown),
+            _ => Err(AuditFailure::Query(QueryError::AuditCommitUnknown)),
         };
     }
     timeout_at(
@@ -874,7 +926,8 @@ async fn audit_transaction(
         tx.rollback(),
     )
     .await
-    .map_err(|_| Error::Internal)??;
+    .map_err(|_| AuditFailure::Query(Error::Internal.into()))?
+    .map_err(|error| AuditFailure::Query(Error::from(error).into()))?;
     Ok(result.and(Err(QueryError::TooHeavy(time_error))))
 }
 

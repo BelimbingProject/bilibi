@@ -854,7 +854,16 @@ impl Registry {
         };
         let output = if handler.requires_transaction() {
             let mut client = db.get().await.map_err(bilibi_database::Error::from)?;
-            transactional_read(&mut **client, handler, scope, input).await?
+            let result = transactional_read(&mut **client, handler, scope, input).await;
+            if matches!(
+                result,
+                Err(Error::Backend(
+                    bilibi_database::Error::UnrecoveredTransaction(_)
+                ))
+            ) {
+                drop(bilibi_database::Connection::take(client));
+            }
+            result?
         } else {
             let client = Pooled {
                 db,
@@ -898,6 +907,15 @@ async fn finish_read_transaction<T>(
     tx: tokio_postgres::Transaction<'_>,
     output: &Result<T>,
 ) -> Result<()> {
+    if matches!(
+        output,
+        Err(Error::Backend(
+            bilibi_database::Error::UnrecoveredTransaction(_)
+        ))
+    ) {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(250), tx.rollback()).await;
+        return Ok(());
+    }
     if matches!(
         output,
         Ok(_)

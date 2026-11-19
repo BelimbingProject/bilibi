@@ -368,6 +368,10 @@ fn grid(error: QueryError) -> ReportError {
     match error {
         QueryError::ForbiddenRoot => ReportError::Unreadable,
         QueryError::AuditCommitUnknown => ReportError::Refused(error.to_string()),
+        error @ QueryError::AuditSummaryFailed { .. } => match Error::from(error) {
+            Error::Refused(message) => ReportError::Refused(message),
+            error => ReportError::Database(error),
+        },
         QueryError::Database(error) => ReportError::Database(error),
         QueryError::Catalog(error) => ReportError::Database(error.into()),
         QueryError::TooHeavy(why) => ReportError::TooHeavy(why),

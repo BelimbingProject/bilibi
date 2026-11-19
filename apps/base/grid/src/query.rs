@@ -22,6 +22,10 @@ pub enum QueryError {
     /// A read exceeded its execution time or planner cost bound.
     TooHeavy(&'static str),
     AuditCommitUnknown,
+    AuditSummaryFailed {
+        prior: Box<QueryError>,
+        summary: Box<QueryError>,
+    },
     ForbiddenRoot,
     Column(String, ColumnError),
     /// A filter, grouping, measure or sort the column's type does not take.
@@ -36,6 +40,9 @@ impl fmt::Display for QueryError {
             Self::AuditCommitUnknown => f.write_str(
                 "The oversight audit commit could not be confirmed. Check the audit trail before retrying.",
             ),
+            Self::AuditSummaryFailed { prior, summary } => {
+                write!(f, "{prior} The parent oversight summary failed: {summary}")
+            }
             Self::ForbiddenRoot => write!(f, "grid table unavailable"),
             Self::Column(spec, why) => write!(f, "grid column {spec}: {why}"),
             Self::Unsupported(spec, why) => write!(f, "grid column {spec}: {why}"),
@@ -74,6 +81,15 @@ impl From<QueryError> for Error {
             | QueryError::Unsupported(_, _) => Self::Invalid,
             QueryError::ForbiddenRoot => Self::Forbidden,
             QueryError::AuditCommitUnknown => Self::refused(error),
+            QueryError::AuditSummaryFailed { ref prior, .. }
+                if matches!(
+                    **prior,
+                    QueryError::Database(Self::UnrecoveredTransaction(_))
+                ) =>
+            {
+                Self::UnrecoveredTransaction(error.to_string())
+            }
+            QueryError::AuditSummaryFailed { .. } => Self::refused(error),
             QueryError::Catalog(error) => error.into(),
             QueryError::Database(error) => error,
         }
