@@ -15,7 +15,7 @@ read base.software.open {"propose":{"domains":["finance"]}}
 
 The answer includes Finance’s description, official repository, a release that accepts this server’s Bilibi version, whether the exact commits were recorded as tested together, and `local_steps`. A proposal highlights entries; it creates no job.
 
-**Ask your developer to add the modules you need, build Bilibi on their computer, and test it before installing it here.** Follow the entry’s repository and commit, keeping any other mounted Domains and Extensions:
+**Run the installation commands in a Bilibi code folder, test the build, then install its release here.** Follow the entry’s repository and commit, keeping any other mounted Domains and Extensions:
 
 ```sh
 ./bilibi add finance --kind domains --source <repository> --commit <recommended-commit>
@@ -31,10 +31,10 @@ cargo build --release --locked -p bilibi-web
 
 ## Compatibility
 
-Official modules (repositories under BelimbingProject) are checked against every Platform release before it ships, so they carry a plain `status` (`installed`, `not_installed`, `update_available`), `latest_version` and, only when no version fits, a `warning`. For modules from any other catalogue, **Compatibility** states whether a version supports the running Bilibi version and whether automated checks covered the exact code running on this server. The catalogue’s Platform requirement supplies version support; its CI record supplies the exact Platform and Domain commits checked.
+Official modules (repositories under BelimbingProject) are checked against every Platform release before it ships, so they carry a plain `status` (`installed`, `not_installed`, `update_available`), `latest_version` and, only when no version fits, a `warning`. Every entry also carries one short `compatibility` line: **Tested with Bilibi X** (automated checks covered the exact code running on this server), **Works with Bilibi X** (a version's requirement accepts the running version), **Needs Bilibi X** or **No published version supports Bilibi X**. The catalogue’s Platform requirement supplies version support; its CI record supplies the exact Platform and Domain commits checked.
 
 - Prefer the newest release recorded as tested with this running commit, then the newest release whose requirements accept this version.
-- Each entry includes `recommended_version`, a plain `compatibility` sentence, `official`, `local_steps`, and `next_step`. Each release includes `fits_running` and `tested_with_running`.
+- Each entry includes `recommended_version`, a one-line `compatibility` fact, `official`, `local_steps`, and `next_step`. Each release includes `fits_running` and `tested_with_running`.
 - No compatible release, no published release, or no exact tested pair is stated plainly. A development build or an unreleased commit does not inherit a released commit’s evidence.
 - Domains were tested individually; separate pairs do not prove a combined composition. Check your composition locally.
 - The published catalogue is read over HTTPS through `base/integration` as the requesting person and cached for five minutes, including an unavailable answer. **Software › Catalogue address** can point to an operator’s catalogue. An unavailable catalogue returns `available: false` and a reason; installed status and installation remain available.
@@ -83,9 +83,9 @@ Install takes an exact GitHub asset or an uploaded bundle from the accepted appl
 
 ## Page and ChatGPT card
 
-The **Software** page (`/system/software`) has one menu entry and two shared tabs: **Domains and Extensions** and **Releases**. Each catalogue item is one compact card with its description, installed version (when installed) and one **Status** line. Official modules show **Installed**, **Not installed** or **Update available: X**, plus a short warning such as **Needs Bilibi X** only when no listed version fits this server. Modules from an operator’s own catalogue are not kept in step with the Platform, so they keep a **Compatibility** line: **Yes · tested with Bilibi X**, **Yes, not tested yet** or **No · needs Bilibi X**. **Developer commands** folds away the repository, exact test evidence and local build commands.
+The **Software** page (`/system/software`) has one menu entry and two shared tabs: **Domains and extensions** and **Releases**. The first tab is one grid of installed and available modules, installed first, with search and **Status** and **Kind** filters kept in the address. Each row shows the name, kind, installed version, latest version (the one the commands install, marked **Update available** when it is newer than the installed one), the one-line compatibility fact and the description. A row with commands has an **Installation commands** icon that opens them in a dialog with a copy icon.
 
-Installed Domains and Extensions missing from the selected catalogue also have a card, labelled **Installed, not in the catalogue**. Each card shows the installed version or **Version unknown**. Extensions also show the recorded code review kind. These cards remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
+Installed Domains and Extensions missing from the selected catalogue also have a row, with **Not in the catalogue** as their compatibility and the installed version or **Unknown**. Extensions also show the recorded code review kind. These rows remain visible when the catalogue cannot be read. Each module appears once, matched by kind and ID.
 
 The page, ChatGPT card and agents read the same installed facts from the compiled composition. The `uncatalogued` field in `base.software.catalogue` (and so in `base.software.open`) lists installed modules missing from the catalogue; `base.software.status` stays free of catalogue reads.
 
