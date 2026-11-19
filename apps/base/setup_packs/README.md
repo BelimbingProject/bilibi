@@ -2,7 +2,7 @@
 
 **Use it for:** copying selected label overrides and active custom field definitions between tenants through agent operations.
 
-**Not for:** copying records, credentials, grants, approvals, record values, pick-list values, shared views or rules.
+**Not for:** copying records, credentials, grants, approvals, record values, pick-list values, shared views or watchers.
 
 ## Transfer setup
 
