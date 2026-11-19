@@ -131,7 +131,7 @@ inventory::submit! {
     Module {
         id: "base/custom_fields", layer: bilibi_module_registry::Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/grid", "base/labels", "base/tenancy", "base/authz", "base/settings", "base/picklists", "base/records", "base/ui", "base/audit", "base/agent_api", "base/menu"],
-        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql")), ("base-custom_fields-004-rule-conditions", include_str!("../migrations/004-rule-conditions.sql"))],
+        migrations: &[("base-custom_fields-001-definitions", include_str!("../migrations/001-definitions.sql")), ("base-custom_fields-002-more-types", include_str!("../migrations/002-more-types.sql")), ("base-custom_fields-003-structured-values", include_str!("../migrations/003-structured-values.sql")), ("base-custom_fields-004-watcher-conditions", include_str!("../migrations/004-watcher-conditions.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let fields = Arc::new(build(services)?);
@@ -160,7 +160,7 @@ inventory::submit! { Contribution::new(PAGE_WRITES, PAGES, provenance!(), &PageW
     contracts: &[
         ("create", "base.custom_fields.define"),
         ("save_field", "base.custom_fields.update"),
-        ("switch_rule_condition", "base.custom_fields.update"),
+        ("switch_watcher_condition", "base.custom_fields.update"),
         ("archive", "base.custom_fields.archive"),
         ("restore", "base.custom_fields.restore"),
     ],
@@ -204,5 +204,5 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
 
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.archive", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields", contract: "base.custom_fields.archive" }) }
 
-inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection { title: "Archived custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Rules already marked for review still need reapproval.", rows: archived_customisation_rows }) }
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection { title: "Archived custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Watchers already marked for review still need reapproval.", rows: archived_customisation_rows }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }

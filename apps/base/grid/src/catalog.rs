@@ -608,15 +608,15 @@ fn add_custom(
             sql,
             column.searchable && column.reference.is_none(),
             column.reference,
-            column.rule_condition,
+            column.watcher_condition,
         ));
     }
     let Some(table) = tables.get_mut(custom.table) else {
         return;
     };
-    for (field, label, sql, searchable, reference, rule_condition) in added {
+    for (field, label, sql, searchable, reference, watcher_condition) in added {
         if table.field(field.id).is_none() {
-            table.add_custom(field, label, sql, searchable, reference, rule_condition);
+            table.add_custom(field, label, sql, searchable, reference, watcher_condition);
         }
     }
 }

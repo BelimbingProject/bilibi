@@ -1,0 +1,3 @@
+id = "watcher_cases"
+layer = "domain"
+# Reference watcher trigger and action owner, mounted only by the watchers proof; never a Platform member.

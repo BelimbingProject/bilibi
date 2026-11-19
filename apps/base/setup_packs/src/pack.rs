@@ -60,7 +60,7 @@ pub(crate) struct Field {
     picklist: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
-    rule_condition: bool,
+    watcher_condition: bool,
 }
 
 impl From<Definition> for Field {
@@ -73,7 +73,7 @@ impl From<Definition> for Field {
             kind: field.kind.as_str().into(),
             picklist: field.picklist,
             target: field.target,
-            rule_condition: field.rule_condition,
+            watcher_condition: field.watcher_condition,
         }
     }
 }
@@ -88,7 +88,7 @@ impl From<&Field> for NewField {
             kind: field.kind.clone(),
             picklist: field.picklist.clone(),
             target: field.target.clone(),
-            rule_condition: field.rule_condition,
+            watcher_condition: field.watcher_condition,
         }
     }
 }

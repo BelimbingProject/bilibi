@@ -167,7 +167,7 @@ fn columns() -> Vec<BuiltinColumn> {
         BuiltinColumn::new("record_type", "Record"),
         BuiltinColumn::new("kind", "Type"),
         BuiltinColumn::new("help", "Help text"),
-        BuiltinColumn::new("rule_condition", "Rule condition"),
+        BuiltinColumn::new("watcher_condition", "Watcher condition"),
         BuiltinColumn::new("status", "Status"),
     ]
 }
@@ -266,8 +266,8 @@ impl Index {
                 if !text("target").is_empty() {
                     input["target"] = json!(text("target"));
                 }
-                if text("rule_condition") == "true" {
-                    input["rule_condition"] = json!(true);
+                if text("watcher_condition") == "true" {
+                    input["watcher_condition"] = json!(true);
                 }
                 let result = self
                     .pages
@@ -358,17 +358,17 @@ impl Index {
                 };
                 self.statuses.put(format!("{id}-{field}"), status);
             }
-            "switch_rule_condition" => {
+            "switch_watcher_condition" => {
                 let Some(current) = self.definition(get("key").unwrap_or_default()).cloned() else {
                     self.notice = "This field no longer exists; reload the page.".into();
                     return Ok(());
                 };
-                let on = !current.rule_condition;
+                let on = !current.watcher_condition;
                 let mut input = json!({
                     "record_type": current.record_type,
                     "key": current.key,
                     "label": current.label,
-                    "rule_condition": on,
+                    "watcher_condition": on,
                     "version": current.version,
                 });
                 if let Some(help) = &current.help {
@@ -381,7 +381,7 @@ impl Index {
                         &Self::call(
                             scope,
                             credential,
-                            "switch_rule_condition",
+                            "switch_watcher_condition",
                             "base.custom_fields.update",
                         ),
                         input,
@@ -390,11 +390,11 @@ impl Index {
                 self.flash = Some(match outcome(result)? {
                     Ok(()) if on => (
                         StatusKind::Success,
-                        format!("Rules can now use “{}” in their conditions.", current.label),
+                        format!("Watchers can now use “{}” in their conditions.", current.label),
                     ),
                     Ok(()) => (
                         StatusKind::Success,
-                        format!("Rules can no longer use “{}”. A rule that reads it stops until a new version is approved.", current.label),
+                        format!("Watchers can no longer use “{}”. A rule that reads it stops until a new version is approved.", current.label),
                     ),
                     Err(message) => (StatusKind::Error, message),
                 });
@@ -609,21 +609,21 @@ impl Index {
                     })?,
                 )
                 .slot(
-                    "rule_condition",
-                    if !definition.kind.rule_condition_kind() {
+                    "watcher_condition",
+                    if !definition.kind.watcher_condition_kind() {
                         Html::text("Not offered for this type")
                     } else if edits && !definition.archived() {
                         render(Toggle {
-                            on: definition.rule_condition,
-                            label: &format!("Rule condition: {}", definition.label),
+                            on: definition.watcher_condition,
+                            label: &format!("Watcher condition: {}", definition.label),
                             id: &format!("custom-field-{}-rule-condition", definition.id),
-                            event: "switch_rule_condition",
+                            event: "switch_watcher_condition",
                             name: "key",
                             value: &row_id(definition),
                             disabled: false,
                         })?
                     } else {
-                        Html::text(if definition.rule_condition {
+                        Html::text(if definition.watcher_condition {
                             "On"
                         } else {
                             "Off"
@@ -843,13 +843,13 @@ impl Index {
                 .errors(errors("help")),
         )?);
         body.push(&render(
-            Field::in_form("field", "rule_condition")
+            Field::in_form("field", "watcher_condition")
                 .id("custom-field-new-rule-condition")
-                .label("Rule condition")
+                .label("Watcher condition")
                 .kind(InputKind::Switch)
-                .value(if value("rule_condition") == "true" { "true" } else { "false" })
-                .hint("Lets rules decide on this field (text, number, date, pick-list and yes/no only). Rules never read a field you have not offered.")
-                .errors(errors("rule_condition")),
+                .value(if value("watcher_condition") == "true" { "true" } else { "false" })
+                .hint("Lets watchers decide on this field (text, number, date, pick-list and yes/no only). Watchers never read a field you have not offered.")
+                .errors(errors("watcher_condition")),
         )?);
         let mut actions = render(Button {
             event: "close_new",

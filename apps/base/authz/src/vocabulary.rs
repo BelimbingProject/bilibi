@@ -144,7 +144,7 @@ pub struct OptionalCapabilities {
     pub standing: bool,
 }
 /// Capabilities of the contributing module offered to `principal`, declared
-/// by a module the contributor depends on (Base Rules' `rules`): the owner of
+/// by a module the contributor depends on (Base Watchers' `watchers`): the owner of
 /// a key, not the principal's module, says that principal may hold it, so a
 /// Base principal can act on a Domain's records without Base naming the
 /// Domain. The keys join the principal's bounds; they grant nothing, a tenant

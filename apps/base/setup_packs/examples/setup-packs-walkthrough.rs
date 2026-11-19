@@ -121,7 +121,7 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     let field = json!({
         "record_type":"company", "key":"contract_stage", "label":"Contract stage",
         "help":"The stage of the contract", "kind":"choice",
-        "picklist":"core.document.status", "rule_condition":true
+        "picklist":"core.document.status", "watcher_condition":true
     });
     source
         .write(&[set_label(LABEL, "Vocabulary"), op(DEFINE, field.clone())])
@@ -215,7 +215,7 @@ async fn refusals(target: &Person<'_>, mut request: Value) -> Result<(), Failure
         unavailable["pack"]["custom_fields"][0],
         {
             "record_type":"unmounted", "key":"related_item", "label":"Related item",
-            "kind":"reference", "target":"unmounted_item", "rule_condition":false
+            "kind":"reference", "target":"unmounted_item", "watcher_condition":false
         }
     ]);
     unavailable["picklist_map"][0]["to"] = json!("unmounted.status");

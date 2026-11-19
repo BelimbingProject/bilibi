@@ -288,7 +288,7 @@ dependencies = [
  "bilibi-principal-directory",
  "bilibi-queue",
  "bilibi-records",
- "bilibi-rules",
+ "bilibi-watchers",
  "bilibi-schedule",
  "bilibi-settings",
  "bilibi-step-up",
@@ -609,7 +609,7 @@ dependencies = [
  "bilibi-records",
  "bilibi-reports",
  "bilibi-residents",
- "bilibi-rules",
+ "bilibi-watchers",
  "bilibi-schedule",
  "bilibi-search",
  "bilibi-security",
@@ -1639,7 +1639,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bilibi-rules"
+name = "bilibi-watchers"
 version = "0.2.1"
 dependencies = [
  "askama",
