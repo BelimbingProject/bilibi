@@ -1,7 +1,10 @@
 //! Read-only inventory of customisations contributed by their owners.
 use crate::{CustomisationRow, CustomisationSection, CUSTOMISATIONS};
 use askama::Template;
-use bilibi_agent_api::page::{Call, PageContracts};
+use bilibi_agent_api::{
+    page::{Call, PageContracts},
+    Error as ContractError,
+};
 use bilibi_database::{Db, Error, Result};
 use bilibi_principal_directory::{PrincipalKind, PrincipalRef};
 use bilibi_tenancy::Scope;
@@ -11,8 +14,8 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    params, BuiltinColumn, Card, Cell, ColumnsOutcome, ConfirmDialog, FlashMap, FlexRow, FlexTable,
-    Header, Html, IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind,
+    params, Alert, BuiltinColumn, Card, Cell, ConfirmDialog, FlashMap, FlexRow, FlexTable, Header,
+    Html, IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind,
     TableEmpty, NO_FLASH,
 };
 use serde_json::Value;
@@ -58,12 +61,13 @@ impl Item {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "components.html" as ui %}{% import "feedback.html" as feedback %}<div data-shared-ui>{% call feedback::flash_group(messages=flash) %}{% endcall %}{% call ui::page(id="customisations-page") %}{{ header }}{{ card }}{{ dialog }}{% endcall %}</div>"#,
+    source = r#"{% import "components.html" as ui %}{% import "feedback.html" as feedback %}<div data-shared-ui>{% call feedback::flash_group(messages=flash) %}{% endcall %}{% call ui::page(id="customisations-page") %}{{ header }}{{ restricted }}{{ card }}{{ dialog }}{% endcall %}</div>"#,
     ext = "html"
 )]
 struct View<'a> {
     flash: FlashMap<'a>,
     header: Html,
+    restricted: Html,
     card: Html,
     dialog: Html,
 }
@@ -78,7 +82,6 @@ struct Index {
     confirm: Option<Item>,
     flash: Option<(StatusKind, String)>,
     shown: usize,
-    rows_changed: bool,
 }
 impl Index {
     fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
@@ -99,7 +102,6 @@ impl Index {
             confirm: None,
             flash: None,
             shown: 0,
-            rows_changed: true,
         })
     }
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
@@ -112,10 +114,7 @@ impl Index {
             "grid" => {
                 let values = params::string_values_checked(value, params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
-                if matches!(self.columns.handle(&values), ColumnsOutcome::Sort(_)) {
-                    return Err(Error::Invalid);
-                }
-                self.rows_changed = false;
+                self.columns.handle(&values);
             }
             "request_undo" => {
                 let key = value["key"].as_str().ok_or(Error::Invalid)?;
@@ -140,21 +139,32 @@ impl Index {
                     event: item.section.event,
                     contract: item.section.undo,
                 };
-                let answer = self
-                    .pages
-                    .contracts
-                    .submit(&call, item.row.input.clone())
-                    .await;
-                self.flash = Some(match answer {
-                    Ok(_) => (StatusKind::Success, "The customisation was changed.".into()),
-                    Err(bilibi_agent_api::Error::Backend(
-                        e @ (Error::Unauthorized | Error::StepUpRequired { .. }),
-                    )) => return Err(e),
-                    Err(_) => {
-                        self.confirm = Some(item);
-                        (StatusKind::Error, "The change could not be completed. Close the dialog, refresh and try again.".into())
+                let message = match self.pages.contracts.submit(&call, item.row.input).await {
+                    Ok(_) => {
+                        self.flash =
+                            Some((StatusKind::Success, "The customisation was changed.".into()));
+                        return Ok(());
                     }
-                });
+                    Err(ContractError::InvalidInput(fields)) => fields
+                        .into_values()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(". "),
+                    Err(ContractError::Backend(Error::Refused(message))) => message,
+                    Err(ContractError::Backend(Error::Conflict)) => {
+                        "The customisation changed. Review the updated row before trying again."
+                            .into()
+                    }
+                    Err(ContractError::NotFound | ContractError::Backend(Error::NotFound)) => {
+                        "The customisation is no longer available.".into()
+                    }
+                    Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
+                        "You do not have permission to make this change.".into()
+                    }
+                    Err(ContractError::Backend(error)) => return Err(error),
+                    Err(_) => return Err(Error::Internal),
+                };
+                self.flash = Some((StatusKind::Error, message));
             }
             "clear-flash" => self.flash = None,
             _ => return Err(Error::Invalid),
@@ -164,20 +174,34 @@ impl Index {
     async fn render(&mut self, scope: &Scope) -> Result<String> {
         let mut items = Vec::new();
         let mut reads = HashMap::new();
+        let mut restricted = Vec::new();
         for section in &self.pages.sections {
             let key = (section.read, (section.read_input)());
             let value = match reads.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let (read, input) = entry.key();
-                    let value = self
-                        .pages
-                        .contracts
-                        .read(scope, read, input)
-                        .await
-                        .map_err(|_| Error::Forbidden)?;
+                    let value = match self.pages.contracts.read(scope, read, input).await {
+                        Ok(value) => Some(value),
+                        Err(
+                            ContractError::Forbidden | ContractError::Backend(Error::Forbidden),
+                        ) => None,
+                        Err(ContractError::Backend(error)) => return Err(error),
+                        Err(_) => return Err(Error::Internal),
+                    };
                     entry.insert(value)
                 }
+            };
+            let Some(value) = value else {
+                restricted.push(section.title);
+                if self
+                    .confirm
+                    .as_ref()
+                    .is_some_and(|item| std::ptr::eq(item.section, *section))
+                {
+                    self.confirm = None;
+                }
+                continue;
             };
             items.extend(
                 (section.rows)(&value["result"])
@@ -189,9 +213,6 @@ impl Index {
         let page = self.list.paginate(&self.items);
         let counts = page.counts;
         self.shown = page.entries.len();
-        if self.rows_changed {
-            self.columns.load(page.entries, Item::key);
-        }
         let client = self.pages.db.get().await?;
         let locale = self
             .pages
@@ -298,9 +319,11 @@ impl Index {
         table.actions = true;
         table.framed = false;
         if counts.total_entries == 0 {
-            table.empty = Some(TableEmpty::Content(Html::text(
-                "No customisations yet. Ask your AI assistant to make a change.",
-            )));
+            table.empty = Some(TableEmpty::Content(Html::text(if restricted.is_empty() {
+                "No customisations yet. Ask your AI assistant to make a change."
+            } else {
+                "No customisations to show."
+            })));
         }
         let mut body = render(table)?;
         body.push(&render(Pagination::new(
@@ -336,8 +359,22 @@ impl Index {
                 StatusKind::Info => flash.info = message,
             }
         }
+        let restricted = if restricted.is_empty() {
+            Html::EMPTY
+        } else {
+            render(Alert {
+                id: "customisations-restricted",
+                kind: StatusKind::Warning,
+                body: Html::text(&format!(
+                    "You do not have access to these sections: {}.",
+                    restricted.join(", ")
+                )),
+                ..Alert::default()
+            })?
+        };
         View {
             flash,
+            restricted,
             header: render(Header {
                 title: Html::text("Customisations"),
                 subtitle: "Review and undo changes made for this tenant.",
@@ -353,7 +390,6 @@ impl Index {
 impl LiveState<Scope, Error> for Index {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
-            self.rows_changed = true;
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {

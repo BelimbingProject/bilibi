@@ -4,12 +4,24 @@ use bilibi_authz::grants::Grants;
 use bilibi_base::session::session_id;
 use bilibi_database::pool;
 use bilibi_tenancy::{Authentication, Scope};
-use bilibi_ui::page::{PageRequest, PageService};
+use bilibi_ui::page::{LiveInput, LiveRequest, PageRequest, PageService};
 use serde_json::json;
 use std::collections::HashMap;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+
+fn request<'a>(
+    scope: &'a Scope,
+    credential: &'a str,
+    input: LiveInput<'a>,
+) -> LiveRequest<'a, Scope> {
+    LiveRequest {
+        scope,
+        credential,
+        input,
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -97,6 +109,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && !b.contains("Tenant one word")
             && !b.contains("Tenant one field")
     );
+    {
+        db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,4,'base.custom-fields.view',false)", &[]).await?;
+        let restricted = pages.0.render(show(&one)).await?.html;
+        assert!(restricted.contains("Tenant one word"));
+        assert!(restricted.contains("You do not have access to these sections"));
+        assert!(
+            restricted.contains("Archived custom fields")
+                && !restricted.contains("Tenant one field")
+        );
+        db.get().await?.execute("DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=4 AND capability='base.custom-fields.view'", &[]).await?;
+    }
+    let mut live = pages
+        .0
+        .mount(show(&one))
+        .await?
+        .ok_or("missing live page")?;
+    live.update(request(&one, &token1, LiveInput::Refresh))
+        .await?;
+    live.update(request(
+        &one,
+        &token1,
+        LiveInput::Event(&json!({"type":"grid","op":"remove","spec":"actor"})),
+    ))
+    .await?;
+    live.update(request(
+        &one,
+        &token1,
+        LiveInput::Event(&json!({"type":"grid","op":"suggest","add":"Changed by"})),
+    ))
+    .await?;
+    let refreshed = live
+        .update(request(&one, &token1, LiveInput::Refresh))
+        .await?
+        .html;
+    assert!(refreshed.contains("customisations-table-suggest-actor"));
     let labels = contracts.read(&one, "base.labels.list", &json!({})).await?;
     let label = labels["result"]
         .as_array()
@@ -125,19 +172,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .find(|row| row["key"] == "walkthrough_field")
         .ok_or("missing field")?;
-    contracts
-        .submit(
-            &Call {
-                scope: &one,
-                credential: &token1,
-                service: "base/labels.customisations",
-                event: "customisation.fields",
-                contract: "base.custom_fields.archive",
-            },
-            json!({"record_type":"company", "key":"walkthrough_field", "version":field["version"]}),
-        )
-        .await?;
-    let after = pages.0.render(show(&one)).await?.html;
+    let archive = json!({"type":"request_undo", "key":format!("custom_field:{}@{}", field["id"], field["version"])});
+    let confirmation = live
+        .update(request(&one, &token1, LiveInput::Event(&archive)))
+        .await?
+        .html;
+    assert!(confirmation.contains("Approved rules that use this field may stop running"));
+    let after = live
+        .update(request(
+            &one,
+            &token1,
+            LiveInput::Event(&json!({"type":"customisation.fields"})),
+        ))
+        .await?
+        .html;
     assert!(
         !after.contains("Tenant one word")
             && after.contains("Archived custom fields")
@@ -145,8 +193,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let other = pages.0.render(show(&two)).await?.html;
     assert!(other.contains("Tenant two word"));
+    {
+        let client = db.get().await?;
+        client.execute("INSERT INTO base_settings(key, tenant_id, scope_type, scope_id, value, is_encrypted) VALUES('base.custom_fields.max_fields',1,'tenant',1,'1',false)", &[]).await?;
+    }
+    contracts.submit(&Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "create", contract: "base.custom_fields.define" }, json!({"record_type":"company", "key":"active_field", "label":"Active field", "kind":"text"})).await?;
+    let fields = contracts
+        .read(
+            &one,
+            "base.custom_fields.list",
+            &json!({"include_archived":true}),
+        )
+        .await?;
+    let archived = fields["result"]
+        .as_array()
+        .ok_or("missing fields")?
+        .iter()
+        .find(|row| row["key"] == "walkthrough_field")
+        .ok_or("missing archived field")?;
+    let restore = json!({"type":"request_undo", "key":format!("custom_field:{}@{}", archived["id"], archived["version"])});
+    live.update(request(&one, &token1, LiveInput::Refresh))
+        .await?;
+    let confirmation = live
+        .update(request(&one, &token1, LiveInput::Event(&restore)))
+        .await?
+        .html;
+    assert!(confirmation.contains("Rules already marked for review still need reapproval"));
+    let refused = live
+        .update(request(
+            &one,
+            &token1,
+            LiveInput::Event(&json!({"type":"customisation.fields_restore"})),
+        ))
+        .await?
+        .html;
+    assert!(
+        refused.contains("archive one first") && !refused.contains("customisations-confirm-title")
+    );
     println!(
-        "PASS: tenant isolation, owner undo operations, audit-backed inventory and archived field visibility"
+        "PASS: tenant isolation, owner undo operations, section denials, picker refresh, rule consequences and owner refusals"
     );
     Ok(())
 }

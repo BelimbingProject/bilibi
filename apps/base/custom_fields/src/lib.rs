@@ -199,10 +199,10 @@ fn archived_customisation_rows(value: &serde_json::Value) -> Vec<bilibi_labels::
     customisation_rows_for(value, true)
 }
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.customisations", provenance!(), &bilibi_labels::CustomisationSection {
-    title: "Custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "People stop seeing this field; records keep their saved values.", rows: customisation_rows,
+    title: "Custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved rules that use this field may stop running and require review and reapproval.", rows: customisation_rows,
 }) }
 
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.archive", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields", contract: "base.custom_fields.archive" }) }
 
-inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection { title: "Archived custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again.", rows: archived_customisation_rows }) }
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection { title: "Archived custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Rules already marked for review still need reapproval.", rows: archived_customisation_rows }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }
