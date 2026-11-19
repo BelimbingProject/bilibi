@@ -329,19 +329,7 @@ Before preparing a release with customer code, follow the [installation policy](
 
 ### Focused component builds
 
-Direct Platform and component clones remain supported for focused contributions. A local Bilibi checkout and an optional coding agent are the operator’s build tools. Find a Domain or Extension in Software or through MCP, read which release accepts this server and which commits CI recorded as tested together, then follow its `local_steps` in that checkout. For example:
-
-```sh
-./bilibi add finance --kind domains --source https://github.com/BelimbingProject/bilibi-dom-finance --commit <recommended-commit>
-python3 scripts/discover-modules.py
-./scripts/build-assets.sh --check
-cargo metadata --format-version 1 > /dev/null
-python3 scripts/discover-modules.py --pin
-cargo build --release --locked -p bilibi-web
-./target/release/bilibi-web status
-```
-
-Keep other mounted Domains and Extensions. For an existing clone at another commit, `add` changes nothing and prints the fetch and checkout steps to run once your work is saved. Run the composition locally against its own database and check its pages in the browser. Build for the server’s operating system, processor and system library version.
+Direct Platform and component clones remain supported for focused contributions. Follow the [Software installation commands](../apps/base/software/README.md#add-a-domain) to mount and check a recommended release in your local checkout. Build for the server’s operating system, processor and system library version.
 
 Do not turn this local binary into a server archive. Create an application with `./bilibi new <name>` and use its release workflow; see [application workspaces](application-workspaces.md). That workflow publishes the complete archive, its checksums and GitHub build provenance. Install the same published asset on Staging and Production with separate reviews and fresh 2FA. Backup, automatic switch-back, audit and Undo use the same path for a GitHub download and an uploaded copy of that verified asset.
 

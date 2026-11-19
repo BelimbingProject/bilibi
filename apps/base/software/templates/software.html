@@ -8,7 +8,7 @@
 {{ banner|safe }}
 {{ tabs|safe }}
 {#- A list keeps the shared gaps between toolbar, table and pager; the cards of Releases sit in a grid. -#}
-{% if list %}{{ content|safe }}{% else %}<div class="grid min-w-0 grid-cols-1 gap-4">
+{% if list %}{{ content }}{% else %}<div class="grid min-w-0 grid-cols-1 gap-4">
 {{ content|safe }}
 </div>{% endif %}
 {{ dialog|safe }}
