@@ -2,9 +2,13 @@
 //! own word for a menu item, a record type or a field, kept against the stable ID.
 //! Data only (ADR 28): it never renames an operation key, route or
 //! permission key. Contract: `README.md`.
+mod customisations;
+mod customisations_web;
 mod operations;
 mod store;
 mod web;
+
+pub use customisations::{CustomisationRow, CustomisationSection, SECTIONS};
 
 pub use store::{
     field_labels, subject_id, Edit, FieldLabels, Kind, LabelSet, Labels, Plan, Stored, Subject,
@@ -18,6 +22,8 @@ use bilibi_module_registry::{
 };
 use std::sync::Arc;
 
+pub(crate) const CUSTOMISATIONS: &str = "base/labels.customisations";
+const CUSTOMISATIONS_VIEW: &str = "base.labels.customisations.view";
 pub const SERVICE: &str = "base/labels.labels";
 /// The operator page.
 pub(crate) const PAGES: &str = "base/labels.pages";
@@ -39,7 +45,7 @@ macro_rules! provenance {
 inventory::submit! { Contribution::new(VOCABULARY, "base/labels", provenance!(), &VocabularyContribution {
     domains: &["base"],
     verbs: &[],
-    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(MANAGE)],
+    capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(CUSTOMISATIONS_VIEW)],
     roles: &[],
     system_principals: &[],
 }) }
@@ -47,7 +53,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/labels", provenance!(),
 inventory::submit! {
     Module {
         id: "base/labels", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/ui", "base/audit", "base/agent_api", "base/menu"],
+        dependencies: &["base/module_registry", "base/database", "base/datetime", "base/locale", "base/principal_directory", "base/tenancy", "base/authz", "base/ui", "base/audit", "base/agent_api", "base/menu"],
         migrations: &[("base-labels-001-labels", include_str!("../migrations/001-labels.sql")), ("base-labels-002-field-labels", include_str!("../migrations/002-field-labels.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
@@ -60,6 +66,15 @@ inventory::submit! {
                 ));
                 operations::bind(labels.clone())?;
                 Ok(labels)
+            } },
+            Service { id: CUSTOMISATIONS, factory: |services| {
+                let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
+                let sections = catalog.entries::<CustomisationSection>(SECTIONS)?.iter().map(|entry| entry.get::<CustomisationSection>()).collect::<Result<Vec<_>, _>>()?;
+                Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(customisations_web::Pages {
+                    db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
+                    display: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, directory: services.get("base/principal_directory.directory")?,
+                    registry: services.get("base/agent_api.registry")?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, sections,
+                }))))
             } },
             Service { id: PAGES, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages {
                 labels: services.get(SERVICE)?,
@@ -87,4 +102,33 @@ bilibi_menu::contribute!(
         .under("admin")
         .requires(bilibi_menu::Requirement::Capability(VIEW))
         .order(65)
+);
+
+inventory::submit! { bilibi_module_registry::Consumer::new::<CustomisationSection>(SECTIONS, "base/labels", |entries| {
+    for entry in entries {
+        let section = entry.get::<CustomisationSection>()?;
+        if section.title.is_empty() || section.read.is_empty() || section.undo.is_empty() || !section.event.starts_with("customisation.") {
+            return Err(bilibi_module_registry::RegistryError::Contribution(format!("invalid customisation section {}", entry.id)));
+        }
+    }
+    Ok(())
+}) }
+
+inventory::submit! { Contribution::new(ROUTES, "base/labels.customisations", provenance!(), &Route { company_scope: bilibi_module_registry::contributions::CompanyScope::Tenant,
+    method: Method::Get, path: "/admin/customisations", service: CUSTOMISATIONS, operation: "index", access: Access::Capability(CUSTOMISATIONS_VIEW), framed: true,
+}) }
+inventory::submit! { Contribution::new(PAGE_WRITES, CUSTOMISATIONS, provenance!(), &PageWrites { service: CUSTOMISATIONS, contracts: &[], pending: Pending::None }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_FAMILIES, CUSTOMISATIONS, provenance!(), &bilibi_agent_api::page::PageFamily { service: CUSTOMISATIONS, event_prefix: "customisation." }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.labels.clear", provenance!(), &bilibi_agent_api::page::PageBinding { service: CUSTOMISATIONS, event: "customisation.labels", contract: "base.labels.clear" }) }
+bilibi_menu::contribute!(
+    "base/labels",
+    bilibi_menu::MenuItem::page(
+        "admin.customisations",
+        "Customisations",
+        "/admin/customisations"
+    )
+    .icon("settings")
+    .under("admin")
+    .requires(bilibi_menu::Requirement::Capability(CUSTOMISATIONS_VIEW))
+    .order(64)
 );

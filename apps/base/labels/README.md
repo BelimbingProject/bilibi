@@ -30,3 +30,9 @@ For column and record-field rendering, follow [Grid's label integration](../grid
 A label is 1 to 60 characters of plain text; Askama escapes it wherever it is shown. A subject that no module declares is refused, and every change is audited as kind `label`.
 
 Editors carry the `identity:version` token returned by `base.labels.list` (`0:0` for an unset override). Changed or replaced overrides and concurrent first writes are refused rather than overwritten.
+
+## Customisations page
+
+Administration › Customisations (`/admin/customisations`, `base.labels.customisations.view`) lists the installed owners' tenant customisations. It shows their latest audit attribution and lets an administrator confirm the owner's restore or undo operation; create and edit remain with the owner.
+
+A module contributes `CustomisationSection` under `SECTIONS` with its read operation, input, row projection, reviewed undo operation and page event. Each row supplies a stable audit kind and record ID plus the versioned input for that operation. The page retains this input server-side through confirmation, calls the operation through `PageContracts`, and re-reads the tenant's sections. The owner also contributes a `PAGE_BINDINGS` entry for its event and write contract to the `base/labels.customisations` page family. Reads and writes keep the owner's normal capability checks. See Labels and Custom Fields for complete contributions; never read another owner's tables from the page.
