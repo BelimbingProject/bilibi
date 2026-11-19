@@ -312,6 +312,7 @@ async fn delay_commit_reply(
     mut client: TcpStream,
     mut server: TcpStream,
     commits_until_delay: &AtomicUsize,
+    seals_until_disconnect: &AtomicUsize,
 ) -> io::Result<()> {
     client.set_nodelay(true)?;
     server.set_nodelay(true)?;
@@ -325,6 +326,16 @@ async fn delay_commit_reply(
             let size = len.checked_sub(4).ok_or(io::ErrorKind::InvalidData)?;
             payload.resize(size as usize, 0);
             database_replies.read_exact(&mut payload).await?;
+            if tag == b'C'
+                && payload == b"SET CONSTRAINTS\0"
+                && seals_until_disconnect.try_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |count| count.checked_sub(1),
+                ) == Ok(1)
+            {
+                return Ok(());
+            }
             if tag == b'C'
                 && payload == b"COMMIT\0"
                 && commits_until_delay.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
@@ -347,6 +358,7 @@ async fn delay_commit_reply(
 async fn delayed_commit_url(
     database_url: &str,
     commits_until_delay: Arc<AtomicUsize>,
+    seals_until_disconnect: Arc<AtomicUsize>,
 ) -> io::Result<url::Url> {
     let mut url = url::Url::parse(database_url).map_err(io::Error::other)?;
     let host = url
@@ -363,9 +375,16 @@ async fn delayed_commit_url(
         while let Ok((client, _)) = listener.accept().await {
             let host = host.clone();
             let commits_until_delay = commits_until_delay.clone();
+            let seals_until_disconnect = seals_until_disconnect.clone();
             tokio::spawn(async move {
                 if let Ok(server) = TcpStream::connect((host.as_str(), port)).await {
-                    let _ = delay_commit_reply(client, server, &commits_until_delay).await;
+                    let _ = delay_commit_reply(
+                        client,
+                        server,
+                        &commits_until_delay,
+                        &seals_until_disconnect,
+                    )
+                    .await;
                 }
             });
         }
@@ -384,7 +403,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before the first catalog read, which describes each source once.
     db.get().await?.batch_execute("CREATE OR REPLACE FUNCTION r1_heavy() RETURNS SETOF int LANGUAGE plpgsql STABLE ROWS 20000000 AS 'BEGIN RETURN NEXT 1; END'; CREATE OR REPLACE FUNCTION r1_slow() RETURNS int LANGUAGE plpgsql STABLE AS 'BEGIN PERFORM pg_sleep(2.5); RETURN 1; END'").await?;
     let commits_until_delay = Arc::new(AtomicUsize::new(0));
-    let reports_url = delayed_commit_url(&database_url, commits_until_delay.clone()).await?;
+    let seals_until_disconnect = Arc::new(AtomicUsize::new(0));
+    let reports_url = delayed_commit_url(
+        &database_url,
+        commits_until_delay.clone(),
+        seals_until_disconnect.clone(),
+    )
+    .await?;
     let app = bilibi_web::App::new(pool(reports_url.as_str())?, "http://localhost:35567")?;
     let auth = app
         .services
@@ -2166,6 +2191,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if child == "tenancy.oversight.read" && event == "tenancy.oversight.query"
             && parent["row_count"] == 1 && parent["children"] == json!([
                 {"tenant_id": 2, "outcome": "refused"},
+                {"tenant_id": 3, "outcome": "ok"}
+            ])),
+        format!("{recovered:?}, oversight evidence: {events:?}"),
+    );
+    let after = audit_watermark().await?;
+    seals_until_disconnect.store(3, Ordering::Relaxed);
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(4),
+        reports.check(&manager, &oversight_rows),
+    )
+    .await?;
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a disconnect while sealing the parent summary before COMMIT permits one replacement write",
+        seals_until_disconnect.load(Ordering::Relaxed) == 0
+            && recovered.is_ok()
+            && matches!(&events[..], [(2, first, _), (3, second, _), (1, event, parent)]
+            if first == "tenancy.oversight.read" && second == "tenancy.oversight.read"
+            && event == "tenancy.oversight.query" && parent["row_count"] == 2
+            && parent["children"] == json!([
+                {"tenant_id": 2, "outcome": "ok"},
                 {"tenant_id": 3, "outcome": "ok"}
             ])),
         format!("{recovered:?}, oversight evidence: {events:?}"),

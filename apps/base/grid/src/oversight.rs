@@ -595,10 +595,8 @@ impl OversightQueries {
                             rows += data.count();
                             Ok("ok")
                         }
-                        Err(AuditFailure::Query(error)) if audit.is_some() => {
-                            Ok(child_refusal(&error))
-                        }
-                        Err(error) => Err(error.into()),
+                        Err(error) if audit.is_some() => Ok(child_refusal(&error)),
+                        Err(error) => Err(error),
                     }
                 }
                 Ok(Err(error)) => Ok(child_refusal(&error)),
@@ -637,7 +635,9 @@ impl OversightQueries {
             None
         };
         let summary = match summary {
-            None | Some(Err(AuditFailure::ClosedBeforeWrite)) => {
+            Some(result @ Err(QueryError::AuditCommitUnknown)) => result,
+            Some(result) if audit.is_some() => result,
+            _ => {
                 let wait = self.db.timeouts().wait.unwrap_or(child_budget);
                 let replacement = timeout(wait, self.db.get_detached("oversight audit"))
                     .await
@@ -653,7 +653,6 @@ impl OversightQueries {
                             async |client| record_query(client, &scope, payload).await,
                         )
                         .await
-                        .map_err(QueryError::from)
                     }
                     Err(error) => {
                         eprintln!(
@@ -673,7 +672,6 @@ impl OversightQueries {
                     }
                 }
             }
-            Some(result) => result.map_err(QueryError::from),
         };
         match (failure, summary) {
             (Some(prior), Err(summary)) => Err(QueryError::AuditSummaryFailed {
@@ -844,40 +842,24 @@ fn sql_cancelled(error: &QueryError) -> bool {
         .is_some_and(|error| error.code() == &tokio_postgres::error::SqlState::QUERY_CANCELED)
 }
 
-enum AuditFailure {
-    ClosedBeforeWrite,
-    Query(QueryError),
-}
-
-impl From<AuditFailure> for QueryError {
-    fn from(error: AuditFailure) -> Self {
-        match error {
-            AuditFailure::ClosedBeforeWrite => {
-                Error::refused("The oversight audit connection closed before the write.").into()
-            }
-            AuditFailure::Query(error) => error,
-        }
-    }
-}
-
 async fn audit_before(
     audit: &mut Option<Connection>,
     deadline: Instant,
     time_error: &'static str,
     work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<(), QueryError>,
-) -> Result<(), AuditFailure> {
+) -> Result<(), QueryError> {
     if Instant::now() >= deadline {
-        return Err(AuditFailure::Query(QueryError::TooHeavy(time_error)));
+        return Err(QueryError::TooHeavy(time_error));
     }
-    let mut client = audit.take().ok_or(AuditFailure::ClosedBeforeWrite)?;
+    let mut client = audit.take().ok_or(Error::Internal)?;
     if client.is_closed() {
         drop(Connection::take(client));
-        return Err(AuditFailure::ClosedBeforeWrite);
+        return Err(Error::refused("The oversight audit connection is closed.").into());
     }
     match audit_transaction(&mut client, deadline, time_error, work).await {
         Ok(result) => {
             *audit = Some(client);
-            result.map_err(AuditFailure::Query)
+            result
         }
         Err(error) => {
             drop(Connection::take(client));
@@ -891,20 +873,17 @@ async fn audit_transaction(
     deadline: Instant,
     time_error: &'static str,
     work: impl for<'a, 't> AsyncFnOnce(&'a tokio_postgres::Transaction<'t>) -> Result<(), QueryError>,
-) -> Result<Result<(), QueryError>, AuditFailure> {
-    let tx = match timeout_at(deadline, client.transaction()).await {
-        Ok(Ok(tx)) => tx,
-        Ok(Err(error)) if error.is_closed() => return Err(AuditFailure::ClosedBeforeWrite),
-        Ok(Err(error)) => return Err(AuditFailure::Query(error.into())),
-        Err(_) => return Err(AuditFailure::Query(QueryError::TooHeavy(time_error))),
-    };
+) -> Result<Result<(), QueryError>, QueryError> {
+    let tx = timeout_at(deadline, client.transaction())
+        .await
+        .map_err(|_| QueryError::TooHeavy(time_error))??;
     let result = budgeted(&tx, deadline, time_error, None, async {
         work(&tx).await?;
         tx.batch_execute("SET CONSTRAINTS ALL IMMEDIATE").await?;
         Ok(())
     })
     .await
-    .map_err(|error| AuditFailure::Query(Error::refused(error).into()))?;
+    .map_err(Error::refused)?;
     if result.is_ok() && Instant::now() < deadline {
         return match timeout_at(deadline, tx.commit()).await {
             Ok(Ok(())) => Ok(Ok(())),
@@ -918,7 +897,7 @@ async fn audit_transaction(
             {
                 Ok(Err(error.into()))
             }
-            _ => Err(AuditFailure::Query(QueryError::AuditCommitUnknown)),
+            _ => Err(QueryError::AuditCommitUnknown),
         };
     }
     timeout_at(
@@ -926,8 +905,7 @@ async fn audit_transaction(
         tx.rollback(),
     )
     .await
-    .map_err(|_| AuditFailure::Query(Error::Internal.into()))?
-    .map_err(|error| AuditFailure::Query(Error::from(error).into()))?;
+    .map_err(|_| Error::Internal)??;
     Ok(result.and(Err(QueryError::TooHeavy(time_error))))
 }
 
