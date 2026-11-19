@@ -23,6 +23,7 @@ navigation in a template.
   container with no visible child is hidden, so unported sections never render.
 - `Requirement::AnyOf` opens a combined page only. Hiding a link is presentation:
   the route and each operation must enforce their own capability.
+- Tenant sibling order is owned by [`base/menu_order`](../menu_order/README.md). Apply it to the permission-filtered staff tree when rendering; do not change the catalog's product order.
 - A tenant's own words for items are not Menu's: `base/labels` keeps them against the item ID and the shell applies them to the label it draws (`LabelSet::menu`). Menu itself still holds only the module's word; a caller that shows an item's label for a reader (not diagnostics) asks the set too.
 - `base/menu` contributes the structural roots (`core`, `admin`, `admin.system.*`, and the
   Domain roots). Attach to them; do not redefine them.

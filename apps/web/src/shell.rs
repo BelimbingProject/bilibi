@@ -197,7 +197,12 @@ async fn context<'a>(
         Err(Error::Forbidden) => false,
         Err(error) => return Err(error),
     };
-    let tree = crate::page_search::visible_menu(app, &capabilities, owner);
+    let mut tree = crate::page_search::visible_menu(app, &capabilities, owner);
+    app.services
+        .get::<bilibi_base::menu_order::MenuOrder>(bilibi_base::menu_order::SERVICE)?
+        .orders(&**client, scope)
+        .await?
+        .apply(&mut tree);
     let active = active_item(&tree, path);
     // The tenant's own words for menu items (ADR 28); keys and routes stay.
     let labels = app

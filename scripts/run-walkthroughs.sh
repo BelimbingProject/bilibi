@@ -214,6 +214,7 @@ WALKTHROUGHS=(
   'web|grid-projection|apps/web|g2-grid|seed|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-summary|apps/web|g5-grid-summary|migrate|BILIBI_GRID_DEMO=disposable|-'
   'web|grid-shared-views|apps/web|g6-shared-views|none|BILIBI_GRID_DEMO=disposable DATABASE_POOL_SIZE=1|-'
+  'web|menu-order|apps/web|menu-order-walkthrough|none|BILIBI_MENU_ORDER_DEMO=disposable|-'
   'web|live-upload|apps/web|live-upload-walkthrough|none|BILIBI_DISPOSABLE_LIVE_UPLOAD_DEMO=yes|-'
   'web|live-wake|apps/web|live-wake-walkthrough|none|BILIBI_DISPOSABLE_LIVE_WAKE_DEMO=yes|-'
   'web|reports|apps/web|r1-reports|migrate|BILIBI_GRID_DEMO=disposable|-'

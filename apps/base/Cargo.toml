@@ -28,6 +28,7 @@ bilibi-locale = { path = "locale" }
 bilibi-mail = { path = "mail" }
 bilibi-media = { path = "media" }
 bilibi-menu = { path = "menu" }
+bilibi-menu-order = { path = "menu_order" }
 bilibi-module-registry = { path = "module_registry" }
 bilibi-notifications = { path = "notifications" }
 bilibi-party-ids = { path = "party_ids" }
