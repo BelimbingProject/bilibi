@@ -595,6 +595,7 @@ dependencies = [
  "bilibi-mail",
  "bilibi-media",
  "bilibi-menu",
+ "bilibi-menu-order",
  "bilibi-module-registry",
  "bilibi-notifications",
  "bilibi-party-ids",
@@ -1233,6 +1234,22 @@ version = "0.2.1"
 dependencies = [
  "bilibi-module-registry",
  "inventory",
+]
+
+[[package]]
+name = "bilibi-menu-order"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-labels",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-tenancy",
+ "inventory",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]

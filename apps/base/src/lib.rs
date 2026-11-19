@@ -20,6 +20,7 @@ pub use bilibi_locale as locale;
 pub use bilibi_mail as mail;
 pub use bilibi_media as media;
 pub use bilibi_menu as menu;
+pub use bilibi_menu_order as menu_order;
 pub use bilibi_module_registry as module_registry;
 pub use bilibi_notifications as notifications;
 pub use bilibi_party_ids as party_ids;

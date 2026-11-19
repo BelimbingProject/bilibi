@@ -27,7 +27,7 @@ The owner identified these five proposals as candidates for AI-led setup, with i
 - **Customise this list:** AI changes labels, fields and views, so a separate entry point on each list is unnecessary.
 - **Setup packs:** The proposal includes labels, fields, views and rules, with imported changes visible on Customisations. See the [Setup packs contract](../../../apps/base/setup_packs/README.md) for current transfer support.
 - **Rule trial runs:** AI runs a draft against past records and presents the results; approval and other business actions keep their pages.
-- **Company menu order:** AI changes the order; Customisations can restore the default.
+- **[Tenant menu order](../../../apps/base/menu_order/README.md):** AI changes the order. Customisations will offer a restore-default action.
 
 ## Consequences
 

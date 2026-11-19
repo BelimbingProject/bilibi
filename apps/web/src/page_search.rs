@@ -10,21 +10,6 @@ use icu_properties::{
     CodePointMapData,
 };
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
-
-pub(crate) fn visible_menu(
-    app: &App,
-    capabilities: &BTreeSet<&str>,
-    owner: bool,
-) -> Vec<menu::Node> {
-    app.menu.visible_tree(&|key| {
-        if key == menu::OWNER_STANDING {
-            owner
-        } else {
-            capabilities.contains(key)
-        }
-    })
-}
 
 /// The address of Company's operator setup page, which the status bar links to
 /// while the operator stands on no primary company (`shell.html`).
@@ -300,7 +285,7 @@ pub(crate) async fn hits(
             .get::<bilibi_base::system::Instances>(bilibi_base::system::SERVICE)?
             .is_core_administrator(scope)
             .await?;
-    let tree = visible_menu(app, &capabilities, owner);
+    let tree = app.menu.visible_staff_tree(&capabilities, owner);
     let viewer = Viewer {
         capabilities: &capabilities,
         operator,
