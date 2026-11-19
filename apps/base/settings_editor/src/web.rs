@@ -441,9 +441,7 @@ impl Editor {
                 let key = get("key").unwrap_or_default();
                 let plan = self.plan(scope).await?;
                 let client = self.core.db.get().await?;
-                let offered = plan
-                    .field(key)
-                    .is_some_and(|field| field.encrypted() && field.stored_secret);
+                let offered = plan.field(key).is_some_and(Field::revealable);
                 if offered
                     && reveal::available(&**client, &plan, &self.core.settings, scope).await?
                 {
@@ -1314,7 +1312,7 @@ fn control(field: &Field, can_reveal: bool, keyed: bool, draft: Option<&str>) ->
             .wrapper_class("mb-0");
         if field.stored_secret {
             secret = secret.stored();
-            if can_reveal {
+            if can_reveal && field.revealable() {
                 secret = secret.stored_reveal("request_secret_reveal", field.key);
             }
         }

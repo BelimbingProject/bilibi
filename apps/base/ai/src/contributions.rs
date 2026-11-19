@@ -3,7 +3,9 @@
 use crate::providers;
 use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Validator, ValueType, DEFINITIONS};
+use bilibi_settings::{
+    Definition, Editor, ScopeKind, Setting, Validator, ValueType, DEFINITIONS, NEVER_REVEALED,
+};
 use serde_json::{json, Value};
 
 /// The interaction list and record pages and reads. Tenant-usable: a tenant
@@ -13,8 +15,8 @@ pub const LIST: &str = "admin.system.ai-interaction.list";
 pub const ENABLED: &str = "ai.enabled";
 /// The company switch, off by default: a company uses AI only when both are on.
 pub const COMPANY_ENABLED: &str = "ai.company_enabled";
-/// The configured providers, a list of `{name, base_url, model}`; the first
-/// is the default.
+/// The configured providers, a list of `{name, base_url, model}` with an
+/// optional `local: true`; the first is the default.
 pub const PROVIDERS: &str = "ai.providers";
 /// The providers' API keys by provider name, encrypted and never shown back.
 pub const PROVIDER_KEYS: &str = "ai.provider_keys";
@@ -77,9 +79,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, COMPANY_ENABLED, provenance!
 inventory::submit! { Contribution::new(DEFINITIONS, PROVIDERS, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Array, scopes: GLOBAL, default: || json!([]), nullable: false, encrypted: false,
     minimum: None, maximum: None,
-    validator: Some(Validator { accepts: accepts_providers, message: "must be a list of up to 20 providers, each {\"name\", \"base_url\", \"model\"} with a unique lower-case name and an http or https base URL" }),
+    validator: Some(Validator { accepts: accepts_providers, message: "must be a list of up to 20 providers, each {\"name\", \"base_url\", \"model\"} with a unique lower-case name and an https base URL, or \"local\": true for an http or https server on this machine or a private network" }),
     editor: Some(Editor { group: "AI", label: "AI providers",
-        help: "OpenAI-compatible servers, such as a hosted service or a local Ollama, vLLM or LM Studio. Example: [{\"name\": \"local\", \"base_url\": \"http://127.0.0.1:11434/v1\", \"model\": \"llama3.1\"}]. The first is the default.",
+        help: "OpenAI-compatible servers. A hosted service needs a public https URL. Mark a server on this machine or your private network, such as Ollama, vLLM or LM Studio, with \"local\": true. Example: [{\"name\": \"local\", \"base_url\": \"http://127.0.0.1:11434/v1\", \"model\": \"llama3.1\", \"local\": true}]. The first is the default.",
         capability: None, reveal_duration_ms: 5_000 }),
 })) }
 inventory::submit! { Contribution::new(DEFINITIONS, PROVIDER_KEYS, provenance!(), &Setting::Definition(Definition {
@@ -87,8 +89,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, PROVIDER_KEYS, provenance!()
     minimum: None, maximum: None,
     validator: Some(Validator { accepts: accepts_keys, message: "must map provider names to API keys, such as {\"hosted\": \"sk-...\"}, with no spaces in a key" }),
     editor: Some(Editor { group: "AI", label: "AI provider API keys",
-        help: "Only for providers that need one, by provider name: {\"hosted\": \"sk-...\"}. Stored encrypted and never shown back; saving replaces every key.",
-        capability: None, reveal_duration_ms: 5_000 }),
+        help: "Only for providers that need one, by provider name: {\"hosted\": \"sk-...\"}. Stored encrypted and never shown back, not even to a holder of the stored-secret reveal; saving replaces every key.",
+        capability: None, reveal_duration_ms: NEVER_REVEALED }),
 })) }
 inventory::submit! { Contribution::new(DEFINITIONS, TIMEOUT_SECONDS, provenance!(), &Setting::Definition(Definition {
     value_type: ValueType::Integer, scopes: GLOBAL, default: || json!(20), nullable: false, encrypted: false,
