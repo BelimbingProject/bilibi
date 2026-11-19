@@ -15,6 +15,8 @@ Summary results put the child first and combine totals over included children; a
 
 Oversight reads are live, read-only and bounded. Prepared exports and scheduled delivery are refused, including the background execution path: child data must not be retained in the parent after revocation. Ordinary tenant reports keep their existing export and scheduling behavior. Dashboard drawing revisions force a fresh oversight run rather than retaining child answers through a panel cache.
 
+Draft checks, write previews and saves use [Grid's audited oversight probe](../grid/README.md#reads-inside-an-existing-transaction). If a check reports an unconfirmed audit commit, check the audit trail before retrying.
+
 ## The rule
 
 - A report stores a **definition**, never data. Every run reads through Grid with the reader's own `Scope`, so a reader sees only the rows and fields the record's own page would show them.

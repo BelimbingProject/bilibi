@@ -510,10 +510,9 @@ impl Reports {
         }
     }
 
-    /// Checks a draft for its author: the shape, then every column against
-    /// the author's own catalog, then a bounded dry run that proves each
-    /// filter, grouping and measure suits its column. A dry run refused only
-    /// by size or cost still saves: the bound applies to each run.
+    /// Checks the draft's shape, catalog and query for its author.
+    /// A same-tenant probe may hit a size or cost bound without blocking
+    /// the save. Oversight checks follow Grid's audited probe rules.
     pub async fn check(&self, scope: &Scope, draft: &Draft) -> Outcome<()> {
         Self::check_draft_shape(draft)?;
         let mut client = self.db.get().await.map_err(Error::from)?;

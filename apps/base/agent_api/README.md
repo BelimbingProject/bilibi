@@ -44,7 +44,7 @@ or cache reach across requests.
 
 `Registry::call(&mut client, scope, key, input)` and `JobContracts::read(&mut client, execution, key, input)` reuse the caller's connection and open a transaction only when the handler requires one. `Registry::call_in(tx, scope, key, input)` runs the same checks and handler on an existing transaction, with the caller responsible for completion.
 
-Callers supplying a connection must discard it before reuse if a contract returns `Backend(UnrecoveredTransaction)`. Job preview bounds its rollback attempt before returning that error. The plan service discards its own connection on the same error.
+On `Backend(UnrecoveredTransaction)`, a caller supplying the connection follows [Database's connection recovery contract](../database/README.md#transaction-continuations). The registry and plan service discard the connections they own. Job preview bounds its rollback attempt before returning that error, and job commit marks the caller's transaction poisoned if the owner preview returns it.
 
 Agent discovery returns operations and guides in `result`. The HTTP and MCP doors also return `pages`, with links to matching pages and their contributed sections. These links use the same page access rules as the top bar. [Page sections](../menu/README.md#make-a-page-section-searchable).
 
@@ -140,7 +140,7 @@ Credential and workplace reproofs use a 150 ms transaction-local lock timeout. L
 
 `PlannedOperation` refuses unknown wire keys. Dry runs and commits accept 1–20 ordered key/input objects by default, at most 1 MiB encoded. The global `agent_api.plan_max_operations` setting controls the 1–100 operation bound. A dry run validates every schema and normal Authz capability and calls owner previews without changing business records. It returns the ordered operations, restricted review results and indexed errors.
 
-The caller shows the dry-run result and waits for the person's explicit approval. Commit takes the unchanged ordered operations directly; Bilibi does not attest that the caller showed the review or obtained consent. Commit starts a fresh `MutationTransaction`, rechecks the credential, workplace, schemas, capabilities and every owner preview, then calls each owner on that same transaction. Every owner error, audit capture error or final identity failure rolls back all writes and audit rows together. Owner version fences recognize changed records and repeated writes. No dry-run state or review content is stored.
+The caller shows the dry-run result and waits for the person's explicit approval. Commit takes the unchanged ordered operations directly; Bilibi does not attest that the caller showed the review or obtained consent. Commit starts a fresh `MutationTransaction`, rechecks the credential, workplace, schemas, capabilities and every owner preview, then calls each owner on that same transaction. Every owner error, audit capture error or final identity failure rolls back all business writes and their transaction's audit rows together. [Grid's oversight probe](../grid/README.md#reads-inside-an-existing-transaction) owns its read audit boundary. Owner version fences recognize changed records and repeated writes. No dry-run state or review content is stored.
 
 ### New records in later steps
 
@@ -162,7 +162,7 @@ References are one-based and accept only `N.id`, with an exact single-key `$ref`
 
 `describe` exposes `creates` (`kind` and the owner-declared `id_pointer` within its result). Owners opt in through `WriteHandler::creates` and `preview_dependent`; the default refuses unresolved references. `PlanReferences::require` checks permitted fields and record kinds. Owners validate all independent input, restrictions, existing records and permissions now, and show defaults and remaining checks in their deterministic preview. Core Company and Person declare created records; relationship assignment, affiliation creation (including namecard contacts) and Address Create & Attach accept their appropriate endpoint references. Other writes fail closed until their owners provide a dependent preview.
 
-Commit repeats the symbolic review, resolves each placeholder from the actual earlier commit result, validates the concrete input schema, and calls the ordinary owner's commit on the shared audited transaction. The owner locks and proves the newly created record through its usual checks. Any failure rolls back every step and its audit rows. Changing a reference or another input requires a new dry run and approval.
+Commit repeats the symbolic review, resolves each placeholder from the actual earlier commit result, validates the concrete input schema, and calls the ordinary owner's commit on the shared audited transaction. The owner locks and proves the newly created record through its usual checks. Changing a reference or another input requires a new dry run and approval.
 
 ### Which Bilibi a write lands on
 

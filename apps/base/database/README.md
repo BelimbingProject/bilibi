@@ -171,3 +171,5 @@ ordering, concurrent seed serialization and exclusion of non-production contribu
 ## Transaction continuations
 
 Use `MutationTransaction::coordinate` when an owner operation must call several existing audited `_in` methods before returning one result. Each nested owner still uses `mutate` or `record`; its changes are captured once. An error or cancelled continuation permanently prevents the outer commit, even if a caller catches the error after an earlier nested write succeeded. Workflow uses this seam to keep the final approval decision and its owner's business effect together.
+
+After a transaction is poisoned or a coordinated continuation fails, explicit rollback has 250 ms to complete. Commit on that transaction also takes the rollback path. If rollback cannot be confirmed, the boundary returns `Error::UnrecoveredTransaction`. The owner of the pooled connection must discard it with `Connection::take`.

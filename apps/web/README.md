@@ -201,6 +201,8 @@ credential check anywhere in the host.
 
 At `/api/v1`, retryable lock contention during bearer sealing or plan reproof returns `422 {"error":"rejected","reason":"record_changed"}`. The caller can retry after the competing change finishes.
 
+An unrecovered agent transaction returns `{"error":"transaction_unrecovered","message":…}`. The HTTP API sends status 503, and MCP returns an `isError` tool result.
+
 An optional `X-Bilibi-Identity-Provider` header selects a company's explicitly enabled provider-token trust instead of Bilibi OAuth. Duplicate selectors refuse the request. Core User verifies the provider signature, resource audience, scopes and exact existing company/account link; Core Agent Access records a digest-only revocable grant and uses the same sealing, plan authority, step-up and audit path. API and MCP audiences are distinct. See [company sign-in](../core/user/sso.md#provider-access-tokens) for opt-in, token shape and revocation limits.
 
 Before dispatch, `record` holds unauthenticated traffic to a per-sender budget (`src/api_gate.rs`); a sender is its IPv4 address or the /64 network of its IPv6 address, as on the visitor edge. A request with no bearer token spends one of the sender's `agent_access.oauth_requests_per_minute`; a request whose token is refused (`401`) spends one of a second, separate budget of the same size, so sign-in traffic from an office address never blocks the valid tokens behind it. A sender out of either budget gets `429 {"error":"rate_limited"}` with `Retry-After: 60` before any handler or token lookup runs. The setting is read once a minute.
