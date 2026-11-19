@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token2 = uuid::Uuid::new_v4().simple().to_string();
     let (one, two) = {
         let client = db.get().await?;
-        client.batch_execute("INSERT INTO roles(tenant_id,name,grant_all) SELECT 2,'Walkthrough administrator',true WHERE NOT EXISTS (SELECT 1 FROM roles WHERE tenant_id=2 AND name='Walkthrough administrator'); INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 2,5,id FROM roles WHERE tenant_id=2 AND name='Walkthrough administrator' ON CONFLICT DO NOTHING;").await?;
+        client.execute("INSERT INTO principal_roles(tenant_id,user_id,role_id) SELECT 2,5,id FROM roles WHERE tenant_id=2 AND code='tenant_owner' ON CONFLICT DO NOTHING", &[]).await?;
         for (tenant, user, token) in [(1_i64, 4_i64, &token1), (2, 5, &token2)] {
             client.execute("INSERT INTO sessions(id,tenant_id,user_id,csrf,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')", &[&session_id(token), &tenant, &user, &uuid::Uuid::new_v4().simple().to_string()]).await?;
         }
@@ -47,6 +47,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth.authenticate(&**client, 2, 5, String::new()).await?,
         )
     };
+    {
+        let client = db.get().await?;
+        let grants = bilibi_authz::effective_capabilities(&**client, &two).await?;
+        assert!(grants.contains("base.labels.customisations.view"));
+        assert!(grants.contains("base.custom-fields.manage"));
+        assert!(!grants.contains("admin.audit.log.list"));
+    }
     let label_call = |scope, credential, contract| Call {
         scope,
         credential,
@@ -83,6 +90,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && a.contains("Tenant one field")
             && !a.contains("Tenant two word")
     );
+    assert!(a.contains("<time") && !a.contains("Unavailable"));
+    assert!(b.contains("<time") && b.contains("Restricted"));
     assert!(
         b.contains("Tenant two word")
             && !b.contains("Tenant one word")
@@ -136,6 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let other = pages.0.render(show(&two)).await?.html;
     assert!(other.contains("Tenant two word"));
-    println!("PASS: tenant isolation, owner undo operations, audit-backed inventory and archived field visibility");
+    println!(
+        "PASS: tenant isolation, owner undo operations, audit-backed inventory and archived field visibility"
+    );
     Ok(())
 }

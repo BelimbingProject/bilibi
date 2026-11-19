@@ -11,6 +11,7 @@ pub struct CustomisationRow {
     pub description: String,
     pub audit_kind: &'static str,
     pub audit_id: i64,
+    pub revision: i64,
     pub input: Value,
 }
 
@@ -33,12 +34,13 @@ fn empty_input() -> Value {
 
 fn label_rows(value: &Value) -> Vec<CustomisationRow> {
     value.as_array().into_iter().flatten().filter_map(|row| {
-        let id = row["id"].as_i64()?;
+        let (id, revision) = crate::operations::version(row).ok()?;
         let label = row["label"].as_str()?;
         Some(CustomisationRow {
-            description: format!("{}: {} → {}", row["kind"].as_str()?, row["default"].as_str()?, label),
+            description: format!("{} {}: {} → {}", row["kind"].as_str()?, row["subject"].as_str()?, row["default"].as_str()?, label),
             audit_kind: "label",
             audit_id: id,
+            revision,
             input: serde_json::json!({"kind": row["kind"], "subject": row["subject"], "version": row["version"]}),
         })
     }).collect()

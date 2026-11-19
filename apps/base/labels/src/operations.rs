@@ -44,7 +44,7 @@ fn subject(input: &Value) -> bilibi_agent_api::Result<&str> {
         .filter(|subject| !subject.is_empty())
         .ok_or_else(|| bilibi_agent_api::invalid("subject", "is required"))
 }
-fn version(input: &Value) -> bilibi_agent_api::Result<(i64, i64)> {
+pub(crate) fn version(input: &Value) -> bilibi_agent_api::Result<(i64, i64)> {
     let token = input
         .get("version")
         .ok_or_else(|| bilibi_agent_api::invalid("version", "is required"))?;
@@ -100,7 +100,7 @@ impl ReadHandler for Read {
                 })
                 .map(|s| {
                     let own = stored.get(&(s.kind, s.id.clone()));
-                    json!({"id": own.map(|own| own.id), "kind": s.kind.key(), "subject": s.id, "default": s.default, "trail": s.trail,
+                    json!({"kind": s.kind.key(), "subject": s.id, "default": s.default, "trail": s.trail,
                         "label": own.map(|own| own.label.clone()), "version": own.map_or_else(|| "0:0".to_owned(), |own| format!("{}:{}", own.id, own.version))})
                 })
                 .collect();
@@ -203,7 +203,7 @@ fn clear_schema() -> Value {
     json!({"type":"object","required":["kind","subject","version"],"properties":{"kind":kind_schema(),"subject":subject_schema(),"version":version_schema()}})
 }
 fn list_output() -> Value {
-    json!({"type":"array","description":"Each word that may be renamed: kind, subject, default (the module's word), trail, id (the override identity, or null), label (the tenant's, or null) and version."})
+    json!({"type":"array","description":"Each word that may be renamed: kind, subject, default (the module's word), trail, label (the tenant's, or null) and version."})
 }
 fn write_output() -> Value {
     json!({"type":"object","description":"kind, subject, default, before and after (null when none)."})

@@ -1,19 +1,18 @@
 //! Read-only inventory of customisations contributed by their owners.
 use crate::{CustomisationRow, CustomisationSection, CUSTOMISATIONS};
 use askama::Template;
-use bilibi_agent_api::{
-    page::{Call, PageContracts},
-    Registry,
-};
+use bilibi_agent_api::page::{Call, PageContracts};
 use bilibi_database::{Db, Error, Result};
+use bilibi_principal_directory::{PrincipalKind, PrincipalRef};
 use bilibi_tenancy::Scope;
 use bilibi_ui::{
+    list_state::FILTERS_FORM,
     page::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    BuiltinColumn, Card, Cell, ColumnsOutcome, ConfirmDialog, FlashMap, FlexRow, FlexTable, Header,
-    Html, IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind,
+    params, BuiltinColumn, Card, Cell, ColumnsOutcome, ConfirmDialog, FlashMap, FlexRow, FlexTable,
+    Header, Html, IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind,
     TableEmpty, NO_FLASH,
 };
 use serde_json::Value;
@@ -37,7 +36,6 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
 #[derive(Clone)]
 pub(crate) struct Pages {
     pub db: Db,
-    pub registry: Arc<Registry>,
     pub contracts: Arc<PageContracts>,
     pub sections: Vec<&'static CustomisationSection>,
     pub display: Arc<bilibi_datetime::DisplayPolicy>,
@@ -52,6 +50,10 @@ struct Item {
 impl Item {
     fn key(&self) -> String {
         format!("{}:{}", self.row.audit_kind, self.row.audit_id)
+    }
+
+    fn action_key(&self) -> String {
+        format!("{}@{}", self.key(), self.row.revision)
     }
 }
 #[derive(Template)]
@@ -76,6 +78,7 @@ struct Index {
     confirm: Option<Item>,
     flash: Option<(StatusKind, String)>,
     shown: usize,
+    rows_changed: bool,
 }
 impl Index {
     fn new(pages: Pages, query: &HashMap<String, String>) -> Result<Self> {
@@ -96,22 +99,31 @@ impl Index {
             confirm: None,
             flash: None,
             shown: 0,
+            rows_changed: true,
         })
     }
     async fn event(&mut self, scope: &Scope, credential: &str, value: &Value) -> Result<()> {
         match value["type"].as_str().unwrap_or_default() {
+            "filters" => self.list.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
             "page" => self.list.put_page(value["page"].as_str()),
             "grid" => {
-                let values =
-                    bilibi_ui::params::string_values_checked(value, bilibi_ui::params::FIELD_LIMIT)
-                        .map_err(Error::refused)?;
+                let values = params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
                 if matches!(self.columns.handle(&values), ColumnsOutcome::Sort(_)) {
                     return Err(Error::Invalid);
                 }
+                self.rows_changed = false;
             }
             "request_undo" => {
                 let key = value["key"].as_str().ok_or(Error::Invalid)?;
-                self.confirm = self.items.iter().find(|item| item.key() == key).cloned();
+                self.confirm = self
+                    .items
+                    .iter()
+                    .find(|item| item.action_key() == key)
+                    .cloned();
             }
             "cancel_confirm" => self.confirm = None,
             event if event.starts_with("customisation.") => {
@@ -151,13 +163,22 @@ impl Index {
     }
     async fn render(&mut self, scope: &Scope) -> Result<String> {
         let mut items = Vec::new();
+        let mut reads = HashMap::new();
         for section in &self.pages.sections {
-            let value = self
-                .pages
-                .registry
-                .read(&self.pages.db, scope, section.read, &(section.read_input)())
-                .await
-                .map_err(|_| Error::Forbidden)?;
+            let key = (section.read, (section.read_input)());
+            let value = match reads.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let (read, input) = entry.key();
+                    let value = self
+                        .pages
+                        .contracts
+                        .read(scope, read, input)
+                        .await
+                        .map_err(|_| Error::Forbidden)?;
+                    entry.insert(value)
+                }
+            };
             items.extend(
                 (section.rows)(&value["result"])
                     .into_iter()
@@ -168,9 +189,9 @@ impl Index {
         let page = self.list.paginate(&self.items);
         let counts = page.counts;
         self.shown = page.entries.len();
-        self.columns.load(page.entries, |item| {
-            format!("{}:{}", item.row.audit_kind, item.row.audit_id)
-        });
+        if self.rows_changed {
+            self.columns.load(page.entries, Item::key);
+        }
         let client = self.pages.db.get().await?;
         let locale = self
             .pages
@@ -186,51 +207,58 @@ impl Index {
         let refs: Vec<_> = page
             .entries
             .iter()
-            .map(|item| (item.row.audit_kind, item.row.audit_id))
+            .map(|item| (item.row.audit_kind, item.row.audit_id, item.row.revision))
             .collect();
         let changes = bilibi_audit::latest_changes(&**client, scope, &refs).await?;
-        let candidates: Vec<_> = changes
-            .iter()
-            .filter_map(|change| {
-                let kind = match change.actor_type.as_str() {
-                    "user" => bilibi_principal_directory::PrincipalKind::User,
-                    "agent" => bilibi_principal_directory::PrincipalKind::Agent,
-                    _ => return None,
-                };
-                bilibi_principal_directory::PrincipalRef::new(kind, change.actor_id).ok()
-            })
-            .collect();
-        let names = self
-            .pages
-            .directory
-            .rank(&**client, scope, &candidates, &Default::default())
-            .await
-            .map_err(|_| Error::Internal)?;
+        let can_see_actor = bilibi_authz::effective_capabilities(&**client, scope)
+            .await?
+            .contains("admin.audit.log.list");
+        let principal = |change: &bilibi_audit::LatestChange| {
+            let kind = match change.actor_type.as_str() {
+                "user" => PrincipalKind::User,
+                "agent" => PrincipalKind::Agent,
+                _ => return None,
+            };
+            PrincipalRef::new(kind, change.actor_id).ok()
+        };
+        let names = if can_see_actor {
+            let candidates: Vec<_> = changes.iter().filter_map(principal).collect();
+            Some(
+                self.pages
+                    .directory
+                    .rank(&**client, scope, &candidates, &Default::default())
+                    .await
+                    .map_err(|_| Error::Internal)?,
+            )
+        } else {
+            None
+        };
         let mut rows = Vec::new();
         for item in page.entries {
-            let key = item.key();
             let change = changes.iter().find(|change| {
-                change.kind == item.row.audit_kind && change.id == item.row.audit_id
+                change.kind == item.row.audit_kind
+                    && change.id == item.row.audit_id
+                    && change.revision == item.row.revision
             });
-            let actor = change
-                .map(|change| {
-                    let kind = match change.actor_type.as_str() {
-                        "user" => Some(bilibi_principal_directory::PrincipalKind::User),
-                        "agent" => Some(bilibi_principal_directory::PrincipalKind::Agent),
-                        _ => None,
-                    };
-                    kind.and_then(|kind| {
-                        bilibi_principal_directory::PrincipalRef::new(kind, change.actor_id).ok()
-                    })
-                    .map(|p| names.label(p))
-                    .unwrap_or_else(|| {
-                        change
-                            .system_principal
-                            .clone()
-                            .unwrap_or_else(|| change.actor_type.clone())
-                    })
-                })
-                .unwrap_or_else(|| "Unavailable".into());
+            let actor = match (names.as_ref(), change) {
+                (Some(names), Some(change)) => {
+                    let mut label =
+                        principal(change)
+                            .map(|p| names.label(p))
+                            .unwrap_or_else(|| {
+                                change
+                                    .system_principal
+                                    .clone()
+                                    .unwrap_or_else(|| change.actor_type.clone())
+                            });
+                    if let Some(id) = change.impersonator_id {
+                        label.push_str(&format!(" · impersonated by User #{id}"));
+                    }
+                    label
+                }
+                (None, _) => "Restricted".into(),
+                (Some(_), None) => "Unavailable".into(),
+            };
             let when = if let Some(change) = change {
                 let timestamp =
                     jiff::Timestamp::try_from(change.occurred_at).map_err(|_| Error::Internal)?;
@@ -249,7 +277,7 @@ impl Index {
             } else {
                 Cell::text("Unavailable")
             };
-            let mut row = FlexRow::new(&key)
+            let mut row = FlexRow::new(item.key())
                 .slot("section", Html::text(item.section.title))
                 .slot("change", Html::text(&item.row.description))
                 .slot("actor", Html::text(&actor))
@@ -257,12 +285,15 @@ impl Index {
             row.actions = render(IconButton {
                 event: "request_undo",
                 name: "key",
-                value: &key,
+                value: &item.action_key(),
                 ..IconButton::new("unarchive", item.section.action)
             })?;
             rows.push(row);
         }
         let mut table = FlexTable::new("customisations-table", self.columns.flex_columns(), rows);
+        table.zoom = self.columns.zoom;
+        table.suggestions = self.columns.flex_suggestions();
+        table.add_query = &self.columns.add_query;
         table.caption = "Customisations";
         table.actions = true;
         table.framed = false;
@@ -322,6 +353,7 @@ impl Index {
 impl LiveState<Scope, Error> for Index {
     fn update<'a>(&'a mut self, request: LiveRequest<'a, Scope>) -> LiveFuture<'a, Error> {
         Box::pin(async move {
+            self.rows_changed = true;
             match request.input {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {

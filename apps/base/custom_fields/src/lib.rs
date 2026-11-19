@@ -25,7 +25,7 @@ pub use {
     inventory,
 };
 
-use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
     contributions::{Access, Method, PageWrites, Pending, Route, PAGE_WRITES, ROUTES},
     Catalog, Module, Service,
@@ -66,7 +66,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/custom_fields", provena
     domains: &["base"],
     verbs: &[],
     capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(MANAGE)],
-    roles: &[],
+    roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: &[VIEW, MANAGE] }],
     system_principals: &[],
 }) }
 
@@ -184,9 +184,10 @@ fn customisation_rows_for(
 ) -> Vec<bilibi_labels::CustomisationRow> {
     value.as_array().into_iter().flatten().filter(|row| row["archived_on"].is_null() != archived).filter_map(|row| {
         Some(bilibi_labels::CustomisationRow {
-            description: format!("{}: {}", row["record_type"].as_str()?, row["label"].as_str()?),
+            description: format!("{}: {} ({})", row["record_type"].as_str()?, row["label"].as_str()?, row["key"].as_str()?),
             audit_kind: "custom_field",
             audit_id: row["id"].as_i64()?,
+            revision: row["version"].as_i64()?,
             input: serde_json::json!({"record_type": row["record_type"], "key": row["key"], "version": row["version"]}),
         })
     }).collect()

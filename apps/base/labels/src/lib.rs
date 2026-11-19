@@ -15,7 +15,7 @@ pub use store::{
     SubjectSource, MAX_LABEL, SUBJECTS,
 };
 
-use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
+use bilibi_authz::{CapabilityDefinition, RoleDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_module_registry::{
     contributions::{Access, Method, PageWrites, Pending, Route, PAGE_WRITES, ROUTES},
     Contribution, Module, Provenance, Service,
@@ -46,7 +46,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/labels", provenance!(),
     domains: &["base"],
     verbs: &[],
     capabilities: &[CapabilityDefinition::tenant(VIEW), CapabilityDefinition::tenant(MANAGE), CapabilityDefinition::tenant(CUSTOMISATIONS_VIEW)],
-    roles: &[],
+    roles: &[RoleDefinition { code: "tenant_owner", name: "Tenant Owner", description: "Contributed system role; reconciled explicitly", grant_all: false, capabilities: &[VIEW, MANAGE, CUSTOMISATIONS_VIEW] }],
     system_principals: &[],
 }) }
 
@@ -73,7 +73,7 @@ inventory::submit! {
                 Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(customisations_web::Pages {
                     db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
                     display: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, directory: services.get("base/principal_directory.directory")?,
-                    registry: services.get("base/agent_api.registry")?, contracts: services.get(bilibi_agent_api::page::SERVICE)?, sections,
+                    contracts: services.get(bilibi_agent_api::page::SERVICE)?, sections,
                 }))))
             } },
             Service { id: PAGES, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages {
