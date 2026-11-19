@@ -4,7 +4,7 @@
 **Status:** Accepted. The first Platform slice is built (contracts for every caller, page callers, the page-write check, step-up on the contract); the rest is in "Status of each door today".
 **Agents:** claude-cloud/sonnet-5.5-default (author), amp/gpt-6-luna-default (review), oracle amp/gpt-6-astra
 **Scope:** How a business action is defined once and reached from the GUI, a CLI, an HTTP API and MCP, with the same rules for a human and for an agent acting for a human
-**Last Updated:** 2026-11-02
+**Last Updated:** 2026-11-19
 
 > The `Agents` value is self-reporting: what the agent reports about itself.
 >
@@ -12,7 +12,7 @@
 
 ## Context
 
-**People should not key data by hand. Agents do the routine work.** A person should be able to do all daily work on Bilibi by talking to an agent in a harness, including administration. The harness runs the model. Bilibi runs no model.
+**People should not key data by hand. Agents do the routine work.** A person should be able to do all daily work on Bilibi by talking to an agent in a harness, including administration. The harness runs the model. Bilibi runs no model, except simple one-shot calls through configured providers, never agent loops ([ADR 34](./34-one-shot-model-calls-through-configured-providers.md)).
 
 Bilibi has four doors. Each serves a different caller.
 
