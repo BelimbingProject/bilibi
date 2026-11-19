@@ -154,7 +154,7 @@ Width is a shared decision. Every page uses `PageVariant`. All three share one c
 - Keep rarely used parts out of the way: `Fold` folds a part under a one-line summary of what it holds and opens itself on an error; `AddMore` ("+ Add address line 2") reveals one more optional field.
 - A greyed field says why, in one line near the field that unlocks it.
 - **Coded choices are a searchable `Combobox`** showing code and name ("MYR · Malaysian ringgit"), never a plain select of codes. Typing also finds the common name people use (RMB for CNY, RM for MYR); the field stores the standard code.
-- **A field that picks another record uses the same combobox.** `RecordPicker` shows matches in the dropdown attached to the input, with the same keyboard controls; it needs no hint telling people to type. Show the record name alone when matches have one kind; add the singular kind name when matches span several kinds.
+- **A field that picks another record uses the same combobox.** It needs no hint telling people to type. See [Record references](apps/base/ui/README.md#record-references) for how `RecordPicker` displays matches.
 - **Show results live.** A calculator or preview updates as the person types or chooses; no Convert or Calculate button.
 - **Familiar patterns win.** A currency converter is two rows of amount + currency, as on Google, with the rate's date and source in one small muted line above them.
 - This departs from the label-above layout on purpose; the shared macros own it, so no page styles its own label.

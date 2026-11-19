@@ -217,6 +217,7 @@ impl Records {
             .map(|hit| bilibi_ui::PickerHit {
                 value: format!("{}:{}", hit.kind, hit.id),
                 label: hit.label.clone(),
+                instant: None,
                 kind_label: if multiple_kinds {
                     let noun = self.kind_nouns(&hit.kind).0;
                     let mut chars = noun.chars();
