@@ -77,7 +77,7 @@ Return `PageChrome::StandaloneReview` from a page operation that needs the signe
 
 ## Embedded application frames
 
-Use `AppFrame` for a self-contained same-origin interactive document inside a Bilibi live page. The frame is stable across patches and `assets/app_frame.js` translates its MCP Apps `tools/call`, `ui/open-link`, size and model-context messages into owner events. The page owns authentication and authorization, then handles each call through the existing operation contract; the frame adds no write path.
+Use `AppFrame` for a self-contained same-origin interactive document inside a Bilibi live page. The frame is stable across patches and loads its document after the bridge registers its listeners and the live client is available. The bridge in `assets/app_frame.js` translates its MCP Apps `tools/call`, `ui/open-link`, size and model-context messages into owner events. The page owns authentication and authorization, then handles each call through the existing operation contract; the frame adds no write path.
 
 A module publishes a self-contained document under `/assets` by contributing one `PublicAsset` to `PUBLIC_ASSETS`. Paths are unique and must start with `/assets/`; give sensitive documents a narrow response Content Security Policy. The asset must not contain credentials. Use a contributed asset and `AppFrame` instead of adding a host router entry, copying the frame markup or writing a page-specific message bridge.
 

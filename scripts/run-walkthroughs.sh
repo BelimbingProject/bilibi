@@ -35,6 +35,7 @@
 #   WALKTHROUGH_QPDF       qpdf (protected PDFs)
 #   WALKTHROUGH_LANGUAGE_MODEL  the pinned fastText file (scripts/provision-language-model.py)
 #   pdftotext              poppler-utils (privacy exports are read back)
+#   node                   runs the tenant settings review-card probe
 set -euo pipefail
 
 # WALKTHROUGH_ROOT names the Platform checkout when this file is run from outside it.
