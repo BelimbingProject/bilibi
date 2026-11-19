@@ -570,6 +570,7 @@ impl OversightQueries {
                 break;
             }
             let child_deadline = deadline.min(start + child_budget);
+            let mut executing_query = false;
             let result = budgeted(
                 tx,
                 child_deadline,
@@ -577,7 +578,9 @@ impl OversightQueries {
                 Some(spec.bounds()),
                 async {
                     let catalog = Catalog::for_oversight(tx, &scope, grant, spec.rows()).await?;
+                    executing_query = true;
                     let data = read_catalog(tx, &catalog, grant, root, &spec).await?;
+                    executing_query = false;
                     recheck_policy(tx, &scope, grant, &spec, &format!("{catalog:?}")).await?;
                     Ok(data)
                 },
@@ -601,9 +604,8 @@ impl OversightQueries {
                     }
                 }
                 Ok(Err(error)) => {
-                    let outcome = child_refusal(&error);
-                    supported |= matches!(outcome, "timed_out" | "over_cost");
-                    Ok(outcome)
+                    supported |= executing_query && matches!(error, QueryError::TooHeavy(_));
+                    Ok(child_refusal(&error))
                 }
                 Err(error) => Err(error.into()),
             };

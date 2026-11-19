@@ -1976,6 +1976,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let after = audit_watermark().await?;
+    client
+        .batch_execute(
+            "ALTER TABLE base_grid_ref_items RENAME TO r1_probe_items;
+             CREATE VIEW base_grid_ref_items AS SELECT * FROM r1_probe_items
+                 WHERE set_config('r1.probe_read', 'done', true) = 'done';
+             CREATE FUNCTION r1_delay_probe_recheck() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF current_setting('r1.probe_read', true) = 'done' THEN
+                     PERFORM pg_sleep(3);
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$;
+             CREATE TRIGGER r1_delay_probe_recheck BEFORE INSERT ON authz_decision_log
+                 FOR EACH ROW WHEN (NEW.capability = 'tenancy.oversight.view')
+                 EXECUTE FUNCTION r1_delay_probe_recheck()",
+        )
+        .await?;
+    let refused = reports.check(&manager, &oversight_summary).await;
+    client
+        .batch_execute(
+            "DROP TRIGGER r1_delay_probe_recheck ON authz_decision_log;
+             DROP FUNCTION r1_delay_probe_recheck();
+             DROP VIEW base_grid_ref_items;
+             ALTER TABLE r1_probe_items RENAME TO base_grid_ref_items",
+        )
+        .await?;
+    let events = oversight_events(after).await?;
+    checks.check(
+        "a policy recheck timeout after a child read cannot validate an oversight draft",
+        matches!(refused, Err(ReportError::Invalid(ref errors)) if errors.contains_key("definition"))
+            && matches!(&events[..], [(1, event, parent)]
+                if event == "tenancy.oversight.query"
+                && parent["row_count"] == 0
+                && parent["children"] == json!([{"tenant_id": 2, "outcome": "timed_out"}])),
+        format!("{refused:?}, oversight evidence: {events:?}"),
+    );
+
+    let after = audit_watermark().await?;
     let mut blocker = db.get_detached("the walkthrough's audit lock").await?;
     let lock = blocker.transaction().await?;
     lock.query_one(
