@@ -261,11 +261,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     prove(
-        "the in-memory draft reaches the editor",
+        "the opener preserves the configuration and omits the draft secret",
         opened
-            .pointer("/entries/0/client_secret")
+            .pointer("/entries/0/configuration")
             .and_then(Value::as_str)
-            == Some(draft_secret.as_str()),
+            == Some(configuration.as_str())
+            && opened.pointer("/entries/0/client_secret").is_none()
+            && !contains(&opened, &draft_secret),
     )?;
     let review_id = opened["review_id"]
         .as_str()

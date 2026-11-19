@@ -304,7 +304,11 @@ impl Plans {
         let instance = Instance::resolve(&self.settings, &tx).await?;
         let mut shown_operations = json!(operations);
         if let Some(items) = shown_operations.as_array_mut() {
-            for operation in items {
+            for (index, operation) in items.iter_mut().enumerate() {
+                if results[index]["valid"] != true {
+                    operation["input"] = json!({});
+                    continue;
+                }
                 if let Some(registered) = operation["key"]
                     .as_str()
                     .and_then(|key| self.registry.operations.get(key))

@@ -289,7 +289,8 @@ impl WriteHandler for Change {
                     authorize_field(client, scope, &field).await?;
                     self.check_supported(&field)
                 }
-                Ok(_) | Err(AgentError::NotFound) => Ok(()),
+                Ok(_) => Ok(()),
+                Err(AgentError::NotFound) if input.get("value").is_none() => Ok(()),
                 Err(error) => Err(error),
             }
         })
@@ -356,7 +357,7 @@ fn key_input() -> Value {
 fn set_input() -> Value {
     json!({"type":"object","required":["key","value"],"properties":{
         "key":{"type":"string","maxLength":255,"description":"Exact key from base.settings_editor.tenant.list"},
-        "value":{"type":"string","maxLength":1048576,"writeOnly":true,"description":"The new value. Use true or false for yes/no, a decimal for a number, and JSON for an object or list. Plain text is used as written."}
+        "value":{"type":"string","maxLength":1048576,"description":"The new non-secret value. Use true or false for yes/no, a decimal for a number, and JSON for an object or list. Plain text is used as written."}
     }})
 }
 
@@ -379,5 +380,5 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/settings_editor", Prov
         Operation { key:"base.settings_editor.tenant.restore", title:"Restore an inherited tenant setting", summary:"Review and remove this tenant's override of one explicitly delegated setting, so it follows the installation value or declared default again. Secret values are never returned.", keywords:&["settings","configuration","customisation","tenant","restore","inherit","default"], capability:TENANT_MANAGE, input:key_input, output:change_output, handler:Handler::SafeWrite(&RESTORE), channels:Channels::Every, step_up:&[TENANT_SECRET_CHANGE] },
     ],
     guides: &[Guide { key:"base.settings_editor", title:"Tenant settings", summary:"Read, set and restore settings their modules delegate to tenant administrators.", keywords:&["settings","configuration","customisation","tenant","inherit","restore","secret"], capability:TENANT_VIEW,
-        body:"Use base.settings_editor.tenant.list first. It returns only settings their owning modules explicitly delegated and this person may manage. `source` is tenant, global or default; `set_for_tenant` says whether restoring will remove a tenant override. Secret values are always null and only `secret_is_set` is shown. Ask an operator to set encrypted values in System Settings (/system/settings). For other settings, plan base.settings_editor.tenant.set with its exact key and a string value: true or false for yes/no, a decimal for a number, JSON for an object or list, and plain text for text. Show the returned before/after source and value, then wait for approval. In the review card the person enters the value before running the dry run. To follow later installation changes again, plan base.settings_editor.tenant.restore; it removes only this tenant's override and asks for 2FA for encrypted settings. Never invent a key or a tenant ID: the credential supplies the tenant and the list supplies the keys." }],
+        body:"Use base.settings_editor.tenant.list first. It returns only settings their owning modules explicitly delegated and this person may manage. `source` is tenant, global or default; `set_for_tenant` says whether restoring will remove a tenant override. Secret values are always null and only `secret_is_set` is shown. Ask an operator to set encrypted values in System Settings (/system/settings). For other settings, plan base.settings_editor.tenant.set with its exact key and a string value: true or false for yes/no, a decimal for a number, JSON for an object or list, and plain text for text. Show the returned before/after source and value, then wait for approval. In the review card the person can edit the proposed value before running the dry run. To follow later installation changes again, plan base.settings_editor.tenant.restore; it removes only this tenant's override and asks for 2FA for encrypted settings. Never invent a key or a tenant ID: the credential supplies the tenant and the list supplies the keys." }],
 }) }

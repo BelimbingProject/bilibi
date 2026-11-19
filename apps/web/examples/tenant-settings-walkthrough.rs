@@ -233,6 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let preview = plans.preview(&admin_browser, &matching_default).await?;
     let change = &preview["results"][0]["preview"]["result"];
     if preview["valid"] != true
+        || preview["operations"][0]["input"]["value"] != "inherited"
         || change["source_before"] != "default"
         || change["source_after"] != "tenant"
         || change["will_change"] != true
