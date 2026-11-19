@@ -190,8 +190,10 @@
       accountRequest('/preferences', {method: 'POST', signal: this.abort.signal, body: JSON.stringify({kind, value})})
         .then((response) => (response.ok ? response.json() : Promise.reject(response.status)))
         .then((reply) => {
-          this.root.dataset.themeChoice = reply.theme;
-          this.root.dataset.displayMode = reply.mode;
+          const name = kind === 'theme' ? 'data-theme-choice' : 'data-display-mode';
+          const saved = kind === 'theme' ? reply.theme : reply.mode;
+          window.BilibiLive?.preferenceSaved(this.root, name);
+          this.root.setAttribute(name, saved);
           if (kind === 'timezone') window.dispatchEvent(new CustomEvent('bilibi:display-mode', {detail: {mode: reply.mode}}));
           this.feedback(kind === 'theme' ? 'Theme saved.' : 'Time display saved.');
           this.closeAll();

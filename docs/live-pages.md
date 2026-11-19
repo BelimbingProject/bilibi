@@ -127,6 +127,12 @@ Form authors follow [Shared UI's form-size rule](../apps/base/ui/README.md#form-
   mounted and destroyed by the `ui.js` mutation observer; the patcher reports the
   hooks whose attributes it rewrote through `BilibiUI.patched`, so each receives
   one `updated` per patch.
+  A successful top-bar preference save protects its shell attribute
+  (`data-theme-choice` or `data-display-mode`) through live patches. In a
+  visible tab, the browser queues a visibility refresh after the save. The
+  first full `page` reply whose request ID matches an intent queued after
+  the save releases that attribute and reconciles the page even when its HTML
+  is identical to the previous reply.
 - **Busy state.** The control that raised an intent carries `aria-busy="true"`
   and `data-live-busy` until its acknowledgement, and is not patched meanwhile;
   a server-rendered `aria-busy` is never touched. `data-working` labels (see
