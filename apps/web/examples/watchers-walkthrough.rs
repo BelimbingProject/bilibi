@@ -278,7 +278,10 @@ impl Proof {
         let receipts = self.receipts(case).await?;
         check(
             receipts.iter().any(|r| r.1 == "queued")
-                && receipts.iter().all(|r| (r.1 == "queued" || (r.1 == "refused" && r.2.as_deref() == Some("watcher_off"))) && r.3.is_empty())
+                && receipts.iter().all(|r| {
+                    (r.1 == "queued" || (r.1 == "refused" && r.2.as_deref() == Some("watcher_off")))
+                        && r.3.is_empty()
+                })
                 && self.case(case).await? == (None, 0, 0),
             "the matching case has pinned runs and no effects before resuming the job",
         );

@@ -756,7 +756,7 @@ async fn main() -> Result<()> {
         let queued_event = commerce_event(&db, created, 1, queued, "draft", 1).await?;
         run_until(&services, async {
             for _ in 0..300 {
-                let exists: bool = db.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM base_watcher_runs WHERE tenant_id=1 AND watcher_id=$1 AND event_id=$2 AND state='queued')", &[&watcher_id,&queued_event]).await?.get(0);
+                let exists: bool = db.get().await?.query_one("SELECT EXISTS(SELECT 1 FROM base_watcher_runs r JOIN base_queue_jobs j ON j.tenant_id=r.tenant_id AND j.worker_id='base/watchers-run' AND j.args->>'run_id'=r.id::text WHERE r.tenant_id=1 AND r.watcher_id=$1 AND r.event_id=$2 AND r.state='queued' AND j.state='scheduled')", &[&watcher_id,&queued_event]).await?.get(0);
                 if exists { return Ok(()); }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
