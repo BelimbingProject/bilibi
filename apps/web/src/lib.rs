@@ -336,6 +336,7 @@ pub fn router(app: App) -> Router {
             "/accept/{token}",
             get(auth::invitation_page).post(auth::accept_invitation),
         )
+        .route("/accept/{token}/resend", post(auth::resend_invitation))
         .route("/login/sso/{provider}/start", get(auth::sso_start))
         .route("/login/sso/callback", get(auth::sso_callback))
         .route(

@@ -140,11 +140,13 @@ pub struct ForgotForm {
     pub email_errors: Vec<String>,
     /// Set once a well-formed request was accepted.
     pub confirmation: String,
+    pub resend: bool,
 }
 
 #[derive(Template)]
 #[template(path = "forgot_password.html")]
 pub struct ForgotPasswordPage {
+    pub resend: bool,
     pub confirmation: String,
     pub email: Html,
 }
@@ -152,6 +154,7 @@ pub struct ForgotPasswordPage {
 impl ForgotPasswordPage {
     pub fn new(form: &ForgotForm) -> askama::Result<Self> {
         Ok(Self {
+            resend: form.resend,
             confirmation: form.confirmation.clone(),
             email: Html::render(
                 &Field::in_form("forgot", "email")
@@ -218,6 +221,7 @@ pub struct InvitationResultPage<'a> {
     pub message: &'a str,
     pub href: &'a str,
     pub action: &'a str,
+    pub resend: bool,
 }
 
 impl InvitationPage {

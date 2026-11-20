@@ -47,7 +47,7 @@ const fn role(
 // The two user-management roles, and the tenant owner's share.
 inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { module: "core/user", source: file!(), line: line!() }, &VocabularyContribution {
     domains: &[], verbs: &["invite"],
-    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE),C::tenant(crate::sso::config::MANAGE)],
+    capabilities: &[C::tenant(LIST), C::tenant(VIEW), C::tenant(CREATE), C::tenant(UPDATE), C::tenant(DELETE), C::tenant(INVITE), C::platform(crate::reset::MANAGE_LIFETIME), C::tenant(crate::sso::config::MANAGE)],
     roles: &[
         role("user_viewer", "User Viewer", "Read-only access to user management.", READ),
         role("user_editor", "User Editor", "Read-write access to user management.", ALL),
@@ -57,6 +57,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "core/user", Provenance { mod
 }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/reset-password/{token}" }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.accept-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}" }) }
+inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.resend-invitation", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/accept/{token}/resend" }) }
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "core/user.portal-reset-password", Provenance { module: "core/user", source: file!(), line: line!() }, &CredentialPath { path: "/portal/reset/{site}/{token}" }) }
 
 // The `admin.user` menu entry for the tenant-wide `/users` index.

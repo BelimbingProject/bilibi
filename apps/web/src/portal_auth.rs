@@ -104,6 +104,7 @@ fn unknown_site() -> Result<Response, HttpError> {
         None,
         "Portal not found",
         &PortalForm {
+            action: "",
             id: "portal-unknown",
             heading: "Portal not found",
             intro: "This portal address is not in use. Check the link from the company that invited you.",
@@ -191,6 +192,7 @@ pub async fn sign_in_root(
         None,
         "Sign in",
         &PortalForm {
+            action: "",
             id: "portal-sign-in-unknown",
             heading: "Sign in to your customer portal",
             intro: "Open the sign-in link from the company that invited you. Each company's portal has its own address.",
@@ -235,6 +237,7 @@ fn sign_in_card(
         Some(site),
         "Sign in",
         &PortalForm {
+            action: "",
             id: "portal-sign-in",
             heading: "Sign in",
             intro: "",
@@ -674,6 +677,8 @@ fn forgot_card(
     status: StatusCode,
 ) -> Result<Response, HttpError> {
     let back = format!("/portal/sign-in/{}", site.address);
+    let action = format!("/portal/forgot/{}", site.address);
+    let resend = errors.iter().any(|error| error == RESET_LINK_INVALID);
     let links = [PortalCardLink {
         id: "portal-forgot-back",
         href: &back,
@@ -683,13 +688,18 @@ fn forgot_card(
         Some(site),
         "Forgot password",
         &PortalForm {
+            action: &action,
             id: "portal-forgot",
             heading: "Forgot your password?",
             intro: "Enter your email address to request a reset link.",
             success,
             error: "",
             fields: vec![rendered(&email_field("forgot", email, errors, true))?],
-            submit: "Send reset link",
+            submit: if resend {
+                "Send me a new link"
+            } else {
+                "Send reset link"
+            },
             working: "Sending…",
             links: &links,
         },
@@ -770,6 +780,7 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
         Some(site),
         "Reset password",
         &PortalForm {
+            action: "",
             id: "portal-reset",
             heading: "Reset your password",
             intro: "Choose a new password for your account.",
@@ -797,16 +808,27 @@ fn reset_card(site: &Site, form: ResetCard<'_>, status: StatusCode) -> Result<Re
         status,
     )
 }
+fn reset_unavailable(site: &Site, email: &str, status: StatusCode) -> Result<Response, HttpError> {
+    forgot_card(site, email, vec![RESET_LINK_INVALID.into()], "", status)
+}
+
 /// `GET /portal/reset/{site}/{token}`: the address comes from the emailed link.
 pub async fn reset_page(
     State(app): State<App>,
-    Path((address, _token)): Path<(String, String)>,
+    Path((address, token)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, HttpError> {
     let Some(site) = site(&app, &address).await? else {
         return unknown_site();
     };
     let email = bounded(query.get("email").map(String::as_str).unwrap_or(""));
+    if !app
+        .user
+        .portal_reset_link_valid(site.tenant, &email, &token)
+        .await?
+    {
+        return reset_unavailable(&site, &email, StatusCode::OK);
+    }
     reset_card(
         &site,
         ResetCard {
@@ -850,15 +872,26 @@ pub async fn reset(
             &submission.password,
         ),
     };
-    if !(form.email_errors.is_empty()
+    let redisplay = if !(form.email_errors.is_empty()
         && form.password_errors.is_empty()
         && form.confirmation_errors.is_empty())
     {
-        return reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
+        Some(StatusCode::UNPROCESSABLE_ENTITY)
+    } else if !recovery_allowed(&app, &headers, peer.as_ref()).await? {
         form.email_errors = vec![RECOVERY_THROTTLED.into()];
-        return reset_card(&site, form, StatusCode::TOO_MANY_REQUESTS);
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    } else {
+        None
+    };
+    if let Some(status) = redisplay {
+        if !app
+            .user
+            .portal_reset_link_valid(site.tenant, &email, &token)
+            .await?
+        {
+            return reset_unavailable(&site, &email, status);
+        }
+        return reset_card(&site, form, status);
     }
     match app
         .user
@@ -869,8 +902,7 @@ pub async fn reset(
             Redirect::to(&format!("/portal/sign-in/{}?done=reset", site.address)).into_response(),
         ),
         Err(CredentialError::InvalidOrExpiredToken) => {
-            form.email_errors = vec![RESET_LINK_INVALID.into()];
-            reset_card(&site, form, StatusCode::UNPROCESSABLE_ENTITY)
+            reset_unavailable(&site, &email, StatusCode::UNPROCESSABLE_ENTITY)
         }
         Err(CredentialError::Policy(violation)) => {
             form.password_errors = vec![violation.to_string()];
@@ -904,6 +936,7 @@ fn accept_card(
         Some(site),
         "Accept invitation",
         &PortalForm {
+            action: "",
             id: "portal-accept",
             heading: "Set up your account",
             intro: &intro,
@@ -950,6 +983,7 @@ fn invitation_invalid(site: &Site, address_taken: bool) -> Result<Response, Http
         Some(site),
         "Accept invitation",
         &PortalForm {
+            action: "",
             id: "portal-accept-invalid",
             heading: "Set up your account",
             intro: "",
@@ -1149,6 +1183,7 @@ fn register_card(
         Some(site),
         "Request an account",
         &PortalForm {
+            action: "",
             id: "portal-register",
             heading: "Request an account",
             intro: if form.success.is_empty() {
@@ -1283,6 +1318,7 @@ fn verify_card(site: &Site, open: bool, done: bool) -> Result<Response, HttpErro
         Some(site),
         "Confirm your request",
         &PortalForm {
+            action: "",
             id: "portal-verify",
             heading: "Confirm your request",
             intro: if open && !done {

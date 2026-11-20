@@ -324,6 +324,20 @@ impl UserService {
             .await
     }
 
+    /// Check the customer's reset link before showing password fields.
+    pub async fn portal_reset_link_valid(
+        &self,
+        tenant: i64,
+        email: &str,
+        token: &str,
+    ) -> Result<bool> {
+        if tenant <= 0 {
+            return Ok(false);
+        }
+        self.reset_link_valid_for(Audience::Customer { tenant }, email, token)
+            .await
+    }
+
     /// Redeems a portal reset link: as [`UserService::reset_password`] for
     /// the customers of `tenant` only.
     pub async fn portal_reset_password(

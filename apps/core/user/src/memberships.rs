@@ -15,6 +15,7 @@ use bilibi_security::Scope;
 use bilibi_settings::Target;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::time::SystemTime;
 
 pub const INVITATION_DAYS_KEY: &str = "user.invitation_days";
 
@@ -85,6 +86,16 @@ fn token_shaped(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+async fn renewable_invitation(
+    client: &tokio_postgres::Client,
+    hash: &[u8],
+) -> Result<Option<tokio_postgres::Row>> {
+    Ok(client.query_opt(
+        "SELECT v.tenant_id,v.created_at,v.expires_at FROM user_invitations v JOIN users u ON u.tenant_id=v.tenant_id AND u.id=v.user_id JOIN tenants t ON t.id=v.tenant_id WHERE v.token_hash=$1 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.status='active' AND t.deleted_at IS NULL",
+        &[&hash],
+    ).await?)
+}
+
 async fn record_acceptance_refusal(
     client: &tokio_postgres::Client,
     scope: &Scope,
@@ -138,6 +149,87 @@ impl UserService {
             tenant_name: row.get(0),
             existing_sign_in,
         })
+    }
+
+    /// Whether the bearer can request a new link for this expired invitation.
+    pub async fn member_invitation_can_be_renewed(&self, raw_token: &str) -> Result<bool> {
+        if !token_shaped(raw_token) {
+            return Ok(false);
+        }
+        let client = self.db.get().await?;
+        Ok(renewable_invitation(&client, &digest(raw_token))
+            .await?
+            .is_some())
+    }
+
+    /// Reissues an expired, still-pending invitation identified by its bearer token.
+    /// All other tokens have the same successful response and send no mail.
+    pub async fn resend_member_invitation(&self, raw_token: &str) -> Result<()> {
+        if !token_shaped(raw_token) {
+            return Ok(());
+        }
+        let old_hash = digest(raw_token);
+        let mut client = self.db.get().await?;
+        let Some(row) = renewable_invitation(&client, &old_hash).await? else {
+            return Ok(());
+        };
+        let tenant: i64 = row.get(0);
+        let old_created_at: SystemTime = row.get(1);
+        let old_expires_at: SystemTime = row.get(2);
+        let new_token = token()?;
+        let new_hash = digest(&new_token);
+        let rollback_old_hash = old_hash.clone();
+        let rollback_new_hash = new_hash.clone();
+        let mut tx = self
+            .mutations
+            .begin(
+                &mut client,
+                Context::system(tenant, crate::sign_in::PRINCIPAL, "user.invitation.reissue"),
+            )
+            .await?;
+        let issued = tx.mutate(move |sql| Box::pin(async move {
+            let row = sql.query_opt(
+                "UPDATE user_invitations v SET token_hash=$3, expires_at=clock_timestamp()+LEAST(GREATEST(v.expires_at-v.created_at, interval '1 day'), interval '60 days'), created_at=clock_timestamp() FROM users u, tenants t WHERE v.tenant_id=$1 AND v.token_hash=$2 AND v.accepted_at IS NULL AND v.revoked_at IS NULL AND v.expires_at<=clock_timestamp() AND u.tenant_id=v.tenant_id AND u.id=v.user_id AND u.status='invited' AND u.identity_id IS NULL AND u.deleted_at IS NULL AND t.id=v.tenant_id AND t.status='active' AND t.deleted_at IS NULL RETURNING v.id,v.email,u.name,t.name",
+                &[&tenant, &old_hash, &new_hash],
+            ).await?;
+            let Some(row) = row else { return Err(Error::Conflict) };
+            let id: i64 = row.get(0);
+            let details = (id, row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3));
+            Ok((details, vec![Change { kind: "user.invitation".into(), id, old: json!({"status": "pending"}), new: json!({"status": "pending", "reissued": true}) }]))
+        })).await;
+        let (id, email, name, tenant_name) = match issued {
+            Ok(details) => details,
+            Err(Error::Conflict) => {
+                tx.rollback().await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let message = Message::text(Address::new(Some(&name), &email).map_err(|_| Error::Invalid)?, format!("You're invited to {tenant_name}"), format!("You are invited to join {tenant_name}.\n\nOpen this link to accept:\n\n{}/accept/{new_token}\n\nThe link works once. If you did not expect this, you can ignore this email.\n", self.origin));
+        let mailer = self.mailer.clone();
+        let db = self.db.clone();
+        let mutations = self.mutations.clone();
+        tx.after_commit(move || {
+            tokio::spawn(async move {
+                if let Err(error) = mailer.deliver(&message).await {
+                    eprintln!("mail: user invitation {id} was not delivered: {error}");
+                    let restore = async {
+                        let mut client = db.get().await?;
+                        let mut tx = mutations.begin(&mut client, Context::system(tenant, crate::sign_in::PRINCIPAL, "user.invitation.reissue_withdrawn")).await?;
+                        let restored = tx.mutate(move |sql| Box::pin(async move {
+                            let row = sql.query_opt("UPDATE user_invitations SET token_hash=$3,expires_at=$5,created_at=$6 WHERE tenant_id=$1 AND id=$2 AND token_hash=$4 AND accepted_at IS NULL AND revoked_at IS NULL RETURNING id", &[&tenant, &id, &rollback_old_hash, &rollback_new_hash, &old_expires_at, &old_created_at]).await?;
+                            if row.is_none() { return Err(Error::Conflict); }
+                            Ok(((), vec![Change { kind: "user.invitation".into(), id, old: json!({"status": "pending", "reissued": true}), new: json!({"status": "pending", "delivery_failed": true}) }]))
+                        })).await;
+                        match restored { Ok(()) => tx.commit().await?, Err(Error::Conflict) => tx.rollback().await?, Err(error) => return Err(error) }
+                        Ok::<(), Error>(())
+                    }.await;
+                    if let Err(error) = restore { eprintln!("mail: user invitation {id} could not be restored: {error}"); }
+                }
+            });
+        });
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Prepares one tenant-owned account and emails a one-time invitation.

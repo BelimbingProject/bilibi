@@ -313,6 +313,7 @@ inventory::submit! {
             users.step_up.bind_session(authenticator)?;
             bilibi_company::bind_work_access(users.clone())?;
             desks_agent::bind(users.clone())?;
+            reset::bind(users.settings.clone())?;
             two_factor::bind(users.clone())?;
             sso::agent::bind(users.clone())?;
             Ok(users)
