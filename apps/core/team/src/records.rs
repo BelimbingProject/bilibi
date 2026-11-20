@@ -67,7 +67,7 @@ static GRID: GridContribution = GridContribution {
         ],
     )
     .label_field("name")
-    .record_types(&["team"])],
+    .record_types(&["team"]).list_address(crate::LIST_PATH)],
     links: &[],
 };
 bilibi_grid::contribute!("core/team", "team.grid", &GRID);

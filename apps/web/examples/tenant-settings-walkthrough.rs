@@ -181,6 +181,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         list(&registry, &mut client, &admin).await?
     };
     prove_masked(&before)?;
+    // Customisation discovery lists the same delegated settings and keeps the secret unread.
+    let discovered = registry
+        .call(
+            &mut **db.get().await?,
+            &admin,
+            "base.labels.customisations.discover",
+            &json!({"purpose":"tenant configuration","page_size":100}),
+        )
+        .await?;
+    let found = |key: &str| {
+        discovered["result"]["choices"]
+            .as_array()
+            .and_then(|choices| choices.iter().find(|choice| choice["subject"] == key))
+            .cloned()
+    };
+    let (plain, secret) = (
+        found(PLAIN).ok_or("plain setting not discovered")?,
+        found(SECRET).ok_or("secret setting not discovered")?,
+    );
+    if discovered.to_string().contains(SECRET_TEXT)
+        || secret["value"] != json!({"restricted":true})
+        || plain["value"] != "inherited"
+        || plain["source"] != "default"
+        || plain["limits"]["type"] != "string"
+        || plain["available_writes"]
+            != json!([
+                "base.settings_editor.tenant.set",
+                "base.settings_editor.tenant.restore"
+            ])
+        || secret["available_writes"] != json!(["base.settings_editor.tenant.restore"])
+        || discovered["result"]["sections"][0]["operations"]["restore"]["key"]
+            != "base.settings_editor.tenant.restore"
+    {
+        return Err("customisation discovery misreported tenant settings".into());
+    }
     println!("tenant 1 before: {before}");
 
     let secret_operations = [setting(SECRET, SUBMITTED_SECRET)];

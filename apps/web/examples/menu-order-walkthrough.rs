@@ -179,6 +179,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?["result"],
         second_before["result"]
     );
+    let discovered = contracts
+        .read(
+            &admin,
+            "base.labels.customisations.discover",
+            &json!({"purpose":"sidebar navigation"}),
+        )
+        .await?;
+    let order = discovered["result"]["choices"]
+        .as_array()
+        .and_then(|choices| choices.iter().find(|choice| choice["subject"] == "admin"))
+        .ok_or("missing Administration menu order")?;
+    let expected: Vec<_> = std::iter::once(json!(last)).chain(remaining).collect();
+    assert_eq!(order["value"], json!(expected));
+    assert_eq!(order["verify_input"], json!({}));
     let reader_preview = contracts
         .read(&reader, "base.menu_order.preview", &json!({}))
         .await?;

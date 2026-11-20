@@ -1016,6 +1016,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/user",
     "core/user.grid-page",
     "users",
+    None,
     crate::contributions::LIST,
     Some(|| SPEC.clone()),
     &[(

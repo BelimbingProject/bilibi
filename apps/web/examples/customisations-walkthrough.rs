@@ -48,6 +48,266 @@ fn confirmation_event(html: &str, event: &str) -> Value {
     json!({"type":event, "key":key})
 }
 
+/// "What can I change here?" through the read contract, for both tenants.
+async fn discovery(
+    db: &bilibi_database::Db,
+    contracts: &PageContracts,
+    one: &Scope,
+    two: &Scope,
+    credential: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KEY: &str = "base.labels.customisations.discover";
+    let section_ids = |answer: &Value| -> Vec<String> {
+        answer["result"]["sections"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|section| section["section"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let choice = |answer: &Value, subject: &str| -> Option<Value> {
+        answer["result"]["choices"]
+            .as_array()?
+            .iter()
+            .find(|choice| choice["subject"] == subject)
+            .cloned()
+    };
+
+    // Every section answers, on one bounded page, with choices nobody changed.
+    let all = contracts.read(one, KEY, &json!({})).await?;
+    let sections = section_ids(&all);
+    for id in [
+        "base/labels.customisations",
+        "base/custom_fields.customisations",
+        "base/grid.customisations",
+        "base/menu_order.customisations",
+    ] {
+        assert!(sections.iter().any(|section| section == id), "{id}");
+    }
+    let page = &all["meta"]["page"];
+    assert_eq!(page["page_size"], 25);
+    assert_eq!(all["result"]["choices"].as_array().map(Vec::len), Some(25));
+    assert!(page["total"].as_u64().is_some_and(|total| total > 25));
+    let last = contracts
+        .read(one, KEY, &json!({"page": 1000000, "page_size": 100}))
+        .await?;
+    assert_eq!(last["result"]["choices"], json!([]));
+    assert!(contracts
+        .read(one, KEY, &json!({"page_size": 101}))
+        .await
+        .is_err());
+
+    // By record kind: the label override, the custom field and the list's views.
+    let company = contracts
+        .read(
+            one,
+            KEY,
+            &json!({"record_kind": "company", "page_size": 100}),
+        )
+        .await?;
+    let word = choice(&company, "record:companies").ok_or("missing record label")?;
+    assert_eq!(word["value"], "Tenant one word");
+    assert_eq!(word["default"], "Companies");
+    assert_eq!(word["source"], "tenant");
+    assert_eq!(word["customised"], true);
+    assert_eq!(word["target"], "tenant");
+    let field = choice(&company, "company.walkthrough_field").ok_or("missing field")?;
+    assert_eq!(field["value"]["label"], "Tenant one field");
+    assert_eq!(field["value"]["kind"], "reference");
+    assert_eq!(field["value"]["target"], "company");
+    assert_eq!(field["value"]["position"], 10);
+    assert_eq!(field["source"], "tenant");
+    let add = choice(&company, "company").ok_or("missing record type")?;
+    assert_eq!(add["value"], json!(["walkthrough_field"]));
+    assert_eq!(add["limits"]["max_fields"], 50);
+    assert_eq!(add["limits"]["active_fields"], 1);
+    let views = choice(&company, "companies").ok_or("missing list views")?;
+    assert_eq!(views["section"], "base/grid.customisations");
+    assert_eq!(views["customised"], false);
+    assert_eq!(views["value"], json!([]));
+    assert!(choice(&company, "admin.labels").is_none());
+    let labels = company["result"]["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["section"] == "base/labels.customisations")
+        })
+        .ok_or("missing labels section")?;
+    assert_eq!(labels["operations"]["change"][0]["key"], "base.labels.set");
+    assert_eq!(labels["operations"]["change"][0]["available"], true);
+    assert_eq!(labels["operations"]["restore"]["key"], "base.labels.clear");
+    assert_eq!(labels["operations"]["verify"]["key"], "base.labels.list");
+    assert!(labels["limits"]
+        .as_str()
+        .is_some_and(|limits| limits.contains("60")));
+
+    let company_page = contracts
+        .read(one, KEY, &json!({"on_page": "/companies"}))
+        .await?;
+    for subject in [
+        "record:companies",
+        "field:companies.name",
+        "company",
+        "company.walkthrough_field",
+        "companies",
+    ] {
+        let found = choice(&company_page, subject)
+            .unwrap_or_else(|| panic!("{subject} missing on /companies"));
+        assert_eq!(found["on_page"], "/companies");
+    }
+
+    for (page, subjects) in [
+        (
+            "/documents",
+            &[
+                "record:documents",
+                "field:documents.name",
+                "field:document_revisions.label",
+            ][..],
+        ),
+        (
+            "/activities",
+            &["record:activities", "field:activities.subject"][..],
+        ),
+        ("/geonames/countries", &["field:countries.country"][..]),
+        ("/work-calendars", &["field:work_calendars.timezone"][..]),
+        (
+            "/companies/legal-entity-types",
+            &["field:legal_entity_types.name"][..],
+        ),
+    ] {
+        let listed = contracts
+            .read(one, KEY, &json!({"on_page":page,"page_size":100}))
+            .await?;
+        for subject in subjects {
+            assert!(
+                choice(&listed, subject).is_some(),
+                "{subject} missing on {page}"
+            );
+        }
+        assert!(!section_ids(&listed)
+            .iter()
+            .any(|section| section == "base/grid.customisations"));
+    }
+    let columns = contracts
+        .read(
+            one,
+            KEY,
+            &json!({"on_page":"/companies","purpose":"rename a column"}),
+        )
+        .await?;
+    assert!(choice(&columns, "field:companies.name").is_some());
+    assert!(choice(&columns, "record:companies").is_none());
+    assert!(columns["result"]["choices"]
+        .as_array()
+        .ok_or("missing column choices")?
+        .iter()
+        .all(|choice| !choice["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("menu:")));
+    let add_fields = contracts
+        .read(
+            one,
+            KEY,
+            &json!({"on_page":"/companies","purpose":"add field"}),
+        )
+        .await?;
+    assert_eq!(add_fields["meta"]["page"]["total"], 1);
+    assert_eq!(add_fields["result"]["choices"][0]["subject"], "company");
+
+    for filters in [
+        json!({"on_page":"/admin/labels", "record_kind":"company"}),
+        json!({"record_kind":"Company"}),
+        json!({"on_page":"?page=2"}),
+        json!({"on_page":"/admin/labels/?page=2"}),
+        json!({"on_page":"/admin/labels/"}),
+        json!({"on_page":"/admin/labels#top"}),
+        json!({"on_page":""}),
+    ] {
+        assert_eq!(
+            contracts.read(one, KEY, &filters).await?["result"]["choices"],
+            json!([])
+        );
+    }
+    // By page, and by purpose.
+    let here = contracts
+        .read(one, KEY, &json!({"on_page": "/admin/labels"}))
+        .await?;
+    assert_eq!(here["meta"]["page"]["total"], 1);
+    assert_eq!(here["result"]["choices"][0]["value"], "Second override");
+    assert_eq!(here["result"]["choices"][0]["on_page"], "/admin/labels");
+    let override_choice = &here["result"]["choices"][0];
+    let token = override_choice["version"]
+        .as_str()
+        .ok_or("missing label version")?;
+    assert_ne!(token, "0:0");
+    assert_eq!(override_choice["input"]["version"], token);
+    let clear = Call {
+        scope: one,
+        credential,
+        service: "base/labels.customisations",
+        event: "customisation.labels",
+        contract: "base.labels.clear",
+    };
+    let input = override_choice["input"].clone();
+    assert_eq!(
+        contracts.preview(&clear, input.clone()).await?["valid"],
+        true
+    );
+    contracts.commit(&clear, input).await?;
+    let restored = contracts
+        .read(one, KEY, &json!({"on_page": "/admin/labels"}))
+        .await?;
+    let default = &restored["result"]["choices"][0];
+    assert_eq!(default["value"], "Labels");
+    assert_eq!(default["source"], "default");
+    assert_eq!(default["version"], "0:0");
+    let mut input = default["input"].clone();
+    input["label"] = json!("Second override");
+    contracts
+        .submit(
+            &Call {
+                scope: one,
+                credential,
+                service: "base/labels.pages",
+                event: "save_field",
+                contract: "base.labels.set",
+            },
+            input,
+        )
+        .await?;
+    let order = contracts
+        .read(one, KEY, &json!({"purpose": "Sidebar navigation"}))
+        .await?;
+    assert_eq!(section_ids(&order), ["base/menu_order.customisations"]);
+    let preview = &order["result"]["sections"][0]["operations"]["preview"];
+    assert_eq!(preview["key"], "base.menu_order.preview");
+
+    let theirs = contracts
+        .read(two, KEY, &json!({"on_page": "/companies"}))
+        .await?;
+    assert_eq!(
+        choice(&theirs, "record:companies").ok_or("missing tenant two label")?["value"],
+        "Tenant two word"
+    );
+    assert!(choice(&theirs, "company.walkthrough_field").is_none());
+    db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed) VALUES(1,4,'base.custom-fields.view',false)", &[]).await?;
+    let denied = contracts
+        .read(one, KEY, &json!({"on_page": "/companies"}))
+        .await?;
+    assert!(choice(&denied, "company.walkthrough_field").is_none());
+    assert!(choice(&denied, "record:companies").is_some());
+    assert!(!section_ids(&denied)
+        .iter()
+        .any(|section| section == "base/custom_fields.customisations"));
+    let logged: i64 = db.get().await?.query_one("SELECT count(*) FROM authz_decision_log WHERE tenant_id=1 AND user_id=4 AND capability='base.custom-fields.view' AND NOT allowed", &[]).await?.get(0);
+    assert_eq!(logged, 0);
+    db.get().await?.execute("DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=4 AND capability='base.custom-fields.view'", &[]).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("BILIBI_CUSTOMISATIONS_DEMO").as_deref() != Ok("disposable") {
@@ -165,7 +425,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &label_call(&one, &token1, "base.labels.set"),
         json!({"kind":"menu", "subject":"admin.labels", "label":"Second override", "version":"0:0"}),
     ).await?;
-    contracts.submit(&Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "create", contract: "base.custom_fields.define" }, json!({"record_type":"company", "key":"walkthrough_field", "label":"Tenant one field", "kind":"text"})).await?;
+    contracts.submit(&Call { scope: &one, credential: &token1, service: "base/custom_fields.pages", event: "create", contract: "base.custom_fields.define" }, json!({"record_type":"company", "key":"walkthrough_field", "label":"Tenant one field", "kind":"reference", "target":"company"})).await?;
+    discovery(&db, &contracts, &one, &two, &token1).await?;
     let path = HashMap::new();
     let query = HashMap::new();
     let show = |scope| PageRequest {

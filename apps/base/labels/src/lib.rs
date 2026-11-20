@@ -4,11 +4,14 @@
 //! permission key. Contract: `README.md`.
 mod customisations;
 mod customisations_web;
+mod discovery;
 mod operations;
 mod store;
 mod web;
 
-pub use customisations::{CustomisationRow, CustomisationSection, SECTIONS};
+pub use customisations::{
+    Changes, Choice, CustomisationRow, CustomisationSection, Read, Undo, SECTIONS,
+};
 
 pub use store::{
     field_labels, subject_id, Edit, FieldLabels, Kind, LabelSet, Labels, Plan, Stored, Subject,
@@ -69,7 +72,9 @@ inventory::submit! {
             } },
             Service { id: CUSTOMISATIONS, factory: |services| {
                 let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
-                let sections = catalog.entries::<CustomisationSection>(SECTIONS)?.iter().map(|entry| entry.get::<CustomisationSection>()).collect::<Result<Vec<_>, _>>()?;
+                let entries = catalog.entries::<CustomisationSection>(SECTIONS)?;
+                let sections = entries.iter().map(|entry| entry.get::<CustomisationSection>()).collect::<Result<Vec<_>, _>>()?;
+                discovery::bind(services.get("base/agent_api.registry")?, entries.iter().map(|entry| entry.id).zip(sections.iter().copied()).collect())?;
                 Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(customisations_web::Pages {
                     db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
                     display: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, directory: services.get("base/principal_directory.directory")?,
@@ -107,7 +112,8 @@ bilibi_menu::contribute!(
 inventory::submit! { bilibi_module_registry::Consumer::new::<CustomisationSection>(SECTIONS, "base/labels", |entries| {
     for entry in entries {
         let section = entry.get::<CustomisationSection>()?;
-        if section.title.is_empty() || section.read.is_empty() || section.undo.is_empty() || !section.event.starts_with("customisation.") {
+        let undo_valid = section.undo.as_ref().is_none_or(|undo| !undo.read.is_empty() && !undo.operation.is_empty() && undo.event.starts_with("customisation."));
+        if section.title.is_empty() || !undo_valid || (section.undo.is_none() && section.changes.is_none()) {
             return Err(bilibi_module_registry::RegistryError::Contribution(format!("invalid customisation section {}", entry.id)));
         }
     }

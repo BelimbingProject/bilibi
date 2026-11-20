@@ -112,9 +112,15 @@ impl ReadHandler for Read {
                                 .iter()
                                 .map(|n| json!({"id":n.item.item.id,"label":n.item.item.label}))
                                 .collect();
+                            let mut effective: Vec<_> =
+                                nodes.iter().map(|node| node.item.item.id).collect();
+                            if let Some(saved) = saved {
+                                saved.order_ids(&mut effective);
+                            }
                             json!({
                                 "parent": parent,
                                 "product": product,
+                                "effective_item_ids": effective,
                                 "item_ids": saved.map(|s| s.visible_items(&siblings)),
                                 "version": version_token(parent, &siblings, saved),
                             })
@@ -215,10 +221,62 @@ fn output() -> Value {
 }
 inventory::submit! { Contribution::new(DEFINITIONS, "base/menu_order.agent", Provenance { module:"base/menu_order", source:file!(), line:line!() }, &Definitions {
     operations: &[
-        Operation { key:"base.menu_order.list", title:"List menu sibling groups", summary:"Read product and saved order with version tokens.", keywords:&["menu","order"], capability:VIEW, input:empty_schema, output:list_output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.menu_order.list", title:"List menu sibling groups", summary:"Read product, saved and effective order with version tokens.", keywords:&["menu","order"], capability:VIEW, input:empty_schema, output:list_output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.preview", title:"Preview my menu", summary:"Preview the menu visible to the current reader in the tenant's order.", keywords:&["menu","preview"], capability:VIEW, input:preview_schema, output:list_output, handler:Handler::Read(&Read::Preview), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.set", title:"Order menu siblings", summary:"Set a tenant's order for siblings by stable menu item ID.", keywords:&["menu","order"], capability:MANAGE, input:set_schema, output, handler:Handler::SafeWrite(&Write::Set), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.restore", title:"Restore product menu order", summary:"Restore product order for the visible siblings in one group.", keywords:&["menu","restore"], capability:MANAGE, input:restore_schema, output, handler:Handler::SafeWrite(&Write::Restore), channels:Channels::Every, step_up:&[] },
     ],
     guides:&[Guide { key:"base.menu_order", title:"Menu order", summary:"Arrange a tenant's menu siblings and restore product order.", keywords:&["menu","order","navigation"], capability:VIEW, body:"Use base.menu_order.list to find visible sibling IDs, the parent ID and version token. The empty parent is the staff menu root. Set an ordered list of visible sibling IDs with base.menu_order.set. Unlisted and newly contributed visible siblings follow in product order, and removed items disappear. Use base.menu_order.preview to see the current reader's permitted menu. Optionally pass parent and item_ids to preview a proposed order without saving. Use base.menu_order.restore with the parent and current version to return visible siblings to product order. Both writes preserve saved IDs for siblings outside your view. Each write requires a dry run, a complete preview and explicit approval before committing the unchanged operation." }],
+}) }
+
+/// What may be changed: every sibling group the caller sees, in product
+/// order or the tenant's own.
+fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
+    let groups = reads[0].as_array().into_iter().flatten();
+    groups
+        .filter_map(|group| {
+            let parent = group["parent"].as_str()?;
+            let product: Vec<Value> = group["product"]
+                .as_array()?
+                .iter()
+                .map(|item| item["id"].clone())
+                .collect();
+            let saved = group["item_ids"].as_array().filter(|ids| !ids.is_empty());
+            Some(bilibi_labels::Choice {
+                keywords: "menu order reorder arrange navigation sidebar move restore",
+                subject: if parent.is_empty() { "root" } else { parent }.to_owned(),
+                title: if parent.is_empty() {
+                    "Menu order: the top level".to_owned()
+                } else {
+                    format!("Menu order: items under {parent}")
+                },
+                value: Some(group["effective_item_ids"].clone()),
+                default: Some(json!(product)),
+                source: Some(if saved.is_some() { "tenant" } else { "default" }.into()),
+                customised: saved.is_some(),
+                version: Some(group["version"].clone()),
+                input: json!({"parent": parent, "version": group["version"]}),
+                verify_input: no_input(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+fn no_input() -> Value {
+    json!({})
+}
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/menu_order.customisations", Provenance { module:"base/menu_order", source:file!(), line:line!() }, &bilibi_labels::CustomisationSection {
+    title: "Menu order",
+    undo: None,
+    changes: Some(bilibi_labels::Changes {
+        purpose: "Arrange the staff menu's items among their siblings for everyone in this tenant.",
+        limits: "Only the order of siblings under one parent, by stable menu item ID. An order never grants access, renames an item or moves it to another parent, and the customer portal menu is not ordered here.",
+        guide: "base.menu_order",
+        reads: &[bilibi_labels::Read { operation: "base.menu_order.list", input: no_input }],
+        choices: customisation_choices,
+        change: &["base.menu_order.set"],
+        preview: Some("base.menu_order.preview"),
+        verify: "base.menu_order.preview",
+        restore: Some("base.menu_order.restore"),
+    }),
 }) }

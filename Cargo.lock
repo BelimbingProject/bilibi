@@ -1761,6 +1761,7 @@ dependencies = [
  "bilibi-audit",
  "bilibi-authz",
  "bilibi-database",
+ "bilibi-labels",
  "bilibi-media",
  "bilibi-menu",
  "bilibi-module-registry",

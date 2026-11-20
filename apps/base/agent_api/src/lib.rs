@@ -918,6 +918,28 @@ impl Registry {
         Ok(output.envelope(key))
     }
 
+    /// Runs read operation `key` on the connection a read handler was handed,
+    /// for a read that gathers other owners' reads. The same admission and
+    /// logged capability decision as [`Registry::call`]; it takes no second
+    /// connection. Use [`Registry::call_in`] for transaction-required reads.
+    pub async fn call_on(
+        &self,
+        client: &dyn OperationClient,
+        scope: &Scope,
+        key: &str,
+        input: &Value,
+    ) -> Result<Value> {
+        let op = self.admitted(key, scope, input)?;
+        authorize_read(client.sql_client().await?, scope, op.capability, input).await?;
+        let Handler::Read(handler) = op.handler else {
+            return Err(Error::WritesNotEnabled);
+        };
+        if handler.requires_transaction() {
+            return Err(Error::Backend(bilibi_database::Error::Internal));
+        }
+        Ok(handler.call(client, scope, input).await?.envelope(key))
+    }
+
     /// Runs read operation `key` for `scope` from the pool, as the `/api/v1`,
     /// MCP and page doors do. The capability check takes a pooled connection
     /// and returns it; the handler then runs with no connection held here, on

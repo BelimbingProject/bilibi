@@ -309,7 +309,7 @@ impl CustomFields {
     }
 
     /// The most active fields one record type may have, a tenant setting.
-    async fn limit(&self, client: &dyn ReadClient, scope: &Scope) -> Result<i64> {
+    pub(crate) async fn limit(&self, client: &dyn ReadClient, scope: &Scope) -> Result<i64> {
         self.settings
             .get(client, scope, Target::Tenant, MAX_FIELDS)
             .await?

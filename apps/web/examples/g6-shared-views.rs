@@ -334,6 +334,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reader_list["result"]["views"][0]["audience"],
         hidden_audience
     );
+    let reader_discovery = contracts
+        .read(
+            &reader,
+            "base.labels.customisations.discover",
+            &json!({"on_page":"/companies","purpose":"shared list views"}),
+        )
+        .await?;
+    let choices = reader_discovery["result"]["choices"]
+        .as_array()
+        .ok_or("missing Companies view choices")?;
+    for subject in ["companies".to_owned(), format!("companies:{company_id}")] {
+        let choice = choices
+            .iter()
+            .find(|choice| choice["subject"] == subject)
+            .ok_or("missing shared view choice")?;
+        assert_eq!(choice["available_writes"], json!([]));
+    }
+    for (scope, count) in [(&admin, 1), (&reader, 0)] {
+        let found = contracts
+            .read(
+                scope,
+                "base.labels.customisations.discover",
+                &json!({"on_page":"/companies","purpose":"delete view"}),
+            )
+            .await?;
+        assert_eq!(found["meta"]["page"]["total"], count);
+        if count == 1 {
+            assert_eq!(found["result"]["choices"][0]["input"]["id"], company_id);
+            assert_eq!(
+                found["result"]["choices"][0]["available_writes"],
+                json!(["base.grid.view.delete"])
+            );
+        }
+    }
     let connection = {
         let client = db.get().await?;
         client.execute(
@@ -355,13 +389,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
         }]
     };
-    let valid = plans.preview(&HeldAgent(&agent), &save(prices)).await?;
+    let price_save = save(prices);
+    let price_authority = HeldAgent(&agent);
+    let valid = plans.preview(&price_authority, &price_save).await?;
     assert_eq!(valid["valid"], true, "{valid}");
     let price_preview = &valid["results"][0]["preview"]["result"]["audience_preview"];
     assert_eq!(
         price_preview["visible_to_current_reader"],
         json!([{"spec":"amount","label":"Amount per base unit"}])
     );
+    plans.commit(&agent, &price_authority, &price_save).await?;
+    let authorized = contracts
+        .read(&reader, "base.grid.view.pages", &json!({}))
+        .await?;
+    let price_page = authorized["result"]["pages"]
+        .as_array()
+        .and_then(|pages| pages.iter().find(|page| page["page"] == "product-prices"))
+        .ok_or("missing product prices page for reader with a desk")?;
+    assert_eq!(price_page["saved_views"][0]["name"], "Price amount");
+    let denied = contracts
+        .read(&admin, "base.grid.view.pages", &json!({}))
+        .await?;
+    assert!(denied["result"]["pages"]
+        .as_array()
+        .ok_or("missing pages")?
+        .iter()
+        .all(|page| page["page"] != "product-prices"));
+    let denied = contracts
+        .read(
+            &admin,
+            "base.labels.customisations.discover",
+            &json!({"record_kind":"product-prices"}),
+        )
+        .await?;
+    assert_eq!(denied["result"]["choices"], json!([]));
     let typo = save(
         json!({"page":"contacts","view":"{}","params":"{}","name":"Mistyped page","audience":{"everyone":true}}),
     );
@@ -777,22 +838,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PASS: shared-view save/delete and label set/list/clear finish with a one-connection pool."
     );
     db.resize(2);
-    let save = |name: String| {
+    let save = |name: String, audience| {
         json!({
-            "page":"reference_items", "view":View::new("reference_items").to_json().to_string(),
-            "params":"{}", "name":name, "audience":{"everyone":true}
+            "page":"companies", "view":View::new("companies").to_json().to_string(),
+            "params":"{}", "name":name, "audience":audience
         })
     };
     for index in 0..99 {
         contracts
-            .submit(&call("base.grid.view.save"), save(format!("Limit {index}")))
+            .submit(
+                &call("base.grid.view.save"),
+                save(format!("Limit {index}"), json!({"roles":[role]})),
+            )
             .await?;
     }
+    let before = contracts
+        .read(
+            &second_admin,
+            "base.labels.customisations.discover",
+            &json!({"on_page":"/companies","purpose":"save view"}),
+        )
+        .await?;
+    assert_eq!(before["result"]["choices"][0]["value"], json!([]));
+    assert_eq!(
+        before["result"]["choices"][0]["available_writes"],
+        json!(["base.grid.view.save"])
+    );
+
     let first = tokio::spawn({
         let contracts = contracts.clone();
         let scope = admin.clone();
         let token = token.clone();
-        let input = save("Concurrent first".into());
+        let input = save("Concurrent first".into(), json!({"everyone":true}));
         async move {
             contracts
                 .submit(
@@ -812,7 +889,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let contracts = contracts.clone();
         let scope = second_admin.clone();
         let token = second_token.clone();
-        let input = save("Concurrent second".into());
+        let input = save("Concurrent second".into(), json!({"everyone":true}));
         async move {
             contracts
                 .submit(
@@ -839,11 +916,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         refused,
         bilibi_agent_api::Error::Backend(bilibi_database::Error::Refused(_))
     ));
-    assert_eq!(views.shared(&admin, "reference_items").await?.len(), 100);
-    let total: i64 = db.get().await?.query_one(
-        "SELECT count(*) FROM base_grid_shared_views WHERE tenant_id=1 AND page='reference_items'", &[]
-    ).await?.get(0);
+    assert_eq!(views.shared(&admin, "companies").await?.len(), 100);
+    let total: i64 = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT count(*) FROM base_grid_shared_views WHERE tenant_id=1 AND page='companies'",
+            &[],
+        )
+        .await?
+        .get(0);
     assert_eq!(total, 100);
+    for (scope, visible) in [(&admin, 100), (&second_admin, 1)] {
+        let after = contracts
+            .read(
+                scope,
+                "base.labels.customisations.discover",
+                &json!({"on_page":"/companies","purpose":"save view"}),
+            )
+            .await?;
+        let choice = &after["result"]["choices"][0];
+        assert_eq!(choice["subject"], "companies");
+        assert_eq!(choice["value"].as_array().map(Vec::len), Some(visible));
+        assert_eq!(choice["available_writes"], json!([]));
+    }
     println!("PASS: concurrent saves at 99 views commit exactly one additional view and refuse the other.");
     Ok(())
 }

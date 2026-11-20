@@ -79,7 +79,7 @@ Use **Administration › Custom fields** (`/admin/custom-fields`, `base.custom-f
 
 | Key | Capability | Does |
 | --- | --- | --- |
-| `base.custom_fields.record_types` | `view` | The record types that take fields, the pick-lists a choice field may use and the kinds of record a record field may point at (`record_kinds`). |
+| `base.custom_fields.record_types` | `view` | The record types that take fields with their registered list addresses, the active-field limit, the pick-lists a choice field may use and the kinds of record a record field may point at (`record_kinds`). |
 | `base.custom_fields.list` | `view` | The tenant's fields, optionally for one record type; archived ones with `include_archived`. |
 | `base.custom_fields.define` | `manage` | Add a field; a choice or several-choices field names its `picklist`, a record field its `target`. |
 | `base.custom_fields.update` | `manage` | Change label, help text or `watcher_condition` (omitted keeps it); needs `version`. |

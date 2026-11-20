@@ -59,6 +59,6 @@ static GRID:GridContribution=GridContribution{
     record_fields:&[],tables:&[TableDecl::new("products","Products",crate::VIEW,
         Source::tenant("SELECT id,code,name,kind,base_unit,category,status,version FROM core_products WHERE tenant_id=$1"),"id",&[
             Field::new("id","ID",FieldType::Integer).protected(),Field::new("code","Code",FieldType::String).protected(),Field::new("name","Name",FieldType::String).protected(),Field::choice("kind","Kind",&["goods","service"]).protected(),Field::new("base_unit","Base unit",FieldType::String).protected(),Field::new("category","Category",FieldType::String).protected(),Field::choice("status","Status",&["active","retired"]).protected(),Field::new("version","Version",FieldType::Integer).protected(),
-        ]).label_field("name").record_types(&["product"])],links:&[],
+        ]).label_field("name").record_types(&["product"]).list_address("/products")],links:&[],
 };
 bilibi_grid::contribute!("core/product", "product.grid", &GRID);

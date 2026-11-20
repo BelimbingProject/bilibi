@@ -198,11 +198,126 @@ fn customisation_rows(value: &serde_json::Value) -> Vec<bilibi_labels::Customisa
 fn archived_customisation_rows(value: &serde_json::Value) -> Vec<bilibi_labels::CustomisationRow> {
     customisation_rows_for(value, true)
 }
+fn no_input() -> serde_json::Value {
+    serde_json::json!({})
+}
+/// What may be changed: every kind of record that takes custom fields, with
+/// or without one, then each field the tenant already has.
+fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choice> {
+    use serde_json::json;
+    let fields = || reads[1].as_array().into_iter().flatten();
+    let types = reads[0]["record_types"].as_array().into_iter().flatten();
+    let mut choices = Vec::new();
+    for record in types {
+        let (Some(id), Some(label)) = (record["id"].as_str(), record["label"].as_str()) else {
+            continue;
+        };
+        let own: Vec<_> = fields()
+            .filter(|field| field["record_type"] == record["id"])
+            .collect();
+        let active: Vec<_> = own
+            .iter()
+            .filter(|field| field["archived_on"].is_null())
+            .map(|field| field["key"].clone())
+            .collect();
+        let page = record["path"].as_str().map(str::to_owned);
+        let record_kinds: Vec<_> = record["record_kinds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| kind.as_str().map(str::to_owned))
+            .collect();
+        let limit = reads[0]["max_fields"].as_u64().unwrap_or_default();
+        let active_count = active.len() as u64;
+        let has_room = active_count < limit;
+        let capacity = json!({"max_fields": limit, "active_fields": active_count});
+        let verify_input = json!({"record_type": id, "include_archived": true});
+        choices.push(bilibi_labels::Choice {
+            subject: id.to_owned(),
+            keywords: "add create define custom field attribute extra column",
+            title: format!("{label}: add a field"),
+            page: page.clone(),
+            record_kinds: record_kinds.clone(),
+            value: Some(json!(active)),
+            default: Some(json!([])),
+            source: Some(
+                if active.is_empty() {
+                    "default"
+                } else {
+                    "tenant"
+                }
+                .into(),
+            ),
+            customised: !active.is_empty(),
+            input: json!({"record_type": id}),
+            verify_input: verify_input.clone(),
+            limits: json!({
+                "max_fields": limit, "active_fields": active_count,
+                "pick_lists": reads[0]["pick_lists"], "reference_kinds": reads[0]["record_kinds"],
+            }),
+            writes: Some(if has_room {
+                vec!["base.custom_fields.define"]
+            } else {
+                Vec::new()
+            }),
+            ..Default::default()
+        });
+        choices.extend(own.into_iter().filter_map(|field| {
+            let key = field["key"].as_str()?;
+            let archived = !field["archived_on"].is_null();
+            let mut writes = vec!["base.custom_fields.update"];
+            if !archived {
+                writes.push("base.custom_fields.archive");
+            } else if has_room {
+                writes.push("base.custom_fields.restore");
+            }
+            Some(bilibi_labels::Choice {
+                subject: format!("{id}.{key}"),
+                keywords: if archived {
+                    "custom field attribute column rename edit update restore"
+                } else {
+                    "custom field attribute column rename edit update archive"
+                },
+                title: format!(
+                    "{label}: {} ({key}){}",
+                    field["label"].as_str()?,
+                    if archived { ", archived" } else { "" }
+                ),
+                page: page.clone(),
+                record_kinds: record_kinds.clone(),
+                value: Some(field.clone()),
+                source: Some("tenant".into()),
+                customised: true,
+                version: Some(field["version"].clone()),
+                input: json!({"record_type": id, "key": key, "version": field["version"]}),
+                verify_input: verify_input.clone(),
+                limits: capacity.clone(),
+                writes: Some(writes),
+                ..Default::default()
+            })
+        }));
+    }
+    choices
+}
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.customisations", provenance!(), &bilibi_labels::CustomisationSection {
-    title: "Custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved rules that use this field may stop running and require review and reapproval.", rows: customisation_rows,
+    title: "Custom fields",
+    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved rules that use this field may stop running and require review and reapproval.", rows: customisation_rows }),
+    changes: Some(bilibi_labels::Changes {
+        purpose: "Add your own typed fields to a kind of record, rename them, and archive or bring back the ones you no longer use.",
+        limits: "A field's key and type never change and a key is never reused. Each kind of record takes a limited number of active fields (the base.custom_fields.max_fields setting). Archive a field to remove it; records keep their saved values.",
+        guide: "base.custom_fields",
+        reads: &[bilibi_labels::Read { operation: "base.custom_fields.record_types", input: no_input }, bilibi_labels::Read { operation: "base.custom_fields.list", input: customisation_input }],
+        choices: customisation_choices,
+        change: &["base.custom_fields.define", "base.custom_fields.update", "base.custom_fields.restore"],
+        preview: None, verify: "base.custom_fields.list", restore: Some("base.custom_fields.archive"),
+    }),
 }) }
 
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.archive", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields", contract: "base.custom_fields.archive" }) }
 
-inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection { title: "Archived custom fields", read: "base.custom_fields.list", read_input: customisation_input, undo: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Watchers already marked for review still need reapproval.", rows: archived_customisation_rows }) }
+inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fields.archived_customisations", provenance!(), &bilibi_labels::CustomisationSection {
+    title: "Archived custom fields",
+    undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.restore", event: "customisation.fields_restore", action: "Restore", detail: "The field and its saved values become available again. Watchers already marked for review still need reapproval.", rows: archived_customisation_rows }),
+    changes: None,
+}) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }

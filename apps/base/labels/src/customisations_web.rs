@@ -1,5 +1,5 @@
 //! Read-only inventory of customisations contributed by their owners.
-use crate::{CustomisationRow, CustomisationSection, CUSTOMISATIONS};
+use crate::{CustomisationRow, CustomisationSection, Undo, CUSTOMISATIONS};
 use askama::Template;
 use bilibi_agent_api::{
     page::{Call, PageContracts},
@@ -48,6 +48,7 @@ pub(crate) struct Pages {
 #[derive(Clone)]
 struct Item {
     section: &'static CustomisationSection,
+    undo: &'static Undo,
     row: CustomisationRow,
 }
 impl Item {
@@ -61,7 +62,7 @@ impl Item {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=item.section.detail, confirm=item.section.action, working="Working…", confirm_event=item.section.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
+    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=item.undo.detail, confirm=item.undo.action, working="Working…", confirm_event=item.undo.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
     ext = "html"
 )]
 struct UndoDialog<'a> {
@@ -137,7 +138,7 @@ impl Index {
             "cancel_confirm" => self.confirm = None,
             event if event.starts_with("customisation.") => {
                 let Some(item) = self.confirm.take_if(|item| {
-                    event == item.section.event
+                    event == item.undo.event
                         && value["key"].as_str() == Some(item.action_key().as_str())
                 }) else {
                     return Ok(());
@@ -146,8 +147,8 @@ impl Index {
                     scope,
                     credential,
                     service: CUSTOMISATIONS,
-                    event: item.section.event,
-                    contract: item.section.undo,
+                    event: item.undo.event,
+                    contract: item.undo.operation,
                 };
                 let message = match self.pages.contracts.submit(&call, item.row.input).await {
                     Ok(_) => {
@@ -186,7 +187,10 @@ impl Index {
         let mut reads = HashMap::new();
         let mut restricted = Vec::new();
         for section in &self.pages.sections {
-            let key = (section.read, (section.read_input)());
+            let Some(undo) = &section.undo else {
+                continue;
+            };
+            let key = (undo.read, (undo.read_input)());
             let value = match reads.entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -213,11 +217,11 @@ impl Index {
                 }
                 continue;
             };
-            items.extend(
-                (section.rows)(&value["result"])
-                    .into_iter()
-                    .map(|row| Item { section, row }),
-            );
+            items.extend((undo.rows)(&value["result"]).into_iter().map(|row| Item {
+                section,
+                undo,
+                row,
+            }));
         }
         self.items = items;
         let page = self.list.paginate(&self.items);
@@ -317,7 +321,7 @@ impl Index {
                 event: "request_undo",
                 name: "key",
                 value: &item.action_key(),
-                ..IconButton::new("unarchive", item.section.action)
+                ..IconButton::new("unarchive", item.undo.action)
             })?;
             rows.push(row);
         }
@@ -349,7 +353,7 @@ impl Index {
         })?;
         let dialog = if let Some(item) = &self.confirm {
             render(UndoDialog {
-                title: format!("{}: {}?", item.section.action, item.row.description),
+                title: format!("{}: {}?", item.undo.action, item.row.description),
                 item,
                 key: item.action_key(),
             })?

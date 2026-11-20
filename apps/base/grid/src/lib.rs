@@ -175,6 +175,12 @@ inventory::submit! {
         &bilibi_authz::field_catalog::CatalogSource { snapshot: restriction_snapshot })
 }
 
+impl Table {
+    pub fn record_kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+        std::iter::once(self.id()).chain(self.decl.record_types.iter().copied())
+    }
+}
+
 /// Grid supplies Labels' renamable record types and fields as data: every
 /// installed table, and each table's non-hidden fields by `table.field`.
 fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> {
@@ -182,17 +188,23 @@ fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> 
     let installed = installed().map_err(|error| error.to_string())?;
     let mut subjects = Vec::new();
     for table in installed.tables() {
+        let record_kinds: Vec<String> = table.record_kinds().map(str::to_owned).collect();
+        let page = table.list_address();
         subjects.push(Subject {
             kind: Kind::Record,
             id: table.id().to_owned(),
             default: table.label().to_owned(),
             trail: String::new(),
+            page: page.map(str::to_owned),
+            record_kinds: record_kinds.clone(),
         });
         subjects.extend(table.visible_fields().map(|field| Subject {
             kind: Kind::Field,
             id: subject_id(table.id(), field.id),
             default: field.label.to_owned(),
             trail: table.label().to_owned(),
+            page: page.map(str::to_owned),
+            record_kinds: record_kinds.clone(),
         }));
     }
     Ok(subjects)

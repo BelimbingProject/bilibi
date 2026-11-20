@@ -78,6 +78,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, REMINDER_EMAIL, provenance!(
 // Events, documents the payload.
 inventory::submit! { Contribution::new(bilibi_events::EVENTS, crate::HAPPENED, provenance!(), &bilibi_events::EventType { version: 1 }) }
 
+const LIST_PATH: &str = "/activities";
+
 // Grid reads with the reader's account as `$2` and no other per-row rule, so
 // Reports see only the activities the reader takes part in (`store::MINE`).
 // Shared ones on records they may view need the owner's record check, which
@@ -106,7 +108,7 @@ static GRID: GridContribution = GridContribution {
             Field::new("created_at", "Created", FieldType::DateTime).protected(),
             Field::new("updated_at", "Updated", FieldType::DateTime).protected(),
             Field::new("closed_at", "Closed", FieldType::DateTime).protected(),
-        ]).label_field("subject").time_field("starts_at").record_types(&[crate::RECORD])],
+        ]).label_field("subject").time_field("starts_at").record_types(&[crate::RECORD]).list_address(LIST_PATH)],
     links: &[],
 };
 bilibi_grid::contribute!("core/activity", "core/activity.grid", &GRID);
@@ -156,7 +158,7 @@ bilibi_records::holder!(
 
 // Pages: the list and the activity's record page.
 inventory::submit! { Contribution::new(ROUTES, "core/activity.list", provenance!(), &Route {
-    method: Method::Get, path: "/activities", service: crate::web::SERVICE, operation: "list",
+    method: Method::Get, path: LIST_PATH, service: crate::web::SERVICE, operation: "list",
     access: Access::Capability(VIEW), framed: true,
     company_scope: CompanyScope::Tenant,
 }) }
@@ -183,7 +185,7 @@ inventory::submit! { Contribution::new(ROUTES, "core/activity.feed_settings", pr
 
 bilibi_menu::contribute!(
     "core/activity",
-    bilibi_menu::MenuItem::page("core.activity", "Activities", "/activities")
+    bilibi_menu::MenuItem::page("core.activity", "Activities", LIST_PATH)
         .under("core")
         .icon("calendar")
         .requires(bilibi_menu::Requirement::Capability(VIEW))

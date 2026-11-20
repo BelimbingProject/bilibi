@@ -23,6 +23,7 @@ pub type PageDetails = for<'a> fn(&'a Client, &'a Scope) -> PageDetailsFuture<'a
 
 pub struct PageMetadata {
     pub page: &'static str,
+    pub path: Option<&'static str>,
     pub capability: &'static str,
     pub spec: Option<fn() -> Arc<ListSpec>>,
     /// Additional query keys owned outside ListState, with an explanation.
@@ -51,12 +52,11 @@ fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
 }
 inventory::submit! { Consumer::new::<PageMetadata>(PAGE_METADATA, "base/grid", validate) }
 
-pub(crate) fn metadata(
-    page: &str,
-) -> bilibi_module_registry::Result<Option<&'static PageMetadata>> {
+/// Every registered list page.
+pub(crate) fn pages() -> bilibi_module_registry::Result<&'static [&'static PageMetadata]> {
     static PAGES: OnceLock<bilibi_module_registry::Result<Vec<&'static PageMetadata>>> =
         OnceLock::new();
-    let pages = PAGES
+    PAGES
         .get_or_init(|| {
             let catalog =
                 bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;
@@ -66,18 +66,23 @@ pub(crate) fn metadata(
                 .map(|entry| entry.get())
                 .collect()
         })
-        .as_ref()
-        .map_err(|e| RegistryError::Contribution(e.to_string()))?;
-    Ok(pages.iter().copied().find(|entry| entry.page == page))
+        .as_deref()
+        .map_err(|e| RegistryError::Contribution(e.to_string()))
+}
+
+pub(crate) fn metadata(
+    page: &str,
+) -> bilibi_module_registry::Result<Option<&'static PageMetadata>> {
+    Ok(pages()?.iter().copied().find(|entry| entry.page == page))
 }
 
 #[macro_export]
 macro_rules! contribute_page_metadata {
-    ($module:literal, $id:literal, $page:expr, $cap:expr, $spec:expr, $extra:expr, $details:expr, $columns:expr) => {
+    ($module:literal, $id:literal, $page:expr, $path:expr, $cap:expr, $spec:expr, $extra:expr, $details:expr, $columns:expr) => {
         $crate::inventory::submit! {
             $crate::Contribution::new($crate::PAGE_METADATA, $id,
                 $crate::Provenance { module: $module, source: file!(), line: line!() },
-                &$crate::PageMetadata { page: $page, capability: $cap, spec: $spec, extra_filters: $extra, details: $details, columns: $columns })
+                &$crate::PageMetadata { page: $page, path: $path, capability: $cap, spec: $spec, extra_filters: $extra, details: $details, columns: $columns })
         }
     };
 }
