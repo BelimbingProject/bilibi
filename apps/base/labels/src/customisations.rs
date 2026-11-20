@@ -39,26 +39,6 @@ pub struct Undo {
     pub rows: fn(&Value) -> Vec<CustomisationRow>,
 }
 
-/// Whose data a change lands in.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Target {
-    /// Everyone in the caller's tenant.
-    Tenant,
-    /// The caller's current company.
-    Company,
-    /// The caller only.
-    Person,
-}
-impl Target {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Tenant => "tenant",
-            Self::Company => "company",
-            Self::Person => "person",
-        }
-    }
-}
-
 /// What an agent may change in a section: the owner's read that lists every
 /// choice, with or without an override, and the operations that change,
 /// preview, verify and restore one.
@@ -67,7 +47,6 @@ pub struct Changes {
     pub purpose: &'static str,
     /// Words people use for this purpose, matched by the `purpose` filter.
     pub keywords: &'static [&'static str],
-    pub target: Target,
     /// The bounds a change must stay within, in plain words.
     pub limits: &'static str,
     /// The owner's guide key.
@@ -114,8 +93,14 @@ pub struct Choice {
     pub customised: bool,
     /// The token the owner's writes ask for.
     pub version: Option<Value>,
-    /// The input that names this choice to the owner's operations.
+    /// The fields identifying the choice in its owner's write input.
     pub input: Value,
+    /// Input to the section's verify operation.
+    pub verify_input: Value,
+    /// Choice-specific constraints read from the owner.
+    pub limits: Value,
+    /// Writes supported for this choice. `None` uses all section writes.
+    pub writes: Option<Vec<&'static str>>,
 }
 
 fn empty_input() -> Value {
@@ -152,6 +137,8 @@ fn label_choices(reads: &[Value]) -> Vec<Choice> {
             customised: label.is_some(),
             version: Some(row["version"].clone()),
             input: serde_json::json!({"kind": kind, "subject": subject, "version": row["version"]}),
+            verify_input: empty_input(),
+            ..Default::default()
         })
     }).collect()
 }
@@ -162,7 +149,6 @@ inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/l
     changes: Some(Changes {
         purpose: "Show your own word for a menu item, a record type or a field.",
         keywords: &["rename", "label", "word", "wording", "terminology", "menu", "field", "column", "heading"],
-        target: Target::Tenant,
         limits: "1 to 60 characters of plain text. Operation keys, routes and permission keys never change.",
         guide: "base.labels",
         reads: &[Read { operation: "base.labels.list", input: empty_input }], choices: label_choices,

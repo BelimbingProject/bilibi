@@ -10,7 +10,7 @@ mod store;
 mod web;
 
 pub use customisations::{
-    Changes, Choice, CustomisationRow, CustomisationSection, Read, Target, Undo, SECTIONS,
+    Changes, Choice, CustomisationRow, CustomisationSection, Read, Undo, SECTIONS,
 };
 
 pub use store::{

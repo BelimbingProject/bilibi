@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut **db.get().await?,
             &admin,
             "base.labels.customisations.discover",
-            &json!({"section":"base/settings_editor.customisations","page_size":100}),
+            &json!({"purpose":"tenant configuration","page_size":100}),
         )
         .await?;
     let found = |key: &str| {
@@ -202,8 +202,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     if discovered.to_string().contains(SECRET_TEXT)
         || secret["value"] != json!({"restricted":true})
-        || plain["value"].is_object()
-        || plain["source"].as_str().is_none()
+        || plain["value"] != "inherited"
+        || plain["source"] != "default"
+        || plain["limits"]["type"] != "string"
+        || plain["available_writes"]
+            != json!([
+                "base.settings_editor.tenant.set",
+                "base.settings_editor.tenant.restore"
+            ])
+        || secret["available_writes"] != json!(["base.settings_editor.tenant.restore"])
         || discovered["result"]["sections"][0]["operations"]["restore"]["key"]
             != "base.settings_editor.tenant.restore"
     {

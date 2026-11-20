@@ -931,6 +931,7 @@ bilibi_grid::contribute_page_metadata!(
     "base/integration",
     "base/integration.grid-page",
     "integration-exchanges",
+    Some("/system/api-exchanges"),
     crate::LIST,
     Some(|| SPEC.clone()),
     &[

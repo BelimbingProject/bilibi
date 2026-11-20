@@ -23,6 +23,7 @@ pub type PageDetails = for<'a> fn(&'a Client, &'a Scope) -> PageDetailsFuture<'a
 
 pub struct PageMetadata {
     pub page: &'static str,
+    pub path: Option<&'static str>,
     pub capability: &'static str,
     pub spec: Option<fn() -> Arc<ListSpec>>,
     /// Additional query keys owned outside ListState, with an explanation.
@@ -77,11 +78,11 @@ pub(crate) fn metadata(
 
 #[macro_export]
 macro_rules! contribute_page_metadata {
-    ($module:literal, $id:literal, $page:expr, $cap:expr, $spec:expr, $extra:expr, $details:expr, $columns:expr) => {
+    ($module:literal, $id:literal, $page:expr, $path:expr, $cap:expr, $spec:expr, $extra:expr, $details:expr, $columns:expr) => {
         $crate::inventory::submit! {
             $crate::Contribution::new($crate::PAGE_METADATA, $id,
                 $crate::Provenance { module: $module, source: file!(), line: line!() },
-                &$crate::PageMetadata { page: $page, capability: $cap, spec: $spec, extra_filters: $extra, details: $details, columns: $columns })
+                &$crate::PageMetadata { page: $page, path: $path, capability: $cap, spec: $spec, extra_filters: $extra, details: $details, columns: $columns })
         }
     };
 }

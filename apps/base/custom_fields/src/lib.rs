@@ -220,10 +220,23 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
             .filter(|field| field["archived_on"].is_null())
             .map(|field| field["key"].clone())
             .collect();
+        let page = record["path"].as_str().map(str::to_owned);
+        let record_kinds: Vec<_> = record["record_kinds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| kind.as_str().map(str::to_owned))
+            .collect();
+        let limit = reads[0]["max_fields"].as_u64().unwrap_or_default();
+        let active_count = active.len() as u64;
+        let has_room = active_count < limit;
+        let capacity = json!({"max_fields": limit, "active_fields": active_count});
+        let verify_input = json!({"record_type": id, "include_archived": true});
         choices.push(bilibi_labels::Choice {
             subject: id.to_owned(),
             title: format!("{label}: add a field"),
-            record_kinds: vec![id.to_owned()],
+            page: page.clone(),
+            record_kinds: record_kinds.clone(),
             value: Some(json!(active)),
             default: Some(json!([])),
             source: Some(
@@ -236,11 +249,27 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
             ),
             customised: !active.is_empty(),
             input: json!({"record_type": id}),
+            verify_input: verify_input.clone(),
+            limits: json!({
+                "max_fields": limit, "active_fields": active_count,
+                "pick_lists": reads[0]["pick_lists"], "reference_kinds": reads[0]["record_kinds"],
+            }),
+            writes: Some(if has_room {
+                vec!["base.custom_fields.define"]
+            } else {
+                Vec::new()
+            }),
             ..Default::default()
         });
         choices.extend(own.into_iter().filter_map(|field| {
             let key = field["key"].as_str()?;
             let archived = !field["archived_on"].is_null();
+            let mut writes = vec!["base.custom_fields.update"];
+            if !archived {
+                writes.push("base.custom_fields.archive");
+            } else if has_room {
+                writes.push("base.custom_fields.restore");
+            }
             Some(bilibi_labels::Choice {
                 subject: format!("{id}.{key}"),
                 title: format!(
@@ -248,14 +277,16 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
                     field["label"].as_str()?,
                     if archived { ", archived" } else { "" }
                 ),
-                record_kinds: vec![id.to_owned()],
-                value: Some(
-                    json!({"label": field["label"], "help": field["help"], "kind": field["kind"]}),
-                ),
-                source: Some(if archived { "archived" } else { "tenant" }.into()),
+                page: page.clone(),
+                record_kinds: record_kinds.clone(),
+                value: Some(field.clone()),
+                source: Some("tenant".into()),
                 customised: true,
                 version: Some(field["version"].clone()),
                 input: json!({"record_type": id, "key": key, "version": field["version"]}),
+                verify_input: verify_input.clone(),
+                limits: capacity.clone(),
+                writes: Some(writes),
                 ..Default::default()
             })
         }));
@@ -268,7 +299,6 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
     changes: Some(bilibi_labels::Changes {
         purpose: "Add your own typed fields to a kind of record, rename them, and archive or bring back the ones you no longer use.",
         keywords: &["custom", "field", "attribute", "extra", "column", "add", "archive"],
-        target: bilibi_labels::Target::Tenant,
         limits: "A field's key and type never change and a key is never reused. Each kind of record takes a limited number of active fields (the base.custom_fields.max_fields setting). Archive a field to remove it; records keep their saved values.",
         guide: "base.custom_fields",
         reads: &[bilibi_labels::Read { operation: "base.custom_fields.record_types", input: no_input }, bilibi_labels::Read { operation: "base.custom_fields.list", input: customisation_input }],

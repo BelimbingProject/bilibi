@@ -112,9 +112,15 @@ impl ReadHandler for Read {
                                 .iter()
                                 .map(|n| json!({"id":n.item.item.id,"label":n.item.item.label}))
                                 .collect();
+                            let mut effective: Vec<_> =
+                                nodes.iter().map(|node| node.item.item.id).collect();
+                            if let Some(saved) = saved {
+                                saved.order_ids(&mut effective);
+                            }
                             json!({
                                 "parent": parent,
                                 "product": product,
+                                "effective_item_ids": effective,
                                 "item_ids": saved.map(|s| s.visible_items(&siblings)),
                                 "version": version_token(parent, &siblings, saved),
                             })
@@ -215,7 +221,7 @@ fn output() -> Value {
 }
 inventory::submit! { Contribution::new(DEFINITIONS, "base/menu_order.agent", Provenance { module:"base/menu_order", source:file!(), line:line!() }, &Definitions {
     operations: &[
-        Operation { key:"base.menu_order.list", title:"List menu sibling groups", summary:"Read product and saved order with version tokens.", keywords:&["menu","order"], capability:VIEW, input:empty_schema, output:list_output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
+        Operation { key:"base.menu_order.list", title:"List menu sibling groups", summary:"Read product, saved and effective order with version tokens.", keywords:&["menu","order"], capability:VIEW, input:empty_schema, output:list_output, handler:Handler::Read(&Read::List), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.preview", title:"Preview my menu", summary:"Preview the menu visible to the current reader in the tenant's order.", keywords:&["menu","preview"], capability:VIEW, input:preview_schema, output:list_output, handler:Handler::Read(&Read::Preview), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.set", title:"Order menu siblings", summary:"Set a tenant's order for siblings by stable menu item ID.", keywords:&["menu","order"], capability:MANAGE, input:set_schema, output, handler:Handler::SafeWrite(&Write::Set), channels:Channels::Every, step_up:&[] },
         Operation { key:"base.menu_order.restore", title:"Restore product menu order", summary:"Restore product order for the visible siblings in one group.", keywords:&["menu","restore"], capability:MANAGE, input:restore_schema, output, handler:Handler::SafeWrite(&Write::Restore), channels:Channels::Every, step_up:&[] },
@@ -243,12 +249,13 @@ fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                 } else {
                     format!("Menu order: items under {parent}")
                 },
-                value: Some(saved.map_or_else(|| json!(product), |ids| json!(ids))),
+                value: Some(group["effective_item_ids"].clone()),
                 default: Some(json!(product)),
                 source: Some(if saved.is_some() { "tenant" } else { "default" }.into()),
                 customised: saved.is_some(),
                 version: Some(group["version"].clone()),
                 input: json!({"parent": parent, "version": group["version"]}),
+                verify_input: no_input(),
                 ..Default::default()
             })
         })
@@ -263,7 +270,6 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/menu_order
     changes: Some(bilibi_labels::Changes {
         purpose: "Arrange the staff menu's items among their siblings for everyone in this tenant.",
         keywords: &["menu", "order", "reorder", "arrange", "navigation", "sidebar", "move"],
-        target: bilibi_labels::Target::Tenant,
         limits: "Only the order of siblings under one parent, by stable menu item ID. An order never grants access, renames an item or moves it to another parent, and the customer portal menu is not ordered here.",
         guide: "base.menu_order",
         reads: &[bilibi_labels::Read { operation: "base.menu_order.list", input: no_input }],

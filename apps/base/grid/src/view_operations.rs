@@ -70,6 +70,15 @@ fn shared_json(view: &crate::SharedView, can_share: bool) -> Value {
         "view": view.view.to_json(), "params": view.params, "audience": audience})
 }
 
+async fn page_columns(
+    client: &tokio_postgres::Client,
+    scope: &Scope,
+    metadata: &PageMetadata,
+) -> bilibi_database::Result<crate::PageColumns> {
+    let views = BOUND.get().cloned().ok_or(Error::Internal)?;
+    (metadata.columns)(client, scope, views).await
+}
+
 async fn authorized_page(
     client: &dyn OperationClient,
     scope: &Scope,
@@ -78,8 +87,7 @@ async fn authorized_page(
     let metadata = metadata(page).map_err(|_| Error::Internal)?;
     if let Some(metadata) = metadata {
         bilibi_authz::authorize_proof(client, scope, metadata.capability).await?;
-        let views = BOUND.get().cloned().ok_or(Error::Internal)?;
-        (metadata.columns)(client.sql_client().await?, scope, views).await?;
+        page_columns(client.sql_client().await?, scope, metadata).await?;
     }
     Ok(metadata)
 }
@@ -106,36 +114,47 @@ enum Read {
     Fields,
 }
 /// Every registered list page the reader holds the grant for, with the
-/// shared views they may open there. One capability snapshot decides, so a
-/// page the reader may not open adds no refused decision to the log.
+/// shared views they may open there after the page owner checks access.
 async fn readable_pages(
     client: &dyn OperationClient,
     scope: &Scope,
 ) -> bilibi_agent_api::Result<Value> {
     let sql = client.sql_client().await?;
     let held = bilibi_authz::effective_capabilities(sql, scope).await?;
-    let readable: Vec<&PageMetadata> = pages()
-        .map_err(|_| Error::Internal)?
-        .iter()
-        .copied()
-        .filter(|page| held.contains(page.capability))
-        .collect();
+    let mut readable = Vec::new();
+    for page in pages().map_err(|_| Error::Internal)? {
+        if !held.contains(page.capability) {
+            continue;
+        }
+        match page_columns(sql, scope, page).await {
+            Ok(_) => readable.push(*page),
+            Err(Error::Forbidden | Error::NotFound) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
     let names: Vec<&str> = readable.iter().map(|page| page.page).collect();
-    let shared = bound()?.shared_names(client, scope, &names).await?;
+    let shared = bound()?.shared_for_pages(client, scope, &names).await?;
+    let can_share = held.contains(SHARE_VIEWS);
     let installed = crate::installed().map_err(|_| Error::Internal)?;
     let rows: Vec<Value> = readable
         .iter()
         .map(|page| {
-            let table = installed.tables().find(|table| table.id() == page.page);
-            let record_kinds: Vec<&str> = std::iter::once(page.page)
-                .chain(table.into_iter().flat_map(|table| table.decl.record_types.iter().copied()))
-                .collect();
-            let views: Vec<&str> = shared
+            let table = installed.table(page.page);
+            let record_kinds: Vec<&str> =
+                table.map_or_else(|| vec![page.page], |table| table.record_kinds().collect());
+            let visible: Vec<_> = shared
                 .iter()
                 .filter(|(on, _)| on == page.page)
-                .map(|(_, name)| name.as_str())
+                .map(|(_, view)| view)
                 .collect();
-            json!({"page": page.page, "label": table.map(|table| table.label()), "record_kinds": record_kinds, "views": views})
+            let views: Vec<_> = visible.iter().map(|view| view.name.as_str()).collect();
+            let saved_views: Vec<_> = visible
+                .iter()
+                .map(|view| shared_json(view, can_share))
+                .collect();
+            json!({"page": page.page, "path": page.path, "label": table.map(|table| table.label()),
+                   "record_kinds": record_kinds, "views": views, "saved_views": saved_views,
+                   "can_share": can_share})
         })
         .collect();
     Ok(json!({"pages": rows}))
@@ -177,9 +196,8 @@ impl ReadHandler for Read {
                     .without_custom_references();
                 let search = input["search"].as_str().unwrap_or_default();
                 let offset = input["offset"].as_u64().unwrap_or(0).min(4096) as usize;
-                let views = BOUND.get().cloned().ok_or(Error::Internal)?;
                 let mut page_columns =
-                    (metadata.columns)(client.sql_client().await?, scope, views).await?;
+                    page_columns(client.sql_client().await?, scope, metadata).await?;
                 let builtins = page_columns.available_builtins(&catalog);
                 let mut columns: Vec<Value> = if offset == 0 {
                     builtins
@@ -229,7 +247,7 @@ fn pages_schema() -> Value {
     json!({"type":"object","properties":{}})
 }
 fn pages_output() -> Value {
-    json!({"type":"object","description":"pages: each list page you may open, with its page name (the page input of the other view operations), label, record_kinds (its Grid table and record types) and the names of the shared views you may open there."})
+    json!({"type":"object","description":"pages: each list page you may open, with its page name (the page input of the other view operations), label, record_kinds (its Grid table and record types) the address when registered, and the names and details of the shared views you may open there."})
 }
 fn list_schema() -> Value {
     json!({"type":"object","required":["page"],"properties":{"page":{"type":"string","maxLength":90}}})
@@ -280,8 +298,7 @@ impl WriteHandler for Write {
                             .await
                             .map_err(Error::from)?
                             .without_custom_references();
-                        let views = BOUND.get().cloned().ok_or(Error::Internal)?;
-                        let mut page = (metadata.columns)(sql, scope, views).await?;
+                        let mut page = page_columns(sql, scope, metadata).await?;
                         Some(
                             page.preview_columns(&catalog, view)
                                 .into_iter()
@@ -399,46 +416,77 @@ inventory::submit! { Contribution::new(DEFINITIONS, "base/grid.views", Provenanc
 /// without a shared view.
 fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
     let pages = reads[0]["pages"].as_array().into_iter().flatten();
-    pages
-        .filter_map(|page| {
-            let name = page["page"].as_str()?;
-            let views = page["views"].as_array()?;
-            Some(bilibi_labels::Choice {
-                subject: name.to_owned(),
-                title: format!(
-                    "{}: shared list views",
-                    page["label"].as_str().unwrap_or(name)
-                ),
-                record_kinds: page["record_kinds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|kind| kind.as_str().map(str::to_owned))
-                    .collect(),
-                value: Some(json!(views)),
-                default: Some(json!([])),
-                source: Some(
-                    if views.is_empty() {
-                        "default"
-                    } else {
-                        "tenant"
-                    }
-                    .into(),
-                ),
-                customised: !views.is_empty(),
-                input: json!({"page": name}),
-                ..Default::default()
-            })
-        })
-        .collect()
+    let mut choices = Vec::new();
+    for page in pages {
+        let (Some(name), Some(views)) = (page["page"].as_str(), page["views"].as_array()) else {
+            continue;
+        };
+        let title = page["label"].as_str().unwrap_or(name);
+        let address = page["path"].as_str().map(str::to_owned);
+        let record_kinds: Vec<_> = page["record_kinds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| kind.as_str().map(str::to_owned))
+            .collect();
+        choices.push(bilibi_labels::Choice {
+            subject: name.to_owned(),
+            title: format!("{title}: shared list views"),
+            page: address.clone(),
+            record_kinds: record_kinds.clone(),
+            value: Some(json!(views)),
+            default: Some(json!([])),
+            source: Some(
+                if views.is_empty() {
+                    "default"
+                } else {
+                    "tenant"
+                }
+                .into(),
+            ),
+            customised: !views.is_empty(),
+            input: json!({"page": name}),
+            verify_input: json!({"page": name}),
+            writes: Some(vec!["base.grid.view.save"]),
+            ..Default::default()
+        });
+        choices.extend(
+            page["saved_views"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|view| {
+                    let id = view["id"].as_i64()?;
+                    let can_delete = view["owned"].as_bool()? || page["can_share"].as_bool()?;
+                    Some(bilibi_labels::Choice {
+                        subject: format!("{name}:{id}"),
+                        title: format!("{title}: {}", view["name"].as_str()?),
+                        page: address.clone(),
+                        record_kinds: record_kinds.clone(),
+                        value: Some(view.clone()),
+                        source: Some("tenant".into()),
+                        customised: true,
+                        input: json!({"id": id}),
+                        verify_input: json!({"page": name}),
+                        writes: Some(if can_delete {
+                            vec!["base.grid.view.delete"]
+                        } else {
+                            Vec::new()
+                        }),
+                        ..Default::default()
+                    })
+                }),
+        );
+    }
+    choices
 }
+
 inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/grid.customisations", Provenance { module: "base/grid", source: file!(), line: line!() }, &bilibi_labels::CustomisationSection {
     title: "Shared list views",
     undo: None,
     changes: Some(bilibi_labels::Changes {
         purpose: "Save a list's columns, filters and sort as a named view for everyone in this tenant or for chosen roles.",
         keywords: &["list", "view", "columns", "column", "filter", "sort", "layout", "share", "arrange"],
-        target: bilibi_labels::Target::Tenant,
         limits: "Up to 100 shared views on a list, each with a name of at most 80 characters, for everyone or 1 to 50 roles. A view never widens what a reader may see: their own grants and field restrictions still apply.",
         guide: "base.grid.views",
         reads: &[bilibi_labels::Read { operation: "base.grid.view.pages", input: pages_input }],

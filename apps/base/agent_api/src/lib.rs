@@ -882,7 +882,7 @@ impl Registry {
     /// Runs read operation `key` on the connection a read handler was handed,
     /// for a read that gathers other owners' reads. The same admission and
     /// logged capability decision as [`Registry::call`]; it takes no second
-    /// connection. A read that needs a transaction runs only inside one.
+    /// connection. Use [`Registry::call_in`] for transaction-required reads.
     pub async fn call_on(
         &self,
         client: &dyn OperationClient,
@@ -895,7 +895,7 @@ impl Registry {
         let Handler::Read(handler) = op.handler else {
             return Err(Error::WritesNotEnabled);
         };
-        if handler.requires_transaction() && client.transaction().is_none() {
+        if handler.requires_transaction() {
             return Err(Error::Backend(bilibi_database::Error::Internal));
         }
         Ok(handler.call(client, scope, input).await?.envelope(key))

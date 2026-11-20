@@ -9,7 +9,7 @@ use bilibi_agent_api::{
 use bilibi_authz::{authorize_proof, effective_capabilities};
 use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, Target};
+use bilibi_settings::{Definition, Editor, ScopeKind, Setting, Settings, Target, ValueType};
 use bilibi_step_up::StepUp;
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
@@ -99,6 +99,24 @@ fn present(value: &Value) -> bool {
     !(value.is_null() || value.as_str() == Some(""))
 }
 
+fn limits(definition: &Definition) -> Value {
+    let value_type = match definition.value_type {
+        ValueType::Array => "array_or_object",
+        ValueType::Boolean => "boolean",
+        ValueType::Float => "float",
+        ValueType::Integer => "integer",
+        ValueType::Mixed => "mixed",
+        ValueType::String => "string",
+    };
+    json!({
+        "type": value_type,
+        "nullable": definition.nullable,
+        "minimum": definition.minimum,
+        "maximum": definition.maximum,
+        "validation": definition.validator.as_ref().map(|validator| validator.message),
+    })
+}
+
 fn setting_json(field: &Field, resolved: &bilibi_settings::Resolved) -> Value {
     json!({
         "key": field.key,
@@ -106,6 +124,8 @@ fn setting_json(field: &Field, resolved: &bilibi_settings::Resolved) -> Value {
         "group": field.editor.group,
         "label": field.editor.label,
         "help": field.editor.help,
+        "limits": limits(field.definition),
+        "set_supported": Change::Set.check_supported(field).is_ok(),
         "value": shown(field.definition, &resolved.value),
         "source": source(resolved.source.map(|scope| scope.kind)),
         "set_for_tenant": resolved.overridden,
@@ -397,7 +417,7 @@ fn set_input() -> Value {
 }
 
 fn list_output() -> Value {
-    json!({"type":"object","description":"Delegated settings the caller may manage, with module, label, help, effective value, source and whether this tenant set an override. Secret values are null; only whether one is set is returned."})
+    json!({"type":"object","description":"Delegated settings the caller may manage, with module, label, help, value limits, whether Set is supported, effective value, source and whether this tenant set an override. Secret values are null; only whether one is set is returned."})
 }
 
 fn change_output() -> Value {
@@ -426,6 +446,10 @@ fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
         .filter_map(|setting| {
             let key = setting["key"].as_str()?;
             let secret = setting["secret"].as_bool().unwrap_or(false);
+            let mut writes = vec!["base.settings_editor.tenant.restore"];
+            if setting["set_supported"].as_bool()? {
+                writes.push("base.settings_editor.tenant.set");
+            }
             Some(bilibi_labels::Choice {
                 subject: key.to_owned(),
                 title: format!(
@@ -437,6 +461,9 @@ fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                 source: setting["source"].as_str().map(str::to_owned),
                 customised: setting["set_for_tenant"].as_bool().unwrap_or(false),
                 input: json!({"key": key}),
+                verify_input: no_input(),
+                limits: setting["limits"].clone(),
+                writes: Some(writes),
                 ..Default::default()
             })
         })
@@ -451,7 +478,6 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/settings_e
     changes: Some(bilibi_labels::Changes {
         purpose: "Set how a module behaves for this tenant, where its owner lets tenant administrators decide.",
         keywords: &["setting", "settings", "configuration", "configure", "option", "preference", "default", "behaviour"],
-        target: bilibi_labels::Target::Tenant,
         limits: "Only settings their modules delegate to tenant administrators, each within its declared type and range. An operator sets encrypted values in System Settings; their value is never shown.",
         guide: "base.settings_editor",
         reads: &[bilibi_labels::Read { operation: "base.settings_editor.tenant.list", input: no_input }],

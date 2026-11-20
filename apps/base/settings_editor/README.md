@@ -16,7 +16,7 @@ The agent uses the caller's tenant and the [settings their owners delegate](../s
 
 Encrypted values are always `null` in list, preview and result data. The list reports whether a secret is set. Agent Set refuses encrypted settings and directs the person to the operator's **System Settings** page with its existing checks. Agent Restore of an encrypted setting requires `base.settings_editor.tenant.secret.change` step-up.
 
-This module contributes a **Tenant settings** [customisation section](../labels/README.md#what-can-be-changed-agents), so `base.labels.customisations.discover` lists every delegated setting with its source and whether this tenant overrides it; a secret's value is restricted there too. Its rows on the read-only Customisations page are still to come (issue #797); it does not add a tenant settings screen.
+This module contributes a **Tenant settings** [customisation section](../labels/README.md#what-can-be-changed-agents), so `base.labels.customisations.discover` lists every delegated setting with its source, declared limits and whether this tenant overrides it; a secret's value is restricted there too. Its rows on the read-only Customisations page are still to come (issue #797); it does not add a tenant settings screen.
 
 Run the `tenant-settings` [walkthrough](../../../docs/runtime-parity.md) to exercise list, Set and Restore against two fixture tenants. It checks source reporting, mutation audit, secret masking and refusal of encrypted Set in the shared review card.
 

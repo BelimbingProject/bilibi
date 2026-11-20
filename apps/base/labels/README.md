@@ -44,7 +44,7 @@ A module contributes one `CustomisationSection` under `SECTIONS` for each kind o
 | Part | Feeds | Declares |
 | --- | --- | --- |
 | `undo` (`Undo`) | The page's rows and their one action | The read operation and input, row projection, reviewed write operation and page event |
-| `changes` (`Changes`) | [What can be changed](#what-can-be-changed-agents) | Purpose, keywords, target, limits, guide, the reads that list every choice, and the change, preview, verify and restore operations |
+| `changes` (`Changes`) | [What can be changed](#what-can-be-changed-agents) | Purpose, keywords, limits, guide, the reads that list every choice, and the change, preview, verify and restore operations |
 
 Each page row supplies a stable audit kind, record ID and revision plus the versioned input for the write. The page retains that input server-side and accepts confirmation only for the displayed action, record and revision. The confirmed action calls `PageContracts::submit`, then the page reads the sections again. Register the event and write contract with a [contributed page binding](../agent_api/README.md#shared-pages-with-contributed-owner-contracts) for `base/labels.customisations`. Project rows through the owner's read operation so its access checks apply.
 
@@ -55,20 +55,17 @@ Each page row supplies a stable audit kind, record ID and revision plus the vers
 | Input | Meaning |
 | --- | --- |
 | `on_page` | A page address such as `/companies`; choices that show on that page match |
-| `record_kind` | A kind of record by any stable ID its owners know it by (`company`, `companies`); given with `on_page`, a choice at either matches |
+| `record_kind` | A kind of record by any stable ID its owners know it by (`company`, `companies`); given with `on_page`, the choice must match both |
 | `purpose` | A few words such as `rename column`; every word must appear in the section's title, purpose or keywords, or in the choice |
-| `section` | Only one section, by the ID an earlier answer gave |
-| `customised` | `true` for what the tenant changed, `false` for what is still at its default |
 | `page`, `page_size` | A bounded page of choices: 25 unless asked, at most 100 |
 
 The answer holds:
 
-- **`choices`:** one page of what may be changed, whether or not the tenant has changed it. Each has its section, subject, title, `on_page`, `record_kinds`, `target` (`tenant`, `company` or `person`), the value in effect, default, `source`, `customised`, `version` and the `input` that names it to the owner's operations. A value that may not be read (a secret) is `{"restricted":true}`.
-- **`sections`:** for each section with a match, its purpose, target, limits, guide and its read, change, preview, verify and restore operations, each marked `available` or not for this caller. Planning a change operation as a dry run is always a preview; `preview` names an extra read when the owner has one.
-- **`unavailable`:** the sections this caller may not read.
+- **`choices`:** one page of what may be changed, whether or not the tenant has changed it. Each has its section, subject, title, `on_page`, `record_kinds`, `target` (`tenant`), the value in effect, default, `source`, `customised`, `version` and any choice-specific `limits`. Use `input` for the choice's identifying write fields, `verify_input` for the verify operation, and `available_writes` for the write operations supported for the choice and caller. A value that may not be read (a secret) is `{"restricted":true}`.
+- **`sections`:** for each section with a match, its purpose, target, limits, guide and its read, change, preview, verify and restore operations, with `available` based on the operation’s capability and channel. Planning a change operation as a dry run is always a preview; `preview` names an extra read when the owner has one.
 - **`meta.page`:** the page, page size and total number of choices.
 
-Permissions are the owners' own. The read takes one capability snapshot, then calls each section's read operations through `Registry::call_on` on the caller's connection, so every owner applies its capability, tenant scope and field restrictions, and a section the caller may not read is named under `unavailable` without a refused decision in the log. Nothing is read from another tenant, and no scope, tenant or actor comes from input.
+Permissions are the owners' own. The read takes one capability snapshot, then calls each section's read operations through `Registry::call_on` on the caller's connection, so every owner applies its capability, tenant scope and field restrictions, and the response omits unreadable sections. Nothing is read from another tenant, and no scope, tenant or actor comes from input.
 
 Contribute `changes` with the section. Boot refuses a section whose reads are missing, are not reads or need a transaction, whose change or restore operation is not a reviewed write, or whose guide is not registered. `choices` projects the read results into `Choice` rows: fill `page` and `record_kinds` only with what the owner knows, and leave `value` as `None` when it must not be read.
 
@@ -76,7 +73,7 @@ Contribute `changes` with the section. Boot refuses a section whose reads are mi
 | --- | --- | --- |
 | Labels | `base/labels` | Every menu item, record type and field that may be renamed |
 | Custom fields | [`base/custom_fields`](../custom_fields/README.md) | Every kind of record that takes fields, then each field |
-| Shared list views | [`base/grid`](../grid/README.md) | Every list page the caller may open |
+| Shared list views | [`base/grid`](../grid/README.md) | Every list page the caller may open and its visible saved views |
 | Tenant settings | [`base/settings_editor`](../settings_editor/README.md) | Every setting delegated to tenant administrators |
 | Menu order | [`base/menu_order`](../menu_order/README.md) | Every sibling group of the staff menu |
 

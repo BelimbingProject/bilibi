@@ -987,6 +987,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/person",
     "core/person.grid-page",
     "persons",
+    Some("/contacts"),
     crate::contributions::LIST,
     Some(|| SPEC.clone()),
     &[],

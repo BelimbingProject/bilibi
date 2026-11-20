@@ -155,6 +155,8 @@ fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
     }
 }
 
+const SHARED_COLUMNS: &str = "v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{}')";
+
 impl PageViews {
     /// The views of `page` this reader may open: their own, those shared with
     /// everyone and those shared with a role they hold, by name.
@@ -172,7 +174,7 @@ impl PageViews {
         id: Option<i64>,
     ) -> Result<Vec<SharedView>> {
         let rows = client.query(
-            &format!("SELECT v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{{}}') FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 AND ($5::bigint IS NULL OR v.id=$5) ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
+            &format!("SELECT {SHARED_COLUMNS} FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 AND ($5::bigint IS NULL OR v.id=$5) ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
             &[&scope.tenant(), &scope.user(), &page, &scope.current_company().map(|company| company.get()), &id],
         ).await?;
         Ok(rows
@@ -181,19 +183,24 @@ impl PageViews {
             .collect())
     }
 
-    /// The names of the shared views the reader may open on each of `pages`,
-    /// as `(page, name)`, under the same visibility rule.
-    pub(crate) async fn shared_names(
+    pub(crate) async fn shared_for_pages(
         &self,
         client: &dyn ReadClient,
         scope: &Scope,
         pages: &[&str],
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<(String, SharedView)>> {
         let rows = client.query(
-            &format!("SELECT v.page, v.name FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page = ANY($3) ORDER BY v.page, lower(v.name), v.id"),
+            &format!("SELECT {SHARED_COLUMNS}, v.page FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page = ANY($3) ORDER BY v.page, lower(v.name), v.id"),
             &[&scope.tenant(), &scope.user(), &pages, &scope.current_company().map(|company| company.get())],
         ).await?;
-        Ok(rows.iter().map(|row| (row.get(0), row.get(1))).collect())
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let page: String = row.get(6);
+                let view = as_view(row, &page, scope.user());
+                (page, view)
+            })
+            .collect())
     }
 
     /// The tenant's roles by name, for choosing whom to share with; `None`

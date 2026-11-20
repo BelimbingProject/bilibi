@@ -334,6 +334,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reader_list["result"]["views"][0]["audience"],
         hidden_audience
     );
+    let reader_discovery = contracts
+        .read(
+            &reader,
+            "base.labels.customisations.discover",
+            &json!({"on_page":"/companies","purpose":"shared list views"}),
+        )
+        .await?;
+    let choices = reader_discovery["result"]["choices"]
+        .as_array()
+        .ok_or("missing Companies view choices")?;
+    for subject in ["companies".to_owned(), format!("companies:{company_id}")] {
+        let choice = choices
+            .iter()
+            .find(|choice| choice["subject"] == subject)
+            .ok_or("missing shared view choice")?;
+        assert_eq!(choice["available_writes"], json!([]));
+    }
     let connection = {
         let client = db.get().await?;
         client.execute(
@@ -355,13 +372,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
         }]
     };
-    let valid = plans.preview(&HeldAgent(&agent), &save(prices)).await?;
+    let price_save = save(prices);
+    let price_authority = HeldAgent(&agent);
+    let valid = plans.preview(&price_authority, &price_save).await?;
     assert_eq!(valid["valid"], true, "{valid}");
     let price_preview = &valid["results"][0]["preview"]["result"]["audience_preview"];
     assert_eq!(
         price_preview["visible_to_current_reader"],
         json!([{"spec":"amount","label":"Amount per base unit"}])
     );
+    plans.commit(&agent, &price_authority, &price_save).await?;
+    let authorized = contracts
+        .read(&reader, "base.grid.view.pages", &json!({}))
+        .await?;
+    let price_page = authorized["result"]["pages"]
+        .as_array()
+        .and_then(|pages| pages.iter().find(|page| page["page"] == "product-prices"))
+        .ok_or("missing product prices page for reader with a desk")?;
+    assert_eq!(price_page["views"], json!(["Price amount"]));
+    let denied = contracts
+        .read(&admin, "base.grid.view.pages", &json!({}))
+        .await?;
+    assert!(denied["result"]["pages"]
+        .as_array()
+        .ok_or("missing pages")?
+        .iter()
+        .all(|page| page["page"] != "product-prices"));
+    let denied = contracts
+        .read(
+            &admin,
+            "base.labels.customisations.discover",
+            &json!({"record_kind":"product-prices"}),
+        )
+        .await?;
+    assert_eq!(denied["result"]["choices"], json!([]));
     let typo = save(
         json!({"page":"contacts","view":"{}","params":"{}","name":"Mistyped page","audience":{"everyone":true}}),
     );

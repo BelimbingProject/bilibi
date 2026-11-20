@@ -19,22 +19,21 @@ impl Orders {
     }
     fn apply_children(&self, nodes: &mut [Node], parent: &str) {
         if let Some(order) = self.0.get(parent) {
-            let positions: BTreeMap<_, _> = order
-                .iter()
-                .enumerate()
-                .map(|(i, id)| (id.as_str(), i))
-                .collect();
-            nodes.sort_by_key(|node| {
-                positions
-                    .get(node.item.item.id)
-                    .copied()
-                    .unwrap_or(usize::MAX)
-            });
+            order_siblings(nodes, order, |node| node.item.item.id);
         }
         for node in nodes {
             self.apply_children(&mut node.children, node.item.item.id);
         }
     }
+}
+
+fn order_siblings<T>(items: &mut [T], order: &[String], id: impl Fn(&T) -> &'static str) {
+    let positions: BTreeMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    items.sort_by_key(|item| positions.get(id(item)).copied().unwrap_or(usize::MAX));
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +43,10 @@ pub(crate) struct Stored {
     items: Vec<String>,
 }
 impl Stored {
+    pub(crate) fn order_ids(&self, ids: &mut [&'static str]) {
+        order_siblings(ids, &self.items, |id| id);
+    }
+
     pub(crate) fn visible_items(&self, siblings: &BTreeSet<&str>) -> Vec<&str> {
         visible_items(&self.items, siblings)
     }

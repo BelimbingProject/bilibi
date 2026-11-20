@@ -109,8 +109,29 @@ impl ReadHandler for Read {
             let value = match self {
                 Self::RecordTypes => {
                     bilibi_authz::authorize_key(client, scope, VIEW).await?;
+                    let installed = bilibi_grid::installed().map_err(|_| Error::Internal)?;
+                    let mut record_types = Vec::new();
+                    for record in bound.fields.record_types() {
+                        let table = bound
+                            .fields
+                            .sources
+                            .iter()
+                            .find(|source| source.record_type == record.id)
+                            .and_then(|source| installed.table(source.table));
+                        let path = table
+                            .map(|table| table.list_address())
+                            .transpose()
+                            .map_err(|_| Error::Internal)?
+                            .flatten();
+                        let mut kinds = vec![record.id];
+                        if let Some(table) = table {
+                            kinds.extend(table.record_kinds().filter(|kind| *kind != record.id));
+                        }
+                        record_types.push(json!({"id": record.id, "label": record.label, "path": path, "record_kinds": kinds}));
+                    }
                     json!({
-                        "record_types": bound.fields.record_types().map(|record| json!({"id": record.id, "label": record.label})).collect::<Vec<_>>(),
+                        "record_types": record_types,
+                        "max_fields": bound.fields.limit(client, scope).await?,
                         "pick_lists": bound.fields.choice_lists().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
                         "record_kinds": bound.fields.reference_kinds().into_iter().map(|(key, label)| json!({"key": key, "label": label})).collect::<Vec<_>>(),
                     })
@@ -317,7 +338,7 @@ fn status_schema() -> Value {
     json!({"type":"object","required":["record_type","key","version"],"properties":{"record_type":record_type_schema(),"key":key_schema(),"version":version_schema()}})
 }
 fn record_types_output() -> Value {
-    json!({"type":"object","description":"record_types (id and label) that offer custom fields, pick_lists (key and label) a choice or choices field may use, and record_kinds (key and label) a reference field may point at."})
+    json!({"type":"object","description":"record_types (id, label, path if registered and record_kinds) that offer custom fields, max_fields (active fields allowed per record type), pick_lists (key and label) a choice or choices field may use, and record_kinds (key and label) a reference field may point at."})
 }
 fn list_output() -> Value {
     json!({"type":"array","description":"The tenant's fields: id, record_type, key, label, help, kind, picklist, target, position, archived_on and version."})
