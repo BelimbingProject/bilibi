@@ -384,6 +384,40 @@ The address must be the exact public origin people browse, without a path, query
 
 AI apps register themselves without an operator-maintained client list. Their return addresses must use HTTPS, except HTTP callbacks to the person's own loopback address. Each app supplies its own callback paths; loopback ports may vary. See [Agent](../apps/core/agent/README.md#client-registration) for matching and retention rules.
 
+## A firewall or CDN in front of Bilibi
+
+AI apps are programs, not browsers. A browser check in front of Bilibi lets a person through and blocks the app, usually after its sign-in already worked.
+
+| | |
+| --- | --- |
+| **Symptom** | The app gets its code approved and a token, then its first `/mcp` or `/api/v1` request answers with an HTML page instead of JSON. Cloudflare's reads `403`, "Error 1010: Access denied", "blocked access based on your browser's signature". |
+| **How to tell** | Every answer Bilibi gives on these paths is JSON. The blocked request never reached Bilibi, so it is missing from **Administration › System › API exchanges**. |
+| **Cause** | A rule that expects a browser: Cloudflare's Browser Integrity Check, Bot Fight Mode, or a managed or JavaScript challenge. |
+| **Fix** | Skip that check for the paths programs call, and only for them. |
+
+The paths programs call:
+
+- `/mcp`
+- `/api/v1/` and everything under it
+- `/oauth/token`, `/oauth/device_authorization` and `/oauth/register`
+- `/.well-known/` and everything under it
+- `/scim/` and `/webhooks/`, when you use them
+
+The pages people open (`/oauth/device`, `/oauth/authorize`, sign-in) keep the browser check.
+
+On Cloudflare, add a custom rule under **Security › WAF › Custom rules** with the action **Skip** and Browser Integrity Check ticked (add the bot and managed-rule products your plan shows, if they also challenge these paths):
+
+```text
+(http.request.uri.path eq "/mcp")
+or starts_with(http.request.uri.path, "/api/v1/")
+or (http.request.uri.path in {"/oauth/token" "/oauth/device_authorization" "/oauth/register"})
+or starts_with(http.request.uri.path, "/.well-known/")
+```
+
+- The free plan's Bot Fight Mode cannot be skipped by a rule. Turn it off for the zone if it is what blocks these paths.
+- Look a blocked request up by its Ray ID under **Security › Events** to see which product stopped it.
+- These paths keep Bilibi's own protection: a budget per sender, a bearer token on every request, and each connection's AI switch. See [the agent edge](../apps/web/README.md#agent-edge-srcapirs).
+
 Upgrading from a static client list:
 
 - Migration `004-client-registration` deletes the retired `agent_access.oauth_clients` setting, including any client an operator added.

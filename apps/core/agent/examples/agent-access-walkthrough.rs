@@ -994,6 +994,63 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err("the device grant did not bind its tokens to the MCP resource".into());
     }
 
+    println!("\n== device grant for a registered client ==");
+    // A cloud app registers itself for the device grant, with no callback,
+    // and only that client redeems the code it was issued.
+    let cloud = grants
+        .register_client(&serde_json::from_value(json!({
+            "client_name": "Cloud app",
+            "grant_types": [bilibi_agent::DEVICE_GRANT, "refresh_token"],
+        }))?)
+        .await?;
+    let cloud_client = cloud["client_id"].as_str().unwrap_or_default().to_owned();
+    println!(
+        "registered:           grant_types={} redirect_uris={}",
+        cloud["grant_types"], cloud["redirect_uris"]
+    );
+    let neither = grants
+        .register_client(&serde_json::from_value(
+            json!({"client_name": "No grant", "grant_types": ["refresh_token"]}),
+        )?)
+        .await;
+    println!("neither grant:        {}", outcome(&neither));
+    let unregistered = grants
+        .start_device_for("nobody-registered-this", None, None, resource)
+        .await;
+    println!("unknown client:       {}", outcome(&unregistered));
+    let code_only = grants
+        .start_device_for(registered_id, None, None, resource)
+        .await;
+    println!("code-grant client:    {}", outcome(&code_only));
+    let by_client = grants
+        .start_device_for(&cloud_client, None, Some(resource), resource)
+        .await?;
+    let named = grants.device(&actor, &by_client.user_code).await?;
+    println!("review names:         {:?}", named.agent_id);
+    grants
+        .decide(&actor, &by_client.user_code, Decision::Approve)
+        .await?;
+    let foreign_redeem = grants.exchange(CLIENT_ID, &by_client.device_code).await;
+    println!("redeem as another:    {}", outcome(&foreign_redeem));
+    client
+        .execute(
+            "UPDATE core_agent_devices SET next_poll_at=now() WHERE status='approved'",
+            &[],
+        )
+        .await?;
+    let own_redeem = grants.exchange(&cloud_client, &by_client.device_code).await;
+    println!("redeem as itself:     {}", outcome(&own_redeem));
+    if cloud["redirect_uris"] != json!([])
+        || !matches!(neither, Err(OAuthError::InvalidClientMetadata))
+        || !matches!(unregistered, Err(OAuthError::InvalidClient))
+        || !matches!(code_only, Err(OAuthError::UnauthorizedClient))
+        || named.agent_id != "Cloud app"
+        || !matches!(foreign_redeem, Err(OAuthError::InvalidClient))
+        || own_redeem.is_err()
+    {
+        return Err("the device grant did not hold a registered client to its own code".into());
+    }
+
     println!("\n== user-code guessing ==");
     // One account's lookups in a minute are bounded, so a signed-in person
     // cannot search for someone else's pending code.

@@ -29,6 +29,24 @@ impl AgentAccess {
         Ok(reply)
     }
 
+    /// The metadata of a client registered through `register_client`. Reads
+    /// the registry only and never fetches a metadata document, so a caller
+    /// nobody signed in cannot make the server request an address.
+    pub(crate) async fn registered_client(&self, id: &str) -> Result<Value, OAuthError> {
+        if id.len() > 255 {
+            return Err(OAuthError::InvalidClient);
+        }
+        let client = self.db.get().await?;
+        client
+            .query_opt(
+                "UPDATE core_agent_oauth_clients SET last_used_at=now() WHERE client_id=$1 AND metadata_expires_at IS NULL RETURNING metadata",
+                &[&id],
+            )
+            .await?
+            .map(|row| row.get(0))
+            .ok_or(OAuthError::InvalidClient)
+    }
+
     pub(crate) async fn client_metadata(&self, id: &str) -> Result<Value, OAuthError> {
         if id.len() > 2048 {
             return Err(OAuthError::InvalidClient);

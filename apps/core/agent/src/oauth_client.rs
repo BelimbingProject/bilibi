@@ -3,7 +3,7 @@
 //! loopback callbacks may vary only their port (RFC 8252 §7.3).
 //! PKCE S256 and the MCP resource are mandatory; the protocol scope delegates only the
 //! person's existing Agent API reach, never a new authorization grant.
-use crate::{secrets, OAuthError, OAUTH_SCOPE};
+use crate::{secrets, OAuthError, DEVICE_GRANT, OAUTH_SCOPE};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -84,6 +84,9 @@ fn loopback_target(uri: &str) -> Option<(&str, &str)> {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ClientRegistration {
     pub client_name: Option<String>,
+    /// Required for the authorization code grant; an app that registers for
+    /// the device grant alone has no callback and sends none.
+    #[serde(default)]
     pub redirect_uris: Vec<String>,
     pub token_endpoint_auth_method: Option<String>,
     pub grant_types: Option<Vec<String>>,
@@ -92,7 +95,15 @@ pub struct ClientRegistration {
 }
 impl ClientRegistration {
     pub(crate) fn metadata(&self) -> Result<Value, OAuthError> {
-        if self.redirect_uris.is_empty()
+        let grants = self
+            .grant_types
+            .clone()
+            .unwrap_or_else(|| vec!["authorization_code".into(), "refresh_token".into()]);
+        // An app with a browser callback asks for the authorization code
+        // grant; one without (a cloud app, a bot) asks for the device grant.
+        let code = grants.iter().any(|kind| kind == "authorization_code");
+        let device = grants.iter().any(|kind| kind == DEVICE_GRANT);
+        if (code && self.redirect_uris.is_empty())
             || self.redirect_uris.len() > 20
             || self
                 .redirect_uris
@@ -101,20 +112,21 @@ impl ClientRegistration {
         {
             return Err(OAuthError::InvalidRedirectUri);
         }
-        let name = self.client_name.as_deref().unwrap_or("Unnamed app");
+        let name = self.client_name.as_deref().unwrap_or(crate::UNNAMED_APP);
+        let responses: &[&str] = if code { &["code"] } else { &[] };
         if !printable_label(name)
             || self.token_endpoint_auth_method.as_deref().unwrap_or("none") != "none"
-            || self.grant_types.as_ref().is_some_and(|types| {
-                types.is_empty()
-                    || !types
-                        .iter()
-                        .all(|kind| matches!(kind.as_str(), "authorization_code" | "refresh_token"))
-                    || !types.iter().any(|kind| kind == "authorization_code")
+            || !(code || device)
+            || !grants.iter().all(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "authorization_code" | "refresh_token" | DEVICE_GRANT
+                )
             })
             || self
                 .response_types
                 .as_ref()
-                .is_some_and(|types| types.as_slice() != ["code"])
+                .is_some_and(|types| types.as_slice() != responses)
             || self
                 .scope
                 .as_deref()
@@ -125,10 +137,17 @@ impl ClientRegistration {
         Ok(serde_json::json!({
             "client_name": name, "redirect_uris": self.redirect_uris,
             "token_endpoint_auth_method": "none",
-            "grant_types": self.grant_types.clone().unwrap_or_else(|| vec!["authorization_code".into(), "refresh_token".into()]),
-            "response_types": ["code"], "scope": OAUTH_SCOPE,
+            "grant_types": grants,
+            "response_types": responses, "scope": OAUTH_SCOPE,
         }))
     }
+}
+/// Whether a registered client asked for the device grant.
+pub(crate) fn device_client(client: &Value) -> bool {
+    client
+        .get("grant_types")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind == DEVICE_GRANT))
 }
 pub(crate) fn registered_redirect(client: &Value, uri: &str) -> bool {
     valid_redirect_uri(uri)

@@ -180,7 +180,8 @@ The host owns the machine endpoints; discovered pages cannot claim them
 - `POST /oauth/device_authorization` and `POST /oauth/token` take urlencoded or
   JSON fields and delegate every decision to `core/agent.grants`
   (device, refresh and PKCE code grants). A device request may name the MCP
-  resource (`resource`, RFC 8707) so its tokens work at `/mcp`, and may leave
+  resource (`resource`, RFC 8707) so its tokens work at `/mcp`, may come from
+  the built-in client or one registered for the device grant, and may leave
   `agent_id` out (`apps/core/agent/README.md`, Contract). Errors are `400 {"error":code}`;
   storage failure is `503 temporarily_unavailable`. Each endpoint has its own
   per-sender bucket from `agent_access.oauth_requests_per_minute`. A sender past it gets `429 {"error":"rate_limited"}` with `Retry-After: 60` at registration and device authorization, and RFC 8628's `slow_down` at the token endpoint, the one place a client polls. The sender
@@ -204,7 +205,7 @@ resource, so an MCP-bound token is refused here, and an API token is refused
 at `/mcp`. `/mcp` uses the same `authenticate` and `Grant`; there is no second
 credential check anywhere in the host.
 
-**`hello` is the connection check** (`bilibi_agent_api::hello`; the `hello` tool at `/mcp`, `GET /api/v1/hello`). It answers `{"message", "server_name", "instance"}`: the caller's message (or `hello`), `Instance::server_name` and the instance object plans carry. It reads no business data and needs no capability, so each failure has one meaning: no answer at all is the transport, `401 invalid_token` is the sign-in, `403 ai_switched_off` is the connection's switch, and once `hello` works a refused `search` or operation is a permission answer. Its exchange row is `mcp.hello` or `agent_api.hello`.
+**`hello` is the connection check** (`bilibi_agent_api::hello`; the `hello` tool at `/mcp`, `GET /api/v1/hello`). It answers `{"message", "server_name", "instance"}`: the caller's message (or `hello`), `Instance::server_name` and the instance object plans carry. It reads no business data and needs no capability, so each failure has one meaning: no answer at all is the transport, `401 invalid_token` is the sign-in, `403 ai_switched_off` is the connection's switch, and once `hello` works a refused `search` or operation is a permission answer. Every answer here is JSON: an HTML page, whatever its status, came from a firewall or CDN in front of Bilibi ([server installation](../../docs/server-install.md#a-firewall-or-cdn-in-front-of-bilibi)). Its exchange row is `mcp.hello` or `agent_api.hello`.
 
 `GET /.well-known/bilibi` names what an app needs before it holds a credential: `api_base`, `mcp_endpoint`, `server_name` (`Instance::server_name`), `client_id` (the built-in device-grant client), `device_authorization_endpoint`, `verification_uri` (the `/oauth/device` page) and `instance`.
 

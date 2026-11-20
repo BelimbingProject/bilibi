@@ -49,7 +49,7 @@ pub fn prompt(instance: &Instance) -> String {
 {identity}\n\
 Server name: {name}\n\
 Server URL: {address}\n\
-Sign-in: OAuth, approved by me in my browser. An app that cannot receive a browser callback on this computer (a cloud app or a bot) uses the device flow with client ID `{client}`: it shows me a code and I approve it at {device}\n\
+Sign-in: OAuth, approved by me in my browser. An app that cannot receive a browser callback on this computer (a cloud app or a bot) uses the device flow, as its own registered client or as the built-in client ID `{client}`: it shows me a code and I approve it at {device}\n\
 AI switch: each connection is switched on or off at {settings}. The error `ai_switched_off` means it is off.\n\
 Check: call the `hello` tool. Tell me what it returned, or the exact error.",
         identity = identity(instance),
