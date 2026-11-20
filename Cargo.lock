@@ -449,6 +449,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-ai"
+version = "0.2.1"
+dependencies = [
+ "askama",
+ "axum",
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-grid",
+ "bilibi-integration",
+ "bilibi-locale",
+ "bilibi-menu",
+ "bilibi-module-registry",
+ "bilibi-queue",
+ "bilibi-schedule",
+ "bilibi-settings",
+ "bilibi-tenancy",
+ "bilibi-ui",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "data-encoding",
+ "inventory",
+ "jiff",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "bilibi-artifacts"
 version = "0.2.1"
 dependencies = [
@@ -598,6 +632,7 @@ name = "bilibi-base"
 version = "0.2.1"
 dependencies = [
  "bilibi-agent-api",
+ "bilibi-ai",
  "bilibi-artifacts",
  "bilibi-audit",
  "bilibi-audit-views",
