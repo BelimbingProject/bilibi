@@ -128,10 +128,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("watcher preflight section");
         assert!(example.contains("one atomic plan: 7."));
         assert!(example.contains("base.labels.clear"));
-        assert!(example.contains("Archive the field only if this setup created it"));
+        assert!(
+            example.contains("base.grid.view.delete using the ID from this setup's confirmed save")
+        );
+        assert!(example.contains("Archive the field only if this setup's confirmed save"));
+        assert!(example
+            .contains("If attribution remains uncertain, report it and stop before proposing cleanup."));
         assert!(!example.contains("base.rules.vocabulary"));
         assert!(watcher.contains("base.rules.vocabulary"));
-        assert!(watcher.contains("conditions, actions and examples"));
+        for limit in ["conditions", "examples", "facts_read", "values_per_list"] {
+            assert!(watcher.contains(limit), "missing watcher limit {limit}");
+        }
+        assert!(watcher.contains("lower of actions and actions_per_run"));
         assert!(!body.contains("{{contract:") && !body.contains("{{plan_limit}}"));
     }
     let label_call = |scope, credential, contract| Call {

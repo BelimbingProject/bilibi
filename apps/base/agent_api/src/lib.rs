@@ -870,12 +870,7 @@ impl Registry {
             cursor = start + rendered.len();
         }
         if body.contains("{{plan_limit}}") {
-            let limit = self
-                .settings
-                .get_global(client, "agent_api.plan_max_operations")
-                .await?
-                .as_u64()
-                .ok_or(bilibi_database::Error::Invalid)?;
+            let limit = plans::max_operations(&self.settings, client).await?;
             body = body.replace("{{plan_limit}}", &limit.to_string());
         }
         Ok(json!({"key":guide.key,"title":guide.title,"summary":guide.summary,"body":body}))
