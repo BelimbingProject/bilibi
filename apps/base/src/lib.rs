@@ -44,6 +44,7 @@ pub use bilibi_setup_packs as setup_packs;
 pub use bilibi_software as software;
 pub use bilibi_step_up as step_up;
 pub use bilibi_system as system;
+pub use bilibi_templates as templates;
 pub use bilibi_tenancy as tenancy;
 pub use bilibi_tiling as tiling;
 pub use bilibi_ui as ui;

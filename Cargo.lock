@@ -642,6 +642,7 @@ dependencies = [
  "bilibi-software",
  "bilibi-step-up",
  "bilibi-system",
+ "bilibi-templates",
  "bilibi-tenancy",
  "bilibi-tiling",
  "bilibi-ui",
@@ -1925,6 +1926,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "bilibi-templates"
+version = "0.2.1"
+dependencies = [
+ "bilibi-agent-api",
+ "bilibi-authz",
+ "bilibi-database",
+ "bilibi-datetime",
+ "bilibi-labels",
+ "bilibi-module-registry",
+ "bilibi-party-ids",
+ "bilibi-tenancy",
+ "icu_locale",
+ "inventory",
+ "jiff",
+ "serde",
+ "serde_json",
  "tokio-postgres",
 ]
 

@@ -52,6 +52,7 @@ bilibi-setup-packs = { path = "setup_packs" }
 bilibi-software = { path = "software" }
 bilibi-step-up = { path = "step_up" }
 bilibi-system = { path = "system" }
+bilibi-templates = { path = "templates" }
 bilibi-tenancy = { path = "tenancy" }
 bilibi-tiling = { path = "tiling" }
 bilibi-ui = { path = "ui" }
