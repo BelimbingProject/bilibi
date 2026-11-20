@@ -109,7 +109,7 @@ Verified against the code on 2026-10-19.
 | GUI | Built. Core Address, Core Person, Core Affiliation, Core Company's relationship screens, Core Tenant and Base Events' replay page call their contracts for every write (`PageContracts`). Other pages still write through facades, each on a listed allowance the page-write check enforces | `apps/base/agent_api/README.md` (Pages as callers, Page writes declaration and check) |
 | API `/api/v1` | Built. Search, describe, guide, call, plans, commit. OAuth device grant, per-person grants, live proof on every request; tenant search/read and atomic tenant-and-companies creation | `apps/web/src/api.rs`, `apps/web/README.md` |
 | MCP `/mcp` | Built. Stateless Streamable HTTP. Six tools: `search`, `describe`, `guide`, `read`, `plan`, `commit`; the same tenant contracts are discovered without plugin changes | `apps/web/src/mcp.rs`, `apps/base/agent_api/src/mcp.rs` |
-| CLI | **Remote client built.** Device authorization and versioned API reads, plans and commits | `scripts/axi.py` |
+| CLI | **Client not built.** `bilibi-web` has only operator commands (`migrate`, `seed`, `seed-production`, `create-owner`, `tenant-provision`, `platform-provision`, `authz-reconcile`, `geonames-import`, `media-cleanup`, `media-reconcile`, `plugin-export`), none of which calls an operation contract | `apps/web/src/main.rs` |
 | Harness plugins | **Built for ChatGPT.** `core/agent` generates the downloadable package: a thin adapter over `/mcp`, with skills generated from the registry, including the agent self-report instruction. Its AI connections page (`/settings/ai-connections`) shows one prompt for the person to paste into their AI app; the ChatGPT ZIP stays a download for administrators. Other harnesses are added when needed | `apps/core/agent/README.md` |
 
 The registry is `base/agent_api` (`apps/base/agent_api/README.md`):
@@ -130,7 +130,7 @@ The registry is `base/agent_api` (`apps/base/agent_api/README.md`):
 - GUI write events invoke contracts. Pages keep rendering and live patching.
 - A platform check (boot or CI) refuses a page write event that names no registered contract. This replaces any separate parity rule.
 - Step-up declarations become a property of the contract. 2FA, the tenant policy and the window rules in section 4 are built on that. The two existing password confirmations (database tables, secret reveal) move onto the same mechanism.
-- Review CLI changes as transport and presentation changes. Business actions must go through the versioned API, the operation registry or the plans layer. Capability checks, stale references, operation ordering and next-step hints stay with the shared contracts.
+- The CLI client is built over the same contracts, as a caller like `/api/v1`.
 - **Platform-owner standing for agents is built.** `prove_owner` re-reads the person's live bootstrap receipt, account eligibility and operator marker, and the grant's revocation, session switch and actor bindings. It refuses impersonation. No grant or input can confer owner standing. Reviewed writes hold the credential row on the mutation transaction; the audit names the person and records the agent connection. Owner-only contracts declare and enforce Base Step-up. The Tenants page's existing operator-plus-capability rule is retained for both callers; creation provisions its companies on the same transaction through a sealed fresh-tenant receipt, never a retargeted scope.
 - `base/agent_api` stops refusing authority-administration capabilities for agents, as part of this slice. Agent reach becomes the person's live capabilities. Step-up policies on those contracts must land first or together, so the refusal is not lifted before its replacement exists.
 
@@ -139,6 +139,7 @@ The registry is `base/agent_api` (`apps/base/agent_api/README.md`):
 | Item | State |
 | --- | --- |
 | Page actions without a contract | Tenant administration is migrated. Other pages write through facades. They are migrated module by module. The platform check turns each gap into a visible failure |
+| CLI client | Not built. Needs a design for login (device grant) and output for agents |
 | Prompt injection | Deferred to the agentic design |
 | Cost per document | Unmeasured. An agent that reads, searches and drafts per document spends model tokens on every call. The harness owner bears this. Bilibi can keep it down with small results, paging and clear guides. Measure it on a real document flow before promising anything |
 | Other harness plugins | Added when needed, one thin adapter each |
