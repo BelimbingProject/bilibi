@@ -23,7 +23,6 @@ pub struct Watchers {
     pub(crate) db: Db,
     pub(crate) jobs: Arc<JobContracts>,
     pub(crate) events: Arc<bilibi_events::Events>,
-    pub(crate) queue: Arc<bilibi_queue::Queue>,
     pub(crate) settings: Arc<Settings>,
     pub(crate) authentication: Arc<Authentication>,
     pub(crate) directory: Arc<bilibi_principal_directory::PrincipalDirectory>,

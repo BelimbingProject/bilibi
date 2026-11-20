@@ -16,7 +16,7 @@
 //!    retry after a crash finds the receipt and does nothing twice.
 use crate::definition::Definition;
 use crate::store::Watchers;
-use crate::{CHAIN_DEPTH, MAX_ATTEMPTS, RUNS_PER_MINUTE};
+use crate::{BURST_SIZE, CHAIN_DEPTH, MAX_ATTEMPTS, RUNS_PER_MINUTE};
 use bilibi_authz::SystemScope;
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_events::{Event, Handoff, On, Subscribe, SubscriberFuture};
@@ -26,7 +26,6 @@ use bilibi_queue::{Ended, Ending, EndingFuture, Execution, Handler, HandlerFutur
 use bilibi_tenancy::Scope;
 use serde_json::{json, Value};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime};
 use tokio_postgres::Transaction;
 
 /// The service, bound once at boot, for the subscriber (a static) to reach.
@@ -216,9 +215,10 @@ impl Worker {
         let tenant = execution.tenant();
         let watchers = &self.watchers;
         let client = watchers.db.get().await?;
-        let (depth, per_minute) = (
+        let (depth, per_minute, burst) = (
             watchers.limit(&**client, &scope, CHAIN_DEPTH).await?,
             watchers.limit(&**client, &scope, RUNS_PER_MINUTE).await?,
+            watchers.limit(&**client, &scope, BURST_SIZE).await?,
         );
         let runs: Vec<Run> = client.query(
             "SELECT id,watcher_id,version_id,event_id,subject,depth,state,logical_event FROM base_watcher_runs WHERE tenant_id=$1 AND event_id=$2 AND state IN ('queued','matched') ORDER BY id",
@@ -233,7 +233,6 @@ impl Worker {
             let mut tx = execution
                 .begin(&mut client, "watchers.run.admitted")
                 .await?;
-            watchers.lock_admission(tx.sql(), &scope).await?;
             let current = tx.sql().query_one("SELECT started_at IS NOT NULL,state FROM base_watcher_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &run.id]).await?;
             let admitted: bool = current.get(0);
             run.state = current.get(1);
@@ -241,32 +240,33 @@ impl Worker {
                 tx.rollback().await?;
                 continue;
             }
-            let started: i64 = tx.sql().query_one(
-                "SELECT count(*) FROM base_watcher_runs WHERE tenant_id=$1 AND started_at > now() - interval '1 minute'",
-                &[&tenant],
-            ).await?.get(0);
-            if !admitted && started >= per_minute {
-                let system =
-                    SystemScope::rehydrate(tx.sql(), tenant, Some(crate::PRINCIPAL)).await?;
-                watchers
-                    .queue
-                    .enqueue_system_at_within(
-                        &mut tx,
-                        &system,
-                        crate::WORKER,
-                        json!({"event_id": event}),
-                        SystemTime::now() + Duration::from_secs(60),
-                    )
-                    .await?;
-                tx.commit().await?;
-                return Ok(());
-            }
             if !admitted {
                 let id = run.id;
-                tx.mutate(move |sql| Box::pin(async move {
-                    let started: String = sql.query_one("UPDATE base_watcher_runs SET started_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING started_at::text", &[&tenant, &id]).await?.get(0);
-                    Ok(((), vec![Change { kind: "base/watchers.run".into(), id, old: json!({"started_at": null}), new: json!({"started_at": started}) }]))
+                let watcher = run.watcher;
+                let allowed = tx.mutate(move |sql| Box::pin(async move {
+                    // The row lock serializes this watcher's bucket across workers. Database
+                    // time and clamping protect it from clock jumps and setting reductions.
+                    let row = sql.query_one("SELECT bucket_tokens, bucket_at::text FROM base_watchers WHERE tenant_id=$1 AND id=$2 FOR UPDATE", &[&tenant, &watcher]).await?;
+                    let old_tokens: Option<f64> = row.get(0);
+                    let old_at: Option<String> = row.get(1);
+                    let available: f64 = sql.query_one("SELECT LEAST($3::bigint::double precision, COALESCE(bucket_tokens + GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - bucket_at)))::double precision * $4::bigint::double precision / 60.0, $3::bigint::double precision)) FROM base_watchers WHERE tenant_id=$1 AND id=$2", &[&tenant, &watcher, &burst, &per_minute]).await?.get(0);
+                    let allowed = available >= 1.0;
+                    let tokens = if allowed { available - 1.0 } else { available };
+                    let at: String = sql.query_one("UPDATE base_watchers SET bucket_tokens=$3,bucket_at=GREATEST(COALESCE(bucket_at, clock_timestamp()), clock_timestamp()) WHERE tenant_id=$1 AND id=$2 RETURNING bucket_at::text", &[&tenant, &watcher, &tokens]).await?.get(0);
+                    if allowed {
+                        sql.execute("UPDATE base_watcher_runs SET started_at=now() WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
+                    } else {
+                        sql.execute("UPDATE base_watcher_runs SET state='refused',reason='rate_limit',finished_at=now() WHERE tenant_id=$1 AND id=$2", &[&tenant, &id]).await?;
+                    }
+                    Ok((allowed, vec![
+                        Change { kind: "base/watchers.watcher".into(), id: watcher, old: json!({"bucket_tokens": old_tokens, "bucket_at": old_at}), new: json!({"bucket_tokens": tokens, "bucket_at": at}) },
+                        Change { kind: "base/watchers.run".into(), id, old: json!({"state": "queued"}), new: if allowed { json!({"started": true}) } else { json!({"state": "refused", "reason": "rate_limit"}) } },
+                    ]))
                 })).await?;
+                if !allowed {
+                    tx.commit().await?;
+                    continue;
+                }
             }
             tx.commit().await?;
             drop(client);

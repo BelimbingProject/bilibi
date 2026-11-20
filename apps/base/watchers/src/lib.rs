@@ -64,8 +64,10 @@ pub const SETTLE: &str = "watchers.run.settle";
 pub const ACTIONS_PER_RUN: &str = "watchers.actions_per_run";
 /// Most watchers in a row one first change may start (the causal-chain budget).
 pub const CHAIN_DEPTH: &str = "watchers.chain_depth";
-/// Most watcher runs one tenant starts in a minute; more wait for the next one.
+/// Tokens refilled per minute for each watcher.
 pub const RUNS_PER_MINUTE: &str = "watchers.runs_per_minute";
+/// Maximum tokens held by each watcher.
+pub const BURST_SIZE: &str = "watchers.burst_size";
 /// Most watchers switched on for one trigger in a tenant.
 pub const ACTIVE_PER_TRIGGER: &str = "watchers.active_per_trigger";
 
@@ -138,7 +140,9 @@ inventory::submit! { Contribution::new(DEFINITIONS, ACTIONS_PER_RUN, provenance!
 inventory::submit! { Contribution::new(DEFINITIONS, CHAIN_DEPTH, provenance!(), &limit(
 "Watchers in a chain", "How many watchers in a row one change may start, when a watcher's action starts another watcher. The next one is refused, and its receipt says so.", || json!(3), 10.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, RUNS_PER_MINUTE, provenance!(), &limit(
-"Watcher runs per minute", "The most watcher runs this tenant starts in a minute. More wait for the next minute, so a burst never holds up other work.", || json!(60), 10_000.0)) }
+"Watcher refill per minute", "Tokens added per minute to each watcher’s bucket. Each new run consumes one token.", || json!(600), 10_000.0)) }
+inventory::submit! { Contribution::new(DEFINITIONS, BURST_SIZE, provenance!(), &limit(
+"Watcher burst size", "The most runs each watcher can start at once. Runs without a token are refused in their receipts.", || json!(600), 10_000.0)) }
 inventory::submit! { Contribution::new(DEFINITIONS, ACTIVE_PER_TRIGGER, provenance!(), &limit(
 "Watchers per trigger", "The most watchers that may be switched on for one trigger.", || json!(20), 100.0)) }
 
@@ -177,7 +181,6 @@ fn build(services: &bilibi_module_registry::Services) -> bilibi_module_registry:
             .clone(),
         jobs,
         events,
-        queue: services.get("base/queue.store")?,
         settings: services.get("base/settings.store")?,
         authentication: services.get("base/tenancy.authentication")?,
         directory: services.get("base/principal_directory.directory")?,
@@ -189,7 +192,7 @@ inventory::submit! {
     Module {
         id: "base/watchers", layer: Layer::Base,
         dependencies: &["base/module_registry", "base/database", "base/audit", "base/tenancy", "base/authz", "base/queue", "base/events", "base/grid", "base/settings", "base/agent_api", "base/principal_directory", "base/ui", "base/menu", "base/datetime", "base/locale"],
-        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql"))],
+        migrations: &[("base-rules-001-rules", include_str!("../migrations/001-rules.sql")), ("base-rules-002-approval-bindings", include_str!("../migrations/002-approval-bindings.sql")), ("base-rules-003-logical-events", include_str!("../migrations/003-logical-events.sql")), ("base-watchers-004-watchers", include_str!("../migrations/004-watchers.sql")), ("base-watchers-005-token-bucket", include_str!("../migrations/005-token-bucket.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
                 let watchers = Arc::new(build(services)?);
