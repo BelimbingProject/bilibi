@@ -157,9 +157,74 @@ async fn discovery(
         assert_eq!(found["on_page"], "/companies");
     }
 
+    for (page, subjects) in [
+        (
+            "/documents",
+            &[
+                "record:documents",
+                "field:documents.name",
+                "field:document_revisions.label",
+            ][..],
+        ),
+        (
+            "/activities",
+            &["record:activities", "field:activities.subject"][..],
+        ),
+        ("/geonames/countries", &["field:countries.country"][..]),
+        ("/work-calendars", &["field:work_calendars.timezone"][..]),
+        (
+            "/companies/legal-entity-types",
+            &["field:legal_entity_types.name"][..],
+        ),
+    ] {
+        let listed = contracts
+            .read(one, KEY, &json!({"on_page":page,"page_size":100}))
+            .await?;
+        for subject in subjects {
+            assert!(
+                choice(&listed, subject).is_some(),
+                "{subject} missing on {page}"
+            );
+        }
+        assert!(!section_ids(&listed)
+            .iter()
+            .any(|section| section == "base/grid.customisations"));
+    }
+    let columns = contracts
+        .read(
+            one,
+            KEY,
+            &json!({"on_page":"/companies","purpose":"rename a column"}),
+        )
+        .await?;
+    assert!(choice(&columns, "field:companies.name").is_some());
+    assert!(choice(&columns, "record:companies").is_none());
+    assert!(columns["result"]["choices"]
+        .as_array()
+        .ok_or("missing column choices")?
+        .iter()
+        .all(|choice| !choice["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("menu:")));
+    let add_fields = contracts
+        .read(
+            one,
+            KEY,
+            &json!({"on_page":"/companies","purpose":"add field"}),
+        )
+        .await?;
+    assert_eq!(add_fields["meta"]["page"]["total"], 1);
+    assert_eq!(add_fields["result"]["choices"][0]["subject"], "company");
+
     for filters in [
         json!({"on_page":"/admin/labels", "record_kind":"company"}),
         json!({"record_kind":"Company"}),
+        json!({"on_page":"?page=2"}),
+        json!({"on_page":"/admin/labels/?page=2"}),
+        json!({"on_page":"/admin/labels/"}),
+        json!({"on_page":"/admin/labels#top"}),
+        json!({"on_page":""}),
     ] {
         assert_eq!(
             contracts.read(one, KEY, &filters).await?["result"]["choices"],
@@ -168,7 +233,7 @@ async fn discovery(
     }
     // By page, and by purpose.
     let here = contracts
-        .read(one, KEY, &json!({"on_page": "/admin/labels/?page=2"}))
+        .read(one, KEY, &json!({"on_page": "/admin/labels"}))
         .await?;
     assert_eq!(here["meta"]["page"]["total"], 1);
     assert_eq!(here["result"]["choices"][0]["value"], "Second override");

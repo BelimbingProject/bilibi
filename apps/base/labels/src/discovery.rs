@@ -138,44 +138,46 @@ impl Bound {
     }
 }
 
-/// A page address without its query, fragment or trailing slash.
-fn address(page: &str) -> &str {
-    let path = page.split(['?', '#']).next().unwrap_or_default();
-    match path.trim_end_matches('/') {
-        "" if path.starts_with('/') => "/",
-        trimmed => trimmed,
-    }
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
 }
 
-struct Filter {
-    on_page: String,
-    record_kind: String,
+struct Filter<'a> {
+    on_page: Option<&'a str>,
+    record_kind: Option<&'a str>,
     purpose: Vec<String>,
 }
-impl Filter {
-    fn new(input: &Value) -> Self {
+impl<'a> Filter<'a> {
+    fn new(input: &'a Value) -> Self {
         Self {
-            on_page: address(&text_field(input, "on_page")).to_owned(),
-            record_kind: input["record_kind"].as_str().unwrap_or_default().to_owned(),
-            purpose: text_field(input, "purpose")
-                .to_lowercase()
-                .split_whitespace()
+            on_page: input["on_page"].as_str(),
+            record_kind: input["record_kind"].as_str(),
+            purpose: words(&text_field(input, "purpose").to_lowercase())
+                .filter(|word| !matches!(*word, "a" | "an" | "the"))
                 .map(str::to_owned)
                 .collect(),
         }
     }
-    fn matches(&self, section_words: &str, choice: &Choice) -> bool {
-        let words = format!("{} {}", choice.title, choice.subject).to_lowercase();
-        (self.on_page.is_empty()
-            || choice
-                .page
-                .as_deref()
-                .is_some_and(|page| address(page) == self.on_page))
-            && (self.record_kind.is_empty() || choice.record_kinds.contains(&self.record_kind))
+    fn matches(&self, choice: &Choice) -> bool {
+        self.on_page
+            .is_none_or(|page| choice.page.as_deref() == Some(page))
             && self
-                .purpose
-                .iter()
-                .all(|word| section_words.contains(word) || words.contains(word))
+                .record_kind
+                .is_none_or(|kind| choice.record_kinds.iter().any(|id| id == kind))
+            && self.matches_purpose(choice)
+    }
+
+    fn matches_purpose(&self, choice: &Choice) -> bool {
+        if self.purpose.is_empty() {
+            return true;
+        }
+        let text =
+            format!("{} {} {}", choice.title, choice.subject, choice.keywords).to_lowercase();
+        let choice_words: BTreeSet<_> = words(&text).collect();
+        self.purpose
+            .iter()
+            .all(|word| choice_words.contains(word.as_str()))
     }
 }
 
@@ -249,16 +251,9 @@ impl ReadHandler for Discover {
                 if results.len() < changes.reads.len() {
                     continue;
                 }
-                let words = format!(
-                    "{} {} {}",
-                    section.title,
-                    changes.purpose,
-                    changes.keywords.join(" ")
-                )
-                .to_lowercase();
                 let matched: Vec<Choice> = (changes.choices)(&results)
                     .into_iter()
-                    .filter(|choice| filter.matches(&words, choice))
+                    .filter(|choice| filter.matches(choice))
                     .collect();
                 if matched.is_empty() {
                     continue;
@@ -294,9 +289,9 @@ impl ReadHandler for Discover {
 
 fn input() -> Value {
     json!({"type":"object","properties":{
-        "on_page":{"type":"string","maxLength":200,"description":"The address of the page the person is on, such as /companies. Choices that show on that page match."},
+        "on_page":{"type":"string","maxLength":200,"description":"The exact page path, such as /companies."},
         "record_kind":{"type":"string","maxLength":120,"description":"A kind of record by its stable ID, such as company. Given with on_page, the choice must match both."},
-        "purpose":{"type":"string","maxLength":120,"description":"What the person wants to do, in a few words, such as rename a column. Every word must appear in the section or the choice."},
+        "purpose":{"type":"string","maxLength":120,"description":"What the person wants to do, in a few words, such as rename a column. Match words in the choice name, ID or purpose terms."},
         "page":{"type":"integer","minimum":1,"maximum":1000000,"description":"Left out: 1."},
         "page_size":{"type":"integer","minimum":1,"maximum":100,"description":"Choices per page. Left out: 25."}
     }})

@@ -118,11 +118,7 @@ impl ReadHandler for Read {
                             .iter()
                             .find(|source| source.record_type == record.id)
                             .and_then(|source| installed.table(source.table));
-                        let path = table
-                            .map(|table| table.list_address())
-                            .transpose()
-                            .map_err(|_| Error::Internal)?
-                            .flatten();
+                        let path = table.and_then(bilibi_grid::Table::list_address);
                         let mut kinds = vec![record.id];
                         if let Some(table) = table {
                             kinds.extend(table.record_kinds().filter(|kind| *kind != record.id));

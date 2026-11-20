@@ -263,6 +263,8 @@ inventory::submit! { Contribution::new(DEFINITIONS, ALLOWED_TYPES, provenance!()
 // the live selected-company proof carried by the document facade, which Grid
 // does not receive; omitting those rows is safe, while treating membership as
 // access would expose restricted documents.
+const LIST_PATH: &str = "/documents";
+
 static GRID: GridContribution = GridContribution {
     record_fields: &[],
     tables: &[
@@ -297,7 +299,7 @@ static GRID: GridContribution = GridContribution {
                 Field::new("created_at", "Created", FieldType::DateTime).protected(),
                 Field::new("updated_at", "Updated", FieldType::DateTime).protected(),
             ],
-        ).label_field("name").time_field("publish_date").record_types(&[RECORD]),
+        ).label_field("name").time_field("publish_date").record_types(&[RECORD]).list_address(LIST_PATH),
         TableDecl::new(
             "document_revisions",
             "Document revisions",
@@ -320,7 +322,7 @@ static GRID: GridContribution = GridContribution {
                 Field::new("created_by", "Created by account ID", FieldType::Integer).protected(),
                 Field::new("created_at", "Created", FieldType::DateTime).protected(),
             ],
-        ).label_field("name").time_field("created_at").record_types(&[crate::REVISION_RECORD]),
+        ).label_field("name").time_field("created_at").record_types(&[crate::REVISION_RECORD]).list_address(LIST_PATH),
         TableDecl::new(
             "document_links",
             "Document links",
@@ -396,7 +398,7 @@ bilibi_search::contribute!("core/document", "document.search", &SEARCH);
 // Pages: the list and a document's record page.
 inventory::submit! { Contribution::new(ROUTES, "core/document.list", provenance!(), &Route {
     company_scope: CompanyScope::Company,
-    method: Method::Get, path: "/documents", service: crate::web::SERVICE, operation: "list",
+    method: Method::Get, path: LIST_PATH, service: crate::web::SERVICE, operation: "list",
     access: Access::Capability(VIEW), framed: true,
 }) }
 inventory::submit! { Contribution::new(ROUTES, "core/document.detail", provenance!(), &Route {
@@ -453,7 +455,7 @@ bilibi_menu::contribute!(
 
 bilibi_menu::contribute!(
     "core/document",
-    bilibi_menu::MenuItem::page("core.document", "Documents", "/documents")
+    bilibi_menu::MenuItem::page("core.document", "Documents", LIST_PATH)
         .under("core")
         .company_scoped()
         .icon("document-text")

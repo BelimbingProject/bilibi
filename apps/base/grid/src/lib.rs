@@ -176,10 +176,6 @@ inventory::submit! {
 }
 
 impl Table {
-    pub fn list_address(&self) -> Result<Option<&'static str>> {
-        Ok(page_metadata::metadata(self.id())?.and_then(|page| page.path))
-    }
-
     pub fn record_kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
         std::iter::once(self.id()).chain(self.decl.record_types.iter().copied())
     }
@@ -193,7 +189,7 @@ fn label_subjects() -> std::result::Result<Vec<bilibi_labels::Subject>, String> 
     let mut subjects = Vec::new();
     for table in installed.tables() {
         let record_kinds: Vec<String> = table.record_kinds().map(str::to_owned).collect();
-        let page = table.list_address().map_err(|error| error.to_string())?;
+        let page = table.list_address();
         subjects.push(Subject {
             kind: Kind::Record,
             id: table.id().to_owned(),

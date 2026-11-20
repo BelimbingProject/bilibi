@@ -150,7 +150,7 @@ static GRID: GridContribution = GridContribution {
     )
     .label_field("name")
     .time_field("created_at")
-    .record_types(&["company"]),
+    .record_types(&["company"]).list_address("/companies"),
     // A department is in the tenant through its company, so the source joins
     // the tenant's live companies; the
     // head is the affiliation id, which the affiliation owner links.
@@ -188,7 +188,7 @@ static GRID: GridContribution = GridContribution {
             Field::new("is_active", "Active", Boolean),
         ],
     )
-    .label_field("name")],
+    .label_field("name").list_address("/companies/legal-entity-types")],
     links: &[
         LinkDecl::on("parent", "Parent company", LinkKind::One, "companies", "parent_id", "companies", "id"),
         LinkDecl::on("children", "Subsidiaries", LinkKind::Many, "companies", "id", "companies", "parent_id"),

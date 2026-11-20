@@ -84,7 +84,7 @@ static GRID: bilibi_grid::GridContribution = bilibi_grid::GridContribution {
             bilibi_grid::Field::record(crate::record_fields::CREATED_AT),
             bilibi_grid::Field::record(crate::record_fields::UPDATED_AT),
             bilibi_grid::Field::record(crate::record_fields::PERSON_ID).hidden(),
-        ]).label_field("name").time_field("created_at").record_types(&["user"])],
+        ]).label_field("name").time_field("created_at").record_types(&["user"]).list_address("/users")],
     links: &[
         bilibi_grid::LinkDecl::on("person", "Person", bilibi_grid::LinkKind::One, "users", "person_id", "persons", "id"),
         bilibi_grid::LinkDecl::on("accounts", "Accounts", bilibi_grid::LinkKind::Many, "persons", "id", "users", "person_id"),

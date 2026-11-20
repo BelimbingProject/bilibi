@@ -1,6 +1,7 @@
 //! Registered sections of tenant customisation: the rows the Customisations
 //! page lists with their undo action, and what an agent may change
 //! (`base.labels.customisations.discover`). One contribution feeds both.
+use crate::Kind;
 use serde_json::Value;
 
 /// Registry key for customisation section contributions.
@@ -45,8 +46,6 @@ pub struct Undo {
 pub struct Changes {
     /// One plain sentence saying what this lets a tenant change.
     pub purpose: &'static str,
-    /// Words people use for this purpose, matched by the `purpose` filter.
-    pub keywords: &'static [&'static str],
     /// The bounds a change must stay within, in plain words.
     pub limits: &'static str,
     /// The owner's guide key.
@@ -79,6 +78,7 @@ pub struct Choice {
     /// Stable within its section.
     pub subject: String,
     pub title: String,
+    pub keywords: &'static str,
     /// The page address this choice shows on, when it belongs to one page.
     pub page: Option<String>,
     /// Every stable ID the owner knows this choice's kind of record by.
@@ -124,10 +124,16 @@ fn label_rows(value: &Value) -> Vec<CustomisationRow> {
 fn label_choices(reads: &[Value]) -> Vec<Choice> {
     reads[0].as_array().into_iter().flatten().filter_map(|row| {
         let (kind, subject, default) = (row["kind"].as_str()?, row["subject"].as_str()?, row["default"].as_str()?);
+        let keywords = match Kind::from_key(kind)? {
+            Kind::Menu => "rename label word wording terminology menu item restore",
+            Kind::Record => "rename label word wording terminology record type restore",
+            Kind::Field => "rename label word wording terminology field column heading restore",
+        };
         let trail = row["trail"].as_str().unwrap_or_default();
         let label = row["label"].as_str();
         Some(Choice {
             subject: format!("{kind}:{subject}"),
+            keywords,
             title: if trail.is_empty() { format!("{kind}: {default}") } else { format!("{kind}: {trail} › {default}") },
             page: row["page"].as_str().map(str::to_owned),
             record_kinds: row["record_kinds"].as_array().into_iter().flatten().filter_map(|kind| kind.as_str().map(str::to_owned)).collect(),
@@ -148,7 +154,6 @@ inventory::submit! { bilibi_module_registry::Contribution::new(SECTIONS, "base/l
     undo: Some(Undo { read: "base.labels.list", read_input: empty_input, operation: "base.labels.clear", event: "customisation.labels", action: "Restore default", detail: "The module's original word will be shown again.", rows: label_rows }),
     changes: Some(Changes {
         purpose: "Show your own word for a menu item, a record type or a field.",
-        keywords: &["rename", "label", "word", "wording", "terminology", "menu", "field", "column", "heading"],
         limits: "1 to 60 characters of plain text. Operation keys, routes and permission keys never change.",
         guide: "base.labels",
         reads: &[Read { operation: "base.labels.list", input: empty_input }], choices: label_choices,

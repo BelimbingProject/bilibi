@@ -243,6 +243,7 @@ fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
                 .collect();
             let saved = group["item_ids"].as_array().filter(|ids| !ids.is_empty());
             Some(bilibi_labels::Choice {
+                keywords: "menu order reorder arrange navigation sidebar move restore",
                 subject: if parent.is_empty() { "root" } else { parent }.to_owned(),
                 title: if parent.is_empty() {
                     "Menu order: the top level".to_owned()
@@ -269,7 +270,6 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/menu_order
     undo: None,
     changes: Some(bilibi_labels::Changes {
         purpose: "Arrange the staff menu's items among their siblings for everyone in this tenant.",
-        keywords: &["menu", "order", "reorder", "arrange", "navigation", "sidebar", "move"],
         limits: "Only the order of siblings under one parent, by stable menu item ID. An order never grants access, renames an item or moves it to another parent, and the customer portal menu is not ordered here.",
         guide: "base.menu_order",
         reads: &[bilibi_labels::Read { operation: "base.menu_order.list", input: no_input }],

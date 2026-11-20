@@ -1080,7 +1080,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/product",
     "core/product.grid-page",
     "products",
-    Some("/products"),
+    None,
     crate::VIEW,
     Some(|| SPEC.clone()),
     &[],

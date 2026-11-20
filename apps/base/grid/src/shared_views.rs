@@ -22,7 +22,7 @@ use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
 use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Share a saved view with everyone or with roles.
 pub const SHARE: &str = "grid.views.share";
@@ -203,6 +203,21 @@ impl PageViews {
             .collect())
     }
 
+    pub(crate) async fn full_pages(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        pages: &[&str],
+    ) -> Result<BTreeSet<String>> {
+        let rows = client
+            .query(
+                "SELECT page FROM base_grid_shared_views WHERE tenant_id=$1 AND page=ANY($2) GROUP BY page HAVING count(*) >= $3",
+                &[&scope.tenant(), &pages, &MAX_PER_PAGE],
+            )
+            .await?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     /// The tenant's roles by name, for choosing whom to share with; `None`
     /// when the reader may not share (they see no role names).
     pub async fn share_roles(&self, scope: &Scope) -> Result<Option<Vec<(i64, String)>>> {
@@ -281,20 +296,16 @@ impl PageViews {
             )
             .await?
             .get(0);
-        let total: i64 = tx
-            .sql()
-            .query_one(
-                "SELECT count(*) FROM base_grid_shared_views WHERE tenant_id=$1 AND page=$2",
-                &[&tenant, &page],
-            )
-            .await?
-            .get(0);
         if taken > 0 {
             return Err(Error::Refused(format!(
                 "A view called “{name}” already exists on this list."
             )));
         }
-        if total >= MAX_PER_PAGE {
+        if self
+            .full_pages(tx.sql(), scope, &[&page])
+            .await?
+            .contains(&page)
+        {
             return Err(refused(
                 "This list already has 100 saved views; delete one first.",
             ));

@@ -44,6 +44,7 @@ impl Source {
 pub struct TableDecl {
     pub id: &'static str,
     pub label: &'static str,
+    list_address: Option<&'static str>,
     /// What an account needs to read any row; checked before a path may touch it.
     pub capability: &'static str,
     pub source: Source,
@@ -77,6 +78,7 @@ impl TableDecl {
         Self {
             id,
             label,
+            list_address: None,
             capability,
             source,
             key,
@@ -86,6 +88,12 @@ impl TableDecl {
             record_types: &[],
             owner: None,
             team: None,
+        }
+    }
+    pub const fn list_address(self, address: &'static str) -> Self {
+        Self {
+            list_address: Some(address),
+            ..self
         }
     }
     pub const fn label_field(self, field: &'static str) -> Self {
@@ -256,6 +264,10 @@ struct CustomField {
     rule_condition: bool,
 }
 impl Table {
+    pub fn list_address(&self) -> Option<&'static str> {
+        self.decl.list_address
+    }
+
     pub fn id(&self) -> &'static str {
         self.decl.id
     }

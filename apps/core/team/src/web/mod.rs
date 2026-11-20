@@ -694,7 +694,7 @@ bilibi_grid::contribute_page_metadata!(
     "core/team",
     "core/team.grid-page",
     "teams",
-    Some(crate::LIST_PATH),
+    None,
     crate::VIEW,
     Some(|| LIST_SPEC.clone()),
     &[],

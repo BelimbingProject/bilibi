@@ -447,11 +447,17 @@ fn customisation_choices(reads: &[Value]) -> Vec<bilibi_labels::Choice> {
             let key = setting["key"].as_str()?;
             let secret = setting["secret"].as_bool().unwrap_or(false);
             let mut writes = vec!["base.settings_editor.tenant.restore"];
-            if setting["set_supported"].as_bool()? {
+            let set_supported = setting["set_supported"].as_bool()?;
+            if set_supported {
                 writes.push("base.settings_editor.tenant.set");
             }
             Some(bilibi_labels::Choice {
                 subject: key.to_owned(),
+                keywords: if set_supported {
+                    "tenant setting settings configuration configure option preference default behaviour set restore"
+                } else {
+                    "tenant setting settings configuration option preference default behaviour encrypted secret restore"
+                },
                 title: format!(
                     "{}: {}",
                     setting["group"].as_str().unwrap_or_default(),
@@ -477,7 +483,6 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/settings_e
     undo: None,
     changes: Some(bilibi_labels::Changes {
         purpose: "Set how a module behaves for this tenant, where its owner lets tenant administrators decide.",
-        keywords: &["setting", "settings", "configuration", "configure", "option", "preference", "default", "behaviour"],
         limits: "Only settings their modules delegate to tenant administrators, each within its declared type and range. An operator sets encrypted values in System Settings; their value is never shown.",
         guide: "base.settings_editor",
         reads: &[bilibi_labels::Read { operation: "base.settings_editor.tenant.list", input: no_input }],

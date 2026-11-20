@@ -62,7 +62,7 @@ static GRID: GridContribution = GridContribution {
             Field::new("phone", "Phone code", String),
         ],
     )
-    .label_field("country")],
+    .label_field("country").list_address(COUNTRIES_PATH)],
     links: &[],
 };
 bilibi_grid::contribute!("core/geonames", "geonames.grid", &GRID);

@@ -234,6 +234,7 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
         let verify_input = json!({"record_type": id, "include_archived": true});
         choices.push(bilibi_labels::Choice {
             subject: id.to_owned(),
+            keywords: "add create define custom field attribute extra column",
             title: format!("{label}: add a field"),
             page: page.clone(),
             record_kinds: record_kinds.clone(),
@@ -272,6 +273,11 @@ fn customisation_choices(reads: &[serde_json::Value]) -> Vec<bilibi_labels::Choi
             }
             Some(bilibi_labels::Choice {
                 subject: format!("{id}.{key}"),
+                keywords: if archived {
+                    "custom field attribute column rename edit update restore"
+                } else {
+                    "custom field attribute column rename edit update archive"
+                },
                 title: format!(
                     "{label}: {} ({key}){}",
                     field["label"].as_str()?,
@@ -298,7 +304,6 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
     undo: Some(bilibi_labels::Undo { read: "base.custom_fields.list", read_input: customisation_input, operation: "base.custom_fields.archive", event: "customisation.fields", action: "Archive", detail: "The field is hidden and records keep their saved values. Approved rules that use this field may stop running and require review and reapproval.", rows: customisation_rows }),
     changes: Some(bilibi_labels::Changes {
         purpose: "Add your own typed fields to a kind of record, rename them, and archive or bring back the ones you no longer use.",
-        keywords: &["custom", "field", "attribute", "extra", "column", "add", "archive"],
         limits: "A field's key and type never change and a key is never reused. Each kind of record takes a limited number of active fields (the base.custom_fields.max_fields setting). Archive a field to remove it; records keep their saved values.",
         guide: "base.custom_fields",
         reads: &[bilibi_labels::Read { operation: "base.custom_fields.record_types", input: no_input }, bilibi_labels::Read { operation: "base.custom_fields.list", input: customisation_input }],

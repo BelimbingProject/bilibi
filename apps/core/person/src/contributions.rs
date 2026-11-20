@@ -71,7 +71,7 @@ static GRID: GridContribution = GridContribution {
             // The tenant's custom values; Grid adds each active field as `cf_<key>`.
             Field::new("custom_fields", "Custom fields", FieldType::String).hidden(),
             Field::new("custom_search_vector", "Custom search terms", FieldType::String).hidden(),
-        ]).label_field("name").time_field("created_at").record_types(&["person"])],
+        ]).label_field("name").time_field("created_at").record_types(&["person"]).list_address("/contacts")],
     links: &[],
 };
 bilibi_grid::contribute!("core/person", "person.grid", &GRID);
