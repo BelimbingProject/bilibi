@@ -9,6 +9,7 @@ pub(crate) fn receipt_columns() -> Result<ListColumns> {
         vec![
             BuiltinColumn::new("trace", "Trace"),
             BuiltinColumn::new("who", "Changed by"),
+            BuiltinColumn::new("when", "Changed"),
             BuiltinColumn::new("where", "Where"),
             BuiltinColumn::new("before", "Before"),
             BuiltinColumn::new("after", "After"),
@@ -78,6 +79,12 @@ pub(crate) fn receipt_where(change: &Value) -> String {
             value["record_type"].as_str().unwrap_or_default(),
             value["key"].as_str().unwrap_or_default()
         ),
+        "base/settings" => value["key"].as_str().unwrap_or_default().to_owned(),
+        "grid.shared_view" => value["page"].as_str().unwrap_or_default().to_owned(),
+        "menu_order" => match value["parent"].as_str() {
+            Some(parent) if !parent.is_empty() => format!("Menu › {parent}"),
+            _ => "Main menu".into(),
+        },
         _ => format!("{} #{}", kind, change["id"].as_str().unwrap_or_default()),
     }
 }
@@ -88,6 +95,18 @@ pub(crate) fn receipt_value(value: &Value) -> String {
     let mut parts = Vec::new();
     for (key, label) in [
         ("label", "Label"),
+        ("kind", "Type"),
+        ("picklist", "Choice list"),
+        ("target", "Reference"),
+        ("value", "Value"),
+        ("source", "Source"),
+        ("name", "View"),
+        ("view", "Layout"),
+        ("params", "Filters"),
+        ("shared_with_everyone", "Shared with everyone"),
+        ("roles", "Roles"),
+        ("audience", "Audience"),
+        ("item_ids", "Order"),
         ("help", "Help"),
         ("archived_on", "Archived"),
         ("rule_condition", "Available to watchers"),
@@ -98,6 +117,14 @@ pub(crate) fn receipt_value(value: &Value) -> String {
                 Value::Null => "None".to_owned(),
                 Value::String(text) => text.clone(),
                 _ => value.to_string(),
+            };
+            let label = if key == "kind"
+                && value.is_string()
+                && matches!(text.as_str(), "menu" | "record" | "field")
+            {
+                "Subject type"
+            } else {
+                label
             };
             parts.push(format!("{label}: {text}"));
         }

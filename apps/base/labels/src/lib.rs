@@ -11,7 +11,7 @@ mod store;
 mod web;
 
 pub use customisations::{
-    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection, ReceiptSource, Undo, RECEIPT_SOURCES, SECTIONS,
+    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection, ReceiptFuture, ReceiptSource, ReceiptUndo, Undo, RECEIPT_SOURCES, SECTIONS,
 };
 
 pub use store::{
@@ -27,7 +27,7 @@ use bilibi_module_registry::{
 use std::sync::Arc;
 
 pub(crate) const CUSTOMISATIONS: &str = "base/labels.customisations";
-const CUSTOMISATIONS_VIEW: &str = "base.labels.customisations.view";
+pub const CUSTOMISATIONS_VIEW: &str = "base.labels.customisations.view";
 pub const SERVICE: &str = "base/labels.labels";
 /// The operator page.
 pub(crate) const PAGES: &str = "base/labels.pages";
@@ -68,7 +68,7 @@ inventory::submit! {
                     bilibi_menu::Menu::from_catalog(&catalog)?,
                     sources,
                 ));
-                operations::bind(labels.clone())?;
+                operations::bind(labels.clone(), services.get("base/principal_directory.directory")?)?;
                 Ok(labels)
             } },
             Service { id: CUSTOMISATIONS, factory: |services| {

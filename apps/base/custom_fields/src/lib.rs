@@ -322,28 +322,53 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }
 
-inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW, manage: MANAGE, read: operations::receipt_fields, current: receipt_current, correction: receipt_correction }) }
+inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW, undo: Some(bilibi_labels::ReceiptUndo { capability: MANAGE, correction: receipt_correction }), read: Some(operations::receipt_fields), project: project_receipt }) }
 
-fn receipt_current(
-    change: &serde_json::Value,
-    rows: &serde_json::Value,
-) -> Option<serde_json::Value> {
-    rows.as_array()?
-        .iter()
-        .find(|row| {
+fn project_receipt<'a>(
+    _: &'a dyn bilibi_agent_api::OperationClient,
+    _: &'a bilibi_tenancy::Scope,
+    change: &'a mut serde_json::Value,
+    rows: &'a serde_json::Value,
+) -> bilibi_labels::ReceiptFuture<'a> {
+    Box::pin(async move {
+        let current = rows.as_array().into_iter().flatten().find(|row| {
             row["id"]
                 .as_i64()
                 .is_some_and(|id| Some(id.to_string().as_str()) == change["id"].as_str())
-        })
-        .cloned()
+        });
+        let matches = current
+            .and_then(|row| row["version"].as_i64())
+            .is_some_and(|version| change["after"]["version"].as_i64() == Some(version));
+        change["changed_since"] = json!(!matches);
+        change["effective"] = current.cloned().unwrap_or_default();
+        Ok(true)
+    })
 }
+
+pub const RECEIPT_DEPENDENCIES: &str = "base/custom_fields.receipt_dependencies";
+
+pub type DependencyFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = bilibi_database::Result<Vec<String>>> + Send + 'a>,
+>;
+
+pub struct ReceiptDependency {
+    pub approved: for<'a> fn(
+        &'a tokio_postgres::Client,
+        &'a bilibi_tenancy::Scope,
+        &'a str,
+        &'a str,
+        bool,
+    ) -> DependencyFuture<'a>,
+}
+
+inventory::submit! { bilibi_module_registry::Consumer::new::<ReceiptDependency>(RECEIPT_DEPENDENCIES, "base/custom_fields", |_| Ok(())) }
 
 fn receipt_correction(
     change: &serde_json::Value,
     current: &serde_json::Value,
 ) -> Option<bilibi_labels::ReceiptCorrection> {
     let old = &change["before"];
-    let mut input = serde_json::json!({"record_type": current["record_type"], "key": current["key"], "version": current["version"]});
+    let mut input = serde_json::json!({"record_type": current["record_type"], "key": current["key"], "version": current["version"], "receipt_undo": true});
     let (contract, event) = if old.is_null() || old.as_object().is_some_and(|o| o.is_empty()) {
         (
             "base.custom_fields.archive",
@@ -362,9 +387,11 @@ fn receipt_correction(
             )
         }
     } else {
-        input["label"] = old["label"].clone();
-        input["help"] = old["help"].clone();
-        input["rule_condition"] = old["rule_condition"].clone();
+        input["label"] = json!(old["label"].as_str()?);
+        if !old["help"].is_null() {
+            input["help"] = json!(old["help"].as_str()?);
+        }
+        input["rule_condition"] = json!(old["rule_condition"].as_bool()?);
         (
             "base.custom_fields.update",
             "customisation.receipt_field_update",

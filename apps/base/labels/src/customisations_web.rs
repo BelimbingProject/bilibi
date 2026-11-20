@@ -15,9 +15,9 @@ use bilibi_ui::{
         LiveBody, LiveFuture, LiveInput, LiveRequest, LiveState, MountFuture, Page, PageBody,
         PageFuture, PageRequest,
     },
-    params, Alert, BuiltinColumn, Card, Cell, FlashMap, FlexRow, FlexTable, Header, Html,
-    IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind, TableEmpty,
-    NO_FLASH,
+    params, Alert, BuiltinColumn, Button, Card, Cell, Filter, FlashMap, FlexRow, FlexTable, Header,
+    Html, IconButton, Instant, ListColumns, ListSpec, ListState, Pagination, StatusKind,
+    TableEmpty, NO_FLASH,
 };
 use serde_json::Value;
 use std::{
@@ -43,6 +43,8 @@ static RECEIPT_SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
         default_page_size: 25,
         page_size_param: "per_page".into(),
         param_prefix: "receipt_".into(),
+        filters: [("before".into(), Filter::string(""))].into(),
+        omit_defaults: true,
         ..ListSpec::default()
     }
     .shared()
@@ -126,7 +128,6 @@ struct Index {
     receipt_columns: ListColumns,
     items: Vec<Item>,
     confirm: Option<(Item, String)>,
-    receipt_items: Vec<ReceiptItem>,
     receipt_confirm: Option<(ReceiptItem, String)>,
     flash: Option<(StatusKind, String)>,
     shown: usize,
@@ -151,7 +152,6 @@ impl Index {
             receipt_columns: receipt_columns()?,
             items: vec![],
             confirm: None,
-            receipt_items: vec![],
             receipt_confirm: None,
             flash: None,
             shown: 0,
@@ -164,11 +164,6 @@ impl Index {
                     .map_err(Error::refused)?,
             ),
             "page" => self.list.put_page(value["page"].as_str()),
-            "receipt_page" => self.receipt_list.put_page(value["page"].as_str()),
-            "receipt_filters" => self.receipt_list.apply_filters(
-                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
-                    .map_err(Error::refused)?,
-            ),
             "receipt_grid" => {
                 let values = params::string_values_checked(value, params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
@@ -208,12 +203,9 @@ impl Index {
             "cancel_confirm" => self.confirm = None,
             "request_receipt_undo" => {
                 let key = value["key"].as_str().ok_or(Error::Invalid)?;
-                if let Some(item) = self
-                    .receipt_items
-                    .iter()
-                    .find(|item| item.key == key)
-                    .cloned()
-                {
+                self.receipt_confirm = None;
+                let reply = self.read_receipts(scope).await?;
+                if let Some(item) = self.receipt_item(&reply, key) {
                     let call = Call {
                         scope,
                         credential,
@@ -226,6 +218,16 @@ impl Index {
                             let preview = &reply["results"][0]["preview"];
                             let facts = preview.get("result").unwrap_or(preview);
                             self.receipt_confirm = Some((item, preview_text(facts)));
+                        }
+                        Ok(reply) => {
+                            let fields = &reply["results"][0]["error"]["fields"]["key"];
+                            let detail = fields.as_array().into_iter().flatten()
+                                .filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+                            if !detail.is_empty() {
+                                self.flash = Some((StatusKind::Error, detail));
+                            } else {
+                                self.flash = Some((StatusKind::Error, "This change cannot be undone. It may have changed or you may not have permission.".into()));
+                            }
                         }
                         Err(ContractError::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. }))) => return Err(error),
                         _ => self.flash = Some((StatusKind::Error, "This change cannot be undone. It may have changed or you may not have permission.".into())),
@@ -240,6 +242,17 @@ impl Index {
                 }) else {
                     return Ok(());
                 };
+                let reply = self.read_receipts(scope).await?;
+                if !self
+                    .receipt_item(&reply, &item.key)
+                    .is_some_and(|current| current.correction == item.correction)
+                {
+                    self.flash = Some((
+                        StatusKind::Error,
+                        "This change is no longer available to undo.".into(),
+                    ));
+                    return Ok(());
+                }
                 let call = Call {
                     scope,
                     credential,
@@ -312,31 +325,93 @@ impl Index {
         }
         Ok(())
     }
-    async fn receipts(&mut self, scope: &Scope) -> Result<Html> {
-        self.receipt_items.clear();
-        let reply = match self
+    async fn read_receipts(&self, scope: &Scope) -> Result<Value> {
+        let mut input = serde_json::json!({"limit": self.receipt_list.page_size});
+        if let Some(before) = self
+            .receipt_list
+            .filters
+            .get("before")
+            .and_then(|before| before.parse::<i64>().ok())
+            .filter(|before| *before > 0)
+        {
+            input["before"] = serde_json::json!(before);
+        }
+        match self
             .pages
             .contracts
-            .read(scope, "base.labels.receipts", &serde_json::json!({}))
+            .read(scope, "base.labels.receipts", &input)
             .await
         {
-            Ok(reply) => reply,
+            Ok(reply) => Ok(reply["result"].clone()),
             Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
-                return render(Alert {
-                    id: "receipt-restricted",
-                    kind: StatusKind::Info,
-                    body: Html::text("Audit access is required to see recent changes."),
-                    ..Alert::default()
-                });
+                Ok(Value::Null)
             }
-            Err(ContractError::Backend(error)) => return Err(error),
-            Err(_) => return Err(Error::Internal),
-        };
+            Err(ContractError::Backend(error)) => Err(error),
+            Err(_) => Err(Error::Internal),
+        }
+    }
+
+    fn receipt_correction(&self, change: &Value) -> Option<ReceiptCorrection> {
+        if change["can_undo"] != true {
+            return None;
+        }
+        let source = self
+            .pages
+            .receipt_sources
+            .iter()
+            .find(|source| Some(source.kind) == change["kind"].as_str())?;
+        (source.undo.as_ref()?.correction)(change, &change["effective"])
+    }
+
+    fn receipt_item(&self, reply: &Value, key: &str) -> Option<ReceiptItem> {
+        let id = key.parse::<i64>().ok()?;
+        let change = reply["receipts"]
+            .as_array()?
+            .iter()
+            .flat_map(|group| group["changes"].as_array().into_iter().flatten())
+            .find(|change| change["mutation_id"].as_i64() == Some(id))?;
+        Some(ReceiptItem {
+            key: key.into(),
+            correction: self.receipt_correction(change)?,
+        })
+    }
+
+    fn receipts(
+        &mut self,
+        reply: &Value,
+        display: &bilibi_datetime::DisplayContext,
+    ) -> Result<Html> {
+        if let Some((item, _)) = &self.receipt_confirm {
+            if !self
+                .receipt_item(reply, &item.key)
+                .is_some_and(|current| current.correction == item.correction)
+            {
+                self.receipt_confirm = None;
+            }
+        }
+        if reply.is_null() {
+            return render(Alert {
+                id: "receipt-restricted",
+                kind: StatusKind::Info,
+                body: Html::text("You do not have access to customisation history."),
+                ..Alert::default()
+            });
+        }
         let mut rows = Vec::new();
-        for group in reply["result"]["receipts"].as_array().into_iter().flatten() {
+        for group in reply["receipts"].as_array().into_iter().flatten() {
             for change in group["changes"].as_array().into_iter().flatten() {
                 let key = change["mutation_id"].to_string();
                 let show = |key: &str| receipt_value(&change[key]);
+                let when = change["when"]
+                    .as_str()
+                    .and_then(|when| when.parse().ok())
+                    .map(|when| {
+                        display.render(
+                            when,
+                            bilibi_datetime::Format::DateTime,
+                            bilibi_datetime::Precision::Minute,
+                        )
+                    });
                 let mut row = FlexRow::new(&key)
                     .slot(
                         "trace",
@@ -344,12 +419,7 @@ impl Index {
                     )
                     .slot(
                         "who",
-                        Html::text(&format!(
-                            "{} #{} · {}",
-                            change["actor_type"].as_str().unwrap_or_default(),
-                            change["actor_id"],
-                            change["when"].as_str().unwrap_or_default()
-                        )),
+                        Html::text(change["who"].as_str().unwrap_or("Unavailable")),
                     )
                     .slot("where", Html::text(&receipt_where(change)))
                     .slot("before", Html::text(&show("before")))
@@ -357,68 +427,67 @@ impl Index {
                     .slot("effective", Html::text(&show("effective")))
                     .slot(
                         "state",
-                        Html::text(if change["changed_since"] == true {
-                            "Changed since"
-                        } else {
-                            "Current"
+                        Html::text(match change["changed_since"].as_bool() {
+                            Some(true) => "Changed since",
+                            Some(false) => "Current",
+                            None => "—",
                         }),
                     );
-                if change["changed_since"] == false && change["can_undo"] == true {
-                    if let Some(source) = self
-                        .pages
-                        .receipt_sources
-                        .iter()
-                        .find(|source| Some(source.kind) == change["kind"].as_str())
-                    {
-                        if let Some(correction) = (source.correction)(change, &change["effective"])
-                        {
-                            row.actions = render(IconButton {
-                                event: "request_receipt_undo",
-                                name: "key",
-                                value: &key,
-                                ..IconButton::new("unarchive", "Undo change")
-                            })?;
-                            self.receipt_items.push(ReceiptItem { key, correction });
-                        }
-                    }
+                if let Some(when) = when {
+                    row = row.cell(
+                        "when",
+                        Cell::instant(Instant::new(
+                            &when.iso,
+                            &when.text,
+                            &when.company,
+                            &when.utc,
+                            when.mode.as_str(),
+                        )),
+                    );
+                }
+                if change["can_undo"] == true {
+                    row.actions = render(IconButton {
+                        event: "request_receipt_undo",
+                        name: "key",
+                        value: &key,
+                        ..IconButton::new("unarchive", "Undo change")
+                    })?;
                 }
                 rows.push(row);
             }
         }
-        let page = self.receipt_list.paginate(&rows);
-        let counts = page.counts;
-        let visible: Vec<_> = page.entries.iter().map(|row| row.key.as_str()).collect();
-        self.receipt_items
-            .retain(|item| visible.contains(&item.key.as_str()));
-        let mut table = FlexTable::new(
-            "receipt-table",
-            self.receipt_columns.flex_columns(),
-            page.entries.to_vec(),
-        );
-        table.caption = if reply["result"]["more"] == true {
-            "Recent changes (traces may be incomplete; see Audit)"
-        } else {
-            "Changes in the last 30 days"
-        };
+        let mut table = FlexTable::new("receipt-table", self.receipt_columns.flex_columns(), rows);
+        table.caption = "Customisation history by trace";
         table.actions = true;
         table.event = "receipt_grid";
         table.zoom = self.receipt_columns.zoom;
         table.suggestions = self.receipt_columns.flex_suggestions();
         table.add_query = &self.receipt_columns.add_query;
         table.framed = false;
-        if counts.total_entries == 0 {
-            table.empty = Some(TableEmpty::Content(Html::text(
-                "No changes in the last 30 days.",
-            )));
-        }
+        table.empty = Some(TableEmpty::Content(Html::text(
+            "No changes to show on this page.",
+        )));
         let mut body = render(table)?;
-        let mut pagination = Pagination::new("receipt-pagination", counts, &PAGE_SIZES);
-        pagination.page_event = "receipt_page";
-        pagination.filters_event = "receipt_filters";
-        body.push(&render(pagination)?);
+        let mut query = self.list.to_params();
+        query.extend(self.receipt_list.to_params());
+        if query.remove("receipt_before").is_some() {
+            body.push(&render(Button {
+                href: &params::address("/admin/customisations", &query),
+                body: Html::text("Latest changes"),
+                ..Button::default()
+            })?);
+        }
+        if let Some(before) = reply["next_before"].as_i64() {
+            query.insert("receipt_before".into(), before.to_string());
+            body.push(&render(Button {
+                href: &params::address("/admin/customisations", &query),
+                body: Html::text("Older changes"),
+                ..Button::default()
+            })?);
+        }
         render(Card {
             id: "receipt-card",
-            title: "Recent changes",
+            title: "Change history",
             inner_class: "p-0",
             body,
             ..Card::default()
@@ -466,10 +535,7 @@ impl Index {
             }));
         }
         self.items = items;
-        let receipts = self.receipts(scope).await?;
-        let page = self.list.paginate(&self.items);
-        let counts = page.counts;
-        self.shown = page.entries.len();
+        let receipt_reply = self.read_receipts(scope).await?;
         let client = self.pages.db.get().await?;
         let locale = self
             .pages
@@ -482,6 +548,10 @@ impl Index {
             .display
             .display(&**client, scope, None, locale)
             .await?;
+        let receipts = self.receipts(&receipt_reply, &display)?;
+        let page = self.list.paginate(&self.items);
+        let counts = page.counts;
+        self.shown = page.entries.len();
         let refs: Vec<_> = page
             .entries
             .iter()

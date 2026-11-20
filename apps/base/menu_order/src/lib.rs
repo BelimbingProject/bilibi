@@ -16,7 +16,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/menu_order", Provenance
 }) }
 inventory::submit! { Module {
     id: "base/menu_order", layer: bilibi_module_registry::Layer::Base,
-    dependencies: &["base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/menu", "base/labels"],
+    dependencies: &["base/audit", "base/module_registry", "base/database", "base/tenancy", "base/authz", "base/agent_api", "base/menu", "base/labels"],
     migrations: &[("base-menu-order-001-order", include_str!("../migrations/001-order.sql"))],
     services: &[Service { id: SERVICE, factory: |services| {
         let catalog = bilibi_module_registry::Catalog::discover(&bilibi_module_registry::discover()?)?;

@@ -252,4 +252,4 @@ console outcome recorded, and an HTTP/browser smoke of the running app.
 
 ### Customisation receipts
 
-`customisation_receipts` reads up to 501 recent mutation rows for caller-authorized kinds in the current tenant. The caller authorizes both each owner and audit attribution, groups traces and reports truncation; Audit supplies evidence rather than a separate history store.
+`customisation_receipts` reads a bounded page of whole traces for caller-authorized kinds in the current tenant. The caller controls owner access, value disclosure and attribution. The cursor continues through retained evidence.

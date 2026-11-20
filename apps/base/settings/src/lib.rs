@@ -435,6 +435,41 @@ impl Settings {
         let (_, encrypted) = self.plan(key)?;
         self.write(tx, actor, target, key, None, encrypted).await
     }
+    pub async fn lock_tenant_override(
+        &self,
+        tx: &MutationTransaction<'_>,
+        actor: &Scope,
+        key: &str,
+    ) -> Result<()> {
+        let scope = self.chain(tx.sql(), actor, Target::Tenant, true).await?[0];
+        let constraints: Vec<_> = self.definitions.constraints_for(key).collect();
+        Self::lock_keys(tx.sql(), scope, key, &constraints).await
+    }
+
+    async fn lock_keys(
+        sql: &tokio_postgres::Transaction<'_>,
+        scope: StorageScope,
+        key: &str,
+        constraints: &[&'static Constraint],
+    ) -> Result<()> {
+        let mut locked: Vec<&str> = constraints
+            .iter()
+            .flat_map(|constraint| constraint.keys.iter().copied())
+            .collect();
+        locked.push(key);
+        locked.sort_unstable();
+        locked.dedup();
+        for name in locked {
+            let lock = String::from_utf8(scope.identity(name)).map_err(|_| Error::Internal)?;
+            sql.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                &[&lock],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn write(
         &self,
         tx: &mut MutationTransaction<'_>,
@@ -479,22 +514,7 @@ impl Settings {
         // old value.
         let constraints: Vec<&'static Constraint> =
             self.definitions.constraints_for(&key).collect();
-        let mut locked: Vec<&str> = constraints
-            .iter()
-            .flat_map(|constraint| constraint.keys.iter().copied())
-            .collect();
-        locked.push(&key);
-        locked.sort_unstable();
-        locked.dedup();
-        for name in locked {
-            let lock = String::from_utf8(scope.identity(name)).map_err(|_| Error::Internal)?;
-            tx.sql()
-                .execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-                    &[&lock],
-                )
-                .await?;
-        }
+        Self::lock_keys(tx.sql(), scope, &key, &constraints).await?;
         let payload =
             json!({"key":key,"tenant":scope.tenant,"scope":scope.kind.as_str(),"id":scope.id})
                 .to_string();

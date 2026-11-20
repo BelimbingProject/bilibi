@@ -196,6 +196,31 @@ enum Change {
 }
 
 impl Change {
+    async fn check_receipt(
+        sql: &tokio_postgres::Client,
+        scope: &Scope,
+        field: &Field,
+        id: i64,
+    ) -> bilibi_agent_api::Result<()> {
+        bilibi_authz::authorize_key(sql, scope, bilibi_labels::CUSTOMISATIONS_VIEW).await?;
+        bilibi_authz::authorize_key(sql, scope, TENANT_VIEW).await?;
+        authorize_field(sql, scope, field).await?;
+        if field.definition.encrypted {
+            return Err(Error::Forbidden.into());
+        }
+        let latest = bilibi_audit::latest_customisation_mutation(
+            sql,
+            scope,
+            "base/settings",
+            &json!({"scope":"tenant","key":field.key}),
+        )
+        .await?;
+        if latest != Some(id) {
+            return Err(Error::Conflict.into());
+        }
+        Ok(())
+    }
+
     fn check_supported(&self, field: &Field) -> bilibi_agent_api::Result<()> {
         if matches!(self, Self::Set) && field.definition.encrypted {
             return Err(bilibi_agent_api::invalid(
@@ -363,6 +388,9 @@ impl WriteHandler for Change {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let field = field(input["key"].as_str().unwrap_or_default())?;
+            if let Some(id) = input["receipt"].as_i64() {
+                Self::check_receipt(client.sql_client().await?, scope, &field, id).await?;
+            }
             let (review, _) = self.review(client, scope, &field, input).await?;
             Ok(Output::from(review))
         })
@@ -377,6 +405,13 @@ impl WriteHandler for Change {
         Box::pin(async move {
             authorize_proof(tx.sql(), scope, TENANT_MANAGE).await?;
             let field = field(input["key"].as_str().unwrap_or_default())?;
+            if let Some(id) = input["receipt"].as_i64() {
+                core()?
+                    .settings
+                    .lock_tenant_override(tx, scope, field.key)
+                    .await?;
+                Self::check_receipt(tx.sql().client(), scope, &field, id).await?;
+            }
             let (review, value_to_set) = self.review(tx.sql(), scope, &field, input).await?;
             self.protect(scope, &field).await?;
             let core = core()?;
@@ -405,12 +440,14 @@ fn empty_input() -> Value {
 
 fn key_input() -> Value {
     json!({"type":"object","required":["key"],"properties":{
+        "receipt":{"type":"integer","minimum":1},
         "key":{"type":"string","maxLength":255,"description":"Exact key from base.settings_editor.tenant.list"}
     }})
 }
 
 fn set_input() -> Value {
     json!({"type":"object","required":["key","value"],"properties":{
+        "receipt":{"type":"integer","minimum":1},
         "key":{"type":"string","maxLength":255,"description":"Exact key from base.settings_editor.tenant.list"},
         "value":{"type":"string","maxLength":1048576,"description":"The new non-secret value. Use true or false for yes/no, a decimal for a number, and JSON for an object or list. Plain text is used as written."}
     }})
@@ -493,3 +530,106 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/settings_e
         restore: Some("base.settings_editor.tenant.restore"),
     }),
 }) }
+
+fn receipt_settings<'a>(client: &'a dyn OperationClient, scope: &'a Scope) -> OperationFuture<'a> {
+    Box::pin(async move { List.call(client, scope, &Value::Null).await })
+}
+
+fn project_receipt<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+    change: &'a mut Value,
+    rows: &'a Value,
+) -> bilibi_labels::ReceiptFuture<'a> {
+    Box::pin(async move {
+        let side = if change["after"].is_null() {
+            &change["before"]
+        } else {
+            &change["after"]
+        };
+        if side["scope"] != "tenant" {
+            return Ok(false);
+        }
+        let Some(current) = rows["settings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|setting| setting["key"] == side["key"])
+        else {
+            return Ok(false);
+        };
+        let latest = bilibi_audit::latest_customisation_mutation(
+            client.sql_client().await?,
+            scope,
+            "base/settings",
+            &json!({"scope":"tenant","key":current["key"]}),
+        )
+        .await?;
+        change["changed_since"] = json!(latest != change["mutation_id"].as_i64());
+        for key in ["before", "after"] {
+            let side = &mut change[key];
+            if side.is_object() {
+                if current["secret"] == true || side["is_encrypted"] == true {
+                    side["value"] = json!("[REDACTED]");
+                }
+                side["label"] = current["label"].clone();
+            }
+        }
+        change["effective"] = current.clone();
+        Ok(true)
+    })
+}
+
+fn receipt_correction(change: &Value, current: &Value) -> Option<bilibi_labels::ReceiptCorrection> {
+    if current["secret"] != false {
+        return None;
+    }
+    let key = current["key"].as_str()?;
+    let mut input = json!({"key":key,"receipt":change["mutation_id"]});
+    let before = &change["before"];
+    let (contract, event) = if before.is_null() {
+        (
+            "base.settings_editor.tenant.restore",
+            "customisation.receipt_setting_restore",
+        )
+    } else {
+        if before["is_encrypted"] != false {
+            return None;
+        }
+        let value = before.get("value")?;
+        let text = value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        if &form::cast(&text, field(key).ok()?.definition).ok()? != value {
+            return None;
+        }
+        input["value"] = json!(text);
+        (
+            "base.settings_editor.tenant.set",
+            "customisation.receipt_setting_set",
+        )
+    };
+    Some(bilibi_labels::ReceiptCorrection {
+        contract,
+        event,
+        input,
+    })
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/settings_editor.receipts",
+        Provenance { module: "base/settings_editor", source: file!(), line: line!() },
+        &bilibi_labels::ReceiptSource { kind: "base/settings", capability: TENANT_VIEW,
+            undo: Some(bilibi_labels::ReceiptUndo { capability: TENANT_MANAGE, correction: receipt_correction }), read: Some(receipt_settings), project: project_receipt })
+}
+inventory::submit! {
+    Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.settings_editor.receipt_set",
+        Provenance { module: "base/settings_editor", source: file!(), line: line!() },
+        &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_setting_set", contract: "base.settings_editor.tenant.set" })
+}
+inventory::submit! {
+    Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.settings_editor.receipt_restore",
+        Provenance { module: "base/settings_editor", source: file!(), line: line!() },
+        &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_setting_restore", contract: "base.settings_editor.tenant.restore" })
+}

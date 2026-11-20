@@ -164,6 +164,9 @@ impl WriteHandler for Write {
                 Self::Restore => None,
             };
             let service = bound()?;
+            if let Some(id) = input["receipt"].as_i64() {
+                check_receipt(client.sql_client().await?, scope, parent(input)?, id).await?;
+            }
             let (plan, tree) = service
                 .plan(
                     client,
@@ -193,8 +196,21 @@ impl WriteHandler for Write {
                 Self::Set => Some(items(input)?),
                 Self::Restore => None,
             };
+            let parent = parent(input)?;
+            bilibi_authz::authorize_key(tx.sql(), scope, MANAGE).await?;
+            let lock = format!("base/menu_order:{}:{parent}", scope.tenant());
+            tx.sql()
+                .execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                    &[&lock],
+                )
+                .await
+                .map_err(Error::from)?;
+            if let Some(id) = input["receipt"].as_i64() {
+                check_receipt(tx.sql().client(), scope, parent, id).await?;
+            }
             let plan = bound()?
-                .apply(tx, scope, parent(input)?, ids.as_deref(), version(input)?)
+                .apply(tx, scope, parent, ids.as_deref(), version(input)?)
                 .await
                 .map_err(found)?;
             Ok(data(plan.review()))
@@ -208,10 +224,10 @@ fn preview_schema() -> Value {
     json!({"type":"object","properties":{"parent":{"type":"string","description":"Optional sibling parent; empty string means root. Supply with item_ids."},"item_ids":{"type":"array","items":{"type":"string"},"description":"Optional proposed order for this reader; supply with parent. An empty array previews product order."}}})
 }
 fn set_schema() -> Value {
-    json!({"type":"object","required":["parent","item_ids","version"],"properties":{"parent":{"type":"string","description":"Parent ID; empty string means the root."},"item_ids":{"type":"array","items":{"type":"string"},"description":"Sibling IDs in desired order. Unlisted items follow in product order."},"version":{"type":"string","description":"Version token for this group from list."}}})
+    json!({"type":"object","required":["parent","item_ids","version"],"properties":{"receipt":{"type":"integer","minimum":1},"parent":{"type":"string","description":"Parent ID; empty string means the root."},"item_ids":{"type":"array","items":{"type":"string"},"description":"Sibling IDs in desired order. Unlisted items follow in product order."},"version":{"type":"string","description":"Version token for this group from list."}}})
 }
 fn restore_schema() -> Value {
-    json!({"type":"object","required":["parent","version"],"properties":{"parent":{"type":"string"},"version":{"type":"string","description":"Version token for this group from list."}}})
+    json!({"type":"object","required":["parent","version"],"properties":{"receipt":{"type":"integer","minimum":1},"parent":{"type":"string"},"version":{"type":"string","description":"Version token for this group from list."}}})
 }
 fn list_output() -> Value {
     json!({"type":"array","description":"Sibling groups or the reader’s visible menu tree."})
@@ -280,3 +296,120 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/menu_order
         restore: Some("base.menu_order.restore"),
     }),
 }) }
+
+fn receipt_order<'a>(client: &'a dyn OperationClient, scope: &'a Scope) -> OperationFuture<'a> {
+    Box::pin(async move { Read::List.call(client, scope, &Value::Null).await })
+}
+
+fn project_receipt<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+    change: &'a mut Value,
+    rows: &'a Value,
+) -> bilibi_labels::ReceiptFuture<'a> {
+    Box::pin(async move {
+        let side = if change["after"].is_null() {
+            &change["before"]
+        } else {
+            &change["after"]
+        };
+        let Some(current) = rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["parent"] == side["parent"])
+        else {
+            return Ok(false);
+        };
+        let latest = bilibi_audit::latest_customisation_mutation(
+            client.sql_client().await?,
+            scope,
+            "menu_order",
+            &json!({"parent": current["parent"]}),
+        )
+        .await?;
+        let visible: HashSet<_> = current["product"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+        for key in ["before", "after"] {
+            if let Some(items) = change[key]
+                .get_mut("item_ids")
+                .and_then(Value::as_array_mut)
+            {
+                items.retain(|id| id.as_str().is_some_and(|id| visible.contains(id)));
+            }
+        }
+        change["changed_since"] = json!(latest != change["mutation_id"].as_i64());
+        change["effective"] = current.clone();
+        Ok(true)
+    })
+}
+
+fn receipt_correction(change: &Value, current: &Value) -> Option<bilibi_labels::ReceiptCorrection> {
+    let old = &change["before"]["item_ids"];
+    let items = old.as_array().filter(|items| !items.is_empty());
+    let after = change["after"]["item_ids"]
+        .as_array()
+        .filter(|items| !items.is_empty());
+    if items == after {
+        return None;
+    }
+    let mut input = json!({"parent": current["parent"], "version": current["version"], "receipt": change["mutation_id"]});
+    let (contract, event) = if let Some(items) = items {
+        input["item_ids"] = json!(items);
+        ("base.menu_order.set", "customisation.receipt_menu_set")
+    } else {
+        (
+            "base.menu_order.restore",
+            "customisation.receipt_menu_restore",
+        )
+    };
+    Some(bilibi_labels::ReceiptCorrection {
+        contract,
+        event,
+        input,
+    })
+}
+
+async fn check_receipt(
+    sql: &tokio_postgres::Client,
+    scope: &Scope,
+    parent: &str,
+    receipt: i64,
+) -> bilibi_database::Result<()> {
+    bilibi_authz::authorize_key(sql, scope, bilibi_labels::CUSTOMISATIONS_VIEW).await?;
+    bilibi_authz::authorize_key(sql, scope, VIEW).await?;
+    if bilibi_audit::latest_customisation_mutation(
+        sql,
+        scope,
+        "menu_order",
+        &json!({"parent":parent}),
+    )
+    .await?
+        != Some(receipt)
+    {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+
+inventory::submit! {
+    Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/menu_order.receipts",
+        Provenance { module: "base/menu_order", source: file!(), line: line!() },
+        &bilibi_labels::ReceiptSource { kind: "menu_order", capability: VIEW,
+            undo: Some(bilibi_labels::ReceiptUndo { capability: MANAGE, correction: receipt_correction }),
+            read: Some(receipt_order), project: project_receipt })
+}
+inventory::submit! {
+    Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.menu_order.receipt_set",
+        Provenance { module: "base/menu_order", source: file!(), line: line!() },
+        &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_menu_set", contract: "base.menu_order.set" })
+}
+inventory::submit! {
+    Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.menu_order.receipt_restore",
+        Provenance { module: "base/menu_order", source: file!(), line: line!() },
+        &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_menu_restore", contract: "base.menu_order.restore" })
+}
