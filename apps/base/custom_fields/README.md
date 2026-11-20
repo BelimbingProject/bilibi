@@ -117,7 +117,7 @@ Global search uses the owner's generated `custom_search_vector` for indexed cand
 
 ## Storage
 
-`base_custom_fields` (migrations `base-custom_fields-001-definitions`, `base-custom_fields-002-more-types`, `base-custom_fields-003-structured-values`, `base-custom_fields-004-watcher-conditions`): one row per tenant, record type and key, with the pick-list or record kind a field takes. Every statement binds the tenant.
+`base_custom_fields` (migrations `base-custom_fields-001-definitions`, `base-custom_fields-002-more-types`, `base-custom_fields-003-structured-values`, `base-custom_fields-004-rule-conditions`, `base-custom_fields-005-watcher-conditions`): one row per tenant, record type and key, with the pick-list or record kind a field takes. Every statement binds the tenant.
 
 ## Runtime check
 

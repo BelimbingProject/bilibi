@@ -15,7 +15,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | Trigger | An event an owner records in its own transaction (`watcher_cases/cases.opened`) | An owner's `Trigger` contribution |
 | Conditions | When `if` is present, `all` or `any` of one or more conditions, each with a field, operator and any required value | The watcher |
 | Actions | 1 to 10 owner write contracts, each with approved parameters | Owners' `Action` contributions; the watcher selects actions and supplies their parameters |
-| Examples | Up to 10 fact sets with expected `match` or `no_match` outcomes | The watcher's author |
+| Examples | 1 to 10 fact sets for a filtered watcher; up to 10 otherwise with expected `match` or `no_match` outcomes | The watcher's author |
 
 - **Fields** are Grid column paths on the trigger's table (`priority`, or `company.name` through a one-link), read as the `watchers` principal. No aggregates.
 - **Tenant custom fields** (`cf_<key>`, [Custom Fields](../custom_fields/README.md#watcher-conditions)) are fields only when the tenant offered them to watcher conditions, and only on the trigger's own record, not through a link. A draft on one that is not offered is refused with that reason; the vocabulary lists only offered ones, under the tenant's label.
@@ -127,7 +127,7 @@ Boot refuses a trigger that is not the contributor's own declared event or names
 
 ## Tables
 
-`base_watchers`, `base_watcher_versions`, `base_watcher_runs` and `base_watcher_effects` (migrations `base-watchers-001-watchers`, `base-watchers-002-approval-bindings` and `base-watchers-003-logical-events`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
+`base_watchers`, `base_watcher_versions`, `base_watcher_runs` and `base_watcher_effects` (migrations `base-rules-001-rules`, `base-rules-002-approval-bindings`, `base-rules-003-logical-events` and `base-watchers-004-watchers`). Account IDs on versions are evidence, not foreign keys: Base names no Core table.
 
 ## Seeing it work
 

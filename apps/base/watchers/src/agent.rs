@@ -400,10 +400,49 @@ fn normalise(input: &Value) -> bilibi_agent_api::Result<Value> {
         .and_then(|v| v.get_mut("conditions"))
         .and_then(Value::as_array_mut)
     {
-        for condition in conditions {
-            if let Some(values) = condition.get("values").cloned() {
-                condition["value"] = values;
-                condition.as_object_mut().map(|o| o.remove("values"));
+        for (i, condition) in conditions.iter_mut().enumerate() {
+            let op = condition
+                .get("op")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let has_value = condition.get("value").is_some();
+            let has_values = condition.get("values").is_some();
+            match op {
+                "in" | "not_in" => {
+                    if has_value {
+                        return Err(bilibi_agent_api::invalid(
+                            &format!("if.conditions.{i}.value"),
+                            "use values for this operator",
+                        ));
+                    }
+                    let Some(values) = condition.get("values").cloned() else {
+                        return Err(bilibi_agent_api::invalid(
+                            &format!("if.conditions.{i}.values"),
+                            "is required",
+                        ));
+                    };
+                    condition["value"] = values;
+                    condition.as_object_mut().map(|o| o.remove("values"));
+                }
+                "empty" | "not_empty" => {
+                    if has_value || has_values {
+                        return Err(bilibi_agent_api::invalid(
+                            &format!(
+                                "if.conditions.{i}.{}",
+                                if has_value { "value" } else { "values" }
+                            ),
+                            "takes no value",
+                        ));
+                    }
+                }
+                _ => {
+                    if has_values {
+                        return Err(bilibi_agent_api::invalid(
+                            &format!("if.conditions.{i}.values"),
+                            "use value for this operator",
+                        ));
+                    }
+                }
             }
         }
     }

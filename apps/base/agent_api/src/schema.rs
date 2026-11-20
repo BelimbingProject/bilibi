@@ -330,16 +330,21 @@ fn errors_at(
             );
         }
     }
-    if schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.contains(input))
-    {
-        add(
-            errors,
-            path,
-            "must be one of the declared enum values".into(),
-        );
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        if !values.contains(input) {
+            add(
+                errors,
+                path,
+                format!(
+                    "must be one of the declared values: {}",
+                    values
+                        .iter()
+                        .map(Value::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
     }
     for (key, holds, message) in [
         ("minimum", true, "must be at least"),

@@ -250,6 +250,12 @@ impl Watchers {
         problems: &mut Problems,
     ) -> Result<()> {
         let table = catalog.table(trigger.definition.table);
+        if !definition.conditions.is_empty() && examples.is_empty() {
+            problems.push((
+                "examples".into(),
+                "give at least one example for a watcher with conditions".into(),
+            ));
+        }
         // A tenant custom field is a condition only when the tenant offered
         // it to watchers, and only on the trigger's own record (#730).
         for (i, condition) in definition.conditions.iter().enumerate() {

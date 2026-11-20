@@ -16,11 +16,11 @@ Export also needs each selected owner's view capability (`base.labels.view`, `ba
 
 Choose entries with `base.labels.list` and `base.custom_fields.list`. Export requires each selection to exist as an override or an active definition. Every selection and pack carries at most 100 entries in total. Duplicate stable keys are refused.
 
-## Version 1 format
+## Version 2 format
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "labels": [
     {"kind": "menu", "subject": "admin.labels", "label": "Vocabulary"}
   ],
@@ -40,7 +40,7 @@ Choose entries with `base.labels.list` and `base.custom_fields.list`. Export req
 
 The labels use the [label owner's stable subject IDs](../labels/README.md). Field definitions use the [custom field owner's field kinds and stable keys](../custom_fields/README.md#behaviour). `help` is optional. `picklist` is required for choice and several-choices fields. `target` is required for reference fields and names a stable record kind. `watcher_condition` carries whether the field is offered to watchers. No watcher or condition using it travels. Tenant and row IDs, edit versions, archived definitions and absolute positions stay with the source; exported field order becomes append order within each destination record type.
 
-Preview takes `{pack, picklist_map?}`. Version 1 maps pick-lists only. Each mapping is `{from, to}` and names a source key used in the pack and an eligible destination key. An unmapped list uses the same stable key. Maintain the destination list's values in [Pick-lists](../picklists/README.md).
+Version 1 packs are refused; export a new version 2 pack. Preview takes `{pack, picklist_map?}`. Version 2 maps pick-lists only. Each mapping is `{from, to}` and names a source key used in the pack and an eligible destination key. An unmapped list uses the same stable key. Maintain the destination list's values in [Pick-lists](../picklists/README.md).
 
 ## Review and apply
 

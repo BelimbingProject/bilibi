@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 fn label_key() -> Value {
     json!({
@@ -56,7 +56,7 @@ pub fn pack() -> Value {
         "type": "object",
         "required": ["version", "labels", "custom_fields"],
         "properties": {
-            "version": {"type": "integer", "enum": [VERSION]},
+            "version": {"type": "integer", "enum": [VERSION], "description": "Only setup pack version 2 is supported; export a new pack instead of using version 1."},
             "labels": {"type": "array", "items": label},
             "custom_fields": {"type": "array", "items": field},
         }

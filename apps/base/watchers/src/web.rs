@@ -153,7 +153,7 @@ fn builtins() -> Vec<BuiltinColumn> {
     last.kind = ColumnType::Datetime;
     vec![
         BuiltinColumn::new("name", "Watcher"),
-        BuiltinColumn::new("trigger", "When"),
+        BuiltinColumn::new("trigger", "Watch"),
         BuiltinColumn::new("status", "Status"),
         BuiltinColumn::new("running", "Running version"),
         last,

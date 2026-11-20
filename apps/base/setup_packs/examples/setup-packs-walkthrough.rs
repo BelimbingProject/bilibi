@@ -132,9 +132,9 @@ async fn round_trip(source: &Person<'_>, target: &Person<'_>) -> Result<Value, F
     });
     let pack = source.read(EXPORT, &selection).await?;
     check(
-        "Tenant A exports the definition and override in version 1",
+        "Tenant A exports the definition and override in version 2",
         pack == json!({
-            "version":1,
+            "version":2,
             "labels":[{"kind":"menu","subject":LABEL,"label":"Vocabulary"}],
             "custom_fields":[field]
         }),
@@ -326,7 +326,7 @@ async fn main() -> Result<(), Failure> {
         staff
             .read(
                 PREVIEW,
-                &json!({"pack":{"version":1,"labels":[],"custom_fields":[]}}),
+                &json!({"pack":{"version":2,"labels":[],"custom_fields":[]}}),
             )
             .await?["ready"]
             == true

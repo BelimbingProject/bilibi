@@ -817,7 +817,7 @@ impl Editor {
             body.push(&render(
                 Field::named("h[trigger]")
                     .id("watcher-draft-trigger")
-                    .label("When")
+                    .label("Watch")
                     .value(title)
                     .hint("A watcher keeps its trigger; draft a new watcher for another one.")
                     .readonly(),
@@ -825,7 +825,7 @@ impl Editor {
         } else {
             body.push(&render(
                 Combobox::new("watcher-draft-trigger", "h[trigger]")
-                    .label("When this happens")
+                    .label("Watch")
                     .value(&self.trigger)
                     .placeholder("Search what happens…")
                     .options(
@@ -1122,7 +1122,7 @@ impl Editor {
                     id: "watcher-draft-review",
                     items: vec![
                         Fact {
-                            title: "When",
+                            title: "Watch",
                             id: "",
                             value: Html::text(&text(&facts["trigger"])),
                         },
@@ -1132,7 +1132,7 @@ impl Editor {
                             value: condition,
                         },
                         Fact {
-                            title: "Then",
+                            title: "Do",
                             id: "",
                             value: render(Bullets {
                                 lines: &list("actions"),

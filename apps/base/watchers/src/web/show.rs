@@ -384,7 +384,7 @@ impl Show {
         );
         let mut items = vec![
             Fact {
-                title: "When",
+                title: "Watch",
                 id: "",
                 value: Html::text(&view.summary.trigger_title),
             },
@@ -394,7 +394,7 @@ impl Show {
                 value: conditions,
             },
             Fact {
-                title: "Then",
+                title: "Do",
                 id: "",
                 value: render(Bullets {
                     lines: &described.actions,
