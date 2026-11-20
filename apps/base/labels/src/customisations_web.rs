@@ -1,5 +1,6 @@
 //! Read-only inventory of customisations contributed by their owners.
-use crate::{CustomisationRow, CustomisationSection, Undo, CUSTOMISATIONS};
+use crate::receipt_display::{preview_text, receipt_columns, receipt_value, receipt_where};
+use crate::{CustomisationRow, CustomisationSection, ReceiptCorrection, ReceiptSource, Undo, CUSTOMISATIONS};
 use askama::Template;
 use bilibi_agent_api::{
     page::{Call, PageContracts},
@@ -36,11 +37,25 @@ static SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
     .expect("customisations list spec")
 });
 
+static RECEIPT_SPEC: LazyLock<Arc<ListSpec>> = LazyLock::new(|| {
+    ListSpec {
+        page_sizes: PAGE_SIZES.to_vec(),
+        default_page_size: 25,
+        page_size_param: "per_page".into(),
+        param_prefix: "receipt_".into(),
+        ..ListSpec::default()
+    }
+    .shared()
+    .expect("receipt list spec")
+});
+
 #[derive(Clone)]
 pub(crate) struct Pages {
     pub db: Db,
+    pub settings: Arc<bilibi_settings::Settings>,
     pub contracts: Arc<PageContracts>,
     pub sections: Vec<&'static CustomisationSection>,
+    pub receipt_sources: Vec<&'static ReceiptSource>,
     pub display: Arc<bilibi_datetime::DisplayPolicy>,
     pub locales: Arc<bilibi_locale::Locales>,
     pub directory: Arc<bilibi_principal_directory::PrincipalDirectory>,
@@ -62,7 +77,7 @@ impl Item {
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=detail, confirm=item.undo.action, working="Working…", confirm_event=item.undo.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
+    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="customisations-confirm", consequence=title, detail=detail, body=banner, confirm=item.undo.action, working="Working…", confirm_event=item.undo.event, cancel_event="cancel_confirm", confirm_key=key) %}{% endcall %}"#,
     ext = "html"
 )]
 struct UndoDialog<'a> {
@@ -70,10 +85,26 @@ struct UndoDialog<'a> {
     item: &'a Item,
     key: String,
     detail: String,
+    banner: Html,
+}
+#[derive(Clone)]
+struct ReceiptItem {
+    key: String,
+    correction: ReceiptCorrection,
 }
 #[derive(Template)]
 #[template(
-    source = r#"{% import "components.html" as ui %}{% import "feedback.html" as feedback %}<div data-shared-ui>{% call feedback::flash_group(messages=flash) %}{% endcall %}{% call ui::page(id="customisations-page") %}{{ header }}{{ restricted }}{{ card }}{{ dialog }}{% endcall %}</div>"#,
+    source = r#"{% import "dialog.html" as dialog %}{% call dialog::confirm_dialog(id="receipt-confirm", consequence="Undo this change?", detail=detail, body=banner, confirm="Undo", working="Working…", confirm_event=item.correction.event, cancel_event="cancel_receipt", confirm_key=item.key) %}{% endcall %}"#,
+    ext = "html"
+)]
+struct ReceiptDialog<'a> {
+    item: &'a ReceiptItem,
+    detail: &'a str,
+    banner: Html,
+}
+#[derive(Template)]
+#[template(
+    source = r#"{% import "components.html" as ui %}{% import "feedback.html" as feedback %}<div data-shared-ui>{% call feedback::flash_group(messages=flash) %}{% endcall %}{% call ui::page(id="customisations-page") %}{{ header }}{{ restricted }}{{ card }}{{ receipts }}{{ dialog }}{% endcall %}</div>"#,
     ext = "html"
 )]
 struct View<'a> {
@@ -81,6 +112,7 @@ struct View<'a> {
     header: Html,
     restricted: Html,
     card: Html,
+    receipts: Html,
     dialog: Html,
 }
 fn render(t: impl Template) -> Result<Html> {
@@ -89,9 +121,13 @@ fn render(t: impl Template) -> Result<Html> {
 struct Index {
     pages: Pages,
     list: ListState,
+    receipt_list: ListState,
     columns: ListColumns,
+    receipt_columns: ListColumns,
     items: Vec<Item>,
     confirm: Option<(Item, String)>,
+    receipt_items: Vec<ReceiptItem>,
+    receipt_confirm: Option<(ReceiptItem, String)>,
     flash: Option<(StatusKind, String)>,
     shown: usize,
 }
@@ -100,6 +136,8 @@ impl Index {
         Ok(Self {
             pages,
             list: ListState::parse(query, SPEC.clone()).map_err(|_| Error::Internal)?,
+            receipt_list: ListState::parse(query, RECEIPT_SPEC.clone())
+                .map_err(|_| Error::Internal)?,
             columns: ListColumns::mount(
                 "customisations",
                 vec![
@@ -110,8 +148,11 @@ impl Index {
                 ],
             )
             .map_err(|_| Error::Internal)?,
+            receipt_columns: receipt_columns()?,
             items: vec![],
             confirm: None,
+            receipt_items: vec![],
+            receipt_confirm: None,
             flash: None,
             shown: 0,
         })
@@ -123,6 +164,16 @@ impl Index {
                     .map_err(Error::refused)?,
             ),
             "page" => self.list.put_page(value["page"].as_str()),
+            "receipt_page" => self.receipt_list.put_page(value["page"].as_str()),
+            "receipt_filters" => self.receipt_list.apply_filters(
+                &params::form_values_checked(value, FILTERS_FORM, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?,
+            ),
+            "receipt_grid" => {
+                let values = params::string_values_checked(value, params::FIELD_LIMIT)
+                    .map_err(Error::refused)?;
+                self.receipt_columns.handle(&values);
+            }
             "grid" => {
                 let values = params::string_values_checked(value, params::FIELD_LIMIT)
                     .map_err(Error::refused)?;
@@ -147,7 +198,7 @@ impl Index {
                         Ok(reply) if reply["valid"] == true && reply["results"][0]["valid"] == true => {
                             let preview = &reply["results"][0]["preview"];
                             let facts = preview.get("result").unwrap_or(preview);
-                            self.confirm = Some((item, serde_json::to_string_pretty(facts).map_err(|_| Error::Internal)?));
+                            self.confirm = Some((item, preview_text(facts)));
                         }
                         Err(ContractError::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. }))) => return Err(error),
                         _ => self.flash = Some((StatusKind::Error, "The change cannot be reviewed. It may have changed or you may not have permission.".into())),
@@ -155,6 +206,66 @@ impl Index {
                 }
             }
             "cancel_confirm" => self.confirm = None,
+            "request_receipt_undo" => {
+                let key = value["key"].as_str().ok_or(Error::Invalid)?;
+                if let Some(item) = self
+                    .receipt_items
+                    .iter()
+                    .find(|item| item.key == key)
+                    .cloned()
+                {
+                    let call = Call {
+                        scope,
+                        credential,
+                        service: CUSTOMISATIONS,
+                        event: item.correction.event,
+                        contract: item.correction.contract,
+                    };
+                    match self.pages.contracts.preview(&call, item.correction.input.clone()).await {
+                        Ok(reply) if reply["valid"] == true && reply["results"][0]["valid"] == true => {
+                            let preview = &reply["results"][0]["preview"];
+                            let facts = preview.get("result").unwrap_or(preview);
+                            self.receipt_confirm = Some((item, preview_text(facts)));
+                        }
+                        Err(ContractError::Backend(error @ (Error::Unauthorized | Error::StepUpRequired { .. }))) => return Err(error),
+                        _ => self.flash = Some((StatusKind::Error, "This change cannot be undone. It may have changed or you may not have permission.".into())),
+                    }
+                }
+            }
+            "cancel_receipt" => self.receipt_confirm = None,
+            event if event.starts_with("customisation.receipt_") => {
+                let Some((item, _)) = self.receipt_confirm.take_if(|(item, _)| {
+                    event == item.correction.event
+                        && value["key"].as_str() == Some(item.key.as_str())
+                }) else {
+                    return Ok(());
+                };
+                let call = Call {
+                    scope,
+                    credential,
+                    service: CUSTOMISATIONS,
+                    event: item.correction.event,
+                    contract: item.correction.contract,
+                };
+                match self
+                    .pages
+                    .contracts
+                    .commit(&call, item.correction.input)
+                    .await
+                {
+                    Ok(_) => {
+                        self.flash = Some((StatusKind::Success, "The change was undone.".into()))
+                    }
+                    Err(ContractError::Backend(
+                        error @ (Error::Unauthorized | Error::StepUpRequired { .. }),
+                    )) => return Err(error),
+                    _ => self.flash = Some((
+                        StatusKind::Error,
+                        "The change could not be undone. Review the current version and try again."
+                            .into(),
+                    )),
+                }
+            }
             event if event.starts_with("customisation.") => {
                 let Some((item, _)) = self.confirm.take_if(|(item, _)| {
                     event == item.undo.event
@@ -201,6 +312,118 @@ impl Index {
         }
         Ok(())
     }
+    async fn receipts(&mut self, scope: &Scope) -> Result<Html> {
+        self.receipt_items.clear();
+        let reply = match self
+            .pages
+            .contracts
+            .read(scope, "base.labels.receipts", &serde_json::json!({}))
+            .await
+        {
+            Ok(reply) => reply,
+            Err(ContractError::Forbidden | ContractError::Backend(Error::Forbidden)) => {
+                return render(Alert {
+                    id: "receipt-restricted",
+                    kind: StatusKind::Info,
+                    body: Html::text("Audit access is required to see recent changes."),
+                    ..Alert::default()
+                });
+            }
+            Err(ContractError::Backend(error)) => return Err(error),
+            Err(_) => return Err(Error::Internal),
+        };
+        let mut rows = Vec::new();
+        for group in reply["result"]["receipts"].as_array().into_iter().flatten() {
+            for change in group["changes"].as_array().into_iter().flatten() {
+                let key = change["mutation_id"].to_string();
+                let show = |key: &str| receipt_value(&change[key]);
+                let mut row = FlexRow::new(&key)
+                    .slot(
+                        "trace",
+                        Html::text(group["trace"].as_str().unwrap_or_default()),
+                    )
+                    .slot(
+                        "who",
+                        Html::text(&format!(
+                            "{} #{} · {}",
+                            change["actor_type"].as_str().unwrap_or_default(),
+                            change["actor_id"],
+                            change["when"].as_str().unwrap_or_default()
+                        )),
+                    )
+                    .slot("where", Html::text(&receipt_where(change)))
+                    .slot("before", Html::text(&show("before")))
+                    .slot("after", Html::text(&show("after")))
+                    .slot("effective", Html::text(&show("effective")))
+                    .slot(
+                        "state",
+                        Html::text(if change["changed_since"] == true {
+                            "Changed since"
+                        } else {
+                            "Current"
+                        }),
+                    );
+                if change["changed_since"] == false && change["can_undo"] == true {
+                    if let Some(source) = self
+                        .pages
+                        .receipt_sources
+                        .iter()
+                        .find(|source| Some(source.kind) == change["kind"].as_str())
+                    {
+                        if let Some(correction) = (source.correction)(change, &change["effective"])
+                        {
+                            row.actions = render(IconButton {
+                                event: "request_receipt_undo",
+                                name: "key",
+                                value: &key,
+                                ..IconButton::new("unarchive", "Undo change")
+                            })?;
+                            self.receipt_items.push(ReceiptItem { key, correction });
+                        }
+                    }
+                }
+                rows.push(row);
+            }
+        }
+        let page = self.receipt_list.paginate(&rows);
+        let counts = page.counts;
+        let visible: Vec<_> = page.entries.iter().map(|row| row.key.as_str()).collect();
+        self.receipt_items
+            .retain(|item| visible.contains(&item.key.as_str()));
+        let mut table = FlexTable::new(
+            "receipt-table",
+            self.receipt_columns.flex_columns(),
+            page.entries.to_vec(),
+        );
+        table.caption = if reply["result"]["more"] == true {
+            "Recent changes (traces may be incomplete; see Audit)"
+        } else {
+            "Changes in the last 30 days"
+        };
+        table.actions = true;
+        table.event = "receipt_grid";
+        table.zoom = self.receipt_columns.zoom;
+        table.suggestions = self.receipt_columns.flex_suggestions();
+        table.add_query = &self.receipt_columns.add_query;
+        table.framed = false;
+        if counts.total_entries == 0 {
+            table.empty = Some(TableEmpty::Content(Html::text(
+                "No changes in the last 30 days.",
+            )));
+        }
+        let mut body = render(table)?;
+        let mut pagination = Pagination::new("receipt-pagination", counts, &PAGE_SIZES);
+        pagination.page_event = "receipt_page";
+        pagination.filters_event = "receipt_filters";
+        body.push(&render(pagination)?);
+        render(Card {
+            id: "receipt-card",
+            title: "Recent changes",
+            inner_class: "p-0",
+            body,
+            ..Card::default()
+        })
+    }
     async fn render(&mut self, scope: &Scope) -> Result<String> {
         let mut items = Vec::new();
         let mut reads = HashMap::new();
@@ -243,6 +466,7 @@ impl Index {
             }));
         }
         self.items = items;
+        let receipts = self.receipts(scope).await?;
         let page = self.list.paginate(&self.items);
         let counts = page.counts;
         self.shown = page.entries.len();
@@ -370,16 +594,27 @@ impl Index {
             body,
             ..Card::default()
         })?;
-        let dialog = if let Some((item, preview)) = &self.confirm {
+        let banner = if self.receipt_confirm.is_some() || self.confirm.is_some() {
+            bilibi_system::Instance::resolve(&self.pages.settings, &**client)
+                .await?
+                .banner("customisation-review-instance", "mb-3")
+                .map_err(|_| Error::Internal)?
+        } else {
+            Html::EMPTY
+        };
+        let dialog = if let Some((item, preview)) = &self.receipt_confirm {
+            render(ReceiptDialog {
+                item,
+                detail: preview,
+                banner,
+            })?
+        } else if let Some((item, preview)) = &self.confirm {
             render(UndoDialog {
                 title: format!("{}: {}?", item.undo.action, item.row.description),
                 item,
                 key: item.action_key(),
-                detail: format!(
-                    "{}
-{}",
-                    item.section.detail, preview
-                ),
+                detail: format!("{} {}", item.section.detail, preview),
+                banner,
             })?
         } else {
             Html::EMPTY
@@ -415,6 +650,7 @@ impl Index {
                 ..Header::default()
             })?,
             card,
+            receipts,
             dialog,
         }
         .render()
@@ -428,16 +664,20 @@ impl LiveState<Scope, Error> for Index {
                 LiveInput::Refresh => {}
                 LiveInput::Params(values) => {
                     self.list =
-                        ListState::parse(values, SPEC.clone()).map_err(|_| Error::Internal)?
+                        ListState::parse(values, SPEC.clone()).map_err(|_| Error::Internal)?;
+                    self.receipt_list = ListState::parse(values, RECEIPT_SPEC.clone())
+                        .map_err(|_| Error::Internal)?
                 }
                 LiveInput::Event(value) => {
                     self.event(request.scope, request.credential, value).await?
                 }
             };
             let html = self.render(request.scope).await?;
+            let mut query = self.list.to_params();
+            query.extend(self.receipt_list.to_params());
             Ok(LiveBody {
                 html,
-                query: self.list.to_params(),
+                query,
                 rows: self.shown,
                 ..LiveBody::default()
             })

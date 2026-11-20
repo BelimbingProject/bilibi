@@ -249,3 +249,7 @@ console outcome recorded, and an HTTP/browser smoke of the running app.
 ## Record revision attribution
 
 `latest_changes` queries at most 100 record revisions at a time on the caller's connection and within the sealed tenant scope. It selects the latest audit mutation for each kind and record ID whose numeric `new_values.version` equals the requested revision and returns the actor, optional impersonator or system principal, and change time. Revisions with no matching evidence are omitted. Callers must authorize the records and the attribution they display.
+
+### Customisation receipts
+
+`customisation_receipts` reads up to 501 recent mutation rows for caller-authorized kinds in the current tenant. The caller authorizes both each owner and audit attribution, groups traces and reports truncation; Audit supplies evidence rather than a separate history store.

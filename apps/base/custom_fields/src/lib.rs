@@ -322,4 +322,60 @@ inventory::submit! { Contribution::new(bilibi_labels::SECTIONS, "base/custom_fie
 }) }
 inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.fields_restore", contract: "base.custom_fields.restore" }) }
 
-inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW }) }
+inventory::submit! { Contribution::new(bilibi_labels::RECEIPT_SOURCES, "base/custom_fields.receipts", provenance!(), &bilibi_labels::ReceiptSource { kind: "custom_field", capability: VIEW, manage: MANAGE, read: operations::receipt_fields, current: receipt_current, correction: receipt_correction }) }
+
+fn receipt_current(
+    change: &serde_json::Value,
+    rows: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    rows.as_array()?
+        .iter()
+        .find(|row| {
+            row["id"]
+                .as_i64()
+                .is_some_and(|id| Some(id.to_string().as_str()) == change["id"].as_str())
+        })
+        .cloned()
+}
+
+fn receipt_correction(
+    change: &serde_json::Value,
+    current: &serde_json::Value,
+) -> Option<bilibi_labels::ReceiptCorrection> {
+    let old = &change["before"];
+    let mut input = serde_json::json!({"record_type": current["record_type"], "key": current["key"], "version": current["version"]});
+    let (contract, event) = if old.is_null() || old.as_object().is_some_and(|o| o.is_empty()) {
+        (
+            "base.custom_fields.archive",
+            "customisation.receipt_field_archive",
+        )
+    } else if old["archived_on"].is_null() != current["archived_on"].is_null() {
+        if old["archived_on"].is_null() {
+            (
+                "base.custom_fields.restore",
+                "customisation.receipt_field_restore",
+            )
+        } else {
+            (
+                "base.custom_fields.archive",
+                "customisation.receipt_field_archive",
+            )
+        }
+    } else {
+        input["label"] = old["label"].clone();
+        input["help"] = old["help"].clone();
+        input["rule_condition"] = old["rule_condition"].clone();
+        (
+            "base.custom_fields.update",
+            "customisation.receipt_field_update",
+        )
+    };
+    Some(bilibi_labels::ReceiptCorrection {
+        contract,
+        event,
+        input,
+    })
+}
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.receipt_archive", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_field_archive", contract: "base.custom_fields.archive" }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.receipt_restore", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_field_restore", contract: "base.custom_fields.restore" }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.custom_fields.receipt_update", provenance!(), &bilibi_agent_api::page::PageBinding { service: "base/labels.customisations", event: "customisation.receipt_field_update", contract: "base.custom_fields.update" }) }

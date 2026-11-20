@@ -150,6 +150,21 @@ impl ReadHandler for Read {
     }
 }
 
+pub(crate) fn receipt_fields<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let sql = client.sql_client().await?;
+        let fields = bound()?
+            .fields
+            .definitions(sql, scope, None, true)
+            .await
+            .map_err(found)?;
+        Ok(Output::Data(record(to_json(fields))))
+    })
+}
+
 enum Write {
     Define,
     Update,

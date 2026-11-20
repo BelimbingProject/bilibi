@@ -94,6 +94,7 @@ impl ReadHandler for Read {
                 )
                 .map_err(|_| Error::Internal)?;
                 let mut kinds = Vec::new();
+                let mut sources = Vec::new();
                 for entry in catalog
                     .entries::<crate::ReceiptSource>(crate::RECEIPT_SOURCES)
                     .map_err(|_| Error::Internal)?
@@ -103,11 +104,56 @@ impl ReadHandler for Read {
                         .map_err(|_| Error::Internal)?;
                     if capabilities.contains(source.capability) {
                         kinds.push(source.kind);
+                        let rows = (source.read)(client, scope).await?.envelope(source.kind);
+                        sources.push((source, rows["result"].clone()));
                     }
                 }
-                let entries = bilibi_audit::customisation_receipts(sql, scope, &kinds).await?;
+                let mut entries = bilibi_audit::customisation_receipts(sql, scope, &kinds).await?;
+                let more = entries.len() > 500;
+                entries.truncate(500);
                 let mut groups: Vec<Value> = Vec::new();
-                for entry in entries {
+                let mut seen_labels = HashSet::new();
+                for mut entry in entries {
+                    let label_latest = if entry["kind"] == "label" {
+                        let side = if entry["after"].is_object() {
+                            &entry["after"]
+                        } else {
+                            &entry["before"]
+                        };
+                        seen_labels.insert((
+                            side["kind"].as_str().unwrap_or_default().to_owned(),
+                            side["subject"].as_str().unwrap_or_default().to_owned(),
+                        ))
+                    } else {
+                        false
+                    };
+                    if let Some((source, rows)) = sources.iter().find(|(source, _)| {
+                        source.kind == entry["kind"].as_str().unwrap_or_default()
+                    }) {
+                        let current = (source.current)(&entry, rows);
+                        let version = entry["after"]["version"].as_i64();
+                        let current_version = current.as_ref().and_then(|row| {
+                            row["version"].as_i64().or_else(|| {
+                                row["version"]
+                                    .as_str()
+                                    .and_then(|v| v.split_once(':'))
+                                    .and_then(|(id, revision)| {
+                                        (id == entry["id"].as_str().unwrap_or_default())
+                                            .then(|| revision.parse().ok())
+                                            .flatten()
+                                    })
+                            })
+                        });
+                        let current_clear = label_latest
+                            && entry["after"].is_null()
+                            && current.as_ref().is_some_and(|row| row["version"] == "0:0");
+                        entry["changed_since"] = json!(
+                            !current_clear && (version.is_none() || version != current_version)
+                        );
+                        entry["can_undo"] =
+                            json!(!current_clear && capabilities.contains(source.manage));
+                        entry["effective"] = current.unwrap_or(Value::Null);
+                    }
                     let trace = entry["trace"].as_str().unwrap_or_default();
                     if let Some(group) = groups.iter_mut().find(|group| group["trace"] == trace) {
                         if let Some(changes) = group["changes"].as_array_mut() {
@@ -118,7 +164,7 @@ impl ReadHandler for Read {
                     }
                 }
                 return Ok(Output::Data(record(
-                    json!({"receipts":groups, "limit":500}),
+                    json!({"receipts":groups, "limit":500, "more":more, "period_days":30}),
                 )));
             }
             let labels = bound()?;
@@ -146,6 +192,13 @@ impl ReadHandler for Read {
             Ok(Output::Data(record(Value::Array(rows))))
         })
     }
+}
+
+pub(crate) fn receipt_labels<'a>(
+    client: &'a dyn OperationClient,
+    scope: &'a Scope,
+) -> OperationFuture<'a> {
+    Box::pin(async move { Read::List.call(client, scope, &json!({})).await })
 }
 
 enum Write {
@@ -231,6 +284,12 @@ fn subject_schema() -> Value {
 fn version_schema() -> Value {
     json!({"type":"string","description":"The identity:version token you read (0:0 when there was no override); a replaced or changed label is refused."})
 }
+fn receipts_schema() -> Value {
+    json!({"type":"object", "properties": {}})
+}
+fn receipts_output() -> Value {
+    json!({"type":"object", "description":"receipts grouped by trace with actor, before, after, current effective result and changed_since; more indicates a truncated 30-day window."})
+}
 fn list_schema() -> Value {
     json!({"type":"object","properties":{"kind":kind_schema(),"search":{"type":"string","maxLength":120,"description":"Only words holding this text, in any case."}}})
 }
@@ -250,7 +309,7 @@ fn write_output() -> Value {
 
 inventory::submit! { Contribution::new(DEFINITIONS, "base/labels.agent", Provenance { module: "base/labels", source: file!(), line: line!() }, &Definitions {
     operations: &[
-        Operation { key: "base.labels.receipts", title: "Read customisation receipts", summary: "Recent audited customisation changes grouped by trace.", keywords: &["customisation", "history", "receipt"], capability: crate::CUSTOMISATIONS_VIEW, input: list_schema, output: write_output, handler: Handler::Read(&Read::Receipts), channels: Channels::Every, step_up: &[] },
+        Operation { key: "base.labels.receipts", title: "Read customisation receipts", summary: "Recent audited customisation changes grouped by trace.", keywords: &["customisation", "history", "receipt"], capability: crate::CUSTOMISATIONS_VIEW, input: receipts_schema, output: receipts_output, handler: Handler::Read(&Read::Receipts), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.list", title: "List labels", summary: "The menu items, record types and fields a tenant may rename, with the module's own word and the tenant's label.", keywords: &["rename", "label", "menu", "terminology"], capability: VIEW, input: list_schema, output: list_output, handler: Handler::Read(&Read::List), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.set", title: "Rename a menu item, record type or field", summary: "Show your own word for a menu item, record type or field, such as Clients for Companies; operation keys, routes and permissions never change.", keywords: &["rename", "label", "menu", "terminology"], capability: MANAGE, input: set_schema, output: write_output, handler: Handler::SafeWrite(&Write::Set), channels: Channels::Every, step_up: &[] },
         Operation { key: "base.labels.clear", title: "Restore a label", summary: "Remove the tenant's label so the module's own word shows again.", keywords: &["restore", "label", "menu"], capability: MANAGE, input: clear_schema, output: write_output, handler: Handler::SafeWrite(&Write::Clear), channels: Channels::Every, step_up: &[] },

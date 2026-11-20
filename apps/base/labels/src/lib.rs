@@ -6,12 +6,12 @@ mod customisations;
 mod customisations_web;
 mod discovery;
 mod operations;
+mod receipt_display;
 mod store;
 mod web;
 
 pub use customisations::{
-    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptSource, Undo,
-    RECEIPT_SOURCES, SECTIONS,
+    Changes, Choice, CustomisationRow, CustomisationSection, Read, ReceiptCorrection, ReceiptSource, Undo, RECEIPT_SOURCES, SECTIONS,
 };
 
 pub use store::{
@@ -57,7 +57,7 @@ inventory::submit! { Contribution::new(VOCABULARY, "base/labels", provenance!(),
 inventory::submit! {
     Module {
         id: "base/labels", layer: bilibi_module_registry::Layer::Base,
-        dependencies: &["base/module_registry", "base/database", "base/datetime", "base/locale", "base/principal_directory", "base/tenancy", "base/authz", "base/ui", "base/audit", "base/agent_api", "base/menu"],
+        dependencies: &["base/module_registry", "base/database", "base/datetime", "base/locale", "base/principal_directory", "base/tenancy", "base/authz", "base/ui", "base/audit", "base/agent_api", "base/menu", "base/settings", "base/system"],
         migrations: &[("base-labels-001-labels", include_str!("../migrations/001-labels.sql")), ("base-labels-002-field-labels", include_str!("../migrations/002-field-labels.sql"))],
         services: &[
             Service { id: SERVICE, factory: |services| {
@@ -78,8 +78,10 @@ inventory::submit! {
                 discovery::bind(services.get("base/agent_api.registry")?, entries.iter().map(|entry| entry.id).zip(sections.iter().copied()).collect())?;
                 Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(customisations_web::Pages {
                     db: services.get::<bilibi_database::Db>("base/database.pool")?.as_ref().clone(),
+                    settings: services.get("base/settings.store")?,
                     display: services.get("base/datetime.display")?, locales: services.get("base/locale.locales")?, directory: services.get("base/principal_directory.directory")?,
                     contracts: services.get(bilibi_agent_api::page::SERVICE)?, sections,
+                    receipt_sources: catalog.entries::<ReceiptSource>(RECEIPT_SOURCES)?.iter().map(|entry| entry.get::<ReceiptSource>()).collect::<Result<Vec<_>, _>>()?,
                 }))))
             } },
             Service { id: PAGES, factory: |services| Ok(Arc::new(bilibi_ui::page::PageService::<bilibi_tenancy::Scope, bilibi_database::Error>(Arc::new(web::Pages {
@@ -141,3 +143,6 @@ bilibi_menu::contribute!(
 );
 
 inventory::submit! { bilibi_module_registry::Consumer::new::<ReceiptSource>(RECEIPT_SOURCES, "base/labels", |_| Ok(())) }
+
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.labels.receipt_set", provenance!(), &bilibi_agent_api::page::PageBinding { service: CUSTOMISATIONS, event: "customisation.receipt_label_set", contract: "base.labels.set" }) }
+inventory::submit! { Contribution::new(bilibi_agent_api::page::PAGE_BINDINGS, "base.labels.receipt_clear", provenance!(), &bilibi_agent_api::page::PageBinding { service: CUSTOMISATIONS, event: "customisation.receipt_label_clear", contract: "base.labels.clear" }) }

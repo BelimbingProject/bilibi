@@ -82,3 +82,11 @@ Contribute `changes` with the section. Boot refuses a section whose reads are mi
 | Menu order | [`base/menu_order`](../menu_order/README.md) | Every sibling group of the staff menu |
 
 Watchers and setup packs do not contribute a section yet.
+
+## Customisation receipts
+
+`base.labels.receipts` and the Customisations page show recent label and custom-field audit changes grouped by trace, including the actor, recorded values and the owner's current result. They require the Customisations capability, audit-list access and the relevant owner's read capability. Changes from owners the reader cannot access are omitted. Audit redactions remain in force.
+
+The read covers the last 30 days and at most 500 changes. `more` reports the limit; when true, a trace may have additional changes outside the returned window. Audit retention can remove older evidence. The page offers an undo for a current version where the owner supplies a correction; it previews and then commits the same versioned owner operation. A stale version is marked **Changed since**. Restored defaults with no remaining version are not offered for undo. Undo is one change at a time, not a trace-wide or historical rollback.
+
+An owner contributes a `ReceiptSource` under `RECEIPT_SOURCES`: its audit kind, read capability, authorized current read, projection and correction to an existing reviewed write. The source must compare stable identity as well as revision. Bind every correction event to its owner contract with `PAGE_BINDINGS`. Receipt reads use Audit evidence, not another history store.
