@@ -87,6 +87,6 @@ Watchers and setup packs do not contribute a section yet.
 
 The Customisations page and `base.labels.receipts` show audited label, custom field, delegated setting, shared view and menu order changes. Each receipt shows who made the change, the recorded before and after, and the effective result. For impersonation, the operator appears first, followed by the account they acted as. The Customisations grant and each owner's access and redaction rules determine which changes are visible.
 
-Pages hold whole trace groups. Pass `next_before` as `before` to continue through retained history. The page previews a single current correction through its owner's contract and rechecks access and freshness when you confirm. Undo is refused when it would withdraw a condition an approved rule uses. Shared views and encrypted settings have history without an Undo action.
+Pages hold whole trace groups. Pass `next_before` as `before` to continue through retained history. The page previews a single current correction through its owner's contract and rechecks access and freshness when you confirm. Undo is refused when it would withdraw a condition an approved watcher uses. Shared views and encrypted settings have history without an Undo action.
 
 An owner contributes a `ReceiptSource` under `RECEIPT_SOURCES` with the audit kind, required capability and authorized projection of current and historical values. Corrections use an existing reviewed owner operation. Bind the correction events through `PAGE_BINDINGS`.

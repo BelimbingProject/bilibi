@@ -391,7 +391,7 @@ fn receipt_correction(
         if !old["help"].is_null() {
             input["help"] = json!(old["help"].as_str()?);
         }
-        input["rule_condition"] = json!(old["rule_condition"].as_bool()?);
+        input["watcher_condition"] = json!(old["watcher_condition"].as_bool()?);
         (
             "base.custom_fields.update",
             "customisation.receipt_field_update",

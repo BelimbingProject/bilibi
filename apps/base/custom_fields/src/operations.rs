@@ -199,7 +199,7 @@ impl Write {
         bilibi_authz::authorize_key(sql, scope, VIEW).await?;
         bilibi_authz::authorize_key(sql, scope, MANAGE).await?;
         if !(matches!(self, Self::Archive)
-            || matches!(self, Self::Update) && input["rule_condition"] == false)
+            || matches!(self, Self::Update) && input["watcher_condition"] == false)
         {
             return Ok(());
         }
@@ -219,7 +219,7 @@ impl Write {
             .defined(sql, scope, record_type)
             .await?
             .iter()
-            .any(|field| field.key == key && field.rule_condition)
+            .any(|field| field.key == key && field.watcher_condition)
         {
             return Ok(());
         }
@@ -230,7 +230,7 @@ impl Write {
         if !affected.is_empty() {
             return Err(bilibi_agent_api::invalid(
                 "key",
-                &format!(
+                format!(
                     "Approved watchers depend on this field: {}.",
                     affected.join(", ")
                 ),
@@ -267,8 +267,8 @@ impl Write {
                         .await
                         .map_err(found)?,
                 )?;
-                json!({"summary":if input["receipt_undo"] == true && !before.rule_condition
-                    && after.rule_condition == Some(true)
+                json!({"summary":if input["receipt_undo"] == true && !before.watcher_condition
+                    && after.watcher_condition == Some(true)
                 {
                     format!("Offer {key} on {record_type} to watchers again. Watchers already marked for review still need reapproval.")
                 } else { format!("Change {key} on {record_type}; its key and type stay") },"before":before,"after":after})
@@ -291,7 +291,7 @@ impl Write {
                         .await
                         .map_err(found)?,
                 )?;
-                json!({"summary":if input["receipt_undo"] == true && before.rule_condition {
+                json!({"summary":if input["receipt_undo"] == true && before.watcher_condition {
                     format!("Restore {key} on {record_type}. Watchers already marked for review still need reapproval.")
                 } else { format!("Restore {key} on {record_type}") },"before":before})
             }
@@ -320,7 +320,7 @@ impl WriteHandler for Write {
                 }
                 None => {
                     let pooled = bound()?.db.get().await.map_err(Error::from)?;
-                    self.receipt_dependencies(&**pooled, scope, input, false)
+                    self.receipt_dependencies(&pooled, scope, input, false)
                         .await?;
                     self.preview_on(&**pooled, scope, input).await
                 }

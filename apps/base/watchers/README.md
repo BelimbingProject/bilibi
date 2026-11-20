@@ -19,6 +19,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 
 - **Fields** are Grid column paths on the trigger's table (`priority`, or `company.name` through a one-link), read as the `watchers` principal. No aggregates.
 - **Tenant custom fields** (`cf_<key>`, [Custom Fields](../custom_fields/README.md#watcher-conditions)) are fields only when the tenant offered them to watcher conditions, and only on the trigger's own record, not through a link. A draft on one that is not offered is refused with that reason; the vocabulary lists only offered ones, under the tenant's label.
+- Undoing a custom-field change that would withdraw an approved watcher's condition is refused after checking the active definitions; the correction preview names the dependency when the reader may see it.
 - **Operators**: `eq`, `ne`, `in`, `not_in`, `lt`, `le`, `gt`, `ge` (numbers and dates), `empty`, `not_empty`.
 - **Values compare exactly**: numbers as exact decimals (integer JSON numbers or decimal strings; fractional JSON numbers and values beyond decimal precision are refused), dates and times as instants, text as written, true/false as such. A missing value matches only `empty`; every other comparison with it is false.
 - **No "update any record" action.** An action is one owner's contract with its own schema, preview, checks and audit. The runner binds the action's subject field to the trigger's record; a watcher never names a record, tenant, principal or operation outside the installed set.

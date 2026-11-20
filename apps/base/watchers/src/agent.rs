@@ -38,7 +38,9 @@ fn approved_field_uses<'a>(
 ) -> bilibi_custom_fields::DependencyFuture<'a> {
     Box::pin(async move {
         let watchers = WATCHERS.get().ok_or(Error::Internal)?;
-        if write { watchers.lock_admission(sql, scope).await?; }
+        if write {
+            watchers.lock_admission(sql, scope).await?;
+        }
         watchers.approved_field_uses(sql, scope, table, key).await
     })
 }

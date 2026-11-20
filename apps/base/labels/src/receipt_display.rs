@@ -109,7 +109,7 @@ pub(crate) fn receipt_value(value: &Value) -> String {
         ("item_ids", "Order"),
         ("help", "Help"),
         ("archived_on", "Archived"),
-        ("rule_condition", "Available to watchers"),
+        ("watcher_condition", "Available to watchers"),
         ("default", "Default"),
     ] {
         if let Some(value) = value.get(key) {
