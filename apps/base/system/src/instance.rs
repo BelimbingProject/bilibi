@@ -244,8 +244,10 @@ impl Instance {
         })
     }
     /// The name an AI app saves this Bilibi under: the host of the canonical
-    /// address with every other character as a hyphen (`try.bilibi.app` is
-    /// `try-bilibi-app`), plus the port when the address names one
+    /// address with dots and port separators as hyphens, and existing hyphens
+    /// doubled (`try.bilibi.app` is `try-bilibi-app`,
+    /// `bilibi-app.example.com` is `bilibi--app-example-com`), plus the port
+    /// when the address names one
     /// (`localhost:8443` is `localhost-8443`). The MCP server name, the
     /// connection prompt and the plugin package all use it.
     ///
@@ -271,7 +273,9 @@ impl Instance {
         let authority = authority.rsplit('@').next().unwrap_or(authority);
         let mut name = String::new();
         for c in authority.chars() {
-            if c.is_ascii_alphanumeric() {
+            if c == '-' {
+                name.push_str("--");
+            } else if c.is_ascii_alphanumeric() {
                 name.push(c.to_ascii_lowercase());
             } else if !name.is_empty() && !name.ends_with('-') {
                 name.push('-');

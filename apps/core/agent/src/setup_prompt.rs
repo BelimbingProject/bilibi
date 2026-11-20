@@ -12,8 +12,9 @@ pub fn address(instance: &Instance) -> String {
     format!("{}/mcp", instance.origin)
 }
 
-/// The name a tool saves the connection under (`Instance::server_name`): the
-/// address with hyphens, so two deployments never share one saved sign-in.
+/// The name a tool saves the connection under (`Instance::server_name`): dots
+/// become hyphens and existing hyphens double, so two deployments never share
+/// one saved sign-in.
 pub fn server_name(instance: &Instance) -> String {
     instance.server_name()
 }
