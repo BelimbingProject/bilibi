@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
     bilibi_extensions::link();
     let domain = std::env::args().nth(1).unwrap_or_else(|| "commerce".into());
     let (event, action, read, manage, kind, source_query) = match domain.as_str() {
-        "commerce" => ("commerce/sales.order_confirmed", "commerce.sales.order.follow_up", "commerce.sales.view", "commerce.sales.followup.manage", "commerce.sales.order", "SELECT id,revision,company_id FROM commerce_sales_documents WHERE tenant_id=1 AND kind='order' AND status='confirmed' ORDER BY id DESC LIMIT 1"),
+        "commerce" => ("commerce/sales.order_transitioned", "commerce.sales.order.follow_up", "commerce.sales.view", "commerce.sales.followup.manage", "commerce.sales.order", "SELECT id,revision,company_id FROM commerce_sales_documents WHERE tenant_id=1 AND kind='order' AND status='confirmed' ORDER BY id DESC LIMIT 1"),
         "supply_chain" => ("supply_chain/purchasing.order_approved", "supply_chain.purchasing.order.follow_up", "supply-chain.purchasing.view", "supply-chain.purchasing.followup.manage", "supply_chain.purchasing.order", "SELECT id,rule_revision,company_id FROM supply_chain_purchasing_orders WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1"),
         "people" => ("people/claims.request_approved", "people.claims.request.follow_up", "people.claims.followup.view", "people.claims.followup.manage", "people.claims.request", "SELECT id,rule_revision,company_id FROM people_claim_submissions WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1"),
         _ => return Err(Error::Invalid),
@@ -423,7 +423,7 @@ async fn main() -> Result<()> {
         !expected_events.is_empty(),
         "the source recorded its expected events",
     )?;
-    if domain == "commerce" || domain == "supply_chain" {
+    if domain == "supply_chain" {
         check(
             expected_events.len() == 2,
             "the two-line order recorded both source parts",
@@ -551,6 +551,45 @@ async fn main() -> Result<()> {
         "DROP TRIGGER watchers_followup_retry_probe ON base_watcher_runs; DROP FUNCTION watchers_followup_retry_probe(); DROP SEQUENCE watchers_followup_retry_probe;",
     ).await?;
     result?;
+    if domain == "commerce" {
+        grants
+            .set_system(&admin, "watchers", "commerce.sales.manage", Some(true))
+            .await?;
+        grants
+            .set_system(&admin, "watchers", "commerce.sales.confirm", Some(true))
+            .await?;
+        let definition = json!({"name":"Cancel newly created orders", "watch":"commerce/sales.order_created", "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Proof cancellation"}}], "examples":[], "explanation":"Cancel a new order in the disposable walkthrough."});
+        let watcher = write(&plans, &admin, "base.watchers.draft", definition).await?;
+        write(
+            &plans,
+            &admin,
+            "base.watchers.approve",
+            json!({"watcher_id":watcher["watcher_id"],"version":watcher["version"]}),
+        )
+        .await?;
+        let line = json!({"description":"Cancellation proof","quantity":"1","unit":"hour","unit_price":"10.00","tax_code":"ZERO","tax_rate":"0"});
+        let order = write(&plans, &admin, "commerce.sales.order.create", json!({"company_id":1,"customer_kind":"company","customer_code":"company_002","currency_code":"MYR","lines":[line.clone(),line]})).await?;
+        let id = order["id"].as_i64().ok_or(Error::Invalid)?;
+        let events = source_events(&db, "commerce/sales.order_created", "/order_id", id).await?;
+        check(
+            events.len() == 1,
+            "a two-line order records one creation occurrence",
+        )?;
+        let watcher_id = watcher["watcher_id"].as_i64().ok_or(Error::Invalid)?;
+        run_until(&services, &db, &events, &[watcher_id]).await?;
+        let row = db
+            .get()
+            .await?
+            .query_one(
+                "SELECT status,revision FROM commerce_sales_documents WHERE tenant_id=1 AND id=$1",
+                &[&id],
+            )
+            .await?;
+        check(
+            row.get::<_, String>(0) == "cancelled" && row.get::<_, i64>(1) == 2,
+            "the creation watcher cancelled the order once",
+        )?;
+    }
     println!("every {domain} watcher follow-up check passed");
     Ok(())
 }

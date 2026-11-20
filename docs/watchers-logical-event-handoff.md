@@ -8,11 +8,11 @@ The trigger identity contract is in [Base Watchers](../apps/base/watchers/README
 
 | Companion | File | Trigger binding | Existing immutable identity |
 | --- | --- | --- | --- |
-| [Commerce PR 12](https://github.com/BelimbingProject/bilibi-dom-commerce/pull/12) | `sales/src/follow_up.rs` | `logical_event: Some("/revision")` | `sales/src/operations.rs` records the confirmation revision in every line payload; the task key also includes the source ID |
+| [Commerce Sales](https://github.com/BelimbingProject/bilibi-dom-commerce/pull/16) | `sales/src/follow_up.rs` | `logical_event: None` | One compact event per order creation or transition; the invoice-consumer events remain multipart |
 | [Supply Chain PR 28](https://github.com/BelimbingProject/bilibi-dom-supply-chain/pull/28) | `purchasing/src/follow_up.rs` | `logical_event: Some("/snapshot_key")` | `purchasing/src/order_events.rs` records one snapshot key across the approval's line parts |
 | [People PR 77](https://github.com/BelimbingProject/bilibi-dom-people/pull/77) | `claims/src/follow_up.rs` | `logical_event: None` | One recorded event per approval: its immutable Events ID identifies the occurrence; `claims/src/workflow.rs` publishes no multipart approval |
 
-The bindings above were inspected at Commerce `06a6596`, Supply Chain `ecc65c0`, and People `8487775`. Purchasing also supplies `fixtures/walkthrough/watchers-source-hook.sh`, which invokes real amendment and independent approval facades. No companion source is copied into Platform.
+The original multipart bindings were inspected at Commerce `06a6596`, Supply Chain `ecc65c0`, and People `8487775`; Commerce now offers compact single-occurrence events. Purchasing also supplies `fixtures/walkthrough/watchers-source-hook.sh`, which invokes real amendment and independent approval facades. No companion source is copied into Platform.
 
 ## Running the proof
 
