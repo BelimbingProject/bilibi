@@ -91,29 +91,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(grants.contains("base.custom-fields.manage"));
         assert!(!grants.contains("admin.audit.log.list"));
     }
-    // The setup guide must reflect the live registry and configured plan limit.
     {
         let client = db.get().await?;
+        client.execute("INSERT INTO base_settings(key, tenant_id, scope_type, scope_id, value, is_encrypted) VALUES('agent_api.plan_max_operations',0,'global',0,'7',false)", &[]).await?;
         let registry = app
             .services
             .get::<bilibi_agent_api::Registry>("base/agent_api.registry")?;
-        let guide = registry
-            .guide(&**client, &one, "base.labels.customise")
-            .await?;
+        let key = "base.labels.customise";
+        let viewer = auth.authenticate(&**client, 1, 2, String::new()).await?;
+        assert!(matches!(
+            registry.guide(&**client, &viewer, key).await,
+            Err(bilibi_agent_api::Error::Forbidden)
+        ));
+        for (scope, available) in [(&one, true), (&viewer, false)] {
+            let hits = registry
+                .search(&**client, scope, key, Default::default())
+                .await?;
+            assert_eq!(hits.iter().any(|hit| hit["key"] == key), available);
+        }
+        let guide = registry.guide(&**client, &one, key).await?;
         let body = guide["body"].as_str().expect("guide body");
-        let described = registry
-            .describe(&**client, &one, "base.custom_fields.define")
-            .await?;
-        let settings = app
-            .services
-            .get::<bilibi_base::settings::Settings>("base/settings.store")?;
-        let limit = settings
-            .get_global(&**client, "agent_api.plan_max_operations")
-            .await?;
-        assert!(body.contains(&described["input"].to_string()));
-        assert!(body.contains(&format!("one atomic plan: {limit}")));
+        let (instructions, contracts) = body
+            .split_once("\n## Live contracts\n")
+            .expect("live contracts section");
+        let define = contracts
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|contract| contract["key"] == "base.custom_fields.define")
+            .expect("custom field definition contract");
+        assert_eq!(
+            define["input"]["required"],
+            json!(["record_type", "key", "label", "kind"])
+        );
+        let (example, watcher) = instructions
+            .split_once("\n## Watcher preflight\n")
+            .expect("watcher preflight section");
+        assert!(example.contains("one atomic plan: 7."));
+        assert!(example.contains("base.labels.clear"));
+        assert!(example.contains("Archive the field only if this setup created it"));
+        assert!(!example.contains("base.rules.vocabulary"));
+        assert!(watcher.contains("base.rules.vocabulary"));
+        assert!(watcher.contains("conditions, actions and examples"));
         assert!(!body.contains("{{contract:") && !body.contains("{{plan_limit}}"));
-        assert!(body.contains("uncertain") && body.contains("watchers"));
     }
     let label_call = |scope, credential, contract| Call {
         scope,

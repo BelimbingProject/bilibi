@@ -35,7 +35,7 @@ The Tenant Owner system role includes `base.labels.view`, `base.labels.manage` a
 
 ## Agent setup guide
 
-Search for **Customise my tenant** (`base.labels.customise`) for a worked setup, review, verification and recovery path. Its operation contracts and plan limit are generated at read time; watcher limits come from the installed automation vocabulary.
+With `base.labels.customisations.view`, search for **Customise my tenant** (`base.labels.customise`) for a worked setup, review, verification and recovery path. The guide includes [delegated tenant settings](../settings_editor/README.md#tenant-agent-operations). Its operation contracts and plan limit are generated at read time. For watcher reviews, read the installed automation vocabulary for tenant limits.
 
 ## Customisations page
 
