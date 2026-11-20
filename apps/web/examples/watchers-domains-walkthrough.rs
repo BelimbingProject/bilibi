@@ -53,15 +53,30 @@ fn check(ok: bool, message: &str) -> Result<()> {
 async fn task_count(db: &Db, kind: &str, source: i64) -> Result<i64> {
     Ok(db.get().await?.query_one("SELECT count(*) FROM core_activities WHERE tenant_id=1 AND related_kind=$1 AND related_id=$2", &[&kind, &source.to_string()]).await?.get(0))
 }
-async fn wait_for_runs(db: &Db, events: &[i64], watchers: &[i64]) -> Result<()> {
+async fn wait_for_runs(
+    db: &Db,
+    events: &[i64],
+    watchers: &[i64],
+    refusal: Option<&str>,
+) -> Result<()> {
     for _ in 0..300 {
         let client = db.get().await?;
         let row = client.query_one(
-            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND r.state='done' AND EXISTS(SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.args->>'run_id'=r.id::text AND j.state='completed')), count(*) FILTER (WHERE r.state NOT IN ('queued','matched','done')) FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) watcher(id) LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/watchers.triggers' LEFT JOIN base_watcher_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.watcher_id=watcher.id",
-            &[&events, &watchers],
+            "SELECT count(*), count(*) FILTER (WHERE d.delivered_at IS NOT NULL AND
+                CASE WHEN $3::text IS NULL THEN r.state='done' AND EXISTS(
+                    SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text AND j.args->>'run_id'=r.id::text AND j.state='completed'
+                ) ELSE r.state='refused' AND r.reason=$3 AND r.finished_at IS NOT NULL AND NOT EXISTS(
+                    SELECT 1 FROM base_queue_jobs j WHERE j.tenant_id=1 AND j.worker_id='base/watchers-run' AND j.args->>'event_id'=e.id::text
+                ) END),
+                count(*) FILTER (WHERE r.state NOT IN ('queued','matched') AND
+                    CASE WHEN $3 IS NULL THEN r.state<>'done' ELSE r.state<>'refused' OR r.reason IS DISTINCT FROM $3 END)
+             FROM unnest($1::bigint[]) e(id) CROSS JOIN unnest($2::bigint[]) watcher(id)
+             LEFT JOIN base_events_deliveries d ON d.event_id=e.id AND d.subscriber='base/watchers.triggers'
+             LEFT JOIN base_watcher_runs r ON r.tenant_id=1 AND r.event_id=e.id AND r.watcher_id=watcher.id",
+            &[&events, &watchers, &refusal],
         ).await?;
         if row.get::<_, i64>(2) != 0 {
-            return check(false, "every expected source part must finish successfully");
+            return check(false, "a source part had an unexpected watcher outcome");
         }
         if row.get::<_, i64>(0) == row.get::<_, i64>(1) {
             return Ok(());
@@ -71,7 +86,7 @@ async fn wait_for_runs(db: &Db, events: &[i64], watchers: &[i64]) -> Result<()> 
     }
     check(
         false,
-        "timed out waiting for every source delivery and successful watcher run",
+        "timed out waiting for every source delivery and expected watcher outcome",
     )
 }
 async fn source_events(db: &Db, event: &str, subject: &str, source: i64) -> Result<Vec<i64>> {
@@ -92,7 +107,45 @@ async fn source_events(db: &Db, event: &str, subject: &str, source: i64) -> Resu
         })
         .collect())
 }
-async fn run_until(services: &Services, db: &Db, events: &[i64], watchers: &[i64]) -> Result<()> {
+async fn commerce_order(plans: &Plans, admin: &Scope) -> Result<i64> {
+    let line = json!({"description":"Watchers proof","quantity":"1","unit":"hour","unit_price":"10.00","tax_code":"ZERO","tax_rate":"0"});
+    let order = write(plans, admin, "commerce.sales.order.create", json!({"company_id":1,"customer_kind":"company","customer_code":"company_002","currency_code":"MYR","lines":[line.clone(),line]})).await?;
+    order["id"].as_i64().ok_or(Error::Invalid)
+}
+async fn commerce_event(
+    db: &Db,
+    event: &str,
+    company: i64,
+    order: i64,
+    status: &str,
+    revision: i64,
+) -> Result<i64> {
+    let events = source_events(db, event, "/order_id", order).await?;
+    check(
+        events.len() == 1,
+        "the two-line order recorded one compact occurrence",
+    )?;
+    let id = events[0];
+    let payload: Value = db
+        .get()
+        .await?
+        .query_one(
+            "SELECT payload FROM base_events WHERE tenant_id=1 AND id=$1",
+            &[&id],
+        )
+        .await?
+        .get(0);
+    check(
+        payload
+            == json!({"company_id": company, "order_id": order, "status": status, "revision": revision}),
+        "the compact occurrence names the correct order, company, status and revision",
+    )?;
+    Ok(id)
+}
+async fn run_until(
+    services: &Services,
+    ready: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
     let executor = Executor::from_services(
         services,
         Config {
@@ -104,7 +157,7 @@ async fn run_until(services: &Services, db: &Db, events: &[i64], watchers: &[i64
     )?;
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(async move { executor.run(shutdown).await });
-    let result = wait_for_runs(db, events, watchers).await;
+    let result = ready.await;
     let _ = stop.send(true);
     let stopped = worker.await.map_err(|_| Error::Internal)?;
     result?;
@@ -247,26 +300,39 @@ async fn main() -> Result<()> {
             .set_system(&admin, "watchers", key, Some(true))
             .await?;
     }
-    let draft_order = if domain == "commerce" {
-        let line = json!({"description":"Follow-up proof","quantity":"1","unit":"hour","unit_price":"10.00","tax_code":"ZERO","tax_rate":"0"});
-        let result = write(&plans, &admin, "commerce.sales.order.create", json!({"company_id":1,"customer_kind":"company","customer_code":"company_002","currency_code":"MYR","lines":[line.clone(),line]})).await?;
-        Some(result["id"].as_i64().ok_or(Error::Invalid)?)
-    } else {
-        None
-    };
-    let (source, company): (i64, i64) = if let Some(id) = draft_order {
-        (id, 1)
-    } else {
-        let row = db
-            .get()
-            .await?
-            .query_opt(source_query, &[])
-            .await?
-            .ok_or_else(|| {
-                eprintln!("Run the {domain} source walkthrough first; no approved source remains.");
-                Error::Invalid
-            })?;
-        (row.get(0), row.get(2))
+    let (source, company): (i64, i64) = match domain.as_str() {
+        "commerce" => (commerce_order(&plans, &admin).await?, 1),
+        "people" => {
+            let client = db.get().await?;
+            let row = client.query_one(
+                "SELECT company_id,claim_type_id,(incurred_on+1)::text,currency,submitted_by_actor_id FROM people_claim_submissions WHERE tenant_id=1 AND status='approved' ORDER BY id DESC LIMIT 1",
+                &[],
+            ).await?;
+            let company: i64 = row.get(0);
+            let staff = auth
+                .authenticate(&**client, 1, row.get(4), "watchers-domains".into())
+                .await?;
+            drop(client);
+            let claim = write(&plans, &staff, "people.claims.request.submit", json!({
+                "company_id":company,"claim_type_id":row.get::<_,i64>(1),"incurred_on":row.get::<_,String>(2),
+                "currency":row.get::<_,String>(3),"amount":"10.00","description":"Watchers proof"
+            })).await?;
+            (claim["id"].as_i64().ok_or(Error::Invalid)?, company)
+        }
+        _ => {
+            let row = db
+                .get()
+                .await?
+                .query_opt(source_query, &[])
+                .await?
+                .ok_or_else(|| {
+                    eprintln!(
+                        "Run the {domain} source walkthrough first; no approved source remains."
+                    );
+                    Error::Invalid
+                })?;
+            (row.get(0), row.get(2))
+        }
     };
     let recipient = 4_i64;
     let draft = json!({
@@ -402,15 +468,6 @@ async fn main() -> Result<()> {
         }
         watcher_ids.push(watcher["watcher_id"].as_i64().ok_or(Error::Invalid)?);
     }
-    if let Some(id) = draft_order {
-        write(
-            &plans,
-            &admin,
-            "commerce.sales.order.transition",
-            json!({"company_id":company,"id":id,"revision":1,"status":"confirmed"}),
-        )
-        .await?;
-    }
     let trigger = services
         .catalog()?
         .entries::<bilibi_base::watchers::Trigger>(bilibi_base::watchers::TRIGGERS)?
@@ -418,15 +475,54 @@ async fn main() -> Result<()> {
         .find(|entry| entry.id == event)
         .ok_or(Error::Invalid)?
         .get::<bilibi_base::watchers::Trigger>()?;
-    let expected_events = source_events(&db, event, trigger.subject, source).await?;
+    let expected_events = match domain.as_str() {
+        "commerce" => {
+            write(
+                &plans,
+                &admin,
+                "commerce.sales.order.transition",
+                json!({"company_id":company,"id":source,"revision":1,"status":"confirmed"}),
+            )
+            .await?;
+            vec![commerce_event(&db, event, company, source, "confirmed", 2).await?]
+        }
+        "people" => {
+            let client = db.get().await?;
+            let row = client.query_one(
+                "SELECT decided_by_actor_id FROM people_claim_submissions WHERE tenant_id=1 AND company_id=$1 AND status='approved' ORDER BY id DESC LIMIT 1",
+                &[&company],
+            ).await?;
+            let manager = auth
+                .authenticate(&**client, 1, row.get(0), "watchers-domains".into())
+                .await?;
+            drop(client);
+            write(
+                &plans,
+                &manager,
+                "people.claims.request.approve",
+                json!({"company_id":company,"request_id":source,"approved_amount":"10.00","decision_reason":"Watchers proof"}),
+            )
+            .await?;
+            source_events(&db, event, trigger.subject, source).await?
+        }
+        _ => {
+            let previous = source_events(&db, event, trigger.subject, source).await?;
+            source_change("reapprove", source).await?;
+            source_events(&db, event, trigger.subject, source)
+                .await?
+                .into_iter()
+                .filter(|id| !previous.contains(id))
+                .collect()
+        }
+    };
     check(
         !expected_events.is_empty(),
         "the source recorded its expected events",
     )?;
     if domain == "supply_chain" {
         check(
-            expected_events.len() == 2,
-            "the two-line order recorded both source parts",
+            expected_events.len() == 4,
+            "reapproval recorded both original and both replacement line parts",
         )?;
     }
     db.get()
@@ -455,7 +551,7 @@ async fn main() -> Result<()> {
                 "SELECT id FROM base_queue_jobs WHERE tenant_id=1 AND worker_id='base/events-delivery' AND args->>'event_id'<>$1 FOR UPDATE",
                 &[&expected_events[0].to_string()],
             ).await?;
-            run_until(&services, &db, &expected_events[..1], &watcher_ids).await?;
+            run_until(&services, wait_for_runs(&db, &expected_events[..1], &watcher_ids, None)).await?;
             let second = held.query_one(
                 "SELECT d.delivered_at IS NULL, NOT EXISTS(SELECT 1 FROM base_watcher_runs r WHERE r.tenant_id=1 AND r.event_id=d.event_id) FROM base_events_deliveries d WHERE d.event_id=$1 AND d.subscriber='base/watchers.triggers'",
                 &[&expected_events[1]],
@@ -465,11 +561,11 @@ async fn main() -> Result<()> {
             source_change("amend-header", source).await?;
             held.rollback().await?;
             drop(client);
-            run_until(&services, &db, &expected_events, &watcher_ids).await?;
+            run_until(&services, wait_for_runs(&db, &expected_events, &watcher_ids, None)).await?;
             snapshot_tasks(&db, &expected_events, &watcher_ids, 1, 2).await?;
             check(task_count(&db, kind, source).await? == 2, "a header amendment between parts leaves exactly one task per watcher")?;
         } else {
-            run_until(&services, &db, &expected_events, &watcher_ids).await?;
+            run_until(&services, wait_for_runs(&db, &expected_events, &watcher_ids, None)).await?;
         }
         let retry = db.get().await?.query_one(
             "SELECT EXISTS(SELECT 1 FROM base_queue_jobs WHERE tenant_id=1 AND worker_id='base/watchers-run' AND args->>'event_id'=$1 AND state='completed' AND attempt>=2), (SELECT last_value FROM watchers_followup_retry_probe)",
@@ -490,8 +586,9 @@ async fn main() -> Result<()> {
         if domain == "supply_chain" {
             source_change("reapprove", source).await?;
             source_change("reapprove", source).await?;
+            let last_expected = *expected_events.last().ok_or(Error::Invalid)?;
             let approvals: Vec<i64> = source_events(&db, event, trigger.subject, source).await?
-                .into_iter().filter(|id| !expected_events.contains(id)).collect();
+                .into_iter().filter(|&id| id > last_expected).collect();
             let client = db.get().await?;
             let snapshots = client.query(
                 "SELECT count(*),count(DISTINCT payload->>'part_index'),min((payload->>'part_index')::bigint),max((payload->>'part_index')::bigint),min((payload->>'part_count')::bigint),max((payload->>'part_count')::bigint) FROM base_events WHERE tenant_id=1 AND id=ANY($1) GROUP BY payload->>'snapshot_key'",
@@ -508,7 +605,7 @@ async fn main() -> Result<()> {
             let evaluated: i64 = client.query_one("SELECT count(*) FROM base_watcher_runs WHERE tenant_id=1 AND event_id=ANY($1)", &[&approvals]).await?.get(0);
             check(undelivered==approvals.len() as i64 && evaluated==0, "both approval snapshots wait until after the latest approval")?;
             drop(client);
-            run_until(&services, &db, &approvals, &watcher_ids).await?;
+            run_until(&services, wait_for_runs(&db, &approvals, &watcher_ids, None)).await?;
             snapshot_tasks(&db, &approvals, &watcher_ids, 2, 1).await?;
             watcher_tasks += 4;
             check(task_count(&db, kind, source).await? == watcher_tasks, "two delayed approval snapshots create two new tasks per watcher at one live revision")?;
@@ -558,7 +655,18 @@ async fn main() -> Result<()> {
         grants
             .set_system(&admin, "watchers", "commerce.sales.confirm", Some(true))
             .await?;
-        let definition = json!({"name":"Cancel newly created orders", "watch":"commerce/sales.order_created", "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Proof cancellation"}}], "examples":[], "explanation":"Cancel a new order in the disposable walkthrough."});
+        let created = "commerce/sales.order_created";
+        let backlog = commerce_order(&plans, &admin).await?;
+        let backlog_event = commerce_event(&db, created, 1, backlog, "draft", 1).await?;
+        write(
+            &plans,
+            &admin,
+            "commerce.sales.order.transition",
+            json!({"company_id":1,"id":backlog,"revision":1,"status":"confirmed"}),
+        )
+        .await?;
+        commerce_event(&db, event, 1, backlog, "confirmed", 2).await?;
+        let definition = json!({"name":"Cancel newly created orders", "watch":created, "do":[{"operation":"commerce.sales.order.transition","input":{"status":"cancelled","reason":"Proof cancellation"}}], "examples":[], "explanation":"Cancel a new order in the disposable walkthrough."});
         let watcher = write(&plans, &admin, "base.watchers.draft", definition).await?;
         write(
             &plans,
@@ -567,16 +675,28 @@ async fn main() -> Result<()> {
             json!({"watcher_id":watcher["watcher_id"],"version":watcher["version"]}),
         )
         .await?;
-        let line = json!({"description":"Cancellation proof","quantity":"1","unit":"hour","unit_price":"10.00","tax_code":"ZERO","tax_rate":"0"});
-        let order = write(&plans, &admin, "commerce.sales.order.create", json!({"company_id":1,"customer_kind":"company","customer_code":"company_002","currency_code":"MYR","lines":[line.clone(),line]})).await?;
-        let id = order["id"].as_i64().ok_or(Error::Invalid)?;
-        let events = source_events(&db, "commerce/sales.order_created", "/order_id", id).await?;
-        check(
-            events.len() == 1,
-            "a two-line order records one creation occurrence",
-        )?;
+        let id = commerce_order(&plans, &admin).await?;
+        let creation_event = commerce_event(&db, created, 1, id, "draft", 1).await?;
         let watcher_id = watcher["watcher_id"].as_i64().ok_or(Error::Invalid)?;
-        run_until(&services, &db, &events, &[watcher_id]).await?;
+        run_until(&services, async {
+            wait_for_runs(
+                &db,
+                &[backlog_event],
+                &[watcher_id],
+                Some("event_before_approval"),
+            )
+            .await?;
+            wait_for_runs(&db, &[creation_event], &[watcher_id], None).await
+        })
+        .await?;
+        let untouched: bool = db.get().await?.query_one(
+            "SELECT status='confirmed' AND revision=2 FROM commerce_sales_documents WHERE tenant_id=1 AND id=$1",
+            &[&backlog],
+        ).await?.get(0);
+        check(
+            untouched,
+            "the backlogged creation left the previously confirmed order unchanged",
+        )?;
         let row = db
             .get()
             .await?
@@ -589,6 +709,7 @@ async fn main() -> Result<()> {
             row.get::<_, String>(0) == "cancelled" && row.get::<_, i64>(1) == 2,
             "the creation watcher cancelled the order once",
         )?;
+        commerce_event(&db, event, 1, id, "cancelled", 2).await?;
     }
     println!("every {domain} watcher follow-up check passed");
     Ok(())

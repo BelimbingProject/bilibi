@@ -733,7 +733,7 @@ impl Watchers {
         tx.mutate(move |sql| Box::pin(async move {
             let previous = sql.query_one("SELECT id,approved_by,approved_at::text,catalog_digest FROM base_watcher_versions WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3", &[&tenant, &watcher, &number]).await?;
             let version: i64 = sql.query_one(
-                "UPDATE base_watcher_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,now()),catalog_digest=COALESCE(catalog_digest,$5) WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3 RETURNING id",
+                "UPDATE base_watcher_versions SET approved_by=COALESCE(approved_by,$4),approved_at=COALESCE(approved_at,clock_timestamp()),catalog_digest=COALESCE(catalog_digest,$5) WHERE tenant_id=$1 AND watcher_id=$2 AND number=$3 RETURNING id",
                 &[&tenant, &watcher, &number, &user, &catalog_digest],
             ).await?.get(0);
             let old: Option<i64> = sql.query_one(

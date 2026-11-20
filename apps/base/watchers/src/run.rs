@@ -115,8 +115,21 @@ impl Subscribe for Triggers {
             };
             let (cause_id, depth) = (cause.map(|c| c.0), cause.map_or(1, |c| c.1 + 1));
             let rows = sql.query(
-                "INSERT INTO base_watcher_runs(tenant_id,watcher_id,version_id,event_id,event_name,subject,cause_run_id,depth,state,logical_event) SELECT tenant_id,id,active_version_id,$3,$2::varchar,$4,$5,$6,'queued',$7 FROM base_watchers WHERE tenant_id=$1 AND trigger=$2::varchar AND active_version_id IS NOT NULL AND disabled_at IS NULL ORDER BY id ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING RETURNING id,watcher_id",
-                &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth, &logical_event],
+                "WITH candidates AS (
+                    SELECT w.id,w.active_version_id,$8::text::timestamptz > v.approved_at AS eligible
+                    FROM base_watchers w JOIN base_watcher_versions v
+                      ON v.tenant_id=w.tenant_id AND v.watcher_id=w.id AND v.id=w.active_version_id
+                    WHERE w.tenant_id=$1 AND w.trigger=$2::varchar AND w.disabled_at IS NULL
+                 )
+                 INSERT INTO base_watcher_runs(tenant_id,watcher_id,version_id,event_id,event_name,subject,cause_run_id,depth,state,logical_event,reason,finished_at)
+                 SELECT $1,id,active_version_id,$3,$2::varchar,$4,$5,$6,
+                        CASE WHEN eligible THEN 'queued' ELSE 'refused' END,$7,
+                        CASE WHEN eligible THEN NULL ELSE 'event_before_approval' END,
+                        CASE WHEN eligible THEN NULL ELSE now() END
+                 FROM candidates ORDER BY id
+                 ON CONFLICT (tenant_id,version_id,event_id) DO NOTHING
+                 RETURNING id,watcher_id,state,reason",
+                &[&event.tenant, &event.name, &event.id, &subject, &cause_id, &depth, &logical_event, &event.recorded_at],
             ).await?;
             Ok(rows
                 .iter()
@@ -124,7 +137,7 @@ impl Subscribe for Triggers {
                     kind: "base/watchers.run".into(),
                     id: row.get(0),
                     old: Value::Null,
-                    new: json!({"watcher": row.get::<_, i64>(1), "event": event.id, "subject": subject, "depth": depth, "state": "queued"}),
+                    new: json!({"watcher": row.get::<_, i64>(1), "event": event.id, "subject": subject, "depth": depth, "state": row.get::<_, &str>(2), "reason": row.get::<_, Option<&str>>(3)}),
                 })
                 .collect())
         })
@@ -132,7 +145,7 @@ impl Subscribe for Triggers {
     fn handoff(&self, event: &Event, changes: &[Change]) -> Option<Handoff> {
         changes
             .iter()
-            .any(|c| c.kind == "base/watchers.run")
+            .any(|c| c.kind == "base/watchers.run" && c.new["state"] == "queued")
             .then(|| Handoff {
                 worker: crate::ADMISSION_WORKER,
                 principal: crate::PRINCIPAL,

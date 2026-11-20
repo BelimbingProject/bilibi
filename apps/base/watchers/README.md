@@ -44,7 +44,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 **Recorded with the trigger's save, run after it commits, never inside it.**
 
 1. The owner records its event in its `MutationTransaction` (`base/events`).
-2. Events hands it to the `base/watchers.triggers` subscriber. In the delivery transaction it writes one `queued` run per watcher switched on for that event in the tenant, pinned to the approved version, and hands the event to the `base/watchers-admit` worker (`Subscribe::handoff`).
+2. Events hands it to the `base/watchers.triggers` subscriber. In the delivery transaction it writes one run per watcher switched on for that event in the tenant, pinned to the approved version. Events recorded after approval hand queued work to the `base/watchers-admit` worker (`Subscribe::handoff`); older events write a refusal directly to the run log.
 3. The worker runs as the `watchers` principal. Per run it checks the chain budget, the version and the switch, reads the conditions' fields through Grid, evaluates them and records `matched` (with the facts and each condition's outcome) or `no_match`.
 4. Before each outstanding action, including after a retry, the worker rechecks the principal's current record and field access. The evaluated record version is bound into the action; its owner checks it under the record lock and refuses a changed record (`record_changed`). Successful actions advance the next action's expected version in the same transaction; the original version remains in the saved facts. Each action calls the owner's contract through the job door (`JobContracts::commit`) in a transaction that also writes its receipt, keyed `(tenant, version, event, position)`. A retry after a crash finds the receipt and does nothing twice.
 5. The run ends `done`, `partial` or `refused`, with a bounded reason code.
@@ -53,6 +53,7 @@ A draft uses `watch` for the event, optional `if` for its filter, and `do` for o
 | --- | --- |
 | `chain_budget` | Another watcher's action started this run and the chain reached `watchers.chain_depth` |
 | `stale_version`, `watcher_off` | The watcher changed before the run acted |
+| `event_before_approval` | The event was already recorded when this watcher version was approved |
 | `read_refused`, `restricted_field` | The principal may not read the record or a condition's field |
 | `subject_unavailable` | The record is gone or out of reach |
 | `action_limit` | The watcher is over the configured action count or actions-per-run limit |
