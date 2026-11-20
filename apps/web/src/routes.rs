@@ -1,13 +1,13 @@
 //! Discovered HTTP pages and downloads: validate/bind once, authorize before
 //! owner dispatch, on every request.
-use crate::{origin, token, App, HttpError};
+use crate::{origin, sender_admission::SenderAdmission, token, App, HttpError};
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, on, MethodFilter},
-    Router,
+    Extension, Router,
 };
 use bilibi_database::{Error, Result};
 use bilibi_module_registry::{
@@ -19,7 +19,7 @@ use bilibi_module_registry::{
 };
 use bilibi_tenancy::PortalScope;
 use bilibi_ui::{download::DownloadRequest, page::PageChrome, page::PageRequest, StatusKind};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 type PageService = bilibi_ui::page::PageService<bilibi_security::Scope, Error>;
 type DownloadService = bilibi_ui::download::DownloadService<bilibi_security::Scope, Error>;
@@ -31,6 +31,7 @@ pub struct BoundRoute {
     pub route: &'static Route,
     pub page: Arc<PageService>,
     pub sections: Vec<&'static PageSection>,
+    sender_admission: Option<Arc<SenderAdmission>>,
 }
 /// A `Download` contribution with its owner service. Downloads share the page
 /// routes' path rules and may not intersect a page or a host path.
@@ -138,6 +139,10 @@ pub fn bind(services: &Services) -> Result<Pages> {
                 route,
                 page: services.get(route.service)?,
                 sections: Vec::new(),
+                sender_admission: route
+                    .access
+                    .sender_budget()
+                    .map(|budget| Arc::new(SenderAdmission::new(budget))),
             });
         }
     }
@@ -186,7 +191,7 @@ fn bind_page_sections(services: &Services, staff: &mut [BoundRoute]) -> Result<(
         });
         let Some(page) = page.filter(|page| {
             page.route.framed
-                && !matches!(page.route.access.base(), Access::Public)
+                && !matches!(page.route.access.base(), Access::Public { .. })
                 && !page.route.path.contains('{')
                 && page.page.0.redirect(page.route.operation).is_none()
         }) else {
@@ -276,7 +281,7 @@ fn validate_access(
         "{} at {}:{}",
         entry.id, entry.provenance.source, entry.provenance.line
     );
-    if matches!(inner, Access::Public | Access::StepUp { .. }) {
+    if matches!(inner, Access::Public { .. } | Access::StepUp { .. }) {
         return Err(invalid(format!(
             "{at} steps up a public or already stepped-up access"
         )));
@@ -418,10 +423,11 @@ pub fn install(mut router: Router<App>, routes: &Pages, downloads: &Downloads) -
                 move |State(app): State<App>,
                       uri: Uri,
                       headers: HeaderMap,
+                      peer: Option<Extension<ConnectInfo<SocketAddr>>>,
                       Path(path): Path<HashMap<String, String>>,
                       Query(query): Query<HashMap<String, String>>,
                       body: Bytes| {
-                    dispatch(app, bound, uri, headers, path, query, body)
+                    dispatch(app, bound, uri, headers, peer, path, query, body)
                 },
             ),
         );
@@ -560,7 +566,7 @@ async fn check_base(
     access: Access,
     credential: Option<&str>,
 ) -> Result<Option<bilibi_security::Scope>> {
-    if matches!(access, Access::Public) {
+    if matches!(access, Access::Public { .. }) {
         return Ok(None);
     }
     let scope = app
@@ -585,7 +591,7 @@ async fn check_base(
         Access::StepUp { .. } => return Err(Error::Internal),
         // Portal pages are bound apart; a staff session never opens one.
         Access::Portal(_) => return Err(Error::Forbidden),
-        Access::Public => unreachable!(),
+        Access::Public { .. } => unreachable!(),
     }
     Ok(Some(scope))
 }
@@ -609,10 +615,20 @@ async fn dispatch(
     bound: BoundRoute,
     uri: Uri,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     path: HashMap<String, String>,
     query: HashMap<String, String>,
     body: Bytes,
 ) -> std::result::Result<Response, HttpError> {
+    if let Some(admission) = &bound.sender_admission {
+        let sender = crate::api::sender_key(crate::api::client_address(
+            peer.as_ref().map(|Extension(ConnectInfo(peer))| *peer),
+            &headers,
+        ));
+        if !admission.allow(&sender) {
+            return Ok((StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response());
+        }
+    }
     let credential = token(&headers).ok();
     let scope = match admit(
         &app,

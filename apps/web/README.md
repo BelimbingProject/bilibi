@@ -90,6 +90,8 @@ The adapter receives the operation, proven optional scope, path/query values,
 bounded request body and presentation flag. HTML escaping belongs to the owner.
 An authenticated page uses the workspace shell by default. A page operation may return `PageChrome::StandaloneReview`; Web then keeps the same guarded live transport, CSRF and session binding but wraps it in Base UI's credential-style review layout with the Bilibi mark and instance banner. Core Agent Access uses this for OAuth consent.
 
+A public GET page that needs sender admission declares `Access::Public { sender_budget: Some(SenderBudget { per_minute, per_hour }) }`. Web derives the sender exactly as the Visitor edge does (IPv4 address or IPv6 /64, through the trusted-proxy boundary), checks the budget before calling the page owner and answers excess traffic with `429 Too many requests`; the owner never receives an address. `sender_budget: None` keeps the page unthrottled. Each route has its own bounded fixed-window counters in the server process, and allowed traffic performs no database write.
+
 Framing comes from `Sec-Fetch-Dest: iframe` (or `frame`) on each HTTP navigation,
 never a cookie, account setting or query parameter. A route with `framed: false`
 returns 403 inside a frame. Allowed pages use Base UI's `Framed` template; no shell, menu or bell is loaded.
@@ -136,6 +138,7 @@ A subscription's `Change` wakes only the sockets of its tenant (and of its recip
 inventory::submit! { Contribution::new(CREDENTIAL_PATHS, "email.click", provenance!(), &CredentialPath { path: "/email/c/{token}" }) }
 inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenance!(), &PublicEndpoint {
     method: Method::Get, path: "/email/c/{token}", service: "cx/email.links", operation: "click",
+    post_sender_budget: None,
 }) }
 ```
 
@@ -148,9 +151,9 @@ inventory::submit! { Contribution::new(PUBLIC_ENDPOINTS, "email.click", provenan
 - **One refusal.** Any refusal from the owner (`NotFound`, `Invalid`, `Forbidden`, ...) and a framed request (`Sec-Fetch-Dest: iframe`) get the same bare `404 Not found` (the error card for a browser), so an unknown token and a known one with an unusable target look alike. A server fault is a 500, logged with the token redacted.
 - **Same answer for unknown tokens.** Where a different answer would reveal which tokens exist, answer as for a known one: the pixel for any token, 204 for any one-click POST whose body says `List-Unsubscribe=One-Click`.
 - **Token lookup.** Store a digest of the token (SHA-256) and look the row up by digest, as Session does; never compare the raw token in SQL or with `==`.
-- **Rate limit.** Each sender (the peer, or the client behind a loopback proxy, as for sign-in) gets `public_endpoints.sender_per_minute` requests per endpoint per minute on each server (Base Integration setting, default 600); more get `429`. The counter is the endpoints' own, apart from sign-in's.
+- **Rate limit.** Each sender (IPv4 address or IPv6 /64, through the same trusted-proxy boundary as Visitor) gets `public_endpoints.sender_per_minute` requests per endpoint per minute on each server (Base Integration setting, default 600); more get `429`. A POST endpoint may also declare `post_sender_budget: Some(SenderBudget { per_minute, per_hour })` for a tighter route-specific budget. GET endpoints use the global minute limit. Each endpoint has its own bounded fixed-window counters in the server process, and allowed traffic performs no database write. The owner never receives the sender address.
 
-`apps/web/examples/public-endpoint-reference.rs` is the running specimen; `--refusals` prints each boot refusal without a database.
+`apps/web/examples/public-endpoint-reference.rs` is the running specimen; `--sender-admission` proves GET and POST refusal, minute and hour limits, sender isolation and minute reset, while `--refusals` prints each boot refusal without a database.
 
 # Visitor edge (`src/visitor.rs`)
 
