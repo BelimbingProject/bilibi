@@ -1,4 +1,4 @@
-//! `/customer-portal` (`core/portal.pages`, operation
+//! [`crate::STAFF_PATH`] (`core/portal.pages`, operation
 //! `portal`): the tenant's customer portal site (and whether it is
 //! on), its invitations and the customer accounts they made.
 //! The page follows the tenants list of
