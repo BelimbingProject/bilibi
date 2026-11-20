@@ -1,4 +1,4 @@
-//! `/customer-access` (`core/portal.pages`, operation
+//! `/customer-portal` (`core/portal.pages`, operation
 //! `portal`): the tenant's customer portal site (and whether it is
 //! on), its invitations and the customer accounts they made.
 //! The page follows the tenants list of
@@ -992,7 +992,7 @@ impl PortalPage {
         .map_err(|_| Error::Internal)
         .map(|html| match &zone {
             Some(zone) => zone
-                .wrap("customer-access-drop", Html::raw(html))
+                .wrap("customer-portal-drop", Html::raw(html))
                 .to_string(),
             None => html,
         })

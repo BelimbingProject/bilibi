@@ -51,9 +51,9 @@ const PAGES: &str = "core/portal.pages";
 const PORTAL_PAGES: &str = "core/portal.portal";
 
 /// See the portal site and the invitations.
-pub const VIEW: &str = "admin.customer-access.view";
+pub const VIEW: &str = "admin.portal.view";
 /// Set the portal site, invite customers and revoke invitations.
-pub const MANAGE: &str = "admin.customer-access.manage";
+pub const MANAGE: &str = "admin.portal.manage";
 /// A customer's own portal home and account.
 pub const PORTAL_ACCOUNT: &str = "portal.account.view";
 /// The portal role every invited customer is given.
@@ -65,7 +65,7 @@ pub const INVITATION_DAYS_KEY: &str = "customer_portal.invitation_days";
 /// confirmed (installation-wide: it is read before anyone is signed in).
 pub const REGISTRATION_DAYS_KEY: &str = "customer_portal.registration_days";
 
-pub const STAFF_PATH: &str = "/customer-access";
+pub const STAFF_PATH: &str = "/customer-portal";
 pub const HOME_PATH: &str = "/portal";
 pub const ACCOUNT_PATH: &str = "/portal/account";
 /// The customer's authenticator page and step-up prompt. Core User names
