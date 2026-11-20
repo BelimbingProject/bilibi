@@ -2,13 +2,14 @@
 //! and the one authenticated call every command makes.
 use crate::{
     now, option,
-    refusal::{failed, settled},
+    refusal::{settled, sign_in_failed},
     store::{Pending, Saved},
     toon::Doc,
     wire::{self, Answer},
     Cli, Done, Problem, Reply, DEFAULT_WAIT, DEVICE_GRANT, REFRESH_MARGIN,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 impl Cli {
@@ -21,6 +22,13 @@ impl Cli {
     pub(crate) fn not_signed_in() -> Problem {
         Problem::new("NOT_SIGNED_IN", "This machine is not signed in to a Bilibi")
             .help("Run `bilibi-axi login <address>` with the Bilibi's address, such as https://bilibi.example.com")
+    }
+
+    /// The address and the sign-in a plan ref is bound to.
+    pub(crate) fn bound_to(&self) -> Result<(String, String), Problem> {
+        let name = self.name().ok_or_else(Self::not_signed_in)?;
+        let saved = self.store.load(&name)?.ok_or_else(Self::not_signed_in)?;
+        Ok((saved.origin, saved.sign_in))
     }
 
     /// Rotates the refresh token. The caller holds the store's lock, so the
@@ -54,7 +62,7 @@ impl Cli {
                 )),
             );
         }
-        Err(failed(&saved.origin, &answer))
+        Err(sign_in_failed(&saved.origin, &answer))
     }
 
     /// Takes the tokens of a token response; false when it is not one.
@@ -218,7 +226,7 @@ impl Cli {
             .await
             .map_err(unreachable)?;
         if answer.status != 200 {
-            return Err(failed(&origin, &answer));
+            return Err(sign_in_failed(&origin, &answer));
         }
         let text = |name: &str| {
             answer
@@ -256,6 +264,7 @@ impl Cli {
                 origin: origin.clone(),
                 server_name: server_name.to_owned(),
                 client_id: client_id.to_owned(),
+                sign_in: String::new(),
                 access_token: None,
                 access_expires_at: 0,
                 refresh_token: None,
@@ -322,6 +331,11 @@ impl Cli {
                             "The sign-in answer was not understood",
                         ));
                     }
+                    // This approval, and no other, from here on.
+                    latest.sign_in = Sha256::digest(pending.device_code.as_bytes())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
                     self.store.save(&latest)?;
                     drop(_lock);
                     self.server = Some(name);
@@ -355,7 +369,7 @@ impl Cli {
                         saved.origin
                     )));
                 }
-                _ => return Err(failed(&saved.origin, &answer)),
+                _ => return Err(sign_in_failed(&saved.origin, &answer)),
             }
             if now() + interval > deadline {
                 let left = pending.expires_at.saturating_sub(now());

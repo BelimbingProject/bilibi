@@ -95,10 +95,16 @@ pub struct ClientRegistration {
 }
 impl ClientRegistration {
     pub(crate) fn metadata(&self) -> Result<Value, OAuthError> {
-        let grants = self
+        let mut grants = self
             .grant_types
             .clone()
             .unwrap_or_else(|| vec!["authorization_code".into(), "refresh_token".into()]);
+        // Every connection is issued a refresh token, so the registration
+        // says so whatever the app listed: the metadata returned is the
+        // grant set in force, not a narrower one the server would not honour.
+        if !grants.iter().any(|kind| kind == "refresh_token") {
+            grants.push("refresh_token".into());
+        }
         // An app with a browser callback asks for the authorization code
         // grant; one without (a cloud app, a bot) asks for the device grant.
         let code = grants.iter().any(|kind| kind == "authorization_code");

@@ -45,15 +45,17 @@ commands[11]:
   guide <key>                     a guide's text
   read <key> [field=value ...] [--input <json|@file|->]
   plan <key> [field=value ...] | plan --file <path|->     check writes; prints a ref
-  commit <ref> <key> [field=value ...] | commit <ref> --file <path|->
+  commit <ref> <key> [field=value ...] | commit <ref> --file <path|->   [--code-stdin]
 flags[3]:
   --json           print the server's JSON instead of TOON
   --server <name>  use this saved sign-in instead of the last one
   --help
-environment[3]:
+environment[2]:
   BILIBI_AXI_HOME            folder of saved sign-ins (default ~/.config/bilibi-axi)
   BILIBI_AGENT_SELF_REPORT   harness/model-version-effort, sent with every request
-  BILIBI_STEP_UP_CODE        the person's current 2FA code, for a commit that asked for one
+2fa:
+  a commit that answers STEP_UP_REQUIRED needs the person's current 2FA code: run it again
+  with --code-stdin and give the code on standard input (never as an argument or a variable)
 values:
   field=value reads the value as JSON when it parses (3, true, [1,2]) and as text otherwise;
   write field='\"3\"' for the text 3. A --file is a JSON list of {\"key\":..,\"input\":{..}} steps.
@@ -67,8 +69,6 @@ pub struct Invocation {
     pub home: PathBuf,
     /// `BILIBI_AGENT_SELF_REPORT`.
     pub self_report: Option<String>,
-    /// `BILIBI_STEP_UP_CODE`.
-    pub step_up_code: Option<String>,
     /// Standard input, read only when an argument is `-`.
     pub stdin: Option<String>,
 }
@@ -145,7 +145,6 @@ pub async fn run(invocation: Invocation) -> Outcome {
     }
     let done = match Cli::new(&mut args, invocation.home, invocation.self_report) {
         Ok(mut cli) => {
-            cli.step_up_code = invocation.step_up_code;
             cli.stdin = invocation.stdin;
             cli.dispatch(args).await
         }
@@ -231,7 +230,6 @@ struct Cli {
     store: Store,
     /// `--server`, else the last sign-in.
     server: Option<String>,
-    step_up_code: Option<String>,
     stdin: Option<String>,
 }
 
@@ -245,7 +243,6 @@ impl Cli {
             server: option(args, "--server")?,
             wire: Wire::new(self_report)?,
             store: Store::new(home),
-            step_up_code: None,
             stdin: None,
         })
     }

@@ -66,14 +66,17 @@ struct Cli {
 impl Cli {
     /// Runs the command with `--json` and returns what it printed and its exit code.
     async fn json(&mut self, args: &[&str]) -> Outcome<(Value, u8)> {
+        self.json_with(args, None).await
+    }
+    /// `json` with something on standard input.
+    async fn json_with(&mut self, args: &[&str], stdin: Option<&str>) -> Outcome<(Value, u8)> {
         let mut args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
         args.push("--json".into());
         let outcome = run(Invocation {
             args,
             home: self.home.clone(),
             self_report: Some("two-doors/walkthrough".into()),
-            step_up_code: None,
-            stdin: None,
+            stdin: stdin.map(str::to_owned),
         })
         .await;
         self.printed.push_str(&outcome.stdout);
@@ -85,7 +88,6 @@ impl Cli {
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             home: self.home.clone(),
             self_report: None,
-            step_up_code: None,
             stdin: None,
         })
         .await;
@@ -364,11 +366,21 @@ async fn main() -> Outcome {
         ])
         .await?;
     checks.expect(
-        "a changed operation is a stale ref, and nothing is sent",
+        "a changed operation is a stale ref, and nothing is written",
         exit == 1 && stale["code"] == "STALE_REF",
         &stale,
     );
-    let (committed, exit) = cli
+    // The ref names the sign-in it was reviewed under: the same account,
+    // signed in again elsewhere, cannot commit under it.
+    let mut again = sign_in(
+        &access,
+        &admin,
+        &origin,
+        &scratch.join("admin-again"),
+        "two doors: second sign-in",
+    )
+    .await?;
+    let (crossed, exit) = again
         .json(&[
             "commit",
             &reference,
@@ -376,6 +388,57 @@ async fn main() -> Outcome {
             "name=Two Doors Trading",
             "status=active",
         ])
+        .await?;
+    checks.expect(
+        "a ref does not cross to another sign-in",
+        exit == 1 && crossed["code"] == "STALE_REF",
+        &crossed,
+    );
+    // Only the whole reviewed set passes: one step of a two-step review is another plan.
+    let step = |name: &str| json!({"key": write_key, "input": {"name": name, "status": "active"}});
+    let (both, one) = (scratch.join("both.json"), scratch.join("one.json"));
+    std::fs::write(
+        &both,
+        json!([step("Two Doors North"), step("Two Doors South")]).to_string(),
+    )?;
+    std::fs::write(&one, json!([step("Two Doors North")]).to_string())?;
+    let (pair, _) = cli
+        .json(&["plan", "--file", &both.to_string_lossy()])
+        .await?;
+    let pair_ref = pair["ref"].as_str().unwrap_or_default().to_owned();
+    let (partial, exit) = cli
+        .json(&["commit", &pair_ref, "--file", &one.to_string_lossy()])
+        .await?;
+    checks.expect(
+        "part of a reviewed set is a stale ref",
+        pair_ref.len() == 64 && exit == 1 && partial["code"] == "STALE_REF",
+        &partial,
+    );
+    let written: i64 = {
+        let client = db.get().await?;
+        let row = client
+            .query_one(
+                "SELECT count(*) FROM companies WHERE name LIKE 'Two Doors%'",
+                &[],
+            )
+            .await?;
+        row.get(0)
+    };
+    checks.expect("no refused commit wrote anything", written == 0, written);
+    // The person's 2FA code travels on standard input and is never printed.
+    const CODE: &str = "731964-two-doors-code";
+    let (committed, exit) = cli
+        .json_with(
+            &[
+                "commit",
+                &reference,
+                write_key,
+                "name=Two Doors Trading",
+                "status=active",
+                "--code-stdin",
+            ],
+            Some(CODE),
+        )
         .await?;
     let id = committed
         .pointer("/results/0/result/result/record/id")
@@ -450,6 +513,106 @@ async fn main() -> Outcome {
         "no token in anything the command line printed",
         secrets.len() == 2 && secrets.iter().all(|secret| !cli.printed.contains(secret)),
         "a token was printed",
+    );
+    checks.expect(
+        "the 2FA code given on standard input is not printed",
+        !cli.printed.contains(CODE),
+        "the code was printed",
+    );
+
+    println!("== a sign-in answer that is not one prints no credential");
+    // A stand-in for a server that answers the token endpoint badly: first a
+    // 200 that carries tokens but is not a whole token response, then a
+    // refusal that repeats them. Neither may reach the output.
+    const LEAK: &str = "LEAK-two-doors";
+    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let stub_origin = format!("http://{}", stub.local_addr()?);
+    tokio::spawn(async move {
+        let bodies = [
+            (
+                "200 OK",
+                json!({"access_token": format!("{LEAK}-access"), "refresh_token": format!("{LEAK}-refresh")}),
+            ),
+            (
+                "400 Bad Request",
+                json!({"error": "invalid_request", "access_token": format!("{LEAK}-access"), "refresh_token": format!("{LEAK}-refresh"), "id_token": format!("{LEAK}-id")}),
+            ),
+        ];
+        for (status, body) in bodies {
+            let Ok((mut stream, _)) = stub.accept().await else {
+                return;
+            };
+            // The whole request: its head, then the body its length names.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let Ok(read) = stream.read(&mut chunk).await else {
+                    return;
+                };
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let Some((head, sent)) = text.split_once("\r\n\r\n") else {
+                    if read == 0 {
+                        break;
+                    }
+                    continue;
+                };
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|length| length.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if sent.len() >= length || read == 0 {
+                    break;
+                }
+            }
+            let body = body.to_string();
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    // A saved sign-in whose access token has run out, so the next command refreshes.
+    let stub_home = scratch.join("stub");
+    let mut stub_cli = Cli {
+        home: stub_home.clone(),
+        printed: String::new(),
+    };
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&stub_home)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let saved = json!({"origin": stub_origin, "server_name": "stub", "client_id": "bilibi-native", "sign_in": "stub", "access_token": null, "access_expires_at": 0, "refresh_token": "spent", "pending": null});
+        std::io::Write::write_all(
+            &mut options.open(stub_home.join("stub.json"))?,
+            saved.to_string().as_bytes(),
+        )?;
+        std::io::Write::write_all(&mut options.open(stub_home.join("current"))?, b"stub")?;
+    }
+    let (malformed, exit_malformed) = stub_cli.json(&["hello"]).await?;
+    let (refused, exit_refused) = stub_cli.json(&["hello"]).await?;
+    checks.expect(
+        "a token response that is not one is a plain protocol error",
+        exit_malformed == 1 && malformed["code"] == "NOT_BILIBI",
+        &malformed,
+    );
+    checks.expect(
+        "a refusal that repeats tokens prints its code alone",
+        exit_refused == 1 && refused["code"] == "INVALID_REQUEST",
+        &refused,
+    );
+    checks.expect(
+        "neither answer's tokens reach the output",
+        !stub_cli.printed.contains(LEAK),
+        "a token from a malformed answer was printed",
     );
     #[cfg(unix)]
     {

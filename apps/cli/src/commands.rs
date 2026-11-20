@@ -23,13 +23,26 @@ fn canonical(value: &Value) -> Value {
     }
 }
 
-/// The ref `plan` prints for its ordered operations and `commit` asks back:
-/// commit sends only operations that still hash to the ref the person
-/// reviewed. It names what was reviewed; the server still rechecks every
-/// operation when it commits.
-fn plan_ref(operations: &Value) -> String {
-    let digest = Sha256::digest(canonical(operations).to_string().as_bytes());
-    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+/// The ref `plan` prints and `commit` asks back: the whole SHA-256 of what
+/// the person reviewed and where. It binds the address and the sign-in the
+/// plan was made with, the ordered operations, and the server's review
+/// itself (every preview, the company it resolved and the instance), so
+/// `commit` goes ahead only when the same sign-in would still get the same
+/// review for the same operations. The digest is not cut short: a ref that
+/// two different plans share must not be findable. The server rechecks every
+/// operation when it commits whatever the ref says.
+fn plan_ref(address: &str, sign_in: &str, operations: &Value, review: &Value) -> String {
+    let bound = json!({
+        "version": 1,
+        "address": address,
+        "sign_in": sign_in,
+        "operations": operations,
+        "review": review,
+    });
+    Sha256::digest(canonical(&bound).to_string().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl Cli {
@@ -335,7 +348,6 @@ impl Cli {
 
     pub(crate) async fn plan(&mut self, args: Vec<String>) -> Done {
         let operations = self.operations(args)?;
-        let reference = plan_ref(&operations);
         let first = operations
             .pointer("/0/key")
             .and_then(Value::as_str)
@@ -360,11 +372,13 @@ impl Cli {
         let mut raw = preview.clone();
         let mut doc = Doc::default().put("valid", valid);
         let help = if valid {
+            let (address, sign_in) = self.bound_to()?;
+            let reference = plan_ref(&address, &sign_in, &operations, &preview);
             raw["ref"] = json!(reference);
-            doc = doc.put("ref", reference.clone());
+            doc = doc.put("ref", reference);
             vec![
                 "Show the person this whole review, naming the instance, and wait for their explicit approval".to_owned(),
-                format!("Then run `bilibi-axi commit {reference}` followed by the same operation arguments; changed arguments are refused as a stale ref"),
+                "Then run `bilibi-axi commit <ref>` followed by the same operation arguments. It is refused as a stale ref if the operations, the sign-in or what Bilibi would write has changed since".to_owned(),
             ]
         } else {
             vec![
@@ -386,16 +400,47 @@ impl Cli {
             ));
         }
         let reference = args.remove(0);
+        // The person's 2FA code comes on standard input: never an argument,
+        // never a variable of the environment.
+        let code = if flag(&mut args, "--code-stdin") {
+            let text = self.stdin.take().unwrap_or_default();
+            let code = text.lines().next().unwrap_or_default().trim().to_owned();
+            if code.is_empty() {
+                return Err(Problem::usage(
+                    "--code-stdin reads the 2FA code from standard input, and nothing was given there",
+                ));
+            }
+            Some(code)
+        } else {
+            None
+        };
         let operations = self.operations(args)?;
-        if plan_ref(&operations) != reference {
+        // Ask for the review again and commit only if it is the one the
+        // person saw: same operations, same sign-in, same answer.
+        let review = self
+            .api("/plans", Some(&json!({"operations": operations})))
+            .await?;
+        if review.get("valid").and_then(Value::as_bool) != Some(true) {
+            return Err(Problem::new(
+                "PLAN_REJECTED",
+                "Bilibi no longer accepts this plan; nothing was written",
+            )
+            .with(
+                "results",
+                review.get("results").cloned().unwrap_or_default(),
+            )
+            .help("Run `bilibi-axi plan` again and show the person the new review"));
+        }
+        let (address, sign_in) = self.bound_to()?;
+        if plan_ref(&address, &sign_in, &operations, &review) != reference {
             return Err(Problem::new(
                 "STALE_REF",
-                format!("These operations are not the ones reviewed as {reference}"),
+                "This is not what was reviewed under that ref: the operations, the sign-in, or what Bilibi would now write has changed. Nothing was written",
             )
             .help("Run `bilibi-axi plan` with these operations, show the person the new review, and commit with the ref it prints"));
         }
         let mut body = json!({"operations": operations});
-        if let Some(code) = &self.step_up_code {
+        if let Some(code) = code {
             body["step_up_code"] = json!(code);
         }
         let committed = self.api("/plans/commit", Some(&body)).await?;

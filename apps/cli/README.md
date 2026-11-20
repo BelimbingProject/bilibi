@@ -31,7 +31,7 @@ bilibi-axi hello
 | `guide <key>` | A guide's text | `GET /api/v1/guides/{key}` |
 | `read <key> [field=value ...] [--input <json\|@file\|->]` | Calls a read operation | `POST /api/v1/operations/{key}/call` |
 | `plan <key> [field=value ...]` or `plan --file <path\|->` | Checks writes without writing; prints the review and a `ref` | `POST /api/v1/plans` |
-| `commit <ref> <same operations>` | Writes the reviewed operations | `POST /api/v1/plans/commit` |
+| `commit <ref> <same operations> [--code-stdin]` | Asks for the review again, and writes when it is still the one reviewed | `POST /api/v1/plans`, then `POST /api/v1/plans/commit` |
 
 - **Values.** `field=value` reads the value as JSON when it parses (`3`, `true`, `[1,2]`) and as text otherwise; write `field='"3"'` for the text 3. A `--file` is a JSON list of `{"key":…,"input":{…}}` steps, as `plan` takes them everywhere.
 - **Output** is [TOON](https://toonformat.dev): `key: value` lines, `name[N]{columns}:` tables and a `help[N]:` list of the next commands. `--json` prints the server's JSON instead.
@@ -40,9 +40,17 @@ bilibi-axi hello
 
 ### Reviewed writes and the ref
 
-`plan` prints the server's review and a `ref`, a short hash of the ordered operations. `commit` takes that ref and the same operations again; operations that no longer hash to the ref are refused as `STALE_REF` before anything is sent, so what is committed is what the person reviewed. The server still rechecks every operation when it commits: the ref is a convenience of this door, not an approval Bilibi relies on.
+`plan` prints the server's review and a `ref`: the whole SHA-256 (64 hex characters) of what was reviewed and where.
 
-When a commit answers `STEP_UP_REQUIRED`, ask the person for their current 2FA code and run the same commit with `BILIBI_STEP_UP_CODE` set to it.
+| The ref binds | So that |
+| --- | --- |
+| The address and the sign-in the plan was made with | A ref cannot be used on another Bilibi, or under another sign-in to the same one |
+| The ordered operations and their inputs | A changed, added or dropped step is another plan |
+| The server's review itself: every preview, the company it resolved, the instance | A record that changed since, or a different company, is another plan |
+
+`commit <ref> <same operations>` asks the server for the review again and goes ahead only when all of that still gives the same ref; otherwise it answers `STALE_REF` and writes nothing. Nothing about a plan is kept on disk. The server still rechecks every operation when it commits: the ref is this door's guard, not an approval Bilibi relies on.
+
+**2FA.** When a commit answers `STEP_UP_REQUIRED`, ask the person for their current code and run the same commit with `--code-stdin`, giving the code on standard input (`bilibi-axi commit <ref> … --code-stdin`, then the code and Enter, or a pipe). The code is never an argument and never an environment variable, so it reaches no process list, shell history or inherited environment.
 
 ### What a failure means
 
@@ -56,9 +64,10 @@ When a commit answers `STEP_UP_REQUIRED`, ask the person for their current 2FA c
 
 ## The saved sign-in
 
-**A token never appears in an argument, an environment variable, a log line or an error.** It arrives in a token response and leaves in an `Authorization` header to the address it was issued by.
+**A token never appears in an argument, an environment variable, a log line or an error.** It arrives in a token response and leaves in an `Authorization` header to the address it was issued by. An answer from the sign-in endpoints prints its error code and nothing else, however it is shaped, and no error prints a field whose name says token, secret, password or code.
 
 - **Where:** `BILIBI_AXI_HOME`, else `bilibi-axi` under `XDG_CONFIG_HOME` (or `~/.config`). The folder is `0700` and each file `0600`. A file other accounts can read is refused, with the `chmod` to run.
+- **Linux and macOS only.** On a system where the program cannot make a file owner-only this way (Windows outside WSL), it saves no sign-in and says so, rather than write one other accounts might read.
 - **Writes** replace the file whole: a new `0600` file, then a rename.
 - **One refresh at a time.** Bilibi's refresh tokens are single-use, and presenting a spent one ends the connection. Every read-refresh-write runs under a lock file, so two commands at once never spend the same one.
 - **One address.** Tokens go only to the address given to `login`, which must be the address that Bilibi states for itself (`/.well-known/bilibi`). The client follows no redirect and refuses plain HTTP except to this computer.
@@ -71,7 +80,7 @@ When a commit answers `STEP_UP_REQUIRED`, ask the person for their current 2FA c
 | Check | What it holds | Where |
 | --- | --- | --- |
 | Structure | The program links no workspace crate and no database driver, so it has nothing to decide with and no path to data but the API | `scripts/cli-door.py`, run by CI |
-| Behaviour | The same request through the command line and through MCP gives the same JSON: `hello`, search, describe, read, a refused input, an unknown key, a write's review, and a write the account may not make. Every request it made reached `/api/v1`, a changed operation is a stale ref, no token is printed, and the saved sign-in is private | `examples/two-doors-walkthrough.rs`, run by `scripts/run-walkthroughs.sh two-doors` |
+| Behaviour | The same request through the command line and through MCP gives the same JSON: `hello`, search, describe, read, a refused input, an unknown key, a write's review, and a write the account may not make. Every request it made reached `/api/v1`. A ref refuses a changed operation, another sign-in and part of a reviewed set. No token, no 2FA code and no credential from a malformed sign-in answer is printed, and the saved sign-in is private | `examples/two-doors-walkthrough.rs`, run by `scripts/run-walkthroughs.sh two-doors` |
 
 To add a command: add the operation or the endpoint on the server first, make the command print its answer, and add the same call through MCP to the walkthrough. A command that needs a rule of its own is a sign the rule belongs in the contract.
 

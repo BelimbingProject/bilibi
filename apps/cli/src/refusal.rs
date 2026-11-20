@@ -61,7 +61,7 @@ pub(crate) fn refusal(status: u16, body: &Value) -> Problem {
             &code,
             described.unwrap_or("This write needs the person's current 2FA code"),
         )
-        .help("Ask the person for their current 2FA code, then run the same commit with BILIBI_STEP_UP_CODE set to it"),
+        .help("Ask the person for their current 2FA code, then run the same commit with `--code-stdin` and give the code on standard input"),
         (_, "forbidden") => Problem::new(&code, "The signed-in account may not do this")
             .help("`bilibi-axi hello` checks the connection itself; this answer is about permission"),
         (_, "invalid_input") => Problem::new(&code, "Bilibi refused the input"),
@@ -92,10 +92,50 @@ pub(crate) fn refusal(status: u16, body: &Value) -> Problem {
     };
     if let Some(fields) = body.as_object() {
         for (name, value) in fields {
-            if !matches!(name.as_str(), "error" | "error_description" | "message") {
+            if !matches!(name.as_str(), "error" | "error_description" | "message")
+                && !credential(name)
+            {
                 problem = problem.with(name, value.clone());
             }
         }
     }
     problem
+}
+
+/// A field whose value could be a credential. Such a field is never printed,
+/// whatever answer it arrived in.
+fn credential(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "device_code",
+        "verifier",
+        "assertion",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
+        || name == "code"
+}
+
+/// Why a sign-in request failed (`/oauth/token`, `/oauth/device_authorization`).
+/// Only the error code and its description are read: these endpoints answer
+/// with credentials, so nothing else in their bodies is ever printed, however
+/// the answer is shaped.
+pub(crate) fn sign_in_failed(origin: &str, answer: &Answer) -> Problem {
+    if !answer.json {
+        return intercepted(origin, answer.status);
+    }
+    let text = |name: &str| answer.body.get(name).and_then(Value::as_str);
+    if (200..300).contains(&answer.status) && text("error").is_none() {
+        return Problem::new("NOT_BILIBI", "The sign-in answer was not understood");
+    }
+    let mut stated = serde_json::Map::new();
+    for name in ["error", "error_description"] {
+        if let Some(value) = text(name) {
+            stated.insert(name.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    refusal(answer.status, &Value::Object(stated))
 }

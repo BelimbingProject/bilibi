@@ -33,6 +33,10 @@ pub struct Saved {
     pub origin: String,
     pub server_name: String,
     pub client_id: String,
+    /// Names this sign-in and no other: a digest set when the person's
+    /// approval is collected, unchanged by every later token refresh. A plan
+    /// ref is bound to it, so a ref cannot cross to another sign-in.
+    pub sign_in: String,
     pub access_token: Option<String>,
     pub access_expires_at: u64,
     pub refresh_token: Option<String>,
@@ -45,6 +49,7 @@ impl Saved {
             "origin": self.origin,
             "server_name": self.server_name,
             "client_id": self.client_id,
+            "sign_in": self.sign_in,
             "access_token": self.access_token,
             "access_expires_at": self.access_expires_at,
             "refresh_token": self.refresh_token,
@@ -64,6 +69,7 @@ impl Saved {
             origin: text(value, "origin")?,
             server_name: text(value, "server_name")?,
             client_id: text(value, "client_id")?,
+            sign_in: text(value, "sign_in")?,
             access_token: text(value, "access_token"),
             access_expires_at: value.get("access_expires_at")?.as_u64()?,
             refresh_token: text(value, "refresh_token"),
@@ -110,6 +116,7 @@ impl Store {
         }
     }
     fn prepare(&self) -> Result<(), Refusal> {
+        supported()?;
         let failed = |_| format!("could not prepare {}", self.dir.display());
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
@@ -135,6 +142,7 @@ impl Store {
         Some(name.trim().to_owned()).filter(|name| !name.is_empty())
     }
     pub fn load(&self, server: &str) -> Result<Option<Saved>, Refusal> {
+        supported()?;
         let path = self.file(server)?;
         let mut file = match File::open(&path) {
             Ok(file) => file,
@@ -228,5 +236,17 @@ fn private(path: &Path, mode: u32) -> Result<(), Refusal> {
 }
 #[cfg(not(unix))]
 fn private(_path: &Path, _mode: u32) -> Result<(), Refusal> {
+    supported()
+}
+
+/// Whether this platform can keep a file to its owner alone the way this
+/// store does it. Where it cannot, nothing is written or read: a sign-in
+/// saved in a file other accounts might read is worse than none.
+#[cfg(unix)]
+fn supported() -> Result<(), Refusal> {
     Ok(())
+}
+#[cfg(not(unix))]
+fn supported() -> Result<(), Refusal> {
+    Err("bilibi-axi cannot keep a saved sign-in private on this system yet, so it saves none here. Run it on Linux or macOS (on Windows, inside WSL)".to_owned())
 }
