@@ -3,6 +3,8 @@
 //! agents, pages call them through [`page`]. Callers authenticate a fresh
 //! sealed Scope at every request. Queued jobs call writes through [`job`]
 //! (ADR 10).
+mod audience_preview;
+pub use audience_preview::AudiencePreview;
 mod input;
 pub mod job;
 pub mod json;

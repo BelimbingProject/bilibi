@@ -257,9 +257,7 @@ impl Index {
             period: None,
             filter: PeriodFilter::new("exchange-period", period, &clock),
             browser_zone: None,
-            columns: PageColumns::mount(views, "integration-exchanges", builtins())
-                .and_then(|columns| columns.with_record_slots(fields::ALL))
-                .map_err(|_| Error::Internal)?,
+            columns: exchange_columns(views)?,
             reload: true,
         })
     }
@@ -915,3 +913,31 @@ fn exchange_facts(
         (fields::ERROR, dash(exchange.error_class.as_deref())),
     ])
 }
+
+fn exchange_columns(views: Arc<PageViews>) -> Result<PageColumns> {
+    PageColumns::mount(views, "integration-exchanges", builtins())
+        .and_then(|columns| columns.with_record_slots(fields::ALL))
+        .map_err(|_| Error::Internal)
+}
+
+fn agent_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move { exchange_columns(views) })
+}
+bilibi_grid::contribute_page_metadata!(
+    "base/integration",
+    "base/integration.grid-page",
+    "integration-exchanges",
+    crate::LIST,
+    Some(|| SPEC.clone()),
+    &[
+        ("period", "Period selection"),
+        ("from", "Start date"),
+        ("to", "End date")
+    ],
+    None,
+    agent_columns
+);

@@ -679,3 +679,45 @@ struct View<'a> {
     record_id: &'a str,
     variant: PageVariant,
 }
+
+fn agent_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        PageColumns::mount(views, "teams", list::columns()).map_err(|_| Error::Internal)
+    })
+}
+
+bilibi_grid::contribute_page_metadata!(
+    "core/team",
+    "core/team.grid-page",
+    "teams",
+    crate::VIEW,
+    Some(|| LIST_SPEC.clone()),
+    &[],
+    None,
+    agent_columns
+);
+
+fn agent_member_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        PageColumns::mount(views, "team-members", record::member_columns())
+            .map_err(|_| Error::Internal)
+    })
+}
+bilibi_grid::contribute_page_metadata!(
+    "core/team",
+    "core/team.grid-member-page",
+    "team-members",
+    crate::VIEW,
+    None,
+    &[],
+    None,
+    agent_member_columns
+);

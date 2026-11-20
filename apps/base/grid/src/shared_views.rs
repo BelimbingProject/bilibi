@@ -20,12 +20,13 @@ use crate::view::View;
 use bilibi_authz::{CapabilityDefinition, VocabularyContribution, VOCABULARY};
 use bilibi_database::{Change, Error, MutationTransaction, Result};
 use bilibi_module_registry::{Contribution, Provenance};
-use bilibi_tenancy::Scope;
+use bilibi_tenancy::{ReadClient, Scope};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 /// Share a saved view with everyone or with roles.
 pub const SHARE: &str = "grid.views.share";
+pub(crate) const ROLE_AUDIENCE_LABEL: &str = "People with a role it is shared with";
 /// The audit kind of a saved view.
 pub const KIND: &str = "grid.shared_view";
 /// Views one page keeps for a tenant, at most.
@@ -123,6 +124,10 @@ fn refused(message: &str) -> Error {
     Error::Refused(message.into())
 }
 
+pub(crate) fn canonical_arrangement(view: &View) -> View {
+    View::from_params(&view.to_params(), &view.table)
+}
+
 fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
     let stored: Value = row.get(3);
     let roles: Vec<i64> = row.get(5);
@@ -140,7 +145,7 @@ fn as_view(row: &tokio_postgres::Row, page: &str, reader: i64) -> SharedView {
         id: row.get(0),
         owned: row.get::<_, i64>(1) == reader,
         name: row.get(2),
-        view: View::from_json(&stored, page),
+        view: canonical_arrangement(&View::from_json(&stored, page)),
         params,
         audience: if row.get(4) {
             Audience::Everyone
@@ -155,12 +160,21 @@ impl PageViews {
     /// everyone and those shared with a role they hold, by name.
     pub async fn shared(&self, scope: &Scope, page: &str) -> Result<Vec<SharedView>> {
         let client = self.db().get().await?;
-        let rows = client
-            .query(
-                &format!("SELECT v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{{}}') FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
-                &[&scope.tenant(), &scope.user(), &page, &scope.current_company().map(|company| company.get())],
-            )
-            .await?;
+        self.shared_on(&**client, scope, page, None).await
+    }
+
+    /// The same visibility rule on the caller's connection, including inside a write.
+    pub(crate) async fn shared_on(
+        &self,
+        client: &dyn ReadClient,
+        scope: &Scope,
+        page: &str,
+        id: Option<i64>,
+    ) -> Result<Vec<SharedView>> {
+        let rows = client.query(
+            &format!("SELECT v.id, v.owner_id, v.name, v.view, v.shared_with_everyone, COALESCE((SELECT array_agg(s.role_id ORDER BY s.role_id) FROM base_grid_shared_view_roles s WHERE s.tenant_id=v.tenant_id AND s.view_id=v.id), '{{}}') FROM base_grid_shared_views v WHERE {VISIBLE} AND v.page=$3 AND ($5::bigint IS NULL OR v.id=$5) ORDER BY lower(v.name), v.id LIMIT {MAX_PER_PAGE}"),
+            &[&scope.tenant(), &scope.user(), &page, &scope.current_company().map(|company| company.get()), &id],
+        ).await?;
         Ok(rows
             .iter()
             .map(|row| as_view(row, page, scope.user()))
@@ -219,7 +233,7 @@ impl PageViews {
         if roles.len() > MAX_ROLES {
             return Err(refused("Share a view with at most 50 roles."));
         }
-        let mut stored = view.to_json();
+        let mut stored = canonical_arrangement(view).to_json();
         stored["params"] = json!(clean_params(params)?);
         if serde_json::to_vec(&stored)
             .map_err(|_| Error::Invalid)?

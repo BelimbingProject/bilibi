@@ -104,6 +104,10 @@ pub(crate) struct Plan {
     siblings: BTreeSet<&'static str>,
 }
 impl Plan {
+    pub(crate) fn propose(&self, orders: &mut Orders) {
+        orders.propose(&self.parent, self.after.clone().unwrap_or_default());
+    }
+
     pub(crate) fn review(&self) -> Value {
         json!({
             "parent": self.parent,
@@ -202,7 +206,7 @@ impl MenuOrder {
         items: Option<&[String]>,
         version: &str,
         lock: bool,
-    ) -> Result<Plan> {
+    ) -> Result<(Plan, Vec<Node>)> {
         bilibi_authz::authorize_proof(sql, scope, crate::MANAGE).await?;
         let tree = self.visible_tree(sql, scope).await?;
         let siblings = Self::validate(&tree, parent, items.unwrap_or_default())?;
@@ -244,12 +248,15 @@ impl MenuOrder {
             }
         }
         after.extend(proposed);
-        Ok(Plan {
-            parent: parent.to_owned(),
-            before,
-            after: (!after.is_empty()).then_some(after),
-            siblings,
-        })
+        Ok((
+            Plan {
+                parent: parent.to_owned(),
+                before,
+                after: (!after.is_empty()).then_some(after),
+                siblings,
+            },
+            tree,
+        ))
     }
     pub(crate) async fn apply(
         &self,
@@ -259,7 +266,7 @@ impl MenuOrder {
         items: Option<&[String]>,
         version: &str,
     ) -> Result<Plan> {
-        let plan = self
+        let (plan, _) = self
             .plan(tx.sql(), scope, parent, items, version, true)
             .await?;
         if plan.before.as_ref().map(|s| &s.items) == plan.after.as_ref() {

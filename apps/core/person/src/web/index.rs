@@ -102,12 +102,12 @@ async fn withheld(
 // The tenant's custom fields are columns a person adds from the picker
 // (`cf_<key>`), each sortable; none is shown by default.
 fn columns(
-    pages: &Pages,
+    views: Arc<bilibi_grid::PageViews>,
     masked: &std::collections::HashSet<String>,
     definitions: &[bilibi_custom_fields::Definition],
 ) -> Result<PageColumns> {
     PageColumns::mount(
-        pages.views.clone(),
+        views,
         "persons",
         [
             BuiltinColumn::new("name", "Name").sortable("name"),
@@ -152,7 +152,7 @@ impl Index {
         let masked = withheld(&client, scope).await?;
         drop(client);
         let definitions = offered(&pages, scope).await?;
-        let mut columns = columns(&pages, &masked, &definitions)?;
+        let mut columns = columns(pages.views.clone(), &masked, &definitions)?;
         columns.from_params(scope, query).await?;
         let open = query.get("new").map(String::as_str) == Some("1")
             && pages.allowed(scope, CREATE).await?;
@@ -194,7 +194,7 @@ impl Index {
         }
         if masked != self.masked || fields_changed {
             let query = self.columns.params();
-            self.columns = columns(&self.pages, &masked, &self.definitions)?;
+            self.columns = columns(self.pages.views.clone(), &masked, &self.definitions)?;
             self.columns.from_params(scope, &query).await?;
             self.masked = masked;
         }
@@ -950,3 +950,46 @@ impl LiveState<Scope, Error> for Index {
         })
     }
 }
+
+fn agent_filter_details<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+) -> bilibi_grid::PageDetailsFuture<'a> {
+    Box::pin(async move {
+        let definitions = crate::custom::fields()?
+            .active(client, scope, crate::custom::RECORD_TYPE)
+            .await?;
+        Ok(definitions.iter().take(super::custom::LIST_MAX).flat_map(|field| {
+            super::custom::filter_keys(field).into_iter().map(move |(key, operator)| json!({"key":key,"type":"string","label":field.label,"operator":operator}))
+        }).collect())
+    })
+}
+
+fn agent_columns<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        let masked = withheld(client, scope).await?;
+        let definitions = crate::custom::fields()?
+            .active(client, scope, crate::custom::RECORD_TYPE)
+            .await?;
+        columns(
+            views,
+            &masked,
+            &definitions[..definitions.len().min(super::custom::LIST_MAX)],
+        )
+    })
+}
+
+bilibi_grid::contribute_page_metadata!(
+    "core/person",
+    "core/person.grid-page",
+    "persons",
+    crate::contributions::LIST,
+    Some(|| SPEC.clone()),
+    &[],
+    Some(agent_filter_details),
+    agent_columns
+);

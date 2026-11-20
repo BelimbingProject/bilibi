@@ -1065,3 +1065,46 @@ fn summary(prefix: &str, errors: &BTreeMap<String, Vec<String>>) -> Result<Html>
     }
     render(summary)
 }
+
+fn agent_columns<'a>(
+    _client: &'a tokio_postgres::Client,
+    _scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        PageColumns::mount(views, "products", cols(false)).map_err(|_| Error::Internal)
+    })
+}
+
+bilibi_grid::contribute_page_metadata!(
+    "core/product",
+    "core/product.grid-page",
+    "products",
+    crate::VIEW,
+    Some(|| SPEC.clone()),
+    &[],
+    None,
+    agent_columns
+);
+
+fn agent_price_columns<'a>(
+    client: &'a tokio_postgres::Client,
+    scope: &'a Scope,
+    views: Arc<bilibi_grid::PageViews>,
+) -> bilibi_grid::PageColumnsFuture<'a> {
+    Box::pin(async move {
+        let company = scope.current_company().ok_or(Error::Forbidden)?;
+        bilibi_company::authorize_work_target(client, scope, company.get(), crate::VIEW).await?;
+        PageColumns::mount(views, "product-prices", cols(true)).map_err(|_| Error::Internal)
+    })
+}
+bilibi_grid::contribute_page_metadata!(
+    "core/product",
+    "core/product.grid-price-page",
+    "product-prices",
+    crate::VIEW,
+    None,
+    &[],
+    None,
+    agent_price_columns
+);

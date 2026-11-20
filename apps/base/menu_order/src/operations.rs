@@ -1,11 +1,11 @@
 use crate::{
-    store::{sibling_groups, sibling_ids, version_token, MenuOrder},
+    store::{sibling_groups, sibling_ids, version_token, MenuOrder, Orders},
     MANAGE, VIEW,
 };
 use bilibi_agent_api::{
     json::{Data, Output},
-    Channels, Definitions, Guide, Handler, Operation, OperationClient, OperationFuture,
-    ReadHandler, WriteHandler, DEFINITIONS,
+    AudiencePreview, Channels, Definitions, Guide, Handler, Operation, OperationClient,
+    OperationFuture, ReadHandler, WriteHandler, DEFINITIONS,
 };
 use bilibi_database::{Error, MutationTransaction};
 use bilibi_module_registry::{Contribution, Provenance, RegistryError};
@@ -68,6 +68,21 @@ fn found(error: Error) -> bilibi_agent_api::Error {
 fn nodes(tree: &[bilibi_menu::Node], labels: &bilibi_labels::LabelSet) -> Value {
     Value::Array(tree.iter().map(|n| json!({"id": n.item.item.id, "label": labels.menu(n.item.item.id, n.item.item.label), "children": nodes(&n.children, labels)})).collect())
 }
+async fn preview_tree(
+    service: &MenuOrder,
+    client: &dyn OperationClient,
+    scope: &Scope,
+    mut tree: Vec<bilibi_menu::Node>,
+    orders: Orders,
+) -> bilibi_agent_api::Result<Value> {
+    orders.apply(&mut tree);
+    let labels = service
+        .labels
+        .labels(client.sql_client().await?, scope)
+        .await?;
+    Ok(nodes(&tree, &labels))
+}
+
 enum Read {
     List,
     Preview,
@@ -84,7 +99,7 @@ impl ReadHandler for Read {
     ) -> OperationFuture<'a> {
         Box::pin(async move {
             let service = bound()?;
-            let mut tree = service.visible_tree(client, scope).await?;
+            let tree = service.visible_tree(client, scope).await?;
             match self {
                 Self::List => {
                     let stored = service.stored(client, scope).await?;
@@ -108,7 +123,6 @@ impl ReadHandler for Read {
                     Ok(data(json!(rows)))
                 }
                 Self::Preview => {
-                    let sql = client.sql_client().await?;
                     let mut orders = service.orders(client, scope).await?;
                     if input.get("parent").is_some() || input.get("item_ids").is_some() {
                         let parent = parent(input)?;
@@ -116,9 +130,9 @@ impl ReadHandler for Read {
                         MenuOrder::validate(&tree, parent, &proposed).map_err(found)?;
                         orders.propose(parent, proposed);
                     }
-                    orders.apply(&mut tree);
-                    let labels = service.labels.labels(sql, scope).await?;
-                    Ok(data(nodes(&tree, &labels)))
+                    Ok(data(
+                        preview_tree(service, client, scope, tree, orders).await?,
+                    ))
                 }
             }
         })
@@ -143,7 +157,8 @@ impl WriteHandler for Write {
                 Self::Set => Some(items(input)?),
                 Self::Restore => None,
             };
-            let plan = bound()?
+            let service = bound()?;
+            let (plan, tree) = service
                 .plan(
                     client,
                     scope,
@@ -154,7 +169,11 @@ impl WriteHandler for Write {
                 )
                 .await
                 .map_err(found)?;
-            Ok(json!({"summary": if ids.is_some() { "Set the order of menu siblings" } else { "Restore the product order of menu siblings" }, "plan":plan.review()}).into())
+            let mut orders = service.orders(client, scope).await?;
+            plan.propose(&mut orders);
+            let menu = preview_tree(service, client, scope, tree, orders).await?;
+            let audience_preview = AudiencePreview::everyone().review(menu);
+            Ok(json!({"summary": if ids.is_some() { "Set the order of menu siblings" } else { "Restore the product order of menu siblings" }, "plan":plan.review(), "audience_preview":audience_preview}).into())
         })
     }
     fn commit<'a>(

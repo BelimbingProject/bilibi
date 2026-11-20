@@ -147,7 +147,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plans.preview(&browser, &wrong_parent).await?["valid"],
         false
     );
-    assert_eq!(plans.preview(&browser, &set).await?["valid"], true);
+    let set_review = plans.preview(&browser, &set).await?;
+    assert_eq!(set_review["valid"], true);
+    let menu = &set_review["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(menu["audience"]["name"], "Everyone");
+    assert_eq!(menu["visible_to_current_reader"], proposed["result"]);
     plans.commit(&admin, &browser, &set).await?;
     assert!(
         plans.commit(&admin, &browser, &set).await.is_err(),
@@ -209,7 +213,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "base.menu_order.restore",
         json!({"parent":"admin","version":version}),
     )];
-    assert_eq!(plans.preview(&browser, &restore).await?["valid"], true);
+    let restore_review = plans.preview(&browser, &restore).await?;
+    assert_eq!(restore_review["valid"], true);
+    let menu = &restore_review["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(menu["visible_to_current_reader"], before["result"]);
     plans.commit(&admin, &browser, &restore).await?;
     let list = contracts
         .read(&admin, "base.menu_order.list", &json!({}))

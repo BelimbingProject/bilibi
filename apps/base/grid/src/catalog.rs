@@ -522,6 +522,18 @@ impl Catalog {
     /// ranks by path depth, so the root's own fields come first. Bounded by
     /// `MAX_SUGGEST_TEXT`, `MAX_TOKENS`, `MAX_CANDIDATES` and `MAX_SUGGESTIONS`.
     pub fn suggest(&self, root: &Table, text: &str, exclude: &[&str], limit: usize) -> Vec<Column> {
+        self.suggest_page(root, text, exclude, 0, limit)
+    }
+
+    /// A bounded page of the same ranked suggestions, for discoverable catalogs.
+    pub fn suggest_page(
+        &self,
+        root: &Table,
+        text: &str,
+        exclude: &[&str],
+        offset: usize,
+        limit: usize,
+    ) -> Vec<Column> {
         let limit = if limit == 0 {
             DEFAULT_SUGGESTIONS
         } else {
@@ -550,7 +562,12 @@ impl Catalog {
                 .then(left.depth.cmp(&right.depth))
                 .then_with(|| left.label.cmp(&right.label))
         });
-        ranked.into_iter().take(limit).map(|(_, c)| c).collect()
+        ranked
+            .into_iter()
+            .skip(offset.min(MAX_CANDIDATES))
+            .take(limit)
+            .map(|(_, c)| c)
+            .collect()
     }
 
     fn link_specs(&self, table: &Table, prefix: &str, depth: usize, out: &mut Vec<String>) {

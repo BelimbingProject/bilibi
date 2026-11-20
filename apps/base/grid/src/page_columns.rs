@@ -536,6 +536,48 @@ impl PageColumns {
         })
     }
 
+    /// Page-owned columns this reader may add, using the same pruning as the page.
+    pub fn available_builtins(&mut self, catalog: &Catalog) -> Vec<(String, String)> {
+        self.catalog = Some(catalog.clone());
+        if let Some(root) = catalog.table(&self.table) {
+            self.record_fields = root.record_fields.clone();
+        }
+        self.builtins
+            .iter()
+            .filter(|builtin| self.builtin_allowed(catalog, builtin))
+            .map(|builtin| {
+                (
+                    builtin.id.clone(),
+                    self.builtin_word(builtin)
+                        .unwrap_or_else(|| builtin.label.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// Resolve the same columns a page would show for this reader, without loading rows.
+    pub fn preview_columns(&mut self, catalog: &Catalog, view: View) -> Vec<(String, String)> {
+        self.view = view;
+        self.catalog = Some(catalog.clone());
+        if let Some(root) = catalog.table(&self.table) {
+            self.record_fields = root.record_fields.clone();
+        }
+        self.split(catalog)
+            .iter()
+            .map(|kept| match kept {
+                Kept::Builtin(index) => {
+                    let builtin = &self.builtins[*index];
+                    (
+                        builtin.id.clone(),
+                        self.builtin_word(builtin)
+                            .unwrap_or_else(|| builtin.label.clone()),
+                    )
+                }
+                Kept::Walked(column) => (column.spec.clone(), column.label.clone()),
+            })
+            .collect()
+    }
+
     /// The flexible table over the page's rows (this state's [`Self::rows`]
     /// with the page's slots filled in), wearing the arranged zoom, lenses,
     /// comparison date and the add box's state. The page still sets its

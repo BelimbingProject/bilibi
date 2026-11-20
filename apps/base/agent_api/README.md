@@ -21,7 +21,7 @@ read operations on write capabilities, and impersonation capabilities (`*.impers
 Titles have a 120-character limit, summaries 500, guide bodies 8 KiB. Registry
 entries retain source provenance and materialized schemas.
 
-A safe-write operation may declare `capability: SIGNED_IN` for owner-authorized self-service. It is discoverable by authenticated accounts without a capability grant; its preview and commit must prove ownership of the target, or authorize the capability required for another owner's target. System principals are refused. Discovery, plans, page submissions and jobs apply the same admission. All other capability strings must name declared vocabulary keys.
+A read or safe-write operation may declare `capability: SIGNED_IN` for owner-authorized self-service. Reads must enforce their owner’s visibility and field restrictions in the handler. It is discoverable by authenticated accounts without a capability grant; its preview and commit must prove ownership of the target, or authorize the capability required for another owner's target. System principals are refused. Discovery, plans, page submissions and jobs apply the same admission. All other capability strings must name declared vocabulary keys.
 
 Two more contract properties, both checked at boot:
 
@@ -210,6 +210,10 @@ BILIBI_AGENT_DEMO=disposable cargo run -p bilibi-agent-api --example write-walkt
 It prints dry-run reviews and outcomes for a successful write, a second-operation rollback, capability revocation, changed owner facts, audit failure and session revocation. Bounded SQL output shows reference state and audit counts. The audit refusal fixture alters only the explicitly disposable database. This is a manual app-service specimen with no test runner,
 mocked identities or assertions. Sessions and temporary grants are removed on
 successful completion; reference/audit evidence remains for inspection.
+
+## Audience previews
+
+Use `AudiencePreview` for a shared customisation review. It names the tenant audience or selected roles and shows the result as the current reader can see it. The owner checks access to the page or menu and permission to inspect role names. Each recipient's own permissions apply when they open the result.
 
 ## MCP Apps: a module's card in the chat
 

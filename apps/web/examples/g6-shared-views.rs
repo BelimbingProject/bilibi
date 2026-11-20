@@ -1,15 +1,32 @@
-use bilibi_agent_api::page::{Call, PageContracts};
+use bilibi_agent_api::{
+    page::{Call, PageContracts},
+    plans::{PlanAuthority, PlanIdentity, PlannedOperation, Plans},
+};
 use bilibi_authz::grants::Grants;
 use bilibi_base::session::session_id;
 use bilibi_database::pool;
 use bilibi_grid::{PageColumns, PageViews, View, ViewCaller, PAGE_VIEWS, SHARE_VIEWS};
-use bilibi_tenancy::Authentication;
+use bilibi_tenancy::{Authentication, ProofFuture, Scope};
 use bilibi_ui::{BuiltinColumn, ListSpec, ListState};
 use serde_json::json;
 use std::collections::HashMap;
+use tokio_postgres::Transaction;
 
 bilibi_walkthrough_fixture::walkthrough_vocabulary!();
 bilibi_walkthrough_fixture::walkthrough_module_roles!();
+
+struct HeldAgent<'a>(&'a Scope);
+
+impl PlanAuthority for HeldAgent<'_> {
+    fn verify<'a>(&'a self, _tx: &'a Transaction<'_>) -> ProofFuture<'a, PlanIdentity> {
+        Box::pin(async move {
+            Ok(PlanIdentity {
+                scope: self.0.clone(),
+                credential_binding: "walkthrough:grid-views".into(),
+            })
+        })
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -84,6 +101,308 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         )
         .await?;
+    // Agent discovery and review use the same page contracts and reader scope.
+    let input = json!({"page":"companies", "view":json!({"columns":["name,revenue"],"lenses":{},"zoom":18,"since":null}).to_string(), "params":json!({"status":"active"}).to_string(), "name":"Reviewed companies", "audience":{"roles":[role]}});
+    let review = contracts
+        .preview(&call("base.grid.view.save"), input.clone())
+        .await?;
+    assert_eq!(review["valid"], true, "{review}");
+    let preview = &review["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(
+        preview["audience"]["roles"][0]["name"],
+        "Shared view readers"
+    );
+    let columns: Vec<_> = preview["visible_to_current_reader"]
+        .as_array()
+        .ok_or("missing column preview")?
+        .iter()
+        .map(|column| &column["spec"])
+        .collect();
+    assert_eq!(columns, [&json!("name"), &json!("revenue")]);
+    let saved = contracts
+        .submit(&call("base.grid.view.save"), input)
+        .await?;
+    let company_id = saved["result"]["id"].as_i64().ok_or("missing saved id")?;
+    assert_eq!(saved["result"]["view"]["name"], "Reviewed companies");
+    assert_eq!(
+        saved["result"]["view"]["view"]["columns"],
+        json!(["name", "revenue"])
+    );
+    assert!(saved["result"]["view"].get("query").is_none());
+    let list = contracts
+        .read(&admin, "base.grid.view.list", &json!({"page":"companies"}))
+        .await?;
+    assert!(list["result"]["views"]
+        .as_array()
+        .ok_or("missing view list")?
+        .iter()
+        .any(|v| v["id"] == company_id));
+    let saved = contracts
+        .read(
+            &admin,
+            "base.grid.view.get",
+            &json!({"page":"companies","id":company_id}),
+        )
+        .await?;
+    assert_eq!(saved["result"]["params"]["status"], "active");
+    assert_eq!(
+        saved["result"]["view"]["columns"],
+        json!(["name", "revenue"])
+    );
+    assert!(saved["result"].get("query").is_none());
+    let shared = views.shared(&admin, "companies").await?;
+    let link = shared
+        .iter()
+        .find(|v| v.id == company_id)
+        .ok_or("missing Companies link")?;
+    let query = link.query();
+    let params: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    assert_eq!(params["cols"], "name,revenue");
+    let users = contracts
+        .submit(
+            &call("base.grid.view.save"),
+            json!({"page":"users", "view":"{}", "params":json!({"search":"staff@example.test"}).to_string(), "name":"Employee lookup", "audience":{"everyone":true}}),
+        )
+        .await?;
+    let users_id = users["result"]["id"]
+        .as_i64()
+        .ok_or("missing Users view ID")?;
+    db.get().await?.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,'admin.user.list',false,'all')",
+        &[],
+    ).await?;
+    for (operation, input) in [
+        ("base.grid.view.list", json!({"page":"users"})),
+        ("base.grid.view.get", json!({"page":"users","id":users_id})),
+    ] {
+        assert!(
+            matches!(
+                contracts.read(&reader, operation, &input).await,
+                Err(bilibi_agent_api::Error::Backend(
+                    bilibi_database::Error::Forbidden
+                ))
+            ),
+            "a staff reader without the Users page grant must be refused by {operation}"
+        );
+    }
+    assert_eq!(
+        users["result"]["view"]["params"]["search"],
+        "staff@example.test"
+    );
+    db.get().await?.execute(
+        "DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=1 AND capability='admin.user.list' AND NOT is_allowed",
+        &[],
+    ).await?;
+    let users_view = contracts
+        .read(
+            &reader,
+            "base.grid.view.get",
+            &json!({"page":"users","id":users_id}),
+        )
+        .await?;
+    assert_eq!(
+        users_view["result"]["params"]["search"],
+        "staff@example.test"
+    );
+    let fields = contracts
+        .read(
+            &admin,
+            "base.grid.view.fields",
+            &json!({"page":"companies"}),
+        )
+        .await?;
+    assert!(fields["result"]["filters"]
+        .as_array()
+        .ok_or("missing filters")?
+        .iter()
+        .any(|f| f["key"] == "status"));
+    assert_eq!(fields["result"]["search_key"], "search");
+    for removed in ["sorts", "sort_key", "direction_key"] {
+        assert!(fields["result"].get(removed).is_none());
+    }
+    let members = contracts
+        .read(
+            &admin,
+            "base.grid.view.fields",
+            &json!({"page":"team-members"}),
+        )
+        .await?;
+    assert_eq!(members["result"]["filters"], json!([]));
+    assert!(members["result"].get("search_key").is_none());
+
+    let exchange_fields = contracts
+        .read(
+            &admin,
+            "base.grid.view.fields",
+            &json!({"page":"integration-exchanges","search":"outcome"}),
+        )
+        .await?;
+    assert_eq!(
+        exchange_fields["result"]["columns"],
+        json!([{"spec":"outcome","label":"Outcome","type":"page"}])
+    );
+    let exchange = contracts
+        .preview(
+            &Call { service: "base/integration.pages", ..call("base.grid.view.save") },
+            json!({"page":"integration-exchanges","view":json!({"columns":["outcome"]}).to_string(),"params":"{}","name":"By outcome","audience":{"everyone":true}}),
+        )
+        .await?;
+    assert_eq!(exchange["valid"], true, "{exchange}");
+    let exchange_preview = &exchange["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(
+        exchange_preview["visible_to_current_reader"],
+        json!([{"spec":"outcome","label":"Outcome"}])
+    );
+
+    assert!(admin.current_company().is_none());
+    assert!(matches!(
+        contracts
+            .read(
+                &admin,
+                "base.grid.view.fields",
+                &json!({"page":"product-prices"})
+            )
+            .await,
+        Err(bilibi_agent_api::Error::Backend(
+            bilibi_database::Error::Forbidden
+        ))
+    ));
+    let prices = json!({"page":"product-prices","view":json!({"columns":["amount"]}).to_string(),"params":"{}","name":"Price amount","audience":{"everyone":true}});
+    let price_review = contracts
+        .preview(
+            &Call {
+                service: "core/product.pages",
+                ..call("base.grid.view.save")
+            },
+            prices.clone(),
+        )
+        .await?;
+    assert_eq!(price_review["valid"], false);
+    assert_eq!(
+        price_review["results"][0]["error"]["code"],
+        "missing_capability"
+    );
+    db.get().await?.execute(
+        "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,'products.view',true,'all')",
+        &[],
+    ).await?;
+    assert!(reader.current_company().is_some());
+    let price_fields = contracts
+        .read(
+            &reader,
+            "base.grid.view.fields",
+            &json!({"page":"product-prices"}),
+        )
+        .await?;
+    assert_eq!(price_fields["result"]["filters"], json!([]));
+    assert!(price_fields["result"].get("search_key").is_none());
+    assert!(price_fields["result"]["columns"]
+        .as_array()
+        .ok_or("missing prices columns")?
+        .iter()
+        .any(|column| column["spec"] == "amount"));
+    db.get().await?.execute("INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,'admin.company.list',true,'all') ON CONFLICT DO NOTHING", &[]).await?;
+    db.get().await?.execute("INSERT INTO field_restrictions(tenant_id,role_id,table_id,field_id) VALUES(1,$1,'companies','revenue') ON CONFLICT DO NOTHING", &[&role]).await?;
+    let restricted = contracts
+        .read(
+            &reader,
+            "base.grid.view.fields",
+            &json!({"page":"companies", "search":"revenue"}),
+        )
+        .await?;
+    assert!(!restricted["result"]["columns"]
+        .as_array()
+        .ok_or("missing restricted columns")?
+        .iter()
+        .any(|c| c["spec"] == "revenue"));
+    let reader_view = contracts
+        .read(
+            &reader,
+            "base.grid.view.get",
+            &json!({"page":"companies", "id":company_id}),
+        )
+        .await?;
+    assert_eq!(reader_view["result"]["name"], "Reviewed companies");
+    let hidden_audience = json!({"name":"People with a role it is shared with"});
+    assert_eq!(reader_view["result"]["audience"], hidden_audience);
+    let reader_list = contracts
+        .read(&reader, "base.grid.view.list", &json!({"page":"companies"}))
+        .await?;
+    assert_eq!(
+        reader_list["result"]["views"][0]["audience"],
+        hidden_audience
+    );
+    let connection = {
+        let client = db.get().await?;
+        client.execute(
+            "INSERT INTO principal_capabilities(tenant_id,user_id,capability,is_allowed,reach) VALUES(1,1,$1,true,'all')",
+            &[&SHARE_VIEWS],
+        ).await?;
+        client.query_one(
+            "INSERT INTO core_agent_connections(tenant_id,user_id,person_id,agent_id,expires_at) VALUES(1,1,1,'grid-views-walkthrough-agent',now()+interval '1 hour') RETURNING id",
+            &[],
+        ).await?.get::<_, i64>(0)
+    };
+    let agent = reader
+        .clone()
+        .for_agent(connection, None, "grid-views-walkthrough".into(), None);
+    let plans = app.services.get::<Plans>("base/agent_api.plans")?;
+    let save = |input| {
+        [PlannedOperation {
+            key: "base.grid.view.save".into(),
+            input,
+        }]
+    };
+    let valid = plans.preview(&HeldAgent(&agent), &save(prices)).await?;
+    assert_eq!(valid["valid"], true, "{valid}");
+    let price_preview = &valid["results"][0]["preview"]["result"]["audience_preview"];
+    assert_eq!(
+        price_preview["visible_to_current_reader"],
+        json!([{"spec":"amount","label":"Amount per base unit"}])
+    );
+    let typo = save(
+        json!({"page":"contacts","view":"{}","params":"{}","name":"Mistyped page","audience":{"everyone":true}}),
+    );
+    for scope in [agent.clone(), agent.over_mcp()] {
+        let authority = HeldAgent(&scope);
+        let review = plans.preview(&authority, &typo).await?;
+        assert_eq!(review["valid"], false);
+        assert_eq!(
+            review["results"][0]["error"]["fields"]["page"],
+            json!(["choose a registered list page"])
+        );
+        assert!(matches!(
+            plans.commit(&scope, &authority, &typo).await,
+            Err(bilibi_agent_api::Error::PlanRejected(_))
+        ));
+    }
+    assert!(views.shared(&reader, "contacts").await?.is_empty());
+    db.get()
+        .await?
+        .execute(
+            "DELETE FROM principal_capabilities WHERE tenant_id=1 AND user_id=1 AND capability=$1",
+            &[&SHARE_VIEWS],
+        )
+        .await?;
+    let other = {
+        let client = db.get().await?;
+        auth.authenticate(&**client, 2, 5, String::new()).await?
+    };
+    assert!(contracts
+        .read(
+            &other,
+            "base.grid.view.get",
+            &json!({"page":"companies", "id":company_id})
+        )
+        .await
+        .is_err());
+    db.get().await?.execute("DELETE FROM field_restrictions WHERE tenant_id=1 AND role_id=$1 AND table_id='companies' AND field_id='revenue'", &[&role]).await?;
+    contracts
+        .submit(&call("base.grid.view.delete"), json!({"id":company_id}))
+        .await?;
+    println!("PASS: scoped view discovery, named audience review, saved readback, restricted reader and second tenant.");
     let owned = views.shared(&admin, "reference_items").await?;
     assert_eq!(owned.len(), 1);
     assert!(owned[0].owned);
