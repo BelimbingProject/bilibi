@@ -95,6 +95,8 @@ pub enum OAuthError {
     InvalidRequest,
     #[error("invalid_client")]
     InvalidClient,
+    #[error("unauthorized_client")]
+    UnauthorizedClient,
     #[error("invalid_client_metadata")]
     InvalidClientMetadata,
     #[error("invalid_grant")]
@@ -675,11 +677,17 @@ impl AgentAccess {
         self.start_device_for(client_id, Some(agent_id), None, "")
             .await
     }
-    /// `start_device` as the host's endpoint takes it. `agent_id` is the name
-    /// the app states for itself; without one it is [`UNNAMED_APP`].
-    /// `resource` is the RFC 8707 audience the app asked for: none for
-    /// `/api/v1`, or exactly `mcp_resource` for `/mcp`, so a cloud app with no
-    /// browser callback can still reach the MCP edge.
+    /// `start_device` as the host's endpoint takes it. The client is the
+    /// built-in one or one registered through `POST /oauth/register` that
+    /// asked for the device grant in its `grant_types`; a registered client
+    /// that did not is `unauthorized_client`. A metadata-document client ID
+    /// (an HTTPS address) is not taken here: this endpoint answers callers
+    /// nobody signed in, and must not fetch an address for them. `agent_id` is the name
+    /// the app states for itself; without one it is the registered
+    /// `client_name`, else [`UNNAMED_APP`]. `resource` is the RFC 8707
+    /// audience the app asked for: none for `/api/v1`, or exactly
+    /// `mcp_resource` for `/mcp`, so a cloud app with no browser callback can
+    /// still reach the MCP edge.
     pub async fn start_device_for(
         &self,
         client_id: &str,
@@ -687,10 +695,19 @@ impl AgentAccess {
         resource: Option<&str>,
         mcp_resource: &str,
     ) -> std::result::Result<DeviceStart, OAuthError> {
-        if client_id != CLIENT_ID {
-            return Err(OAuthError::InvalidClient);
-        }
-        let agent_id = agent_id.unwrap_or(UNNAMED_APP);
+        let registered = if client_id == CLIENT_ID {
+            None
+        } else {
+            let metadata = self.registered_client(client_id).await?;
+            if !oauth_client::device_client(&metadata) {
+                return Err(OAuthError::UnauthorizedClient);
+            }
+            metadata
+                .get("client_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let agent_id = agent_id.or(registered.as_deref()).unwrap_or(UNNAMED_APP);
         if !valid_label(agent_id) {
             return Err(OAuthError::InvalidRequest);
         }
@@ -702,7 +719,7 @@ impl AgentAccess {
         let client = self.db.get().await?;
         client.execute(
             "INSERT INTO core_agent_devices(device_hash,user_hash,client_id,agent_id,resource,expires_at,next_poll_at,interval,status) VALUES($1,$2,$3,$4,$5,now()+make_interval(secs => $6::double precision),now(),$7,'pending')",
-            &[&secrets::digest(&device_code),&secrets::digest(&user_code),&CLIENT_ID,&agent_id,&resource,&(DEVICE_SECONDS as f64),&POLL_INTERVAL_SECONDS],
+            &[&secrets::digest(&device_code),&secrets::digest(&user_code),&client_id,&agent_id,&resource,&(DEVICE_SECONDS as f64),&POLL_INTERVAL_SECONDS],
         ).await?;
         Ok(DeviceStart {
             device_code,
@@ -792,7 +809,7 @@ impl AgentAccess {
         let device = tx
             .sql()
             .query_opt(
-                "SELECT id,agent_id,resource,expires_at>now() AS live FROM core_agent_devices WHERE user_hash=$1 AND status='pending' FOR UPDATE",
+                "SELECT id,agent_id,client_id,resource,expires_at>now() AS live FROM core_agent_devices WHERE user_hash=$1 AND status='pending' FOR UPDATE",
                 &[&secrets::digest(user_code)],
             )
             .await?;
@@ -805,6 +822,9 @@ impl AgentAccess {
         // state, as an authorization-code connection does.
         let resource: Option<String> = device.get("resource");
         let oauth_scope = resource.as_ref().map(|_| OAUTH_SCOPE);
+        // The connection belongs to the client that started the request, so
+        // only that client can redeem and refresh it.
+        let client_id: String = device.get("client_id");
         if !device.get::<_, bool>("live") {
             tx.rollback().await?;
             return Err(OAuthError::ExpiredToken);
@@ -835,7 +855,7 @@ impl AgentAccess {
                 let mut changes = replace_connections(sql, tenant, user, &agent_id, &replace).await?;
                 let row = sql.query_one(
                     "INSERT INTO core_agent_connections(tenant_id,user_id,organisation_id,person_id,agent_id,client_id,resource,oauth_scope,expires_at,approved_client,enabled_session_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'infinity',$9,$10) RETURNING id,expires_at::text",
-                    &[&tenant,&user,&organisation,&person,&agent_id,&CLIENT_ID,&resource,&oauth_scope,&browser.name,&enabled_session],
+                    &[&tenant,&user,&organisation,&person,&agent_id,&client_id,&resource,&oauth_scope,&browser.name,&enabled_session],
                 ).await?;
                 let connection: i64 = row.get(0);
                 sql.execute(
@@ -844,7 +864,7 @@ impl AgentAccess {
                 )
                 .await?;
                 changes.extend(vec![
-                        change("agent_connection", connection, json!({}), json!({"agent_id":agent_id,"client_id":CLIENT_ID,"resource":resource,"oauth_scope":oauth_scope,"approved_client":browser.name,"enabled":true,"session_bound":true})),
+                        change("agent_connection", connection, json!({}), json!({"agent_id":agent_id,"client_id":client_id,"resource":resource,"oauth_scope":oauth_scope,"approved_client":browser.name,"enabled":true,"session_bound":true})),
                         change("agent_device", device_id, json!({"status":"pending"}), json!({"status":"approved","connection_id":connection})),
                     ]);
                 Ok(((), changes))
@@ -862,11 +882,12 @@ impl AgentAccess {
         client_id: &str,
         device_code: &str,
     ) -> std::result::Result<TokenResponse, OAuthError> {
-        if client_id != CLIENT_ID {
-            return Err(OAuthError::InvalidClient);
-        }
         if !secret_shaped(device_code) {
-            return Err(OAuthError::InvalidRequest);
+            return Err(if client_id == CLIENT_ID {
+                OAuthError::InvalidRequest
+            } else {
+                OAuthError::InvalidClient
+            });
         }
         let mut client = self.db.get().await?;
         // Receipt state is pre-authentication housekeeping; the lock serializes
@@ -874,7 +895,7 @@ impl AgentAccess {
         let tx = client.transaction().await?;
         let device = tx
             .query_opt(
-                "SELECT id,status,expires_at>now() AS live,next_poll_at>now() AS early,interval,connection_id FROM core_agent_devices WHERE device_hash=$1 FOR UPDATE",
+                "SELECT id,status,expires_at>now() AS live,next_poll_at>now() AS early,interval,connection_id,client_id FROM core_agent_devices WHERE device_hash=$1 FOR UPDATE",
                 &[&secrets::digest(device_code)],
             )
             .await?;
@@ -882,6 +903,11 @@ impl AgentAccess {
             tx.rollback().await?;
             return Err(OAuthError::InvalidGrant);
         };
+        // A device code is redeemed by the client it was issued to.
+        if device.get::<_, String>("client_id") != client_id {
+            tx.rollback().await?;
+            return Err(OAuthError::InvalidClient);
+        }
         let (id, status): (i64, String) = (device.get(0), device.get(1));
         let connection_id: Option<i64> = device.get(5);
         let refusal = if !device.get::<_, bool>("live") {
