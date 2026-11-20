@@ -1,0 +1,400 @@
+use bilibi_module_registry::{Consumer, Entry, RegistryError};
+use jiff::civil::Date;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const CATALOGUE: &str = "base/templates.catalogue";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Audience {
+    Staff,
+    Customer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Output {
+    PlainText,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Context {
+    Subject,
+    PlainText,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Value<'a> {
+    Text(&'a str),
+    Date(Date),
+}
+
+impl Value<'_> {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Text(_) => "text",
+            Self::Date(_) => "date",
+        }
+    }
+}
+
+pub struct Variable {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub optional: bool,
+    pub sample: Value<'static>,
+    pub slots: &'static [&'static str],
+}
+
+pub struct Slot {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub context: Context,
+    pub required: bool,
+    pub max_bytes: usize,
+}
+
+pub struct DefaultText {
+    pub language: &'static str,
+    pub version: &'static str,
+    pub slots: &'static [(&'static str, &'static str)],
+}
+
+pub struct Template {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub audience: Audience,
+    pub outputs: &'static [Output],
+    pub slots: &'static [Slot],
+    pub variables: &'static [Variable],
+    pub base_language: &'static str,
+    pub defaults: &'static [DefaultText],
+}
+
+pub type Text = BTreeMap<String, String>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum Origin {
+    Packaged { version: String },
+    Tenant { revision: i64 },
+    Company { company_id: i64, revision: i64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolved {
+    pub origin: Origin,
+    pub language: String,
+    pub slots: Text,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Problem {
+    pub field: String,
+    pub message: String,
+}
+
+impl Problem {
+    pub(crate) fn new(field: &str, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.field, self.message)
+    }
+}
+
+impl std::error::Error for Problem {}
+
+type Checked<T> = Result<T, Problem>;
+
+fn identifier(id: &str) -> bool {
+    id.starts_with(|c: char| c.is_ascii_lowercase())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+pub(crate) fn language(input: &str) -> Option<String> {
+    if input.len() > 80 {
+        return None;
+    }
+    input
+        .parse::<icu_locale::Locale>()
+        .ok()
+        .map(|tag| tag.to_string())
+}
+
+pub(crate) fn languages(
+    requested: &str,
+    fallback: Option<&str>,
+    base: &'static str,
+) -> Checked<Vec<String>> {
+    let requested = language(requested)
+        .ok_or_else(|| Problem::new("language", "Enter a language tag such as en or en-MY."))?;
+    let mut choices = vec![requested.clone()];
+    if let Some((parent, _)) = requested.split_once('-') {
+        choices.push(parent.into());
+    }
+    if let Some(fallback) = fallback.and_then(language) {
+        choices.push(fallback);
+    }
+    choices.push(base.into());
+    let mut seen = BTreeSet::new();
+    choices.retain(|tag| seen.insert(tag.clone()));
+    Ok(choices)
+}
+
+impl DefaultText {
+    pub(crate) fn resolve(&self) -> Resolved {
+        Resolved {
+            origin: Origin::Packaged {
+                version: self.version.into(),
+            },
+            language: self.language.into(),
+            slots: self
+                .slots
+                .iter()
+                .map(|&(id, text)| (id.into(), text.into()))
+                .collect(),
+        }
+    }
+}
+
+fn forbidden_character(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+fn check_text(slot: &Slot, text: &str) -> Checked<()> {
+    if slot.required && text.trim().is_empty() {
+        return Err(Problem::new(
+            slot.id,
+            format!("Enter {}.", slot.label.to_lowercase()),
+        ));
+    }
+    if text.len() > slot.max_bytes {
+        return Err(Problem::new(
+            slot.id,
+            format!("{} must fit in {} bytes.", slot.label, slot.max_bytes),
+        ));
+    }
+    if text.chars().any(|c| {
+        forbidden_character(c)
+            && !(slot.context == Context::PlainText
+                && matches!(c, '\n' | '\t' | '\u{2028}' | '\u{2029}'))
+    }) {
+        return Err(Problem::new(
+            slot.id,
+            format!("{} contains a character this field cannot use.", slot.label),
+        ));
+    }
+    Ok(())
+}
+
+impl Template {
+    /// Render declared slots without any lookups. Only named references use
+    /// braces. A value is appended as data and is never parsed again.
+    pub fn render(&self, text: &Text, values: &[(&str, Value<'_>)]) -> Checked<Text> {
+        for id in text.keys() {
+            if !self.slots.iter().any(|slot| slot.id == id) {
+                return Err(Problem::new("slots", "This template has an unknown field."));
+            }
+        }
+        self.slots
+            .iter()
+            .filter(|slot| slot.required || text.contains_key(slot.id))
+            .map(|slot| {
+                let source = text.get(slot.id).map(String::as_str).unwrap_or_default();
+                let output = self.render_slot(slot, source, values)?;
+                Ok((slot.id.into(), output))
+            })
+            .collect()
+    }
+
+    pub fn preview(&self, text: &Text) -> Checked<Text> {
+        let sample: Vec<_> = self.variables.iter().map(|v| (v.id, v.sample)).collect();
+        self.render(text, &sample)
+    }
+
+    fn render_slot(
+        &self,
+        slot: &Slot,
+        source: &str,
+        values: &[(&str, Value<'_>)],
+    ) -> Checked<String> {
+        check_text(slot, source)?;
+        let syntax = || {
+            Problem::new(
+                slot.id,
+                "Use double braces around a field name, such as {{customer_name}}.",
+            )
+        };
+        let mut remaining = source;
+        let mut output = String::with_capacity(source.len());
+        while let Some((literal, reference)) = remaining.split_once("{{") {
+            if literal.contains("}}") {
+                return Err(syntax());
+            }
+            output.push_str(literal);
+            let (id, tail) = reference.split_once("}}").ok_or_else(syntax)?;
+            let variable = self
+                .variables
+                .iter()
+                .find(|v| v.id == id.trim())
+                .ok_or_else(|| {
+                    Problem::new(
+                        slot.id,
+                        "Remove the unknown variable or choose one of the available variables.",
+                    )
+                })?;
+            if !variable.slots.contains(&slot.id) {
+                return Err(Problem::new(
+                    slot.id,
+                    format!(
+                        "{} cannot be used in {}.",
+                        variable.label,
+                        slot.label.to_lowercase()
+                    ),
+                ));
+            }
+            match values
+                .iter()
+                .find(|(id, _)| *id == variable.id)
+                .map(|(_, value)| *value)
+            {
+                Some(value) if variable.sample.kind() == value.kind() => match value {
+                    Value::Text(value) => {
+                        if value.trim().is_empty() && !variable.optional {
+                            return Err(Problem::new(
+                                variable.id,
+                                "Required template value is missing.",
+                            ));
+                        }
+                        if value.len() > slot.max_bytes {
+                            return Err(Problem::new(
+                                variable.id,
+                                "Template value exceeds the field limit.",
+                            ));
+                        }
+                        output.extend(value.chars().map(|c| {
+                            if forbidden_character(c)
+                                && !(slot.context == Context::PlainText
+                                    && matches!(c, '\n' | '\t' | '\u{2028}' | '\u{2029}'))
+                            {
+                                ' '
+                            } else {
+                                c
+                            }
+                        }));
+                    }
+                    Value::Date(date) => output
+                        .push_str(&bilibi_datetime::DisplayContext::anonymous().render_date(date)),
+                },
+                Some(_) => {
+                    return Err(Problem::new(
+                        variable.id,
+                        "Template value has the wrong type.",
+                    ))
+                }
+                None if variable.optional => {}
+                None => {
+                    return Err(Problem::new(
+                        variable.id,
+                        "Required template value is missing.",
+                    ))
+                }
+            }
+            if output.len() > slot.max_bytes {
+                return Err(Problem::new(
+                    slot.id,
+                    format!("{} exceeds the rendered field limit.", slot.label),
+                ));
+            }
+            remaining = tail;
+        }
+        if remaining.contains("}}") {
+            return Err(syntax());
+        }
+        output.push_str(remaining);
+        check_text(slot, &output)?;
+        Ok(output)
+    }
+}
+
+fn validate(entries: &[Entry]) -> bilibi_module_registry::Result<()> {
+    for entry in entries {
+        let template = entry.get::<Template>()?;
+        let invalid = |reason: &str| {
+            RegistryError::Contribution(format!(
+                "template {} at {}:{}: {reason}",
+                entry.id, entry.provenance.source, entry.provenance.line
+            ))
+        };
+        let owner = entry.provenance.module.replace('/', ".");
+        if entry.id != template.key
+            || !template
+                .key
+                .strip_prefix(&owner)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+                .is_some_and(identifier)
+            || template.label.trim().is_empty()
+            || template.outputs != [Output::PlainText]
+        {
+            return Err(invalid(
+                "declare an owner-prefixed key, label and plain-text output",
+            ));
+        }
+        let mut slots = BTreeSet::new();
+        if template.slots.is_empty()
+            || template.slots.iter().any(|s| {
+                !identifier(s.id)
+                    || !slots.insert(s.id)
+                    || s.label.trim().is_empty()
+                    || s.max_bytes == 0
+            })
+        {
+            return Err(invalid(
+                "slots need unique IDs, labels and positive byte limits",
+            ));
+        }
+        let mut variables = BTreeSet::new();
+        if template.variables.iter().any(|v| {
+            !identifier(v.id)
+                || !variables.insert(v.id)
+                || v.label.trim().is_empty()
+                || v.slots.is_empty()
+                || v.slots.iter().any(|s| !slots.contains(s))
+        }) {
+            return Err(invalid("variables need unique IDs, labels and valid slots"));
+        }
+        let mut languages = BTreeSet::new();
+        for default in template.defaults {
+            if language(default.language).as_deref() != Some(default.language)
+                || !languages.insert(default.language)
+                || default.version.trim().is_empty()
+                || default.resolve().slots.len() != default.slots.len()
+            {
+                return Err(invalid(
+                    "packaged defaults need unique canonical language tags, versions and slots",
+                ));
+            }
+            template
+                .preview(&default.resolve().slots)
+                .map_err(|problem| invalid(&problem.to_string()))?;
+        }
+        if !languages.contains(template.base_language) {
+            return Err(invalid(
+                "a packaged default is required for the base language",
+            ));
+        }
+    }
+    Ok(())
+}
+
+inventory::submit! { Consumer::new::<Template>(CATALOGUE, "base/templates", validate) }

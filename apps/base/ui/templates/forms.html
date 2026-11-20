@@ -269,3 +269,16 @@
 {% endfor %}
 </div>
 {% endmacro %}
+
+{% macro text_insertions(field, choices) %}
+<div id="{{ field.id }}-insertions" data-hook="TextInsertions">
+  {% call input(field=field) %}{% endcall %}
+  {% if !choices.is_empty() %}
+  <div class="flex flex-wrap gap-1 pb-2">
+    {% for choice in choices %}
+      {% call ui::button(variant=bilibi_ui::ButtonVariant::Secondary, button_type="button", name="insert-text", value=choice.value) %}{{ choice.label }}{% endcall %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endmacro %}
