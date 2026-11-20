@@ -151,7 +151,7 @@ The builder, archive and exporter do not change when a harness is added.
 - A public installation needs an HTTPS address ChatGPT can reach and automatic OAuth registration. A LAN or VPN installation also needs OpenAI's Secure MCP Tunnel because a VPN on a person's computer does not let ChatGPT reach Bilibi.
 - The archive contains public configuration and skills only, with no token, credential, record or executable.
 - `bilibi-web plugin-export --harness chatgpt --output <new-directory>` uses the same builder from `APP_ORIGIN`. It refuses an existing output directory, an unknown harness and an HTTP origin, and never publishes or registers the package.
-- The exporter is not a client. A general Bilibi CLI client over `/api/v1` does not exist yet.
+- The exporter is not a client. The agent command line over `/api/v1` is `bilibi-axi` ([`apps/cli`](../../cli/README.md)).
 
 ## Injected identity
 

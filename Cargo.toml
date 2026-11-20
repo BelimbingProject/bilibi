@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/base", "apps/core", "apps/domains", "apps/extensions", "apps/installer", "apps/web", "fixtures/walkthrough"]
+members = ["apps/base", "apps/cli", "apps/core", "apps/domains", "apps/extensions", "apps/installer", "apps/web", "fixtures/walkthrough"]
 resolver = "2"
 
 [workspace.package]
@@ -51,8 +51,12 @@ hmac = "0.13.0"
 # Random keys and secrets (Core User authenticator keys, Core Consent address keys).
 getrandom = "0.4.3"
 futures-core = "0.3"
-# Outgoing HTTPS (base/integration) trusts the server's own CA store too.
+# Outgoing HTTPS (base/integration, and the agent command line in apps/cli)
+# over rustls with the ring provider; both trust the machine's own CA store too.
 rustls-native-certs = "0.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.9"
 # Authenticator two-factor (Core User): RFC 6238 over RustCrypto SHA-1, the
 # base32 key, the otpauth label and the QR code drawn server-side as SVG.
 sha1 = "0.11"

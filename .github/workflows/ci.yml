@@ -57,6 +57,9 @@ jobs:
         run: python3 scripts/discover-modules.py --check
       - if: steps.decide.outputs.affected == 'true'
         run: python3 scripts/catalogue.py --check
+      - name: The agent command line links no Bilibi crate (it is only a door)
+        if: steps.decide.outputs.affected == 'true'
+        run: python3 scripts/cli-door.py
       - if: steps.decide.outputs.affected == 'true'
         run: cargo fmt --all -- --check
       - if: steps.decide.outputs.affected == 'true'

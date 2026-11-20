@@ -573,6 +573,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "bilibi-axi"
+version = "0.2.1"
+dependencies = [
+ "axum",
+ "bilibi-agent",
+ "bilibi-base",
+ "bilibi-core",
+ "bilibi-database",
+ "bilibi-tenancy",
+ "bilibi-walkthrough-fixture",
+ "bilibi-web",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "webpki-roots",
+]
+
+[[package]]
 name = "bilibi-base"
 version = "0.2.1"
 dependencies = [

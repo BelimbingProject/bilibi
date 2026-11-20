@@ -1,0 +1,34 @@
+# The agent command line (`bilibi-axi`): one more door to the operations the
+# API, MCP and pages already call. Not a module: it runs on another machine,
+# signs in with the OAuth device grant and speaks only the versioned API, so
+# its program depends on no Bilibi crate. `scripts/cli-door.py` holds that
+# line; the walkthrough alone (dev-dependencies) stands up a server to call.
+# What it does: apps/cli/README.md.
+[package]
+name = "bilibi-axi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+bilibi-agent = { path = "../core/agent" }
+bilibi-base.workspace = true
+bilibi-core.workspace = true
+bilibi-database.workspace = true
+bilibi-tenancy = { path = "../base/tenancy" }
+bilibi-walkthrough-fixture = { path = "../../fixtures/walkthrough" }
+bilibi-web.workspace = true
+
+[lints]
+workspace = true
